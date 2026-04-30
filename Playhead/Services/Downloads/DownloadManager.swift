@@ -1783,16 +1783,31 @@ extension DownloadManager {
 /// `UserPreferences.allowsCellular` for the source of truth.
 struct UserPreferencesSnapshot: Sendable {
     var allowsCellular: Bool
+    /// playhead-jzik: mirrored copy of `UserPreferences.episodeSummariesEnabled`
+    /// so the off-main-actor `EpisodeSummaryBackfillCoordinator` can read
+    /// the toggle without a SwiftData hop. Defaults to `true` to match the
+    /// SwiftData default; the Settings toggle calls
+    /// `save(episodeSummariesEnabled:)` to keep the slot in sync.
+    var episodeSummariesEnabled: Bool
 
     static let defaultsKey = "UserPreferencesSnapshot.allowsCellular"
+    static let episodeSummariesDefaultsKey = "UserPreferencesSnapshot.episodeSummariesEnabled"
 
     static var current: UserPreferencesSnapshot {
         let allows = UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true
-        return UserPreferencesSnapshot(allowsCellular: allows)
+        let summaries = UserDefaults.standard.object(forKey: episodeSummariesDefaultsKey) as? Bool ?? true
+        return UserPreferencesSnapshot(
+            allowsCellular: allows,
+            episodeSummariesEnabled: summaries
+        )
     }
 
     static func save(allowsCellular: Bool) {
         UserDefaults.standard.set(allowsCellular, forKey: defaultsKey)
+    }
+
+    static func save(episodeSummariesEnabled: Bool) {
+        UserDefaults.standard.set(episodeSummariesEnabled, forKey: episodeSummariesDefaultsKey)
     }
 }
 

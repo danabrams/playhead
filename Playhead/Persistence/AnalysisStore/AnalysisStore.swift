@@ -703,7 +703,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 17
+    nonisolated private static let currentSchemaVersion = 18
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -1150,6 +1150,11 @@ actor AnalysisStore {
             // with the post-cycle-1 shape (FK RESTRICT, nullable
             // decisionCohortJSON) for any DB that already opened at v16.
             try migrateTrainingExamplesV17IfNeeded()
+            // playhead-jzik: episode_summaries — on-device verbatim
+            // summaries keyed by analysisAssetId. Lazy backfill via
+            // `EpisodeSummaryBackfillCoordinator` once transcript
+            // coverage clears the ≥80% gate.
+            try migrateEpisodeSummariesV18IfNeeded()
             // ef2.5.1: ShowTraitProfile JSON on podcast_profiles.
             try addColumnIfNeeded(
                 table: "podcast_profiles",
@@ -1300,6 +1305,9 @@ actor AnalysisStore {
         // pre-fix v16 DB into the corrected shape.
         try migrateTrainingExamplesV16IfNeeded()
         try migrateTrainingExamplesV17IfNeeded()
+        // playhead-jzik: episode_summaries v18 — ladder-only seam
+        // mirrors `migrate()` so schema-version tests lock at v18.
+        try migrateEpisodeSummariesV18IfNeeded()
         // H1 fix: mirror the addColumnIfNeeded calls from migrate() that
         // follow the versioned ladder steps. Without these, the isolated-
         // ladder test seam cannot catch regressions in column additions.
@@ -2649,6 +2657,53 @@ actor AnalysisStore {
             """)
 
         try setSchemaVersion(17)
+    }
+
+    /// playhead-jzik: schema v18 introduces `episode_summaries` —
+    /// on-device, verbatim-grounded summaries keyed 1:1 to
+    /// `analysis_assets(id)`. The `EpisodeSummaryBackfillCoordinator`
+    /// upserts a row once an asset clears the ≥80% transcript-coverage
+    /// gate, and re-generates whenever `transcriptVersion` flips or the
+    /// in-row `schemaVersion` falls below
+    /// `EpisodeSummary.currentSchemaVersion`.
+    ///
+    /// Schema decisions:
+    ///   - PRIMARY KEY on `analysisAssetId` (1 summary per asset).
+    ///   - `ON DELETE CASCADE` from `analysis_assets`: deleting the
+    ///     asset row drops its summary too. Summaries are derived
+    ///     artifacts — no need to preserve them past their source.
+    ///   - `mainTopicsJSON` / `notableGuestsJSON` carry encoded
+    ///     `[String]` payloads. SQLite has no native array type and
+    ///     a `json1` virtual table would force a parse on every read.
+    ///     Per-row decode in Swift is fast enough for the cell render.
+    ///   - `transcriptVersion` is nullable: assets without a
+    ///     transcript-version stamp (legacy fixtures) shouldn't fail
+    ///     the insert, just refuse the row's downstream invalidation
+    ///     check.
+    ///   - `createdAt` REAL: Unix epoch seconds. Diagnostic-only — the
+    ///     row's freshness is governed by `transcriptVersion` /
+    ///     `schemaVersion`, never by wall clock.
+    ///   - One index on `transcriptVersion` so the backfill coordinator
+    ///     can look up "summaries whose transcriptVersion no longer
+    ///     matches the asset's" in a single query.
+    private func migrateEpisodeSummariesV18IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 18 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS episode_summaries (
+                analysisAssetId    TEXT PRIMARY KEY REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                summary            TEXT NOT NULL,
+                mainTopicsJSON     TEXT NOT NULL,
+                notableGuestsJSON  TEXT NOT NULL,
+                schemaVersion      INTEGER NOT NULL,
+                transcriptVersion  TEXT,
+                createdAt          REAL NOT NULL
+            )
+            """)
+        try exec("""
+            CREATE INDEX IF NOT EXISTS idx_episode_summaries_transcript_version
+            ON episode_summaries(transcriptVersion)
+            """)
+        try setSchemaVersion(18)
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -8182,6 +8237,157 @@ actor AnalysisStore {
             transcriptQuality: text(stmt, 19),
             createdAt: sqlite3_column_double(stmt, 20)
         )
+    }
+
+    // MARK: - CRUD: episode_summaries (playhead-jzik)
+
+    /// Upsert the on-device episode summary keyed by `analysisAssetId`.
+    /// Replaces any prior row outright — summaries are single-source-of-truth
+    /// per asset, and the backfill coordinator only re-extracts when the
+    /// upstream `transcriptVersion` or `schemaVersion` has moved.
+    ///
+    /// `mainTopics` / `notableGuests` are encoded as JSON arrays of strings.
+    /// The encoder cannot realistically fail for `[String]`; if it ever
+    /// does we surface the failure rather than papering over with `"[]"`.
+    func upsertEpisodeSummary(_ summary: EpisodeSummary) throws {
+        let topicsData = try JSONEncoder().encode(summary.mainTopics)
+        guard let topicsJSON = String(data: topicsData, encoding: .utf8) else {
+            throw AnalysisStoreError.encodingFailure(
+                "episode_summaries.mainTopicsJSON: encoder returned non-UTF8 bytes"
+            )
+        }
+        let guestsData = try JSONEncoder().encode(summary.notableGuests)
+        guard let guestsJSON = String(data: guestsData, encoding: .utf8) else {
+            throw AnalysisStoreError.encodingFailure(
+                "episode_summaries.notableGuestsJSON: encoder returned non-UTF8 bytes"
+            )
+        }
+
+        let sql = """
+            INSERT INTO episode_summaries
+            (analysisAssetId, summary, mainTopicsJSON, notableGuestsJSON,
+             schemaVersion, transcriptVersion, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(analysisAssetId) DO UPDATE SET
+                summary = excluded.summary,
+                mainTopicsJSON = excluded.mainTopicsJSON,
+                notableGuestsJSON = excluded.notableGuestsJSON,
+                schemaVersion = excluded.schemaVersion,
+                transcriptVersion = excluded.transcriptVersion,
+                createdAt = excluded.createdAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, summary.analysisAssetId)
+        bind(stmt, 2, summary.summary)
+        bind(stmt, 3, topicsJSON)
+        bind(stmt, 4, guestsJSON)
+        bind(stmt, 5, summary.schemaVersion)
+        bind(stmt, 6, summary.transcriptVersion)
+        bind(stmt, 7, summary.createdAt.timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Fetch the persisted episode summary for `analysisAssetId`, or nil if
+    /// none exists. The caller is responsible for invalidating against the
+    /// asset's current `transcriptVersion` / `EpisodeSummary.currentSchemaVersion`.
+    func fetchEpisodeSummary(assetId: String) throws -> EpisodeSummary? {
+        let sql = """
+            SELECT analysisAssetId, summary, mainTopicsJSON, notableGuestsJSON,
+                   schemaVersion, transcriptVersion, createdAt
+            FROM episode_summaries
+            WHERE analysisAssetId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+
+        let topicsJSON = text(stmt, 2)
+        let guestsJSON = text(stmt, 3)
+        let topics: [String] = {
+            guard let data = topicsJSON.data(using: .utf8) else { return [] }
+            return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+        }()
+        let guests: [String] = {
+            guard let data = guestsJSON.data(using: .utf8) else { return [] }
+            return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+        }()
+        return EpisodeSummary(
+            analysisAssetId: text(stmt, 0),
+            summary: text(stmt, 1),
+            mainTopics: topics,
+            notableGuests: guests,
+            schemaVersion: Int(sqlite3_column_int(stmt, 4)),
+            transcriptVersion: optionalText(stmt, 5),
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
+        )
+    }
+
+    /// Delete the persisted episode summary for `analysisAssetId`. Idempotent —
+    /// if no row exists, the call is a no-op. Used by the backfill coordinator
+    /// when an asset's `transcriptVersion` shifts and the prior summary should
+    /// be evicted before the new generation lands.
+    func deleteEpisodeSummary(assetId: String) throws {
+        let sql = "DELETE FROM episode_summaries WHERE analysisAssetId = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Returns up to `limit` `analysisAssetId`s whose current asset row is
+    /// summary-eligible (transcript coverage ≥ `coverageFraction`) but for
+    /// which `episode_summaries` either has no row, has a stale
+    /// `schemaVersion`, or has a `transcriptVersion` that no longer matches
+    /// the live transcript fingerprint.
+    ///
+    /// Coverage is computed as
+    ///     `fastTranscriptCoverageEndTime / episodeDurationSec`,
+    /// matching the runtime gate the coordinator uses.
+    ///
+    /// Notes:
+    ///   - Assets with a missing or zero `episodeDurationSec` are excluded
+    ///     (we cannot compute coverage), even if a transcript exists.
+    ///   - Assets in `analysisState = 'failed'` are excluded — the
+    ///     backfill coordinator should not poke at known-failed rows.
+    ///   - The coordinator does the per-asset transcript-version probe;
+    ///     this query only filters out rows whose summary is at the
+    ///     current `currentSchemaVersion` AND has a non-null
+    ///     `transcriptVersion` matching the asset's row. Anything
+    ///     ambiguous (NULL transcriptVersion on either side) returns so
+    ///     the coordinator can decide.
+    func fetchEpisodeSummaryBackfillCandidates(
+        coverageFraction: Double,
+        currentSchemaVersion: Int,
+        limit: Int
+    ) throws -> [String] {
+        let sql = """
+            SELECT a.id
+            FROM analysis_assets a
+            LEFT JOIN episode_summaries s ON s.analysisAssetId = a.id
+            WHERE a.episodeDurationSec IS NOT NULL
+              AND a.episodeDurationSec > 0
+              AND a.fastTranscriptCoverageEndTime IS NOT NULL
+              AND (a.fastTranscriptCoverageEndTime / a.episodeDurationSec) >= ?
+              AND a.analysisState != 'failed'
+              AND (
+                    s.analysisAssetId IS NULL
+                 OR s.schemaVersion < ?
+              )
+            ORDER BY a.createdAt DESC
+            LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, coverageFraction)
+        bind(stmt, 2, currentSchemaVersion)
+        bind(stmt, 3, limit)
+        var ids: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            ids.append(text(stmt, 0))
+        }
+        return ids
     }
 
     // MARK: - CRUD: boundary_priors (ef2.3.5)

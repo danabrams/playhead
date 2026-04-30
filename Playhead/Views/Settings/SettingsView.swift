@@ -118,6 +118,7 @@ struct SettingsView: View {
                         storageSettingsSection
                         diagnosticsSection
                         backgroundSection(prefs)
+                        episodeSummariesSection(prefs)
                         storageSection
                         purchasesSection
                         aboutSection
@@ -425,6 +426,43 @@ private extension SettingsView {
             sectionHeader("Processing")
         } footer: {
             Text("When enabled, episodes are transcribed and analyzed in the background. Requires sufficient battery.")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
+        }
+    }
+
+    /// playhead-jzik: toggle for the on-device episode-summary feature.
+    /// Default ON. Disabling halts the backfill coordinator on its
+    /// next pass and leaves any previously-generated rows in place
+    /// (re-enabling resumes generation against rows still missing or
+    /// stale). The footer copy intentionally does not reach for the
+    /// "AI" framing — the user-facing language is about what the
+    /// feature does, not how.
+    func episodeSummariesSection(_ prefs: UserPreferences) -> some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { prefs.episodeSummariesEnabled },
+                set: { newValue in
+                    prefs.episodeSummariesEnabled = newValue
+                    // playhead-jzik: mirror into the UserDefaults
+                    // `UserPreferencesSnapshot` slot so the
+                    // EpisodeSummaryBackfillCoordinator (which lives
+                    // off the main actor and has no SwiftData hop)
+                    // can read the toggle synchronously.
+                    UserPreferencesSnapshot.save(episodeSummariesEnabled: newValue)
+                }
+            )) {
+                Label("Episode Summaries", systemImage: "text.alignleft")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+            }
+            .tint(AppColors.accent)
+            .listRowBackground(AppColors.surface)
+            .accessibilityIdentifier("Settings.episodeSummaries.toggle")
+        } header: {
+            sectionHeader("Episode Summaries")
+        } footer: {
+            Text("Generate short, on-device summaries for episodes you've finished analyzing. Tap an episode in the library to expand and read the summary.")
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.textTertiary)
         }

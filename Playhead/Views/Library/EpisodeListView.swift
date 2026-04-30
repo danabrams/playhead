@@ -49,6 +49,15 @@ struct EpisodeListView: View {
     @State private var navigateToNowPlaying = false
     @State private var selectedEpisode: Episode?
 
+    /// playhead-jzik: per-row expansion state. The set holds the
+    /// canonicalEpisodeKeys whose row is currently expanded — the row
+    /// view consults this to render the optional summary block. Kept
+    /// at the list level (rather than inside `EpisodeRow`) because
+    /// SwiftData rebuilds row instances on @Query updates and a
+    /// row-local @State would forget the user's expansion across
+    /// re-renders.
+    @State private var expandedEpisodeKeys: Set<String> = []
+
     /// Tracks whether the user has already dismissed the first-✓
     /// tooltip. Persisted via UserDefaults; see
     /// `OnboardingFlags.firstCheckmarkTooltipSeenKey`.
@@ -227,12 +236,21 @@ private extension EpisodeListView {
             }
 
             ForEach(episodes) { episode in
-                EpisodeRow(episode: episode)
+                EpisodeRow(
+                    episode: episode,
+                    isExpanded: expandedEpisodeKeys.contains(episode.canonicalEpisodeKey),
+                    onPlay: { playEpisode(episode) }
+                )
                     .listRowBackground(AppColors.background)
                     .listRowSeparatorTint(AppColors.textSecondary.opacity(0.2))
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        playEpisode(episode)
+                        // playhead-jzik: tap expands/collapses the row.
+                        // The play action moves to the leading swipe (and
+                        // the explicit Play button rendered when the row
+                        // is expanded). Same gesture is unaffected by the
+                        // accessibility label change below.
+                        toggleExpansion(for: episode)
                     }
                     .swipeActions(edge: .leading) {
                         Button {
@@ -263,7 +281,7 @@ private extension EpisodeListView {
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("\(episode.title)\(episode.isPlayed ? ", played" : "")")
-                    .accessibilityHint("Tap to play this episode")
+                    .accessibilityHint("Tap to expand. Swipe right to play.")
             }
         }
         .listStyle(.plain)
@@ -290,6 +308,20 @@ private extension EpisodeListView {
     func togglePlayed(_ episode: Episode) {
         episode.isPlayed.toggle()
     }
+
+    /// playhead-jzik: toggle the expansion state for the supplied
+    /// episode's row. Animated with `Motion.standard` so the disclosure
+    /// reads as a smooth reveal of the editorial summary block.
+    func toggleExpansion(for episode: Episode) {
+        let key = episode.canonicalEpisodeKey
+        withAnimation(Motion.standard) {
+            if expandedEpisodeKeys.contains(key) {
+                expandedEpisodeKeys.remove(key)
+            } else {
+                expandedEpisodeKeys.insert(key)
+            }
+        }
+    }
 }
 
 // MARK: - Episode Row
@@ -297,6 +329,24 @@ private extension EpisodeListView {
 private struct EpisodeRow: View {
 
     let episode: Episode
+    /// playhead-jzik: whether this row is currently expanded. Owned by
+    /// `EpisodeListView` so the set survives @Query rebuilds; the row
+    /// itself is purely a function of (episode, isExpanded).
+    let isExpanded: Bool
+    /// playhead-jzik: invoked when the user taps the explicit "Play"
+    /// affordance inside the expanded body. The row itself doesn't have
+    /// the runtime (the list does), so we route the action up.
+    let onPlay: () -> Void
+
+    /// playhead-jzik: lazy-loaded persisted summary. Populated on first
+    /// expansion via the AnalysisStore lookup chain
+    /// `episodeId → analysisAssetId → episode_summaries`. Cached for the
+    /// life of this row instance so subsequent collapse/expand cycles
+    /// stay within the <50ms render budget. Stays `nil` when no summary
+    /// has been written yet (the backfill coordinator hasn't gotten to
+    /// this asset, or coverage is still <80%).
+    @State private var fetchedSummary: EpisodeSummary?
+    @Environment(PlayheadRuntime.self) private var runtime
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
@@ -386,8 +436,114 @@ private struct EpisodeRow: View {
                 .frame(height: 2)
                 .accessibilityValue("Progress: \(Int(min(episode.playbackPosition / (episode.duration ?? 1), 1.0) * 100)) percent")
             }
+
+            // playhead-jzik: expanded summary body. Only mounted when
+            // `isExpanded` is true; the lazy `.task` below is responsible
+            // for populating `fetchedSummary` on first reveal.
+            if isExpanded {
+                expandedBody
+            }
         }
         .padding(.vertical, Spacing.xs)
+        // playhead-jzik: load the summary the first time this row
+        // expands. `.task(id:)` handles both initial mount and the
+        // collapse→expand transition; SwiftUI tears the task down on
+        // collapse so the in-flight read can be discarded mid-fetch
+        // without leaking. We guard on `fetchedSummary == nil` so that
+        // expanding the same row twice (after a collapse) doesn't
+        // re-issue the SQLite query.
+        .task(id: isExpanded) {
+            guard isExpanded, fetchedSummary == nil else { return }
+            await loadSummary()
+        }
+    }
+
+    // MARK: - Expanded Body (playhead-jzik)
+
+    /// Editorial expanded section rendered when the row is open. Three
+    /// stacked elements:
+    ///
+    ///   1. Summary prose (serif). Either the FM-generated 2–3 sentence
+    ///      blurb or, while the backfill coordinator hasn't gotten to
+    ///      this asset, a quiet placeholder line.
+    ///   2. Topic pills (Soft Steel, capped at `EpisodeSummary.visibleTopicCap`).
+    ///      Hidden entirely when there are no topics — we don't want an
+    ///      empty pill row to draw the eye.
+    ///   3. Explicit "Play" affordance (Copper). The tap target moved
+    ///      from the row to the disclosure because the tap gesture now
+    ///      handles expansion; this restores the always-available play
+    ///      action without forcing the user to swipe.
+    @ViewBuilder
+    private var expandedBody: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            if let summary = fetchedSummary, !summary.summary.isEmpty {
+                Text(summary.summary)
+                    .font(AppTypography.serif(size: 15, weight: .regular))
+                    .foregroundStyle(AppColors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                let topics = Array(summary.mainTopics.prefix(EpisodeSummary.visibleTopicCap))
+                if !topics.isEmpty {
+                    HStack(spacing: Spacing.xs) {
+                        ForEach(topics, id: \.self) { topic in
+                            topicPill(topic)
+                        }
+                    }
+                }
+            } else {
+                Text("Summary will appear once analysis is ready.")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textSecondary)
+            }
+
+            Button(action: onPlay) {
+                Label("Play", systemImage: "play.fill")
+                    .font(AppTypography.sans(size: 14, weight: .semibold))
+                    .foregroundStyle(AppColors.accent)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("EpisodeRow.expanded.playButton")
+        }
+        .padding(.top, Spacing.xs)
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    /// Single topic pill — Soft Steel background, sans label. Sized to
+    /// hug the text so the row's three pills wrap naturally rather than
+    /// creating a fixed grid.
+    @ViewBuilder
+    private func topicPill(_ text: String) -> some View {
+        Text(text)
+            .font(AppTypography.sans(size: 12, weight: .medium))
+            .foregroundStyle(AppColors.textPrimary)
+            .padding(.horizontal, Spacing.sm)
+            .padding(.vertical, 4)
+            .background(
+                Capsule().fill(Palette.softSteel.opacity(0.25))
+            )
+            .accessibilityLabel("Topic: \(text)")
+    }
+
+    /// playhead-jzik: walk the lookup chain
+    /// `episodeId → analysisAssetId → episode_summaries`. All three hops
+    /// are cheap (indexed lookups) so a single async chain on .task is
+    /// fine — no need to push work onto a queue. Failures are silent;
+    /// the placeholder copy carries the empty-state message.
+    private func loadSummary() async {
+        let store = runtime.analysisStore
+        let key = episode.canonicalEpisodeKey
+        let summary: EpisodeSummary?
+        do {
+            guard let asset = try await store.fetchAssetByEpisodeId(key) else {
+                return
+            }
+            summary = try await store.fetchEpisodeSummary(assetId: asset.id)
+        } catch {
+            return
+        }
+        if let summary {
+            await MainActor.run { self.fetchedSummary = summary }
+        }
     }
 
     // MARK: - Formatting

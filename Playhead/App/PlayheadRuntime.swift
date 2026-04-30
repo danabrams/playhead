@@ -129,6 +129,14 @@ final class PlayheadRuntime {
     /// `setShadowLaneTickHandler`.
     let shadowCaptureCoordinator: ShadowCaptureCoordinator?
 
+    /// playhead-jzik: standalone polling coordinator that lazily fills
+    /// the `episode_summaries` table for assets that have cleared the
+    /// transcript-coverage threshold. `nil` in preview runtimes so the
+    /// SwiftUI canvas / unit tests don't spin up FM machinery they
+    /// don't need. Started from the deferred bootstrap Task once
+    /// `analysisStore.migrate()` has succeeded.
+    let episodeSummaryBackfillCoordinator: EpisodeSummaryBackfillCoordinator?
+
     /// Retained so the shadow coordinator's synchronous protocol getters
     /// have a stable producer for the currently loaded episode's asset id.
     /// Updated by `PlayheadRuntime.setCurrentEpisode(...)` indirectly through
@@ -985,6 +993,34 @@ final class PlayheadRuntime {
             self.shadowCaptureCoordinator = nil
         }
 
+        // playhead-jzik: standalone polling coordinator for the
+        // `episode_summaries` table. Skipped in preview runtimes so the
+        // SwiftUI canvas does not spin up FM machinery. The toggle is
+        // read from `UserPreferencesSnapshot.current` (a UserDefaults
+        // mirror) so the coordinator can stay off the main actor; the
+        // Settings UI calls `UserPreferencesSnapshot.save(episodeSummariesEnabled:)`
+        // alongside the SwiftData write so the slot stays in sync. The
+        // loop is started below from the deferred bootstrap Task once
+        // `analysisStore.migrate()` has completed.
+        if !isPreviewRuntime {
+            let extractor = EpisodeSummaryExtractor(
+                transport: LiveEpisodeSummaryTransport(),
+                capability: CapabilitiesServiceEpisodeSummaryCapabilityProvider(
+                    capabilities: capabilitiesService
+                )
+            )
+            self.episodeSummaryBackfillCoordinator = EpisodeSummaryBackfillCoordinator(
+                extractor: extractor,
+                candidates: AnalysisStoreEpisodeSummaryBackfillCandidateProvider(
+                    store: analysisStore
+                ),
+                sink: AnalysisStoreEpisodeSummaryBackfillSink(store: analysisStore),
+                userToggle: { UserPreferencesSnapshot.current.episodeSummariesEnabled }
+            )
+        } else {
+            self.episodeSummaryBackfillCoordinator = nil
+        }
+
         // Set error state after all stored properties are initialized.
         if let storeError {
             self.initializationError = storeError
@@ -1036,7 +1072,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator] in
             // playhead-8u3i: inject pre-analysis services FIRST, before any
             // migrate calls. The BG-task handlers registered in
             // `BackgroundProcessingService.registerBackgroundTasks()` race
@@ -1089,6 +1125,17 @@ final class PlayheadRuntime {
 
             // Wake any UI that hit AnalysisStore before isOpen flipped true.
             AnalysisWorkScheduler.postActivityRefreshNotification()
+
+            // playhead-jzik: start the episode-summary backfill loop now
+            // that the analysis store has migrated. The coordinator is
+            // idempotent (`start()` is a no-op if the loop is already
+            // running), polls on a long idle interval, and bails out
+            // immediately when the user-toggle returns false or the FM
+            // capability is unavailable. Off-main-actor by design — the
+            // coordinator is its own actor.
+            if let episodeSummaryBackfillCoordinator {
+                await episodeSummaryBackfillCoordinator.start()
+            }
 
             // playhead-jndk: warm `AdCatalogStore` off-main now that the
             // analysis store migration has succeeded. The catalog's
