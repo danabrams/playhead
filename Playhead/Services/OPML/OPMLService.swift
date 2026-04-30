@@ -131,6 +131,66 @@ public struct OPMLService: Sendable {
         }
         return unique
     }
+
+    // MARK: - Serialize
+
+    /// Serialize a list of feeds into an OPML 2.0 document.
+    ///
+    /// The output is deterministic (same input → same bytes) so callers
+    /// can rely on byte-equality across runs. Attribute values are
+    /// XML-escaped per `&`, `<`, `>`, `"`. UTF-8 characters are written
+    /// verbatim (the document is UTF-8 encoded).
+    public func serializeOPML(
+        feeds: [OPMLFeed],
+        documentTitle: String = "Playhead Subscriptions"
+    ) -> Data {
+        var xml = ""
+        xml.reserveCapacity(160 + feeds.count * 96)
+        xml.append(#"<?xml version="1.0" encoding="UTF-8"?>"#)
+        xml.append("\n")
+        xml.append(#"<opml version="2.0">"#)
+        xml.append("\n  <head><title>")
+        xml.append(Self.escapeXML(documentTitle))
+        xml.append("</title></head>\n")
+        xml.append("  <body>\n")
+        for feed in feeds {
+            let title = feed.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayTitle = (title?.isEmpty ?? true)
+                ? feed.xmlUrl.absoluteString
+                : title!
+            xml.append("    <outline ")
+            xml.append(#"type="rss" "#)
+            xml.append(#"text=""#)
+            xml.append(Self.escapeXML(displayTitle))
+            xml.append(#"" "#)
+            xml.append(#"xmlUrl=""#)
+            xml.append(Self.escapeXML(feed.xmlUrl.absoluteString))
+            xml.append(#""/>"#)
+            xml.append("\n")
+        }
+        xml.append("  </body>\n")
+        xml.append("</opml>\n")
+        return Data(xml.utf8)
+    }
+
+    /// XML attribute-value escape. Only the five characters that change
+    /// the meaning of a quoted attribute need escaping; everything else
+    /// (including UTF-8) passes through verbatim.
+    private static func escapeXML(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.count)
+        for ch in s {
+            switch ch {
+            case "&": out.append("&amp;")
+            case "<": out.append("&lt;")
+            case ">": out.append("&gt;")
+            case "\"": out.append("&quot;")
+            case "'": out.append("&apos;")
+            default: out.append(ch)
+            }
+        }
+        return out
+    }
 }
 
 // MARK: - XMLParser Delegate
