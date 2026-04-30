@@ -127,6 +127,7 @@ struct SettingsView: View {
                         diagnosticsSection
                         backgroundSection(prefs)
                         episodeSummariesSection(prefs)
+                        notificationsSection(prefs)
                         storageSection
                         opmlSection
                         purchasesSection
@@ -472,6 +473,39 @@ private extension SettingsView {
             sectionHeader("Episode Summaries")
         } footer: {
             Text("Generate short, on-device summaries for episodes you've finished analyzing. Tap an episode in the library to expand and read the summary.")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
+        }
+    }
+
+    /// playhead-snp: master switch for new-episode local notifications.
+    /// Default ON. When the user flips this OFF, any pending (not yet
+    /// delivered) new-episode notifications are removed from the
+    /// system queue so they don't fire after the opt-out.
+    func notificationsSection(_ prefs: UserPreferences) -> some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { prefs.newEpisodeNotificationsEnabled },
+                set: { newValue in
+                    let previous = prefs.newEpisodeNotificationsEnabled
+                    prefs.newEpisodeNotificationsEnabled = newValue
+                    if previous == true && newValue == false {
+                        let cancellation = SystemPendingNewEpisodeCancellation()
+                        Task { await cancellation.cancelAllPendingNewEpisodeNotifications() }
+                    }
+                }
+            )) {
+                Label("New Episode Alerts", systemImage: "bell")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+            }
+            .tint(AppColors.accent)
+            .listRowBackground(AppColors.surface)
+            .accessibilityIdentifier("Settings.newEpisodeNotifications.toggle")
+        } header: {
+            sectionHeader("Notifications")
+        } footer: {
+            Text("Get notified when subscribed shows publish new episodes. Adjust per-show alerts by long-pressing a podcast in your Library.")
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.textTertiary)
         }

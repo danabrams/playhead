@@ -19,13 +19,23 @@ final class Podcast {
     var episodes: [Episode]
     var subscribedAt: Date
 
+    /// playhead-snp: per-show toggle for new-episode local notifications.
+    /// Default ON (opt-out). When `false`, the new-episode notification
+    /// scheduler skips this podcast entirely, regardless of the app-wide
+    /// `UserPreferences.newEpisodeNotificationsEnabled` setting.
+    /// Additive optional with a Swift default — existing rows decode
+    /// with `true` so an upgrade preserves the spec'd opt-out behavior
+    /// for already-subscribed shows.
+    var notificationsEnabled: Bool = true
+
     init(
         feedURL: URL,
         title: String,
         author: String,
         artworkURL: URL? = nil,
         episodes: [Episode] = [],
-        subscribedAt: Date = .now
+        subscribedAt: Date = .now,
+        notificationsEnabled: Bool = true
     ) {
         self.feedURL = feedURL
         self.title = title
@@ -33,6 +43,7 @@ final class Podcast {
         self.artworkURL = artworkURL
         self.episodes = episodes
         self.subscribedAt = subscribedAt
+        self.notificationsEnabled = notificationsEnabled
     }
 }
 
