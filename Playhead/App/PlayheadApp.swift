@@ -61,10 +61,27 @@ struct PlayheadApp: App {
     /// via `SystemNotificationScheduler`.
     @State private var batchNotificationService = BatchNotificationService()
 
+    /// playhead-05i: live playback queue. Constructed once here so
+    /// every view that reaches into the environment for an enqueue
+    /// affordance shares one persistent queue (rather than each view
+    /// spinning its own actor). The auto-advance observer
+    /// (`PlaybackQueueFinishObserver`) is wired in `.task` below — same
+    /// scene scope, so it lives as long as the WindowGroup.
+    @State private var playbackQueueController = PlaybackQueueController()
+
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(runtime)
+                // playhead-05i: expose the live queue service to the
+                // view tree so Library swipe actions and the NowPlaying
+                // "Up Next" sheet share one persistent queue. When the
+                // controller hasn't started yet (very first scene tick
+                // before the `.task` below has run), the environment
+                // value is `nil` and `makeEnqueueLast` / `makeEnqueueNext`
+                // become no-ops — same null-safety the EnvironmentKey's
+                // default value provides.
+                .environment(\.playbackQueueService, playbackQueueController.service)
                 .task {
                     // playhead-zp0x: drive the batch-notification
                     // coordinator on a periodic tick. v1 uses a simple
@@ -168,6 +185,27 @@ struct PlayheadApp: App {
                     )
                     BackgroundFeedRefreshService.attachSharedService(feedRefreshService)
                     feedRefreshService.start()
+
+                    // playhead-05i: wire the playback queue + auto-advance.
+                    // The play handler resolves a `canonicalEpisodeKey`
+                    // back to a SwiftData `Episode` row and asks the
+                    // runtime to play it — same path the user-initiated
+                    // tap uses. If the episode no longer resolves (rare:
+                    // dropped on a feed refresh), the handler is a
+                    // silent no-op and the queue moves on.
+                    playbackQueueController.start(
+                        modelContainer: modelContainer,
+                        playHandler: { @Sendable [runtime, modelContainer] episodeKey in
+                            await MainActor.run {
+                                let context = modelContainer.mainContext
+                                let descriptor = FetchDescriptor<Episode>(
+                                    predicate: #Predicate { $0.canonicalEpisodeKey == episodeKey }
+                                )
+                                guard let episode = try? context.fetch(descriptor).first else { return }
+                                Task { await runtime.playEpisode(episode) }
+                            }
+                        }
+                    )
                 }
                 .task {
                     let stateStream = await runtime.playbackService.observeStates()
