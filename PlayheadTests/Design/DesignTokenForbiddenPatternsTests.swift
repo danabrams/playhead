@@ -122,12 +122,27 @@ final class DesignTokenForbiddenPatternsTests: XCTestCase {
         "case .spring, .interpolatingSpring, .bouncy:",
     ]
 
+    /// File-level exemptions. Files in this set are skipped entirely by
+    /// the source-code regex sweep. Add a file here only when its use of
+    /// an otherwise-forbidden API is intentional and approved.
+    ///
+    /// - `OnboardingView.swift` — the looping copper-line sweep on the
+    ///   welcome screen uses a `LinearGradient` to soft-edge the
+    ///   translating highlight band. Approved as an onboarding-only
+    ///   exception; the rest of the app remains gradient-free.
+    private static let exemptFiles: Set<String> = [
+        "OnboardingView.swift",
+    ]
+
     func testNoDesignSourceFileUsesAForbiddenAPI() throws {
         let appSources = try Self.playheadSourceFiles()
         XCTAssertFalse(appSources.isEmpty,
                        "Could not locate Playhead/**/*.swift sources from #filePath")
 
         for fileURL in appSources {
+            if Self.exemptFiles.contains(fileURL.lastPathComponent) {
+                continue
+            }
             let contents = try String(contentsOf: fileURL, encoding: .utf8)
             let lines = contents.components(separatedBy: "\n")
 
