@@ -27,7 +27,7 @@ struct UserPreferencesPersistenceTests {
     /// in-memory store, and verify the persisted value is observed.
     @Test func skipBehaviorRoundTrips() throws {
         let schema = Schema([UserPreferences.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try ModelContainer(for: schema, configurations: config)
 
         // First context: write `.manual`.
@@ -51,7 +51,7 @@ struct UserPreferencesPersistenceTests {
 
     @Test func playbackSpeedRoundTrips() throws {
         let schema = Schema([UserPreferences.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try ModelContainer(for: schema, configurations: config)
 
         do {
@@ -69,7 +69,7 @@ struct UserPreferencesPersistenceTests {
 
     @Test func skipIntervalsRoundTrip() throws {
         let schema = Schema([UserPreferences.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try ModelContainer(for: schema, configurations: config)
 
         do {

@@ -184,6 +184,11 @@ struct SettingsView: View {
                     viewModel.refreshEligibility(
                         using: runtime.analysisEligibilityEvaluator
                     )
+                    // playhead-5c1t: read the iCloud sync status from the
+                    // coordinator BEFORE the (suspending) premium-stream
+                    // observation below — that observation never returns,
+                    // so anything queued after it would never run.
+                    await viewModel.observeICloudSyncStatus(runtime.iCloudSyncCoordinator)
                     // playhead-j2u: subscribe to premium-status updates
                     // so the Purchases section reflects transactions
                     // arriving from other devices / restores.
@@ -699,6 +704,29 @@ private extension SettingsView {
                 .accessibilityIdentifier("Settings.about.privacy")
         } header: {
             sectionHeader("About")
+        } footer: {
+            // playhead-5c1t: quiet "Synced via iCloud" / "iCloud sync
+            // paused" footer. Peace-of-mind, not metrics — no badge, no
+            // animation, no quantified counter. Single tertiary-color
+            // line, hidden entirely when the runtime hasn't loaded the
+            // status yet so we never lie about the state.
+            iCloudSyncFooter
+        }
+    }
+
+    /// playhead-5c1t: footer text for the About section. Reflects the
+    /// `ICloudSyncCoordinator.isSyncEnabled` state observed from the
+    /// view model. Empty string while the first observation lands —
+    /// avoids flashing the wrong value at launch.
+    @ViewBuilder
+    var iCloudSyncFooter: some View {
+        if let enabled = viewModel.iCloudSyncEnabled {
+            Text(enabled ? SettingsAboutCopy.iCloudSyncedFooter : SettingsAboutCopy.iCloudPausedFooter)
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
+                .accessibilityIdentifier("Settings.about.iCloudFooter")
+        } else {
+            EmptyView()
         }
     }
 
@@ -718,6 +746,16 @@ private extension SettingsView {
 enum SettingsAboutCopy {
     /// Privacy statement — verbatim per playhead-j2u.
     static let privacyStatement: String = "Your podcasts never leave your device."
+
+    /// playhead-5c1t: footer text shown when iCloud sync is available.
+    /// Quiet, single-line, peace-of-mind — no badge, no animation.
+    static let iCloudSyncedFooter: String = "Synced via iCloud."
+
+    /// playhead-5c1t: footer text shown when iCloud sync is paused
+    /// (signed-out, restricted, or temporarily unavailable). Avoids the
+    /// word "error" — the user's local data is fine; only the sync is
+    /// paused.
+    static let iCloudPausedFooter: String = "iCloud sync paused."
 }
 
 // MARK: - Debug Toggles Section (always visible)

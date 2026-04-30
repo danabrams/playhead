@@ -24,6 +24,14 @@ final class PlayheadRuntime {
     let capabilitiesService: CapabilitiesService
     let analysisStore: AnalysisStore
     let entitlementManager: EntitlementManager
+
+    /// playhead-5c1t: cross-device sync coordinator for podcast
+    /// subscriptions + the premium entitlement. Backed by a real
+    /// CKContainer in production; tests inject a fake provider. The
+    /// coordinator is constructed eagerly so the rest of the runtime
+    /// can call into it without optional unwraps; `start()` is invoked
+    /// from the deferred bootstrap Task.
+    let iCloudSyncCoordinator: ICloudSyncCoordinator
     let audioService: AnalysisAudioService
     let featureService: FeatureExtractionService
     let transcriptEngine: TranscriptEngineService
@@ -456,6 +464,15 @@ final class PlayheadRuntime {
         self.analysisStore = resolvedStore
 
         self.entitlementManager = EntitlementManager()
+
+        // playhead-5c1t: production iCloud sync wiring. The default
+        // `CKContainerCloudKitProvider` reads the container identifier
+        // from `Playhead.entitlements`. Preview / test runtimes should
+        // construct the runtime via the dedicated init and inject a
+        // fake provider; here we wire production by default.
+        self.iCloudSyncCoordinator = ICloudSyncCoordinator(
+            provider: CKContainerCloudKitProvider()
+        )
 
         self.audioService = AnalysisAudioService()
 
@@ -1504,6 +1521,10 @@ final class PlayheadRuntime {
 
             await backgroundProcessingService.start()
             await entitlementManager.start()
+            // playhead-5c1t: kick off iCloud sync in the background.
+            // Failures are logged inside the coordinator — sync is a
+            // best-effort feature and must never block app startup.
+            await iCloudSyncCoordinator.start()
             await capabilitiesService.runSelfTest()
         }
     }

@@ -35,7 +35,7 @@ struct LibraryViewUnplayedCountPerfTests {
 
         // SwiftData container — same schema as production.
         let schema = Schema([Podcast.self, Episode.self, UserPreferences.self])
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let container = try ModelContainer(for: schema, configurations: [config])
         let context = ModelContext(container)
 

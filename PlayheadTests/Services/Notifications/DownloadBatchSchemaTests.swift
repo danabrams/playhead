@@ -25,7 +25,8 @@ struct DownloadBatchSchemaTests {
         let config = ModelConfiguration(
             "DownloadBatchSchemaTests",
             schema: SwiftDataStore.schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         let container = try ModelContainer(
             for: SwiftDataStore.schema,
@@ -78,7 +79,8 @@ struct DownloadBatchSchemaTests {
         let config = ModelConfiguration(
             "DownloadBatchSchemaTests-empty",
             schema: SwiftDataStore.schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         let container = try ModelContainer(
             for: SwiftDataStore.schema,
@@ -107,7 +109,8 @@ struct DownloadBatchSchemaTests {
         let config = ModelConfiguration(
             "DownloadBatchSchemaTests-migration",
             schema: SwiftDataStore.schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         let container = try ModelContainer(
             for: SwiftDataStore.schema,

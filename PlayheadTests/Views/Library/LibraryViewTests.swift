@@ -14,7 +14,7 @@ final class LibraryViewTests: XCTestCase {
     // MARK: - Helpers
 
     private func makeInMemoryContainer() throws -> ModelContainer {
-        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         return try ModelContainer(
             for: Podcast.self, Episode.self,
             configurations: config
