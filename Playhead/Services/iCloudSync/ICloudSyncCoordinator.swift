@@ -42,6 +42,15 @@ actor ICloudSyncCoordinator {
     /// snapshots, not a strict event log).
     private var pendingWrites: [CKRecord.ID: CKRecord] = [:]
 
+    /// Subscribers receive a fresh `Bool` whenever the cached account
+    /// status changes (true = `isSyncEnabled`). The Settings footer
+    /// uses this so sign-out mid-session flips its label without a
+    /// view re-appear. We use a `.bufferingNewest(1)` policy so a slow
+    /// consumer that misses an intermediate value still sees the
+    /// latest status on resume. Multiple-consumer fan-out is
+    /// implemented via an array of continuations — one per subscriber.
+    private var syncEnabledContinuations: [UUID: AsyncStream<Bool>.Continuation] = [:]
+
     init(provider: CloudKitProviding) {
         self.provider = provider
     }
@@ -68,14 +77,47 @@ actor ICloudSyncCoordinator {
     /// Refresh the cached account status from the provider. Drives
     /// `isSyncEnabled` and gating logic for writes.
     func handleAccountStatusChange() async {
-        cachedAccountStatus = await provider.accountStatus()
+        let next = await provider.accountStatus()
+        let changed = next != cachedAccountStatus
+        cachedAccountStatus = next
         logger.info("Account status: \(String(describing: self.cachedAccountStatus))")
+        if changed {
+            let enabled = (next == .available)
+            for (_, continuation) in syncEnabledContinuations {
+                continuation.yield(enabled)
+            }
+        }
     }
 
     /// True when sync would attempt a network call. Read by the
     /// Settings UI footer and by tests.
     var isSyncEnabled: Bool {
         cachedAccountStatus == .available
+    }
+
+    /// Live stream of `isSyncEnabled` updates. The first element is the
+    /// current status (so a late subscriber sees the value rather than
+    /// hanging until the next account-status change). Subsequent
+    /// elements are emitted only when `handleAccountStatusChange`
+    /// observes a change. The stream is buffered to size 1 — slow
+    /// consumers see the latest value on resume rather than a stale
+    /// in-flight one.
+    func syncEnabledUpdates() -> AsyncStream<Bool> {
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let id = UUID()
+            self.syncEnabledContinuations[id] = continuation
+            // Seed with the current value so a subscriber that joins
+            // after `start()` doesn't have to wait for the next change.
+            continuation.yield(self.cachedAccountStatus == .available)
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                Task { await self.removeContinuation(id: id) }
+            }
+        }
+    }
+
+    private func removeContinuation(id: UUID) {
+        syncEnabledContinuations[id] = nil
     }
 
     var pendingWriteCount: Int {
@@ -94,6 +136,43 @@ actor ICloudSyncCoordinator {
     func upsertEntitlement(_ record: EntitlementRecord) async throws {
         let ckRecord = record.toCKRecord()
         try await save(ckRecord, kind: "entitlement")
+    }
+
+    /// Save with last-write-wins merging against the server copy.
+    /// Subscriptions are mundane mutable state (title, artwork, tombstone
+    /// flag), NOT a trust signal — so collisions resolve by latest
+    /// `lastModified` rather than the GRANT-WINS rule used for
+    /// entitlements. Returns the merged record (which is what got
+    /// persisted to the server, modulo a queued offline write).
+    @discardableResult
+    func upsertSubscriptionMerging(_ local: SubscriptionRecord) async throws -> SubscriptionRecord {
+        // Signed-out: queue the local copy. The next flush will run
+        // through `save(_:)`, which on a `serverRecordChanged` collision
+        // bottoms out in the queue again — at which point the call site
+        // can re-run the merge with a fresh server fetch. The user's
+        // most recent local intent is never silently dropped.
+        await refreshAccountStatusIfUnknown()
+        if cachedAccountStatus != .available {
+            pendingWrites[local.toCKRecord().recordID] = local.toCKRecord()
+            return local
+        }
+        let merged: SubscriptionRecord
+        do {
+            if let serverRecord = try await provider.fetch(
+                recordID: SubscriptionRecord.recordID(forFeedURL: local.feedURL)
+            ),
+                let serverDecoded = try? SubscriptionRecord(ckRecord: serverRecord)
+            {
+                merged = SubscriptionRecord.merge(local: local, remote: serverDecoded)
+            } else {
+                merged = local
+            }
+            try await save(merged.toCKRecord(), kind: "subscription")
+            return merged
+        } catch let cloudError as CloudKitProviderError {
+            handleSaveError(cloudError, record: local.toCKRecord())
+            return local
+        }
     }
 
     /// Save with grant-wins merging against the server copy. If the

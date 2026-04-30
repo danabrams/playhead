@@ -250,4 +250,124 @@ struct ICloudSyncCoordinatorTests {
         #expect(installed.contains(SubscriptionRecord.recordType))
         #expect(installed.contains(EntitlementRecord.recordType))
     }
+
+    // MARK: - Subscription merge (last-write-wins)
+
+    @Test("upsertSubscriptionMerging: stale local edit loses to newer server copy")
+    func subscriptionMergeStaleLocalLosesToNewerServer() async throws {
+        // Server already has a newer rename for the same feed.
+        let provider = FakeCloudKitProvider()
+        let serverRecord = Self.makeSubscription(
+            title: "Server Renamed",
+            modifiedAt: 1_700_000_500
+        )
+        await provider.seed(serverRecord.toCKRecord())
+
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+
+        // Local has an older edit (e.g. stale offline). After merge the
+        // server copy must win — last-write-wins, NOT GRANT-WINS.
+        let localStale = Self.makeSubscription(
+            title: "Local Stale",
+            modifiedAt: 1_700_000_000
+        )
+        let merged = try await coordinator.upsertSubscriptionMerging(localStale)
+        #expect(merged.title == "Server Renamed",
+                "Newer server lastModified must win over older local edit.")
+
+        // The server-side record was preserved (not clobbered with stale
+        // local title).
+        let saved = try await provider.fetch(
+            recordID: SubscriptionRecord.recordID(forFeedURL: localStale.feedURL)
+        )
+        let decoded = try #require(saved.flatMap { try? SubscriptionRecord(ckRecord: $0) })
+        #expect(decoded.title == "Server Renamed")
+    }
+
+    @Test("upsertSubscriptionMerging: newer local edit beats older server copy")
+    func subscriptionMergeNewerLocalBeatsOlderServer() async throws {
+        let provider = FakeCloudKitProvider()
+        await provider.seed(
+            Self.makeSubscription(title: "Old Server", modifiedAt: 1_700_000_000).toCKRecord()
+        )
+
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+        let local = Self.makeSubscription(title: "New Local", modifiedAt: 1_700_000_500)
+        let merged = try await coordinator.upsertSubscriptionMerging(local)
+        #expect(merged.title == "New Local")
+
+        let saved = try await provider.fetch(
+            recordID: SubscriptionRecord.recordID(forFeedURL: local.feedURL)
+        )
+        let decoded = try #require(saved.flatMap { try? SubscriptionRecord(ckRecord: $0) })
+        #expect(decoded.title == "New Local")
+    }
+
+    @Test("upsertSubscriptionMerging: unsubscribe tombstone after server add still propagates")
+    func subscriptionMergeTombstonePropagates() async throws {
+        let provider = FakeCloudKitProvider()
+        // Server has an older add.
+        await provider.seed(
+            Self.makeSubscription(modifiedAt: 1_700_000_000).toCKRecord()
+        )
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+
+        // Local emits a newer tombstone — must win the merge.
+        let tombstone = Self.makeSubscription(
+            isRemoved: true,
+            modifiedAt: 1_700_000_500
+        )
+        let merged = try await coordinator.upsertSubscriptionMerging(tombstone)
+        #expect(merged.isRemoved == true,
+                "Newer remove must beat older add — otherwise unsubscribe never propagates.")
+    }
+
+    // MARK: - syncEnabledUpdates stream
+
+    @Test("syncEnabledUpdates: yields current value to a fresh subscriber")
+    func syncEnabledUpdatesSeedsCurrent() async {
+        let provider = FakeCloudKitProvider(initialAccountStatus: .available)
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+        await coordinator.handleAccountStatusChange()
+
+        let stream = await coordinator.syncEnabledUpdates()
+        var iterator = stream.makeAsyncIterator()
+        let first = await iterator.next()
+        #expect(first == true,
+                "Late subscribers must observe the current sync-enabled value, not hang waiting for the next account-status change.")
+    }
+
+    @Test("syncEnabledUpdates: sign-out mid-session flips the published value")
+    func syncEnabledUpdatesFlipOnSignOut() async {
+        let provider = FakeCloudKitProvider(initialAccountStatus: .available)
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+        await coordinator.handleAccountStatusChange()
+
+        let stream = await coordinator.syncEnabledUpdates()
+        var iterator = stream.makeAsyncIterator()
+        // Drain the seed value.
+        _ = await iterator.next()
+
+        // Drive the provider to unavailable and re-poll.
+        await provider.setAccountStatus(.noAccount)
+        await coordinator.handleAccountStatusChange()
+
+        let next = await iterator.next()
+        #expect(next == false,
+                "Sign-out must flip the stream's published value so the Settings footer updates without a view re-appear.")
+    }
+
+    @Test("upsertSubscriptionMerging: queues local copy when account unavailable")
+    func subscriptionMergeQueuesWhenSignedOut() async throws {
+        let provider = FakeCloudKitProvider(initialAccountStatus: .noAccount)
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+        let local = Self.makeSubscription()
+
+        let returned = try await coordinator.upsertSubscriptionMerging(local)
+        // Queued — nothing reached the fake DB and the merge couldn't run.
+        #expect(returned == local)
+        #expect(await provider.records.isEmpty)
+        #expect(await coordinator.pendingWriteCount == 1)
+    }
+
 }

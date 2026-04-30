@@ -147,4 +147,135 @@ struct SubscriptionLibraryTests {
         let podcasts = try ctx.fetch(FetchDescriptor<Podcast>())
         #expect(podcasts.isEmpty)
     }
+
+    // MARK: - Cold-start hop
+
+    @Test("bootstrapFromRemote: pre-seeded coordinator records land in the local library")
+    func bootstrapFromRemotePopulatesLibrary() async throws {
+        let ctx = try Self.makeContext()
+        let library = SubscriptionLibrary(modelContext: ctx)
+
+        let provider = FakeCloudKitProvider(initialAccountStatus: .available)
+        let seed = SubscriptionRecord(
+            feedURL: URL(string: "https://a.com/f")!,
+            title: "Server Show",
+            author: "Server Author",
+            artworkURL: nil,
+            subscribedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            isRemoved: false,
+            lastModified: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        await provider.seed(seed.toCKRecord())
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+
+        try await library.bootstrapFromRemote(coordinator: coordinator)
+
+        let podcasts = try ctx.fetch(FetchDescriptor<Podcast>())
+        #expect(podcasts.count == 1)
+        #expect(podcasts.first?.title == "Server Show")
+        #expect(podcasts.first?.feedURL == seed.feedURL)
+    }
+
+    @Test("bootstrapFromRemote: signed-out is a no-op (no apply, no throw)")
+    func bootstrapFromRemoteSignedOutIsNoOp() async throws {
+        let ctx = try Self.makeContext()
+        let library = SubscriptionLibrary(modelContext: ctx)
+
+        let provider = FakeCloudKitProvider(initialAccountStatus: .noAccount)
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+        try await library.bootstrapFromRemote(coordinator: coordinator)
+
+        let podcasts = try ctx.fetch(FetchDescriptor<Podcast>())
+        #expect(podcasts.isEmpty)
+    }
+
+    // MARK: - Writer-tap helpers
+
+    @Test("subscribedRecord(for:) carries Podcast fields and isRemoved=false")
+    func subscribedRecordCarriesFields() throws {
+        let url = URL(string: "https://a.com/f")!
+        let podcast = Podcast(
+            feedURL: url,
+            title: "Show",
+            author: "Author",
+            artworkURL: URL(string: "https://a.com/art.jpg")
+        )
+        let now = Date(timeIntervalSince1970: 1_700_000_500)
+        let record = SubscriptionLibrary.subscribedRecord(for: podcast, now: now)
+
+        #expect(record.feedURL == url)
+        #expect(record.title == "Show")
+        #expect(record.author == "Author")
+        #expect(record.isRemoved == false)
+        #expect(record.lastModified == now,
+                "lastModified must reflect the fresh subscribe so concurrent-device merges resolve in favor of the new edit.")
+    }
+
+    @Test("tombstoneRecord(for:) preserves Podcast metadata + sets isRemoved=true")
+    func tombstoneRecordSetsRemoved() throws {
+        let url = URL(string: "https://a.com/f")!
+        let podcast = Podcast(
+            feedURL: url,
+            title: "Show",
+            author: "Author",
+            artworkURL: nil
+        )
+        let now = Date(timeIntervalSince1970: 1_700_000_500)
+        let record = SubscriptionLibrary.tombstoneRecord(for: podcast, now: now)
+
+        #expect(record.feedURL == url)
+        #expect(record.title == "Show")
+        #expect(record.isRemoved == true,
+                "Tombstone propagates the unsubscribe to other devices.")
+        #expect(record.lastModified == now)
+    }
+
+    @Test("Writer-tap: subscribedRecord pushed via coordinator lands in CloudKit")
+    func subscribedRecordRoundTripsThroughCoordinator() async throws {
+        let provider = FakeCloudKitProvider(initialAccountStatus: .available)
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+
+        let url = URL(string: "https://a.com/f")!
+        let podcast = Podcast(feedURL: url, title: "Show", author: "Author")
+        let record = SubscriptionLibrary.subscribedRecord(for: podcast)
+        try await coordinator.upsertSubscriptionMerging(record)
+
+        let saved = await provider.records
+        #expect(saved.count == 1)
+        let decoded = try #require(saved.first.flatMap { try? SubscriptionRecord(ckRecord: $0) })
+        #expect(decoded.feedURL == url)
+        #expect(decoded.isRemoved == false)
+    }
+
+    @Test("Writer-tap: tombstoneRecord pushed via coordinator marks server record removed")
+    func tombstoneRecordRoundTripsThroughCoordinator() async throws {
+        let provider = FakeCloudKitProvider(initialAccountStatus: .available)
+        // Server already has the add.
+        let url = URL(string: "https://a.com/f")!
+        let priorAdd = SubscriptionRecord(
+            feedURL: url,
+            title: "Show",
+            author: "Author",
+            artworkURL: nil,
+            subscribedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            isRemoved: false,
+            lastModified: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        await provider.seed(priorAdd.toCKRecord())
+
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+        let podcast = Podcast(feedURL: url, title: "Show", author: "Author")
+        let tombstone = SubscriptionLibrary.tombstoneRecord(
+            for: podcast,
+            now: Date(timeIntervalSince1970: 1_700_000_500)
+        )
+        try await coordinator.upsertSubscriptionMerging(tombstone)
+
+        let serverAfter = try await provider.fetch(
+            recordID: SubscriptionRecord.recordID(forFeedURL: url)
+        )
+        let decoded = try #require(serverAfter.flatMap { try? SubscriptionRecord(ckRecord: $0) })
+        #expect(decoded.isRemoved == true,
+                "Newer tombstone must overwrite the older add on the server.")
+    }
 }

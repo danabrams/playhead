@@ -27,6 +27,40 @@ final class SubscriptionLibrary {
         self.modelContext = modelContext
     }
 
+    /// Build the wire-format record describing a freshly-subscribed
+    /// podcast. The record's `lastModified` is `now` so a concurrent
+    /// device's later edit (rename / artwork update) will win the
+    /// merge naturally. Pure — doesn't touch CloudKit; the call site
+    /// pushes via the coordinator.
+    static func subscribedRecord(for podcast: Podcast, now: Date = .now) -> SubscriptionRecord {
+        SubscriptionRecord(
+            feedURL: podcast.feedURL,
+            title: podcast.title,
+            author: podcast.author,
+            artworkURL: podcast.artworkURL,
+            subscribedAt: podcast.subscribedAt,
+            isRemoved: false,
+            lastModified: now
+        )
+    }
+
+    /// Build the tombstone record describing an unsubscribed podcast.
+    /// `lastModified` is `now` so the remove beats any earlier add on
+    /// other devices. The record retains the prior metadata so a
+    /// re-subscription on another device sees coherent fields rather
+    /// than `""` placeholders.
+    static func tombstoneRecord(for podcast: Podcast, now: Date = .now) -> SubscriptionRecord {
+        SubscriptionRecord(
+            feedURL: podcast.feedURL,
+            title: podcast.title,
+            author: podcast.author,
+            artworkURL: podcast.artworkURL,
+            subscribedAt: podcast.subscribedAt,
+            isRemoved: true,
+            lastModified: now
+        )
+    }
+
     /// Snapshot of every persisted `Podcast` as a `SubscriptionRecord`.
     /// Tombstones are NOT generated here — the caller emits a tombstone
     /// when it deletes a row.
@@ -43,6 +77,19 @@ final class SubscriptionLibrary {
                 lastModified: podcast.subscribedAt
             )
         }
+    }
+
+    /// Cold-start helper: ask the coordinator for the server-side
+    /// subscription set and apply it into the local library. Hides the
+    /// fetch + apply choreography from the launch path so
+    /// `PlayheadApp.task` only sees a single call. Best-effort — when
+    /// the coordinator is signed-out the fetch returns empty and the
+    /// apply is a no-op. Errors propagate; the launch path catches and
+    /// logs.
+    func bootstrapFromRemote(coordinator: ICloudSyncCoordinator) async throws {
+        let records = try await coordinator.initialSubscriptionFetch()
+        guard !records.isEmpty else { return }
+        try apply(remoteRecords: records)
     }
 
     /// Apply the given remote records to the local library. New URLs
