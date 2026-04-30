@@ -155,6 +155,33 @@ struct PlayheadApp: App {
                     )
                     await runtime.adDetectionService.setEpisodeMetadataProvider(provider)
 
+                    // playhead-5c1t: cold-start hop for iCloud sync.
+                    // Once the ModelContainer is available we ask the
+                    // coordinator for the server-side subscription set
+                    // and apply it into the local library, so a fresh
+                    // device install lands the user's existing
+                    // subscriptions without manual re-search. The
+                    // coordinator's `start()` (called in
+                    // `PlayheadRuntime.init`) is what publishes the
+                    // account status to the cache; the bootstrap just
+                    // reads + applies. Best-effort: when signed-out,
+                    // `initialSubscriptionFetch` returns empty and the
+                    // apply is a no-op. Failures (network, parse) are
+                    // logged to the iCloudSync category and never
+                    // cascade into a launch failure.
+                    Task { @MainActor in
+                        let library = SubscriptionLibrary(
+                            modelContext: modelContainer.mainContext
+                        )
+                        do {
+                            try await library.bootstrapFromRemote(
+                                coordinator: runtime.iCloudSyncCoordinator
+                            )
+                        } catch {
+                            Self.logger.warning("iCloud initial subscription fetch failed: \(error.localizedDescription)")
+                        }
+                    }
+
                     // playhead-fv2q: construct and attach the periodic
                     // feed-refresh service now that the ModelContainer is
                     // available. The BGAppRefreshTask identifier itself

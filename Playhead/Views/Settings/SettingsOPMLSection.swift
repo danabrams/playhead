@@ -191,7 +191,8 @@ extension SettingsView {
 
         let bridge = SettingsOPMLImportBridge(
             modelContext: self.modelContext,
-            discoveryService: PodcastDiscoveryService()
+            discoveryService: PodcastDiscoveryService(),
+            iCloudSyncCoordinator: runtime.iCloudSyncCoordinator
         )
 
         await opmlViewModel.runImport(
@@ -227,10 +228,20 @@ extension SettingsView {
 final class SettingsOPMLImportBridge {
     let modelContext: ModelContext
     let discoveryService: PodcastDiscoveryService
+    /// playhead-5c1t: optional so previews / unit tests that don't
+    /// exercise the iCloud writer-tap can construct the bridge without
+    /// a coordinator. Production wiring always passes the runtime's
+    /// coordinator; the writer-tap fires fire-and-forget when present.
+    let iCloudSyncCoordinator: ICloudSyncCoordinator?
 
-    init(modelContext: ModelContext, discoveryService: PodcastDiscoveryService) {
+    init(
+        modelContext: ModelContext,
+        discoveryService: PodcastDiscoveryService,
+        iCloudSyncCoordinator: ICloudSyncCoordinator? = nil
+    ) {
         self.modelContext = modelContext
         self.discoveryService = discoveryService
+        self.iCloudSyncCoordinator = iCloudSyncCoordinator
     }
 
     func exists(feedURL: URL) -> Bool {
@@ -256,7 +267,17 @@ final class SettingsOPMLImportBridge {
         // will retry the missing feed via the dedup logic.
         do {
             let parsed = try await discoveryService.fetchFeed(url: feed.xmlUrl)
-            _ = discoveryService.persist(parsed, from: feed.xmlUrl, in: modelContext)
+            let podcast = discoveryService.persist(parsed, from: feed.xmlUrl, in: modelContext)
+            // playhead-5c1t: writer-tap. Each OPML-imported feed is
+            // also pushed to iCloud so the import propagates to the
+            // user's other devices. Fire-and-forget; the coordinator
+            // handles offline / not-signed-in queueing.
+            if let coordinator = iCloudSyncCoordinator {
+                let record = SubscriptionLibrary.subscribedRecord(for: podcast)
+                Task.detached {
+                    _ = try? await coordinator.upsertSubscriptionMerging(record)
+                }
+            }
         } catch {
             // Intentional swallow.
         }
