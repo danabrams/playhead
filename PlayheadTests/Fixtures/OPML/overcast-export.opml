@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="1.0">
+    <head>
+        <title>Overcast Podcast Subscriptions</title>
+    </head>
+    <body>
+        <outline text="feeds">
+            <outline type="rss" text="The Daily" title="The Daily" xmlUrl="https://feeds.simplecast.com/54nAGcIl" htmlUrl="https://www.nytimes.com/podcasts/the-daily"/>
+            <outline type="rss" text="Reply All" title="Reply All" xmlUrl="https://feeds.megaphone.fm/replyall" htmlUrl="https://gimletmedia.com/shows/reply-all"/>
+            <outline type="rss" text="Conan O'Brien Needs A Friend" title="Conan O'Brien Needs A Friend" xmlUrl="https://feeds.simplecast.com/dHoohVNH" htmlUrl="https://teamcoco.com/podcasts"/>
+        </outline>
+    </body>
+</opml>

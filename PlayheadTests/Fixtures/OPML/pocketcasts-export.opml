@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="1.0">
+    <head>
+        <title>Pocket Casts Feeds</title>
+    </head>
+    <body>
+        <outline text="feeds">
+            <outline type="rss" text="Hardcore History" xmlUrl="https://feeds.feedburner.com/dancarlin/history"/>
+            <outline type="rss" text="Radiolab" xmlUrl="https://feeds.simplecast.com/EmVW7VGp"/>
+        </outline>
+    </body>
+</opml>

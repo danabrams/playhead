@@ -20,7 +20,7 @@ import UIKit
 struct SettingsView: View {
 
     @Query private var allPreferences: [UserPreferences]
-    @Environment(\.modelContext) private var modelContext
+    @Environment(\.modelContext) var modelContext
     @Environment(PlayheadRuntime.self) private var runtime
 
     @State private var viewModel = SettingsViewModel()
@@ -87,6 +87,14 @@ struct SettingsView: View {
     /// flippable in TestFlight builds for dogfood-only debugging.
     @AppStorage(DebugFlagKeys.showPipelineStrip) private var showPipelineStrip = false
 
+    /// playhead-2jo: OPML import/export state. Owns the file picker /
+    /// share-sheet plumbing for the Subscriptions group; the actual
+    /// parse + import work lives on `OPMLImportExportViewModel`.
+    /// Internal access so the cross-file `SettingsOPMLSection` extension
+    /// can read/bind these fields.
+    @State var opmlViewModel = OPMLImportExportViewModel()
+    @State var opmlImporterPresented = false
+
     var body: some View {
         NavigationStack {
             ScrollViewReader { proxy in
@@ -120,6 +128,7 @@ struct SettingsView: View {
                         backgroundSection(prefs)
                         episodeSummariesSection(prefs)
                         storageSection
+                        opmlSection
                         purchasesSection
                         aboutSection
                         // playhead-btoa.4: always-visible debug-toggles

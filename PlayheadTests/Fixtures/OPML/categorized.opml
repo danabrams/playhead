@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+    <head>
+        <title>Categorized Subscriptions</title>
+    </head>
+    <body>
+        <outline text="News">
+            <outline type="rss" text="The Daily" xmlUrl="https://feeds.simplecast.com/54nAGcIl"/>
+            <outline text="Tech">
+                <outline type="rss" text="ATP" xmlUrl="https://atp.fm/rss"/>
+            </outline>
+        </outline>
+        <outline text="Comedy">
+            <outline type="rss" text="Conan O'Brien Needs A Friend" xmlUrl="https://feeds.simplecast.com/dHoohVNH"/>
+        </outline>
+    </body>
+</opml>
