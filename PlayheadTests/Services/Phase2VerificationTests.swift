@@ -89,20 +89,24 @@ struct AcousticBreakDetectorPerformanceTests {
 
     /// Wall-clock budget for processing 1800 windows. The production
     /// goal (and what the algorithm achieves on an unloaded simulator)
-    /// is ~30–80ms — well under the historical 100ms ceiling. The
-    /// budget below is intentionally 3× that ceiling so the test
-    /// remains a meaningful guard against algorithmic regressions
-    /// (anything that pushes the inner loop into a higher complexity
-    /// class will blow well past 300ms) while absorbing the variance
-    /// induced by parallel-test CPU pressure on this 16 GB
-    /// dev-machine — multiple `xcodebuild` jobs share the same cores
-    /// and a 100ms scalar test is the kind of measurement that
-    /// reliably misses a tight wall-clock budget under contention.
-    /// See CLAUDE.md "Parallelism Ceiling" and the playhead-ss38
-    /// note in `LanePreemptionCoordinatorTests`.
-    private static let fullEpisodeBudgetMs: Double = 300.0
+    /// is ~30–80ms — well under the historical 100ms ceiling. We
+    /// assert the *median* of N=10 iterations meets a 100ms budget
+    /// (the production target) and use a generous per-iteration hang
+    /// ceiling to catch genuine algorithmic regressions (anything
+    /// that pushes the inner loop into a higher complexity class
+    /// will blow well past the ceiling on every iteration). Median-
+    /// based measurement is robust to the parallel-test CPU pressure
+    /// on this 16 GB dev-machine — multiple `xcodebuild` jobs share
+    /// cores and a single-sample wall-clock test reliably misses a
+    /// tight budget under contention. See CLAUDE.md "Parallelism
+    /// Ceiling" and the playhead-ss38 note in
+    /// `LanePreemptionCoordinatorTests.promotionLatencyUnder100ms`,
+    /// which is the template for this median pattern.
+    private static let fullEpisodeBudgetMs: Double = 100.0
+    private static let fullEpisodeHangCeilingMs: Double = 5_000.0
+    private static let fullEpisodeIterations = 10
 
-    @Test("Processes 1800 windows (60-min episode) under 300ms")
+    @Test("Processes 1800 windows (60-min episode) under 100ms (median of 10)")
     func fullEpisodePerformance() {
         var rng = LCG(seed: 42)
 
@@ -149,21 +153,41 @@ struct AcousticBreakDetectorPerformanceTests {
             ))
         }
 
-        // Measure wall clock time
+        // Run the detector N times and capture wall-clock samples. We
+        // measure the median (typical case) rather than a single max
+        // because xcodebuild runs 3000+ tests in parallel and any one
+        // sample can be stretched 100ms–1s+ by cooperative-pool
+        // scheduling regardless of the algorithm's actual cost. The
+        // hang ceiling on `maxMs` still catches a runaway implementation
+        // (every iteration would balloon, not just the unlucky one).
+        // See bead playhead-rbv4 / playhead-ss38.
         let clock = ContinuousClock()
-        let start = clock.now
-        let breaks = AcousticBreakDetector.detectBreaks(in: windows)
-        let elapsed = clock.now - start
+        var samplesMs: [Double] = []
+        samplesMs.reserveCapacity(Self.fullEpisodeIterations)
+        var lastBreaks: [AcousticBreak] = []
 
-        let elapsedMs = Double(elapsed.components.attoseconds) / 1e15 +
-                         Double(elapsed.components.seconds) * 1000.0
+        for _ in 0..<Self.fullEpisodeIterations {
+            let start = clock.now
+            let breaks = AcousticBreakDetector.detectBreaks(in: windows)
+            let elapsed = clock.now - start
+            let elapsedMs = Double(elapsed.components.attoseconds) / 1e15 +
+                             Double(elapsed.components.seconds) * 1000.0
+            samplesMs.append(elapsedMs)
+            lastBreaks = breaks
+        }
 
-        #expect(elapsedMs < Self.fullEpisodeBudgetMs,
-                "Should process 1800 windows in under \(Self.fullEpisodeBudgetMs)ms, took \(elapsedMs)ms")
+        let sorted = samplesMs.sorted()
+        let medianMs = sorted[sorted.count / 2]
+        let maxMs = sorted.last!
+
+        #expect(medianMs < Self.fullEpisodeBudgetMs,
+                "Median (over \(Self.fullEpisodeIterations) iterations) should process 1800 windows in under \(Self.fullEpisodeBudgetMs)ms, was \(medianMs)ms (max=\(maxMs)ms, samples=\(samplesMs))")
+        #expect(maxMs < Self.fullEpisodeHangCeilingMs,
+                "Max iteration should not exceed hang ceiling of \(Self.fullEpisodeHangCeilingMs)ms, was \(maxMs)ms (median=\(medianMs)ms, samples=\(samplesMs))")
 
         // Sanity: should detect breaks near the 4 ad boundaries
         let detectedNearBoundary = adBoundaries.filter { boundary in
-            breaks.contains { abs($0.time - boundary) < 6.0 }
+            lastBreaks.contains { abs($0.time - boundary) < 6.0 }
         }
         #expect(detectedNearBoundary.count >= 3,
                 "Should detect breaks near most of the 4 ad boundaries, found \(detectedNearBoundary.count)")
