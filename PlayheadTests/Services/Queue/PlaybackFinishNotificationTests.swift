@@ -30,9 +30,12 @@ struct PlaybackFinishNotificationTests {
             return false
         }
 
-        // Yield once so the service's notification observer task has a
-        // chance to start consuming the stream.
-        try await Task.sleep(for: .milliseconds(20))
+        // Yield generously so the service's notification observer task
+        // has a chance to start consuming the stream. 20 ms was enough
+        // in isolation but flaked under heavy parallel load — the
+        // service's observer runs on its own actor so it requires
+        // multiple scheduling hops before it's listening.
+        try await Task.sleep(for: .milliseconds(100))
 
         // Synthesize the AVPlayerItem-end-time notification on the
         // injected center; the service's observer should re-broadcast
@@ -42,9 +45,10 @@ struct PlaybackFinishNotificationTests {
             object: nil
         )
 
-        // Wait up to ~1s for the re-broadcast.
+        // Wait up to ~3 s for the re-broadcast (was 1 s; doubled-plus
+        // to absorb FastTests scheduler pressure).
         let timeoutTask = Task {
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .seconds(3))
             received.cancel()
             return false
         }

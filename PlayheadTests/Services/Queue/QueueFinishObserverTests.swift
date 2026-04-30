@@ -48,14 +48,21 @@ struct QueueFinishObserverTests {
         observer.start()
         defer { observer.stop() }
 
-        // Yield once so the observer task is consuming.
-        try await Task.sleep(for: .milliseconds(10))
+        // Yield generously so the observer task is consuming on the
+        // simulator's heavily-loaded scheduler. 10ms was enough in
+        // isolation but flaked under PlayheadFastTests parallel load.
+        try await Task.sleep(for: .milliseconds(50))
 
         center.post(name: .playbackDidFinishEpisode, object: nil)
 
-        // Allow advance + handler to complete.
-        try await Task.sleep(for: .milliseconds(100))
-
+        // Poll up to 2 s for the handler to fire rather than relying
+        // on a fixed sleep — keeps the test deterministic under load.
+        let deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline {
+            let played = await recorder.played
+            if played == ["ep-A"] { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
         let played = await recorder.played
         #expect(played == ["ep-A"])
     }

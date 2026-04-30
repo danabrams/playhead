@@ -46,6 +46,12 @@ struct EpisodeListView: View {
     /// Settings tab observes and scrolls on next appearance.
     @Environment(\.settingsRouter) private var settingsRouter
 
+    /// playhead-05i: live playback-queue service exposed at the App
+    /// scene scope. When `nil` (preview / test contexts that don't set
+    /// the environment), the swipe actions become no-ops with haptic
+    /// feedback rather than crashing.
+    @Environment(\.playbackQueueService) private var playbackQueueService
+
     @State private var navigateToNowPlaying = false
     @State private var selectedEpisode: Episode?
 
@@ -86,10 +92,25 @@ struct EpisodeListView: View {
         )
     }
 
+    /// playhead-05i: append `episode` to the tail of the playback
+    /// queue. Fire-and-forget — the swipe gesture should never block.
+    /// Errors are swallowed (the queue service surfaces only
+    /// programmer-error throws like duplicate-key races).
     func queueEpisode(_ episode: Episode) {
-        // Queue functionality will be wired in a future bead.
-        // For now, mark as a no-op placeholder with haptic feedback.
         hapticPlayer.play(.save)
+        let key = episode.canonicalEpisodeKey
+        guard let service = playbackQueueService else { return }
+        Task { try? await service.addLast(episodeKey: key) }
+    }
+
+    /// playhead-05i: insert `episode` at the head of the queue so it
+    /// plays immediately after the current episode finishes. Same
+    /// fire-and-forget shape as `queueEpisode(_:)`.
+    func playNextEpisode(_ episode: Episode) {
+        hapticPlayer.play(.save)
+        let key = episode.canonicalEpisodeKey
+        guard let service = playbackQueueService else { return }
+        Task { try? await service.addNext(episodeKey: key) }
     }
 
     var body: some View {
@@ -272,12 +293,24 @@ private extension EpisodeListView {
                         }
                         .tint(AppColors.textSecondary)
 
+                        // playhead-05i: "Play Last" = append to the
+                        // tail of the queue.
                         Button {
                             queueEpisode(episode)
                         } label: {
-                            Label("Queue", systemImage: "text.badge.plus")
+                            Label("Play Last", systemImage: "text.badge.plus")
                         }
                         .tint(Palette.mutedSage)
+
+                        // playhead-05i: "Play Next" = insert at the
+                        // head of the queue so the user's current
+                        // episode is followed by this one.
+                        Button {
+                            playNextEpisode(episode)
+                        } label: {
+                            Label("Play Next", systemImage: "text.insert")
+                        }
+                        .tint(AppColors.accent)
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("\(episode.title)\(episode.isPlayed ? ", played" : "")")
