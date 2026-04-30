@@ -76,7 +76,15 @@ protocol ContinuedProcessingTaskProtocol: BackgroundProcessingTaskProtocol {
     var identifier: String { get }
 }
 
+// playhead-izvj.1: `BGContinuedProcessingTask` is iOS-only — the API
+// is unavailable in Mac Catalyst. The protocol itself stays compileable
+// on Catalyst (production callsites that don't touch the concrete type
+// keep working); only the conformance is gated. The continued-processing
+// registration + handler in `register(...)` below is gated in the same
+// way so the BG-task lifecycle is a Catalyst-side no-op.
+#if !targetEnvironment(macCatalyst)
 extension BGContinuedProcessingTask: ContinuedProcessingTaskProtocol {}
+#endif
 
 /// Abstracts BGTaskScheduler for testability.
 protocol BackgroundTaskScheduling: Sendable {
@@ -537,11 +545,19 @@ actor BackgroundProcessingService {
             // user-initiated window). Older BGProcessingTask remains
             // accepted as a fallback for the previous no-op path so
             // scheduler re-registrations during tests do not crash.
+            //
+            // playhead-izvj.1: Mac Catalyst doesn't have
+            // `BGContinuedProcessingTask`. The submission side
+            // (`DownloadManager.submitContinuedProcessingRequest`) is a
+            // no-op on Catalyst, so this handler will never fire there;
+            // we defensively complete the task to keep the system happy.
+            #if !targetEnvironment(macCatalyst)
             if let continuedTask = task as? BGContinuedProcessingTask {
                 let sendableTask = UncheckedSendableBox(continuedTask)
                 Task { await self.handleContinuedProcessingTask(sendableTask.value) }
                 return
             }
+            #endif
             if task as? BGProcessingTask != nil {
                 // Legacy identifier path: mark complete without work.
                 // The new flow uses BGContinuedProcessingTask exclusively.
