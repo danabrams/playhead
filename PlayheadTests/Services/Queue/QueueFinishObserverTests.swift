@@ -48,16 +48,17 @@ struct QueueFinishObserverTests {
         observer.start()
         defer { observer.stop() }
 
-        // Yield generously so the observer task is consuming on the
-        // simulator's heavily-loaded scheduler. 10ms was enough in
-        // isolation but flaked under PlayheadFastTests parallel load.
-        try await Task.sleep(for: .milliseconds(50))
-
+        // The observer registers a synchronous addObserver block, so
+        // by the time `start()` returns, the post below is guaranteed
+        // to fire the block. The block dispatches into an unstructured
+        // Task whose advance() runs on the actor — poll the recorder
+        // up to a generous wall-clock deadline so parallel-test
+        // scheduler pressure (PlayheadFastTests runs ~5000 tests in
+        // ~700 suites) can't wedge us. The advance Task may queue
+        // behind many cooperative-pool workers under that load.
         center.post(name: .playbackDidFinishEpisode, object: nil)
 
-        // Poll up to 2 s for the handler to fire rather than relying
-        // on a fixed sleep — keeps the test deterministic under load.
-        let deadline = Date().addingTimeInterval(2.0)
+        let deadline = Date().addingTimeInterval(8.0)
         while Date() < deadline {
             let played = await recorder.played
             if played == ["ep-A"] { return }

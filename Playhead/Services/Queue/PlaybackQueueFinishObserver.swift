@@ -1,7 +1,16 @@
 // PlaybackQueueFinishObserver.swift
 // Bridge between the `playbackDidFinishEpisode` notification and the
-// queue's `PlaybackQueueAutoAdvancer`. Holds a long-running Task that
-// awaits each notification and calls `advance()`.
+// queue's `PlaybackQueueAutoAdvancer`. Registers a synchronous block
+// observer with NotificationCenter; the block kicks off an unstructured
+// Task that calls `advance()` on the advancer actor.
+//
+// Why a callback observer rather than `for await center.notifications(...)`:
+// the async-sequence path only begins receiving posts once the consumer
+// task has actively entered its `for await` loop. Under heavy parallel
+// test load (PlayheadFastTests runs ~5000 tests across ~700 suites), a
+// notification posted shortly after `start()` can race the consumer
+// task and be silently dropped. `addObserver(forName:object:queue:using:)`
+// is fully registered by the time the call returns, so no race exists.
 //
 // Lives outside any actor — its sole responsibility is wiring; the
 // real serialization happens inside the advancer (which is itself an
@@ -13,7 +22,7 @@ final class PlaybackQueueFinishObserver: @unchecked Sendable {
 
     private let center: NotificationCenter
     private let advancer: PlaybackQueueAutoAdvancer
-    private var task: Task<Void, Never>?
+    private var token: NSObjectProtocol?
 
     init(center: NotificationCenter, advancer: PlaybackQueueAutoAdvancer) {
         self.center = center
@@ -23,13 +32,19 @@ final class PlaybackQueueFinishObserver: @unchecked Sendable {
     /// Begin observing `playbackDidFinishEpisode`. Idempotent — calling
     /// `start()` while already started is a no-op.
     func start() {
-        guard task == nil else { return }
-        task = Task { [center, advancer] in
-            let notifications = center.notifications(named: .playbackDidFinishEpisode)
-            for await _ in notifications {
-                if Task.isCancelled { return }
-                await advancer.advance()
-            }
+        guard token == nil else { return }
+        let advancer = self.advancer
+        // `queue: nil` delivers the block synchronously on the posting
+        // thread. We dispatch the actual advance into an unstructured
+        // Task so the (possibly main-thread) post call returns
+        // immediately and the actor-isolated work runs on its own
+        // executor.
+        token = center.addObserver(
+            forName: .playbackDidFinishEpisode,
+            object: nil,
+            queue: nil
+        ) { _ in
+            Task { await advancer.advance() }
         }
     }
 
@@ -39,11 +54,11 @@ final class PlaybackQueueFinishObserver: @unchecked Sendable {
     /// have other reasons for an advance to be in progress, e.g. they
     /// just tapped "Play next" manually).
     func stop() {
-        task?.cancel()
-        task = nil
+        if let token { center.removeObserver(token) }
+        token = nil
     }
 
     deinit {
-        task?.cancel()
+        if let token { center.removeObserver(token) }
     }
 }
