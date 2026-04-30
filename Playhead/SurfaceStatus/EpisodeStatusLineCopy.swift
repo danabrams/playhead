@@ -227,13 +227,30 @@ enum EpisodeStatusLineCopy {
     /// already prefix some reasons with "Paused —" (e.g. `phoneIsHot`,
     /// `powerLimited`); we strip that prefix when present so the final
     /// string has exactly one "Paused —" lead.
+    ///
+    /// playhead-9mya post-own9 reconcile: when `hint == .none`, the
+    /// trailing "· {hintCopy}" segment is omitted so user-cancelled
+    /// jobs (which `CauseAttributionPolicy` now routes through
+    /// `(paused, cancelled, none)`) and `.noNetwork` pauses (which now
+    /// route through `(paused, waitingForNetwork, none)`) do not
+    /// emit the awkward / redundant "· waiting" tail. `.none` means
+    /// "no hint at all" per `ResolutionHint` semantics; the legacy
+    /// fallthrough into `hintCopy(.none) → "waiting"` was a copy bug
+    /// the policy delegation in own9 forced into the rendered string.
     private static func pausedPrimary(
         reason: SurfaceReason,
         hint: ResolutionHint
     ) -> String {
         let raw = SurfaceReasonCopyTemplates.template(for: reason)
         let reasonText = stripPausedPrefix(raw)
-        return "Paused \(emdash) \(reasonText) \(middot) \(hintCopy(hint))"
+        let head = "Paused \(emdash) \(reasonText)"
+        switch hint {
+        case .none:
+            return head
+        case .wait, .connectToWiFi, .chargeDevice, .freeUpStorage,
+             .enableAppleIntelligence, .openAppToResume, .retry:
+            return "\(head) \(middot) \(hintCopy(hint))"
+        }
     }
 
     /// Strip a leading "Paused — " / "Paused -" / "Paused: " so the
@@ -256,6 +273,36 @@ enum EpisodeStatusLineCopy {
     /// The optional secondary line emitted when a backfill is active
     /// (and the primary line is a playable-state copy).
     static let backfillSecondary = "analyzing remainder"
+
+    /// Subcopy for an Activity Paused row: "{reason}" when `hint`
+    /// is `.none`, "{reason} · {hintCopy}" otherwise.
+    ///
+    /// `ActivityView.PausedRowView` renders this string below the
+    /// episode title. The Activity section header already says
+    /// "Paused", so the row's title-adjacent line does NOT add a
+    /// "Paused —" prefix — callers get the verbatim
+    /// `SurfaceReasonCopyTemplates` string for the reason.
+    ///
+    /// playhead-9mya post-own9 reconcile: when `hint == .none`, the
+    /// trailing "· {hintCopy}" segment is omitted so user-cancelled
+    /// rows (which `CauseAttributionPolicy` now routes through
+    /// `(paused, cancelled, none)`) and `.noNetwork` pauses (which
+    /// now route through `(paused, waitingForNetwork, none)`) do not
+    /// emit the awkward / redundant "· waiting" tail. This matches
+    /// the same `.none`-hint rule applied in `pausedPrimary`.
+    static func pausedSubcopy(
+        reason: SurfaceReason,
+        hint: ResolutionHint
+    ) -> String {
+        let reasonCopy = SurfaceReasonCopyTemplates.template(for: reason)
+        switch hint {
+        case .none:
+            return reasonCopy
+        case .wait, .connectToWiFi, .chargeDevice, .freeUpStorage,
+             .enableAppleIntelligence, .openAppToResume, .retry:
+            return "\(reasonCopy) \(middot) \(hintCopy(hint))"
+        }
+    }
 
     /// Copy for a `ResolutionHint`. Localized strings will replace this
     /// in Phase 2; until then the strings are the canonical copy.

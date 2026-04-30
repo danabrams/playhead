@@ -334,14 +334,20 @@ private struct PausedRowView: View {
     // Same key as NowRowView; SwiftUI auto-invalidates each view independently.
     @AppStorage(DebugFlagKeys.showPipelineStrip) private var showPipelineStrip = false
     var body: some View {
-        let reasonCopy = SurfaceReasonCopyTemplates.template(for: row.reason)
-        let hintCopy = EpisodeStatusLineCopy.hintCopy(row.hint)
+        // playhead-9mya: pausedSubcopy drops the "· {hint}" suffix
+        // when hint is .none so post-own9 user-cancelled / noNetwork
+        // rows render "Cancelled" / "Waiting for network" rather than
+        // "Cancelled · waiting" / "Waiting for network · waiting".
+        let subcopy = EpisodeStatusLineCopy.pausedSubcopy(
+            reason: row.reason,
+            hint: row.hint
+        )
         VStack(alignment: .leading, spacing: 2) {
             Text(row.title)
                 .font(AppTypography.body)
                 .foregroundStyle(AppColors.textPrimary)
                 .lineLimit(2)
-            Text("\(reasonCopy) · \(hintCopy)")
+            Text(subcopy)
                 .font(AppTypography.mono(size: 12, weight: .regular))
                 .foregroundStyle(AppColors.textSecondary)
                 .accessibilityIdentifier("ActivityView.paused.reason")
@@ -356,7 +362,7 @@ private struct PausedRowView: View {
         }
         .padding(.vertical, Spacing.xs)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(Text("Paused: \(row.title), \(reasonCopy), \(hintCopy)"))
+        .accessibilityLabel(Text("Paused: \(row.title), \(subcopy)"))
     }
 }
 

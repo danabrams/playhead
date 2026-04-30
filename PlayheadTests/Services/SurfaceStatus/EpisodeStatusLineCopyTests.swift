@@ -192,6 +192,77 @@ struct EpisodeStatusLineCopyTests {
         #expect(line.primary == "Paused \(Self.emdash) Open Playhead to resume \(Self.middot) open Playhead to resume")
     }
 
+    // MARK: - 5b. paused with hint == .none (post-own9 reconcile)
+    //
+    // After playhead-own9 routed `.userCancelled`, `.userPreempted`, and
+    // `.noNetwork` through `(paused, _, .none)`, the legacy
+    // "Paused — {reason} · waiting" template emitted a redundant /
+    // semantically-clashing "· waiting" suffix (e.g. "Cancelled · waiting"
+    // or "Waiting for network · waiting"). The reconcile (playhead-9mya):
+    // when `hint == .none`, the resolver omits the trailing
+    // "{middot} {hintCopy}" segment entirely and renders the bare
+    // "Paused — {reason}" line.
+
+    @Test("paused + cancelled + none renders \"Paused — Cancelled\" without \"· waiting\" tail")
+    func pausedCancelledNoneGolden() {
+        // Post-own9: userCancelled / userPreempted route through
+        // (paused, cancelled, none). The legacy template would have
+        // emitted "Paused — Cancelled · waiting", which clashes with a
+        // user-initiated cancel.
+        let status = Self.dispositionStatus(
+            disposition: .paused,
+            reason: .cancelled,
+            hint: .none
+        )
+        let line = EpisodeStatusLineCopy.resolve(
+            status: status,
+            coverage: nil,
+            anchor: nil
+        )
+        #expect(line.primary == "Paused \(Self.emdash) Cancelled")
+        #expect(!line.primary.contains("waiting"))
+        #expect(line.secondary == nil)
+    }
+
+    @Test("paused + waitingForNetwork + none renders \"Paused — Waiting for network\" without \"· waiting\" tail")
+    func pausedWaitingForNetworkNoneGolden() {
+        // Post-own9: .noNetwork routes through
+        // (paused, waitingForNetwork, none). Legacy template emitted
+        // "Paused — Waiting for network · waiting" — the trailing
+        // "· waiting" duplicates "Waiting for network".
+        let status = Self.dispositionStatus(
+            disposition: .paused,
+            reason: .waitingForNetwork,
+            hint: .none
+        )
+        let line = EpisodeStatusLineCopy.resolve(
+            status: status,
+            coverage: nil,
+            anchor: nil
+        )
+        #expect(line.primary == "Paused \(Self.emdash) Waiting for network")
+        #expect(line.secondary == nil)
+    }
+
+    @Test("paused with hint != .none retains the \"· {hint}\" tail")
+    func pausedWithExplicitHintRetainsTail() {
+        // Sanity: only `.none` triggers the suffix elision. `.wait`
+        // still produces "· waiting"; `.connectToWiFi` still produces
+        // "· connect to Wi-Fi" — the spec says the user-actionable hint
+        // must be visible.
+        let status = Self.dispositionStatus(
+            disposition: .paused,
+            reason: .waitingForNetwork,
+            hint: .connectToWiFi
+        )
+        let line = EpisodeStatusLineCopy.resolve(
+            status: status,
+            coverage: nil,
+            anchor: nil
+        )
+        #expect(line.primary == "Paused \(Self.emdash) Waiting for network \(Self.middot) connect to Wi-Fi")
+    }
+
     // MARK: - 6. unavailable
 
     @Test("unavailable renders \"Analysis unavailable — [reason]\"")
@@ -389,6 +460,74 @@ struct EpisodeStatusLineCopyTests {
         for hint in ResolutionHint.allCases {
             let copy = EpisodeStatusLineCopy.hintCopy(hint)
             #expect(!copy.isEmpty, "hintCopy(\(hint)) must not be empty")
+        }
+    }
+
+    // MARK: - pausedSubcopy (playhead-9mya)
+    //
+    // Helper consumed by `ActivityView.PausedRowView` to render the
+    // "{reason} · {hint}" subcopy below an Activity Paused row's title.
+    // Mirrors the `pausedPrimary` rule that drops the "· {hint}" tail
+    // when `hint == .none` so post-own9 user-cancelled / noNetwork
+    // rows do not produce "Cancelled · waiting" / "Waiting for
+    // network · waiting".
+
+    @Test("pausedSubcopy drops the \"· hint\" tail when hint is .none")
+    func pausedSubcopyOmitsTailWhenHintIsNone() {
+        let copy = EpisodeStatusLineCopy.pausedSubcopy(
+            reason: .cancelled,
+            hint: .none
+        )
+        #expect(copy == "Cancelled")
+        #expect(!copy.contains("·"))
+        #expect(!copy.contains("waiting"))
+    }
+
+    @Test("pausedSubcopy drops the \"· hint\" tail for waitingForNetwork + none")
+    func pausedSubcopyOmitsTailForWaitingForNetworkNone() {
+        let copy = EpisodeStatusLineCopy.pausedSubcopy(
+            reason: .waitingForNetwork,
+            hint: .none
+        )
+        #expect(copy == "Waiting for network")
+    }
+
+    @Test("pausedSubcopy retains the \"· hint\" tail when hint is actionable")
+    func pausedSubcopyKeepsTailWhenHintIsActionable() {
+        let copy = EpisodeStatusLineCopy.pausedSubcopy(
+            reason: .waitingForNetwork,
+            hint: .connectToWiFi
+        )
+        #expect(copy == "Waiting for network \(Self.middot) connect to Wi-Fi")
+    }
+
+    @Test("pausedSubcopy retains the \"· waiting\" tail when hint is .wait")
+    func pausedSubcopyKeepsWaitTail() {
+        // Sanity: only `.none` triggers the elision. `.wait` is still
+        // a real (if anodyne) hint that the View should render.
+        let copy = EpisodeStatusLineCopy.pausedSubcopy(
+            reason: .phoneIsHot,
+            hint: .wait
+        )
+        // pausedSubcopy uses the verbatim SurfaceReasonCopyTemplates
+        // string (no "Paused —" strip) because the Activity row's
+        // section header already says "Paused".
+        #expect(copy == "Paused \(Self.emdash) phone is too hot \(Self.middot) waiting")
+    }
+
+    @Test("every (SurfaceReason, ResolutionHint) pair produces a non-empty pausedSubcopy")
+    func pausedSubcopyIsExhaustive() {
+        for reason in SurfaceReason.allCases {
+            for hint in ResolutionHint.allCases {
+                let copy = EpisodeStatusLineCopy.pausedSubcopy(
+                    reason: reason,
+                    hint: hint
+                )
+                #expect(
+                    !copy.isEmpty,
+                    "pausedSubcopy(\(reason), \(hint)) must not be empty"
+                )
+            }
         }
     }
 

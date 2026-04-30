@@ -409,6 +409,66 @@ struct ActivityViewModelTests {
         #expect(row.outcome == .couldntAnalyze)
     }
 
+    // MARK: - playhead-9mya post-own9 reconcile: user-cancelled paused rows
+
+    @Test("paused + cancelled + none (post-own9 user-cancelled) lands in Paused with reason/hint forwarded")
+    func userCancelledPausedLandsInPausedSection() {
+        // After playhead-own9, CauseAttributionPolicy routes
+        // .userCancelled / .userPreempted to (paused, cancelled, none).
+        // The reducer therefore emits a paused-disposition status that
+        // must surface in the Activity Paused section (not vanish, not
+        // get rerouted to Recently Finished). The reconcile decision
+        // for playhead-9mya is "keep in pausedRows" — giving the user
+        // visibility on what they cancelled and a re-engagement seam.
+        let input = Self.makeInput(
+            id: "ep-user-cancel",
+            status: Self.makeStatus(
+                disposition: .paused,
+                reason: .cancelled,
+                hint: .none
+            ),
+            isRunning: false,
+            finishedAt: nil
+        )
+        let snapshot = ActivityViewModel.aggregate(inputs: [input], now: Date())
+        #expect(snapshot.now.isEmpty)
+        #expect(snapshot.upNext.isEmpty)
+        #expect(snapshot.recentlyFinished.isEmpty)
+        #expect(snapshot.paused.count == 1)
+        let row = try! #require(snapshot.paused.first)
+        #expect(row.episodeId == "ep-user-cancel")
+        // Reason + hint are forwarded verbatim so the View can render
+        // "Cancelled" via EpisodeStatusLineCopy.pausedSubcopy(...).
+        #expect(row.reason == .cancelled)
+        #expect(row.hint == .none)
+    }
+
+    @Test("paused + cancelled + none with finishedAt set still lands in Paused (terminalOutcome returns nil for paused)")
+    func userCancelledPausedWithFinishedAtStaysInPaused() {
+        // Defensive: even if a finishedAt timestamp leaks onto a
+        // paused-disposition row (e.g. transitional snapshot during
+        // state-change propagation), terminalOutcome returns nil for
+        // .paused, so the row falls through to the .paused branch and
+        // lands in pausedRows. The Recently Finished bucket is reserved
+        // for terminal outcomes (success / couldntAnalyze /
+        // analysisUnavailable) and a user-cancelled-but-paused row
+        // is not terminal.
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let input = Self.makeInput(
+            id: "ep-user-cancel-with-ts",
+            status: Self.makeStatus(
+                disposition: .paused,
+                reason: .cancelled,
+                hint: .none
+            ),
+            isRunning: false,
+            finishedAt: now.addingTimeInterval(-30)
+        )
+        let snapshot = ActivityViewModel.aggregate(inputs: [input], now: now)
+        #expect(snapshot.recentlyFinished.isEmpty)
+        #expect(snapshot.paused.count == 1)
+    }
+
     // MARK: - playhead-cjqq: queuePosition sort + persistence
 
     /// Variant of `makeInput` that sets `queuePosition` so the

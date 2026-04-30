@@ -436,6 +436,23 @@ final class ActivityViewModel {
 
             // Non-terminal rows: Paused dominates Queued. Queued rows
             // split on isRunning into Now vs Up Next.
+            //
+            // playhead-9mya post-own9 reconcile: user-cancelled and
+            // user-preempted jobs are now routed by
+            // `CauseAttributionPolicy` to `(paused, cancelled, none)`
+            // (previously `(cancelled, cancelled, retry)`). The
+            // reconcile decision is to keep them in `pausedRows` —
+            // the `.paused` disposition flows through this branch
+            // unchanged, so a user-cancelled job lands in the
+            // Activity Paused section with `reason == .cancelled`
+            // and `hint == .none`. The View renders this through
+            // `EpisodeStatusLineCopy.pausedSubcopy(reason:hint:)`
+            // which omits the trailing "· {hint}" tail for
+            // `.none` so the line reads "Cancelled" rather than
+            // "Cancelled · waiting". The alternative (filter
+            // user-cancelled out of Activity entirely) would
+            // restore the pre-own9 silent-disappearance behavior
+            // and lose the user's only re-engagement seam.
             switch input.status.disposition {
             case .paused:
                 pausedRows.append(
