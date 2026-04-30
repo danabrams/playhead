@@ -17,6 +17,11 @@ enum SwiftDataStore {
             // suspension/restart so an overnight-completed download
             // still fires `tripReady`.
             DownloadBatch.self,
+            // playhead-05i: persisted playback queue. Distinct from
+            // `Episode.queuePosition` (analysis-priority ordering on the
+            // Activity screen, playhead-cjqq) — this is the user-facing
+            // "Up Next" playback queue that drives auto-advance.
+            QueueEntry.self,
         ])
     }
 
@@ -68,6 +73,13 @@ enum PlayheadSchemaV1: VersionedSchema {
             // with `queuePosition == nil` and inherit the provider's
             // natural ordering until a drag-reorder writes through.
             DownloadBatch.self,
+            // playhead-05i: additive new entity for the user-facing
+            // playback queue ("Up Next"). Adding to V1 is acceptable
+            // because there is nothing to migrate FROM — existing
+            // installs simply observe an empty queue table on first
+            // launch. Once V2 is introduced these references must be
+            // replaced with frozen type snapshots per the warning above.
+            QueueEntry.self,
         ]
     }
 }

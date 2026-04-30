@@ -4,6 +4,7 @@
 // "Quiet Instrument" aesthetic — precise, minimal chrome, typographic hierarchy.
 
 import OSLog
+import SwiftData
 import SwiftUI
 
 // MARK: - NowPlayingView
@@ -15,7 +16,13 @@ struct NowPlayingView: View {
     @State private var viewModel: NowPlayingViewModel
     @State private var bannerQueue = AdBannerQueue()
     @State private var showTranscriptPeek = false
+    /// playhead-05i: drives the "Up Next" sheet presentation. The
+    /// sheet hosts a `QueueView` whose VM reads the same
+    /// `PlaybackQueueService` injected at App scene scope.
+    @State private var showQueueSheet = false
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.playbackQueueService) private var playbackQueueService
+    @Environment(\.modelContext) private var modelContext
 
     /// Accepts an optional external ViewModel for shared state with NowPlayingBar.
     /// Falls back to creating its own if none provided.
@@ -156,6 +163,34 @@ struct NowPlayingView: View {
                 viewModel.stopObservingBanners()
             }
         }
+        .sheet(isPresented: $showQueueSheet) {
+            // playhead-05i: queue sheet. The VM is constructed
+            // inside the sheet builder so it pulls the live service
+            // from the environment at presentation time. When the
+            // service is `nil` (e.g. preview / test runtime), the
+            // VM still constructs but `refresh()` returns no rows.
+            if let service = playbackQueueService {
+                QueueView(
+                    viewModel: QueueViewModel(
+                        queueService: service,
+                        modelContainer: modelContext.container
+                    )
+                )
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(AppColors.surface)
+            } else {
+                // No service: render an empty placeholder rather than
+                // a half-broken queue. The real path always has a
+                // service because `PlayheadApp` wires it before any
+                // view tree is realized.
+                Text("Queue unavailable")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textSecondary)
+                    .padding()
+                    .presentationDetents([.medium])
+            }
+        }
         .sheet(isPresented: $showTranscriptPeek) {
             if let assetId = analysisAssetId {
                 TranscriptPeekView(
@@ -225,21 +260,36 @@ private extension NowPlayingView {
 
             Spacer()
 
-            // Transcript peek — visible when analysis is available
-            if analysisAssetId != nil {
+            HStack(spacing: Spacing.md) {
+                // playhead-05i: "Up Next" — opens the queue sheet.
+                // Always visible (the queue is a global concept), even
+                // when no analysis is available.
                 Button {
-                    showTranscriptPeek = true
+                    showQueueSheet = true
                 } label: {
-                    Image(systemName: "text.quote")
+                    Image(systemName: "list.bullet")
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(AppColors.textSecondary)
                 }
-                .accessibilityLabel("Transcript")
-                .accessibilityHint("Opens the transcript peek sheet")
-            } else {
-                // Balance the chevron when transcript unavailable
-                Color.clear
-                    .frame(width: 18, height: 18)
+                .accessibilityLabel("Up Next")
+                .accessibilityHint("Opens the playback queue")
+
+                // Transcript peek — visible when analysis is available
+                if analysisAssetId != nil {
+                    Button {
+                        showTranscriptPeek = true
+                    } label: {
+                        Image(systemName: "text.quote")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(AppColors.textSecondary)
+                    }
+                    .accessibilityLabel("Transcript")
+                    .accessibilityHint("Opens the transcript peek sheet")
+                } else {
+                    // Balance the chevron when transcript unavailable
+                    Color.clear
+                        .frame(width: 18, height: 18)
+                }
             }
         }
     }

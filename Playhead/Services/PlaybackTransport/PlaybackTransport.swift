@@ -35,6 +35,16 @@ actor PlaybackServiceActor {
     static let shared = PlaybackServiceActor()
 }
 
+extension Notification.Name {
+    /// Posted by `PlaybackService` when the underlying `AVPlayerItem`
+    /// reaches the end of its asset (re-broadcast of
+    /// `AVPlayerItem.didPlayToEndTimeNotification` on the service's
+    /// injected `NotificationCenter`). The playback queue's
+    /// `PlaybackQueueAutoAdvancer` subscribes to this to drive
+    /// auto-advance to the next queued episode (playhead-05i).
+    static let playbackDidFinishEpisode = Notification.Name("PlaybackDidFinishEpisode")
+}
+
 // MARK: - PlaybackService
 
 /// Playback transport wrapping AVPlayer. Handles long-form podcast audio,
@@ -148,6 +158,7 @@ final class PlaybackService: NSObject, Sendable {
             // assertions when accessing actor-isolated self.
             self.observeInterruptionsAsync()
             self.observeRouteChangesAsync()
+            self.observePlayerItemFinishAsync()
         }
     }
 
@@ -485,6 +496,44 @@ final class PlaybackService: NSObject, Sendable {
                 default:
                     break
                 }
+            }
+        }
+    }
+
+    // MARK: - Episode Finish (Async)
+
+    /// Re-broadcast `AVPlayerItem.didPlayToEndTimeNotification` as
+    /// `Notification.Name.playbackDidFinishEpisode` on the injected
+    /// notification center. The playback queue's auto-advancer
+    /// subscribes to the re-broadcast (playhead-05i) — re-broadcasting
+    /// here keeps the queue layer ignorant of AVFoundation's specific
+    /// notification name, and ensures tests that inject a private
+    /// `NotificationCenter` see the finish event without having to
+    /// fight `.default`.
+    ///
+    /// Why a re-broadcast rather than letting the queue subscribe
+    /// directly to `AVPlayerItem.didPlayToEndTimeNotification`: AVFoundation
+    /// posts on `.default`, and the runtime / tests use a per-instance
+    /// notification center for isolation. The PlaybackService is the only
+    /// type that owns the player item and therefore the right place to
+    /// fan out the event onto the configured center.
+    private func observePlayerItemFinishAsync() {
+        let center = notificationCenter
+        Task { @PlaybackServiceActor [weak self] in
+            // Subscribe on the injected center. AVFoundation posts on
+            // `.default` in production; that is exactly the center
+            // PlayheadRuntime injects, so the observer fires for real
+            // playback. Tests post a synthetic notification on their
+            // private center to drive the same path.
+            let notifications = center.notifications(
+                named: AVPlayerItem.didPlayToEndTimeNotification
+            )
+            for await _ in notifications {
+                guard self != nil else { break }
+                center.post(
+                    name: .playbackDidFinishEpisode,
+                    object: nil
+                )
             }
         }
     }
