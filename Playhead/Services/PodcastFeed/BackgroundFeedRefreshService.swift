@@ -108,6 +108,25 @@ protocol DownloadsSettingsProviding: Sendable {
     func currentAutoDownloadSetting() -> AutoDownloadOnSubscribe
 }
 
+/// playhead-snp: post-refresh hop that converts the union of all newly-
+/// discovered episodes into local user notifications. Production wires
+/// this to a `BackgroundFeedRefreshNewEpisodeAnnouncer` adapter that
+/// hops onto the MainActor, resolves the SwiftData `Podcast` and
+/// `Episode` rows for each `canonicalEpisodeKey`, and forwards to a
+/// shared `NewEpisodeNotificationScheduler`. The default conformer is
+/// a no-op so older test factories can construct the service without
+/// caring about the notification surface.
+protocol NewEpisodeAnnouncing: Sendable {
+    func announce(newEpisodes: [FeedRefreshNewEpisode]) async
+}
+
+/// Default no-op announcer. Used when the runtime does not wire a real
+/// announcer (e.g. unit tests that only care about the refresh + diff
+/// + auto-download pipeline).
+struct NoOpNewEpisodeAnnouncer: NewEpisodeAnnouncing {
+    func announce(newEpisodes _: [FeedRefreshNewEpisode]) async {}
+}
+
 /// playhead-5uvz.4 (Gap-5): submits a backfill `BGProcessingTask` so
 /// iOS wakes the app to drain the analysis queue after a feed refresh
 /// just enqueued new downloads.
@@ -354,6 +373,11 @@ actor BackgroundFeedRefreshService {
     /// `ProductionBackfillScheduler`.
     private let backfillScheduler: (any BackfillScheduling)?
 
+    /// playhead-snp: announcer hop invoked once per refresh fire when
+    /// at least one new episode was discovered. Defaults to a no-op so
+    /// older test factories don't have to thread an announcer through.
+    private let newEpisodeAnnouncer: any NewEpisodeAnnouncing
+
     /// Actor-local expiration flag. iOS's `BGAppRefreshTask.expirationHandler`
     /// fires on an arbitrary system queue; the handler closure hops back
     /// onto the actor to flip this flag so the refresh loop can bail at
@@ -385,7 +409,8 @@ actor BackgroundFeedRefreshService {
         settingsProvider: any DownloadsSettingsProviding,
         taskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared,
         backfillScheduler: (any BackfillScheduling)? = nil,
-        bgTelemetry: any BGTaskTelemetryLogging = NoOpBGTaskTelemetryLogger()
+        bgTelemetry: any BGTaskTelemetryLogging = NoOpBGTaskTelemetryLogger(),
+        newEpisodeAnnouncer: any NewEpisodeAnnouncing = NoOpNewEpisodeAnnouncer()
     ) {
         self.enumerator = enumerator
         self.refresher = refresher
@@ -394,6 +419,7 @@ actor BackgroundFeedRefreshService {
         self.taskScheduler = taskScheduler
         self.backfillScheduler = backfillScheduler
         self.bgTelemetry = bgTelemetry
+        self.newEpisodeAnnouncer = newEpisodeAnnouncer
     }
 
     // MARK: - Start
@@ -643,6 +669,16 @@ actor BackgroundFeedRefreshService {
         // that found nothing new doesn't change the backfill backlog.
         if enqueuedCount > 0 {
             await backfillScheduler?.scheduleBackfillIfNeeded()
+        }
+
+        // playhead-snp: announce newly-discovered episodes. The
+        // announcer is responsible for resolving feed/episode metadata,
+        // applying user toggles, dedup, rate limit, and authorization.
+        // Skip the call when nothing new surfaced (clean no-op cap on
+        // an idle refresh) and when the BG task has expired so we don't
+        // run additional MainActor work past the post-expiration grace.
+        if !allNewEpisodes.isEmpty && !expired {
+            await newEpisodeAnnouncer.announce(newEpisodes: allNewEpisodes)
         }
     }
 
