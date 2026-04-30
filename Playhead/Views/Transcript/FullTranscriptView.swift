@@ -142,14 +142,13 @@ struct FullTranscriptView: View {
             episodeTitle: metadata.episodeTitle,
             now: Date()
         ) {
-            // Two share-sheet items: the share text (rich block quote
-            // with the URL embedded as the last line) and the URL by
-            // itself so iOS recognises a tappable link target. Plain-
-            // text-only recipients still see the URL via the embedded
-            // line; rich recipients (Notes, Mail) get both.
-            ShareLink(
-                items: [envelope.shareText, envelope.deepLinkURL.absoluteString]
-            ) {
+            // Share the editorial text artifact only — the deep link
+            // is already the last line of `shareText` so plain-text
+            // recipients (Twitter, Slack) get a tappable link, and
+            // rich recipients (Notes, Mail) preserve the block-quote
+            // formatting. Passing both `text` and `url` as separate
+            // items makes some recipients paste duplicate content.
+            ShareLink(item: envelope.shareText) {
                 Image(systemName: "square.and.arrow.up")
                     .accessibilityLabel("Share quote")
             }

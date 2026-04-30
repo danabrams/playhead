@@ -55,6 +55,7 @@ enum QuoteFormatter {
 
         let body = trimmed.joined(separator: "\n\n")
         let timestamp = TimeFormatter.formatTime(startTime)
+        let attribution = attributionLine(showTitle: showTitle, episodeTitle: episodeTitle)
 
         // Plain `\n` line endings — recipients on every platform render
         // them identically. Build the artifact in one literal so the
@@ -62,11 +63,30 @@ enum QuoteFormatter {
         return """
         \(leftDoubleQuote)\(body)\(rightDoubleQuote)
 
-        \(emDash) \(showTitle), \(leftDoubleQuote)\(episodeTitle)\(rightDoubleQuote)
+        \(attribution)
         \(timestamp)
 
         Shared from Playhead
         \(deepLinkURL.absoluteString)
         """
+    }
+
+    /// Build the em-dash attribution line, omitting empty fields so
+    /// blanks don't surface as `— , "Ep"` or `— Show, ""` artifacts in
+    /// the share artifact.
+    private static func attributionLine(showTitle: String, episodeTitle: String) -> String {
+        let trimmedShow = showTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedEp = episodeTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "\(emDash) "
+        switch (trimmedShow.isEmpty, trimmedEp.isEmpty) {
+        case (false, false):
+            return "\(prefix)\(trimmedShow), \(leftDoubleQuote)\(trimmedEp)\(rightDoubleQuote)"
+        case (true, false):
+            return "\(prefix)\(leftDoubleQuote)\(trimmedEp)\(rightDoubleQuote)"
+        case (false, true):
+            return "\(prefix)\(trimmedShow)"
+        case (true, true):
+            return String(emDash)
+        }
     }
 }

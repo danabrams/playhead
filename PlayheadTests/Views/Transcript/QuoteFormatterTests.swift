@@ -145,6 +145,40 @@ struct QuoteFormatterTests {
 
     // MARK: - Line endings
 
+    @Test("Empty show title omits the leading comma in the attribution line")
+    func emptyShowTitleOmitsComma() {
+        let result = QuoteFormatter.format(
+            quotes: ["Test"],
+            showTitle: "",
+            episodeTitle: "Ep",
+            startTime: 0,
+            deepLinkURL: URL(string: "playhead://episode/ep?t=0")!
+        )
+        // No "—  ," sequence (em-dash space space comma) — the
+        // attribution line should fall back to just the episode title
+        // when the show title is empty.
+        #expect(!result.contains(", \u{201C}Ep\u{201D}") || result.contains(" \u{201C}Ep\u{201D}"))
+        // More directly: the attribution line should be either
+        // "— Ep" form or the standard "— Show, Ep". Since show is
+        // empty, expect "— "Ep"" with no leading comma.
+        let attributionLine = result.split(separator: "\n").first(where: { $0.hasPrefix("\u{2014}") })
+        #expect(attributionLine == "\u{2014} \u{201C}Ep\u{201D}")
+    }
+
+    @Test("Empty episode title falls back to show title in attribution")
+    func emptyEpisodeTitleUsesShowOnly() {
+        let result = QuoteFormatter.format(
+            quotes: ["Test"],
+            showTitle: "Show",
+            episodeTitle: "",
+            startTime: 0,
+            deepLinkURL: URL(string: "playhead://episode/ep?t=0")!
+        )
+        let attributionLine = result.split(separator: "\n").first(where: { $0.hasPrefix("\u{2014}") })
+        // Just the show, no trailing comma + empty quotes.
+        #expect(attributionLine == "\u{2014} Show")
+    }
+
     @Test("Output uses LF line endings only (no CRLF)")
     func usesLineFeedOnly() {
         let result = QuoteFormatter.format(
