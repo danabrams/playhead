@@ -173,6 +173,128 @@ public struct OPMLService: Sendable {
         return Data(xml.utf8)
     }
 
+    // MARK: - Import
+
+    /// Result type for the per-feed resolve seam. Strings carry
+    /// human-readable reasons (e.g. "HTTP 404", "DNS lookup failed") so
+    /// the result-summary UI can surface them verbatim.
+    public enum ResolveOutcome: Sendable {
+        case success(Void)
+        case failure(String)
+    }
+
+    /// Run the OPML feeds through the given resolve / persist seam.
+    ///
+    /// - Parameters:
+    ///   - feeds: Parsed OPML entries. Order is preserved in the
+    ///     returned counts.
+    ///   - exists: Synchronous predicate that returns `true` if a
+    ///     podcast with this `feedURL` is already in the library.
+    ///     Production binds this to a SwiftData fetch.
+    ///   - resolve: Async closure that validates / fetches feed
+    ///     metadata. Returns `.success` if the feed is reachable,
+    ///     `.failure(reason)` otherwise.
+    ///   - persist: Async closure invoked exactly once per
+    ///     successfully-resolved, non-duplicate feed. Production binds
+    ///     this to `PodcastDiscoveryService.persist`.
+    ///   - progress: Reports `(completed, total)` after each feed
+    ///     finishes (resolved, duplicate-skipped, or failed).
+    ///   - maxConcurrent: Upper bound on concurrent resolves. Defaults
+    ///     to 5, matching the spec's "5 simultaneous requests" rule.
+    public func importFeeds(
+        _ feeds: [OPMLFeed],
+        exists: @escaping @Sendable (URL) -> Bool,
+        resolve: @escaping @Sendable (URL) async -> ResolveOutcome,
+        persist: @escaping @Sendable (OPMLFeed) async -> Void,
+        progress: @escaping @Sendable (Int, Int) -> Void,
+        maxConcurrent: Int = 5
+    ) async -> OPMLImportResult {
+        // De-duplicate the input list itself so a malformed OPML with
+        // repeated entries cannot inflate the counts.
+        let deduped = OPMLParserDelegate.dedup(feeds)
+        let total = deduped.count
+        guard total > 0 else {
+            return OPMLImportResult(imported: 0, skippedDuplicate: 0, failed: [])
+        }
+
+        let agg = OPMLImportAggregator()
+
+        // Fan out work in chunks of `maxConcurrent` rather than spawning
+        // `total` tasks at once. A chunked TaskGroup is a simpler and
+        // more predictable concurrency cap than a homemade semaphore.
+        let limit = max(1, maxConcurrent)
+        await withTaskGroup(of: Void.self) { group in
+            var index = 0
+            // Prime the group with up to `limit` workers.
+            while index < deduped.count, index < limit {
+                let feed = deduped[index]
+                index += 1
+                group.addTask {
+                    await Self.processOne(
+                        feed: feed,
+                        total: total,
+                        exists: exists,
+                        resolve: resolve,
+                        persist: persist,
+                        progress: progress,
+                        aggregator: agg
+                    )
+                }
+            }
+            // Each time a worker finishes, kick off the next feed.
+            while await group.next() != nil {
+                if index < deduped.count {
+                    let feed = deduped[index]
+                    index += 1
+                    group.addTask {
+                        await Self.processOne(
+                            feed: feed,
+                            total: total,
+                            exists: exists,
+                            resolve: resolve,
+                            persist: persist,
+                            progress: progress,
+                            aggregator: agg
+                        )
+                    }
+                }
+            }
+        }
+
+        let snapshot = await agg.snapshot()
+        return OPMLImportResult(
+            imported: snapshot.imported,
+            skippedDuplicate: snapshot.skipped,
+            failed: snapshot.failed
+        )
+    }
+
+    /// Per-feed worker. Extracted so both the priming loop and the
+    /// drain loop in `importFeeds` add identical tasks.
+    private static func processOne(
+        feed: OPMLFeed,
+        total: Int,
+        exists: @escaping @Sendable (URL) -> Bool,
+        resolve: @escaping @Sendable (URL) async -> ResolveOutcome,
+        persist: @escaping @Sendable (OPMLFeed) async -> Void,
+        progress: @escaping @Sendable (Int, Int) -> Void,
+        aggregator: OPMLImportAggregator
+    ) async {
+        if exists(feed.xmlUrl) {
+            await aggregator.recordSkipped()
+        } else {
+            switch await resolve(feed.xmlUrl) {
+            case .success:
+                await persist(feed)
+                await aggregator.recordImported()
+            case .failure(let reason):
+                await aggregator.recordFailed(feed.xmlUrl, reason)
+            }
+        }
+        let done = await aggregator.completed()
+        progress(done, total)
+    }
+
     /// XML attribute-value escape. Only the five characters that change
     /// the meaning of a quoted attribute need escaping; everything else
     /// (including UTF-8) passes through verbatim.
@@ -256,5 +378,35 @@ private final class OPMLParserDelegate: NSObject, XMLParserDelegate {
             }
         }
         return result
+    }
+}
+
+// MARK: - Import Aggregator
+
+/// Concurrent-safe accumulator for `importFeeds`. File-private (rather
+/// than nested inside `importFeeds`) so the static `processOne` worker
+/// can name its parameter type without resorting to `any AnyActor`.
+final actor OPMLImportAggregator {
+    private(set) var imported = 0
+    private(set) var skipped = 0
+    private(set) var failed: [OPMLImportResult.Failure] = []
+    private(set) var done = 0
+
+    func recordImported() { imported += 1; done += 1 }
+    func recordSkipped() { skipped += 1; done += 1 }
+    func recordFailed(_ url: URL, _ reason: String) {
+        failed.append(.init(url: url, reason: reason))
+        done += 1
+    }
+    func completed() -> Int { done }
+
+    func snapshot() -> Snapshot {
+        Snapshot(imported: imported, skipped: skipped, failed: failed)
+    }
+
+    struct Snapshot: Sendable {
+        let imported: Int
+        let skipped: Int
+        let failed: [OPMLImportResult.Failure]
     }
 }
