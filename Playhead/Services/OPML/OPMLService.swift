@@ -280,18 +280,26 @@ public struct OPMLService: Sendable {
         progress: @escaping @Sendable (Int, Int) -> Void,
         aggregator: OPMLImportAggregator
     ) async {
+        // Each branch returns the unique `done` value the increment
+        // produced — this guarantees the progress callback sees a
+        // distinct count per feed even under concurrent execution.
+        // (Reading `completed()` in a separate hop is racy: two
+        // increments can both observe the same post-second-increment
+        // value and emit duplicate progress events.)
+        let done: Int
         if await exists(feed.xmlUrl) {
-            await aggregator.recordSkipped()
+            done = await aggregator.recordSkippedReturningDone()
         } else {
             switch await resolve(feed.xmlUrl) {
             case .success:
                 await persist(feed)
-                await aggregator.recordImported()
+                done = await aggregator.recordImportedReturningDone()
             case .failure(let reason):
-                await aggregator.recordFailed(feed.xmlUrl, reason)
+                done = await aggregator.recordFailedReturningDone(
+                    feed.xmlUrl, reason
+                )
             }
         }
-        let done = await aggregator.completed()
         progress(done, total)
     }
 
@@ -398,6 +406,21 @@ final actor OPMLImportAggregator {
         failed.append(.init(url: url, reason: reason))
         done += 1
     }
+
+    /// Atomic record + read so concurrent feeds get distinct `done` values.
+    func recordImportedReturningDone() -> Int {
+        recordImported()
+        return done
+    }
+    func recordSkippedReturningDone() -> Int {
+        recordSkipped()
+        return done
+    }
+    func recordFailedReturningDone(_ url: URL, _ reason: String) -> Int {
+        recordFailed(url, reason)
+        return done
+    }
+
     func completed() -> Int { done }
 
     func snapshot() -> Snapshot {

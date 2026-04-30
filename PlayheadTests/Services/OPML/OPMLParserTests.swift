@@ -225,6 +225,61 @@ struct OPMLParserTests {
         #expect(feeds[1].title == "B")
     }
 
+    @Test("Leading UTF-8 BOM does not crash the parser")
+    func leadingBOMOK() throws {
+        let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
+        let body = #"""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <opml version="2.0">
+          <head><title>x</title></head>
+          <body>
+            <outline type="rss" text="A" xmlUrl="https://example.com/a.rss"/>
+          </body>
+        </opml>
+        """#
+        var data = Data(bom)
+        data.append(Data(body.utf8))
+        let feeds = try OPMLService().parseOPML(from: data)
+        #expect(feeds.count == 1)
+    }
+
+    @Test("OPML inside a comment block does not surface as a feed")
+    func commentedOutFeedNotEmitted() throws {
+        let xml = #"""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <opml version="2.0">
+          <head><title>x</title></head>
+          <body>
+            <outline type="rss" text="Real" xmlUrl="https://example.com/real.rss"/>
+            <!-- <outline type="rss" text="Commented" xmlUrl="https://example.com/dead.rss"/> -->
+          </body>
+        </opml>
+        """#
+        let feeds = try OPMLService().parseOPML(from: Data(xml.utf8))
+        #expect(feeds.count == 1)
+        #expect(feeds[0].title == "Real")
+    }
+
+    @Test("Non-OPML XML root throws .invalidFormat")
+    func nonOPMLRootThrows() throws {
+        let xml = #"""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>Wrong shape</title>
+          </channel>
+        </rss>
+        """#
+        do {
+            _ = try OPMLService().parseOPML(from: Data(xml.utf8))
+            Issue.record("Expected throw")
+        } catch let error as OPMLError {
+            if case .invalidFormat = error { /* ok */ } else {
+                Issue.record("Expected .invalidFormat, got \(error)")
+            }
+        }
+    }
+
     @Test("Deeply nested outlines (4+ levels) still flatten")
     func deeplyNestedFlattens() throws {
         let xml = #"""
