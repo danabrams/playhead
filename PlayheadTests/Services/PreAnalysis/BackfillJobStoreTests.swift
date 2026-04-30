@@ -239,11 +239,9 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // Current schema is v17 after playhead-4my.10.1 cycle-2 M-A
-        // rebuilt `training_examples` with the post-fix shape (FK
-        // RESTRICT, nullable decisionCohortJSON) so any DB already opened
-        // at v16 picks up the corrected schema.
-        #expect(version == 17)
+        // Current schema is v18 after playhead-jzik added the
+        // `episode_summaries` table for on-device summary persistence.
+        #expect(version == 18)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")

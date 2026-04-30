@@ -27,13 +27,24 @@ final class UserPreferences {
     /// trip context other than Generic.
     var notificationPermissionAsked: Bool = false
 
+    /// playhead-jzik: whether on-device episode summaries (and the
+    /// expandable subtitle they back) are enabled. Default ON because
+    /// the FM cost is negligible (one extraction per asset, gated on
+    /// transcript coverage) and the surface enriches the backlog
+    /// browse without any user-facing "AI" framing. Setting this to
+    /// `false` halts the backfill coordinator and leaves the
+    /// `episode_summaries` table alone — re-enabling resumes
+    /// generation against any rows still missing or stale.
+    var episodeSummariesEnabled: Bool = true
+
     init(
         skipBehavior: SkipBehavior = .auto,
         playbackSpeed: Double = 1.0,
         skipIntervals: SkipIntervals = .init(),
         backgroundProcessingEnabled: Bool = true,
         allowsCellular: Bool = true,
-        notificationPermissionAsked: Bool = false
+        notificationPermissionAsked: Bool = false,
+        episodeSummariesEnabled: Bool = true
     ) {
         self.skipBehavior = skipBehavior
         self.playbackSpeed = playbackSpeed
@@ -41,6 +52,7 @@ final class UserPreferences {
         self.backgroundProcessingEnabled = backgroundProcessingEnabled
         self.allowsCellular = allowsCellular
         self.notificationPermissionAsked = notificationPermissionAsked
+        self.episodeSummariesEnabled = episodeSummariesEnabled
     }
 }
 
