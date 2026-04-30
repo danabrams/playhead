@@ -465,6 +465,7 @@ private struct RootView: View {
     @AppStorage(OnboardingFlags.firstSubscriptionOnboardingSeenKey)
     private var hasSeenFirstSubscriptionOnboarding = false
     @Environment(PlayheadRuntime.self) private var runtime
+    @Environment(\.modelContext) private var modelContext
     @Query private var podcasts: [Podcast]
     // playhead-5nwy: SplashController owns the fixed-timer dismiss path.
     // Constructed inline as @State so the timer fires the moment the
@@ -502,6 +503,47 @@ private struct RootView: View {
                 }
             } else {
                 OnboardingView()
+            }
+        }
+        // playhead-m8v7: handle incoming `playhead://episode/<id>?t=<sec>`
+        // deep links emitted by the transcript-share artifact. The
+        // closure captures the runtime + modelContext at the
+        // RootView scope so the router has everything it needs to
+        // resolve an episode and dispatch playback. We log + ignore
+        // unhandled URLs (wrong scheme, unknown id) — see the
+        // router's `handle(url:)` for the rejection contract.
+        .onOpenURL { url in
+            Task { @MainActor in
+                let context = modelContext
+                let runtimeRef = runtime
+                let router = TranscriptDeepLinkRouter(
+                    resolveEpisode: { episodeId in
+                        let descriptor = FetchDescriptor<Episode>(
+                            predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
+                        )
+                        guard let _ = try? context.fetch(descriptor).first else {
+                            return nil
+                        }
+                        return TranscriptDeepLinkRouter.ResolvedEpisode(episodeId: episodeId)
+                    },
+                    playEpisode: { resolved in
+                        // The `#Predicate` macro can't dereference a
+                        // struct property through the closure capture
+                        // — bind the id to a plain `String` first.
+                        let key = resolved.episodeId
+                        let descriptor = FetchDescriptor<Episode>(
+                            predicate: #Predicate { $0.canonicalEpisodeKey == key }
+                        )
+                        guard let episode = try? context.fetch(descriptor).first else {
+                            return
+                        }
+                        await runtimeRef.playEpisode(episode)
+                    },
+                    seek: { time in
+                        await runtimeRef.seek(to: time)
+                    }
+                )
+                _ = await router.handle(url: url)
             }
         }
     }

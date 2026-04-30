@@ -95,6 +95,15 @@ targets:
           - com.playhead.app.analysis.continued
           - com.playhead.app.preanalysis.recovery
           - com.playhead.app.feed-refresh
+        # playhead-m8v7: register the `playhead://` URL scheme for
+        # transcript-share deep links. `CFBundleURLName` uses the
+        # bundle id as a uniqueness key (Apple's documented
+        # convention); the scheme itself is `playhead`.
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Viewer
+            CFBundleURLName: com.playhead.app.deeplink
+            CFBundleURLSchemes:
+              - playhead
     scheme:
       testTargets:
         - name: PlayheadTests

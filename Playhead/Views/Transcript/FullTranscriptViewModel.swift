@@ -75,6 +75,18 @@ final class FullTranscriptViewModel {
     /// are no matches.
     private(set) var currentMatchPosition: Int?
 
+    /// playhead-m8v7: ids of paragraphs the user has selected for a
+    /// share-quote. Empty when selection mode is inactive. `Set` rather
+    /// than `Array` because selection cardinality is order-independent
+    /// (the share envelope re-orders into document order from
+    /// `paragraphs`).
+    private(set) var selectedParagraphIds: Set<String> = []
+
+    /// playhead-m8v7: convenience derived from `selectedParagraphIds`.
+    /// Read by the view to branch the tap action between
+    /// "tap-to-seek" (default) and "tap-to-toggle" (selection mode).
+    var isSelectionModeActive: Bool { !selectedParagraphIds.isEmpty }
+
     // MARK: Configuration
 
     let analysisAssetId: String
@@ -179,11 +191,82 @@ final class FullTranscriptViewModel {
     // MARK: Tap-to-seek
 
     /// Returns the seek target (in seconds) for the paragraph at the
-    /// supplied index, or `nil` when the index is out of range. The
-    /// view should hand the result to the playback service.
+    /// supplied index, or `nil` when the index is out of range OR
+    /// when selection mode is active (in which case the tap toggles
+    /// the paragraph in/out of `selectedParagraphIds` instead). The
+    /// view should hand a non-nil result to the playback service and
+    /// otherwise treat the tap as a selection toggle that the
+    /// view-model has already applied.
     func tappedParagraph(at index: Int) -> TimeInterval? {
         guard index >= 0, index < paragraphs.count else { return nil }
+
+        // playhead-m8v7: while selection mode is active, the tap is a
+        // selection toggle — it does NOT seek. Apply the toggle here
+        // and return nil so the host knows to skip the seek.
+        if isSelectionModeActive {
+            let id = paragraphs[index].id
+            if selectedParagraphIds.contains(id) {
+                selectedParagraphIds.remove(id)
+            } else {
+                selectedParagraphIds.insert(id)
+            }
+            return nil
+        }
         return paragraphs[index].startTime
+    }
+
+    // MARK: Selection (playhead-m8v7)
+
+    /// Long-press is the entry point into selection mode: it adds the
+    /// paragraph at `index` to `selectedParagraphIds`. Idempotent —
+    /// long-pressing an already-selected paragraph leaves it selected.
+    /// Out-of-range indices are silent no-ops.
+    func longPressedParagraph(at index: Int) {
+        guard index >= 0, index < paragraphs.count else { return }
+        selectedParagraphIds.insert(paragraphs[index].id)
+    }
+
+    /// Empty the selection set and exit selection mode. Called from
+    /// the view's "Done" button or after a successful share.
+    func clearSelection() {
+        selectedParagraphIds.removeAll()
+    }
+
+    /// Build a `(text, deepLinkURL)` envelope for the currently-
+    /// selected paragraphs. Returns `nil` when the set is empty.
+    /// Paragraphs are emitted in document order; the URL points at
+    /// the FIRST selected paragraph's `startTime` (the natural
+    /// "where to land me" target).
+    ///
+    /// `now` is unused today but accepted so a future revision can
+    /// stamp share-time provenance without churning the call sites.
+    func shareEnvelope(
+        episodeId: String,
+        showTitle: String,
+        episodeTitle: String,
+        now: Date
+    ) -> TranscriptShareEnvelope? {
+        guard !selectedParagraphIds.isEmpty else { return nil }
+
+        // Walk paragraphs in document order; pick the ones whose ids
+        // are in `selectedParagraphIds`. Cheap because paragraph counts
+        // are O(hundreds), not O(thousands).
+        let ordered = paragraphs.filter { selectedParagraphIds.contains($0.id) }
+        guard let first = ordered.first else { return nil }
+
+        let url = TranscriptDeepLink.url(
+            episodeId: episodeId,
+            startTime: first.startTime
+        )
+        let text = QuoteFormatter.format(
+            quotes: ordered.map(\.text),
+            showTitle: showTitle,
+            episodeTitle: episodeTitle,
+            startTime: first.startTime,
+            deepLinkURL: url
+        )
+        _ = now  // currently unused; see docstring.
+        return TranscriptShareEnvelope(shareText: text, deepLinkURL: url)
     }
 
     // MARK: In-episode search

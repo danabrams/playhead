@@ -765,7 +765,16 @@ private struct LibraryFullTranscriptHost: View {
                     await runtime.playEpisode(episode)
                     await runtime.seek(to: seekTime)
                 }
-            }
+            },
+            // playhead-m8v7: feed the share-quote feature with the
+            // metadata it needs to build an editorial share artifact
+            // + a deep link back to this episode at the selected
+            // paragraph's timestamp.
+            shareMetadata: FullTranscriptView.ShareMetadata(
+                episodeId: episode.canonicalEpisodeKey,
+                showTitle: episode.podcast?.title ?? "",
+                episodeTitle: episode.title
+            )
         )
         .task {
             await beginObservingIfCurrent()
