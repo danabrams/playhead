@@ -807,10 +807,6 @@ actor BackfillJobRunner {
         // Phase 4 region clustering; ignored by persistence-only callers.
         var fmRefinementWindows: [FMRefinementWindowOutput] = []
 
-        guard !inputs.segments.isEmpty else {
-            return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows)
-        }
-
         // Cycle 10 Rev3-M5: derive the `runMode` discriminator from the
         // persisted job's coveragePolicy. The original Rev3-M5 intent was
         // to distinguish Phase 3 shadow-validation rows from Phase 5
@@ -822,6 +818,34 @@ actor BackfillJobRunner {
         let runMode: SemanticScanPhase = (job.coveragePolicy == .targetedWithAudit)
             ? .targeted
             : .shadow
+
+        // Bug 11 (semantic_scan_results wiring): an admitted backfill job
+        // that reaches `markBackfillJobComplete` MUST produce at least one
+        // row in `semantic_scan_results` keyed to the asset+job. The
+        // captured-DB symptom (7 complete jobs / 0 scan rows) was caused by
+        // edge paths returning early without persisting anything, which
+        // breaks cohort tracking, planner state, and the "1:N completed-job
+        // → scan-rows" relationship downstream readers assume.
+        //
+        // The empty-segments case is the structural short-circuit: with no
+        // segments to scan there's nothing for `coarsePassA` to do. We
+        // still write a `.noAds` sentinel row so the asset+job tuple is
+        // observable in `fetchSemanticScanResults(analysisAssetId:)`.
+        // The defensive end-of-function backstop below covers any
+        // hypothetical future fall-through where coarse/refinement produce
+        // neither windows nor failures.
+        guard !inputs.segments.isEmpty else {
+            let sentinel = makeNoWorkSentinelScanResult(
+                inputs: inputs,
+                jobId: job.jobId,
+                jobPhase: job.phase,
+                runMode: runMode,
+                reason: "emptySegments"
+            )
+            try await store.insertSemanticScanResult(sentinel)
+            scanResultIds.append(sentinel.id)
+            return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows)
+        }
 
         // bd-1en Phase 1: dispatch sensitive windows (pharma /
         // medical / mental-health / regulated tests) through the
@@ -1065,7 +1089,104 @@ actor BackfillJobRunner {
             }
         }
 
+        // Bug 11 backstop: the coarse/refinement branches above are
+        // exhaustive in principle — every successful coarse window persists
+        // a passA row (line 852-872), every failed window persists a
+        // failure row, and any non-success top-level status persists a
+        // pass-level failure row. If despite all that we still have zero
+        // scan rows for an admitted job with non-empty segments, that's a
+        // wiring drift bug and the cohort tracker will silently miss this
+        // run. Write a defensive sentinel so the invariant holds even when
+        // a future code change introduces a new fall-through.
+        if scanResultIds.isEmpty {
+            let sentinel = makeNoWorkSentinelScanResult(
+                inputs: inputs,
+                jobId: job.jobId,
+                jobPhase: job.phase,
+                runMode: runMode,
+                reason: "noWorkPersistedByPasses"
+            )
+            try await store.insertSemanticScanResult(sentinel)
+            scanResultIds.append(sentinel.id)
+            logger.error(
+                "FM backfill job \(job.jobId, privacy: .public) reached completion with zero persisted rows — sentinel written. coarse.windows=\(coarse.windows.count, privacy: .public) coarse.failedWindows=\(coarse.failedWindowStatuses.count, privacy: .public) coarse.status=\(coarse.status.rawValue, privacy: .public)"
+            )
+        }
+
         return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows)
+    }
+
+    // MARK: - Bug 11 sentinel row builder
+    //
+    // A "noWork" sentinel scan result keyed to the admitted backfill job.
+    // Used when an admitted job's coarse/refinement passes produce zero
+    // rows — most commonly because `inputs.segments.isEmpty`, defensively
+    // also for any hypothetical future fall-through where coarse returns
+    // success+empty+empty.
+    //
+    // Status: `.noAds` is intentionally chosen over `.success` because:
+    //   1. `.success` carries semantic weight ("the FM call succeeded and
+    //      returned this disposition") that is wrong for a row representing
+    //      "we admitted this job but had nothing to scan".
+    //   2. `.noAds` already exists for the analogous "permissive retry
+    //      succeeded but returned no spans" case (SemanticScanStatus.swift
+    //      line 35), so its retry policy (`.none`) is already correct.
+    //   3. The H-1 success-protection probe in
+    //      `AnalysisStore.insertSemanticScanResult` only treats
+    //      `status == .success` as canonical; using `.noAds` here ensures
+    //      a sentinel never blocks a real success row that arrives later
+    //      under the same reuseKeyHash.
+    //
+    // Disposition `.noAds` and empty `spansJSON` reflect "no ads found
+    // because no work was performed". `errorContext` carries the
+    // structured reason so operators can distinguish empty-segments from
+    // the defensive backstop.
+    private func makeNoWorkSentinelScanResult(
+        inputs: AssetInputs,
+        jobId: String,
+        jobPhase: BackfillJobPhase,
+        runMode: SemanticScanPhase,
+        reason: String
+    ) -> SemanticScanResult {
+        // Use the segments' attempted range if available; fall back to a
+        // structurally-honest 0/0 zero-range when there are no segments.
+        let range = attemptedRange(for: inputs.segments)
+        let firstOrdinal = range?.firstAtomOrdinal ?? 0
+        let lastOrdinal = range?.lastAtomOrdinal ?? 0
+        let startTime = range?.startTime ?? 0.0
+        let endTime = range?.endTime ?? 0.0
+        let quality = range?.transcriptQuality ?? .good
+
+        return SemanticScanResult(
+            id: Self.makeFailureScanResultIdForTesting(
+                assetId: inputs.analysisAssetId,
+                transcriptVersion: inputs.transcriptVersion,
+                pass: "passA",
+                windowKey: "noWork-\(reason)",
+                jobKey: jobId
+            ),
+            analysisAssetId: inputs.analysisAssetId,
+            windowFirstAtomOrdinal: firstOrdinal,
+            windowLastAtomOrdinal: lastOrdinal,
+            windowStartTime: startTime,
+            windowEndTime: endTime,
+            scanPass: "passA",
+            transcriptQuality: quality,
+            disposition: .noAds,
+            spansJSON: "[]",
+            status: .noAds,
+            attemptCount: 1,
+            errorContext: "noWork:\(reason)",
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: 0,
+            prewarmHit: false,
+            scanCohortJSON: scanCohortJSON,
+            transcriptVersion: inputs.transcriptVersion,
+            reuseScope: jobId,
+            runMode: runMode,
+            jobPhase: jobPhase.rawValue
+        )
     }
 
     // MARK: - bd-1my: outward expansion
