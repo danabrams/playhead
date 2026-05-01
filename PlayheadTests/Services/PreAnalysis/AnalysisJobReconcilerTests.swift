@@ -314,6 +314,9 @@ struct AnalysisJobReconcilerTests {
         #expect(second.completedJobsGarbageCollected == 0)
         #expect(second.failedJobsBackedOff == 0)
         #expect(second.unEnqueuedDownloadsCreated == 0)
+        // stranded-backfill-reaper: with no `backfill_jobs` rows seeded the
+        // reaper has nothing to flip, so the count is 0 on every pass.
+        #expect(second.strandedBackfillJobsReset == 0)
     }
 
     // MARK: - playhead-5uvz.8 (Gap-10): same-pass re-enqueue
@@ -763,5 +766,164 @@ struct AnalysisJobReconcilerTests {
 
         let c = try await store.fetchJob(byId: "blocked-missing")
         #expect(c?.state == "queued")
+    }
+
+    // MARK: - stranded-backfill-reaper
+
+    @Test("Reconciler resets stranded backfill_jobs row from running to queued, and the M-5 path can re-drive it without throwing")
+    func testStrandedBackfillJobReset() async throws {
+        let store = try await makeTestStore()
+        // backfill_jobs has FK CASCADE on analysis_assets.id, so seed the
+        // parent asset first.
+        try await store.insertAsset(makeTestAsset(id: "asset-stranded-bf"))
+
+        // Seed a `running` backfill row that survived a prior process.
+        let strandedJobId = "fm-stranded-running"
+        let strandedJob = makeBackfillJob(
+            jobId: strandedJobId,
+            analysisAssetId: "asset-stranded-bf",
+            phase: .scanLikelyAdSlots,
+            coveragePolicy: .targetedWithAudit,
+            progressCursor: BackfillProgressCursor(
+                processedPhaseCount: 1,
+                lastProcessedUpperBoundSec: 30
+            ),
+            retryCount: 1,
+            deferReason: "prior-defer-reason",
+            // Insert as queued, then force to running. `insertBackfillJob`
+            // accepts any status, but using the explicit force helper
+            // keeps intent obvious — we are simulating what the prior
+            // process left behind, NOT what the runner would write today.
+            status: .queued
+        )
+        try await store.insertBackfillJob(strandedJob)
+        try await store.forceBackfillJobStateForTesting(
+            jobId: strandedJobId,
+            status: .running,
+            progressCursor: BackfillProgressCursor(
+                processedPhaseCount: 1,
+                lastProcessedUpperBoundSec: 30
+            ),
+            retryCount: 1,
+            deferReason: "prior-defer-reason"
+        )
+
+        // Also seed a `complete` row to prove the reaper is not overzealous.
+        let completeJobId = "fm-already-complete"
+        try await store.insertBackfillJob(makeBackfillJob(
+            jobId: completeJobId,
+            analysisAssetId: "asset-stranded-bf",
+            phase: .fullEpisodeScan,
+            coveragePolicy: .fullCoverage,
+            status: .queued
+        ))
+        try await store.forceBackfillJobStateForTesting(
+            jobId: completeJobId,
+            status: .complete,
+            progressCursor: BackfillProgressCursor(processedPhaseCount: 1)
+        )
+
+        // Run the reconciler.
+        let reconciler = makeReconciler(store: store)
+        let report = try await reconciler.reconcile()
+
+        // The stranded `running` row was reset.
+        #expect(report.strandedBackfillJobsReset == 1,
+                "reconcileStrandedBackfillJobs must report exactly the running row")
+        let resurrected = try await store.fetchBackfillJob(byId: strandedJobId)
+        #expect(resurrected?.status == .queued,
+                "stranded `.running` row must be flipped back to `.queued`")
+        // Audit trail (progressCursor / retryCount / deferReason) is
+        // preserved — the reaper only touches `status`.
+        #expect(resurrected?.progressCursor?.processedPhaseCount == 1)
+        #expect(resurrected?.progressCursor?.lastProcessedUpperBoundSec == 30)
+        #expect(resurrected?.retryCount == 1)
+        #expect(resurrected?.deferReason == "prior-defer-reason")
+
+        // The `.complete` row must NOT be touched.
+        let stillComplete = try await store.fetchBackfillJob(byId: completeJobId)
+        #expect(stillComplete?.status == .complete,
+                "reaper must only flip running rows; complete rows are terminal")
+
+        // Re-driving the now-queued row through the M-5 path must NOT
+        // throw. M-5 (`BackfillJobRunner.swift:386-403`) re-enqueues the
+        // existing row through admission and the runner then calls
+        // `markBackfillJobRunning` as the first DB write of the drain
+        // loop. We exercise that exact write here so the test proves
+        // end-to-end recovery: status reset → admission → running.
+        try await store.markBackfillJobRunning(jobId: strandedJobId)
+        let nowRunning = try await store.fetchBackfillJob(byId: strandedJobId)
+        #expect(nowRunning?.status == .running,
+                "M-5 path re-drives the row by calling markBackfillJobRunning, which must succeed against a queued row")
+        // markBackfillJobRunning is documented to preserve
+        // progressCursor / retryCount / deferReason. Re-assert here so a
+        // future change that clobbers them on running will fail this test.
+        #expect(nowRunning?.progressCursor?.processedPhaseCount == 1)
+        #expect(nowRunning?.retryCount == 1)
+        #expect(nowRunning?.deferReason == "prior-defer-reason")
+
+        // Idempotency: a second reconcile pass after the row has legitimately
+        // been re-flipped to running by the live runner would reset it again.
+        // That is the correct shape for the launch-time reaper (each new
+        // process is a fresh strand candidate); but a second pass within
+        // the SAME process invocation must NOT reset rows that were
+        // legitimately just re-driven within this process. Simulate by
+        // running reconcile() a second time AFTER the markBackfillJobRunning
+        // above. The reaper WILL flip it again — and that is fine in the
+        // production flow because reconcile() runs at most once per launch
+        // (PlayheadRuntime) and once per BGProcessingTask handler. We
+        // verify the count is 1 (the one running row we just promoted)
+        // rather than 0, documenting the launch-only contract.
+        let secondReport = try await reconciler.reconcile()
+        #expect(secondReport.strandedBackfillJobsReset == 1,
+                "reaper is intentionally process-restart-implies-strand; documented launch-only invocation")
+        let postSecond = try await store.fetchBackfillJob(byId: strandedJobId)
+        #expect(postSecond?.status == .queued)
+    }
+
+    @Test("Reaper only flips `running`; `queued`/`deferred`/`failed`/`complete` rows are untouched")
+    func testStrandedBackfillReaperOnlyTouchesRunningRows() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTestAsset(id: "asset-reaper-discriminator"))
+
+        // Seed one row per non-running status so a future change that
+        // widens the WHERE clause has a regression rail. status='running'
+        // is exercised by `testStrandedBackfillJobReset`; here we
+        // explicitly pin the negative space.
+        let cases: [(jobId: String, status: BackfillJobStatus)] = [
+            ("fm-stays-queued", .queued),
+            ("fm-stays-deferred", .deferred),
+            ("fm-stays-failed", .failed),
+            ("fm-stays-complete", .complete),
+        ]
+        for (offset, c) in cases.enumerated() {
+            try await store.insertBackfillJob(makeBackfillJob(
+                jobId: c.jobId,
+                analysisAssetId: "asset-reaper-discriminator",
+                phase: .fullEpisodeScan,
+                coveragePolicy: .fullCoverage,
+                status: .queued,
+                createdAt: Date().timeIntervalSince1970 + Double(offset) * 0.0001
+            ))
+            // `.queued` is the insert default; for the others, force.
+            if c.status != .queued {
+                try await store.forceBackfillJobStateForTesting(
+                    jobId: c.jobId,
+                    status: c.status,
+                    progressCursor: BackfillProgressCursor(processedPhaseCount: 0)
+                )
+            }
+        }
+
+        let reconciler = makeReconciler(store: store)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.strandedBackfillJobsReset == 0,
+                "reaper must not touch any non-running row")
+        for c in cases {
+            let row = try await store.fetchBackfillJob(byId: c.jobId)
+            #expect(row?.status == c.status,
+                    "row \(c.jobId) must remain in status .\(c.status); reaper SQL must filter exactly on status='running'")
+        }
     }
 }

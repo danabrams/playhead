@@ -30,6 +30,13 @@ struct ReconciliationReport: Sendable {
     let completedJobsGarbageCollected: Int
     let failedJobsBackedOff: Int
     let unEnqueuedDownloadsCreated: Int
+    /// stranded-backfill-reaper: rows in `backfill_jobs` that were stuck
+    /// in `status='running'` from a prior process and have been flipped
+    /// back to `queued` so the next `BackfillJobRunner.runPendingBackfill`
+    /// call's M-5 idempotency check can re-enqueue them. Distinct from
+    /// `recoveredStrandedSessionJobs` (which acts on the `analysis_jobs`
+    /// table, not `backfill_jobs`).
+    let strandedBackfillJobsReset: Int
 }
 
 // MARK: - AnalysisJobReconciler
@@ -70,7 +77,8 @@ actor AnalysisJobReconciler {
                 missingFilesStillBlocked: 0, modelsUnblocked: 0,
                 staleVersionsSuperseded: 0, staleVersionsReenqueued: 0,
                 completedJobsGarbageCollected: 0,
-                failedJobsBackedOff: 0, unEnqueuedDownloadsCreated: 0
+                failedJobsBackedOff: 0, unEnqueuedDownloadsCreated: 0,
+                strandedBackfillJobsReset: 0
             )
         }
         isReconciling = true
@@ -91,6 +99,7 @@ actor AnalysisJobReconciler {
         let step5 = try await garbageCollectOldJobs()
         let step6 = try await backoffFailedJobs()
         let step7 = try await discoverUnEnqueuedDownloads()
+        let stepBackfillReaper = try await reconcileStrandedBackfillJobs()
 
         let report = ReconciliationReport(
             expiredLeasesRecovered: step1,
@@ -102,7 +111,8 @@ actor AnalysisJobReconciler {
             staleVersionsReenqueued: step4.reenqueued,
             completedJobsGarbageCollected: step5,
             failedJobsBackedOff: step6,
-            unEnqueuedDownloadsCreated: step7
+            unEnqueuedDownloadsCreated: step7,
+            strandedBackfillJobsReset: stepBackfillReaper
         )
 
         logger.info("""
@@ -116,7 +126,8 @@ actor AnalysisJobReconciler {
         staleReenqueued=\(report.staleVersionsReenqueued), \
         gc=\(report.completedJobsGarbageCollected), \
         backoff=\(report.failedJobsBackedOff), \
-        newJobs=\(report.unEnqueuedDownloadsCreated)
+        newJobs=\(report.unEnqueuedDownloadsCreated), \
+        strandedBackfillJobs=\(report.strandedBackfillJobsReset)
         """)
 
         return report
@@ -488,6 +499,53 @@ actor AnalysisJobReconciler {
             logger.info("Created \(unEnqueued.count) job(s) for un-enqueued downloads")
         }
         return unEnqueued.count
+    }
+
+    // MARK: - Step 8: Reap stranded backfill jobs (stranded-backfill-reaper)
+
+    /// Flips every `backfill_jobs` row stuck at `status='running'` back to
+    /// `'queued'` so the next `BackfillJobRunner.runPendingBackfill`
+    /// invocation can re-enqueue them through the M-5 idempotency check
+    /// at `BackfillJobRunner.swift:386-403`.
+    ///
+    /// **Why a process-restart-implies-strand reaper is sufficient.**
+    /// `BackfillJobRunner` writes `status='running'` immediately before
+    /// dispatching FM and only clears it on a terminal transition
+    /// (`markBackfillJobComplete` / `markBackfillJobFailed` /
+    /// `markBackfillJobDeferred`). If a `running` row survives a process
+    /// boundary, the prior process necessarily failed to reach any
+    /// terminal — there is no in-memory dispatch state that could re-arm
+    /// the row, so it stays stuck forever (the captured xcappdata case
+    /// pinned `fm-8cbf80fee0a24b99` for 4.8 days). The reconciler runs
+    /// exactly once at app launch from `PlayheadRuntime.startSchedulerLoop`
+    /// (and once per BGProcessingTask handler invocation), so by the time
+    /// this step executes the only living writer is the current process —
+    /// which has not yet started a backfill run. A blanket
+    /// `UPDATE backfill_jobs SET status='queued' WHERE status='running'`
+    /// is therefore safe without an `updatedAt` / `leaseExpiresAt` filter.
+    ///
+    /// **Re-driving safety.** The M-5 idempotency check accepts any
+    /// non-`.complete` row including `.running` (today the
+    /// `markBackfillJobRunning` guard at
+    /// `AnalysisStore.swift` accepts `IN ('queued', 'deferred', 'running')`),
+    /// so even if a row is somehow observed in `running` between this
+    /// reset and the next runner invocation, the runner will not throw.
+    /// Resetting to `queued` is strictly more conservative — it forces
+    /// the runner to enqueue through the admission controller again,
+    /// preserving `progressCursor` / `retryCount` / `deferReason` (the
+    /// `markBackfillJobRunning` SET clause does not touch those columns).
+    ///
+    /// Position in `reconcile()`: runs last because it operates on a
+    /// disjoint table (`backfill_jobs` rather than `analysis_jobs`) and
+    /// has no ordering interaction with steps 1–7. Placing it at the end
+    /// keeps the existing step ordering pinned and makes the new counter
+    /// the trailing field in the structured log line.
+    private func reconcileStrandedBackfillJobs() async throws -> Int {
+        let count = try await store.resetStrandedBackfillJobs()
+        if count > 0 {
+            logger.info("stranded_backfill_reset count=\(count)")
+        }
+        return count
     }
 
     // MARK: - Helpers
