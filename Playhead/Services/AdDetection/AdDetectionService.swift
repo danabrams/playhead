@@ -4440,11 +4440,16 @@ actor AdDetectionService {
         }
 
         let observationCount = (existingProfile?.observationCount ?? 0) + 1
-        // Trust score approaches 1.0 as observations grow, but FP signals reduce it.
-        let fpCount = existingProfile?.implicitFalsePositiveCount ?? 0
-        let rawTrust = Double(observationCount) / (Double(observationCount) + 5.0)
-        let fpPenalty = Double(fpCount) * 0.02
-        let trustScore = max(0, min(1.0, rawTrust - fpPenalty))
+        // Bug 4a (trust-clobber fix): updatePriors is responsible for lexical/slot
+        // priors and observationCount only. `skipTrustScore` is owned exclusively
+        // by `TrustScoringService` (see `recordSuccessfulObservation`,
+        // `recordFalseSkipSignal`, `recordFalseNegativeSignal`). Recomputing trust
+        // here from `implicitFalsePositiveCount` clobbered every user-FP
+        // decrement that TrustScoringService had persisted, so user corrections
+        // never durably moved trust down. Carry the stored value forward
+        // unchanged; default to 0.5 only when no profile exists yet (matches
+        // `setUserOverride`'s new-profile default).
+        let trustScore = existingProfile?.skipTrustScore ?? 0.5
 
         let updatedProfile = PodcastProfile(
             podcastId: podcastId,
