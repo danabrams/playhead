@@ -599,8 +599,12 @@ struct TrustScoringServiceTests {
 @Suite("TrustScoring — False-Negative Signals")
 struct TrustScoringFalseNegativeTests {
 
-    @Test("recordFalseNegativeSignal increments trust by half the observation bonus")
-    func falseNegativeIncrementsTrustByHalfBonus() async throws {
+    // Bug 4b: a false negative means the system MISSED an ad — the user
+    // manually skipped content the model failed to flag. That's a model error,
+    // so trust must move DOWN, mirroring the false-positive magnitude.
+
+    @Test("recordFalseNegativeSignal decrements trust by falseSignalPenalty")
+    func falseNegativeDecrementsTrustByFalseSignalPenalty() async throws {
         let initialTrust = 0.50
         let seed = makeProfile(mode: SkipMode.auto.rawValue, trustScore: initialTrust, observations: 5)
         let (sut, store) = try await makeSUT(seedProfile: seed)
@@ -608,20 +612,22 @@ struct TrustScoringFalseNegativeTests {
         await sut.recordFalseNegativeSignal(podcastId: testPodcastId)
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
-        // Default correctObservationBonus = 0.10, half = 0.05
-        let expected = initialTrust + TrustScoringConfig.default.correctObservationBonus * 0.5
+        // FN mirrors FP magnitude: trust drops by falseSignalPenalty (default 0.10).
+        let expected = initialTrust - TrustScoringConfig.default.falseSignalPenalty
         expectScore(profile?.skipTrustScore, equals: expected)
     }
 
-    @Test("recordFalseNegativeSignal caps trust at 1.0")
-    func falseNegativeCapsAtOne() async throws {
-        let seed = makeProfile(mode: SkipMode.auto.rawValue, trustScore: 0.98, observations: 10)
+    @Test("recordFalseNegativeSignal floors trust at 0.0")
+    func falseNegativeFloorsAtZero() async throws {
+        // Starting trust below the penalty would otherwise drive trust negative.
+        let seed = makeProfile(mode: SkipMode.shadow.rawValue, trustScore: 0.05, observations: 5)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
         await sut.recordFalseNegativeSignal(podcastId: testPodcastId)
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
-        expectScore(profile?.skipTrustScore, equals: 1.0)
+        // 0.05 - 0.10 = -0.05 -> clamped to 0.0
+        expectScore(profile?.skipTrustScore, equals: 0.0)
     }
 
     @Test("recordFalseNegativeSignal does not change mode")
@@ -648,7 +654,20 @@ struct TrustScoringFalseNegativeTests {
         #expect(profile?.observationCount == 42,
                 "observationCount must not change on false-negative signal")
         #expect(profile?.recentFalseSkipSignals == 3,
-                "recentFalseSkipSignals must not change on false-negative signal")
+                "recentFalseSkipSignals must not change on false-negative signal (only FPs feed the demotion path)")
+    }
+
+    @Test("recordFalseNegativeSignal does not increment implicitFalsePositiveCount")
+    func falseNegativeDoesNotIncrementFalsePositiveCount() async throws {
+        let seed = makeProfile(mode: SkipMode.auto.rawValue, trustScore: 0.50,
+                               observations: 5, falsePosCount: 7)
+        let (sut, store) = try await makeSUT(seedProfile: seed)
+
+        await sut.recordFalseNegativeSignal(podcastId: testPodcastId)
+
+        let profile = try await store.fetchProfile(podcastId: testPodcastId)
+        #expect(profile?.implicitFalsePositiveCount == 7,
+                "implicitFalsePositiveCount tracks FPs, not FNs")
     }
 
     @Test("recordFalseNegativeSignal no-ops when profile does not exist")
@@ -660,5 +679,54 @@ struct TrustScoringFalseNegativeTests {
 
         let profile = try await store.fetchProfile(podcastId: "nonexistent-podcast")
         #expect(profile == nil, "No profile should be created for nonexistent podcast")
+    }
+
+    /// Bug 4b symmetry guarantee: a single FP and a single FN starting from the
+    /// same trust score must land on the same final trust value. Both are
+    /// model errors of equal weight — neither catastrophic on its own.
+    @Test("FP and FN of same magnitude land on same trust score (symmetry)")
+    func falsePositiveAndFalseNegativeAreSymmetric() async throws {
+        let initialTrust = 0.60
+        let podcastA = "fp-podcast"
+        let podcastB = "fn-podcast"
+
+        // Two isolated stores so each signal acts on a fresh profile.
+        let storeA = try await makeTestStore()
+        try await storeA.upsertProfile(PodcastProfile(
+            podcastId: podcastA, sponsorLexicon: nil, normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil, jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0, skipTrustScore: initialTrust,
+            observationCount: 5, mode: SkipMode.manual.rawValue,
+            recentFalseSkipSignals: 0
+        ))
+        let svcA = TrustScoringService(store: storeA)
+        await svcA.recordFalseSkipSignal(podcastId: podcastA)
+        let profileA = try await storeA.fetchProfile(podcastId: podcastA)
+
+        let storeB = try await makeTestStore()
+        try await storeB.upsertProfile(PodcastProfile(
+            podcastId: podcastB, sponsorLexicon: nil, normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil, jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0, skipTrustScore: initialTrust,
+            observationCount: 5, mode: SkipMode.manual.rawValue,
+            recentFalseSkipSignals: 0
+        ))
+        let svcB = TrustScoringService(store: storeB)
+        await svcB.recordFalseNegativeSignal(podcastId: podcastB)
+        let profileB = try await storeB.fetchProfile(podcastId: podcastB)
+
+        guard let scoreA = profileA?.skipTrustScore,
+              let scoreB = profileB?.skipTrustScore else {
+            Issue.record("Profiles must exist after recording signals")
+            return
+        }
+        // Both deltas must equal -falseSignalPenalty (default -0.10).
+        let expected = initialTrust - TrustScoringConfig.default.falseSignalPenalty
+        #expect(abs(scoreA - expected) < scoreTolerance,
+                "FP did not move trust by -falseSignalPenalty; got \(scoreA)")
+        #expect(abs(scoreB - expected) < scoreTolerance,
+                "FN did not move trust by -falseSignalPenalty; got \(scoreB)")
+        #expect(abs(scoreA - scoreB) < scoreTolerance,
+                "FP and FN must produce identical trust deltas; FP=\(scoreA) FN=\(scoreB)")
     }
 }
