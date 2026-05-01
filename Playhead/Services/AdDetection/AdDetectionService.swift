@@ -4304,6 +4304,49 @@ actor AdDetectionService {
             slotFraction: AutoSkipPrecisionGateConfig.default.slotFraction
         )
 
+        // playhead-2m2i: query the catalog so `SafetySignal.catalogMatch`
+        // actually contributes to the auto-vs-markOnly decision. Prior to
+        // this bead, `precisionGateLabel` constructed
+        // `AutoSkipPrecisionGateInput` without `catalogMatchSimilarity`,
+        // so the field defaulted to 0 and the catalog signal could never
+        // fire from the hot path — even when the catalog had a real
+        // fingerprint match for the span. Reusing
+        // `overlappingFeatureWindows` (already fetched above) means the
+        // catalog fingerprint is built from the same feature-window slice
+        // the gate uses for the acoustic safety signal — no second
+        // `fetchFeatureWindows` round trip. The catalog DB query itself
+        // (SQLite) still runs, but only when a catalog store is wired.
+        // Returns 0 when no catalog store is wired (preserves the
+        // pre-bead behaviour byte-for-byte) or when the fingerprint is
+        // zero (sparse / silent span — `AdCatalogStore.matches` would
+        // refuse to match anyway).
+        //
+        // Show context: the hot path doesn't carry `podcastId` through
+        // `runHotPath`, so this query passes `show: nil` (global match
+        // across all shows). `AdCatalogStore.matches(show:)` accepts a
+        // nil show and falls back to the unscoped query, which matches
+        // both `show_id IS NULL` rows and any per-show entry; that is
+        // strictly looser than the fusion path's per-show query (which
+        // does have `podcastId` available) but still correct: a
+        // cross-show fingerprint collision at the 0.80 default floor is
+        // an extreme positive, and elevating those is precisely the
+        // precision win the catalog signal is designed to deliver.
+        let catalogMatchSimilarity: Float
+        if let adCatalogStore, !overlappingFeatureWindows.isEmpty {
+            let fingerprint = AcousticFingerprint.fromFeatureWindows(overlappingFeatureWindows)
+            if fingerprint.isZero {
+                catalogMatchSimilarity = 0
+            } else {
+                let matches = await adCatalogStore.matches(
+                    fingerprint: fingerprint,
+                    show: nil
+                )
+                catalogMatchSimilarity = matches.first?.similarity ?? 0
+            }
+        } else {
+            catalogMatchSimilarity = 0
+        }
+
         // playhead-gtt9.26: Calibrate the post-fusion classifier score
         // before it enters the gate. Cold-start (`.production` ships
         // empty) returns `.identity` so the calibrated score equals the
@@ -4325,7 +4368,8 @@ actor AdDetectionService {
             episodeDuration: episodeDuration,
             overlappingFeatureWindows: overlappingFeatureWindows,
             lexicalCategories: lexicalCategories,
-            userCorrectionBoostFactor: boost
+            userCorrectionBoostFactor: boost,
+            catalogMatchSimilarity: catalogMatchSimilarity
         )
 
         switch AutoSkipPrecisionGate.classify(input: input, config: gateConfig) {
