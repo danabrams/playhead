@@ -22,8 +22,7 @@ struct SchedulerRegressionTests {
             audioProvider: StubAnalysisAudioProvider(),
             featureService: FeatureExtractionService(store: store),
             transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
-            adDetection: StubAdDetectionProvider(),
-            cueMaterializer: SkipCueMaterializer(store: store)
+            adDetection: StubAdDetectionProvider()
         )
         let capabilities = CapabilitiesService()
         return AnalysisWorkScheduler(
@@ -689,8 +688,7 @@ struct SchedulerBugFixRegressionTests {
             audioProvider: StubAnalysisAudioProvider(),
             featureService: FeatureExtractionService(store: store),
             transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
-            adDetection: StubAdDetectionProvider(),
-            cueMaterializer: SkipCueMaterializer(store: store)
+            adDetection: StubAdDetectionProvider()
         )
         let capabilities = CapabilitiesService()
         return AnalysisWorkScheduler(

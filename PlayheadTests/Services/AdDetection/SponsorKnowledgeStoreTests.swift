@@ -703,7 +703,7 @@ struct SponsorKnowledgeSchemaMigrationTests {
     func v7MigrationCreates() async throws {
         let analysisStore = try await makeTestStore()
         let version = try await analysisStore.schemaVersion()
-        #expect(version == 18, "Schema version should be 18 after migration")
+        #expect(version == 19, "Schema version should be 19 after migration")
     }
 
     @Test("V7 migration is idempotent")
@@ -712,7 +712,7 @@ struct SponsorKnowledgeSchemaMigrationTests {
         // migrate() is called by makeTestStore; call it again.
         try await analysisStore.migrate()
         let version = try await analysisStore.schemaVersion()
-        #expect(version == 18)
+        #expect(version == 19)
     }
 }
 

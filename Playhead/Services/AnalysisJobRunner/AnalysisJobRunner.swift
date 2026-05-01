@@ -16,6 +16,13 @@ actor AnalysisJobRunner {
 
     private let logger = Logger(subsystem: "com.playhead", category: "AnalysisJobRunner")
 
+    /// Bug 5 (skip-cues-deletion): minimum confidence used to compute
+    /// `cueCoverage` (the highest confidence-passing window endTime)
+    /// and `newCueCount` (count of confidence-passing windows that
+    /// did not exist before this run). Mirrors the 0.7 threshold the
+    /// (now-deleted) `SkipCueMaterializer` used.
+    private static let cueConfidenceThreshold: Double = 0.7
+
     // MARK: - Dependencies
 
     private let store: AnalysisStore
@@ -23,7 +30,6 @@ actor AnalysisJobRunner {
     private let featureService: FeatureExtractionService
     private let transcriptEngine: TranscriptEngineService
     private let adDetection: AdDetectionProviding
-    private let cueMaterializer: SkipCueMaterializer
     private let thermalStateProvider: @Sendable () -> ProcessInfo.ThermalState
     /// playhead-e2vw: injectable clock for synthetic-time test harnesses.
     /// Defaults to `Date.init` so production behavior is byte-identical;
@@ -68,7 +74,6 @@ actor AnalysisJobRunner {
         featureService: FeatureExtractionService,
         transcriptEngine: TranscriptEngineService,
         adDetection: AdDetectionProviding,
-        cueMaterializer: SkipCueMaterializer,
         thermalStateProvider: @escaping @Sendable () -> ProcessInfo.ThermalState = {
             ProcessInfo.processInfo.thermalState
         },
@@ -83,7 +88,6 @@ actor AnalysisJobRunner {
         self.featureService = featureService
         self.transcriptEngine = transcriptEngine
         self.adDetection = adDetection
-        self.cueMaterializer = cueMaterializer
         self.thermalStateProvider = thermalStateProvider
         self.preemptionCoordinator = preemptionCoordinator
         self.clock = clock
@@ -528,41 +532,43 @@ actor AnalysisJobRunner {
 
         PreAnalysisInstrumentation.endStage(detectionSignpost)
 
-        // Compute coverage from confidence-filtered windows only, matching
-        // the threshold used by SkipCueMaterializer, so that tier advancement
-        // reflects actual materialized cues rather than raw ad detections.
-        let confidenceThreshold = cueMaterializer.confidenceThreshold
+        // Compute coverage from confidence-filtered windows only, mirroring
+        // the 0.7 threshold the (now-deleted) `SkipCueMaterializer` used,
+        // so that tier advancement reflects actual high-confidence ad
+        // windows rather than raw ad detections.
+        let confidenceThreshold = Self.cueConfidenceThreshold
         let cueCoverage = finalWindows
             .filter { $0.confidence >= confidenceThreshold && $0.endTime > $0.startTime }
             .map(\.endTime)
             .max() ?? 0
 
-        // -- Stage 5: Cue materialization (policy-dependent) --
-
+        // -- Stage 5: Cue accounting (policy-dependent) --
+        //
+        // Bug 5 (skip-cues-deletion): the cue materialization stage was
+        // removed when the `skip_cues` table was deleted. `newCueCount`
+        // is now defined as the count of confidence-passing windows that
+        // are newly present after this run (i.e. did not exist in
+        // `existingWindowsBeforeDetection`). The scheduler uses
+        // `newCueCount > 0` as a "made progress" signal in
+        // `shouldRetryCoverageInsufficient`; that signal is preserved.
+        //
+        // `outputPolicy` is preserved as-is: `.writeWindowsOnly` and
+        // `.writeWindowsAndPushLive` continue to mean "do not produce a
+        // cue count." `.writeWindowsAndCues` is the only policy that
+        // surfaces the count, matching prior semantics from the caller's
+        // perspective.
         var newCueCount = 0
-
         if request.outputPolicy == .writeWindowsAndCues {
-            let cueSignpost = PreAnalysisInstrumentation.beginStage("cue_materialization")
-            do {
-                let cues = try await cueMaterializer.materialize(
-                    windows: finalWindows,
-                    analysisAssetId: assetId,
-                    source: request.mode == .preRollWarmup ? "preAnalysis" : "playback"
-                )
-                newCueCount = cues.count
-                PreAnalysisInstrumentation.endStage(cueSignpost)
-            } catch {
-                PreAnalysisInstrumentation.endStage(cueSignpost)
-                logger.error("Cue materialization failed for job \(request.jobId): \(error)")
-                return makeOutcome(
-                    assetId: assetId,
-                    request: request,
-                    featureCoverageSec: featureCoverage,
-                    transcriptCoverageSec: transcriptCoverage,
-                    cueCoverageSec: cueCoverage,
-                    stopReason: .failed("cueMaterialization: \(error)")
-                )
-            }
+            let priorCueIds = Set(
+                existingWindowsBeforeDetection
+                    .filter { $0.confidence >= confidenceThreshold && $0.endTime > $0.startTime }
+                    .map(\.id)
+            )
+            newCueCount = finalWindows.filter {
+                $0.confidence >= confidenceThreshold
+                    && $0.endTime > $0.startTime
+                    && !priorCueIds.contains($0.id)
+            }.count
         }
 
         return AnalysisOutcome(

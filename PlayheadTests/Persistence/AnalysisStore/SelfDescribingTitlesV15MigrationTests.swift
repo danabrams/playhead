@@ -38,7 +38,7 @@ struct SelfDescribingTitlesV15MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 18)
+        #expect(try await store.schemaVersion() == 19)
         #expect(try probeColumnExists(in: dir, table: "analysis_assets", column: "episodeTitle"))
         #expect(try probeColumnExists(in: dir, table: "podcast_profiles", column: "title"))
     }
@@ -58,7 +58,7 @@ struct SelfDescribingTitlesV15MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let bootstrap = try AnalysisStore(directory: dir)
         try await bootstrap.migrate()
-        #expect(try await bootstrap.schemaVersion() == 18)
+        #expect(try await bootstrap.schemaVersion() == 19)
 
         // Insert one asset row (with title) so we have a pre-existing
         // row to rewind around.
@@ -102,7 +102,7 @@ struct SelfDescribingTitlesV15MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 18)
+        #expect(try await store.schemaVersion() == 19)
         #expect(try probeColumnExists(in: dir, table: "analysis_assets", column: "episodeTitle"))
         #expect(try probeColumnExists(in: dir, table: "podcast_profiles", column: "title"))
 
@@ -125,7 +125,7 @@ struct SelfDescribingTitlesV15MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 18)
+        #expect(try await store.schemaVersion() == 19)
         #expect(try probeColumnExists(in: dir, table: "analysis_assets", column: "episodeTitle"))
         #expect(try probeColumnExists(in: dir, table: "podcast_profiles", column: "title"))
     }

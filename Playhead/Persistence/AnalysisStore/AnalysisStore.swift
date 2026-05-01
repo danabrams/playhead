@@ -386,18 +386,9 @@ struct AdWindow: Sendable {
     }
 }
 
-struct SkipCue: Sendable {
-    let id: String
-    let analysisAssetId: String
-    let cueHash: String
-    let startTime: Double
-    let endTime: Double
-    let confidence: Double
-    let source: String      // "preAnalysis" | "live"
-    let materializedAt: Double
-    let wasSkipped: Bool
-    let userDismissed: Bool
-}
+// Bug 5 (skip-cues-deletion): the `SkipCue` model and `skip_cues` table
+// were deleted. `SkipOrchestrator.beginEpisode` now reads
+// confirmed-confidence `AdWindow` rows directly.
 
 struct PodcastProfile: Sendable {
     let podcastId: String
@@ -703,7 +694,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 18
+    nonisolated private static let currentSchemaVersion = 19
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -1174,11 +1165,10 @@ actor AnalysisStore {
             //   - feature_schema_version  INTEGER NOT NULL DEFAULT 0
             //
             // Placement: columns are appended to the END of each table
-            // (SQLite's only supported position for ADD COLUMN). Three
-            // `SELECT * FROM {transcript_chunks, ad_windows, skip_cues}`
-            // readers in this file (lines ~2610/2643, ~2747, ~2993) use
-            // positional column indices 0..N-1; appending at index N,
-            // N+1, N+2 leaves them correct. A test
+            // (SQLite's only supported position for ADD COLUMN). Two
+            // `SELECT * FROM {transcript_chunks, ad_windows}`
+            // readers in this file use positional column indices 0..N-1;
+            // appending at index N, N+1, N+2 leaves them correct. A test
             // (`AnalysisStoreVersionColumnsMigrationTests.selectStarReadersTolerateNewColumns`)
             // locks that contract.
             //
@@ -1218,6 +1208,9 @@ actor AnalysisStore {
                 column: "catalogStoreMatchSimilarity",
                 definition: "REAL"
             )
+            // Bug 5 (skip-cues-deletion): drop the vestigial `skip_cues`
+            // table on existing DBs. Bumps schema_version to 19.
+            try migrateDropSkipCuesV19IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1442,6 +1435,9 @@ actor AnalysisStore {
         if try tableExists("analysis_assets") {
             try addEpisodeDurationColumnIfNeeded()
         }
+        // Bug 5 (skip-cues-deletion): mirror the v19 drop of `skip_cues`
+        // so the ladder-only seam reaches the current schema version.
+        try migrateDropSkipCuesV19IfNeeded()
     }
     #endif
 
@@ -1458,7 +1454,7 @@ actor AnalysisStore {
             "feature_windows",
             "feature_extraction_state",
             "ad_windows",
-            "skip_cues",
+            // skip_cues was dropped in v19 (Bug 5).
         ]
         for table in inScopeTables where try tableExists(table) {
             try addColumnIfNeeded(
@@ -1624,7 +1620,7 @@ actor AnalysisStore {
             "feature_windows",
             "feature_extraction_state",
             "ad_windows",
-            "skip_cues",
+            // skip_cues was dropped in v19 (Bug 5).
         ]
         for table in inScopeTables {
             try addColumnIfNeeded(
@@ -2706,6 +2702,24 @@ actor AnalysisStore {
         try setSchemaVersion(18)
     }
 
+    /// Bug 5 (skip-cues-deletion): drop the vestigial `skip_cues` table.
+    ///
+    /// The table and its CRUD methods had no remaining production
+    /// readers (`markSkipCueSkipped` / `markSkipCueDismissed` had zero
+    /// callers; the only `fetchSkipCues` consumer in `SkipOrchestrator.beginEpisode`
+    /// is moved to read confirmed-confidence `ad_windows` directly).
+    /// Existing on-device DBs may already carry populated `skip_cues`
+    /// rows — those rows are vestigial (their `wasSkipped` was never
+    /// written) and `DROP TABLE IF EXISTS` cleanly removes them.
+    ///
+    /// Idempotent: re-running is a no-op because both the version guard
+    /// and the `IF EXISTS` clause short-circuit when the table is gone.
+    private func migrateDropSkipCuesV19IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 19 else { return }
+        try exec("DROP TABLE IF EXISTS skip_cues")
+        try setSchemaVersion(19)
+    }
+
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
     /// is missing (only possible on a corrupted store, since `migrate()` writes
     /// it on first run).
@@ -2926,24 +2940,8 @@ actor AnalysisStore {
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_ad_asset ON ad_windows(analysisAssetId)")
 
-        // skip_cues
-        try exec("""
-            CREATE TABLE IF NOT EXISTS skip_cues (
-                id TEXT PRIMARY KEY,
-                analysisAssetId TEXT NOT NULL,
-                cueHash TEXT NOT NULL,
-                startTime REAL NOT NULL,
-                endTime REAL NOT NULL,
-                confidence REAL NOT NULL,
-                source TEXT NOT NULL DEFAULT 'preAnalysis',
-                materializedAt REAL NOT NULL,
-                wasSkipped INTEGER NOT NULL DEFAULT 0,
-                userDismissed INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(cueHash)
-            )
-            """)
-        try exec("CREATE INDEX IF NOT EXISTS idx_skip_cues_asset ON skip_cues(analysisAssetId)")
-        try exec("CREATE INDEX IF NOT EXISTS idx_skip_cues_time ON skip_cues(analysisAssetId, startTime)")
+        // skip_cues table was dropped in v19 (Bug 5). Pre-v19 DBs that
+        // still carry the table get cleared by `migrateDropSkipCuesV19IfNeeded`.
 
         // podcast_profiles
         // playhead-i9dj: `title` (nullable) carries the human-readable show
@@ -4599,86 +4597,10 @@ actor AnalysisStore {
         )
     }
 
-    // MARK: - CRUD: skip_cues
-
-    func insertSkipCue(_ cue: SkipCue) throws {
-        let sql = """
-            INSERT OR IGNORE INTO skip_cues
-            (id, analysisAssetId, cueHash, startTime, endTime, confidence,
-             source, materializedAt, wasSkipped, userDismissed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, cue.id)
-        bind(stmt, 2, cue.analysisAssetId)
-        bind(stmt, 3, cue.cueHash)
-        bind(stmt, 4, cue.startTime)
-        bind(stmt, 5, cue.endTime)
-        bind(stmt, 6, cue.confidence)
-        bind(stmt, 7, cue.source)
-        bind(stmt, 8, cue.materializedAt)
-        bind(stmt, 9, cue.wasSkipped ? 1 : 0)
-        bind(stmt, 10, cue.userDismissed ? 1 : 0)
-        try step(stmt, expecting: SQLITE_DONE)
-    }
-
-    func insertSkipCues(_ cues: [SkipCue]) throws {
-        guard !cues.isEmpty else { return }
-        try exec("BEGIN TRANSACTION")
-        do {
-            for cue in cues {
-                try insertSkipCue(cue)
-            }
-            try exec("COMMIT")
-        } catch {
-            try? exec("ROLLBACK")
-            throw error
-        }
-    }
-
-    func fetchSkipCues(for analysisAssetId: String) throws -> [SkipCue] {
-        let sql = "SELECT * FROM skip_cues WHERE analysisAssetId = ? ORDER BY startTime ASC"
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, analysisAssetId)
-        var results: [SkipCue] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(readSkipCue(stmt))
-        }
-        return results
-    }
-
-    func markSkipCueSkipped(id: String) throws {
-        let sql = "UPDATE skip_cues SET wasSkipped = 1 WHERE id = ?"
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, id)
-        try step(stmt, expecting: SQLITE_DONE)
-    }
-
-    func markSkipCueDismissed(id: String) throws {
-        let sql = "UPDATE skip_cues SET userDismissed = 1 WHERE id = ?"
-        let stmt = try prepare(sql)
-        defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, id)
-        try step(stmt, expecting: SQLITE_DONE)
-    }
-
-    private func readSkipCue(_ stmt: OpaquePointer?) -> SkipCue {
-        SkipCue(
-            id: text(stmt, 0),
-            analysisAssetId: text(stmt, 1),
-            cueHash: text(stmt, 2),
-            startTime: sqlite3_column_double(stmt, 3),
-            endTime: sqlite3_column_double(stmt, 4),
-            confidence: sqlite3_column_double(stmt, 5),
-            source: text(stmt, 6),
-            materializedAt: sqlite3_column_double(stmt, 7),
-            wasSkipped: sqlite3_column_int(stmt, 8) != 0,
-            userDismissed: sqlite3_column_int(stmt, 9) != 0
-        )
-    }
+    // Bug 5 (skip-cues-deletion): the `skip_cues` CRUD methods
+    // (`insertSkipCue`, `insertSkipCues`, `fetchSkipCues`,
+    // `markSkipCueSkipped`, `markSkipCueDismissed`, `readSkipCue`)
+    // were deleted along with the table.
 
     // MARK: - CRUD: podcast_profiles
 
@@ -7756,7 +7678,7 @@ actor AnalysisStore {
     /// an empty string. Use ``optionalText(_:_:)`` for nullable columns.
     ///
     /// NOTE: This silent NULL → "" coercion is preserved for legacy readers
-    /// (`readAsset`, `readSkipCue`, `readJob`, etc.) that are non-throwing.
+    /// (`readAsset`, `readJob`, etc.) that are non-throwing.
     /// New code on the persistence boundary should call ``requireText(_:_:)``
     /// instead so an unexpected NULL throws `AnalysisStoreError.invalidRow`.
     private func text(_ stmt: OpaquePointer?, _ idx: Int32) -> String {

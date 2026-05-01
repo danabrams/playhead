@@ -220,7 +220,6 @@ struct CandidateWindowCascadeProximalReadinessSLITest {
                 store: store
             ),
             adDetection: StubAdDetectionProvider(),
-            cueMaterializer: SkipCueMaterializer(store: store),
             clock: clock.dateProvider
         )
         let scheduler = AnalysisWorkScheduler(

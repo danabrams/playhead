@@ -498,8 +498,7 @@ struct PreAnalysisRecoveryRaceTests {
             audioProvider: StubAnalysisAudioProvider(),
             featureService: FeatureExtractionService(store: store),
             transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
-            adDetection: StubAdDetectionProvider(),
-            cueMaterializer: SkipCueMaterializer(store: store)
+            adDetection: StubAdDetectionProvider()
         )
         return AnalysisWorkScheduler(
             store: store,
