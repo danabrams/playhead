@@ -42,7 +42,8 @@ struct SwiftDataNewEpisodeAnnouncerTests {
             "SwiftDataNewEpisodeAnnouncerTests",
             schema: schema,
             isStoredInMemoryOnly: true,
-            allowsSave: true
+            allowsSave: true,
+            cloudKitDatabase: .none
         )
         return try ModelContainer(for: schema, configurations: [config])
     }

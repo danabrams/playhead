@@ -189,6 +189,52 @@ struct SubscriptionLibraryTests {
         #expect(podcasts.isEmpty)
     }
 
+    @Test("bootstrapFromRemote: uploads local-only subscriptions the server doesn't know about")
+    func bootstrapFromRemoteUploadsLocalOnly() async throws {
+        // Cycle 2 H4 fix: a podcast that exists locally but is NOT in
+        // the remote set must be pushed up, not silently destroyed.
+        let ctx = try Self.makeContext()
+        let library = SubscriptionLibrary(modelContext: ctx)
+
+        // Local-only podcast — user added before iCloud was reachable.
+        let localURL = URL(string: "https://local.com/feed")!
+        ctx.insert(Podcast(
+            feedURL: localURL,
+            title: "Local Show",
+            author: "Local Author"
+        ))
+        try ctx.save()
+
+        // Server has a different podcast.
+        let provider = FakeCloudKitProvider(initialAccountStatus: .available)
+        let serverURL = URL(string: "https://server.com/feed")!
+        let serverRecord = SubscriptionRecord(
+            feedURL: serverURL,
+            title: "Server Show",
+            author: "Server Author",
+            artworkURL: nil,
+            subscribedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            isRemoved: false,
+            lastModified: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        await provider.seed(serverRecord.toCKRecord())
+        let coordinator = ICloudSyncCoordinator(provider: provider)
+
+        try await library.bootstrapFromRemote(coordinator: coordinator)
+
+        // Local: now has both.
+        let podcasts = try ctx.fetch(FetchDescriptor<Podcast>())
+        let urls = Set(podcasts.map(\.feedURL))
+        #expect(urls == [localURL, serverURL],
+                "Local-only podcast must NOT be deleted; remote podcast must be inserted.")
+
+        // Remote: now has both — local-only got pushed up.
+        let saved = await provider.records
+        let savedURLs = Set(saved.compactMap { try? SubscriptionRecord(ckRecord: $0).feedURL })
+        #expect(savedURLs == [localURL, serverURL],
+                "Local-only subscription must be uploaded so other devices see it.")
+    }
+
     // MARK: - Writer-tap helpers
 
     @Test("subscribedRecord(for:) carries Podcast fields and isRemoved=false")

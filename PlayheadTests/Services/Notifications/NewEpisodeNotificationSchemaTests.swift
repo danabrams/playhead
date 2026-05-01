@@ -34,7 +34,8 @@ struct NewEpisodeNotificationSchemaTests {
         let config = ModelConfiguration(
             "NewEpisodeSchemaTests.podcast",
             schema: schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         let container = try ModelContainer(for: schema, configurations: [config])
         let context = container.mainContext
@@ -58,7 +59,8 @@ struct NewEpisodeNotificationSchemaTests {
         let config = ModelConfiguration(
             "NewEpisodeSchemaTests.prefs",
             schema: schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         let container = try ModelContainer(for: schema, configurations: [config])
         let context = container.mainContext

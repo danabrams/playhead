@@ -92,21 +92,67 @@ struct EntitlementRecordTests {
         #expect(EntitlementRecord.merge(local: earlier, remote: later) == earlier)
     }
 
-    @Test("Merge: when neither granted, the record is the canonical not-granted state")
-    func bothNotGrantedNoOp() {
-        let a = EntitlementRecord(
+    @Test("Merge: when neither granted, most recently modified wins")
+    func bothNotGrantedMostRecentWins() {
+        let earlier = EntitlementRecord(
             productID: "com.playhead.premium",
             isGranted: false,
             grantedAt: Date(timeIntervalSince1970: 1_700_000_000),
             sourceDeviceID: "A"
         )
-        let b = EntitlementRecord(
+        let later = EntitlementRecord(
             productID: "com.playhead.premium",
             isGranted: false,
             grantedAt: Date(timeIntervalSince1970: 1_700_000_500),
             sourceDeviceID: "B"
         )
-        // Either is acceptable; the implementation picks `local` for stability.
-        #expect(EntitlementRecord.merge(local: a, remote: b) == a)
+        // For not-granted records, `grantedAt` acts as the
+        // lastModified timestamp (per the field doc) — most recent
+        // edit wins so transient diagnostics don't oscillate.
+        #expect(EntitlementRecord.merge(local: earlier, remote: later) == later)
+        #expect(EntitlementRecord.merge(local: later, remote: earlier) == later)
+    }
+
+    @Test("Merge tie-break (both granted, identical grantedAt): smaller sourceDeviceID wins")
+    func bothGrantedTieBreakOnSourceID() {
+        let ts = Date(timeIntervalSince1970: 1_700_000_000)
+        let aDevice = EntitlementRecord(
+            productID: "com.playhead.premium",
+            isGranted: true,
+            grantedAt: ts,
+            sourceDeviceID: "A"
+        )
+        let bDevice = EntitlementRecord(
+            productID: "com.playhead.premium",
+            isGranted: true,
+            grantedAt: ts,
+            sourceDeviceID: "B"
+        )
+        // Symmetric: regardless of order, the lexicographically
+        // smaller sourceDeviceID is the deterministic winner.
+        #expect(EntitlementRecord.merge(local: aDevice, remote: bDevice) == aDevice)
+        #expect(EntitlementRecord.merge(local: bDevice, remote: aDevice) == aDevice)
+    }
+
+    @Test("Merge tie-break (both not-granted, identical grantedAt): smaller sourceDeviceID wins")
+    func bothNotGrantedTieBreakOnSourceID() {
+        let ts = Date(timeIntervalSince1970: 1_700_000_000)
+        let aDevice = EntitlementRecord(
+            productID: "com.playhead.premium",
+            isGranted: false,
+            grantedAt: ts,
+            sourceDeviceID: "A"
+        )
+        let bDevice = EntitlementRecord(
+            productID: "com.playhead.premium",
+            isGranted: false,
+            grantedAt: ts,
+            sourceDeviceID: "B"
+        )
+        // The same deterministic tie-break must apply on the
+        // (false, false) branch — anything else leaves
+        // `sourceDeviceID` oscillating in diagnostics.
+        #expect(EntitlementRecord.merge(local: aDevice, remote: bDevice) == aDevice)
+        #expect(EntitlementRecord.merge(local: bDevice, remote: aDevice) == aDevice)
     }
 }

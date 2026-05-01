@@ -440,6 +440,21 @@ struct BackfillEvidenceFusionTests {
         #expect(result.eligibilityGate == .eligible)
     }
 
+    @Test("DecisionMapper blocks fmAcousticCorroborated when classifier weight is zero")
+    func fmAcousticCorroboratedZeroWeightClassifierBlocks() {
+        // Regression: a classifier entry with weight == 0 must NOT count as
+        // external corroboration. Cycle 2 H2 fix: only weight > 0 classifier
+        // entries satisfy quorum.
+        let span = makeSpanWithFMAcoustic(startTime: 10.0, endTime: 40.0)
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.35, detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1")),
+            .init(source: .classifier, weight: 0.0, detail: .classifier(score: 0.62))
+        ]
+        let mapper = DecisionMapper(span: span, ledger: entries, config: defaultConfig(), transcriptQuality: .good)
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .blockedByEvidenceQuorum)
+    }
+
     @Test("DecisionMapper blocks by quorum for fmConsensus with too-short span")
     func blockedByQuorumShortSpan() {
         // Span < 5s

@@ -85,19 +85,34 @@ struct EntitlementRecord: Equatable, Sendable {
 
     /// Grant-wins merge. If either side is granted, the merged record is
     /// granted with the earliest known `grantedAt` (stable trust signal).
-    /// When both sides are not-granted the local copy wins — saves on a
-    /// no-op merge avoid an unnecessary CloudKit round-trip.
+    /// When both sides are not-granted the most recently-modified copy
+    /// wins (using `grantedAt` as the lastModified-equivalent for
+    /// not-granted records, per the field doc).
+    ///
+    /// Tie-break on identical `grantedAt` (common after CloudKit's
+    /// millisecond-precision round-trip): the record with the
+    /// lexicographically smaller `sourceDeviceID` wins. This makes the
+    /// merge fully deterministic across devices, preventing
+    /// `sourceDeviceID` from oscillating in diagnostics. The tie-break
+    /// applies symmetrically to both the (true, true) and (false,
+    /// false) branches — anything else leaves diagnostics unstable.
     static func merge(local: EntitlementRecord, remote: EntitlementRecord) -> EntitlementRecord {
         switch (local.isGranted, remote.isGranted) {
         case (true, true):
-            // Pick the earlier grantedAt; preserve that record's source.
-            return local.grantedAt <= remote.grantedAt ? local : remote
+            if local.grantedAt < remote.grantedAt { return local }
+            if remote.grantedAt < local.grantedAt { return remote }
+            return local.sourceDeviceID <= remote.sourceDeviceID ? local : remote
         case (true, false):
             return local
         case (false, true):
             return remote
         case (false, false):
-            return local
+            // Both are not-granted: pick the most recently-modified
+            // record (via `grantedAt`-as-lastModified). Ties broken
+            // lexicographically on `sourceDeviceID` for determinism.
+            if local.grantedAt > remote.grantedAt { return local }
+            if remote.grantedAt > local.grantedAt { return remote }
+            return local.sourceDeviceID <= remote.sourceDeviceID ? local : remote
         }
     }
 }

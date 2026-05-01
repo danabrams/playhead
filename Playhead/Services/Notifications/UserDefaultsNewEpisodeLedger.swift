@@ -17,12 +17,14 @@
 // UserDefaults serializes its access internally.
 
 import Foundation
+import OSLog
 
 /// MainActor-isolated bounded LRU dedup ledger persisted in UserDefaults.
 /// Conforms to `NewEpisodeNotificationScheduler.DedupLedger`.
 @MainActor
 final class UserDefaultsNewEpisodeLedger: NewEpisodeNotificationScheduler.DedupLedger {
 
+    private let logger = Logger(subsystem: "com.playhead", category: "NewEpisodeLedger")
     private let defaults: UserDefaults
     private let capacity: Int
     private let storageKey: String
@@ -70,6 +72,23 @@ final class UserDefaultsNewEpisodeLedger: NewEpisodeNotificationScheduler.DedupL
     // MARK: - Helpers
 
     private func currentKeys() -> [String] {
-        defaults.array(forKey: storageKey) as? [String] ?? []
+        guard let raw = defaults.object(forKey: storageKey) else { return [] }
+        guard let keys = raw as? [String] else {
+            // Stored under the same key but the wrong shape — most
+            // likely a future-format migration we don't recognize, or
+            // user-driven defaults corruption. Log so the failure is
+            // visible in Console; reset the slot so we don't keep
+            // tripping the cast on every call. Behavior on corruption:
+            // any episode that flows through a fresh discovery pass
+            // before its key is re-recorded MAY re-announce. The
+            // outer SwiftData Episode-existence check at the discovery
+            // boundary still suppresses already-known episodes, so
+            // the practical exposure is bounded to the (rare)
+            // discovery-without-existence-check path.
+            logger.error("Ledger value at \(self.storageKey, privacy: .public) is not [String]; resetting.")
+            defaults.removeObject(forKey: storageKey)
+            return []
+        }
+        return keys
     }
 }

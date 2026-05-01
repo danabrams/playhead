@@ -15,6 +15,9 @@
 // Pure computation on value types.
 
 import Foundation
+import os.log
+
+private let fusionLog = OSLog(subsystem: "com.playhead", category: "AcousticFeatureFusion")
 
 enum AcousticFeatureFusion {
 
@@ -90,8 +93,46 @@ enum AcousticFeatureFusion {
     ) -> [WindowFusion] {
 
         // Determine window count from the longest score array.
-        let maxCount = featureScores.values.map(\.count).max() ?? 0
+        let counts = featureScores.values.map(\.count)
+        let maxCount = counts.max() ?? 0
         guard maxCount > 0 else { return [] }
+
+        // Detect mismatched per-feature window counts. The arrays are
+        // documented as "aligned by construction" — a divergence usually
+        // indicates a windowing off-by-one in a feature implementation
+        // OR a feature that completely failed to compute (empty array).
+        // Both cases are visible here:
+        //   * Empty arrays for an active feature show up as "missing
+        //     feature kinds" — a feature that registered weight but
+        //     emitted no scores.
+        //   * Non-empty count divergence shows up via min vs. max.
+        // Log via OSLog so Console picks it up; keep zero-pad behavior
+        // so a single misbehaving feature doesn't crash the pipeline.
+        let nonEmptyCounts = counts.filter { $0 > 0 }
+        if let minCount = nonEmptyCounts.min(),
+           let maxNonEmpty = nonEmptyCounts.max(),
+           minCount != maxNonEmpty {
+            os_log(
+                "AcousticFeatureFusion.combine: mismatched feature window counts (min=%{public}d, max=%{public}d) — zero-padding",
+                log: fusionLog,
+                type: .error,
+                minCount,
+                maxNonEmpty
+            )
+        }
+        let emptyKinds = featureScores
+            .filter { $0.value.isEmpty }
+            .keys
+            .map(\.rawValue)
+            .sorted()
+        if !emptyKinds.isEmpty {
+            os_log(
+                "AcousticFeatureFusion.combine: feature(s) emitted no scores — zero-padded contribution: %{public}@",
+                log: fusionLog,
+                type: .error,
+                emptyKinds.joined(separator: ",")
+            )
+        }
 
         // Use the longest score array (any feature's output; they're all
         // aligned by construction) to source the (start, end) pairs.

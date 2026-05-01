@@ -19,7 +19,8 @@ struct NewEpisodeNotificationTapHandlerTests {
         let config = ModelConfiguration(
             "TapHandlerTests",
             schema: schema,
-            isStoredInMemoryOnly: true
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
         )
         return try ModelContainer(for: schema, configurations: [config])
     }

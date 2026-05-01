@@ -42,6 +42,20 @@ actor ICloudSyncCoordinator {
     /// snapshots, not a strict event log).
     private var pendingWrites: [CKRecord.ID: CKRecord] = [:]
 
+    /// Per-record consecutive-failure counter. Reset on success; bumped
+    /// on every `.other` error during a flush. After
+    /// `quarantineThreshold` consecutive failures the record is moved
+    /// to `quarantinedWrites` so it stops blocking the rest of the
+    /// drain. The user can recover by editing the record (which
+    /// re-queues a fresh CKRecord under the same key, clearing the
+    /// counter).
+    private var saveFailureCounts: [CKRecord.ID: Int] = [:]
+    private var quarantinedWrites: [CKRecord.ID: CKRecord] = [:]
+    private let quarantineThreshold = 5
+
+    /// Diagnostics-only count of permanently-quarantined records.
+    var quarantinedWriteCount: Int { quarantinedWrites.count }
+
     /// Subscribers receive a fresh `Bool` whenever the cached account
     /// status changes (true = `isSyncEnabled`). The Settings footer
     /// uses this so sign-out mid-session flips its label without a
@@ -78,6 +92,16 @@ actor ICloudSyncCoordinator {
     /// `isSyncEnabled` and gating logic for writes.
     func handleAccountStatusChange() async {
         let next = await provider.accountStatus()
+        applyAccountStatus(next)
+    }
+
+    /// Apply a known account status to the cache and notify the
+    /// `syncEnabledUpdates` stream. Use this anywhere a non-`.available`
+    /// state is observed mid-flow (e.g. an in-flight save returning
+    /// `.accountUnavailable`) — direct assignment to `cachedAccountStatus`
+    /// would leave the Settings UI stale until the next external account
+    /// event.
+    private func applyAccountStatus(_ next: CloudKitAccountStatus) {
         let changed = next != cachedAccountStatus
         cachedAccountStatus = next
         logger.info("Account status: \(String(describing: self.cachedAccountStatus))")
@@ -244,17 +268,33 @@ actor ICloudSyncCoordinator {
 
     // MARK: - Queue draining
 
-    /// Attempt to flush every queued write. Stops on the first error
-    /// (the failed record stays in the queue for the next attempt) so
-    /// rate-limits don't pound the server. Returns the number of
+    /// Attempt to flush every queued write. Returns the number of
     /// records successfully drained.
+    ///
+    /// Failure-handling policy:
+    /// * `.networkUnavailable` / `.rateLimited` — abort the drain and
+    ///   throw, so the upstream caller can apply backoff and avoid
+    ///   pounding the server.
+    /// * `.accountUnavailable` — abort and throw; sync is paused until
+    ///   the account comes back.
+    /// * `.serverRecordChanged` — leave the record in the queue and
+    ///   continue draining; the call site re-runs the merge on the
+    ///   next push.
+    /// * `.other` — log, bump per-record failure counter, and continue
+    ///   draining the rest of the snapshot. After
+    ///   `quarantineThreshold` consecutive failures the record is moved
+    ///   to `quarantinedWrites` so a permanently-broken record can't
+    ///   block the rest of the queue forever.
     ///
     /// Always refreshes account status before draining — the queue's
     /// whole reason for existing is to outlive transient unavailability,
     /// so a sticky cached `noAccount` would defeat the point.
     @discardableResult
     func flushPendingWrites() async throws -> Int {
-        cachedAccountStatus = await provider.accountStatus()
+        // Refresh through the canonical channel so subscribers see the
+        // status flip. Skipping `handleAccountStatusChange` here would
+        // leave Settings UI stale until the next external account event.
+        await handleAccountStatusChange()
         guard cachedAccountStatus == .available else { return 0 }
         var drained = 0
         // Snapshot the queue so we can mutate `pendingWrites` while iterating.
@@ -262,14 +302,81 @@ actor ICloudSyncCoordinator {
         for (id, record) in snapshot {
             do {
                 _ = try await provider.save(record)
-                pendingWrites.removeValue(forKey: id)
+                // Reentrancy guard: while suspended on `provider.save` a
+                // concurrent caller may have replaced `pendingWrites[id]`
+                // with a fresh edit. Only retire the entry if it's still
+                // the record we just saved. CKRecord is a class; `===`
+                // is the identity check we want here. If the slot now
+                // holds a newer edit, leave it for the next drain — the
+                // user's most recent intent must never be silently
+                // dropped.
+                if pendingWrites[id] === record {
+                    pendingWrites.removeValue(forKey: id)
+                    saveFailureCounts.removeValue(forKey: id)
+                }
                 drained += 1
             } catch let cloudError as CloudKitProviderError {
-                handleSaveError(cloudError, record: record)
-                throw cloudError
+                switch cloudError {
+                case .accountUnavailable:
+                    // Account flipped during the drain; route through the
+                    // canonical apply so `syncEnabledUpdates` subscribers
+                    // see `false` immediately rather than waiting for the
+                    // next external account event.
+                    applyAccountStatus(.noAccount)
+                    requeueIfStillCurrent(id: id, record: record)
+                    logger.info("Drain aborted: account unavailable; re-queued.")
+                    throw cloudError
+                case .networkUnavailable, .rateLimited:
+                    // Transient / blocking — back off and let upstream
+                    // schedule a retry. Re-queue and abort the drain.
+                    requeueIfStillCurrent(id: id, record: record)
+                    if case .rateLimited(let retry) = cloudError {
+                        logger.warning("Drain rate-limited; retry after \(retry ?? 0) s.")
+                    } else {
+                        logger.info("Drain aborted: network unavailable; re-queued.")
+                    }
+                    throw cloudError
+                case .serverRecordChanged:
+                    // Leave the record in place; next push merges. Don't
+                    // bump the counter — this is a normal merge race.
+                    requeueIfStillCurrent(id: id, record: record)
+                    logger.info("Drain hit server-record-changed; queued for merge on next push.")
+                    continue
+                case .other(let message):
+                    // Only count this failure if `pendingWrites[id]` is
+                    // still the record we attempted — a concurrent edit
+                    // would have replaced it, and the new record gets a
+                    // fresh attempt budget.
+                    guard pendingWrites[id] === record || pendingWrites[id] == nil else {
+                        // Concurrent edit landed; let the next drain take it.
+                        continue
+                    }
+                    let count = (saveFailureCounts[id] ?? 0) + 1
+                    if count >= quarantineThreshold {
+                        pendingWrites.removeValue(forKey: id)
+                        saveFailureCounts.removeValue(forKey: id)
+                        quarantinedWrites[id] = record
+                        logger.error("Save failed (other: \(message)); quarantined after \(count) attempts.")
+                    } else {
+                        saveFailureCounts[id] = count
+                        pendingWrites[id] = record
+                        logger.warning("Save failed (other: \(message)); attempt \(count)/\(self.quarantineThreshold); continuing drain.")
+                    }
+                    continue
+                }
             }
         }
         return drained
+    }
+
+    /// Re-queue the in-flight record only if a concurrent caller hasn't
+    /// already replaced the slot with a fresher edit. Used by the
+    /// failure paths in `flushPendingWrites` to honor "no silent data
+    /// loss" — the newer edit always wins.
+    private func requeueIfStillCurrent(id: CKRecord.ID, record: CKRecord) {
+        if pendingWrites[id] == nil || pendingWrites[id] === record {
+            pendingWrites[id] = record
+        }
     }
 
     // MARK: - Internals
@@ -283,6 +390,11 @@ actor ICloudSyncCoordinator {
         }
         do {
             _ = try await provider.save(ckRecord)
+            // A successful direct save supersedes any older queued copy of
+            // the same record. Without this, a stale queued retry would
+            // clobber the newer record on the next `flushPendingWrites`.
+            pendingWrites.removeValue(forKey: ckRecord.recordID)
+            saveFailureCounts.removeValue(forKey: ckRecord.recordID)
         } catch let cloudError as CloudKitProviderError {
             handleSaveError(cloudError, record: ckRecord)
         }
@@ -291,7 +403,7 @@ actor ICloudSyncCoordinator {
     private func handleSaveError(_ error: CloudKitProviderError, record: CKRecord) {
         switch error {
         case .accountUnavailable:
-            cachedAccountStatus = .noAccount
+            applyAccountStatus(.noAccount)
             pendingWrites[record.recordID] = record
             logger.info("Save failed: account unavailable; queued.")
         case .networkUnavailable:

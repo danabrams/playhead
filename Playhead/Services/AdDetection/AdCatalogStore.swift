@@ -120,7 +120,9 @@ actor AdCatalogStore {
 
     /// Schema version stamped into `PRAGMA user_version`. Bumped on any
     /// schema change; `migrate()` handles forward migrations.
-    static let schemaVersion: Int32 = 1
+    /// V1 → V2: dedup + UNIQUE index on (show_id, fingerprint_blob),
+    /// per-show row cap with LRU eviction.
+    static let schemaVersion: Int32 = 2
 
     /// Default similarity floor used when callers don't override it.
     /// 0.80 is deliberately conservative — the bead targets 15% firing
@@ -128,10 +130,12 @@ actor AdCatalogStore {
     /// are expensive (they can promote a non-ad to auto-skip-eligible).
     static let defaultSimilarityFloor: Float = 0.80
 
-    /// Maximum number of entries to scan per query. The catalog is
-    /// expected to stay O(hundreds-to-thousands) per user; an in-memory
-    /// linear scan is cheap. The limit caps worst-case memory.
-    private static let queryScanLimit: Int = 5_000
+    /// Maximum entries retained per (show_id) bucket. Rows beyond this
+    /// are evicted by `created_at ASC` after each insert. Total catalog
+    /// bound is therefore O(maxEntriesPerShow × distinct shows). 500 is
+    /// chosen so a heavy listener with 50 shows still fits in <25k rows
+    /// while preserving multiple ad fingerprints per show.
+    static let maxEntriesPerShow: Int = 500
 
     // MARK: State
 
@@ -271,12 +275,39 @@ actor AdCatalogStore {
             return
         }
 
+        // ON CONFLICT(show_id, fingerprint_blob) DO UPDATE keeps a single
+        // row per (show, fingerprint) and refreshes recency + lifts
+        // confidence to the higher of the two values. The UNIQUE index
+        // is created in V2 migration. A repeated insert of the same
+        // fingerprint by the same show no longer wastes a slot; without
+        // this, a binge listening session could fill the catalog with
+        // duplicates of the same network ad.
         let sql = """
-        INSERT OR REPLACE INTO ad_catalog_entries
+        INSERT INTO ad_catalog_entries
             (id, created_at, show_id, episode_position, duration_sec,
              fingerprint_blob, transcript_snippet, sponsor_tokens_json,
              original_confidence)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            created_at = excluded.created_at,
+            episode_position = excluded.episode_position,
+            duration_sec = excluded.duration_sec,
+            transcript_snippet = excluded.transcript_snippet,
+            sponsor_tokens_json = excluded.sponsor_tokens_json,
+            original_confidence = CASE
+                WHEN original_confidence IS NULL AND excluded.original_confidence IS NULL THEN NULL
+                WHEN original_confidence IS NULL THEN excluded.original_confidence
+                WHEN excluded.original_confidence IS NULL THEN original_confidence
+                ELSE MAX(original_confidence, excluded.original_confidence)
+            END
+        ON CONFLICT(show_id, fingerprint_blob) WHERE show_id IS NOT NULL DO UPDATE SET
+            created_at = excluded.created_at,
+            original_confidence = CASE
+                WHEN original_confidence IS NULL AND excluded.original_confidence IS NULL THEN NULL
+                WHEN original_confidence IS NULL THEN excluded.original_confidence
+                WHEN excluded.original_confidence IS NULL THEN original_confidence
+                ELSE MAX(original_confidence, excluded.original_confidence)
+            END
         """
 
         var stmt: OpaquePointer?
@@ -324,6 +355,62 @@ actor AdCatalogStore {
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw AdCatalogStoreError.insertFailed(String(cString: sqlite3_errmsg(db)))
         }
+
+        try evictOldestForShowIfNeeded(showId: entry.showId)
+    }
+
+    /// Cap the per-show row count at `maxEntriesPerShow` by deleting the
+    /// oldest entries for that show. Called after each insert, so the
+    /// table never exceeds the cap by more than one row at a time. Does
+    /// nothing when the cap is not reached.
+    private func evictOldestForShowIfNeeded(showId: String?) throws {
+        guard let db else { return }
+        let countSQL: String
+        if showId != nil {
+            countSQL = "SELECT COUNT(*) FROM ad_catalog_entries WHERE show_id = ?"
+        } else {
+            countSQL = "SELECT COUNT(*) FROM ad_catalog_entries WHERE show_id IS NULL"
+        }
+        var countStmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, countSQL, -1, &countStmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(countStmt) }
+        if let showId {
+            sqlite3_bind_text(countStmt, 1, showId, -1, Self.SQLITE_TRANSIENT)
+        }
+        guard sqlite3_step(countStmt) == SQLITE_ROW else { return }
+        let total = Int(sqlite3_column_int(countStmt, 0))
+        guard total > Self.maxEntriesPerShow else { return }
+        let toEvict = total - Self.maxEntriesPerShow
+
+        let deleteSQL: String
+        if showId != nil {
+            deleteSQL = """
+            DELETE FROM ad_catalog_entries
+            WHERE id IN (
+                SELECT id FROM ad_catalog_entries
+                WHERE show_id = ?
+                ORDER BY created_at ASC
+                LIMIT \(toEvict)
+            )
+            """
+        } else {
+            deleteSQL = """
+            DELETE FROM ad_catalog_entries
+            WHERE id IN (
+                SELECT id FROM ad_catalog_entries
+                WHERE show_id IS NULL
+                ORDER BY created_at ASC
+                LIMIT \(toEvict)
+            )
+            """
+        }
+        var delStmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, deleteSQL, -1, &delStmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(delStmt) }
+        if let showId {
+            sqlite3_bind_text(delStmt, 1, showId, -1, Self.SQLITE_TRANSIENT)
+        }
+        _ = sqlite3_step(delStmt)
     }
 
     /// Convenience: insert with individual fields.
@@ -350,7 +437,8 @@ actor AdCatalogStore {
         return entry
     }
 
-    /// Return all catalog entries (diagnostic / test use).
+    /// Return all catalog entries (diagnostic / test use). No row cap —
+    /// total rows are bounded by the per-show eviction policy.
     func allEntries() throws -> [CatalogEntry] {
         try ensureOpen()
         guard db != nil else { throw AdCatalogStoreError.queryFailed("database closed") }
@@ -360,7 +448,6 @@ actor AdCatalogStore {
                original_confidence
         FROM ad_catalog_entries
         ORDER BY created_at DESC
-        LIMIT \(Self.queryScanLimit)
         """
         return try loadEntries(sql: sql, bind: nil)
     }
@@ -398,7 +485,6 @@ actor AdCatalogStore {
             FROM ad_catalog_entries
             WHERE show_id = ? OR show_id IS NULL
             ORDER BY created_at DESC
-            LIMIT \(Self.queryScanLimit)
             """
         } else {
             sql = """
@@ -407,7 +493,6 @@ actor AdCatalogStore {
                    original_confidence
             FROM ad_catalog_entries
             ORDER BY created_at DESC
-            LIMIT \(Self.queryScanLimit)
             """
         }
 
@@ -559,6 +644,40 @@ actor AdCatalogStore {
             CREATE INDEX IF NOT EXISTS idx_catalog_created_at ON ad_catalog_entries(created_at);
             """
             try exec(handle, createSQL)
+        }
+
+        // V1 → V2: dedup existing rows by (show_id, fingerprint_blob),
+        // then add a UNIQUE index so future inserts can use UPSERT to
+        // refresh recency / confidence in place. Within each group the
+        // surviving row is the one with the highest `original_confidence`
+        // (NULL sorts as lowest); ties broken by highest rowid (most
+        // recent insert). This matches the post-V2 UPSERT contract,
+        // which keeps the higher-confidence value on collision —
+        // the migration must not undo that property by dropping a
+        // strong older row in favor of a weaker newer one. NULL show_id
+        // rows are not collapsed against each other (SQLite treats
+        // NULLs in UNIQUE indexes as distinct, so legacy NULL-show
+        // duplicates remain — they are rare per the docstring contract).
+        if current < 2 {
+            let dedupSQL = """
+            DELETE FROM ad_catalog_entries
+            WHERE rowid NOT IN (
+                SELECT rowid FROM (
+                    SELECT rowid,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY show_id, fingerprint_blob
+                               ORDER BY IFNULL(original_confidence, -1.0) DESC,
+                                        rowid DESC
+                           ) AS rn
+                    FROM ad_catalog_entries
+                    WHERE show_id IS NOT NULL
+                ) WHERE rn = 1
+                UNION ALL
+                SELECT rowid FROM ad_catalog_entries WHERE show_id IS NULL
+            );
+            """
+            try exec(handle, dedupSQL)
+            try exec(handle, "CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_show_fingerprint ON ad_catalog_entries(show_id, fingerprint_blob) WHERE show_id IS NOT NULL")
         }
 
         try exec(handle, "PRAGMA user_version = \(schemaVersion)")

@@ -66,24 +66,83 @@ struct CKContainerCloudKitProvider: CloudKitProviding {
     }
 
     func fetchAll(recordType: String) async throws -> [CKRecord] {
+        let query = CKQuery(
+            recordType: recordType,
+            predicate: NSPredicate(value: true)
+        )
         do {
-            let query = CKQuery(
-                recordType: recordType,
-                predicate: NSPredicate(value: true)
+            return try await Self.collectPages(
+                pageSize: pageSize,
+                maxPages: maxPages,
+                recordTypeForLog: recordType,
+                logger: logger,
+                fetchFirst: { limit -> PageResult<CKRecord, CKQueryOperation.Cursor> in
+                    let page = try await self.database.records(
+                        matching: query, resultsLimit: limit
+                    )
+                    return PageResult(
+                        records: page.matchResults.compactMap { try? $1.get() },
+                        cursor: page.queryCursor
+                    )
+                },
+                fetchNext: { cursor, limit -> PageResult<CKRecord, CKQueryOperation.Cursor> in
+                    let page = try await self.database.records(
+                        continuingMatchFrom: cursor, resultsLimit: limit
+                    )
+                    return PageResult(
+                        records: page.matchResults.compactMap { try? $1.get() },
+                        cursor: page.queryCursor
+                    )
+                }
             )
-            // Bounded to a generous default; production uses cursor
-            // pagination once a user has more than the first page of
-            // subscriptions / entitlements (currently 1 entitlement +
-            // one record per subscription, which on a large library is
-            // still well under this cap).
-            let result = try await database.records(matching: query, resultsLimit: 200)
-            return result.matchResults.compactMap { _, recordResult in
-                try? recordResult.get()
-            }
         } catch {
             throw mapError(error)
         }
     }
+
+    /// Single page of paginated records; returned by both `fetchFirst`
+    /// and `fetchNext` injection points so the cursor-paging loop is
+    /// testable without a real CKContainer.
+    /// Generic over `Record` and `Cursor` so the test suite can drive
+    /// the loop with plain Swift types instead of having to synthesize
+    /// `CKQueryOperation.Cursor` (which has no public initializer).
+    struct PageResult<Record, Cursor> {
+        let records: [Record]
+        let cursor: Cursor?
+    }
+
+    /// Cursor pagination with a defensive page cap. Extracted as a
+    /// static helper so tests can drive it with stubbed page-fetcher
+    /// closures rather than spinning a real CKDatabase.
+    /// 200 pages × 200 rows = 40k records, well above the realistic
+    /// ceiling for a single user's entire subscription + entitlement
+    /// universe — anything past it indicates a misbehaving server or
+    /// SDK bug and we'd rather log + truncate than memory-bloat.
+    static func collectPages<Record, Cursor>(
+        pageSize: Int,
+        maxPages: Int,
+        recordTypeForLog: String,
+        logger: Logger,
+        fetchFirst: (Int) async throws -> PageResult<Record, Cursor>,
+        fetchNext: (Cursor, Int) async throws -> PageResult<Record, Cursor>
+    ) async throws -> [Record] {
+        var collected: [Record] = []
+        var page = try await fetchFirst(pageSize)
+        collected.append(contentsOf: page.records)
+        var pagesFetched = 1
+        while let cursor = page.cursor, pagesFetched < maxPages {
+            page = try await fetchNext(cursor, pageSize)
+            collected.append(contentsOf: page.records)
+            pagesFetched += 1
+        }
+        if page.cursor != nil {
+            logger.warning("fetchAll(\(recordTypeForLog)) hit page cap \(maxPages); truncating result.")
+        }
+        return collected
+    }
+
+    private var pageSize: Int { 200 }
+    private var maxPages: Int { 200 }
 
     func subscribeToChanges(recordType: String, subscriptionID: String) async throws {
         let predicate = NSPredicate(value: true)
