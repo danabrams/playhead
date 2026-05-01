@@ -1299,6 +1299,22 @@ final class PlayheadRuntime {
                     ShadowLaneBAdapter(coordinator: shadowCaptureCoordinator)
                 )
             }
+            // playhead-work-journal-wiring: install the production
+            // `WorkJournalRecording` binding so scheduler-driven
+            // outcomes (cancel-mid-decode preempt, asset-resolution
+            // failure, success finalize) actually land as
+            // `released`/`finalized`/`failed`/`preempted` rows in
+            // `work_journal`. Pre-this-fix, the scheduler held a
+            // `NoopWorkJournalRecorder` and every release event was
+            // dropped — the captured DB had 66 of 66 `acquired` rows
+            // and zero terminal rows, leaving forensic debugging blind
+            // when background analysis halted. The recorder is
+            // best-effort (errors logged + swallowed); installing it
+            // before `startSchedulerLoop()` ensures the very first
+            // dispatched job's outcome already flows through it.
+            await analysisWorkScheduler.setWorkJournalRecorder(
+                AnalysisStoreWorkJournalRecorder(store: analysisStore)
+            )
             // playhead-5uvz.2 (Gap-2): journal-aware orphan recovery.
             // Runs BEFORE the reconciler's blind `recoverExpiredLeases`
             // sweep so the journal-aware policy (terminal vs. resumable

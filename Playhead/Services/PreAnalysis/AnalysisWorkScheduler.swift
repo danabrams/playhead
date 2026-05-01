@@ -2573,6 +2573,25 @@ actor AnalysisWorkScheduler {
             // this arm. On `maxAttemptsReached`, supersede so the
             // slot frees for queued work behind it.
             let attempts = job.attemptCount + 1
+            // playhead-work-journal-wiring: asset-resolution failure
+            // is a pipeline error (the decoder never ran). Use
+            // `.pipelineError` so the journal's `cause` column
+            // accurately distinguishes this from cancel-driven
+            // (`.userCancelled` / `.taskExpired`) and runner-driven
+            // (`.asrFailed`, etc.) failures.
+            let assetResolutionMetadata = SliceCompletionInstrumentation
+                .buildMetadata(
+                    sliceDurationMs: 0,
+                    bytesProcessed: 0,
+                    shardsCompleted: 0,
+                    deviceClass: DeviceClass.detect(),
+                    extras: [
+                        "stage": "analysisWorkScheduler.assetResolution",
+                        "job_id": job.jobId,
+                        "attempt": "\(attempts)",
+                    ]
+                )
+                .encodeJSON()
             if attempts >= Self.maxAttemptCount {
                 await commitOutcomeArm(
                     "assetResolution.supersede",
@@ -2585,6 +2604,11 @@ actor AnalysisWorkScheduler {
                             lastErrorCode: "maxAttemptsReached:assetResolution: \(error)"
                         )
                     )
+                )
+                await emitJournalFailed(
+                    episodeId: job.episodeId,
+                    cause: .pipelineError,
+                    metadataJSON: assetResolutionMetadata
                 )
                 logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: assetResolution: \(error)")
             } else {
@@ -2600,6 +2624,11 @@ actor AnalysisWorkScheduler {
                             lastErrorCode: "assetResolution: \(error)"
                         )
                     )
+                )
+                await emitJournalFailed(
+                    episodeId: job.episodeId,
+                    cause: .pipelineError,
+                    metadataJSON: assetResolutionMetadata
                 )
             }
             return
@@ -2653,6 +2682,38 @@ actor AnalysisWorkScheduler {
                 await writeIfStillOwned("cancelRace.releaseLease") {
                     try await store.releaseLease(jobId: job.jobId)
                 }
+                // playhead-work-journal-wiring: emit the preempt row
+                // for the cancel-before-runner-start path. This arm
+                // fires when `shouldCancelCurrentJob` is already true
+                // when the lease is acquired — i.e. the user (or BG
+                // task expiration) issued the cancel before the
+                // decoder started. The cancel cause defaults to
+                // `.userCancelled` because the only canceller that
+                // can reach this arm before runTask is the explicit
+                // user-cancel path; the BG-task expiration cancels
+                // mid-decode and lands in the catch arm below
+                // (which already emits via the existing recorder
+                // call). `pendingCancelCause` overrides when the
+                // racing canceller passed a more specific cause.
+                let cancelRaceCause = pendingCancelCause ?? .userCancelled
+                let cancelRaceMetadata = await SliceCompletionInstrumentation
+                    .recordPaused(
+                        cause: cancelRaceCause,
+                        deviceClass: DeviceClass.detect(),
+                        sliceDurationMs: 0,
+                        bytesProcessed: 0,
+                        shardsCompleted: 0,
+                        extras: [
+                            "stage": "analysisWorkScheduler.cancelRace",
+                            "job_id": job.jobId,
+                        ]
+                    )
+                    .encodeJSON()
+                await emitJournalPreempted(
+                    episodeId: job.episodeId,
+                    cause: cancelRaceCause,
+                    metadataJSON: cancelRaceMetadata
+                )
                 // Clear cancel state so it doesn't leak into the next
                 // job picked up by the loop. `pendingCancelCause` was
                 // set by the racing canceller for the now-skipped job;
@@ -2697,6 +2758,13 @@ actor AnalysisWorkScheduler {
                 // job supersedes and frees the lease slot. Terminal branch
                 // also drops `nextEligibleAt` to make the job non-dispatchable.
                 let attempts = job.attemptCount + 1
+                // playhead-1nl6: cause that accompanied the cancel.
+                // Default `.pipelineError` for callers that forgot to
+                // pass one; BG-task expiration passes `.taskExpired`;
+                // explicit user cancel passes `.userCancelled`.
+                let cause = pendingCancelCause ?? .pipelineError
+                pendingCancelCause = nil
+                let episodeId = job.episodeId
                 if attempts >= Self.maxAttemptCount {
                     await commitOutcomeArm(
                         "cancelCatch.supersede",
@@ -2709,6 +2777,35 @@ actor AnalysisWorkScheduler {
                                 lastErrorCode: "maxAttemptsReached:cancelMidRun"
                             )
                         )
+                    )
+                    // playhead-work-journal-wiring: terminal supersede
+                    // is a non-recoverable failure (the slot will not
+                    // be retried). Emit `.failed` with
+                    // `cause: .pipelineError` per the audit's Gap-1
+                    // recommendation — supersede after a poisoned
+                    // cancel loop is a pipeline-class failure, not a
+                    // transient pause. The `recordFailed` counter on
+                    // `SliceCompletionInstrumentation` is incremented
+                    // here so the cause taxonomy stays consistent.
+                    let supersedeMetadata = await SliceCompletionInstrumentation
+                        .recordFailed(
+                            cause: .pipelineError,
+                            deviceClass: DeviceClass.detect(),
+                            sliceDurationMs: 0,
+                            bytesProcessed: 0,
+                            shardsCompleted: 0,
+                            extras: [
+                                "stage": "analysisWorkScheduler.cancelCatchSupersede",
+                                "job_id": job.jobId,
+                                "original_cancel_cause": cause.rawValue,
+                                "attempts": "\(attempts)",
+                            ]
+                        )
+                        .encodeJSON()
+                    await emitJournalFailed(
+                        episodeId: episodeId,
+                        cause: .pipelineError,
+                        metadataJSON: supersedeMetadata
                     )
                     logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: cancelMidRun")
                 } else {
@@ -2735,34 +2832,29 @@ actor AnalysisWorkScheduler {
                             )
                         )
                     )
+                    // playhead-1nl6 / work-journal-wiring: requeue
+                    // path is a transient pause — emit `.preempted`
+                    // with the cancel's typed cause. Routes through
+                    // the helper so the recorder snapshot is taken on
+                    // the actor and `lostOwnership` is re-checked at
+                    // emission time.
+                    let metadata = await SliceCompletionInstrumentation.recordPaused(
+                        cause: cause,
+                        deviceClass: DeviceClass.detect(),
+                        sliceDurationMs: 0,
+                        bytesProcessed: 0,
+                        shardsCompleted: 0,
+                        extras: [
+                            "stage": "analysisWorkScheduler.cancelCurrentJob",
+                            "job_id": job.jobId,
+                        ]
+                    )
+                    await emitJournalPreempted(
+                        episodeId: episodeId,
+                        cause: cause,
+                        metadataJSON: metadata.encodeJSON()
+                    )
                 }
-                // playhead-1nl6: emit the cause that accompanied the
-                // cancel into the WorkJournal via the injected recorder.
-                // Default cause is `.pipelineError` so callers that
-                // forgot to pass one still produce a typed tag; the
-                // expirationHandler in BackgroundProcessingService
-                // passes `.taskExpired`, the explicit user cancel path
-                // passes `.userCancelled`.
-                let cause = pendingCancelCause ?? .pipelineError
-                pendingCancelCause = nil
-                let recorder = workJournalRecorder
-                let episodeId = job.episodeId
-                let metadata = await SliceCompletionInstrumentation.recordPaused(
-                    cause: cause,
-                    deviceClass: DeviceClass.detect(),
-                    sliceDurationMs: 0,
-                    bytesProcessed: 0,
-                    shardsCompleted: 0,
-                    extras: [
-                        "stage": "analysisWorkScheduler.cancelCurrentJob",
-                        "job_id": job.jobId,
-                    ]
-                )
-                await recorder.recordPreempted(
-                    episodeId: episodeId,
-                    cause: cause,
-                    metadataJSON: metadata.encodeJSON()
-                )
                 return
             }
             currentRunningTask = nil
@@ -2841,6 +2933,14 @@ actor AnalysisWorkScheduler {
                             stateUpdate: .init(state: "complete", nextEligibleAt: nil, lastErrorCode: nil)
                         )
                     )
+                    // playhead-work-journal-wiring: tier advance is a
+                    // successful completion of the current tier. Emit
+                    // `.finalized` so the journal records a clean
+                    // success row for forensic audit. The next-tier
+                    // job is inserted in the same transaction; its
+                    // own `acquired` row will land when the scheduler
+                    // claims it on a future iteration.
+                    await emitJournalFinalized(episodeId: job.episodeId)
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Tier advancement: \(job.desiredCoverageSec)s -> \(nextCoverage)s for episode \(job.episodeId)")
                 } else {
@@ -2852,6 +2952,12 @@ actor AnalysisWorkScheduler {
                             stateUpdate: .init(state: "complete", nextEligibleAt: nil, lastErrorCode: nil)
                         )
                     )
+                    // playhead-work-journal-wiring: all tiers
+                    // complete is the terminal success — the episode
+                    // has reached its highest coverage target and
+                    // will not requeue. Emit `.finalized` to seal
+                    // the journal trail.
+                    await emitJournalFinalized(episodeId: job.episodeId)
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Job \(job.jobId) complete (all tiers done)")
                 }
@@ -2872,6 +2978,15 @@ actor AnalysisWorkScheduler {
                             )
                         )
                     )
+                    // playhead-work-journal-wiring (review-cycle-1):
+                    // analysis_jobs row terminates `state="complete"`.
+                    // The "no progress" suffix is forensic detail
+                    // carried in `lastErrorCode`; semantically the job
+                    // is done — coverage just was not reachable. Emit
+                    // `.finalized` so the journal mirrors the row's
+                    // terminal-success classification (orphan recovery
+                    // treats `.finalized` as "nothing to resume").
+                    await emitJournalFinalized(episodeId: job.episodeId)
                     logger.info("Job \(job.jobId) marked complete after no-progress pass (coverage insufficient)")
                 } else {
                     // playhead-5uvz.3: predict the post-increment value
@@ -2896,6 +3011,13 @@ actor AnalysisWorkScheduler {
                                 )
                             )
                         )
+                        // playhead-work-journal-wiring (review-cycle-1):
+                        // identical reasoning to noProgress above —
+                        // `state="complete"` means the job will not
+                        // requeue. The retry-budget exhaustion is a
+                        // graceful give-up, not a runner failure, so
+                        // `.finalized` is the correct lifecycle event.
+                        await emitJournalFinalized(episodeId: job.episodeId)
                         logger.info("Job \(job.jobId) marked complete after max attempts (coverage insufficient)")
                     } else {
                         // Backoff before next attempt: without a
@@ -2919,6 +3041,30 @@ actor AnalysisWorkScheduler {
                                     lastErrorCode: nil
                                 )
                             )
+                        )
+                        // playhead-work-journal-wiring (review-cycle-1):
+                        // transient pause — the job will retry. Emit
+                        // `.preempted/.pipelineError` to record the
+                        // pause without misclassifying it as a
+                        // terminal failure.
+                        let coverageRequeueMetadata = await SliceCompletionInstrumentation
+                            .recordPaused(
+                                cause: .pipelineError,
+                                deviceClass: DeviceClass.detect(),
+                                sliceDurationMs: 0,
+                                bytesProcessed: 0,
+                                shardsCompleted: 0,
+                                extras: [
+                                    "stage": "analysisWorkScheduler.coverageInsufficientRequeue",
+                                    "job_id": job.jobId,
+                                    "attempts": "\(attempts)",
+                                ]
+                            )
+                            .encodeJSON()
+                        await emitJournalPreempted(
+                            episodeId: job.episodeId,
+                            cause: .pipelineError,
+                            metadataJSON: coverageRequeueMetadata
                         )
                     }
                 }
@@ -2971,6 +3117,34 @@ actor AnalysisWorkScheduler {
                             )
                         )
                     )
+                    // playhead-work-journal-wiring (review-cycle-1):
+                    // runner-driven failure exhausted retry budget —
+                    // analysis_jobs is `superseded`, slot will not
+                    // requeue. This is the most common terminal
+                    // failure shape in production (decode/ASR/feature
+                    // errors); the prior WIP missed it. Emit
+                    // `.failed/.pipelineError` so orphan recovery and
+                    // forensic audit see the terminal row.
+                    let failedSupersedeMetadata = await SliceCompletionInstrumentation
+                        .recordFailed(
+                            cause: .pipelineError,
+                            deviceClass: DeviceClass.detect(),
+                            sliceDurationMs: 0,
+                            bytesProcessed: 0,
+                            shardsCompleted: 0,
+                            extras: [
+                                "stage": "analysisWorkScheduler.failedSupersede",
+                                "job_id": job.jobId,
+                                "runner_reason": reason,
+                                "attempts": "\(attempts)",
+                            ]
+                        )
+                        .encodeJSON()
+                    await emitJournalFailed(
+                        episodeId: job.episodeId,
+                        cause: .pipelineError,
+                        metadataJSON: failedSupersedeMetadata
+                    )
                     logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: \(reason)")
                 } else {
                     let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
@@ -2988,6 +3162,34 @@ actor AnalysisWorkScheduler {
                             )
                         )
                     )
+                    // playhead-work-journal-wiring (review-cycle-1):
+                    // transient runner failure — analysis_jobs goes
+                    // to `state="failed"` with backoff but will retry
+                    // on a future scheduler tick. Emit
+                    // `.preempted/.pipelineError` (not `.failed`)
+                    // because the slot is recoverable; using
+                    // `.failed` would make orphan recovery treat the
+                    // job as terminal.
+                    let failedRequeueMetadata = await SliceCompletionInstrumentation
+                        .recordPaused(
+                            cause: .pipelineError,
+                            deviceClass: DeviceClass.detect(),
+                            sliceDurationMs: 0,
+                            bytesProcessed: 0,
+                            shardsCompleted: 0,
+                            extras: [
+                                "stage": "analysisWorkScheduler.failedRequeue",
+                                "job_id": job.jobId,
+                                "runner_reason": reason,
+                                "attempts": "\(attempts)",
+                            ]
+                        )
+                        .encodeJSON()
+                    await emitJournalPreempted(
+                        episodeId: job.episodeId,
+                        cause: .pipelineError,
+                        metadataJSON: failedRequeueMetadata
+                    )
                     logger.warning("Job \(job.jobId) failed: \(reason), attempt \(attempts), backoff \(backoff)s")
                 }
 
@@ -3000,6 +3202,28 @@ actor AnalysisWorkScheduler {
                         stateUpdate: .init(state: "queued", nextEligibleAt: nil, lastErrorCode: nil)
                     )
                 )
+                // playhead-work-journal-wiring (review-cycle-1):
+                // BG-task expiration is the canonical
+                // `.preempted/.taskExpired` shape — runner reported
+                // it from inside the decode loop. Job is requeued.
+                let bgExpiredMetadata = await SliceCompletionInstrumentation
+                    .recordPaused(
+                        cause: .taskExpired,
+                        deviceClass: DeviceClass.detect(),
+                        sliceDurationMs: 0,
+                        bytesProcessed: 0,
+                        shardsCompleted: 0,
+                        extras: [
+                            "stage": "analysisWorkScheduler.backgroundExpiredRequeue",
+                            "job_id": job.jobId,
+                        ]
+                    )
+                    .encodeJSON()
+                await emitJournalPreempted(
+                    episodeId: job.episodeId,
+                    cause: .taskExpired,
+                    metadataJSON: bgExpiredMetadata
+                )
                 logger.info("Job \(job.jobId) background expired, requeued")
 
             case .cancelledByPlayback:
@@ -3011,6 +3235,30 @@ actor AnalysisWorkScheduler {
                         stateUpdate: .init(state: "queued", nextEligibleAt: nil, lastErrorCode: nil)
                     )
                 )
+                // playhead-work-journal-wiring (review-cycle-1):
+                // playback started — analysis was preempted by
+                // user-driven foreground work. Use `.userPreempted`
+                // (the cause taxonomy distinguishes this from
+                // `.userCancelled` which is an explicit user-issued
+                // stop).
+                let playbackCancelMetadata = await SliceCompletionInstrumentation
+                    .recordPaused(
+                        cause: .userPreempted,
+                        deviceClass: DeviceClass.detect(),
+                        sliceDurationMs: 0,
+                        bytesProcessed: 0,
+                        shardsCompleted: 0,
+                        extras: [
+                            "stage": "analysisWorkScheduler.cancelledByPlaybackRequeue",
+                            "job_id": job.jobId,
+                        ]
+                    )
+                    .encodeJSON()
+                await emitJournalPreempted(
+                    episodeId: job.episodeId,
+                    cause: .userPreempted,
+                    metadataJSON: playbackCancelMetadata
+                )
                 logger.info("Job \(job.jobId) cancelled by playback, requeued")
 
             case .preempted:
@@ -3021,6 +3269,30 @@ actor AnalysisWorkScheduler {
                         progress: progress,
                         stateUpdate: .init(state: "queued", nextEligibleAt: nil, lastErrorCode: nil)
                     )
+                )
+                // playhead-work-journal-wiring (review-cycle-1):
+                // higher-lane work bumped this slot. The runner
+                // surfaced `.preempted` directly — emit the matching
+                // journal row with `.userPreempted` so the cause
+                // taxonomy is consistent across the two arms that
+                // produce `.preempted` from non-cancel-driven sources.
+                let runnerPreemptMetadata = await SliceCompletionInstrumentation
+                    .recordPaused(
+                        cause: .userPreempted,
+                        deviceClass: DeviceClass.detect(),
+                        sliceDurationMs: 0,
+                        bytesProcessed: 0,
+                        shardsCompleted: 0,
+                        extras: [
+                            "stage": "analysisWorkScheduler.preemptedRequeue",
+                            "job_id": job.jobId,
+                        ]
+                    )
+                    .encodeJSON()
+                await emitJournalPreempted(
+                    episodeId: job.episodeId,
+                    cause: .userPreempted,
+                    metadataJSON: runnerPreemptMetadata
                 )
                 logger.info("Job \(job.jobId) preempted by higher-lane work, requeued")
             }
@@ -3047,6 +3319,29 @@ actor AnalysisWorkScheduler {
                         )
                     )
                 )
+                // playhead-work-journal-wiring (review-cycle-1):
+                // uncaught exception exhausted retries — terminal
+                // failure. Emit `.failed/.pipelineError`.
+                let outerSupersedeMetadata = await SliceCompletionInstrumentation
+                    .recordFailed(
+                        cause: .pipelineError,
+                        deviceClass: DeviceClass.detect(),
+                        sliceDurationMs: 0,
+                        bytesProcessed: 0,
+                        shardsCompleted: 0,
+                        extras: [
+                            "stage": "analysisWorkScheduler.outerCatchSupersede",
+                            "job_id": job.jobId,
+                            "error": error.localizedDescription,
+                            "attempts": "\(attempts)",
+                        ]
+                    )
+                    .encodeJSON()
+                await emitJournalFailed(
+                    episodeId: job.episodeId,
+                    cause: .pipelineError,
+                    metadataJSON: outerSupersedeMetadata
+                )
             } else {
                 let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
                 let nextEligible = clock().timeIntervalSince1970 + backoff
@@ -3061,6 +3356,32 @@ actor AnalysisWorkScheduler {
                             lastErrorCode: error.localizedDescription
                         )
                     )
+                )
+                // playhead-work-journal-wiring (review-cycle-1):
+                // uncaught exception, transient retry — emit
+                // `.preempted/.pipelineError`. Same shape as
+                // `failed.requeue`: the slot is recoverable, so
+                // `.preempted` (not `.failed`) keeps orphan recovery
+                // honest about the slot's resumability.
+                let outerRequeueMetadata = await SliceCompletionInstrumentation
+                    .recordPaused(
+                        cause: .pipelineError,
+                        deviceClass: DeviceClass.detect(),
+                        sliceDurationMs: 0,
+                        bytesProcessed: 0,
+                        shardsCompleted: 0,
+                        extras: [
+                            "stage": "analysisWorkScheduler.outerCatchRequeue",
+                            "job_id": job.jobId,
+                            "error": error.localizedDescription,
+                            "attempts": "\(attempts)",
+                        ]
+                    )
+                    .encodeJSON()
+                await emitJournalPreempted(
+                    episodeId: job.episodeId,
+                    cause: .pipelineError,
+                    metadataJSON: outerRequeueMetadata
                 )
             }
             logger.error("Job \(job.jobId) threw: \(error)")
@@ -3145,6 +3466,104 @@ actor AnalysisWorkScheduler {
         } catch {
             logger.error("Failed outcome arm [\(what)]: \(error)")
         }
+    }
+
+    // MARK: - WorkJournal lifecycle emission helpers (work-journal-wiring)
+    //
+    // **Why these exist.** Pre-this-fix, `processJob` only emitted a
+    // `recordPreempted(...)` row from the cancel-mid-decode catch arm
+    // — and even that was a no-op against the default
+    // `NoopWorkJournalRecorder` because `PlayheadRuntime` never
+    // installed a real recorder. The captured production DB had 66 of
+    // 66 `acquired` rows and zero terminal rows, which made the
+    // journal useless for forensic debugging when background analysis
+    // halted.
+    //
+    // The audit at `docs/audits/2026-04-25-episode-job-dag-audit.md`
+    // (Gap-1) called out the cancel arms as the priority. The
+    // review-cycle-1 expansion below covers the full outcome-arm
+    // taxonomy in `processJob` so the journal stays complete on
+    // every terminal/recoverable transition (tracked arms enumerated
+    // on `commitOutcomeArm` above). Pause-only arms
+    // (`blockedByModel`, `pausedThermalOrMemory`) deliberately do
+    // NOT emit — those states are awaiting an external precondition
+    // (model availability, thermal headroom) and the slot has not
+    // released. Orphan recovery already disambiguates these via the
+    // `analysis_jobs.state` column. Each helper is a thin wrapper
+    // around the matching `WorkJournalRecording` method that:
+    //
+    //   - Captures the recorder + episodeId on the actor (snapshot
+    //     once per call so the helper is `nonisolated` from the
+    //     recorder's perspective).
+    //   - Skips emission when `lostOwnership == true` — orphan
+    //     recovery has already reclaimed the lease and the new owner
+    //     will write its own journal row when its outcome arm fires.
+    //     Writing here would corrupt the new owner's audit trail with
+    //     a mid-stream row attributed to the old owner's epoch.
+    //   - Awaits the recorder. The recorder is best-effort (errors
+    //     logged + swallowed at the recorder), so a journal-append
+    //     failure cannot disrupt the scheduler's state machine.
+    //
+    // The recorder is invoked AFTER `commitOutcomeArm` lands the row's
+    // state-machine update, so the journal row is a tail emission
+    // that observes (not drives) the terminal transition. If the
+    // process dies between `commitOutcomeArm` and the recorder call,
+    // the analysis_jobs row is still terminally correct — only the
+    // journal row is missing. Orphan recovery already tolerates
+    // missing journal rows (Gap-1's "empty journal" case routes via
+    // `decisionEvent == .none` → resume branch).
+
+    /// Emit a `.finalized` row for `episodeId`. Called from the
+    /// success outcome arms (`tierAdvance`, `allTiersDone`,
+    /// `coverageInsufficient.noProgress`,
+    /// `coverageInsufficient.maxAttempts`) — all cases where
+    /// `analysis_jobs.state="complete"`.
+    private func emitJournalFinalized(episodeId: String) async {
+        guard !lostOwnership else { return }
+        let recorder = workJournalRecorder
+        await recorder.recordFinalized(episodeId: episodeId)
+    }
+
+    /// Emit a `.failed` row for `episodeId`. Called from the
+    /// terminal-failure arms: `assetResolution.{supersede,requeue}`,
+    /// `cancelCatch.supersede`, `failed.supersede`, and
+    /// `outerCatch.supersede`. `metadataJSON` carries caller-specific
+    /// context (job id, stage, attempt count, runner_reason) for the
+    /// journal row's `metadata` column.
+    private func emitJournalFailed(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {
+        guard !lostOwnership else { return }
+        let recorder = workJournalRecorder
+        await recorder.recordFailed(
+            episodeId: episodeId,
+            cause: cause,
+            metadataJSON: metadataJSON
+        )
+    }
+
+    /// Emit a `.preempted` row for `episodeId`. Called from the
+    /// recoverable-pause arms: `cancelRace.releaseLease`,
+    /// `cancelCatch.revertQueued` (the cancel-mid-decode requeue),
+    /// `coverageInsufficient.requeue`, `failed.requeue`,
+    /// `backgroundExpired.requeue`, `cancelledByPlayback.requeue`,
+    /// `preempted.requeue`, and `outerCatch.requeue`. All represent
+    /// "lease released, slot will retry" — distinct from `.failed`
+    /// which marks a terminal non-recoverable failure.
+    private func emitJournalPreempted(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {
+        guard !lostOwnership else { return }
+        let recorder = workJournalRecorder
+        await recorder.recordPreempted(
+            episodeId: episodeId,
+            cause: cause,
+            metadataJSON: metadataJSON
+        )
     }
 
     // MARK: - Tier Definitions
