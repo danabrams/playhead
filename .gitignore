@@ -57,6 +57,15 @@ Package.resolved
 # Auto-generated session summaries (ntm)
 .ntm/summaries/
 
+# ntm runtime state — regenerated per session
+.ntm/rate_limits.json
+
+# Claude Code session lockfile — runtime state, not source
+.claude/scheduled_tasks.lock
+
+# Disk-cleanup script log — append-only runtime state
+.logs/
+
 # Wizard round archive — cached locally, never committed
 .wizard-archive/
 
