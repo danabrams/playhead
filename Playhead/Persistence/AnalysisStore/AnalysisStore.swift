@@ -6812,6 +6812,44 @@ actor AnalysisStore {
         return optionalText(stmt, 0)
     }
 
+    /// stranded-backfill-reaper: reaper for `backfill_jobs` rows stranded in
+    /// `status='running'` across a process death. Process restart implies
+    /// strand — there is no `updatedAt` / `leaseExpiresAt` column on
+    /// `backfill_jobs`, and the runner only writes `running` immediately
+    /// before dispatching FM (see `BackfillJobRunner.markBackfillJobRunning`
+    /// at the top of the drain loop). If a row is observed in `running` at
+    /// process launch, the prior process necessarily failed to reach a
+    /// terminal transition for it, so the safe move is to flip it back to
+    /// `queued` so the next `runPendingBackfill` invocation's M-5
+    /// idempotency check (`BackfillJobRunner.swift:386-403`) can re-enqueue
+    /// it through the admission controller.
+    ///
+    /// The UPDATE is unconditional (no `WHERE status='running' AND ...`
+    /// freshness filter) because the existing schema has no clock/lease
+    /// column to filter against, AND this method is invoked from
+    /// `AnalysisJobReconciler.reconcile()`, which is itself called exactly
+    /// once at app launch from `PlayheadRuntime` and from the
+    /// BGProcessingTask handler. Both call sites guarantee the prior
+    /// process is dead by the time this UPDATE runs — there is no live
+    /// runner that could be holding a `running` row legitimately when the
+    /// reaper executes.
+    ///
+    /// Returns the number of rows reset. Callers (the reconciler) report
+    /// the count in `ReconciliationReport` so a stranded-fleet event leaves
+    /// a structured log trail.
+    @discardableResult
+    func resetStrandedBackfillJobs() throws -> Int {
+        let sql = """
+            UPDATE backfill_jobs
+            SET status = 'queued'
+            WHERE status = 'running'
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
+    }
+
     #if DEBUG
     /// bd-m8k test-only helper: drop the `podcast_planner_state` table from
     /// under the live connection so the next `migrate()` against this path
