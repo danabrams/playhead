@@ -1652,6 +1652,15 @@ actor AdDetectionService {
             logger.info("[kgby] backfill transcript boundary hits: \(transcriptBoundaryHits.count) (from \(finalChunks.count) final chunks)")
         }
 
+        // Bug 6 (decision-results wiring): hoist the per-asset DecisionCohort encoding
+        // out of the per-window loop. The cohort is a function of detectorVersion only,
+        // so it is identical for every window in this run; encoding it once avoids
+        // repeated JSON work and gives Step 16.5 a single canonical value to persist
+        // in `ad_decision_results.decisionCohortJSON`.
+        let assetDecisionCohort = DecisionCohort.production(appBuild: config.detectorVersion)
+        let assetCohortJSON = (try? JSONEncoder().encode(assetDecisionCohort))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+
         for span in decodedSpans {
             try Task.checkCancellation()
 
@@ -1903,10 +1912,11 @@ actor AdDetectionService {
                 recomputationRevision: 0
             ))
 
-            // Accumulate DecisionEvent for step 16.
-            let decisionCohort = DecisionCohort.production(appBuild: config.detectorVersion)
-            let cohortJSON = (try? JSONEncoder().encode(decisionCohort))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            // Accumulate DecisionEvent for step 16. Bug 6: cohortJSON is hoisted
+            // to asset scope (`assetCohortJSON`) so the per-asset
+            // `ad_decision_results` row and every per-window `decision_events` row
+            // serialize the same cohort string.
+            let cohortJSON = assetCohortJSON
             // playhead-ef2.1.4: build structured explanation trace from ledger + decision
             let explanation = DecisionExplanation.build(
                 ledger: ledger,
@@ -1987,6 +1997,41 @@ actor AdDetectionService {
                 try await store.appendDecisionEvent(event)
             } catch {
                 logger.warning("Backfill: appendDecisionEvent failed for window \(event.windowId): \(error.localizedDescription)")
+            }
+        }
+
+        // ── Step 16.5: Persist the per-asset DecisionResultArtifact ──────────
+        // Bug 6: prior to this block, `ad_decision_results` rows were never
+        // written by production code (only by tests), even though every other
+        // artifact of the backfill pipeline lands in SQLite. Building it here
+        // — after `decision_events` are flushed and before SkipOrchestrator
+        // forwarding — gives downstream eval/replay a single canonical roll-up
+        // per asset that matches the events that were just persisted.
+        //
+        // The UNIQUE(analysisAssetId) constraint plus `INSERT OR REPLACE` in
+        // `saveDecisionResultArtifact` makes this idempotent across re-runs
+        // (e.g. cohort recomputes after a settings change). We persist even
+        // when `fusionDecisionResults` is empty so that "no ads found" is
+        // representable as `decisionJSON == "[]"` rather than a missing row;
+        // a missing row is ambiguous (never analysed vs analysed-with-zero).
+        if !decodedSpans.isEmpty {
+            let inputArtifactRefs = (try? JSONEncoder().encode(fusionWindows.map(\.id)))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+            let decisionJSON = (try? JSONEncoder().encode(
+                fusionDecisionResults.map(PersistedDecisionResult.init(_:))
+            )).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+            let artifact = DecisionResultArtifact(
+                id: UUID().uuidString,
+                analysisAssetId: analysisAssetId,
+                decisionCohortJSON: assetCohortJSON,
+                inputArtifactRefs: inputArtifactRefs,
+                decisionJSON: decisionJSON,
+                createdAt: Date().timeIntervalSince1970
+            )
+            do {
+                try await store.saveDecisionResultArtifact(artifact)
+            } catch {
+                logger.warning("Backfill: saveDecisionResultArtifact failed for asset \(analysisAssetId): \(error.localizedDescription)")
             }
         }
 
@@ -4646,5 +4691,37 @@ enum PostClassifyBoundaryExpansion {
         let finalEnd = max(expandedEnd, endTime)
 
         return (finalStart, finalEnd)
+    }
+}
+
+// MARK: - DecisionResultArtifact serialization (Bug 6)
+
+/// Codable DTO mirroring `AdDecisionResult` for persistence in
+/// `ad_decision_results.decisionJSON`.
+///
+/// `AdDecisionResult` itself is a runtime type used by `SkipOrchestrator` and is
+/// intentionally not `Codable` — adding the conformance there would expand the
+/// model's contract beyond the orchestrator's needs and pull
+/// `AdDecisionEligibilityGate` into the persistence surface. Encoding through a
+/// local DTO keeps the on-disk schema decoupled from the runtime struct so a
+/// future field rename in `AdDecisionResult` does not silently change the JSON
+/// shape that downstream consumers (replay, eval, NARL) depend on.
+struct PersistedDecisionResult: Codable, Equatable {
+    let id: String
+    let analysisAssetId: String
+    let startTime: Double
+    let endTime: Double
+    let skipConfidence: Double
+    let eligibilityGate: String
+    let recomputationRevision: Int
+
+    init(_ result: AdDecisionResult) {
+        self.id = result.id
+        self.analysisAssetId = result.analysisAssetId
+        self.startTime = result.startTime
+        self.endTime = result.endTime
+        self.skipConfidence = result.skipConfidence
+        self.eligibilityGate = result.eligibilityGate.rawValue
+        self.recomputationRevision = result.recomputationRevision
     }
 }
