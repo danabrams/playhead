@@ -57,8 +57,11 @@ Package.resolved
 # Auto-generated session summaries (ntm)
 .ntm/summaries/
 
-# ntm runtime state — regenerated per session
+# ntm machine-local provider state — not portable across machines
 .ntm/rate_limits.json
+
+# ntm per-session agent logs (am-/cm- panes)
+.ntm/logs/
 
 # Claude Code session lockfile — runtime state, not source
 .claude/scheduled_tasks.lock
