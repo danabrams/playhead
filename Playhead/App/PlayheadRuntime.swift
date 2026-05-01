@@ -346,7 +346,8 @@ final class PlayheadRuntime {
     //       Task) or to first-write through `ensureBootstrapped()`.
     //   17. BackgroundProcessingService(...) — pure object construction;
     //       BGTaskScheduler.register is a no-op until the OS calls back.
-    //   18. SkipCueMaterializer(store:) — pure object construction.
+    //   18. (removed Bug 5) SkipCueMaterializer was deleted along with
+    //       the `skip_cues` table.
     //   19. LanePreemptionCoordinator() — pure object construction.
     //   20. AnalysisJobRunner(...) — pure object construction.
     //   21. CandidateWindowCascade() — reads PreAnalysisConfig (Bundle).
@@ -869,7 +870,6 @@ final class PlayheadRuntime {
             bgTelemetry: bgTaskTelemetry
         )
 
-        let cueMaterializer = SkipCueMaterializer(store: analysisStore)
         let lanePreemptionCoordinator = LanePreemptionCoordinator()
         self.lanePreemptionCoordinator = lanePreemptionCoordinator
         self.analysisJobRunner = AnalysisJobRunner(
@@ -878,7 +878,6 @@ final class PlayheadRuntime {
             featureService: featureService,
             transcriptEngine: transcriptEngine,
             adDetection: adDetectionService,
-            cueMaterializer: cueMaterializer,
             preemptionCoordinator: lanePreemptionCoordinator,
             transcriptShadowGateLogger: preBuiltShadowGateLogger ?? NoOpTranscriptShadowGateLogger()
         )

@@ -2,7 +2,7 @@
 // playhead-7mq: foundation for B4 fast revalidation (playhead-zx6i).
 //
 // Asserts that `model_version`, `policy_version`, and
-// `feature_schema_version` columns exist on the six tables whose row
+// `feature_schema_version` columns exist on the five tables whose row
 // validity depends on model / policy / feature-schema versions, and
 // that pre-existing rows are backfilled with the documented sentinels
 // (`'pre-instrumentation'`, `0`, `0`).
@@ -11,15 +11,19 @@
 //   1. Fresh-migrate shape check (columns present on brand-new DB).
 //   2. Prod-shape fixture: rows pre-exist from a version-agnostic DB
 //      (columns absent), migration adds columns AND applies sentinel
-//      backfill to every existing row across all six tables.
+//      backfill to every existing row across all five tables.
 //   3. Idempotence: running `migrate()` a second time is a no-op —
 //      columns don't duplicate, row values don't mutate.
-//   4. SELECT *-tolerance: the three extant readers that use
-//      `SELECT * FROM {transcript_chunks,ad_windows,skip_cues}` still
+//   4. SELECT *-tolerance: the two extant readers that use
+//      `SELECT * FROM {transcript_chunks,ad_windows}` still
 //      decode rows correctly after the new columns are appended.
 //      (SQLite `ALTER TABLE ADD COLUMN` appends to the END of the
 //      column list; the positional readers at fixed indices 0..N-1
 //      remain correct because the new columns sit at index N, N+1, N+2.)
+//
+// Bug 5 (skip-cues-deletion): `skip_cues` was dropped from this
+// suite when the table was deleted; the in-scope set is now five
+// tables, not six.
 
 import Foundation
 import SQLite3
@@ -36,7 +40,6 @@ struct AnalysisStoreVersionColumnsMigrationTests {
         "feature_windows",
         "feature_extraction_state",
         "ad_windows",
-        "skip_cues",
     ]
 
     private static let versionColumns: [String] = [
@@ -47,7 +50,7 @@ struct AnalysisStoreVersionColumnsMigrationTests {
 
     // MARK: - 1. Fresh-migrate shape
 
-    @Test("Fresh DB: all three version columns present on all six in-scope tables")
+    @Test("Fresh DB: all three version columns present on all five in-scope tables")
     func freshDbAddsVersionColumnsToAllTables() async throws {
         let dir = try makeTempDir(prefix: "VersionCols-Fresh")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -69,11 +72,11 @@ struct AnalysisStoreVersionColumnsMigrationTests {
     // MARK: - 2. Prod-shape fixture: pre-instrumentation rows get sentinel backfill
 
     /// Builds a "prod-shape" fixture: open a store, run migrate, write
-    /// representative rows to all six in-scope tables, then drop the
+    /// representative rows to all five in-scope tables, then drop the
     /// newly-added version columns to simulate a pre-instrumentation
     /// database. Re-opening the store must restore the columns and
     /// apply sentinel backfill to every pre-existing row.
-    @Test("Prod-shape DB: pre-existing rows are backfilled with sentinel values on all six tables")
+    @Test("Prod-shape DB: pre-existing rows are backfilled with sentinel values on all five tables")
     func prodShapeBackfillAppliesSentinelsEverywhere() async throws {
         let dir = try makeTempDir(prefix: "VersionCols-ProdShape")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -138,10 +141,9 @@ struct AnalysisStoreVersionColumnsMigrationTests {
 
     // MARK: - 4. SELECT * tolerance: existing readers still decode correctly
 
-    /// Three call-sites use `SELECT * FROM ...` against in-scope tables:
+    /// Two call-sites use `SELECT * FROM ...` against in-scope tables:
     ///   - `fetchTranscriptChunks(assetId:)` / `fetchTranscriptChunk(...)`
     ///   - `fetchAdWindows(assetId:)`
-    ///   - `fetchSkipCues(for:)`
     ///
     /// Their readers address columns positionally (0-based indices into
     /// the prepared statement). SQLite's `ALTER TABLE ADD COLUMN`
@@ -149,7 +151,10 @@ struct AnalysisStoreVersionColumnsMigrationTests {
     /// pre-existing positional indices remain valid. This test asserts
     /// that post-migration round-trips through those call-sites still
     /// work — if anyone swaps the column order we will catch it here.
-    @Test("SELECT * tolerates new columns: round-trip via fetchTranscriptChunks / fetchAdWindows / fetchSkipCues")
+    ///
+    /// Bug 5 (skip-cues-deletion): the third reader `fetchSkipCues`
+    /// was deleted along with the `skip_cues` table.
+    @Test("SELECT * tolerates new columns: round-trip via fetchTranscriptChunks / fetchAdWindows")
     func selectStarReadersTolerateNewColumns() async throws {
         let store = try await makeTestStore()
         try await seedRepresentativeRows(store: store, assetId: "asset-select-star")
@@ -165,12 +170,6 @@ struct AnalysisStoreVersionColumnsMigrationTests {
         #expect(ads.count >= 1)
         #expect(ads.first?.id == "ad-0")
         #expect(ads.first?.boundaryState == "lexical")
-
-        // skip_cues
-        let cues = try await store.fetchSkipCues(for: "asset-select-star")
-        #expect(cues.count >= 1)
-        #expect(cues.first?.id == "cue-0")
-        #expect(cues.first?.source == "preAnalysis")
     }
 
     // MARK: - Fixture: seed representative rows across all six tables
@@ -295,21 +294,7 @@ struct AnalysisStoreVersionColumnsMigrationTests {
             )
         )
 
-        // skip_cues — one row
-        try await store.insertSkipCue(
-            SkipCue(
-                id: "cue-0",
-                analysisAssetId: assetId,
-                cueHash: "hash-0",
-                startTime: 60,
-                endTime: 120,
-                confidence: 0.85,
-                source: "preAnalysis",
-                materializedAt: 0,
-                wasSkipped: false,
-                userDismissed: false
-            )
-        )
+        // skip_cues was deleted in Bug 5; no row to seed.
     }
 
     // MARK: - Fixture: strip version columns to simulate a pre-instrumentation DB

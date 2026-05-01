@@ -184,8 +184,6 @@ private func makeRunner(
         store: store
     )
     let adStub = StubAdDetectionProvider()
-    let materializer = SkipCueMaterializer(store: store)
-
     let coin = safetySampleCoin
     return AnalysisJobRunner(
         store: store,
@@ -193,7 +191,6 @@ private func makeRunner(
         featureService: featureService,
         transcriptEngine: transcriptEngine,
         adDetection: adStub,
-        cueMaterializer: materializer,
         acousticGateConfig: gateConfig,
         transcriptShadowGateLogger: shadowLogger,
         safetySampleRNG: { coin }

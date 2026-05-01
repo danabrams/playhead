@@ -107,8 +107,7 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             audioProvider: audioProvider,
             featureService: FeatureExtractionService(store: store),
             transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
-            adDetection: StubAdDetectionProvider(),
-            cueMaterializer: SkipCueMaterializer(store: store)
+            adDetection: StubAdDetectionProvider()
         )
         let scheduler = AnalysisWorkScheduler(
             store: store,
@@ -463,8 +462,7 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             audioProvider: audioStub,
             featureService: FeatureExtractionService(store: store),
             transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
-            adDetection: StubAdDetectionProvider(),
-            cueMaterializer: SkipCueMaterializer(store: store)
+            adDetection: StubAdDetectionProvider()
         )
         let scheduler = AnalysisWorkScheduler(
             store: store,

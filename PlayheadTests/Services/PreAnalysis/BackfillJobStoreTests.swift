@@ -239,9 +239,9 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // Current schema is v18 after playhead-jzik added the
-        // `episode_summaries` table for on-device summary persistence.
-        #expect(version == 18)
+        // Current schema is v19 after Bug 5 (skip-cues-deletion)
+        // dropped the vestigial `skip_cues` table.
+        #expect(version == 19)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")

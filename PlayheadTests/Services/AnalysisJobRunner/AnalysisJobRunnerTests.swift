@@ -139,15 +139,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         let request = makeTestRequest(desiredCoverageSec: 120)
@@ -179,15 +176,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         // Only want first 90s — shards 0 (0s), 1 (30s), 2 (60s) have startTime < 90
@@ -243,26 +237,21 @@ struct AnalysisJobRunnerTests {
                 userDismissedBanner: false
             ),
         ]
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         let request = makeTestRequest(outputPolicy: .writeWindowsOnly)
         let outcome = await runner.run(request)
 
-        // No cues should have been created.
+        // No cues should have been counted (Bug 5: skip_cues table
+        // and SkipCueMaterializer were deleted, so newCueCount is the
+        // sole on-the-record signal).
         #expect(outcome.newCueCount == 0)
-
-        // Verify no SkipCue rows in the store.
-        let cues = try await store.fetchSkipCues(for: "test-asset")
-        #expect(cues.isEmpty)
     }
 
     @Test("Blocked by model returns failed outcome")
@@ -280,15 +269,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         let request = makeTestRequest()
@@ -322,15 +308,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
             adDetection: adStub,
-            cueMaterializer: materializer,
             thermalStateProvider: { .serious }
         )
 
@@ -356,15 +339,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
             adDetection: adStub,
-            cueMaterializer: materializer,
             thermalStateProvider: { .critical }
         )
 
@@ -420,15 +400,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 30, outputPolicy: .writeWindowsOnly))
@@ -485,15 +462,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 30, outputPolicy: .writeWindowsOnly))
@@ -528,15 +502,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 30, outputPolicy: .writeWindowsOnly))
@@ -580,15 +551,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         _ = await runner.run(makeTestRequest(desiredCoverageSec: 120))
@@ -619,15 +587,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         _ = await runner.run(makeTestRequest(desiredCoverageSec: 90))
@@ -660,15 +625,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         _ = await runner.run(makeTestRequest(desiredCoverageSec: 60))
@@ -750,15 +712,12 @@ struct AnalysisJobRunnerTests {
             store: store
         )
         let adStub = StubAdDetectionProvider()
-        let materializer = SkipCueMaterializer(store: store)
-
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
             featureService: featureService,
             transcriptEngine: transcriptEngine,
-            adDetection: adStub,
-            cueMaterializer: materializer
+            adDetection: adStub
         )
 
         let request = AnalysisRangeRequest(

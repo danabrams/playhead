@@ -1,7 +1,13 @@
 // RunnerMaterializerRegressionTests.swift
-// Regression tests for fixes in AnalysisJobRunner, SkipCueMaterializer,
-// and DownloadManager. Each test targets a specific bug or edge case
-// that was previously broken and is now guarded against recurrence.
+// Regression tests for fixes in AnalysisJobRunner and DownloadManager.
+// Each test targets a specific bug or edge case that was previously
+// broken and is now guarded against recurrence.
+//
+// Bug 5 (skip-cues-deletion): the SkipCueMaterializer regression
+// suites and helpers were removed when the materializer and
+// `skip_cues` table were deleted. Cue-side semantics (confidence
+// gating, zero-length filtering, dedup-by-id) are now exercised
+// through SkipOrchestratorPreloadTests.
 
 import CryptoKit
 import Foundation
@@ -78,14 +84,12 @@ private func makeRunner(
         speechService: speechService,
         store: store
     )
-    let materializer = SkipCueMaterializer(store: store)
     return AnalysisJobRunner(
         store: store,
         audioProvider: audioStub,
         featureService: featureService,
         transcriptEngine: transcriptEngine,
-        adDetection: adStub,
-        cueMaterializer: materializer
+        adDetection: adStub
     )
 }
 
@@ -238,92 +242,11 @@ struct AnalysisJobRunnerRegressionTests {
 }
 
 // MARK: - SkipCueMaterializer Regression Tests
-
-@Suite("SkipCueMaterializer – Regressions")
-struct SkipCueMaterializerRegressionTests {
-
-    // 6. Inverted window (endTime < startTime) is filtered out.
-    @Test("Inverted window is filtered out")
-    func testInvertedWindowFiltered() async throws {
-        let store = try await makeTestStore()
-        try await seedAsset(store: store, assetId: "asset-inv")
-
-        let invertedWindow = makeAdWindow(startTime: 90, endTime: 60, confidence: 0.85)
-        let materializer = SkipCueMaterializer(store: store, confidenceThreshold: 0.7)
-
-        let cues = try await materializer.materialize(
-            windows: [invertedWindow],
-            analysisAssetId: "asset-inv"
-        )
-
-        #expect(cues.isEmpty, "Inverted window (endTime < startTime) should produce no cues")
-
-        let fetched = try await store.fetchSkipCues(for: "asset-inv")
-        #expect(fetched.isEmpty)
-    }
-
-    // 7. Zero-length window (endTime == startTime) is filtered out.
-    @Test("Zero-length window is filtered out")
-    func testZeroLengthWindowFiltered() async throws {
-        let store = try await makeTestStore()
-        try await seedAsset(store: store, assetId: "asset-zero")
-
-        let zeroWindow = makeAdWindow(startTime: 60, endTime: 60, confidence: 0.85)
-        let materializer = SkipCueMaterializer(store: store, confidenceThreshold: 0.7)
-
-        let cues = try await materializer.materialize(
-            windows: [zeroWindow],
-            analysisAssetId: "asset-zero"
-        )
-
-        #expect(cues.isEmpty, "Zero-length window (endTime == startTime) should produce no cues")
-
-        let fetched = try await store.fetchSkipCues(for: "asset-zero")
-        #expect(fetched.isEmpty)
-    }
-
-    // 8. Valid window above threshold creates a cue (sanity check).
-    @Test("Valid window above threshold creates a cue")
-    func testValidWindowCreatesCue() async throws {
-        let store = try await makeTestStore()
-        try await seedAsset(store: store, assetId: "asset-valid")
-
-        let window = makeAdWindow(startTime: 60, endTime: 90, confidence: 0.85)
-        let materializer = SkipCueMaterializer(store: store, confidenceThreshold: 0.7)
-
-        let cues = try await materializer.materialize(
-            windows: [window],
-            analysisAssetId: "asset-valid"
-        )
-
-        #expect(cues.count == 1)
-        #expect(cues[0].startTime == 60)
-        #expect(cues[0].endTime == 90)
-
-        let fetched = try await store.fetchSkipCues(for: "asset-valid")
-        #expect(fetched.count == 1)
-    }
-
-    // 9. Window below confidence threshold is filtered out.
-    @Test("Window below confidence threshold is filtered out")
-    func testBelowThresholdFiltered() async throws {
-        let store = try await makeTestStore()
-        try await seedAsset(store: store, assetId: "asset-low")
-
-        let window = makeAdWindow(startTime: 60, endTime: 90, confidence: 0.5)
-        let materializer = SkipCueMaterializer(store: store, confidenceThreshold: 0.7)
-
-        let cues = try await materializer.materialize(
-            windows: [window],
-            analysisAssetId: "asset-low"
-        )
-
-        #expect(cues.isEmpty, "Window at confidence 0.5 should be filtered by 0.7 threshold")
-
-        let fetched = try await store.fetchSkipCues(for: "asset-low")
-        #expect(fetched.isEmpty)
-    }
-}
+//
+// (Removed in Bug 5 — `SkipCueMaterializer` and the `skip_cues`
+// table were deleted. The equivalent confidence-gate, zero-length,
+// and inverted-window guards are now covered by
+// SkipOrchestratorPreloadTests.)
 
 // MARK: - DownloadManager Regression Tests
 
@@ -493,117 +416,10 @@ struct AnalysisJobRunnerZeroCoverageRegressionTests {
     }
 }
 
-@Suite("SkipCueMaterializer – Confidence Filtering & Hashing")
-struct SkipCueMaterializerFilteringRegressionTests {
-
-    // 16. cueCoverage uses confidence-filtered windows: only high-confidence
-    //     windows contribute to coverage. A low-confidence window ending later
-    //     should NOT inflate the coverage value.
-    @Test("Materialize filters low-confidence windows from output")
-    func testMaterializeFiltersLowConfidenceWindows() async throws {
-        let store = try await makeTestStore()
-        try await seedAsset(store: store, assetId: "asset-filter")
-
-        let highConfWindow = makeAdWindow(startTime: 60, endTime: 120, confidence: 0.9)
-        let lowConfWindow = makeAdWindow(startTime: 130, endTime: 200, confidence: 0.3)
-
-        let materializer = SkipCueMaterializer(store: store, confidenceThreshold: 0.7)
-
-        let cues = try await materializer.materialize(
-            windows: [highConfWindow, lowConfWindow],
-            analysisAssetId: "asset-filter"
-        )
-
-        // Only the high-confidence window should produce a cue.
-        #expect(cues.count == 1, "Expected 1 cue (high-confidence only), got \(cues.count)")
-        #expect(cues[0].startTime == 60)
-        #expect(cues[0].endTime == 120)
-
-        // The effective coverage is 120s (end of last high-confidence cue),
-        // NOT 200s (end of the low-confidence window).
-        let effectiveCoverage = cues.map(\.endTime).max() ?? 0
-        #expect(effectiveCoverage == 120, "Coverage should be 120, not 200")
-    }
-
-    // 17. Cue hash uses rounding (not truncation) for sub-second precision.
-    //     (12.8, 45.2) rounds to (13, 45), NOT truncates to (12, 45).
-    @Test("Cue hash rounds to nearest integer, not truncates")
-    func testCueHashRoundsNotTruncates() {
-        let assetId = "test-asset"
-
-        let hash = SkipCueMaterializer.computeCueHash(
-            analysisAssetId: assetId,
-            startTime: 12.8,
-            endTime: 45.2
-        )
-
-        // Rounded: 12.8 → 13, 45.2 → 45 → input "test-asset:13:45"
-        let expectedInput = "\(assetId):13:45"
-        let expectedDigest = SHA256.hash(data: Data(expectedInput.utf8))
-        let expectedHash = expectedDigest.map { String(format: "%02x", $0) }.joined()
-
-        #expect(hash == expectedHash, "Hash should use rounded values (13, 45), not truncated (12, 45)")
-
-        // Verify it does NOT match the truncated version.
-        let truncatedInput = "\(assetId):12:45"
-        let truncatedDigest = SHA256.hash(data: Data(truncatedInput.utf8))
-        let truncatedHash = truncatedDigest.map { String(format: "%02x", $0) }.joined()
-
-        #expect(hash != truncatedHash, "Hash must NOT match truncated computation")
-    }
-
-    // 18. Cue hash dedup with rounding: nearby windows that round to the
-    //     same integer seconds produce the same hash (→ deduped), while
-    //     windows that round differently produce distinct hashes.
-    @Test("Nearby windows with same rounded times produce same hash (dedup)")
-    func testCueHashDedupWithRounding() {
-        let assetId = "test-asset"
-
-        // Window A: (12.3, 45.7) → rounds to (12, 46)
-        let hashA = SkipCueMaterializer.computeCueHash(
-            analysisAssetId: assetId, startTime: 12.3, endTime: 45.7
-        )
-
-        // Window B: (12.4, 45.6) → rounds to (12, 46) — same as A
-        let hashB = SkipCueMaterializer.computeCueHash(
-            analysisAssetId: assetId, startTime: 12.4, endTime: 45.6
-        )
-
-        // Window C: (12.6, 45.4) → rounds to (13, 45) — different from A/B
-        let hashC = SkipCueMaterializer.computeCueHash(
-            analysisAssetId: assetId, startTime: 12.6, endTime: 45.4
-        )
-
-        #expect(hashA == hashB, "Windows A and B round to same integers and must share a hash")
-        #expect(hashA != hashC, "Window C rounds to different integers and must have a distinct hash")
-
-        // Verify the actual rounded values.
-        let expectedAB = SHA256.hash(data: Data("\(assetId):12:46".utf8))
-            .map { String(format: "%02x", $0) }.joined()
-        let expectedC = SHA256.hash(data: Data("\(assetId):13:45".utf8))
-            .map { String(format: "%02x", $0) }.joined()
-
-        #expect(hashA == expectedAB)
-        #expect(hashC == expectedC)
-    }
-
-    // 19. Empty windows array produces empty cues — no crash, no side effects.
-    @Test("Empty windows array produces zero cues")
-    func testEmptyWindowsProducesNoCues() async throws {
-        let store = try await makeTestStore()
-        try await seedAsset(store: store, assetId: "asset-empty")
-
-        let materializer = SkipCueMaterializer(store: store, confidenceThreshold: 0.7)
-
-        let cues = try await materializer.materialize(
-            windows: [],
-            analysisAssetId: "asset-empty",
-            source: "preAnalysis"
-        )
-
-        #expect(cues.isEmpty, "Empty windows should produce zero cues")
-
-        let fetched = try await store.fetchSkipCues(for: "asset-empty")
-        #expect(fetched.isEmpty, "Store should have no cues for empty input")
-    }
-}
+// MARK: - SkipCueMaterializer Filtering & Hashing
+//
+// (Removed in Bug 5 — `SkipCueMaterializer` and the `skip_cues`
+// table were deleted. Confidence filtering, zero-length filtering,
+// and dedup-by-id are now exercised through
+// SkipOrchestratorPreloadTests. The integer-second-rounding cue
+// hash no longer exists because cues are no longer materialized.)

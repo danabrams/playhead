@@ -142,6 +142,13 @@ actor SkipOrchestrator {
 
     private let logger = Logger(subsystem: "com.playhead", category: "SkipOrchestrator")
 
+    /// Bug 5 (skip-cues-deletion): minimum confidence required for an
+    /// `AdWindow` to be eligible for the `beginEpisode` preload that
+    /// previously read from `skip_cues`. Mirrors the 0.7 threshold the
+    /// (now-deleted) `SkipCueMaterializer` used. Kept private to this
+    /// actor — the only consumer is `beginEpisode`.
+    private static let preloadConfidenceThreshold: Double = 0.7
+
     // MARK: - Dependencies
 
     private let store: AnalysisStore
@@ -488,31 +495,29 @@ actor SkipOrchestrator {
             activeSkipMode = .shadow
         }
 
-        // Pre-load materialized skip cues from prior analysis.
+        // Bug 5 (skip-cues-deletion): pre-load directly from `ad_windows`,
+        // filtered to confirmed-confidence rows. Replaces the prior path
+        // that read from the now-deleted `skip_cues` table. The 0.7
+        // threshold mirrors the cue materializer's threshold so the
+        // preload set is byte-identical to what the cue table used to
+        // contain at the same point in time. We forward the persisted
+        // `AdWindow` rows directly to `receiveAdWindows` so the existing
+        // event-stream path applies its standard logic — eligibilityGate,
+        // banner state, decision-log dedup, etc. Forwarding the
+        // unmodified row preserves any auto-skip / markOnly precision
+        // gate stamped at write-time, which a synthesized "confirmed"
+        // shape would silently strip.
         do {
-            let preCues = try await store.fetchSkipCues(for: analysisAssetId)
-            if !preCues.isEmpty {
-                let syntheticWindows = preCues.map { cue in
-                    AdWindow(
-                        id: cue.id,
-                        analysisAssetId: analysisAssetId,
-                        startTime: cue.startTime,
-                        endTime: cue.endTime,
-                        confidence: cue.confidence,
-                        boundaryState: "confirmed",
-                        decisionState: "confirmed",
-                        detectorVersion: "preAnalysis",
-                        advertiser: nil, product: nil, adDescription: nil,
-                        evidenceText: nil, evidenceStartTime: nil,
-                        metadataSource: "preAnalysis",
-                        metadataConfidence: nil, metadataPromptVersion: nil,
-                        wasSkipped: false, userDismissedBanner: false
-                    )
-                }
-                await receiveAdWindows(syntheticWindows)
+            let preWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+            let eligible = preWindows.filter {
+                $0.confidence >= Self.preloadConfidenceThreshold
+                    && $0.endTime > $0.startTime
+            }
+            if !eligible.isEmpty {
+                await receiveAdWindows(eligible)
             }
         } catch {
-            logger.warning("Failed to load pre-materialized cues: \(error.localizedDescription)")
+            logger.warning("Failed to load preload ad_windows: \(error.localizedDescription)")
         }
 
         logger.info("Begin episode: asset=\(analysisAssetId)")

@@ -1,6 +1,10 @@
 // PreAnalysisIntegrationTests.swift
 // Cross-component integration tests for the pre-analysis pipeline:
-// AnalysisStore ↔ AnalysisJobReconciler ↔ SkipCueMaterializer.
+// AnalysisStore ↔ AnalysisJobReconciler.
+//
+// Bug 5 (skip-cues-deletion): the cue-hash dedup integration test was
+// removed when the `skip_cues` table and `SkipCueMaterializer` were
+// deleted.
 
 import Foundation
 import Testing
@@ -121,30 +125,9 @@ struct PreAnalysisIntegrationTests {
     }
 
     // MARK: - Test 5: Cue hash dedup
-
-    @Test("Materializing the same ad range twice produces only one SkipCue")
-    func cueHashDedup() async throws {
-        let store = try await makeTestStore()
-        let materializer = SkipCueMaterializer(store: store)
-        let assetId = "asset-dedup"
-        let window = makeAdWindow(startTime: 30.0, endTime: 60.0, confidence: 0.9)
-
-        let first = try await materializer.materialize(
-            windows: [window],
-            analysisAssetId: assetId
-        )
-        #expect(first.count == 1)
-
-        let second = try await materializer.materialize(
-            windows: [window],
-            analysisAssetId: assetId
-        )
-        // INSERT OR IGNORE means the second call succeeds but creates no new rows.
-        _ = second
-
-        let cues = try await store.fetchSkipCues(for: assetId)
-        #expect(cues.count == 1)
-    }
+    //
+    // (Removed in Bug 5 — `SkipCueMaterializer` and the `skip_cues`
+    // table were deleted; dedup-by-cueHash is no longer a concept.)
 
     // MARK: - Test 6: Lease expiry crash recovery
 
