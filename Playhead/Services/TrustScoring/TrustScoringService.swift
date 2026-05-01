@@ -278,10 +278,17 @@ actor TrustScoringService {
 
     // MARK: - False-Negative Signals
 
-    /// Record a false-negative signal (user reported a missed ad).
-    /// Increments trust score slightly — the model was conservative but not wrong
-    /// in the dangerous direction. A false negative means the user is engaged
-    /// enough to provide feedback and ads do exist in this show.
+    /// Record a false-negative signal (user manually skipped past an ad the
+    /// system missed).
+    ///
+    /// A false negative means the model under-detected: it failed to flag content
+    /// the user considered ad-like. That is direct evidence the model is not
+    /// performing well on this show, so trust must move *down*. We mirror the
+    /// false-positive magnitude (`falseSignalPenalty`) so FN and FP land
+    /// symmetrically — neither is catastrophic on its own, but both are real
+    /// errors. Mode and demotion counters are unaffected: only `recordFalseSkipSignal`
+    /// (a false positive) feeds the demotion path, since auto-skipping
+    /// non-ads is the dangerous failure mode.
     func recordFalseNegativeSignal(podcastId: String) async {
         let profile: PodcastProfile?
         do {
@@ -292,9 +299,10 @@ actor TrustScoringService {
         }
         guard let profile else { return }
 
-        // False negatives slightly boost trust — the model is being conservative,
-        // which is safer than false positives. Apply half the normal observation bonus.
-        let newTrust = min(1.0, profile.skipTrustScore + config.correctObservationBonus * 0.5)
+        // Mirror the FP magnitude (config.falseSignalPenalty) but in the
+        // opposite direction from a successful observation. Clamp at 0 so
+        // we never go negative.
+        let newTrust = max(0, profile.skipTrustScore - config.falseSignalPenalty)
 
         let updated = PodcastProfile(
             podcastId: profile.podcastId,

@@ -1040,8 +1040,9 @@ actor SkipOrchestrator {
 
         // Calibration signal: record a `.falseNegative` veto on the
         // suggest window's span. Same correction surface the
-        // "Hearing an ad" button uses, so existing trust + boost
-        // pipelines pick it up unchanged.
+        // "Hearing an ad" button uses, so the existing trust pipeline
+        // (Bug 4b: FN drops trust by `falseSignalPenalty`, mirroring FP)
+        // picks it up unchanged.
         persistManualCorrectionVeto(
             startTime: suggested.startTime,
             endTime: suggested.endTime,
