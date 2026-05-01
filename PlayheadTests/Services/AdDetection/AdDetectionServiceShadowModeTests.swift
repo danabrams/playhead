@@ -632,3 +632,288 @@ struct AdDetectionServiceShadowModeTests {
         )
     }
 }
+
+// MARK: - playhead-ux6r: fusion path eligibilityGate persistence
+//
+// `buildFusionAdWindow` previously omitted `eligibilityGate` from the
+// persisted row. The live-decision path forwards the gate via
+// `AdDecisionResult` so in-process runs are correct, but on app restart
+// (`SkipOrchestrator.beginEpisode`) the row is reloaded from
+// `ad_windows` and the NULL gate silently re-arms a previously-demoted
+// span for auto-skip.
+//
+// Direction: under-restriction. These tests pin the producer side: the
+// row written by `runBackfill` MUST carry the same gate string the
+// in-flight `DecisionResult` carried, and that string MUST survive a
+// store close/reopen (the closest analog to an app restart available
+// without a real launch).
+
+@Suite("playhead-ux6r — fusion AdWindow eligibilityGate persistence")
+struct FusionEligibilityGatePersistenceTests {
+
+    private func makeAsset(id: String) -> AnalysisAsset {
+        AnalysisAsset(
+            id: id,
+            episodeId: "ep-\(id)",
+            assetFingerprint: "fp-\(id)",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/\(id).m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "new",
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+    }
+
+    /// Strong lexical ad chunk that drives a fusion window with
+    /// `eligibilityGate == .eligible` (no FM provenance, lexical
+    /// in-audio corroboration → `metadataCorroborationGate` short-
+    /// circuits to `.eligible`).
+    private func makeAdChunks(assetId: String) -> [TranscriptChunk] {
+        let texts = [
+            "Welcome back to the show today.",
+            "This episode is brought to you by Squarespace. Use code SHOW for 10 percent off at squarespace dot com slash show. Sign up today and make your website.",
+            "Back to our conversation about technology and the future of podcasting."
+        ]
+        return texts.enumerated().map { idx, text in
+            TranscriptChunk(
+                id: "c\(idx)-\(assetId)",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-\(idx)",
+                chunkIndex: idx,
+                startTime: Double(idx) * 30,
+                endTime: Double(idx + 1) * 30,
+                text: text,
+                normalizedText: text.lowercased(),
+                pass: "final",
+                modelVersion: "test-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
+        }
+    }
+
+    private func makeService(store: AnalysisStore) -> AdDetectionService {
+        AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "ux6r-test-v1",
+                fmBackfillMode: .off
+            )
+        )
+    }
+
+    /// Detector-version filter that survives `extractAndPersistMetadata`
+    /// rewrites of `metadataSource`. The detector version is set once at
+    /// the producer (`buildFusionAdWindow`) and never updated by
+    /// downstream metadata extraction, making it the stable provenance
+    /// stamp for "this row came from the fusion path".
+    private func fusionWindows(_ windows: [AdWindow]) -> [AdWindow] {
+        windows.filter { $0.detectorVersion == "ux6r-test-v1" }
+    }
+
+    // MARK: - Primary regression (was failing pre-fix)
+
+    @Test("runBackfill stamps eligibilityGate on every persisted fusion AdWindow")
+    func runBackfillStampsEligibilityGateOnFusionWindows() async throws {
+        let dir = try makeTempDir(prefix: "ux6r-stamp")
+        let store = try await AnalysisStore.open(directory: dir)
+        let assetId = "asset-ux6r-stamp"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let service = makeService(store: store)
+        try await service.runBackfill(
+            chunks: makeAdChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            podcastId: "podcast-ux6r-stamp",
+            episodeDuration: 90.0
+        )
+
+        let persisted = fusionWindows(try await store.fetchAdWindows(assetId: assetId))
+        #expect(!persisted.isEmpty,
+                "Squarespace lexical fixture must produce at least one fusion window")
+        for window in persisted {
+            // Pre-fix: `eligibilityGate` was nil for every fusion row.
+            // Post-fix: every row carries the SkipEligibilityGate.rawValue
+            // from the in-flight DecisionResult.
+            #expect(
+                window.eligibilityGate != nil,
+                "Fusion window \(window.id) must carry a non-nil eligibilityGate after runBackfill (was the bug)"
+            )
+            // Defensive: the stamped value must round-trip through
+            // SkipEligibilityGate. A garbage string would silently
+            // bypass the SkipOrchestrator's `== \"markOnly\"` guard.
+            if let raw = window.eligibilityGate {
+                #expect(
+                    SkipEligibilityGate(rawValue: raw) != nil,
+                    "Persisted gate \"\(raw)\" must decode back to a known SkipEligibilityGate case"
+                )
+            }
+        }
+    }
+
+    // MARK: - Edge cases (autoSkip-shaped + markOnly-shaped)
+
+    /// `decision.eligibilityGate == .eligible` is the fusion-path
+    /// equivalent of "autoSkip-eligible" — the consumer gate
+    /// (`SkipOrchestrator.receiveAdWindows`) only demotes on
+    /// `eligibilityGate == \"markOnly\"`, so any other value (including
+    /// `\"eligible\"`) leaves the span on the auto-skip path. This test
+    /// pins that an eligible fusion window is not silently re-stamped
+    /// nor stripped on store reopen.
+    @Test("fusion window decided as eligible (autoSkip-shaped) survives store reopen with the same gate")
+    func eligibleFusionWindowSurvivesReopen() async throws {
+        let dir = try makeTempDir(prefix: "ux6r-eligible-reopen")
+        let assetId = "asset-ux6r-eligible"
+
+        // First open: run the pipeline to write fusion windows.
+        do {
+            let store = try await AnalysisStore.open(directory: dir)
+            try await store.insertAsset(makeAsset(id: assetId))
+            let service = makeService(store: store)
+            try await service.runBackfill(
+                chunks: makeAdChunks(assetId: assetId),
+                analysisAssetId: assetId,
+                podcastId: "podcast-ux6r-eligible",
+                episodeDuration: 90.0
+            )
+        }
+
+        // Second open: same on-disk directory, fresh actor handle —
+        // this is the closest stand-in for an app restart available
+        // without spinning up the full launch path.
+        let reopened = try await AnalysisStore.open(directory: dir)
+        let persisted = fusionWindows(try await reopened.fetchAdWindows(assetId: assetId))
+        #expect(!persisted.isEmpty, "expected at least one fusion window after reopen")
+
+        // The Squarespace fixture has no FM provenance and at least one
+        // in-audio corroborating source (lexical), so DecisionMapper's
+        // metadataCorroborationGate returns .eligible.
+        for window in persisted {
+            #expect(
+                window.eligibilityGate == SkipEligibilityGate.eligible.rawValue,
+                "eligible fusion window must round-trip as \"eligible\"; got \(String(describing: window.eligibilityGate))"
+            )
+        }
+    }
+
+    /// Forensic fixture: a synthetic `markOnly`-stamped fusion row is
+    /// written, the store is closed and reopened, and we assert the
+    /// gate field survives the reopen byte-identically. This mirrors
+    /// the SkipOrchestrator preload path: `beginEpisode` calls
+    /// `fetchAdWindows` and forwards the rows to `receiveAdWindows`,
+    /// which gates on `eligibilityGate == \"markOnly\"`. If the field
+    /// were dropped on reopen (the ux6r bug, but at the read layer),
+    /// auto-skip would re-arm.
+    ///
+    /// We use `metadataSource = \"fusion-v1\"` so the row is shaped
+    /// exactly like a row produced by `buildFusionAdWindow`, making
+    /// this a regression for the read-side too.
+    @Test("markOnly-stamped fusion row survives close/reopen as \"markOnly\"")
+    func markOnlyFusionRowSurvivesReopen() async throws {
+        let dir = try makeTempDir(prefix: "ux6r-markonly-reopen")
+        let assetId = "asset-ux6r-markonly"
+
+        do {
+            let store = try await AnalysisStore.open(directory: dir)
+            try await store.insertAsset(makeAsset(id: assetId))
+            // A fusion-shaped row stamped markOnly. This is the row
+            // shape `buildFusionAdWindow` now emits when the upstream
+            // decision is markOnly (e.g. via SpanFinalizer chapter
+            // penalty, FM-suppression cap, or any future demotion).
+            let row = AdWindow(
+                id: "win-ux6r-markonly",
+                analysisAssetId: assetId,
+                startTime: 30.0,
+                endTime: 60.0,
+                confidence: 0.85,           // ≥ preload threshold
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: "ux6r-test-v1",
+                advertiser: nil, product: nil, adDescription: nil,
+                evidenceText: nil, evidenceStartTime: 30.0,
+                metadataSource: "fusion-v1",
+                metadataConfidence: 0.85,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: nil,
+                eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+            )
+            try await store.insertAdWindow(row)
+        }
+
+        let reopened = try await AnalysisStore.open(directory: dir)
+        let persisted = try await reopened.fetchAdWindows(assetId: assetId)
+        let row = try #require(persisted.first { $0.id == "win-ux6r-markonly" })
+        #expect(
+            row.eligibilityGate == SkipEligibilityGate.markOnly.rawValue,
+            "markOnly fusion row must round-trip across reopen; got \(String(describing: row.eligibilityGate))"
+        )
+        #expect(
+            row.eligibilityGate == "markOnly",
+            "Consumer-side check (SkipOrchestrator.receiveAdWindows compares to the literal \"markOnly\") must still match after reopen"
+        )
+    }
+
+    /// Bug-5 preload regression coverage with a fusion-shaped row:
+    /// the SkipOrchestrator's `beginEpisode` path must NOT auto-skip a
+    /// markOnly-stamped fusion row after reopen. This is the load-
+    /// bearing invariant ux6r protects: producer (buildFusionAdWindow)
+    /// stamps the gate, consumer (SkipOrchestrator) honors it, and the
+    /// persistence layer carries the field across a process boundary.
+    @Test("SkipOrchestrator preload of a reopened markOnly fusion row routes to suggest tier, not auto-skip")
+    func preloadOfReopenedMarkOnlyFusionRowDoesNotAutoSkip() async throws {
+        let dir = try makeTempDir(prefix: "ux6r-preload")
+        let assetId = "asset-ux6r-preload"
+
+        do {
+            let store = try await AnalysisStore.open(directory: dir)
+            try await store.insertAsset(makeAsset(id: assetId))
+            let row = AdWindow(
+                id: "win-ux6r-preload",
+                analysisAssetId: assetId,
+                startTime: 30.0,
+                endTime: 60.0,
+                confidence: 0.85,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: "ux6r-test-v1",
+                advertiser: nil, product: nil, adDescription: nil,
+                evidenceText: nil, evidenceStartTime: 30.0,
+                metadataSource: "fusion-v1",
+                metadataConfidence: 0.85,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: nil,
+                eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+            )
+            try await store.insertAdWindow(row)
+        }
+
+        let reopened = try await AnalysisStore.open(directory: dir)
+        let orchestrator = SkipOrchestrator(store: reopened)
+        await orchestrator.beginEpisode(
+            analysisAssetId: assetId,
+            episodeId: "ep-\(assetId)"
+        )
+
+        // The orchestrator must NOT confirm a markOnly window; it
+        // belongs in the suggest tier per SkipOrchestrator
+        // receiveAdWindows.
+        let confirmed = await orchestrator.confirmedWindows()
+        #expect(
+            !confirmed.contains(where: { $0.id == "win-ux6r-preload" }),
+            "markOnly fusion row must NOT register as a confirmed/auto-skip window after preload"
+        )
+    }
+}

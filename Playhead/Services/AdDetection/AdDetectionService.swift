@@ -2541,6 +2541,15 @@ actor AdDetectionService {
             metadataPromptVersion: nil,
             wasSkipped: false,
             userDismissedBanner: false,
+            // playhead-ux6r: stamp the eligibility gate on the persisted
+            // fusion window. Without this, the live decision-time gate
+            // (consumed via AdDecisionResult) is silently dropped on
+            // restart, and SkipOrchestrator.beginEpisode preload re-arms
+            // a previously-demoted markOnly span for auto-skip. The
+            // value here is the same SkipEligibilityGate.rawValue that
+            // decision_events records for the same window, keeping the
+            // ad_windows row and decision_events row consistent.
+            eligibilityGate: decision.eligibilityGate.rawValue,
             catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
         )
     }
