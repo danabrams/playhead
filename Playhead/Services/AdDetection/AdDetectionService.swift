@@ -2949,12 +2949,18 @@ actor AdDetectionService {
             logger.warning("Shadow retry skipped: failed to fetch chunks for \(analysisAssetId): \(error.localizedDescription)")
             return false
         }
-        // Only the final-pass chunks drive the FM shadow phase — they carry
-        // the stable `transcriptVersion` that `BackfillJobRunner.jobId`
-        // consumes for dedupe. Fast-pass chunks are ignored.
+        // Prefer final-pass chunks for the FM shadow phase — they carry the
+        // higher-accuracy `transcriptVersion` that `BackfillJobRunner.jobId`
+        // consumes for dedupe. When no final-pass chunks exist (the common
+        // case until the charge-gated final-pass backfill phase has run),
+        // fall back to fast-pass chunks. This mirrors the fallback pattern
+        // used at lines 1395 and 2607 of this file. Without the fallback
+        // the shadow-retry drain bails unconditionally because production
+        // currently persists only `pass='fast'` rows.
         let finalChunks = chunks.filter { $0.pass == TranscriptPassType.final_.rawValue }
-        guard !finalChunks.isEmpty else {
-            logger.debug("Shadow retry skipped: no final transcript chunks for \(analysisAssetId)")
+        let chunksForReplay = finalChunks.isEmpty ? chunks : finalChunks
+        guard !chunksForReplay.isEmpty else {
+            logger.debug("Shadow retry skipped: no transcript chunks for \(analysisAssetId)")
             return false
         }
 
@@ -2980,7 +2986,7 @@ actor AdDetectionService {
         // double-record Phase 4 bundles for the same asset under
         // different window sets and is outside the retry contract.
         let shadowResult = await runShadowFMPhase(
-            chunks: finalChunks,
+            chunks: chunksForReplay,
             analysisAssetId: analysisAssetId,
             podcastId: podcastId,
             sessionIdOverride: sessionId

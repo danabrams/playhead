@@ -63,6 +63,22 @@ struct AnalysisAsset: Sendable {
     let analysisState: String
     let analysisVersion: Int
     let capabilitySnapshot: String?
+    /// Bug 9 (final-pass wiring): high-water mark for final-pass
+    /// re-transcription coverage. The charge-gated final-pass runner
+    /// re-transcribes audio ranges corresponding to AdWindows whose
+    /// coarse-pass confidence cleared the configured threshold, then
+    /// advances this watermark to the maximum window endTime that has
+    /// been covered. Persisted so a process relaunch can resume rather
+    /// than redo. `nil` on legacy rows (pre-Bug-9) and on assets that
+    /// have never had a final-pass run admitted.
+    ///
+    /// This watermark is approximate by design: it represents
+    /// "no final-pass work remains for any window ending at or below
+    /// this time" rather than "every second of audio up to this time
+    /// has a final-pass row". The runner reads it as an upper bound to
+    /// short-circuit fully-covered assets and to skip individual
+    /// AdWindows whose `endTime <= finalPassCoverageEndTime`.
+    let finalPassCoverageEndTime: Double?
     /// playhead-h7r: classification for storage-budget accounting.
     /// Defaults to ``ArtifactClass/media`` so every existing call-site
     /// (two in `AnalysisCoordinator`, one in `AnalysisWorkScheduler`)
@@ -126,7 +142,8 @@ struct AnalysisAsset: Sendable {
         artifactClass: ArtifactClass = .media,
         episodeDurationSec: Double? = nil,
         terminalReason: String? = nil,
-        episodeTitle: String? = nil
+        episodeTitle: String? = nil,
+        finalPassCoverageEndTime: Double? = nil
     ) {
         self.id = id
         self.episodeId = episodeId
@@ -143,6 +160,7 @@ struct AnalysisAsset: Sendable {
         self.episodeDurationSec = episodeDurationSec
         self.terminalReason = terminalReason
         self.episodeTitle = episodeTitle
+        self.finalPassCoverageEndTime = finalPassCoverageEndTime
     }
 }
 
@@ -1441,6 +1459,16 @@ actor AnalysisStore {
         // seeded fixtures may not include `analysis_assets`.
         if try tableExists("analysis_assets") {
             try addEpisodeDurationColumnIfNeeded()
+        }
+        // Bug 9: mirror the finalPassCoverageEndTime column add from
+        // `createTables()` so that the isolated-ladder test seam also
+        // applies the column to seeded pre-Bug-9 fixtures.
+        if try tableExists("analysis_assets") {
+            try addColumnIfNeeded(
+                table: "analysis_assets",
+                column: "finalPassCoverageEndTime",
+                definition: "REAL"
+            )
         }
     }
     #endif
@@ -2786,6 +2814,18 @@ actor AnalysisStore {
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_assets_episode ON analysis_assets(episodeId)")
+        // Bug 9: final-pass coverage watermark (added unconditionally — the
+        // explicit `finalPassCoverageEndTime` column is referenced by
+        // `assetSelectColumns` and must exist on both fresh and upgraded
+        // DBs. This is a separate `ADD COLUMN` rather than a column on the
+        // CREATE TABLE statement above so that test seams that pin a
+        // pre-Bug-9 schema (via `seedRawSchemaForTesting`) still get the
+        // column applied through the migrate() ladder.
+        try addColumnIfNeeded(
+            table: "analysis_assets",
+            column: "finalPassCoverageEndTime",
+            definition: "REAL"
+        )
 
         // analysis_sessions
         // bd-3bz (Phase 4): `needsShadowRetry` + `shadowRetryPodcastId` are
@@ -3029,6 +3069,28 @@ actor AnalysisStore {
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_backfill_jobs_status_priority ON backfill_jobs(status, priority DESC, createdAt ASC)")
         try exec("CREATE INDEX IF NOT EXISTS idx_backfill_jobs_asset_phase ON backfill_jobs(analysisAssetId, phase)")
+
+        // final_pass_jobs (Bug 9)
+        // Sibling table to backfill_jobs. Per-AdWindow grain so admission and
+        // retry tracking are isolated from FM text classification jobs.
+        // jobId is "fpj-<analysisAssetId>-<adWindowId>", which is stable
+        // across runs and gives us idempotent INSERT OR IGNORE.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS final_pass_jobs (
+                jobId TEXT PRIMARY KEY,
+                analysisAssetId TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                podcastId TEXT,
+                adWindowId TEXT NOT NULL,
+                windowStartTime REAL NOT NULL,
+                windowEndTime REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                retryCount INTEGER NOT NULL DEFAULT 0,
+                deferReason TEXT,
+                createdAt REAL NOT NULL
+            )
+            """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_final_pass_jobs_status ON final_pass_jobs(status, createdAt ASC)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_final_pass_jobs_asset ON final_pass_jobs(analysisAssetId)")
 
         // semantic_scan_results
         // C5: `reuseKeyHash` is a SHA-256 over the canonical concatenation of
@@ -3626,12 +3688,13 @@ actor AnalysisStore {
     ///
     /// playhead-gtt9.8: `terminalReason` appended at index 13.
     /// playhead-i9dj: `episodeTitle` appended at index 14.
+    /// Bug 9: `finalPassCoverageEndTime` appended at index 15.
     private static let assetSelectColumns: String = """
         id, episodeId, assetFingerprint, weakFingerprint, sourceURL, \
         featureCoverageEndTime, fastTranscriptCoverageEndTime, \
         confirmedAdCoverageEndTime, analysisState, analysisVersion, \
         capabilitySnapshot, artifact_class, episodeDurationSec, \
-        terminalReason, episodeTitle
+        terminalReason, episodeTitle, finalPassCoverageEndTime
         """
 
     private var assetSelectColumns: String { Self.assetSelectColumns }
@@ -3663,6 +3726,7 @@ actor AnalysisStore {
     ///  12: episodeDurationSec  (playhead-gtt9.1.1)
     ///  13: terminalReason  (playhead-gtt9.8)
     ///  14: episodeTitle  (playhead-i9dj)
+    ///  15: finalPassCoverageEndTime  (Bug 9 final-pass wiring)
     private func readAssetShifted(_ stmt: OpaquePointer?, columnOffset: Int32) -> AnalysisAsset {
         AnalysisAsset(
             id: text(stmt, columnOffset + 0),
@@ -3679,7 +3743,8 @@ actor AnalysisStore {
             artifactClass: ArtifactClass.fromPersistedRaw(optionalText(stmt, columnOffset + 11)),
             episodeDurationSec: optionalDouble(stmt, columnOffset + 12),
             terminalReason: optionalText(stmt, columnOffset + 13),
-            episodeTitle: optionalText(stmt, columnOffset + 14)
+            episodeTitle: optionalText(stmt, columnOffset + 14),
+            finalPassCoverageEndTime: optionalDouble(stmt, columnOffset + 15)
         )
     }
 
@@ -4232,6 +4297,34 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, endTime)
         bind(stmt, 2, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Bug 9 (final-pass wiring): advance the final-pass coverage
+    /// watermark on an `analysis_assets` row. Called by the charge-gated
+    /// `FinalPassRetranscriptionRunner` after each AdWindow's audio range
+    /// has been re-transcribed and its `pass='final'` chunks have been
+    /// persisted.
+    ///
+    /// Monotonic semantics: the new value is taken iff it is strictly
+    /// greater than the existing watermark. A no-op write (equal or
+    /// smaller) preserves the prior maximum so a stale resumer
+    /// (e.g. a pending job whose progressCursor lagged the live state)
+    /// cannot rewind the watermark and re-admit work that has already
+    /// completed.
+    func advanceFinalPassCoverage(id: String, endTime: Double) throws {
+        let sql = """
+            UPDATE analysis_assets
+            SET finalPassCoverageEndTime = ?
+            WHERE id = ?
+              AND (finalPassCoverageEndTime IS NULL
+                   OR finalPassCoverageEndTime < ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, endTime)
+        bind(stmt, 2, id)
+        bind(stmt, 3, endTime)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -6848,6 +6941,153 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         try step(stmt, expecting: SQLITE_DONE)
         return Int(sqlite3_changes(db))
+    }
+
+    // MARK: - CRUD: final_pass_jobs (Bug 9)
+
+    /// INSERT OR IGNORE — idempotent. The composite jobId
+    /// (`fpj-<assetId>-<adWindowId>`) is stable across runs so a re-enqueue
+    /// of the same window is a guaranteed no-op rather than an error.
+    /// Mirrors the BackfillJobRunner enqueue contract; the runner relies on
+    /// no-throw idempotency for its launch-time scan.
+    func insertOrIgnoreFinalPassJob(_ job: FinalPassJob) throws {
+        let sql = """
+            INSERT OR IGNORE INTO final_pass_jobs
+            (jobId, analysisAssetId, podcastId, adWindowId,
+             windowStartTime, windowEndTime, status, retryCount,
+             deferReason, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, job.jobId)
+        bind(stmt, 2, job.analysisAssetId)
+        bind(stmt, 3, job.podcastId)
+        bind(stmt, 4, job.adWindowId)
+        bind(stmt, 5, job.windowStartTime)
+        bind(stmt, 6, job.windowEndTime)
+        bind(stmt, 7, job.status.rawValue)
+        bind(stmt, 8, job.retryCount)
+        bind(stmt, 9, job.deferReason)
+        bind(stmt, 10, job.createdAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func fetchFinalPassJob(byId jobId: String) throws -> FinalPassJob? {
+        let sql = """
+            SELECT jobId, analysisAssetId, podcastId, adWindowId,
+                   windowStartTime, windowEndTime, status, retryCount,
+                   deferReason, createdAt
+            FROM final_pass_jobs WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return try readFinalPassJob(stmt)
+    }
+
+    func markFinalPassJobRunning(jobId: String) throws {
+        let sql = """
+            UPDATE final_pass_jobs
+            SET status = 'running'
+            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Same idempotent / refresh-deferReason semantics as
+    /// `markBackfillJobDeferred`, but without the `invalidStateTransition`
+    /// throw on terminal rows. Final-pass jobs are append-only re-runs;
+    /// silently leaving a `.complete` row alone when the runner attempts a
+    /// late defer is the correct behavior because the work has already
+    /// landed.
+    func markFinalPassJobDeferred(jobId: String, reason: String) throws {
+        let sql = """
+            UPDATE final_pass_jobs
+            SET status = 'deferred', deferReason = ?
+            WHERE jobId = ? AND status IN ('queued', 'running', 'deferred')
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, reason)
+        bind(stmt, 2, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func markFinalPassJobComplete(jobId: String) throws {
+        let sql = """
+            UPDATE final_pass_jobs
+            SET status = 'complete'
+            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running', 'complete')
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func markFinalPassJobFailed(jobId: String, reason: String) throws {
+        let sql = """
+            UPDATE final_pass_jobs
+            SET status = 'failed', deferReason = ?, retryCount = retryCount + 1
+            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, reason)
+        bind(stmt, 2, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Reaper sibling to `resetStrandedBackfillJobs`. Same rationale: at
+    /// process launch a `running` row necessarily belongs to a dead prior
+    /// process — flip it back to `queued` so the next reconcile can pick
+    /// it up.
+    @discardableResult
+    func resetStrandedFinalPassJobs() throws -> Int {
+        let sql = """
+            UPDATE final_pass_jobs
+            SET status = 'queued'
+            WHERE status = 'running'
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
+    }
+
+    private func readFinalPassJob(_ stmt: OpaquePointer?) throws -> FinalPassJob {
+        let jobId = try requireText(stmt, 0)
+        let analysisAssetId = try requireText(stmt, 1)
+        let podcastId = optionalText(stmt, 2)
+        let adWindowId = try requireText(stmt, 3)
+        let windowStartTime = sqlite3_column_double(stmt, 4)
+        let windowEndTime = sqlite3_column_double(stmt, 5)
+        let statusRaw = try requireText(stmt, 6)
+        guard let status = BackfillJobStatus(rawValue: statusRaw) else {
+            throw AnalysisStoreError.queryFailed(
+                "Unknown final_pass_jobs.status: \(statusRaw)"
+            )
+        }
+        let retryCount = Int(sqlite3_column_int(stmt, 7))
+        let deferReason = optionalText(stmt, 8)
+        let createdAt = sqlite3_column_double(stmt, 9)
+        return FinalPassJob(
+            jobId: jobId,
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId,
+            adWindowId: adWindowId,
+            windowStartTime: windowStartTime,
+            windowEndTime: windowEndTime,
+            status: status,
+            retryCount: retryCount,
+            deferReason: deferReason,
+            createdAt: createdAt
+        )
     }
 
     #if DEBUG

@@ -49,6 +49,13 @@ final class PlayheadRuntime {
     let analysisJobRunner: AnalysisJobRunner
     let analysisWorkScheduler: AnalysisWorkScheduler
     let analysisJobReconciler: AnalysisJobReconciler
+    /// Bug 9: charge-gated final-pass re-transcription runner. Lives
+    /// alongside `BackfillJobRunner` and runs an independent pipeline:
+    /// for each high-confidence AdWindow, re-transcribes the audio
+    /// range with `SpeechService.loadFinalModel()` and appends
+    /// `pass='final'` rows. Triggered at launch via the bootstrap Task
+    /// once `analysisStore.migrate()` has succeeded.
+    let finalPassRetranscriptionRunner: FinalPassRetranscriptionRunner?
     /// playhead-01t8: runtime-owned coordinator that lets the scheduler
     /// flip a preemption flag on active lower-lane jobs when admitting
     /// a Now-lane job. Installed on `analysisWorkScheduler` via
@@ -950,6 +957,30 @@ final class PlayheadRuntime {
             capabilitiesService: capabilitiesService
         )
 
+        // Bug 9: final-pass re-transcription runner. Skipped in preview
+        // runtimes (no FM machinery, no live device stack). Production
+        // runtimes get a runner that gates strictly on
+        // (charge + nominal thermal + LPM=false). The runner does NOT
+        // share the BackfillJobRunner's AdmissionController queue —
+        // gating is derived inline from a CapabilitySnapshot read so the
+        // FM pipeline cannot mass-defer final-pass work and vice-versa.
+        if !isPreviewRuntime {
+            let capabilitiesForFinalPass = capabilitiesService
+            let batteryForFinalPass = batteryProvider
+            self.finalPassRetranscriptionRunner = FinalPassRetranscriptionRunner(
+                store: analysisStore,
+                speechService: speechService,
+                audioProvider: audioService,
+                capabilitySnapshotProvider: { await capabilitiesForFinalPass.currentSnapshot },
+                batteryLevelProvider: { await batteryForFinalPass.currentBatteryState().level },
+                chargeStateProvider: { await batteryForFinalPass.currentBatteryState().isCharging },
+                confidenceFloor: FinalPassRetranscriptionRunner.defaultConfidenceFloor,
+                modelVersion: FinalPassRetranscriptionRunner.defaultModelVersion
+            )
+        } else {
+            self.finalPassRetranscriptionRunner = nil
+        }
+
         // bd-3bz (Phase 4): construct the shadow-retry observer once all
         // dependencies (capabilitiesService, analysisStore, adDetectionService)
         // are initialized. The observer is skipped in preview runtimes — the
@@ -1089,7 +1120,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner] in
             // playhead-8u3i: inject pre-analysis services FIRST, before any
             // migrate calls. The BG-task handlers registered in
             // `BackgroundProcessingService.registerBackgroundTasks()` race
@@ -1372,6 +1403,24 @@ final class PlayheadRuntime {
                 Logger(subsystem: "com.playhead", category: "Runtime")
                     .error("Job reconciliation failed at startup: \(error)")
             }
+
+            // Bug 9: opportunistic final-pass re-transcription sweep at
+            // launch. The runner gates strictly on (charge + nominal
+            // thermal + LPM=false) so off-charge or warm devices return
+            // promptly with a top-level defer. We do not gate on a
+            // pre-check here — the runner is the source of truth for
+            // admission so a single code path decides eligibility for
+            // both this launch hook and any future BG-task entry.
+            // Errors are intentionally swallowed; final-pass is best-
+            // effort — a failure here must not block the scheduler loop.
+            if let finalPassRetranscriptionRunner {
+                _ = await Self.runFinalPassBackfillForAllAssetsAtLaunch(
+                    runner: finalPassRetranscriptionRunner,
+                    analysisStore: analysisStore,
+                    downloadManager: downloadManager
+                )
+            }
+
             await analysisWorkScheduler.startSchedulerLoop()
         }
 
@@ -1600,6 +1649,71 @@ final class PlayheadRuntime {
         shadowRetryObserver
     }
     #endif
+
+    // MARK: - Final-pass re-transcription (Bug 9)
+
+    /// Drains the charge-gated final-pass re-transcription pipeline for
+    /// every persisted asset that still has windows past its watermark.
+    ///
+    /// Resolves each asset's audio URL through the `DownloadManager` cache
+    /// (no resume from a deleted file), constructs an `AssetInput`, and
+    /// hands off to `runner.runFinalPassBackfill`. The runner enforces
+    /// the three-gate admission policy itself, so a non-charging /
+    /// non-nominal call returns promptly with `topLevelDeferReason`
+    /// populated and no per-window work.
+    ///
+    /// Static so the bootstrap `Task` (which captures stored properties
+    /// individually rather than `self`) can call it without forming a
+    /// strong cycle, and so the same code path drives both the launch
+    /// hook in the deferred bootstrap Task and any future BG-task entry.
+    ///
+    /// Idempotent. Re-runs against an asset whose watermark already
+    /// covers every eligible AdWindow are no-ops.
+    static func runFinalPassBackfillForAllAssetsAtLaunch(
+        runner: FinalPassRetranscriptionRunner,
+        analysisStore: AnalysisStore,
+        downloadManager: DownloadManager
+    ) async -> Int {
+        let log = Logger(subsystem: "com.playhead", category: "FinalPassRetranscription")
+        let assets: [AnalysisAsset]
+        do {
+            assets = try await analysisStore.fetchAllAssets()
+        } catch {
+            log.warning("fetchAllAssets failed: \(error.localizedDescription, privacy: .public)")
+            return 0
+        }
+
+        var driven = 0
+        for asset in assets {
+            // Resolve audio URL via the download cache. If the file was
+            // evicted, no re-transcription can run anyway — skip silently.
+            guard let cachedURL = await downloadManager.cachedFileURL(for: asset.episodeId) else {
+                continue
+            }
+            guard let localURL = LocalAudioURL(cachedURL) else { continue }
+
+            let input = FinalPassRetranscriptionRunner.AssetInput(
+                analysisAssetId: asset.id,
+                podcastId: nil,
+                audioURL: localURL,
+                episodeId: asset.episodeId
+            )
+            do {
+                let result = try await runner.runFinalPassBackfill(for: input)
+                driven += result.reTranscribedWindowIds.count
+                // If the very first asset deferred at the top level (no
+                // charge / thermal / LPM), every subsequent asset would
+                // hit the same gate. Bail to avoid pointless DB reads.
+                if let reason = result.topLevelDeferReason {
+                    log.info("Top-level deferred (\(reason.rawValue, privacy: .public)) — abandoning sweep")
+                    break
+                }
+            } catch {
+                log.warning("Run failed for \(asset.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return driven
+    }
 
     /// Stops long-lived runtime observers and cancels any pending startup
     /// task. Safe to call more than once.
