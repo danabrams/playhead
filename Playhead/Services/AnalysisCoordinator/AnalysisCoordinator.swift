@@ -1929,6 +1929,36 @@ actor AnalysisCoordinator {
         }
 
         let allChunks = try await store.fetchTranscriptChunks(assetId: assetId)
+
+        // Stale-denominator fix (`bead/finalize-denominator-fix`):
+        // resolve the episode duration ONCE up front and reuse it for
+        // both the ad-detection backfill pass below and the terminal
+        // verdict at the bottom of this function.
+        //
+        // `currentEpisodeDuration()` derives from `activeShards` (or the
+        // cached persisted duration). On libsyn/flightcast feeds with a
+        // truncated `<itunes:duration>` the initial-decode shard sum is
+        // ~13% of the true audio length and is never refreshed when
+        // streaming-decode shards extend `activeShards`. Meanwhile, the
+        // duration-backfill sweep (`runEpisodeDurationBackfillIfNeeded`)
+        // probes the cached audio file and rewrites
+        // `analysis_assets.episodeDurationSec` to the probed truth. We
+        // take the larger of the two so a probe-rewritten or otherwise
+        // larger persisted value beats a stale shard sum, while a
+        // legitimately-larger-than-row live shard sum still wins (e.g.
+        // the row was set to a small placeholder before decode).
+        //
+        // Real-world: asset 8A9DFC82 closed `completeFull` at ~13% true
+        // coverage because the stale 748s shard sum was used as the
+        // denominator while the row already carried 5645s. The same
+        // denominator gates the verdict's feature-shortfall and
+        // transcript-coverage branches AND `runBackfill`'s end-of-
+        // episode bracketing, so resolving once here fixes all three.
+        let asset = try await store.fetchAsset(id: assetId)
+        let liveDuration = currentEpisodeDuration()
+        let persistedDuration = asset?.episodeDurationSec ?? 0
+        let resolvedEpisodeDuration = max(liveDuration, persistedDuration)
+
         if let podcastId = activePodcastId, !allChunks.isEmpty {
             // Cycle 4 H5: thread the sessionId through so the shadow FM
             // phase can stamp `needsShadowRetry` on this exact session if
@@ -1941,7 +1971,7 @@ actor AnalysisCoordinator {
                 chunks: allChunks,
                 analysisAssetId: assetId,
                 podcastId: podcastId,
-                episodeDuration: currentEpisodeDuration(),
+                episodeDuration: resolvedEpisodeDuration,
                 sessionId: sessionId
             )
         }
@@ -1992,12 +2022,17 @@ actor AnalysisCoordinator {
         //     for the three failure shapes the reducer now reports.
         // `.complete` (the legacy monolithic case) is never written on
         // new sessions post-gtt9.8.
-        let episodeDuration = currentEpisodeDuration()
-        let asset = try await store.fetchAsset(id: assetId)
+        //
+        // `resolvedEpisodeDuration` was computed at the top of this
+        // function (stale-denominator fix). Re-fetching `asset` here
+        // could pick up a duration-backfill sweep that ran concurrently;
+        // we deliberately reuse the value resolved at function entry so
+        // the verdict logged here matches the duration handed to
+        // `runBackfill` above.
         let featureCoverage = asset?.featureCoverageEndTime
         let verdict = Self.classifyBackfillTerminal(
             chunks: allChunks,
-            episodeDuration: episodeDuration,
+            episodeDuration: resolvedEpisodeDuration,
             featureCoverage: featureCoverage,
             budgetCancelled: false,
             transcriptFailed: false,
@@ -2687,6 +2722,58 @@ actor AnalysisCoordinator {
                 failureReason: String(describing: error)
             )
         }
+    }
+
+    /// Test seam (`bead/finalize-denominator-fix`): drive `finalizeBackfill`
+    /// directly with caller-controlled `activeShards`. Used to verify the
+    /// stale-denominator fix at the finalize callsite, where the live
+    /// `currentEpisodeDuration()` (derived from `activeShards`) reflects a
+    /// truncated initial-decode sum on libsyn/flightcast feeds while the
+    /// duration-backfill sweep has already rewritten
+    /// `analysis_assets.episodeDurationSec` to the probed truth. The seam
+    /// primes the in-memory state without going through spool/streaming.
+    ///
+    /// Behaviour:
+    /// - Snapshots and then overwrites `activeSessionId`, `activeAssetId`,
+    ///   `activeEpisodeId`, `activePodcastId`, and `activeShards`. The
+    ///   prior values are restored on exit (success or throw) so a single
+    ///   coordinator instance can be reused across calls without state
+    ///   bleeding from one test to the next.
+    /// - Invokes the private `finalizeBackfill` directly. The session must
+    ///   already be in a state from which `finalizeBackfill` can drive a
+    ///   transition (`.backfill`, `.hotPathReady`, `.waitingForBackfill`,
+    ///   or `.featuresReady`).
+    /// - When `podcastId` is non-nil, the inner `adDetectionService.runBackfill`
+    ///   branch fires (matching the shipping code path); when nil, that
+    ///   branch is skipped (useful when a test doesn't want to construct
+    ///   a podcast-profile-shaped fixture).
+    ///
+    /// Only compiled in DEBUG.
+    func finalizeBackfillForTesting(
+        sessionId: String,
+        assetId: String,
+        episodeId: String,
+        activeShards: [AnalysisShard]?,
+        podcastId: String? = nil
+    ) async throws {
+        let priorSessionId = activeSessionId
+        let priorAssetId = activeAssetId
+        let priorEpisodeId = activeEpisodeId
+        let priorPodcastId = activePodcastId
+        let priorShards = self.activeShards
+        defer {
+            activeSessionId = priorSessionId
+            activeAssetId = priorAssetId
+            activeEpisodeId = priorEpisodeId
+            activePodcastId = priorPodcastId
+            self.activeShards = priorShards
+        }
+        activeSessionId = sessionId
+        activeAssetId = assetId
+        activeEpisodeId = episodeId
+        activePodcastId = podcastId
+        self.activeShards = activeShards
+        try await finalizeBackfill(sessionId: sessionId, assetId: assetId)
     }
     #endif
 }
