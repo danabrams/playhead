@@ -2311,6 +2311,340 @@ struct BackfillJobRunnerTests {
     }
 }
 
+// MARK: - Bug 11: Job-complete must imply at least one persisted scan row
+//
+// Captured xcappdata from a real device showed 7 backfill_jobs with
+// status='complete' but 0 rows in semantic_scan_results — the runner marked
+// jobs done without recording any audit trail. Cohort tracking, planner
+// state, and forensic queries all assume a 1:N relationship from completed
+// job to scan rows; a 1:0 relationship is a wiring bug.
+//
+// These tests pin the invariant: every admitted backfill job that reaches
+// markBackfillJobComplete MUST have produced at least one row in
+// semantic_scan_results keyed to the job's analysisAssetId+jobId. A
+// "no work was performed" outcome is recorded as a sentinel row, not as
+// silent absence.
+@Suite("BackfillJobRunner — job-complete persistence invariant (Bug 11)")
+struct BackfillJobRunnerJobCompletePersistenceInvariantTests {
+
+    // MARK: - Fixtures
+
+    private func makeAsset(id: String) -> AnalysisAsset {
+        AnalysisAsset(
+            id: id,
+            episodeId: "ep-\(id)",
+            assetFingerprint: "fp-\(id)",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/\(id).m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "new",
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+    }
+
+    private func makePlannerContext() -> CoveragePlannerContext {
+        CoveragePlannerContext(
+            observedEpisodeCount: 0,
+            stableRecall: false,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 0,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+    }
+
+    private func makeRunner(
+        store: AnalysisStore,
+        runtime: FoundationModelClassifier.Runtime,
+        mode: FMBackfillMode = .shadow
+    ) -> BackfillJobRunner {
+        BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: runtime, config: .default),
+            coveragePlanner: CoveragePlanner(),
+            mode: mode,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+    }
+
+    // MARK: - Tests
+
+    /// Captured-DB symptom: a backfill job runs through the admission
+    /// pipeline with empty input segments (e.g. a transcript that
+    /// atomized/segmented to nothing on a corner-case input). Today the
+    /// runner marks the job complete without persisting any scan row,
+    /// leaving a job with `status='complete'` and zero corresponding
+    /// rows in `semantic_scan_results`. The fix must write a sentinel
+    /// row so the asset+job pair appears in scan-result queries.
+    @Test("admitted job with empty segments persists at least one scan row keyed by asset")
+    func emptySegmentsAdmittedJobStillPersistsScanRow() async throws {
+        let assetId = "asset-empty-segments"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let fmRuntime = TestFMRuntime()
+
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: assetId,
+            transcriptVersion: "tx-empty-v1",
+            entries: []
+        )
+        let inputs = BackfillJobRunner.AssetInputs(
+            analysisAssetId: assetId,
+            podcastId: "podcast-empty",
+            segments: [],
+            evidenceCatalog: evidenceCatalog,
+            transcriptVersion: "tx-empty-v1",
+            plannerContext: makePlannerContext()
+        )
+
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+        let result = try await runner.runPendingBackfill(for: inputs)
+
+        // The job must be admitted — we want to test the persistence
+        // path, not the device-defer path. CoveragePlanner emits at
+        // least the fullEpisodeScan phase for cold-start state.
+        #expect(!result.admittedJobIds.isEmpty,
+                "test setup: at least one job should be admitted")
+
+        // The captured-DB symptom: jobs marked complete with no
+        // scan rows. After the fix, every admitted+completed job
+        // must produce at least one scan row keyed to the asset.
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(!scans.isEmpty,
+                "Bug 11: admitted+completed job left semantic_scan_results empty for asset=\(assetId)")
+
+        // The sentinel row carries a structured `errorContext` so
+        // forensic queries can distinguish "no work was done" from a
+        // genuine FM scan that produced zero windows. This locks that
+        // contract: at least one row must carry the noWork marker.
+        // (`reuseScope` is not surfaced back through `fetchSemanticScanResults`
+        // — it's an INSERT-time-only field that contributes to reuseKeyHash —
+        // so we use the persisted `errorContext` column instead.)
+        let noWorkRows = scans.filter {
+            ($0.errorContext ?? "").hasPrefix("noWork:")
+        }
+        #expect(!noWorkRows.isEmpty,
+                "Bug 11: empty-segments path must persist a noWork sentinel row")
+
+        // Backfill_jobs row should reflect status=complete (the bug
+        // pre-fix: complete row, zero scan rows).
+        let job = try #require(
+            try await store.fetchBackfillJob(byId: result.admittedJobIds[0]),
+            "admitted job should be persisted"
+        )
+        #expect(job.status == .complete,
+                "admitted job should reach .complete after runner returns")
+    }
+
+    /// Edge case 1: the FM scan succeeds with zero windows of interest
+    /// (e.g. the @Generable path returns "noAds" for every plan and
+    /// somehow no windows get recorded, simulated here by a runtime
+    /// that returns success but the runner's coarse path produces
+    /// only no-ad rows). The test asserts the strict invariant that
+    /// every admitted job must produce at least one scan row.
+    @Test("admitted job with no-ads coarse output still persists scan rows for every plan")
+    func noAdsCoarseOutputPersistsScanRowPerPlan() async throws {
+        let assetId = "asset-noads"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let fmRuntime = TestFMRuntime()
+
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: "tx-noads-v1",
+            lines: [
+                (0, 30, "Welcome to the show. Today's topic is craftsmanship."),
+                (30, 60, "Our guest has been working in the field for decades."),
+                (60, 90, "We talked about technique, mistakes, and recovery.")
+            ]
+        )
+        let evidenceCatalog = EvidenceCatalogBuilder.build(
+            atoms: segments.flatMap(\.atoms),
+            analysisAssetId: assetId,
+            transcriptVersion: "tx-noads-v1"
+        )
+        let inputs = BackfillJobRunner.AssetInputs(
+            analysisAssetId: assetId,
+            podcastId: "podcast-noads",
+            segments: segments,
+            evidenceCatalog: evidenceCatalog,
+            transcriptVersion: "tx-noads-v1",
+            plannerContext: makePlannerContext()
+        )
+
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+        let result = try await runner.runPendingBackfill(for: inputs)
+
+        #expect(!result.admittedJobIds.isEmpty)
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(!scans.isEmpty,
+                "Bug 11: noAds coarse output left semantic_scan_results empty")
+
+        // Every coarse window must produce a passA row, even when
+        // disposition is .noAds (current behavior at line 852-872).
+        // This locks that contract.
+        let passARows = scans.filter { $0.scanPass == "passA" }
+        #expect(!passARows.isEmpty,
+                "Bug 11: at least one passA row must be persisted per admitted job")
+    }
+
+    /// Edge case 2: foreign-key wiring. The asset must exist in
+    /// `analysis_assets` before any `semantic_scan_results` row can be
+    /// inserted (FK on analysisAssetId). The runner already relies on
+    /// this — the test pins the assumption so a future schema change
+    /// that drops the FK doesn't silently skew the persistence path.
+    @Test("scan-result FK to analysis_assets is enforced — runner errors are surfaced not swallowed")
+    func scanResultForeignKeyFailureIsSurfaced() async throws {
+        // Intentionally do NOT insert the asset. The store's FK on
+        // semantic_scan_results.analysisAssetId should reject any
+        // insert attempt. The runner's catch arms must propagate or
+        // mark the job .failed — not silently mark .complete with 0
+        // rows (that would re-introduce Bug 11 via the FK path).
+        let assetId = "asset-orphan"
+        let store = try await makeTestStore()
+        // (no insertAsset)
+
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(
+                        supportLineRefs: [0],
+                        certainty: .strong
+                    )
+                )
+            ]
+        )
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: "tx-orphan-v1",
+            lines: [
+                (0, 30, "Use code DEAL for 20 percent off at example dot com.")
+            ]
+        )
+        let evidenceCatalog = EvidenceCatalogBuilder.build(
+            atoms: segments.flatMap(\.atoms),
+            analysisAssetId: assetId,
+            transcriptVersion: "tx-orphan-v1"
+        )
+        let inputs = BackfillJobRunner.AssetInputs(
+            analysisAssetId: assetId,
+            podcastId: "podcast-orphan",
+            segments: segments,
+            evidenceCatalog: evidenceCatalog,
+            transcriptVersion: "tx-orphan-v1",
+            plannerContext: makePlannerContext()
+        )
+
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        // The runner's outer call should NOT throw — its catch arms
+        // convert store errors into markBackfillJobFailed transitions
+        // and continue. But the resulting backfill_jobs row must NOT
+        // be `.complete` with zero scan rows. It must be `.failed`
+        // (or `.queued` if backfill_jobs FK also rejects), because
+        // that's the only honest signal: "we tried, the store said
+        // no, we recorded the failure".
+        do {
+            _ = try await runner.runPendingBackfill(for: inputs)
+        } catch {
+            // Acceptable: the FK rejection on backfill_jobs itself
+            // prevents enqueue. Either way the contract holds —
+            // we did NOT silently complete with 0 rows.
+            return
+        }
+
+        // If the runner returned successfully, every admitted job
+        // must NOT be `.complete` with zero scan rows for the asset.
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        if scans.isEmpty {
+            // The bug: at least one job marked .complete with 0 rows.
+            // Walk every backfill_jobs row that targeted this orphan
+            // asset and assert none of them is `.complete`.
+            // We can't fetch by asset directly without a helper, so
+            // we reconstruct the deterministic ids the runner would
+            // emit and check each one. If any are .complete, that's
+            // Bug 11 reappearing.
+            for phase in BackfillJobPhase.allCases {
+                let jobId = BackfillJobRunner.makeJobIdForTesting(
+                    analysisAssetId: assetId,
+                    transcriptVersion: "tx-orphan-v1",
+                    phase: phase,
+                    offset: 0
+                )
+                if let job = try await store.fetchBackfillJob(byId: jobId) {
+                    #expect(job.status != .complete,
+                            "Bug 11 (FK path): job \(jobId) marked .complete despite 0 scan rows for orphan asset")
+                }
+            }
+        }
+    }
+
+    /// Edge case 3: a job that's deferred at admission time must NOT
+    /// produce a sentinel row — only admitted+completed jobs should.
+    /// This is the negative companion to the main test: it locks the
+    /// fix's scope so the sentinel write doesn't fire on non-admitted
+    /// paths.
+    @Test("deferred job (thermal) does not insert a sentinel row")
+    func deferredJobDoesNotInsertSentinelRow() async throws {
+        let assetId = "asset-deferred"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let fmRuntime = TestFMRuntime()
+
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: "tx-deferred-v1",
+            lines: [(0, 30, "Editorial line.")]
+        )
+        let evidenceCatalog = EvidenceCatalogBuilder.build(
+            atoms: segments.flatMap(\.atoms),
+            analysisAssetId: assetId,
+            transcriptVersion: "tx-deferred-v1"
+        )
+        let inputs = BackfillJobRunner.AssetInputs(
+            analysisAssetId: assetId,
+            podcastId: "podcast-deferred",
+            segments: segments,
+            evidenceCatalog: evidenceCatalog,
+            transcriptVersion: "tx-deferred-v1",
+            plannerContext: makePlannerContext()
+        )
+
+        // Use a thermal-throttled snapshot so AdmissionController defers
+        // every job before runJob is called.
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: fmRuntime.runtime, config: .default),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makeThermalThrottledSnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+
+        let result = try await runner.runPendingBackfill(for: inputs)
+        #expect(!result.deferredJobIds.isEmpty,
+                "test setup: jobs should defer under thermal throttle")
+        #expect(result.admittedJobIds.isEmpty,
+                "test setup: no jobs should be admitted under thermal throttle")
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(scans.isEmpty,
+                "deferred jobs must NOT produce sentinel rows (the fix only applies to admitted+completed)")
+    }
+}
+
 private actor WindowedTestFMRuntime {
     private var coarseQueue: [CoarseScreeningSchema]
     private var refinementQueue: [RefinementWindowSchema]
