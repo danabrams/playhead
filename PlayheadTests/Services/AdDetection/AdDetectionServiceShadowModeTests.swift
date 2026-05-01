@@ -290,6 +290,93 @@ struct AdDetectionServiceShadowModeTests {
         #expect(factoryCallCount == 0, "shadow FM factory must not be invoked without a podcast id")
     }
 
+    /// Bug 7 regression: `runBackfill` end-to-end on an FM-capable fixture
+    /// MUST land at least one row in `training_examples`. The captured
+    /// xcappdata bundle from 2026-04-30 had 0 rows in `training_examples`
+    /// despite real classifier decisions and ad windows on disk; the
+    /// proximate cause (Bug 11) was that `BackfillJobRunner.runJob` could
+    /// return early with zero `semantic_scan_results` rows, which is the
+    /// spine the `TrainingExampleMaterializer` requires. Bug 11 was fixed
+    /// in the previous commit on this branch's history; this test pins the
+    /// production wiring so a future regression that removes the
+    /// `materializeTrainingExamples` call site or breaks the spine
+    /// invariant trips a fast-test.
+    ///
+    /// We deliberately use the same factory shape as
+    /// `shadowModeWritesScanTelemetry` (real-canned coarse `.containsAd`
+    /// response → real `.success` row) so the materializer's
+    /// `status == .success` filter is satisfied. Sentinel rows
+    /// (`.noAds` status, written by Bug 11's defensive backstop) do NOT
+    /// produce training examples and are not what we are asserting here.
+    @Test("Bug 7: shadow mode runBackfill materializes at least one training_examples row")
+    func shadowModeMaterializesTrainingExamples() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-bug7-train"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "detection-v1",
+                fmBackfillMode: .shadow
+            ),
+            backfillJobRunnerFactory: { store, mode in
+                BackfillJobRunner(
+                    store: store,
+                    admissionController: AdmissionController(),
+                    classifier: FoundationModelClassifier(
+                        runtime: TestFMRuntime(
+                            coarseResponses: [
+                                CoarseScreeningSchema(
+                                    disposition: .containsAd,
+                                    support: CoarseSupportSchema(
+                                        supportLineRefs: [1],
+                                        certainty: .strong
+                                    )
+                                )
+                            ]
+                        ).runtime
+                    ),
+                    coveragePlanner: CoveragePlanner(),
+                    mode: mode,
+                    capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+                    batteryLevelProvider: { 1.0 },
+                    scanCohortJSON: makeTestScanCohortJSON()
+                )
+            }
+        )
+
+        try await service.runBackfill(
+            chunks: makeChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            podcastId: "podcast-bug7-train",
+            episodeDuration: 90
+        )
+
+        // Pre-condition the materializer depends on: there MUST be at
+        // least one .success-status scan row, otherwise the materializer
+        // produces nothing (and our assertion below would silently pass
+        // for the wrong reason).
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        let successScans = scans.filter { $0.status == .success }
+        #expect(!successScans.isEmpty,
+                "fixture must produce at least one success scan row so the materializer has a spine to read from (got \(scans.count) total, \(successScans.count) success)")
+
+        // Bug 7 invariant: training_examples MUST be populated for an
+        // FM-capable run that produced success scan rows. The
+        // materializer is invoked from `runShadowFMPhase` after
+        // `runner.runPendingBackfill` returns success — if that wiring
+        // breaks, this assertion fails.
+        let examples = try await store.loadTrainingExamples(forAsset: assetId)
+        #expect(!examples.isEmpty,
+                "training_examples MUST be populated when shadow FM phase runs to completion against success scan rows (got \(examples.count) for \(successScans.count) success scans)")
+    }
+
     @Test("shadow mode actually writes semantic_scan_results telemetry")
     func shadowModeWritesScanTelemetry() async throws {
         let store = try await makeTestStore()
