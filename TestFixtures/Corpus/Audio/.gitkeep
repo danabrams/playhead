@@ -1,0 +1,4 @@
+# Placeholder so git tracks the empty Audio/ directory.
+# Real audio files (matching `<episode_id>.<ext>` naming) are
+# excluded by .gitignore — see TestFixtures/Corpus/README.md for
+# the storage policy.
