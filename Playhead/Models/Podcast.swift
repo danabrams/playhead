@@ -28,6 +28,23 @@ final class Podcast {
     /// for already-subscribed shows.
     var notificationsEnabled: Bool = true
 
+    /// playhead-epii: per-show opt-out for structure-aware silence
+    /// compression. Default OFF (compression-on by default). When
+    /// `true`, the `SilenceCompressor` short-circuits for episodes of
+    /// this podcast and never raises playback rate above the user's
+    /// chosen base speed — music intros, jingles, and dead air play at
+    /// full duration. Targets shows where the music IS the experience
+    /// (composed scores, narrative beats).
+    ///
+    /// Additive optional with a Swift default — existing rows decode
+    /// with `false`, preserving the spec'd "it just works" default
+    /// (compression engaged) for already-subscribed shows.
+    ///
+    /// No global toggle exists; per-show is the only surface, in line
+    /// with the bead's "peace of mind, not metrics" stance — there is
+    /// no app-wide setting to disable compression entirely.
+    var keepFullMusic: Bool = false
+
     init(
         feedURL: URL,
         title: String,
@@ -35,7 +52,8 @@ final class Podcast {
         artworkURL: URL? = nil,
         episodes: [Episode] = [],
         subscribedAt: Date = .now,
-        notificationsEnabled: Bool = true
+        notificationsEnabled: Bool = true,
+        keepFullMusic: Bool = false
     ) {
         self.feedURL = feedURL
         self.title = title
@@ -44,6 +62,7 @@ final class Podcast {
         self.episodes = episodes
         self.subscribedAt = subscribedAt
         self.notificationsEnabled = notificationsEnabled
+        self.keepFullMusic = keepFullMusic
     }
 }
 

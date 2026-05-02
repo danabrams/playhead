@@ -146,6 +146,40 @@ private extension LibraryView {
                                 )
                             }
                         }
+
+                        // playhead-epii: per-show "Keep full music"
+                        // override for structure-aware silence
+                        // compression. Default OFF (compression-on by
+                        // default). When ON, the SilenceCompressor
+                        // never raises rate above the user's chosen
+                        // base speed for episodes of this show — music
+                        // intros, jingles, and dead air play at full
+                        // duration. The label mirrors `notificationsEnabled`'s
+                        // pattern: shows the inverse action so the
+                        // user knows what the press will do.
+                        Button {
+                            podcast.keepFullMusic.toggle()
+                            // Push the change to the live coordinator
+                            // so a flip during active playback takes
+                            // effect on the next tick rather than
+                            // waiting for the next play-started event.
+                            let next = podcast.keepFullMusic
+                            Task { @MainActor in
+                                await runtime.updateKeepFullMusic(next)
+                            }
+                        } label: {
+                            if podcast.keepFullMusic {
+                                Label(
+                                    "Compress Music Beds",
+                                    systemImage: "waveform.path"
+                                )
+                            } else {
+                                Label(
+                                    "Keep Full Music",
+                                    systemImage: "music.note"
+                                )
+                            }
+                        }
                     }
                     .accessibilityLabel("\(podcast.title), \(unplayedCount) unplayed")
                 }

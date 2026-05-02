@@ -2,6 +2,7 @@
 // Shared app-level composition root for long-lived services.
 
 @preconcurrency import AVFoundation
+import CoreMedia
 import Foundation
 import os
 import OSLog
@@ -38,6 +39,13 @@ final class PlayheadRuntime {
     let trustService: TrustScoringService
     let adDetectionService: AdDetectionService
     let skipOrchestrator: SkipOrchestrator
+    /// playhead-epii: structure-aware silence compression coordinator.
+    /// Drives the `SilenceCompressor` planner from the playback
+    /// observation loop and applies its decisions to PlaybackService.
+    /// Always non-nil so the wiring is ungated; the planner itself
+    /// short-circuits when no asset id is set (i.e. before the first
+    /// playback event resolves an analysis asset id).
+    let silenceCompressionCoordinator: SilenceCompressionCoordinator
     let analysisCoordinator: AnalysisCoordinator
     let backgroundProcessingService: BackgroundProcessingService
     /// playhead-shpy: BG-task lifecycle telemetry logger. Exposed so the
@@ -499,7 +507,8 @@ final class PlayheadRuntime {
         defer { initSignposter.endInterval("PlayheadRuntime.init", initSignpostState) }
 
         self.isPreviewRuntime = isPreviewRuntime
-        self.playbackService = PlaybackService()
+        let createdPlaybackService = PlaybackService()
+        self.playbackService = createdPlaybackService
         self.capabilitiesService = CapabilitiesService()
 
         // playhead-6boz: AnalysisStore is now lazily-opened. The init
@@ -743,6 +752,17 @@ final class PlayheadRuntime {
             correctionStore: correctionStore,
             invariantLogger: surfaceStatusLogger,
             episodeIdHasher: surfaceStatusHasher
+        )
+
+        // playhead-epii: structure-aware silence compression. Construct
+        // here (after `analysisStore` and `playbackService`) so the
+        // coordinator captures stable references to both — neither
+        // re-issues across runtime lifetime. The actual planner is
+        // dormant until `beginEpisode` is called from the play-started
+        // path; until then `notePlayhead` is a cheap no-op.
+        self.silenceCompressionCoordinator = SilenceCompressionCoordinator(
+            playback: createdPlaybackService,
+            source: AnalysisStoreSilenceSource(store: resolvedStore)
         )
         // playhead-8em9 (narL): DEBUG-only DecisionLogger. Constructed
         // synchronously BEFORE AdDetectionService so the very first
@@ -1629,7 +1649,7 @@ final class PlayheadRuntime {
             await analysisWorkScheduler.startSchedulerLoop()
         }
 
-        Task { [playbackService, analysisCoordinator, skipOrchestrator, shadowCaptureCoordinator, analysisWorkScheduler, currentEpisodeIdMirror] in
+        Task { [playbackService, analysisCoordinator, skipOrchestrator, shadowCaptureCoordinator, analysisWorkScheduler, currentEpisodeIdMirror, silenceCompressionCoordinator] in
             // skeptical-review-cycle-10 L-4 / cycle-11 L-4: applied to
             // the bootstrap `Task { }` bodies whose semantics actually
             // depend on MainActor isolation — currently the launch-sweep
@@ -1645,9 +1665,24 @@ final class PlayheadRuntime {
             // debug builds if a future refactor breaks isolation
             // inheritance.
             MainActor.assertIsolated()
-            await skipOrchestrator.setSkipCueHandler { cues in
+            await skipOrchestrator.setSkipCueHandler { [silenceCompressionCoordinator] cues in
                 Task { @PlaybackServiceActor in
                     playbackService.setSkipCues(cues)
+                }
+                // playhead-epii: also publish the cue ranges to the
+                // silence-compression coordinator so its planner
+                // refuses to compress regions the skip path will
+                // jump past wholesale. Hopping to MainActor mirrors
+                // the coordinator's isolation; the call is a thin
+                // in-memory filter (no I/O).
+                let plain = cues.map { range -> (start: Double, end: Double) in
+                    (
+                        start: CMTimeGetSeconds(range.start),
+                        end: CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                    )
+                }
+                Task { @MainActor in
+                    silenceCompressionCoordinator.updateSkipRanges(plain)
                 }
             }
 
@@ -1681,6 +1716,16 @@ final class PlayheadRuntime {
                     await analysisCoordinator.handlePlaybackEvent(
                         .speedChanged(rate: state.playbackSpeed, time: state.currentTime)
                     )
+                    // playhead-epii: notify the silence-compression
+                    // coordinator so its planner state machine doesn't
+                    // get stranded thinking it's still compressing
+                    // after `setSpeed` cleared the multiplier on the
+                    // playback side. The coordinator resets to idle
+                    // and forces a fresh lookahead refresh, so the
+                    // very next tick re-engages compression on top of
+                    // the new base speed if the playhead is still
+                    // inside an active plan.
+                    await silenceCompressionCoordinator.recordUserSpeedChange()
                 }
 
                 // playhead-gtt9.14: forward transport status to the
@@ -1730,6 +1775,14 @@ final class PlayheadRuntime {
                     let rate = state.rate > 0 ? state.rate : state.playbackSpeed
                     await analysisCoordinator.handlePlaybackEvent(
                         .timeUpdate(time: state.currentTime, rate: rate)
+                    )
+                    // playhead-epii: drive the silence-compression
+                    // coordinator on the same heartbeat. The
+                    // coordinator throttles internally to the
+                    // configured tick cadence, so this hop is cheap
+                    // (most calls return before any I/O).
+                    await silenceCompressionCoordinator.notePlayhead(
+                        time: state.currentTime
                     )
                     // playhead-narl.2: Lane A tick piggybacks on the playback
                     // heartbeat. The coordinator samples its own playback
@@ -2147,6 +2200,12 @@ final class PlayheadRuntime {
         let episodeId = episode.canonicalEpisodeKey
         let podcastId = episode.podcast?.feedURL.absoluteString
         let position = episode.playbackPosition
+        // playhead-epii: read the per-show "Keep full music" override
+        // synchronously on MainActor before any async hops, so the
+        // value can be captured by Sendable closures that don't have
+        // SwiftData access. Default `false` per spec — compression-on
+        // by default.
+        let keepFullMusic = episode.podcast?.keepFullMusic ?? false
 
         setCurrentEpisodeId(episodeId)
         currentPodcastId = podcastId
@@ -2275,6 +2334,14 @@ final class PlayheadRuntime {
                             episodeId: episodeId,
                             podcastId: podcastId
                         )
+                        // playhead-epii: hand the asset id and the
+                        // per-show override to the silence-compression
+                        // coordinator. Until this call lands the
+                        // coordinator's `notePlayhead` is a no-op.
+                        await self.silenceCompressionCoordinator.beginEpisode(
+                            assetId: assetId,
+                            keepFullMusic: keepFullMusic
+                        )
                     }
 
                     // Wait for the full download before starting analysis —
@@ -2320,6 +2387,13 @@ final class PlayheadRuntime {
                 episodeId: episodeId,
                 podcastId: podcastId
             )
+            // playhead-epii: same handoff as the streaming branch —
+            // hand the resolved asset id and per-show override to
+            // the silence-compression coordinator.
+            await silenceCompressionCoordinator.beginEpisode(
+                assetId: assetId,
+                keepFullMusic: keepFullMusic
+            )
         }
     }
 
@@ -2331,6 +2405,10 @@ final class PlayheadRuntime {
         await backgroundProcessingService.playbackDidStop()
         await analysisCoordinator.handlePlaybackEvent(.stopped)
         await skipOrchestrator.endEpisode()
+        // playhead-epii: clear the silence-compression planner and
+        // disengage on PlaybackService so the next episode never
+        // inherits stale plan state from the prior one.
+        await silenceCompressionCoordinator.endEpisode()
         await playbackService.pause()
         setCurrentEpisodeId(nil)
         currentPodcastId = nil
@@ -2390,6 +2468,11 @@ final class PlayheadRuntime {
     func seek(to seconds: TimeInterval) async {
         let snapshot = await playbackService.snapshot()
         await skipOrchestrator.recordUserSeek(to: seconds)
+        // playhead-epii: drop any in-flight compression so the user
+        // doesn't land mid-plan and stay sped up across an unintended
+        // boundary. The next playhead tick re-engages from idle if
+        // the new position falls inside a fresh plan.
+        await silenceCompressionCoordinator.recordUserSeek(to: seconds)
         await playbackService.seek(to: seconds)
         await analysisCoordinator.handlePlaybackEvent(
             .scrubbed(to: seconds, rate: snapshot.playbackSpeed)
@@ -2403,6 +2486,16 @@ final class PlayheadRuntime {
         await analysisCoordinator.handlePlaybackEvent(
             .speedChanged(rate: speed, time: snapshot.currentTime)
         )
+    }
+
+    /// playhead-epii: push the per-show "Keep full music" toggle
+    /// change into the live silence-compression coordinator. Called
+    /// from `LibraryView`'s context menu when the user flips the
+    /// toggle on the currently-playing podcast — without this hop,
+    /// the change would only take effect after the next play-started
+    /// event. Idempotent.
+    func updateKeepFullMusic(_ enabled: Bool) async {
+        await silenceCompressionCoordinator.updateKeepFullMusicOverride(enabled)
     }
 
     // MARK: - User Correction: Mark as Ad
