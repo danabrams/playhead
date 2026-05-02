@@ -32,6 +32,7 @@ struct AnalysisWorkSchedulerLaneAdmissionTests {
             capabilitiesService: capabilities,
             downloadManager: StubDownloadProvider(),
             batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider(),
             config: config
         )
     }
@@ -224,28 +225,11 @@ struct AnalysisWorkSchedulerLaneAdmissionTests {
 
     // MARK: - AdmissionGate integration (playhead-bnrs)
 
-    /// Stub transport provider that lets tests drive the scheduler's
-    /// admission gate into `.wifiRequired` without standing up a real
-    /// `NWPathMonitor`. Defaults mirror `WifiTransportStatusProvider`
-    /// (the production fallback) so individual tests can override only
-    /// the axes they care about.
-    private struct StubTransportStatusProvider: TransportStatusProviding {
-        let reachability: TransportSnapshot.Reachability
-        let allowsCellular: Bool
-
-        init(
-            reachability: TransportSnapshot.Reachability = .wifi,
-            allowsCellular: Bool = true
-        ) {
-            self.reachability = reachability
-            self.allowsCellular = allowsCellular
-        }
-
-        func currentReachability() async -> TransportSnapshot.Reachability {
-            reachability
-        }
-        func userAllowsCellular() async -> Bool { allowsCellular }
-    }
+    // skeptical-review-cycle-18 M-1: the formerly-private nested
+    // StubTransportStatusProvider was promoted to PlayheadTests/Helpers/
+    // Stubs.swift. Tests in this file pass instances with explicit
+    // axis overrides (e.g. `.cellular`, `allowsCellular: false`) to
+    // exercise the AdmissionGate transport rejection paths.
 
     @Test("evaluateAdmissionGate rejects a background (maintenance) job on cellular with .wifiRequired")
     func testAdmissionGateRejectsMaintenanceOnCellular() async throws {

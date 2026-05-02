@@ -64,6 +64,7 @@ struct AnalysisWorkSchedulerAcousticPromotionTests {
             capabilitiesService: capabilities,
             downloadManager: StubDownloadProvider(),
             batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider(),
             acousticPromotionPolicy: promotionPolicy
         )
 

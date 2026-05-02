@@ -43,6 +43,7 @@ struct AnalysisWorkSchedulerThreeLaneTests {
             capabilitiesService: capabilities,
             downloadManager: downloads,
             batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider(),
             config: config
         )
     }

@@ -72,5 +72,17 @@ Package.resolved
 # Wizard round archive — cached locally, never committed
 .wizard-archive/
 
+# Dueling-idea-wizards skill artifacts at repo root (reactions,
+# blindspots, ideas, scores, dueling reports). Generated locally per
+# session; never committed. Without these patterns a `git add -A`
+# would silently include them.
+#
+# Cycle-23 L-1: anchor with leading `/` so the patterns ONLY match
+# at the repo root. Without the anchor, `WIZARD_*.md` would also
+# match e.g. `Playhead/Docs/WIZARD_FOO.md`, which could silently
+# hide a deliberately-named documentation file deep in the tree.
+/WIZARD_*.md
+/DUELING_*_REPORT.md
+
 # narl eval harness output (reports, trend log) — regenerated per run
 .eval-out/

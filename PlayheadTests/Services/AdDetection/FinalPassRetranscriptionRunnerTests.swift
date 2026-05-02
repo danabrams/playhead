@@ -193,8 +193,6 @@ struct FinalPassRetranscriptionRunnerTests {
     func testWatermarkSkipsCoveredWindows() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
-        // `insertAsset` does not bind `finalPassCoverageEndTime`; advance
-        // through the production API instead so the column lands.
         try await store.advanceFinalPassCoverage(id: "asset-fp", endTime: 100.0)
         try await store.insertAdWindow(
             makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 10, endTime: 30, confidence: 0.9)

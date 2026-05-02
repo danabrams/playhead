@@ -31,6 +31,11 @@ struct AnalysisWorkSchedulerCatchupTests {
         let job: AnalysisJob
     }
 
+    // skeptical-review-cycle-18 M-1: the formerly-private nested
+    // StubTransportStatusProvider was promoted to PlayheadTests/Helpers/
+    // Stubs.swift so every scheduler test can pin reachability without
+    // copy/pasting the type. The cycle-16 #45 root-cause comment moved
+    // with it.
     private func makeFixture(
         thermalState: ThermalState = .nominal,
         catchupPolicy: AnalysisWorkScheduler.PlayheadCatchupPolicy = .default,
@@ -65,6 +70,13 @@ struct AnalysisWorkSchedulerCatchupTests {
             capabilitiesService: capabilities,
             downloadManager: StubDownloadProvider(),
             batteryProvider: battery,
+            // skeptical-review-cycle-16 #45 root-cause: pin Wi-Fi
+            // reachability so the dispatchForegroundCatchup admission
+            // tests (testAdmissionDenialDoesNotPersistEscalation,
+            // testAdmittedEscalationPersists) cannot intermittently
+            // reject on `.noNetwork` from the LiveTransportStatusProvider's
+            // first-update latency under heavy parallel load.
+            transportStatusProvider: StubTransportStatusProvider(),
             catchupPolicy: catchupPolicy
         )
 

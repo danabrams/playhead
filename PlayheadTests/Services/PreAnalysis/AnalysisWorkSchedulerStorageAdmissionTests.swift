@@ -49,6 +49,12 @@ struct AnalysisWorkSchedulerStorageAdmissionTests {
         }
     }
 
+    // skeptical-review-cycle-18 M-1: the formerly-private nested
+    // StubTransportStatusProvider (cycle-16 #45 root-cause stub for
+    // NWPathMonitor first-update flakiness) was promoted to
+    // PlayheadTests/Helpers/Stubs.swift so every scheduler test can
+    // pin reachability without copy/pasting the type.
+
     // MARK: - Helpers
 
     private func makeScheduler(
@@ -80,6 +86,11 @@ struct AnalysisWorkSchedulerStorageAdmissionTests {
             capabilitiesService: capabilities,
             downloadManager: StubDownloadProvider(),
             batteryProvider: battery,
+            // skeptical-review-cycle-16 #45 root-cause: pin Wi-Fi
+            // reachability so the transport axis cannot intermittently
+            // reject these tests under parallel-load NWPathMonitor
+            // first-update latency.
+            transportStatusProvider: StubTransportStatusProvider(),
             storageBudgetSnapshotter: snapshotter
         )
     }

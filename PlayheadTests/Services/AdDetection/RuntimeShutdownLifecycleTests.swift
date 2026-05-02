@@ -284,7 +284,7 @@ struct RuntimeShutdownLifecycleTests {
             // the deinit test is also legal in the "no loop ever started"
             // path; we just need to give it a fair chance.
             if let obs = runtime._shadowRetryObserverForTesting() {
-                let loopDeadline = Date().addingTimeInterval(2.0)
+                let loopDeadline = Date().addingTimeInterval(8.0)
                 while Date() < loopDeadline {
                     if await obs.testIsLoopRunning() { break }
                     try? await Task.sleep(nanoseconds: 5_000_000)  // 5ms
@@ -295,8 +295,13 @@ struct RuntimeShutdownLifecycleTests {
 
         // Bounded wait for ARC to settle. The runtime must release
         // even though the observer loop is still running in the
-        // background.
-        let deadline = Date().addingTimeInterval(2.0)
+        // background. Budget is generous (8s) because the FastTests
+        // plan runs 5k+ tests in parallel and ARC reclaim on a
+        // saturated cooperative pool can take several seconds; the
+        // happy path completes in milliseconds, so this only matters
+        // under load. A real cycle would still pin the reference
+        // forever — the bounded wait still catches it.
+        let deadline = Date().addingTimeInterval(8.0)
         while weakRuntime != nil && Date() < deadline {
             await Task.yield()
             try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms

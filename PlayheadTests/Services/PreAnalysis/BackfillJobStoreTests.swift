@@ -239,9 +239,11 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // Current schema is v19 after Bug 5 (skip-cues-deletion)
-        // dropped the vestigial `skip_cues` table.
-        #expect(version == 19)
+        // Current schema is v20 after the cycle-1 M3 no-op bump that
+        // accompanied the work-journal/H1 reaper additions; the prior
+        // v19 baseline was set after Bug 5 (skip-cues-deletion) dropped
+        // the vestigial `skip_cues` table.
+        #expect(version == 20)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")

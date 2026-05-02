@@ -797,6 +797,12 @@ struct AnalysisJobReconcilerTests {
             status: .queued
         )
         try await store.insertBackfillJob(strandedJob)
+        // skeptical-review-cycle-1 H1: the reaper applies a 600 s
+        // freshness floor (`strandedJobFreshnessSeconds`) so a row
+        // whose `updatedAt` is current cannot be stranded. Simulate a
+        // genuine prior-process strand by backdating `updatedAt` to
+        // 700 s ago — well past the floor.
+        let strandedAt = Int(Date().timeIntervalSince1970) - 700
         try await store.forceBackfillJobStateForTesting(
             jobId: strandedJobId,
             status: .running,
@@ -805,7 +811,8 @@ struct AnalysisJobReconcilerTests {
                 lastProcessedUpperBoundSec: 30
             ),
             retryCount: 1,
-            deferReason: "prior-defer-reason"
+            deferReason: "prior-defer-reason",
+            updatedAtOverride: strandedAt
         )
 
         // Also seed a `complete` row to prove the reaper is not overzealous.
@@ -862,23 +869,23 @@ struct AnalysisJobReconcilerTests {
         #expect(nowRunning?.retryCount == 1)
         #expect(nowRunning?.deferReason == "prior-defer-reason")
 
-        // Idempotency: a second reconcile pass after the row has legitimately
-        // been re-flipped to running by the live runner would reset it again.
-        // That is the correct shape for the launch-time reaper (each new
-        // process is a fresh strand candidate); but a second pass within
-        // the SAME process invocation must NOT reset rows that were
-        // legitimately just re-driven within this process. Simulate by
-        // running reconcile() a second time AFTER the markBackfillJobRunning
-        // above. The reaper WILL flip it again — and that is fine in the
-        // production flow because reconcile() runs at most once per launch
-        // (PlayheadRuntime) and once per BGProcessingTask handler. We
-        // verify the count is 1 (the one running row we just promoted)
-        // rather than 0, documenting the launch-only contract.
+        // Idempotency under the H1 freshness floor: a second reconcile
+        // pass within the SAME process must NOT reset the row we just
+        // legitimately re-drove via `markBackfillJobRunning`, because
+        // that call updates `updatedAt` to now and the reaper's
+        // `strftime('%s','now') - 600` filter will skip it as
+        // too-fresh-to-strand. This is exactly the cycle-1 H1 fix:
+        // the freshness floor is the safeguard against same-process
+        // BG-task reentry racing with a foreground runner that holds a
+        // valid lease. Pre-H1 this expectation was `== 1` (the reaper
+        // was process-restart-implies-strand and would re-flip the
+        // freshly-running row); under H1 it MUST be 0.
         let secondReport = try await reconciler.reconcile()
-        #expect(secondReport.strandedBackfillJobsReset == 1,
-                "reaper is intentionally process-restart-implies-strand; documented launch-only invocation")
+        #expect(secondReport.strandedBackfillJobsReset == 0,
+                "H1 freshness floor must skip rows whose updatedAt is < 600 s old; the live foreground runner that just called markBackfillJobRunning is the owner")
         let postSecond = try await store.fetchBackfillJob(byId: strandedJobId)
-        #expect(postSecond?.status == .queued)
+        #expect(postSecond?.status == .running,
+                "freshness floor must leave the live runner's row at .running")
     }
 
     @Test("Reaper only flips `running`; `queued`/`deferred`/`failed`/`complete` rows are untouched")
@@ -925,5 +932,106 @@ struct AnalysisJobReconcilerTests {
             #expect(row?.status == c.status,
                     "row \(c.jobId) must remain in status .\(c.status); reaper SQL must filter exactly on status='running'")
         }
+    }
+
+    // MARK: - stranded-final-pass-reaper (C5 #46 parity)
+
+    /// Sibling parity test for `testStrandedBackfillJobReset`. The
+    /// final_pass_jobs reaper (`resetStrandedFinalPassJobs`) is wired into
+    /// `AnalysisJobReconciler.reconcile()` and shares the H1 freshness floor
+    /// (`strandedJobFreshnessSeconds` = 600 s) with the backfill reaper. This
+    /// test pins both halves of the contract:
+    ///   1. A genuinely stranded `running` row (updatedAt > 600 s ago) is
+    ///      flipped back to `queued` and counted in
+    ///      `report.strandedFinalPassJobsReset`.
+    ///   2. After a live runner re-drives the row via `markFinalPassJobRunning`
+    ///      (which bumps `updatedAt` to now), a second reconcile pass MUST
+    ///      return 0 — the freshness floor is the safeguard that prevents
+    ///      same-process BG-task reentry from racing with the live runner.
+    @Test("Reconciler resets stranded final_pass_jobs row from running to queued, and the live runner can re-drive it without a second-pass strand")
+    func testStrandedFinalPassJobReset() async throws {
+        let store = try await makeTestStore()
+        // final_pass_jobs has FK CASCADE on analysis_assets.id; seed parent.
+        try await store.insertAsset(makeTestAsset(id: "asset-stranded-fp"))
+
+        let strandedJobId = "fpj-stranded-running"
+        let strandedJob = FinalPassJob(
+            jobId: strandedJobId,
+            analysisAssetId: "asset-stranded-fp",
+            podcastId: "pod-stranded-fp",
+            adWindowId: "aw-stranded-fp",
+            windowStartTime: 30,
+            windowEndTime: 90,
+            status: .queued,
+            retryCount: 1,
+            deferReason: "prior-defer-reason",
+            createdAt: Date().timeIntervalSince1970
+        )
+        try await store.insertOrIgnoreFinalPassJob(strandedJob)
+        // H1: backdate `updatedAt` to 700 s ago — past the 600 s freshness
+        // floor — so the reaper actually fires. A row whose updatedAt is
+        // current cannot be stranded by definition.
+        let strandedAt = Int(Date().timeIntervalSince1970) - 700
+        try await store.forceFinalPassJobStateForTesting(
+            jobId: strandedJobId,
+            status: .running,
+            retryCount: 1,
+            deferReason: "prior-defer-reason",
+            updatedAtOverride: strandedAt
+        )
+
+        // Negative-space: a `.complete` row must not be touched by the reaper.
+        let completeJobId = "fpj-already-complete"
+        try await store.insertOrIgnoreFinalPassJob(FinalPassJob(
+            jobId: completeJobId,
+            analysisAssetId: "asset-stranded-fp",
+            podcastId: "pod-stranded-fp",
+            adWindowId: "aw-already-complete",
+            windowStartTime: 120,
+            windowEndTime: 180,
+            status: .queued,
+            retryCount: 0,
+            deferReason: nil,
+            createdAt: Date().timeIntervalSince1970
+        ))
+        try await store.forceFinalPassJobStateForTesting(
+            jobId: completeJobId,
+            status: .complete
+        )
+
+        let reconciler = makeReconciler(store: store)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.strandedFinalPassJobsReset == 1,
+                "reconcileStrandedFinalPassJobs must report exactly the running row")
+        let resurrected = try await store.fetchFinalPassJob(byId: strandedJobId)
+        #expect(resurrected?.status == .queued,
+                "stranded `.running` row must be flipped back to `.queued`")
+        // Audit trail (retryCount / deferReason) is preserved — the reaper
+        // only touches `status` and `updatedAt`.
+        #expect(resurrected?.retryCount == 1)
+        #expect(resurrected?.deferReason == "prior-defer-reason")
+
+        let stillComplete = try await store.fetchFinalPassJob(byId: completeJobId)
+        #expect(stillComplete?.status == .complete,
+                "reaper must only flip running rows; complete rows are terminal")
+
+        // Re-drive via the documented live-runner path. `markFinalPassJobRunning`
+        // bumps `updatedAt` to now, which is the exact precondition the H1
+        // freshness floor relies on for idempotency under same-process reentry.
+        try await store.markFinalPassJobRunning(jobId: strandedJobId)
+        let nowRunning = try await store.fetchFinalPassJob(byId: strandedJobId)
+        #expect(nowRunning?.status == .running,
+                "live runner re-drive via markFinalPassJobRunning must succeed against a queued row")
+
+        // H1 freshness floor: a second reconcile within the SAME process MUST
+        // NOT reset the row the live runner just claimed. Pre-H1 this returned
+        // 1 (process-restart-implies-strand); under H1 it MUST be 0.
+        let secondReport = try await reconciler.reconcile()
+        #expect(secondReport.strandedFinalPassJobsReset == 0,
+                "H1 freshness floor must skip rows whose updatedAt is < 600 s old; the live runner that just called markFinalPassJobRunning is the owner")
+        let postSecond = try await store.fetchFinalPassJob(byId: strandedJobId)
+        #expect(postSecond?.status == .running,
+                "freshness floor must leave the live runner's row at .running")
     }
 }

@@ -65,6 +65,7 @@ struct AnalysisWorkSchedulerQueueProgressIntegrationTests {
                 b.charging = true
                 return b
             }(),
+            transportStatusProvider: StubTransportStatusProvider(),
             config: PreAnalysisConfig()
         )
     }

@@ -51,8 +51,21 @@ final class RecordingURLProtocol: URLProtocol, @unchecked Sendable {
         return recordedURLs
     }
 
+    /// Network schemes the privacy gate cares about. Custom in-process
+    /// schemes (e.g. `playhead-progressive://` for the AVAssetResourceLoader
+    /// shim) flow through `URLProtocol.canInit` too, but they never leave
+    /// the device — they're synthetic handles, not real network. Excluding
+    /// them here keeps the gate from flaking when another suite running
+    /// concurrently happens to instantiate an AVURLAsset.
+    /// `URLProtocol.registerClass` is process-global, so this filter is
+    /// the only way to insulate the recorder from foreign-suite traffic
+    /// without hard-serializing the entire xctestplan.
+    private static let networkSchemes: Set<String> = ["http", "https", "ws", "wss"]
+
     override class func canInit(with request: URLRequest) -> Bool {
-        if let url = request.url {
+        if let url = request.url, let scheme = url.scheme?.lowercased(),
+            networkSchemes.contains(scheme)
+        {
             lock.lock()
             recordedURLs.append(url)
             lock.unlock()

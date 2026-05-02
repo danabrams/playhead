@@ -40,6 +40,7 @@ struct AnalysisWorkSchedulerCandidateWindowTests {
                 b.charging = true
                 return b
             }(),
+            transportStatusProvider: StubTransportStatusProvider(),
             candidateWindowCascade: cascade,
             config: PreAnalysisConfig()
         )

@@ -323,4 +323,257 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
             """
         )
     }
+
+    /// skeptical-review-cycle-6 H-Z1 regression canary: the launch
+    /// sweep loop in `runFinalPassBackfillForAllAssetsAtLaunch` must
+    /// honor cooperative cancellation BETWEEN assets. The cycle-5 H-Y1
+    /// fix tracked the detached sweep task and cancelled it from
+    /// `shutdown()`, but the cycle-6 review caught that the per-asset
+    /// catch was a generic `catch error` that swallowed
+    /// `CancellationError` rethrown by `runner.runFinalPassBackfill` —
+    /// so after `shutdown()`, the loop kept marching through every
+    /// remaining asset and re-issuing FM/ASR work on each one.
+    ///
+    /// The fix has two complementary safety nets:
+    ///   1. `Task.isCancelled` check at the top of each iteration so a
+    ///      cancellation that lands BEFORE the runner is invoked stops
+    ///      the sweep without paying the cost of any further DB or
+    ///      download lookups.
+    ///   2. `catch is CancellationError { break }` BEFORE the generic
+    ///      `catch error` arm so a cancellation surfaced THROUGH the
+    ///      runner stops the loop instead of being logged as a
+    ///      per-asset failure.
+    ///
+    /// Both arms must remain. A regression that drops either one
+    /// re-introduces the H-Z1 leak: `shutdown()` returns immediately,
+    /// but the launch sweep keeps issuing per-asset FM/ASR jobs the
+    /// user no longer needs. We assert both arms appear in the body
+    /// of `runFinalPassBackfillForAllAssetsAtLaunch` specifically (not
+    /// just anywhere in the file) so a regression that deletes the
+    /// loop's cancellation handling but leaves cancellation tokens
+    /// elsewhere in the file still trips the canary.
+    func testLaunchSweepHonorsCancellationBetweenAssets() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+
+        let signature = "static func runFinalPassBackfillForAllAssetsAtLaunch("
+        guard let body = SwiftSourceInspector.firstBody(in: source, after: signature) else {
+            XCTFail(
+                """
+                Could not locate the body of `\(signature)` in \
+                PlayheadRuntime.swift — either the function moved/renamed \
+                or its signature shape drifted. Update the canary anchor.
+                """
+            )
+            return
+        }
+
+        XCTAssertTrue(
+            body.contains("if Task.isCancelled { break }"),
+            """
+            `runFinalPassBackfillForAllAssetsAtLaunch` body no longer \
+            contains the `if Task.isCancelled { break }` check at the \
+            top of the per-asset loop. Cycle-6 H-Z1: shutdown() \
+            cancels the launch-sweep task, but without this top-of-loop \
+            check the loop keeps marching through remaining assets and \
+            issuing fresh FM/ASR work the user no longer needs. Re-add \
+            the check OR update this canary if the cancellation gate \
+            intentionally moved.
+            """
+        )
+
+        XCTAssertTrue(
+            body.contains("catch is CancellationError"),
+            """
+            `runFinalPassBackfillForAllAssetsAtLaunch` body no longer \
+            contains a `catch is CancellationError` clause. Cycle-6 \
+            H-Z1: cycle-5 made `runner.runFinalPassBackfill` cancellation- \
+            aware, but the loop's only catch was a generic `catch error` \
+            that logged and continued — silently swallowing the very \
+            cancellation that shutdown() relies on to stop the sweep. \
+            Restore the typed catch BEFORE the generic catch OR update \
+            this canary if the cancellation handling intentionally \
+            changed shape.
+            """
+        )
+
+        // Defense-in-depth: the typed catch must appear BEFORE the
+        // generic catch arm of the per-asset do/catch. We anchor on
+        // the unique log line in the generic arm rather than the
+        // bare `catch {` token, because the function body has an
+        // earlier do/catch around `analysisStore.fetchAllAssets()`
+        // whose `catch {` would otherwise be matched first and
+        // produce a false "typed catch comes after generic catch"
+        // failure.
+        if let typedRange = body.range(of: "catch is CancellationError"),
+           let genericRange = body.range(of: "log.warning(\"Run failed for") {
+            XCTAssertLessThan(
+                typedRange.lowerBound, genericRange.lowerBound,
+                """
+                `catch is CancellationError` appears AFTER the generic \
+                catch clause that logs `"Run failed for ..."` in the \
+                per-asset loop. Swift evaluates catch clauses in source \
+                order, so the typed catch is unreachable — every \
+                CancellationError is consumed by the generic arm and \
+                the loop continues. Reorder so the typed catch precedes \
+                the generic catch.
+                """
+            )
+        } else {
+            XCTFail(
+                """
+                Could not locate either `catch is CancellationError` or \
+                the per-asset generic catch's `log.warning("Run failed for …` \
+                in the body of `runFinalPassBackfillForAllAssetsAtLaunch`. \
+                Update the canary anchors if either was renamed.
+                """
+            )
+        }
+    }
+
+    /// skeptical-review-cycle-12 T-4: pin the two
+    /// `MainActor.assertIsolated()` calls inserted by cycles 9-11 inside
+    /// the bare bootstrap `Task { ... }` bodies in `PlayheadRuntime`'s
+    /// init. Both Tasks rely on `@MainActor` isolation inherited via
+    /// SE-0420 from the `@MainActor`-declared `PlayheadRuntime` class:
+    ///   • the launch-sweep installer Task (cycle-8 M1's
+    ///     `if !isShutdown { ... }` atomicity) — first MainActor.assertIsolated()
+    ///   • the playback-state observer Task (`lastForwardedContext`,
+    ///     `lastStatus`, `lastSpeed` mutated across `await` boundaries
+    ///     under single-mutator-via-suspension) — second MainActor.assertIsolated()
+    ///
+    /// A future refactor that strips inheritance (swap to `Task.detached`,
+    /// add `@Sendable` that drops actor capture, hoist the body into a
+    /// free function, or annotate the surrounding Task with a different
+    /// global actor) silently lapses the isolation contract. The runtime
+    /// assertion itself catches that on debug builds, but only if it
+    /// remains in place; this canary catches a regression that DELETES
+    /// the assertion or moves the surrounding Task body out from under
+    /// the inheritance.
+    ///
+    /// What we pin:
+    ///   1. At least two `MainActor.assertIsolated()` calls in the file.
+    ///   2. Each one appears inside a bare `Task { [...] in ... }` body
+    ///      (no `@MainActor`, no `@Sendable`, no `Task.detached`,
+    ///      no `Task<...>` type-spec) — i.e. the body actually inherits
+    ///      MainActor isolation rather than acquiring it explicitly.
+    ///
+    /// (2) is the load-bearing half — a refactor that flips
+    /// `Task { ... }` to `Task.detached { ... }` would still let the
+    /// assertion compile and trip at runtime, but ONLY because the
+    /// detached Task hops onto a non-main executor and fails the
+    /// assertion. That's the right failure mode in DEBUG, but a
+    /// stronger source-level pin guards release builds (where the
+    /// assertion is `#if DEBUG`-stripped) too.
+    func testMainActorAssertIsolatedRemainsInBootstrapTasks() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingComments(source)
+
+        let assertionRegex = try NSRegularExpression(
+            pattern: #"MainActor\s*\.\s*assertIsolated\s*\(\s*\)"#
+        )
+        let fullRange = NSRange(stripped.startIndex..., in: stripped)
+        let matches = assertionRegex.matches(in: stripped, range: fullRange)
+
+        XCTAssertGreaterThanOrEqual(
+            matches.count, 2,
+            """
+            Expected at least 2 `MainActor.assertIsolated()` calls in \
+            `PlayheadRuntime.swift` (cycle-9 / cycle-10 added one each \
+            for the launch-sweep installer Task and the playback-state \
+            observer Task). Found \(matches.count). A regression that \
+            deletes either assertion silently lapses the cycle-8 M1 \
+            atomicity claim or the single-mutator-via-suspension claim \
+            on `lastForwardedContext`/`lastStatus`/`lastSpeed`. Restore \
+            the assertion(s) OR update this canary if the isolation \
+            contract intentionally moved.
+            """
+        )
+
+        // For each assertion site, find:
+        //   • the nearest preceding bare `Task {` opener
+        //   • the nearest preceding `Task.detached` opener
+        // and require: bare opener is more recent than detached opener.
+        //
+        // skeptical-review-cycle-13 M-1: the cycle-12 implementation
+        // checked only "is there a `Task.detached` near the chosen bare
+        // opener?", which was vacuous against its stated threat model:
+        // the bare-opener regex `Task\s*\{` cannot match `Task.detached
+        // {` (the `.detached` is not whitespace), so a refactor that
+        // flips `Task { ... }` at PlayheadRuntime.swift:1156 (or :1529)
+        // to `Task.detached { ... }` makes that opener silently
+        // disappear from the bare-opener match list, `nearestOpener`
+        // falls back to a previous bare sibling (e.g. line 1142 for
+        // assertion #1), and a window check around the sibling finds
+        // no `.detached`. The test passes while the assertion is
+        // actually inside a detached body — exactly the regression we
+        // claimed to catch.
+        //
+        // The fix below scans both the bare openers and the detached
+        // openers independently, then asserts the bare opener is the
+        // more recent one. A flip-to-detached at the assertion's
+        // immediate-enclosing Task makes the detached opener jump past
+        // the bare one, tripping the assertion. The bare-Task at line
+        // 1495 (`finalPassLaunchSweepTask = Task.detached { ... }`)
+        // is currently MORE RECENT than assertion #2's enclosing
+        // bare `Task {` opener at 1529 — wait, no, 1495 < 1529, so
+        // the bare-at-1529 wins. Confirmed by inspection.
+        let taskOpenerRegex = try NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9_.])Task\s*\{"#
+        )
+        let detachedRegex = try NSRegularExpression(
+            pattern: #"Task\s*\.\s*detached"#
+        )
+
+        for (i, match) in matches.enumerated() {
+            let upToAssertion = NSRange(
+                location: 0,
+                length: match.range.location
+            )
+            let bareOpeners = taskOpenerRegex.matches(in: stripped, range: upToAssertion)
+            let detachedOpeners = detachedRegex.matches(in: stripped, range: upToAssertion)
+
+            guard let nearestBare = bareOpeners.last else {
+                XCTFail(
+                    """
+                    Could not find a bare `Task {` opener before \
+                    `MainActor.assertIsolated()` occurrence #\(i + 1) in \
+                    `PlayheadRuntime.swift`. The cycle-9/10/11 \
+                    assertions are placed inside bare bootstrap Task \
+                    bodies that inherit MainActor isolation via \
+                    SE-0420; if the surrounding shape changed (e.g. the \
+                    assertion moved to a free function or method, or \
+                    every preceding Task was converted to detached), \
+                    update this canary.
+                    """
+                )
+                continue
+            }
+
+            let nearestBareLoc = nearestBare.range.location
+            let nearestDetachedLoc = detachedOpeners.last?.range.location ?? -1
+
+            XCTAssertGreaterThan(
+                nearestBareLoc, nearestDetachedLoc,
+                """
+                `MainActor.assertIsolated()` occurrence #\(i + 1) in \
+                `PlayheadRuntime.swift` is preceded by a `Task.detached` \
+                opener that is MORE RECENT than any bare `Task {` opener \
+                — i.e. the assertion is now inside a detached Task body. \
+                Detached Tasks do NOT inherit MainActor isolation from \
+                the surrounding `@MainActor` class, so the assertion \
+                will trip on a background executor in DEBUG and (if \
+                stripped under #if DEBUG) silently let the un-isolated \
+                body run in release, dropping the cycle-8 M1 atomicity \
+                / single-mutator-via-suspension protection. Restore the \
+                bare `Task { ... }` shape OR explicitly annotate the \
+                surrounding Task body with `@MainActor` and update this \
+                canary.
+                """
+            )
+        }
+    }
 }

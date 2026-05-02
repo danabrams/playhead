@@ -76,6 +76,11 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
         }
     }
 
+    // skeptical-review-cycle-18 M-1: the formerly-private nested
+    // StubTransportStatusProvider (cycle-16 #45 root-cause stub for
+    // NWPathMonitor first-update flakiness) was promoted to
+    // PlayheadTests/Helpers/Stubs.swift.
+
     private func makeScheduler(
         store: AnalysisStore,
         audioProvider: any AnalysisAudioProviding,
@@ -100,6 +105,7 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
                 b.charging = true
                 return b
             }(),
+            transportStatusProvider: StubTransportStatusProvider(),
             config: PreAnalysisConfig()
         )
     }
@@ -286,7 +292,19 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             )
             await scheduler.startSchedulerLoop()
 
-            let entered = await pollUntil(timeout: .seconds(15)) {
+            // skeptical-review-cycle-16 #45 root-cause: the original
+            // timeout (15s) was tight enough that, when this test ran
+            // concurrently with the rest of PlayheadFastTests (~5,100
+            // tests, 742 suites), cooperative-pool jitter could starve
+            // the scheduler-loop tick that admits + dispatches the job.
+            // The 2026-05-01 cycle-16 verification reproduced the
+            // "Decode never started (startingAttempts=0)" failure with
+            // a 23s wall-clock — i.e. the poll exhausted before the
+            // first dispatch. The 60s ceiling absorbs that jitter
+            // without masking a real product regression: in isolation
+            // the same test completes in 0.147s, so a regression that
+            // genuinely stalls dispatch will still trip the timeout.
+            let entered = await pollUntil(timeout: .seconds(60)) {
                 audioStub.decodeCallCount >= 1
             }
             #expect(entered, "Decode never started (startingAttempts=\(startingAttempts))")
@@ -297,7 +315,10 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             let beforeCancel = Date().timeIntervalSince1970
             await scheduler.cancelCurrentJob(cause: .taskExpired)
 
-            let landed = await pollUntil(timeout: .seconds(10)) {
+            // Same parallel-load jitter rationale as the decode-started
+            // poll above: bumped from 10s → 60s after the cycle-16
+            // intermittent failure.
+            let landed = await pollUntil(timeout: .seconds(60)) {
                 let j = try? await store.fetchJob(byId: jobId)
                 guard let j else { return false }
                 return j.attemptCount == startingAttempts + 1

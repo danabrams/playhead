@@ -99,6 +99,7 @@ struct AnalysisWorkSchedulerBackfillRearmTests {
             capabilitiesService: capabilities,
             downloadManager: StubDownloadProvider(),
             batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider(),
             backfillScheduler: backfillScheduler
         )
         return (scheduler, store)

@@ -30,6 +30,7 @@ struct SchedulerRegressionTests {
             jobRunner: runner,
             capabilitiesService: capabilities,
             downloadManager: downloads,
+            transportStatusProvider: StubTransportStatusProvider(),
             config: config
         )
     }
@@ -696,6 +697,7 @@ struct SchedulerBugFixRegressionTests {
             jobRunner: runner,
             capabilitiesService: capabilities,
             downloadManager: downloads,
+            transportStatusProvider: StubTransportStatusProvider(),
             config: config
         )
     }

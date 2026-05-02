@@ -36,7 +36,7 @@ struct EpisodeSummariesV18MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 19)
+        #expect(try await store.schemaVersion() == 20)
         #expect(try probeTableExists(in: dir, table: "episode_summaries"))
         #expect(try probeColumnExists(in: dir, table: "episode_summaries", column: "analysisAssetId"))
         #expect(try probeColumnExists(in: dir, table: "episode_summaries", column: "summary"))
@@ -59,7 +59,7 @@ struct EpisodeSummariesV18MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let bootstrap = try AnalysisStore(directory: dir)
         try await bootstrap.migrate()
-        #expect(try await bootstrap.schemaVersion() == 19)
+        #expect(try await bootstrap.schemaVersion() == 20)
 
         // Phase 2: rewind to v17 — drop the new table + reset _meta.
         let dbURL = dir.appendingPathComponent("analysis.sqlite")
@@ -81,7 +81,7 @@ struct EpisodeSummariesV18MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 19)
+        #expect(try await store.schemaVersion() == 20)
         #expect(try probeTableExists(in: dir, table: "episode_summaries"))
     }
 
@@ -99,7 +99,7 @@ struct EpisodeSummariesV18MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 19)
+        #expect(try await store.schemaVersion() == 20)
         #expect(try probeTableExists(in: dir, table: "episode_summaries"))
     }
 

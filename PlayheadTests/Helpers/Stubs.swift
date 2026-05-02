@@ -272,3 +272,55 @@ final class StubBatteryProvider: BatteryStateProviding, @unchecked Sendable {
         (level, charging)
     }
 }
+
+// MARK: - StubTransportStatusProvider
+//
+// skeptical-review-cycle-18 M-1: a deterministic transport stub that
+// pins reachability to .wifi (and `userAllowsCellular` to true) so
+// scheduler tests cannot flake on `LiveTransportStatusProvider`'s
+// NWPathMonitor first-update latency under parallel load. Every test
+// that constructs an `AnalysisWorkScheduler` MUST pass an explicit
+// `transportStatusProvider:` argument — the source canary at
+// `AnalysisWorkSchedulerTransportStubSourceCanaryTests.swift`
+// enforces this. If a new test suite needs to vary the transport
+// axis (e.g. exercising `.unreachable` or `allowsCellular = false`),
+// initialize this stub with the appropriate values rather than
+// reaching for `LiveTransportStatusProvider()`.
+//
+// **Cycle-19 L-4 caveat — permissive defaults can mask cellular bugs:**
+// the default `(reachability: .wifi, allowsCellular: true)` is safe
+// for the vast majority of scheduler tests (they don't care about the
+// transport axis and just want admission to succeed). It is NOT safe
+// for any test that exercises a cellular-rejection branch — e.g.
+// "scheduler must defer this lane when `userAllowsCellular = false`".
+// Those tests MUST construct the stub with an EXPLICIT cellular value:
+//
+//     let stub = StubTransportStatusProvider(
+//         reachability: .cellular,
+//         allowsCellular: false   // ← required: don't lean on the default
+//     )
+//
+// If the default `true` is used by accident in a cellular test, the
+// scheduler will accept the lane and the test will still pass, even if
+// the production cellular-rejection logic is broken. Reviewer cycle-19
+// L-4 flagged this as a silent-blindness risk; this paragraph is the
+// documented mitigation. If you are writing a cellular-axis test and
+// in doubt, prefer building the stub via the parameter labels above
+// rather than relying on the defaults.
+struct StubTransportStatusProvider: TransportStatusProviding {
+    let reachability: TransportSnapshot.Reachability
+    let allowsCellular: Bool
+
+    init(
+        reachability: TransportSnapshot.Reachability = .wifi,
+        allowsCellular: Bool = true
+    ) {
+        self.reachability = reachability
+        self.allowsCellular = allowsCellular
+    }
+
+    func currentReachability() async -> TransportSnapshot.Reachability {
+        reachability
+    }
+    func userAllowsCellular() async -> Bool { allowsCellular }
+}

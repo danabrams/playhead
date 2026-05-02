@@ -233,6 +233,7 @@ struct CandidateWindowCascadeProximalReadinessSLITest {
                 b.charging = true
                 return b
             }(),
+            transportStatusProvider: StubTransportStatusProvider(),
             candidateWindowCascade: cascade,
             config: config,
             clock: clock.dateProvider

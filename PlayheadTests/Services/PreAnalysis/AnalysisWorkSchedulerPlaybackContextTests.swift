@@ -57,7 +57,8 @@ struct AnalysisWorkSchedulerPlaybackContextTests {
             jobRunner: runner,
             capabilitiesService: capabilities,
             downloadManager: StubDownloadProvider(),
-            batteryProvider: battery
+            batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider()
         )
     }
 

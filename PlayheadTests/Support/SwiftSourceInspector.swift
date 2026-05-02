@@ -205,12 +205,34 @@ enum SwiftSourceInspector {
         return out
     }
 
-    /// Returns `source` with both comments AND double-quoted string
-    /// literal **contents** replaced by spaces. The opening and
-    /// closing quote characters of each string literal are preserved
-    /// so a regex anchored on a quote boundary still matches. Newlines
-    /// inside multi-line content are preserved so line numbers in
-    /// error messages still line up.
+    /// Returns `source` with comments AND every Swift string literal's
+    /// **contents** replaced by spaces. Handles all four string-literal
+    /// forms the language defines:
+    ///   * regular: `"..."`  — escape sequences active, `\"` does NOT close
+    ///   * triple-quoted: `"""..."""`  — escape sequences active, multi-line
+    ///   * raw: `#"..."#` (and `##"..."##`, etc.) — escapes inactive,
+    ///     closer is `"` followed by exactly the opening hash count
+    ///   * raw triple-quoted: `#"""..."""#` (and multi-hash variants)
+    ///
+    /// Boundary characters (`"`, `"""`) at the start/end of each literal
+    /// are preserved in the output so regexes anchored on a quote still
+    /// match. Hash markers (`#`) are blanked. Newlines inside multi-line
+    /// content are preserved so line numbers in error messages stay
+    /// aligned.
+    ///
+    /// **Length invariant (cycle-23 L-7, cycle-25 L-3, cycle-26 M-3):**
+    /// the returned string has the same `Character` count as `source`.
+    /// Every branch in the implementation emits exactly one output
+    /// `Character` per source `Character` consumed (escape sequences emit
+    /// 2-for-2, triple-quote boundaries emit 3-for-3, etc.). Callers that
+    /// walk back into `source` using a position computed from the stripped
+    /// output (see
+    /// ``AdDetectionServiceUpdatePriorsAtomicityCanaryTests/closureBodyStripped(forExistingInTokenAt:sourceText:strippedText:)``)
+    /// rely on this. The invariant is pinned by every fixture in
+    /// `SwiftSourceInspectorStringStrippingTests` (cycle-25 L-3 added a
+    /// `XCTAssertEqual(stripped.count, source.count)` to every test case).
+    /// **Do not "optimize" any branch to emit a different number of
+    /// characters than it consumes.**
     ///
     /// Use this in source canaries whose token of interest could
     /// plausibly appear inside a string literal — e.g. a regex that
@@ -219,42 +241,75 @@ enum SwiftSourceInspector {
     /// string contents neutralises that false positive without
     /// affecting genuine code mentions of the token.
     ///
+    /// Cycle-19 M-3 motivation: the original implementation only
+    /// understood single-quoted `"..."` literals. A multi-line message
+    /// inside `"""..."""` (common for XCTAssert failure messages and
+    /// SQL fixtures in tests) would terminate the literal at the first
+    /// inner `"`, leaking subsequent text into "code" position and
+    /// producing canary false positives.
+    ///
     /// This is the stricter cousin of ``strippingComments(_:)``;
     /// callers that need to grep for tokens that should match inside
     /// string interpolations (e.g. an asset key that the codebase
     /// hardcodes via a literal) should keep using
     /// ``strippingComments(_:)``.
+    ///
+    /// Cycle-22 L-2 (Character vs codepoint assumption): callers that
+    /// align offsets between `source` and the returned `stripped`
+    /// (e.g., ``AdDetectionServiceUpdatePriorsAtomicityCanaryTests``'s
+    /// `closureBodyContainingExistingIn` helper) rely on the two
+    /// strings having identical lengths under Swift's `String.count`,
+    /// which counts extended grapheme clusters (Characters) not
+    /// codepoints or UTF-8 bytes. The implementation preserves Character
+    /// alignment for every code path EXCEPT one edge case: a `\`
+    /// followed by a multi-Character grapheme cluster (e.g., a
+    /// flag-emoji escape in a Swift `\u{...}` sequence whose result is
+    /// a multi-Character cluster). Today no such patterns exist in
+    /// any source canary input, but if a future canary inspects
+    /// content with embedded multi-Character grapheme clusters it
+    /// MUST verify Character alignment of `stripped.count == source.count`
+    /// before performing offset arithmetic via
+    /// `String.distance`/`String.index(offsetBy:)`.
     static func strippingCommentsAndStrings(_ source: String) -> String {
+        // String-literal state. `nil` when outside any literal.
+        // `hashes == 0` for non-raw (regular and triple). `triple` flags
+        // the `"""` form. The closer for a literal with `triple == true`
+        // is `"""` followed by `hashes` `#`s; for `triple == false` it is
+        // `"` followed by `hashes` `#`s.
+        struct StringState {
+            var triple: Bool
+            var hashes: Int
+            var isRaw: Bool { hashes > 0 }
+        }
         var out = String()
         out.reserveCapacity(source.count)
         var i = source.startIndex
         var inLineComment = false
         var inBlockComment = false
-        var inString = false
+        var stringState: StringState? = nil
         let endIdx = source.endIndex
+
+        // Returns the character at `offset` from `i`, or `\0` if past end.
+        func peek(_ offset: Int) -> Character {
+            guard let idx = source.index(i, offsetBy: offset, limitedBy: endIdx),
+                  idx < endIdx else { return Character("\0") }
+            return source[idx]
+        }
+
+        // Returns true if a run of exactly `count` `#` chars starts at
+        // `i + base`. Used to confirm a raw-string closer.
+        func hashRunFollows(base: Int, count: Int) -> Bool {
+            guard count > 0 else { return true }
+            for k in 0..<count where peek(base + k) != "#" { return false }
+            return true
+        }
 
         while i < endIdx {
             let c = source[i]
-            let next = source.index(after: i) < endIdx ? source[source.index(after: i)] : Character("\0")
 
             if inLineComment {
                 if c == "\n" {
                     inLineComment = false
-                    out.append(c) // preserve line breaks
-                } else {
-                    out.append(" ")
-                }
-                i = source.index(after: i)
-                continue
-            }
-            if inBlockComment {
-                if c == "*" && next == "/" {
-                    inBlockComment = false
-                    out.append("  ")
-                    i = source.index(i, offsetBy: 2)
-                    continue
-                }
-                if c == "\n" {
                     out.append(c)
                 } else {
                     out.append(" ")
@@ -262,31 +317,67 @@ enum SwiftSourceInspector {
                 i = source.index(after: i)
                 continue
             }
-            if inString {
-                // Preserve the closing quote so the boundary survives;
-                // blank everything else inside the literal so no token
-                // inside the string contents can match a regex.
-                if c == "\\" && source.index(after: i) < endIdx {
-                    let escaped = source[source.index(after: i)]
-                    // Preserve newlines inside the literal so line
-                    // numbers stay aligned, blank everything else.
+            if inBlockComment {
+                if c == "*" && peek(1) == "/" {
+                    inBlockComment = false
+                    out.append("  ")
+                    i = source.index(i, offsetBy: 2)
+                    continue
+                }
+                out.append(c == "\n" ? "\n" : " ")
+                i = source.index(after: i)
+                continue
+            }
+            if let st = stringState {
+                // Inside a string literal — blank contents until closer.
+                // Backslash escapes ONLY active in non-raw literals.
+                // 2-for-2 length invariant: a backslash escape (`\X`)
+                // consumes 2 source Characters and emits 2 output
+                // Characters — `" "` for the backslash plus a blank for
+                // `X` (or `\n` if `X` is a literal newline, to preserve
+                // line alignment for error-message line numbers). This
+                // matches the function's overall length invariant — see
+                // the doc-comment at the function declaration.
+                if !st.isRaw && c == "\\" && source.index(after: i) < endIdx {
+                    let escaped = peek(1)
                     out.append(" ")
                     out.append(escaped == "\n" ? "\n" : " ")
                     i = source.index(i, offsetBy: 2)
                     continue
                 }
-                if c == "\"" {
-                    inString = false
-                    out.append(c) // preserve closing quote
-                } else if c == "\n" {
-                    out.append(c) // preserve raw newlines
+                if st.triple {
+                    // Closer: `"""` + hashes `#`s.
+                    if c == "\"" && peek(1) == "\"" && peek(2) == "\""
+                        && hashRunFollows(base: 3, count: st.hashes) {
+                        stringState = nil
+                        out.append("\"\"\"")
+                        i = source.index(i, offsetBy: 3)
+                        for _ in 0..<st.hashes {
+                            out.append(" ")
+                            i = source.index(after: i)
+                        }
+                        continue
+                    }
                 } else {
-                    out.append(" ")
+                    // Closer: `"` + hashes `#`s.
+                    if c == "\"" && hashRunFollows(base: 1, count: st.hashes) {
+                        stringState = nil
+                        out.append("\"")
+                        i = source.index(after: i)
+                        for _ in 0..<st.hashes {
+                            out.append(" ")
+                            i = source.index(after: i)
+                        }
+                        continue
+                    }
                 }
+                out.append(c == "\n" ? "\n" : " ")
                 i = source.index(after: i)
                 continue
             }
 
+            // Not inside any string / comment. Detect what's next.
+            let next = peek(1)
             if c == "/" && next == "/" {
                 inLineComment = true
                 out.append("  ")
@@ -299,10 +390,48 @@ enum SwiftSourceInspector {
                 i = source.index(i, offsetBy: 2)
                 continue
             }
-            if c == "\"" {
-                inString = true
-                out.append(c) // preserve opening quote
+            if c == "#" {
+                // Count consecutive `#` characters; if they're followed
+                // by `"` or `"""`, this is a raw string literal opener.
+                // Otherwise (e.g. `#if`, `#available`, `#filePath`) the
+                // `#` is just a regular character — emit it and advance.
+                var hashes = 0
+                while peek(hashes) == "#" {
+                    hashes += 1
+                    if hashes > 256 { break } // safety: unreasonable
+                }
+                let afterHashes = peek(hashes)
+                if afterHashes == "\"" {
+                    let isTriple = (peek(hashes + 1) == "\"" && peek(hashes + 2) == "\"")
+                    for _ in 0..<hashes { out.append(" ") }
+                    if isTriple {
+                        out.append("\"\"\"")
+                        i = source.index(i, offsetBy: hashes + 3)
+                        stringState = StringState(triple: true, hashes: hashes)
+                    } else {
+                        out.append("\"")
+                        i = source.index(i, offsetBy: hashes + 1)
+                        stringState = StringState(triple: false, hashes: hashes)
+                    }
+                    continue
+                }
+                // Not a raw-string opener; emit one `#` and advance.
+                // Subsequent `#`s in the same run will visit this branch
+                // again and append themselves identically.
+                out.append(c)
                 i = source.index(after: i)
+                continue
+            }
+            if c == "\"" {
+                if peek(1) == "\"" && peek(2) == "\"" {
+                    out.append("\"\"\"")
+                    i = source.index(i, offsetBy: 3)
+                    stringState = StringState(triple: true, hashes: 0)
+                    continue
+                }
+                out.append("\"")
+                i = source.index(after: i)
+                stringState = StringState(triple: false, hashes: 0)
                 continue
             }
 

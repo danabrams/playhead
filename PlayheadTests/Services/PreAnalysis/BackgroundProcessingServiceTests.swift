@@ -217,6 +217,23 @@ struct BackfillTaskHandlerTests {
 /// Wait for a `StubContinuedProcessingTask`'s `completedSuccess` flag
 /// to flip, with a deadline. Used by playhead-44h1 handler tests that
 /// drive the hand-off through its async work task.
+///
+/// **Cycle-22 L-4 known intermittent flake:**
+/// `expirationHandlerTriggersPauseAtNextCheckpoint` (below) has been
+/// observed to fail under heavy parallel load (full PlayheadFastTests
+/// run with 5750+ tests) with `task.completedSuccess → nil` after the
+/// 10s budget. The test passes deterministically in isolation in
+/// ~0.014s. The likely root cause is simulator-CPU starvation pushing
+/// the expiration handler's `Task` past the 10ms polling budget — not
+/// a behavioral change in the production paths the test exercises
+/// (`BackgroundFeedRefreshService` / `BackgroundProcessingService` /
+/// `AnalysisCoordinator`).
+///
+/// If this flake reappears: re-run the test in isolation with
+/// `-only-testing:'PlayheadTests/ContinuedProcessingHandlerTests/expirationHandlerTriggersPauseAtNextCheckpoint'`.
+/// A green isolated run confirms it's still the parallel-load flake;
+/// a red isolated run is a real regression that warrants bisecting
+/// recent commits to those production paths.
 private func waitForCompletion(
     of task: StubContinuedProcessingTask,
     timeout: Duration = .seconds(10)
@@ -504,7 +521,8 @@ struct PreAnalysisRecoveryRaceTests {
             store: store,
             jobRunner: runner,
             capabilitiesService: StubCapabilitiesProvider(),
-            downloadManager: StubDownloadProvider()
+            downloadManager: StubDownloadProvider(),
+            transportStatusProvider: StubTransportStatusProvider()
         )
     }
 
