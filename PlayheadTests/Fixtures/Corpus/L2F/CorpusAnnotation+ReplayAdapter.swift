@@ -19,19 +19,94 @@ import Foundation
 
 extension CorpusAnnotation {
 
-    /// Map an `AdType` from this corpus into the `GroundTruthAdSegment.AdSegmentType`
-    /// the existing simulator expects. The corpus is richer than the
-    /// simulator's pre-existing enum, so we map best-effort:
-    ///   - `host_read`, `blended_host_read`, `produced_segment`, `promo`
-    ///     all become `midRoll` (positional) by default.
-    ///   - `dynamic_insertion` stays as `dynamicInsertion` so
-    ///     simulator-side variant tests can detect it.
-    private func mappedAdType() -> GroundTruthAdSegment.AdSegmentType {
-        // Position-aware mapping requires the window's location relative
-        // to the episode timeline; until the upstream simulator gains a
-        // dedicated category for this corpus we use `midRoll` as the
-        // closest neutral value (the existing enum has no "unspecified").
-        .midRoll
+    // MARK: - Position-derived AdSegmentType thresholds
+    //
+    // The L2F corpus carries no explicit pre/mid/post-roll label — the
+    // window's position on the episode timeline is the only signal we
+    // have. We classify an ad window by where it sits relative to the
+    // episode boundaries:
+    //
+    //   * `start_seconds < threshold`                       → .preRoll
+    //   * `end_seconds   > duration_seconds - threshold`    → .postRoll
+    //   * otherwise                                         → .midRoll
+    //
+    // The threshold uses an OR-style rule: the *larger* of an absolute
+    // floor (`absoluteThresholdSeconds`) and a duration-relative ratio
+    // (`relativeThresholdFraction`). This means an ad qualifies as
+    // pre/post-roll if EITHER condition is satisfied — the more
+    // permissive interpretation. Concretely:
+    //
+    //     effective_threshold = max(30 s, 0.01 * duration_seconds)
+    //
+    // Rationale for the constants:
+    //   - 30 s absolute floor: typical podcast pre-rolls run 15-30 s
+    //     (e.g. iHeart, Wondery, Spotify host-reads), so a 30 s ad
+    //     positioned at t=0 is unambiguously pre-roll. Anything later
+    //     is more likely a programmed mid-roll break.
+    //   - 1 % duration-relative arm: a 60-minute show has a 36 s
+    //     pre-roll budget, a 3-hour show has 108 s — proportional to
+    //     the show's length so very long episodes don't accidentally
+    //     classify a 45 s post-intro segment as mid-roll.
+    //   - We take the LARGER of the two so a 30 s ad in a 60-minute
+    //     episode (30 s < 36 s) classifies as .preRoll, matching
+    //     intuition.
+    //
+    // Off-by-one: comparisons are STRICT (`<` and `>`). An ad
+    // starting at exactly the threshold boundary is treated as
+    // mid-roll, on the theory that the boundary case is ambiguous and
+    // mid-roll is the safer default (the corpus's mid-roll counts are
+    // larger and a misclassification there is less analytically
+    // disruptive).
+    //
+    // Precedence when both arms match (extremely short episodes
+    // where pre + post > duration, or an ad that spans the whole
+    // episode): pre-roll wins. This is deterministic and keeps the
+    // classification stable as duration shrinks past the threshold
+    // sum; the alternative (post-roll wins) would cause a 30 s
+    // episode-spanning ad to flip from pre-roll to post-roll once
+    // the episode crosses 60 s, which is harder to reason about.
+
+    /// Absolute threshold (in seconds) that classifies an ad as
+    /// pre-roll if it starts before this point — or as post-roll if it
+    /// ends after `duration - this`. See the file-level comment for
+    /// the rationale behind 30 seconds.
+    static let absoluteThresholdSeconds: Double = 30.0
+
+    /// Duration-relative arm of the threshold rule. 1 % of the
+    /// episode duration; combined with `absoluteThresholdSeconds` via
+    /// `max(...)`.
+    static let relativeThresholdFraction: Double = 0.01
+
+    /// Effective pre/post-roll boundary threshold for this annotation,
+    /// in seconds. The `max(absolute, relative)` form implements the
+    /// "either condition" semantics described in the file header.
+    /// Used symmetrically: an ad qualifies as pre-roll if
+    /// `start_seconds` is below this value, or as post-roll if
+    /// `end_seconds` exceeds `duration_seconds - this`.
+    var rollBoundaryThresholdSeconds: Double {
+        max(Self.absoluteThresholdSeconds, Self.relativeThresholdFraction * durationSeconds)
+    }
+
+    /// Map an ad window to the simulator's `AdSegmentType` based on
+    /// where it sits on the episode timeline. See the file header for
+    /// the threshold derivation, off-by-one decision, and tiny-episode
+    /// precedence rule.
+    ///
+    /// Note: this intentionally ignores the corpus `AdType` enum
+    /// (`hostRead`, `dynamicInsertion`, etc.) — that's an orthogonal
+    /// axis (insertion style) which is captured separately via
+    /// `DeliveryStyle`. `AdSegmentType` here describes timeline
+    /// position only.
+    private func mappedAdType(for window: AdWindow) -> GroundTruthAdSegment.AdSegmentType {
+        let threshold = rollBoundaryThresholdSeconds
+        let isPreRoll = window.startSeconds < threshold
+        let isPostRoll = window.endSeconds > durationSeconds - threshold
+        // Pre-roll wins when both arms match (e.g. tiny episodes where
+        // the threshold sum exceeds duration, or an ad that spans the
+        // full episode).
+        if isPreRoll { return .preRoll }
+        if isPostRoll { return .postRoll }
+        return .midRoll
     }
 
     /// Map an `AdType` to the simulator's `DeliveryStyle`.
@@ -48,7 +123,8 @@ extension CorpusAnnotation {
     }
 
     /// Convert this annotation's `ad_windows` into the simulator's
-    /// `GroundTruthAdSegment` array.
+    /// `GroundTruthAdSegment` array. Each window's `AdSegmentType` is
+    /// derived from its timeline position (see `mappedAdType(for:)`).
     func groundTruthSegments() -> [GroundTruthAdSegment] {
         adWindows.map { w in
             GroundTruthAdSegment(
@@ -56,7 +132,7 @@ extension CorpusAnnotation {
                 endTime: w.endSeconds,
                 advertiser: w.advertiser,
                 product: w.product,
-                adType: mappedAdType(),
+                adType: mappedAdType(for: w),
                 deliveryStyle: Self.mapDeliveryStyle(w.adType)
             )
         }
