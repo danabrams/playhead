@@ -274,6 +274,28 @@ final class PlayheadRuntime {
     /// drift on real devices when SwiftUI tears down the runtime mid-sweep.
     @ObservationIgnored
     private var finalPassLaunchSweepTask: Task<Void, Never>?
+    /// playhead-l8dz: in-process recovery observer that re-fires the
+    /// final-pass launch sweep when device conditions transition from
+    /// "throttled" to "runnable" (thermalState=.nominal && charging && !LPM).
+    /// Without this, deferred `final_pass_jobs` only retry on the next cold
+    /// launch — a phone that throttles once mid-session and recovers can
+    /// sit on a queue of `deferReason='thermalThrottled'` rows for hours.
+    @ObservationIgnored
+    private let finalPassThermalRecoveryObserver: FinalPassThermalRecoveryObserver?
+    @ObservationIgnored
+    private var finalPassRecoveryObserverStartupTask: Task<Void, Never>?
+    /// playhead-l8dz M1 (cycle 1 review): shared in-flight flag between
+    /// the cold-launch detached sweep at `start()` and the recovery
+    /// observer's `kickSweep` closure. Both call paths invoke
+    /// `runFinalPassBackfillForAllAssetsAtLaunch` over the same asset
+    /// set; without this flag a thermal recovery transition that lands
+    /// while the launch sweep is still mid-drain would dispatch a second
+    /// concurrent sweep, double-booking transcribe slots and racing on
+    /// the same `final_pass_jobs` rows. Each caller `tryAcquire()`s
+    /// before dispatching and `release()`s in `defer`. Held nil on
+    /// preview runtimes (no sweeps run there).
+    @ObservationIgnored
+    private let finalPassSweepInFlightFlag: FinalPassSweepInFlightFlag?
     private var isShutdown = false
 
     /// True when an episode is actively loaded for playback.
@@ -1014,6 +1036,68 @@ final class PlayheadRuntime {
             self.finalPassRetranscriptionRunner = nil
         }
 
+        // playhead-l8dz: construct the in-process recovery observer that
+        // re-fires the launch-sweep when device conditions transition from
+        // throttled → runnable. The kickSweep closure mirrors the launch
+        // sweep at start() so the same set of assets gets revisited under
+        // the watermark. Skipped on preview runtimes (no runner, no point).
+        if !isPreviewRuntime, let runnerForRecovery = finalPassRetranscriptionRunner {
+            let storeForRecovery = analysisStore
+            let downloadsForRecovery = downloadManager
+            let resolverBoxForRecovery = episodePodcastIdResolverBox
+            let batchResolverBoxForRecovery = episodePodcastIdBatchResolverBox
+            // H1 (cycle 1 review): pass the SAME fresh-probe closures the
+            // runner reads from so the observer's runnable check matches
+            // `FinalPassRetranscriptionRunner.currentDeferReason()` exactly.
+            // Without this, `CapabilitySnapshot.isCharging` (only updated
+            // on `batteryStateDidChangeNotification`) can lag a fresh
+            // `BatteryStateProviding` read by a few ms — the observer would
+            // fire and the runner would refuse, churning deferReason stamps.
+            let capabilitiesForRecovery = capabilitiesService
+            let batteryForRecovery = batteryProvider
+            // M1 (cycle 1 review): shared in-flight flag with the launch
+            // sweep dispatch at `start()`. Captured by the kickSweep
+            // closure so the observer-driven sweep skips when the launch
+            // sweep is still draining the same asset set.
+            let sweepFlag = FinalPassSweepInFlightFlag()
+            self.finalPassSweepInFlightFlag = sweepFlag
+            self.finalPassThermalRecoveryObserver = FinalPassThermalRecoveryObserver(
+                capabilities: capabilitiesService,
+                capabilitySnapshotProvider: { await capabilitiesForRecovery.currentSnapshot },
+                chargeStateProvider: { await batteryForRecovery.currentBatteryState().isCharging },
+                kickSweep: { [runnerForRecovery, storeForRecovery, downloadsForRecovery, resolverBoxForRecovery, batchResolverBoxForRecovery, sweepFlag] in
+                    // M1: skip if launch sweep (or a previous recovery
+                    // kick) still draining. The observer's own
+                    // `sweepTask != nil` guard protects against the
+                    // observer overlapping itself, but cannot see the
+                    // launch sweep started by `init`.
+                    guard sweepFlag.tryAcquire() else { return }
+                    defer { sweepFlag.release() }
+                    let batchResolver = await Self.awaitEpisodePodcastIdBatchResolver(
+                        box: batchResolverBoxForRecovery,
+                        timeoutSec: 2.0
+                    )
+                    let perEpisodeResolver = batchResolver == nil
+                        ? await Self.awaitEpisodePodcastIdResolver(
+                            box: resolverBoxForRecovery,
+                            timeoutSec: 0.5
+                        )
+                        : nil
+                    if Task.isCancelled { return }
+                    _ = await Self.runFinalPassBackfillForAllAssetsAtLaunch(
+                        runner: runnerForRecovery,
+                        analysisStore: storeForRecovery,
+                        downloadManager: downloadsForRecovery,
+                        podcastIdResolver: perEpisodeResolver,
+                        podcastIdBatchResolver: batchResolver
+                    )
+                }
+            )
+        } else {
+            self.finalPassThermalRecoveryObserver = nil
+            self.finalPassSweepInFlightFlag = nil
+        }
+
         // bd-3bz (Phase 4): construct the shadow-retry observer once all
         // dependencies (capabilitiesService, analysisStore, adDetectionService)
         // are initialized. The observer is skipped in preview runtimes — the
@@ -1358,6 +1442,13 @@ final class PlayheadRuntime {
             if let shadowRetryObserver {
                 await self.startShadowRetryObserverIfNeeded(observer: shadowRetryObserver)
             }
+            // playhead-l8dz: start the recovery observer alongside the
+            // shadow-retry observer. Same store-migrated precondition
+            // applies — kickSweep eventually calls into AnalysisStore for
+            // the full asset list.
+            if let finalPassThermalRecoveryObserver {
+                await self.startFinalPassRecoveryObserverIfNeeded(observer: finalPassThermalRecoveryObserver)
+            }
 
             // playhead-8u3i: pre-analysis service injection moved to the top
             // of this Task (above the migrate chain) to fix the cold-launch
@@ -1492,7 +1583,19 @@ final class PlayheadRuntime {
                 // no suspension point between `if !isShutdown` and the
                 // assignment. If shutdown already ran, skip the install.
                 if !isShutdown {
-                    finalPassLaunchSweepTask = Task.detached { [analysisStore, downloadManager, finalPassRetranscriptionRunner, episodePodcastIdBatchResolverBox, episodePodcastIdResolverBox] in
+                    let sweepFlagForLaunch = finalPassSweepInFlightFlag
+                    finalPassLaunchSweepTask = Task.detached { [analysisStore, downloadManager, finalPassRetranscriptionRunner, episodePodcastIdBatchResolverBox, episodePodcastIdResolverBox, sweepFlagForLaunch] in
+                        // playhead-l8dz M1 (cycle 1 review): acquire the
+                        // shared in-flight flag so the recovery observer's
+                        // kickSweep skips overlapping the launch sweep.
+                        // The flag is nil only on preview runtimes (where
+                        // this branch is also skipped via
+                        // `finalPassRetranscriptionRunner == nil`); on
+                        // production runtimes the launch sweep is the
+                        // first acquirer at startup and always wins.
+                        let acquired = sweepFlagForLaunch?.tryAcquire() ?? true
+                        defer { if acquired { sweepFlagForLaunch?.release() } }
+                        guard acquired else { return }
                         let batchResolver = await Self.awaitEpisodePodcastIdBatchResolver(
                             box: episodePodcastIdBatchResolverBox,
                             timeoutSec: 2.0
@@ -1947,13 +2050,33 @@ final class PlayheadRuntime {
         // further work is issued.
         audioCacheTask?.cancel()
         audioCacheTask = nil
+        // playhead-l8dz: cancel the recovery observer's startup task and
+        // stop the observer itself. Mirrors the shadowRetryObserver
+        // teardown above so the loop task is awaited to completion before
+        // shutdown returns.
+        finalPassRecoveryObserverStartupTask?.cancel()
+        finalPassRecoveryObserverStartupTask = nil
         await shadowRetryObserver?.stop()
+        await finalPassThermalRecoveryObserver?.stop()
     }
 
     @MainActor
     private func startShadowRetryObserverIfNeeded(observer: ShadowRetryObserver) {
         guard !isShutdown, shadowRetryObserverStartupTask == nil else { return }
         shadowRetryObserverStartupTask = Task { [observer] in
+            guard !Task.isCancelled else { return }
+            await observer.start()
+        }
+    }
+
+    /// playhead-l8dz: mirrors `startShadowRetryObserverIfNeeded` for the
+    /// final-pass recovery observer. The startup task is held so
+    /// `shutdown()` can cancel it before the observer's loop has even
+    /// started.
+    @MainActor
+    private func startFinalPassRecoveryObserverIfNeeded(observer: FinalPassThermalRecoveryObserver) {
+        guard !isShutdown, finalPassRecoveryObserverStartupTask == nil else { return }
+        finalPassRecoveryObserverStartupTask = Task { [observer] in
             guard !Task.isCancelled else { return }
             await observer.start()
         }
