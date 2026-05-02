@@ -719,15 +719,18 @@ actor SkipOrchestrator {
             //     `buildFusionAdWindow`'s `policyAction` switch — so
             //     a fresh hot-path window overlapping that row will
             //     inherit the fusion stamp on the hot-path push.
-            // The decode here pins the markOnly branch only; it does
-            // NOT validate that the persisted value is a
-            // `SkipEligibilityGate` case, and is NOT a guard against
-            // fusion-path values like `.blockedByPolicy` reaching the
-            // standard skip path. The asymmetry is therefore
-            // caller-relevant for ALL THREE callers; the contrast
-            // with `receiveAdDecisionResults` (which hard-filters to
-            // `eligibilityGate == .eligible`) is tracked in
-            // playhead-bq70.
+            // The decode here is the producer-aware first half of the
+            // guard pair: this branch handles `.markOnly` (the live
+            // precision-gate value that round-trips as a known case)
+            // by routing to the suggest tier. The companion fusion-
+            // blocked-gate guard immediately below — added in
+            // playhead-bq70 — restores symmetry with
+            // `receiveAdDecisionResults` (which hard-filters to
+            // `eligibilityGate == .eligible`) by dropping all other
+            // recognised non-eligible cases before they reach
+            // `evaluateAndPush`. nil / unknown-raw-value still falls
+            // through to the standard managed path (the non-fusion
+            // producer contract).
             let decodedGate = adWindow.eligibilityGate.flatMap { SkipEligibilityGate(rawValue: $0) }
             if decodedGate == .markOnly {
                 logger.debug(
@@ -739,6 +742,38 @@ actor SkipOrchestrator {
                     suggestWindows[adWindow.id] = adWindow
                     emitSuggestBanner(for: adWindow)
                 }
+                continue
+            }
+
+            // playhead-bq70: symmetric blocked-gate guard. `receiveAdDecisionResults`
+            // hard-filters its inputs to `eligibilityGate == .eligible`; this entry
+            // point must honor the same precision contract for fusion-stamped rows
+            // surfaced via the AdWindow path. The fusion stamps that originate in
+            // `AdDetectionService.runBackfill` via `buildFusionAdWindow` write the
+            // full `SkipEligibilityGate.rawValue` space — including the blocked
+            // cases (`.blockedByEvidenceQuorum`, `.blockedByPolicy`,
+            // `.blockedByUserCorrection`, `.cappedByFMSuppression`). These rows
+            // surface to all three `receiveAdWindows` callers (cross-launch
+            // preload, hot-path post-classify push, final-pass backfill push) —
+            // see the producer-note block above. Without this guard a
+            // `policyAction == .autoSkipEligible` row that fusion subsequently
+            // demoted via `eligibilityGate != .eligible` (persisted as
+            // `decisionState == .candidate`) would silently re-enter the
+            // auto-skip path on any of the three callers, violating the
+            // precision contract.
+            //
+            // Semantics chosen to match `receiveAdDecisionResults` exactly:
+            // anything that decodes to a recognised `SkipEligibilityGate` case
+            // OTHER than `.eligible` (the markOnly branch already returned
+            // above) is dropped here. nil / unknown-future-raw-value still
+            // flows through to the standard managed path — this preserves the
+            // non-fusion producer contract (the live precision-gate label
+            // emits `"autoSkip"` and `nil`, both of which decode to nil and
+            // are NOT fusion stamps). See playhead-bq70 for the cycle history.
+            if let decoded = decodedGate, decoded != .eligible {
+                logger.debug(
+                    "AdWindow \(adWindow.id, privacy: .public) eligibilityGate=\(decoded.rawValue, privacy: .public) — blocked, not adding to active windows"
+                )
                 continue
             }
 
