@@ -1112,11 +1112,15 @@ struct SkipOrchestratorSuggestTierTests {
     //
     // Cycle-3 L-1: parameterized over the non-`.markOnly` raw-value
     // space the L3 decode is supposed to handle. The fusion-path
-    // `SkipEligibilityGate` cases (`.blockedByPolicy` etc.) are
-    // deliberately NOT included here — the asymmetry between
-    // `receiveAdWindows` and `receiveAdDecisionResults` for those values
-    // is tracked in playhead-bq70 and pinning their current fall-through
-    // behavior would be pinning the bug.
+    // blocked `SkipEligibilityGate` cases (`.blockedByPolicy` etc.) are
+    // deliberately NOT included here — the symmetric blocked-gate guard
+    // in `receiveAdWindows` (playhead-bq70) drops them BEFORE the
+    // standard managed path, so they are exercised by the dedicated
+    // blocked-gate suite (`SkipOrchestratorBlockedGateGuardTests`)
+    // rather than this fall-through suite. The values here all decode
+    // to nil (nil-stamp, "" stamp, "autoSkip", unknown future label) or
+    // to `.eligible` (the canonical eligible enum case), and must
+    // therefore continue to flow through to the standard managed path.
     //
     // Cycle-4 L-1: `"eligible"` (the legitimate
     // `SkipEligibilityGate.eligible.rawValue`) is included as the
