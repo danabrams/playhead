@@ -172,6 +172,18 @@ struct AdDetectionServiceListenRewindTraitJSONTests {
             window.decisionState == AdDecisionState.reverted.rawValue,
             "AdWindow.decisionState should flip to 'reverted', got \(window.decisionState)"
         )
+
+        // C26 L-2 paired-with-happy-path assertion: the missing-profile
+        // counter MUST stay at 0 when the profile exists. Without this
+        // assertion a future regression that inverts the increment
+        // condition (incrementing on every call instead of only on
+        // missing-profile) would still pass `recordListenRewindMissingProfileNoOps`
+        // (which only checks `== 1`).
+        let missingCount = await service.missingProfileListenRewindCount
+        #expect(
+            missingCount == 0,
+            "missingProfileListenRewindCount must stay at 0 on the with-profile happy path; got \(missingCount)"
+        )
     }
 
     @Test("recordListenRewind no-ops gracefully when profile is missing")
@@ -202,6 +214,109 @@ struct AdDetectionServiceListenRewindTraitJSONTests {
         #expect(
             window.decisionState == AdDecisionState.reverted.rawValue,
             "Window decisionState must still flip to 'reverted' even when profile is missing, got \(window.decisionState)"
+        )
+
+        // C26 L-2: telemetry counter must increment on the missing-profile
+        // branch. Without this assertion the counter could regress to a
+        // dead variable and the test would still pass on the log line
+        // alone (which is harder to observe in production).
+        let missingCount = await service.missingProfileListenRewindCount
+        #expect(
+            missingCount == 1,
+            "missingProfileListenRewindCount must increment exactly once when recordListenRewind hits the no-profile branch, got \(missingCount)"
+        )
+    }
+
+    @Test("recordListenRewind missing-profile counter monotonically increments across multiple calls")
+    func recordListenRewindMissingProfileCounterIsMonotonic() async throws {
+        // C26 L-2 monotonicity contract: the counter docstring claims
+        // "monotonic counter incremented every time recordListenRewind
+        // reaches the updateProfileIfExists == nil branch". A test that
+        // calls the path twice and asserts `== 2` pins that, distinct
+        // from the single-call test which only proves `>= 1`.
+        let store = try await makeTestStore()
+        let podcastId = "podcast-monotonic-listen-rewind"
+        let assetId = "asset-monotonic-listen-rewind"
+        let windowIdA = "window-monotonic-listen-rewind-a"
+        let windowIdB = "window-monotonic-listen-rewind-b"
+
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertAdWindow(makeAdWindow(id: windowIdA, assetId: assetId))
+        try await store.insertAdWindow(makeAdWindow(id: windowIdB, assetId: assetId))
+
+        let service = makeService(store: store)
+        try await service.recordListenRewind(windowId: windowIdA, podcastId: podcastId)
+        try await service.recordListenRewind(windowId: windowIdB, podcastId: podcastId)
+
+        let missingCount = await service.missingProfileListenRewindCount
+        #expect(
+            missingCount == 2,
+            "missingProfileListenRewindCount must increment monotonically per missing-profile call; got \(missingCount) after 2 calls"
+        )
+    }
+
+    @Test("recordListenRewind missing-profile counter only increments on missing branch — interleaved happy/missing calls")
+    func recordListenRewindMissingProfileCounterIsBranchScoped() async throws {
+        // Cycle-3 L-3: pin that the counter is incremented ONLY on the
+        // missing-profile branch and is NOT touched by the happy path.
+        // The single-call missing test proves `>= 1` on miss, the
+        // monotonic test proves `== 2` on two misses, and the happy-path
+        // == 0 assertion proves "never increments without a miss" — but
+        // none of those interleave the branches in a single service
+        // instance. A regression that increments on EVERY call (or that
+        // accidentally resets on a happy-path call) would still pass
+        // each of those tests in isolation.
+        //
+        // This test runs miss → hit → miss → hit (alternating) on the
+        // same `AdDetectionService` and asserts the counter equals
+        // exactly the number of misses (2), proving:
+        //   1. the happy path does not increment, AND
+        //   2. the happy path does not reset what the miss path
+        //      previously incremented.
+        let store = try await makeTestStore()
+        let missingPodcastId = "podcast-interleaved-missing"
+        let presentPodcastId = "podcast-interleaved-present"
+        let assetId = "asset-interleaved-listen-rewind"
+        let missWindowA = "window-interleaved-miss-a"
+        let hitWindowA  = "window-interleaved-hit-a"
+        let missWindowB = "window-interleaved-miss-b"
+        let hitWindowB  = "window-interleaved-hit-b"
+
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertAdWindow(makeAdWindow(id: missWindowA, assetId: assetId))
+        try await store.insertAdWindow(makeAdWindow(id: hitWindowA,  assetId: assetId))
+        try await store.insertAdWindow(makeAdWindow(id: missWindowB, assetId: assetId))
+        try await store.insertAdWindow(makeAdWindow(id: hitWindowB,  assetId: assetId))
+
+        // Seed a profile under `presentPodcastId` so its calls hit the
+        // happy path. `missingPodcastId` has NO profile so its calls hit
+        // the missing branch.
+        let seed = PodcastProfile(
+            podcastId: presentPodcastId,
+            sponsorLexicon: nil,
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 0.5,
+            observationCount: 5,
+            mode: SkipMode.auto.rawValue,
+            recentFalseSkipSignals: 0,
+            traitProfileJSON: nil,
+            title: nil
+        )
+        try await store.upsertProfile(seed)
+
+        let service = makeService(store: store)
+        try await service.recordListenRewind(windowId: missWindowA, podcastId: missingPodcastId) // +1
+        try await service.recordListenRewind(windowId: hitWindowA,  podcastId: presentPodcastId) // +0
+        try await service.recordListenRewind(windowId: missWindowB, podcastId: missingPodcastId) // +1
+        try await service.recordListenRewind(windowId: hitWindowB,  podcastId: presentPodcastId) // +0
+
+        let count = await service.missingProfileListenRewindCount
+        #expect(
+            count == 2,
+            "missingProfileListenRewindCount must equal the number of missing-profile calls (2) and be untouched by happy-path calls; got \(count)"
         )
     }
 }

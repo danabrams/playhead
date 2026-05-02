@@ -29,8 +29,14 @@
 //                          "possible ad" in the UI; NEVER auto-skipped.
 //   3. autoSkipEligible  — score ≥ `autoSkipThreshold` AND duration is
 //                          plausible AND ≥1 safety signal fires. Persisted
-//                          as AdWindow with `eligibilityGate = "eligible"`.
+//                          as AdWindow with `eligibilityGate = "autoSkip"`.
 //                          Eligible for auto-skip via the orchestrator.
+//                          (Note: `"autoSkip"` is the literal raw value
+//                          stamped by `AdDetectionService.precisionGateLabel`;
+//                          it is NOT a `SkipEligibilityGate` enum case. The
+//                          orchestrator's `receiveAdWindows` decode treats
+//                          it as a non-`.markOnly` value, falling through
+//                          to the standard skip path.)
 //
 // Scope guardrails
 // ----------------
@@ -119,7 +125,9 @@ enum AutoSkipClassification: Sendable, Equatable {
 
     /// Score ≥ `autoSkipThreshold`, duration plausible, and ≥1 safety
     /// signal fired. Caller persists an AdWindow with
-    /// `eligibilityGate = "eligible"`; the orchestrator may auto-skip.
+    /// `eligibilityGate = "autoSkip"` (the literal raw value emitted by
+    /// `AdDetectionService.precisionGateLabel`, NOT a
+    /// `SkipEligibilityGate` enum case); the orchestrator may auto-skip.
     case autoSkipEligible(firedSignals: Set<SafetySignal>)
 }
 

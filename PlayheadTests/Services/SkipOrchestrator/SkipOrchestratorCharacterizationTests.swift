@@ -1099,6 +1099,120 @@ struct SkipOrchestratorSuggestTierTests {
             "markOnly window must not produce applied/confirmed decisions; got \(appliedOrConfirmed)")
     }
 
+    // C27 cycle-2/3 missing test: positive control for the L3 fix in
+    // `SkipOrchestrator.receiveAdWindows`. The fix decodes
+    // `AdWindow.eligibilityGate` through `SkipEligibilityGate(rawValue:)`
+    // and routes only `.markOnly` to the suggest tier. Every other value
+    // (nil, empty string, the producer-specific "autoSkip" literal, and
+    // unknown raw values) decodes to a non-`.markOnly` result and must
+    // fall through to the standard managed-window path. A future
+    // regression that stringly-treats one of these as a suggest-tier
+    // marker would silently drop high-confidence ads out of the
+    // auto-skip path.
+    //
+    // Cycle-3 L-1: parameterized over the non-`.markOnly` raw-value
+    // space the L3 decode is supposed to handle. The fusion-path
+    // `SkipEligibilityGate` cases (`.blockedByPolicy` etc.) are
+    // deliberately NOT included here — the asymmetry between
+    // `receiveAdWindows` and `receiveAdDecisionResults` for those values
+    // is tracked in playhead-bq70 and pinning their current fall-through
+    // behavior would be pinning the bug.
+    //
+    // Cycle-4 L-1: `"eligible"` (the legitimate
+    // `SkipEligibilityGate.eligible.rawValue`) is included as the
+    // canonical "valid non-markOnly enum case" — a future producer
+    // change that emitted `"eligible"` in place of `"autoSkip"` (e.g. to
+    // align the precision-gate label with the enum) MUST still flow
+    // through the standard managed path; this parameter pins that.
+    //
+    // Cycle-6 missing test: pin the "unknown raw value" arm explicitly.
+    // The L3 decode comment asserts that ANY non-`.markOnly` raw value
+    // (including unknown future values) falls through. The other
+    // parameter cases all happen to map to known shapes (nil → nil,
+    // "" → nil, "autoSkip" → nil, "eligible" → .eligible). A
+    // gibberish-but-non-empty value is the case that exercises the
+    // `SkipEligibilityGate(rawValue:)` returning nil for an unknown
+    // future label, which then `flatMap` collapses to nil and falls
+    // through the `decodedGate == .markOnly` guard.
+    @Test(
+        "non-markOnly eligibilityGate values fall through to standard managed path, NOT suggest tier",
+        arguments: [
+            (label: "nil-stamp",                 gate: String?.none),
+            (label: "empty-string-stamp",         gate: String?.some("")),
+            (label: "autoSkip-stamp",             gate: String?.some("autoSkip")),
+            (label: "eligible-stamp",             gate: String?.some("eligible")),
+            (label: "unknown-future-value-stamp", gate: String?.some("futureGateName"))
+        ]
+    )
+    func nonMarkOnlyGateEntersStandardSkipPath(label: String, gate: String?) async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // Inline-build the AdWindow at high confidence with
+        // `decisionState: "confirmed"` so a successful entry into the
+        // standard path is observable via `confirmedWindows()`. The
+        // factory in TestHelpers does not expose `eligibilityGate`.
+        let windowId = "ad-non-markonly-\(label)"
+        let window = AdWindow(
+            id: windowId,
+            analysisAssetId: "asset-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.85,
+            boundaryState: "lexical",
+            decisionState: "confirmed",
+            detectorVersion: "detection-v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: "brought to you by",
+            evidenceStartTime: 60,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: gate
+        )
+
+        // Subscribe to the banner stream BEFORE delivery so a (wrongly
+        // emitted) suggest-tier banner can't slip through unnoticed.
+        let stream = await orchestrator.bannerItemStream()
+        nonisolated(unsafe) var receivedBanners: [AdSkipBannerItem] = []
+        let collectTask = Task {
+            for await item in stream {
+                receivedBanners.append(item)
+            }
+        }
+
+        await orchestrator.receiveAdWindows([window])
+
+        // Allow any banner-stream yields to drain.
+        try await Task.sleep(for: .milliseconds(100))
+        collectTask.cancel()
+
+        // Positive: the window IS in the standard managed path.
+        let confirmed = await orchestrator.confirmedWindows()
+        #expect(
+            confirmed.contains { $0.id == windowId },
+            "[\(label)] eligibilityGate=\(String(describing: gate)) must enter standard confirmed-windows path; got \(confirmed.map(\.id))"
+        )
+
+        // Negative: NO suggest-tier banner emitted.
+        let suggestBanners = receivedBanners.filter { $0.tier == .suggest }
+        #expect(
+            suggestBanners.isEmpty,
+            "[\(label)] eligibilityGate=\(String(describing: gate)) must NOT emit a suggest-tier banner; got \(suggestBanners)"
+        )
+    }
+
     @Test("acceptSuggestedSkip promotes window to confirmed and clears suggest state")
     func acceptSuggestedSkipConfirmsWindow() async throws {
         let store = try await makeTestStore()

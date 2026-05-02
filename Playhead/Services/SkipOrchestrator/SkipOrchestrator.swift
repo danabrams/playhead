@@ -677,7 +677,59 @@ actor SkipOrchestrator {
             // `evaluateAndPush()`. The only effect is one banner emission
             // (per window) on the existing `bannerItemStream`, tagged
             // `tier: .suggest` so the UI renders the medium-tier copy.
-            if adWindow.eligibilityGate == "markOnly" {
+            //
+            // L3: decode the persisted raw value through `SkipEligibilityGate`
+            // rather than literal-string compare. The consumer cares about
+            // exactly one case (`.markOnly`) — every other value (nil,
+            // unknown raw values, and any other `SkipEligibilityGate`
+            // case) decodes to a non-`.markOnly` result and falls through
+            // to the standard eligible-skip path.
+            //
+            // Producer note: `AdWindow.eligibilityGate` has multiple
+            // writers. The live precision-gate label
+            // (`AdDetectionService.precisionGateLabel`, called from
+            // both the hot-path post-classify site and the aggregator
+            // promotion site) emits `"markOnly"` (which round-trips
+            // as `SkipEligibilityGate.markOnly` — the case this
+            // decode pins) and `"autoSkip"` (a literal that is NOT a
+            // `SkipEligibilityGate` raw value and therefore decodes
+            // to nil). Fusion stamps — the full `SkipEligibilityGate`
+            // raw-value space, including `.eligible`, the blocked-*
+            // cases, and `.cappedByFMSuppression` — originate only in
+            // `AdDetectionService.runBackfill` via
+            // `buildFusionAdWindow`, which writes
+            // `decision.eligibilityGate.rawValue` directly. Those
+            // fusion-stamped rows surface to every `receiveAdWindows`
+            // caller, NOT just the preload + finalizeBackfill paths:
+            //   - cross-launch preload (`beginEpisode`) reads them
+            //     from the store on relaunch;
+            //   - the final-pass backfill push delivers them
+            //     in-memory immediately after `runBackfill`;
+            //   - the hot-path push (`AnalysisCoordinator
+            //     .handlePersistedTranscriptChunks`) delivers
+            //     `runHotPathResult.windows` whose gate is normally
+            //     the precision-gate literal, BUT
+            //     `reconcileHotPathWindows` builds a `preservedWindow`
+            //     that copies `existing.eligibilityGate` from a
+            //     previously-persisted `decisionState == .candidate`
+            //     row matched in the store. A backfill row written
+            //     with `policyAction == .autoSkipEligible` and
+            //     `decision.eligibilityGate != .eligible` is persisted
+            //     with `decisionState == .candidate` by
+            //     `buildFusionAdWindow`'s `policyAction` switch — so
+            //     a fresh hot-path window overlapping that row will
+            //     inherit the fusion stamp on the hot-path push.
+            // The decode here pins the markOnly branch only; it does
+            // NOT validate that the persisted value is a
+            // `SkipEligibilityGate` case, and is NOT a guard against
+            // fusion-path values like `.blockedByPolicy` reaching the
+            // standard skip path. The asymmetry is therefore
+            // caller-relevant for ALL THREE callers; the contrast
+            // with `receiveAdDecisionResults` (which hard-filters to
+            // `eligibilityGate == .eligible`) is tracked in
+            // playhead-bq70.
+            let decodedGate = adWindow.eligibilityGate.flatMap { SkipEligibilityGate(rawValue: $0) }
+            if decodedGate == .markOnly {
                 logger.debug(
                     "AdWindow \(adWindow.id, privacy: .public) eligibilityGate=markOnly — surfacing as suggest tier"
                 )

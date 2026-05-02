@@ -3095,12 +3095,35 @@ actor AdDetectionService {
             )
         }
         if merged == nil {
-            logger.warning("No profile found for podcast \(podcastId) during listen-rewind recording")
+            missingProfileListenRewindCount += 1
+            logger.warning("No profile found for podcast \(podcastId) during listen-rewind recording (count=\(self.missingProfileListenRewindCount))")
             return
         }
 
         logger.info("Recorded listen-rewind for window \(windowId), podcast \(podcastId)")
     }
+
+    /// C26 L-2: monotonic counter incremented every time `recordListenRewind`
+    /// reaches the `updateProfileIfExists == nil` branch (the user tapped
+    /// "Listen" on a window whose podcast has no priors row yet). The
+    /// surrounding warn-log is sufficient for one-off diagnosis, but a
+    /// counter lets later phases observe the rate of this case across a
+    /// session without grepping logs. Read-only outside this actor.
+    ///
+    /// Status today: the counter is observed only by tests in
+    /// `AdDetectionServiceListenRewindTraitJSONTests` (cycle-3 added
+    /// monotonic-increment and branch-scoped interleaved-call tests on
+    /// top of the original missing-profile no-op test). Production
+    /// code does not yet surface it (no debug-log dump on session-end,
+    /// no diagnostics-bundle export). When such a surface is wired up,
+    /// drop this paragraph.
+    ///
+    /// Test contract: the counter has no exposed reset and is per-instance.
+    /// Tests that observe it must use a fresh `AdDetectionService` (the
+    /// `makeService(store:)` helper produces one per test); reusing a
+    /// service across test cases will drift the count and silently
+    /// invalidate the assertion.
+    private(set) var missingProfileListenRewindCount: Int = 0
 
     // MARK: - Classification Pipeline
 
