@@ -1,0 +1,44 @@
+{
+  "episode_id": "corpus-XXX",
+  "show_name": "Example Show Name",
+  "duration_seconds": 3600.0,
+  "ad_windows": [
+    {
+      "start_seconds": 180.0,
+      "end_seconds": 240.0,
+      "advertiser": "Squarespace",
+      "product": "Website builder",
+      "ad_type": "host_read",
+      "transition_type": "explicit",
+      "confidence_notes": "Clear 'brought to you by' intro at 3:00, host returns to topic at 4:00"
+    },
+    {
+      "start_seconds": 1800.0,
+      "end_seconds": 1860.0,
+      "advertiser": "BetterHelp",
+      "product": "Online therapy",
+      "ad_type": "blended_host_read",
+      "transition_type": "blended",
+      "confidence_notes": "Host weaves sponsor mention into anecdote — no musical cue, soft boundary"
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 180.0,
+      "notes": "Cold open + interview setup — must NEVER be skipped"
+    },
+    {
+      "start_seconds": 240.0,
+      "end_seconds": 1800.0,
+      "notes": "Main interview block"
+    },
+    {
+      "start_seconds": 1860.0,
+      "end_seconds": 3600.0,
+      "notes": "Closing interview + outro"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

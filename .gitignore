@@ -86,3 +86,10 @@ Package.resolved
 
 # narl eval harness output (reports, trend log) — regenerated per run
 .eval-out/
+
+# playhead-l2f labeled corpus: JSON annotations + README are committed,
+# but the referenced audio files (~2-3 GB total when full) are kept
+# out of the repo. They live alongside the annotations on the
+# annotator's machine and are verified via `audio_fingerprint`.
+TestFixtures/Corpus/Audio/*
+!TestFixtures/Corpus/Audio/.gitkeep
