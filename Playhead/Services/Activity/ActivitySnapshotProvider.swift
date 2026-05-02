@@ -142,6 +142,20 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         // hot path. Filtering at the descriptor level means SwiftData
         // does not have to materialize Episode rows that will be
         // immediately discarded.
+        //
+        // skeptical-review-cycle-7 H1: the eligible-id list MUST be an
+        // `Array`, not a `Set`. SwiftData's `#Predicate` macro accepts
+        // `Set.contains` at compile time but its translation against
+        // SQLite is fragile across toolchain revs — depending on the
+        // build, it falls back to a per-row in-memory scan, fails to
+        // translate (matching nothing — Activity widget appears empty),
+        // or crashes. `Array.contains` is the only form that reliably
+        // lowers to `IN (?, ?, …)`. PlayheadApp.swift:159-169 documents
+        // this constraint at the other call site; that sweep missed
+        // this one. Keep it `Array` and do not introduce a `Set` here
+        // even if a future reader thinks the membership semantics
+        // are nicer — the dictionary keys are already unique and
+        // SwiftData's translator does not benefit from `Set`-ness.
         let allAssets: [String: AnalysisAsset]
         do {
             allAssets = try await store.fetchLatestAssetByEpisodeIdMap()
@@ -149,7 +163,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             return []
         }
         if allAssets.isEmpty { return [] }
-        let eligibleEpisodeIds = Set(allAssets.keys)
+        let eligibleEpisodeIds = Array(allAssets.keys)
 
         // playhead-btoa.3: snapshot the download manager's per-episode
         // foreground fraction map once per refresh. The closure is

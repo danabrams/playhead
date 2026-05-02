@@ -133,6 +133,54 @@ struct PlayheadApp: App {
                             trigger: trigger
                         )
                     }
+                    // skeptical-review-cycle-1: install the resolver so
+                    // the launch-time final-pass sweep can populate
+                    // `FinalPassJob.podcastId`. Without this the static
+                    // sweep hard-coded `nil`, breaking per-podcast trust
+                    // telemetry and SponsorKnowledge keying for every
+                    // asset re-driven at cold launch.
+                    runtime.setEpisodePodcastIdResolver { @Sendable episodeId in
+                        await MainActor.run {
+                            let context = modelContainer.mainContext
+                            let descriptor = FetchDescriptor<Episode>(
+                                predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
+                            )
+                            return (try? context.fetch(descriptor).first)?
+                                .podcast?.feedURL.absoluteString
+                        }
+                    }
+                    // skeptical-review-cycle-3 M-B: batch shape — single
+                    // MainActor hop, single FetchDescriptor against the
+                    // requested ids. Avoids N MainActor hops on cold-launch
+                    // sweeps for libraries with hundreds of episodes.
+                    runtime.setEpisodePodcastIdBatchResolver { @Sendable episodeIds in
+                        await MainActor.run {
+                            let context = modelContainer.mainContext
+                            // skeptical-review-cycle-5 M-Y3: use Array (not
+                            // Set) inside the #Predicate. SwiftData's
+                            // predicate translator handles Array.contains
+                            // reliably across iOS/macOS Catalyst paths;
+                            // Set.contains can fall back to a linear scan
+                            // or fail to translate at all on some builds.
+                            // De-dupe via Set first, then materialize to
+                            // Array for the predicate.
+                            let idArray = Array(Set(episodeIds))
+                            let descriptor = FetchDescriptor<Episode>(
+                                predicate: #Predicate { idArray.contains($0.canonicalEpisodeKey) }
+                            )
+                            guard let episodes = try? context.fetch(descriptor) else {
+                                return [:]
+                            }
+                            var result: [String: String] = [:]
+                            result.reserveCapacity(episodes.count)
+                            for episode in episodes {
+                                if let feed = episode.podcast?.feedURL.absoluteString {
+                                    result[episode.canonicalEpisodeKey] = feed
+                                }
+                            }
+                            return result
+                        }
+                    }
                     // playhead-z3ch: install the SwiftData-backed
                     // EpisodeMetadataProvider so the fusion pipeline can
                     // pre-seed metadata-derived ledger entries (capped at

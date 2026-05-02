@@ -37,6 +37,11 @@ struct ReconciliationReport: Sendable {
     /// `recoveredStrandedSessionJobs` (which acts on the `analysis_jobs`
     /// table, not `backfill_jobs`).
     let strandedBackfillJobsReset: Int
+    /// C1 follow-up to Bug 9: same shape as `strandedBackfillJobsReset` but
+    /// against the `final_pass_jobs` sibling table. Bug 9 added the reaper
+    /// helper but did not wire it; this counter records its yield so a
+    /// stranded-final-pass-fleet event leaves a structured trail.
+    let strandedFinalPassJobsReset: Int
 }
 
 // MARK: - AnalysisJobReconciler
@@ -78,7 +83,8 @@ actor AnalysisJobReconciler {
                 staleVersionsSuperseded: 0, staleVersionsReenqueued: 0,
                 completedJobsGarbageCollected: 0,
                 failedJobsBackedOff: 0, unEnqueuedDownloadsCreated: 0,
-                strandedBackfillJobsReset: 0
+                strandedBackfillJobsReset: 0,
+                strandedFinalPassJobsReset: 0
             )
         }
         isReconciling = true
@@ -100,6 +106,7 @@ actor AnalysisJobReconciler {
         let step6 = try await backoffFailedJobs()
         let step7 = try await discoverUnEnqueuedDownloads()
         let stepBackfillReaper = try await reconcileStrandedBackfillJobs()
+        let stepFinalPassReaper = try await reconcileStrandedFinalPassJobs()
 
         let report = ReconciliationReport(
             expiredLeasesRecovered: step1,
@@ -112,7 +119,8 @@ actor AnalysisJobReconciler {
             completedJobsGarbageCollected: step5,
             failedJobsBackedOff: step6,
             unEnqueuedDownloadsCreated: step7,
-            strandedBackfillJobsReset: stepBackfillReaper
+            strandedBackfillJobsReset: stepBackfillReaper,
+            strandedFinalPassJobsReset: stepFinalPassReaper
         )
 
         logger.info("""
@@ -127,7 +135,8 @@ actor AnalysisJobReconciler {
         gc=\(report.completedJobsGarbageCollected), \
         backoff=\(report.failedJobsBackedOff), \
         newJobs=\(report.unEnqueuedDownloadsCreated), \
-        strandedBackfillJobs=\(report.strandedBackfillJobsReset)
+        strandedBackfillJobs=\(report.strandedBackfillJobsReset), \
+        strandedFinalPassJobs=\(report.strandedFinalPassJobsReset)
         """)
 
         return report
@@ -524,6 +533,18 @@ actor AnalysisJobReconciler {
     /// `UPDATE backfill_jobs SET status='queued' WHERE status='running'`
     /// is therefore safe without an `updatedAt` / `leaseExpiresAt` filter.
     ///
+    /// **skeptical-review-cycle-1 H1 / cycle-4 M1 reconciliation.** The
+    /// implementation in `AnalysisStore.resetStrandedBackfillJobs` DOES
+    /// apply an `updatedAt < strftime('%s','now') - 600` floor. The
+    /// "blanket update is safe" reasoning above is the design
+    /// invariant; the freshness filter is defence-in-depth against the
+    /// edge case where a same-process BG-task reconciler fires while
+    /// the foreground runner still holds a lease. The filter strictly
+    /// strengthens the invariant — every row the implementation reaps
+    /// is also one this design comment authorises reaping; the
+    /// implementation just additionally protects rows that are too
+    /// fresh to have been crashed-and-abandoned.
+    ///
     /// **Re-driving safety.** The M-5 idempotency check accepts any
     /// non-`.complete` row including `.running` (today the
     /// `markBackfillJobRunning` guard at
@@ -544,6 +565,23 @@ actor AnalysisJobReconciler {
         let count = try await store.resetStrandedBackfillJobs()
         if count > 0 {
             logger.info("stranded_backfill_reset count=\(count)")
+        }
+        return count
+    }
+
+    /// C1: sibling reaper for `final_pass_jobs.status='running'` rows
+    /// stranded across a process death. Bug 9 introduced the `final_pass_jobs`
+    /// table and the `resetStrandedFinalPassJobs` helper but never wired
+    /// the helper into `reconcile()`, leaving stranded final-pass rows in
+    /// `running` forever. Same H1 freshness-filter semantics as the
+    /// backfill sibling — only rows whose `updatedAt` predates
+    /// `AnalysisStore.strandedJobFreshnessSeconds` are reset, so a
+    /// foreground runner mid-drain is not racy with a same-process
+    /// BGProcessingTask reentry.
+    private func reconcileStrandedFinalPassJobs() async throws -> Int {
+        let count = try await store.resetStrandedFinalPassJobs()
+        if count > 0 {
+            logger.info("stranded_final_pass_reset count=\(count)")
         }
         return count
     }

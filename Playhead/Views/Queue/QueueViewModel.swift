@@ -87,6 +87,16 @@ final class QueueViewModel {
     private func fetchEpisodeMap(keys: [String]) -> [String: Episode] {
         guard !keys.isEmpty else { return [:] }
         let context = ModelContext(modelContainer)
+        // skeptical-review-cycle-8 M3: `keys` MUST stay typed as
+        // `[String]` (Array). SwiftData's `#Predicate` translator
+        // handles `Array.contains` reliably across iOS / macOS Catalyst
+        // builds, but `Set.contains` can fall back to a linear scan or
+        // fail to translate at all on some toolchain combinations
+        // (witnessed during cycle-7 H1 work in
+        // `ActivitySnapshotProvider.swift:163`, fixed at
+        // `PlayheadApp.swift:159-169`). Do not "tighten" this signature
+        // to `Set<String>` — the Queue list silently empties if the
+        // predicate stops matching.
         let descriptor = FetchDescriptor<Episode>(
             predicate: #Predicate { keys.contains($0.canonicalEpisodeKey) }
         )

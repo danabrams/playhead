@@ -511,6 +511,25 @@ actor BackfillJobRunner {
                     plan: plan,
                     rootInputs: inputs
                 ) else {
+                    // C2: persist a `.noAds` sentinel scan row before the
+                    // job flips to `.complete`. The Bug 11 sentinel inside
+                    // `runJob` only fires after `runJob` is called; this
+                    // path bypasses `runJob` entirely. Without a sentinel
+                    // here, the captured-DB symptom (admitted job +
+                    // `.complete` status + zero `semantic_scan_results`
+                    // rows for that asset+job tuple) was reachable through
+                    // the H13 short-circuit even with Bug 11 in place.
+                    let h13RunMode: SemanticScanPhase =
+                        (job.coveragePolicy == .targetedWithAudit) ? .targeted : .shadow
+                    let sentinel = makeNoWorkSentinelScanResult(
+                        inputs: inputs,
+                        jobId: job.jobId,
+                        jobPhase: job.phase,
+                        runMode: h13RunMode,
+                        reason: "phaseProducedNoAnchors"
+                    )
+                    try await store.insertSemanticScanResult(sentinel)
+                    scanResultIds.append(sentinel.id)
                     try await store.markBackfillJobComplete(
                         jobId: job.jobId,
                         progressCursor: BackfillProgressCursor(
@@ -819,6 +838,29 @@ actor BackfillJobRunner {
             ? .targeted
             : .shadow
 
+        // skeptical-review-cycle-5 L-Y1: lease-freshness heartbeat. Mirrors
+        // the `FinalPassRetranscriptionRunner` M-E pattern. The H1
+        // stranded-row reaper now flips a `running` row back to `queued`
+        // after `strandedJobFreshnessSeconds` (10 min) without an
+        // `updatedAt` touch (`AnalysisJobReconciler.resetStrandedBackfillJobs`).
+        // A long single-FM call (coarse or refinement) on a degraded
+        // device can exceed that floor, so refresh the lease at every
+        // safe boundary inside `runJob` — between the coarse and
+        // refinement passes (the most likely overrun site), and between
+        // persistence iterations as a periodic tick. The store call is
+        // idempotent on an already-`running` row at the same `jobId`,
+        // so an extra heartbeat that races a concurrent reaper has no
+        // effect beyond the single SQL `UPDATE`.
+        // skeptical-review-cycle-5 L-Y1 follow-up: the heartbeat check is
+        // inlined at each call site rather than wrapped in a local
+        // `func heartbeatIfDue()` because a nested local function is
+        // nonisolated by default in Swift 6, which makes the captured
+        // `lastHeartbeatTick` var trip a "sending across isolation"
+        // diagnostic. Inlining keeps the check inside actor isolation.
+        let jobIdForHeartbeat = job.jobId
+        var lastHeartbeatTick = ContinuousClock.now
+        let heartbeatInterval = Duration.seconds(300) // half the 10-min floor
+
         // Bug 11 (semantic_scan_results wiring): an admitted backfill job
         // that reaches `markBackfillJobComplete` MUST produce at least one
         // row in `semantic_scan_results` keyed to the asset+job. The
@@ -873,8 +915,23 @@ actor BackfillJobRunner {
         permissiveDecodingFailureCount += coarse.permissiveFailureCounts.decodingFailure
         permissiveContextOverflowCount += coarse.permissiveFailureCounts.contextOverflow
 
+        // skeptical-review-cycle-5 L-Y1: refresh the lease right after
+        // the coarse FM call returns. This is the highest-yield
+        // heartbeat site — a degraded-device coarse pass can spend
+        // multiple minutes inside the FM call alone, leaving the
+        // lease's `updatedAt` stale before refinement adds another
+        // long FM call.
+        if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
+            try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+            lastHeartbeatTick = ContinuousClock.now
+        }
+
         for window in coarse.windows {
             try Task.checkCancellation()
+            if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
+                try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+                lastHeartbeatTick = ContinuousClock.now
+            }
             let result = makeScanResult(
                 windowOutput: window,
                 inputs: inputs,
@@ -956,6 +1013,14 @@ actor BackfillJobRunner {
                 evidenceCatalog: inputs.evidenceCatalog
             )
             if !zoomPlans.isEmpty {
+                // skeptical-review-cycle-5 L-Y1: refresh the lease before
+                // the refinement FM call. If coarsePassA + the zoom-plan
+                // build burned >5 min already, this prevents the reaper
+                // from racing the refinement call.
+                if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
+                    try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+                    lastHeartbeatTick = ContinuousClock.now
+                }
                 let refinement = try await dispatchedRefinePassB(
                     zoomPlans: zoomPlans,
                     inputs: inputs
@@ -978,6 +1043,10 @@ actor BackfillJobRunner {
 
                 for window in refinement.windows {
                     try Task.checkCancellation()
+                    if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
+                        try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+                        lastHeartbeatTick = ContinuousClock.now
+                    }
                     let result = makeRefinementScanResult(
                         windowOutput: window,
                         inputs: inputs,
@@ -1098,6 +1167,21 @@ actor BackfillJobRunner {
         // wiring drift bug and the cohort tracker will silently miss this
         // run. Write a defensive sentinel so the invariant holds even when
         // a future code change introduces a new fall-through.
+        //
+        // skeptical-review-cycle-7 L3: the `try await
+        // store.insertSemanticScanResult(...)` below is INTENTIONALLY not
+        // wrapped in a do/catch. If the sentinel insert throws, the throw
+        // propagates up through `runJob` and the surrounding caller's
+        // `markBackfillJobComplete` is never reached — the job row stays
+        // `running` and the H1 stranded-job reaper
+        // (`AnalysisStore.resetStrandedBackfillJobs`) re-queues it after
+        // the `strandedJobFreshnessSeconds` floor. That is the desired
+        // behavior: a database error on a sentinel write is a serious
+        // signal that the store is broken, and force-completing the
+        // job to avoid orphaning it would mask the underlying fault. The
+        // only reachable post-conditions of this block are therefore:
+        // (sentinel persisted → caller proceeds to markBackfillJobComplete)
+        // OR (insert threw → job is left `running` for the H1 reaper).
         if scanResultIds.isEmpty {
             let sentinel = makeNoWorkSentinelScanResult(
                 inputs: inputs,

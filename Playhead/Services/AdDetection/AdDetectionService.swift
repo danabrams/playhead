@@ -438,8 +438,13 @@ actor AdDetectionService {
     /// playhead-8n1: cache the current PodcastProfile so the Phase 4
     /// shadow phase can thread it into `RegionFeatureExtractor`, which
     /// in turn constructs a `LexicalScanner` with per-show sponsor
-    /// patterns. Kept in sync with `scanner`/`showPriors` in init,
-    /// `updateProfile`, and `updatePriorsFromObservation`.
+    /// patterns. Kept in sync with `scanner`/`showPriors` in init and
+    /// in `updatePriors`. (skeptical-review-cycle-16 M-1: the public
+    /// `updateProfile(_:)` setter was removed because it had zero
+    /// callers and its post-hoc in-memory write could clobber an
+    /// in-flight `updatePriors` if a future caller were added. If the
+    /// API needs to come back, gate the post-await assignments in
+    /// `updatePriors` on a generation token before re-introducing it.)
     private var currentPodcastProfile: PodcastProfile?
     /// Episode duration for position-based scoring.
     private var episodeDuration: Double = 0
@@ -736,14 +741,13 @@ actor AdDetectionService {
         }
     }
 
-    // MARK: - Profile Update
-
-    /// Update the scanner and priors when the podcast profile changes.
-    func updateProfile(_ profile: PodcastProfile?) {
-        scanner = LexicalScanner(podcastProfile: profile)
-        showPriors = ShowPriors.from(profile: profile)
-        currentPodcastProfile = profile
-    }
+    // skeptical-review-cycle-16 M-1: dead `updateProfile(_:)` setter
+    // removed (zero callers in production or tests). The post-hoc
+    // in-memory write at `currentPodcastProfile = profile` could clobber
+    // an in-flight `updatePriors`'s post-await assignment if a future
+    // caller were ever added. If the API needs to come back, also gate
+    // the post-await assignments in `updatePriors` on a generation
+    // token / fingerprint check before re-introducing the public setter.
 
     /// Rebuild the smallest hot-path replay slice that can still reproduce the
     /// hypothesis engine's transitive context growth for duplicate chunk
@@ -2014,6 +2018,19 @@ actor AdDetectionService {
         // when `fusionDecisionResults` is empty so that "no ads found" is
         // representable as `decisionJSON == "[]"` rather than a missing row;
         // a missing row is ambiguous (never analysed vs analysed-with-zero).
+        //
+        // L5 (skeptical-review-cycle-1): two distinct "empty" axes —
+        //   1. `decodedSpans.isEmpty`     — upstream phases produced no
+        //      anchored evidence at all. We treat this as "not analysed
+        //      enough to summarise" and skip writing the row so a future
+        //      run with richer transcript coverage can produce the
+        //      canonical artifact.
+        //   2. `fusionDecisionResults.isEmpty` — spans existed but fusion
+        //      confirmed no ads. We DO write the row with `decisionJSON
+        //      == "[]"` so downstream readers can distinguish
+        //      analysed-with-zero from never-analysed.
+        // The guard below is on (1), not (2) — the comment above describes
+        // (2)'s behaviour inside the guard.
         if !decodedSpans.isEmpty {
             let inputArtifactRefs = (try? JSONEncoder().encode(fusionWindows.map(\.id)))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
@@ -3030,6 +3047,24 @@ actor AdDetectionService {
 
     /// Record that the user rewound back into a skipped ad window,
     /// signaling a potential false positive. Updates the podcast profile.
+    ///
+    /// skeptical-review-cycle-17 M-1: routed through the atomic
+    /// `store.updateProfileIfExists` helper (was a non-atomic
+    /// `fetchProfile` → mutate → `upsertProfile` pair). The same two
+    /// defects cycle-15 closed in `updatePriors` were live here:
+    ///
+    ///   • Lost-update race: the actor suspended between read and write,
+    ///     so a concurrent `TrustScoringService.recordSuccessfulObservation`
+    ///     / `.recordFalseSkipSignal` / `.decayFalseSignals` could land
+    ///     a merged write that this method then silently overwrote with
+    ///     a stale full-row upsert.
+    ///   • `traitProfileJSON` clobber: the previous `PodcastProfile(...)`
+    ///     constructor omitted `traitProfileJSON` and `title`, both
+    ///     defaulting to `nil`. `upsertProfile`'s SQL writes
+    ///     `traitProfileJSON = excluded.traitProfileJSON` (NOT COALESCE),
+    ///     so every "Listen" tap silently nilled that podcast's persisted
+    ///     trait profile. (`title` is COALESCE-protected, but is also
+    ///     carried forward here for symmetry with `updatePriors`.)
     func recordListenRewind(
         windowId: String,
         podcastId: String
@@ -3040,24 +3075,29 @@ actor AdDetectionService {
             decisionState: AdDecisionState.reverted.rawValue
         )
 
-        // Increment false-positive signal on the profile.
-        guard let profile = try await store.fetchProfile(podcastId: podcastId) else {
+        // Increment false-positive signal on the profile via an atomic
+        // read-modify-write. `updateProfileIfExists` returns nil when no
+        // row exists (matches the prior `fetchProfile` early-return).
+        let merged = try await store.updateProfileIfExists(podcastId: podcastId) { existing in
+            PodcastProfile(
+                podcastId: existing.podcastId,
+                sponsorLexicon: existing.sponsorLexicon,
+                normalizedAdSlotPriors: existing.normalizedAdSlotPriors,
+                repeatedCTAFragments: existing.repeatedCTAFragments,
+                jingleFingerprints: existing.jingleFingerprints,
+                implicitFalsePositiveCount: existing.implicitFalsePositiveCount + 1,
+                skipTrustScore: max(0, existing.skipTrustScore - 0.05),
+                observationCount: existing.observationCount,
+                mode: existing.mode,
+                recentFalseSkipSignals: existing.recentFalseSkipSignals + 1,
+                traitProfileJSON: existing.traitProfileJSON,
+                title: existing.title
+            )
+        }
+        if merged == nil {
             logger.warning("No profile found for podcast \(podcastId) during listen-rewind recording")
             return
         }
-        let updatedProfile = PodcastProfile(
-            podcastId: profile.podcastId,
-            sponsorLexicon: profile.sponsorLexicon,
-            normalizedAdSlotPriors: profile.normalizedAdSlotPriors,
-            repeatedCTAFragments: profile.repeatedCTAFragments,
-            jingleFingerprints: profile.jingleFingerprints,
-            implicitFalsePositiveCount: profile.implicitFalsePositiveCount + 1,
-            skipTrustScore: max(0, profile.skipTrustScore - 0.05),
-            observationCount: profile.observationCount,
-            mode: profile.mode,
-            recentFalseSkipSignals: profile.recentFalseSkipSignals + 1
-        )
-        try await store.upsertProfile(updatedProfile)
 
         logger.info("Recorded listen-rewind for window \(windowId), podcast \(podcastId)")
     }
@@ -4487,6 +4527,30 @@ actor AdDetectionService {
 
     /// Update PodcastProfile priors from confirmed ad windows.
     /// Learns ad slot positions and sponsor names over time.
+    ///
+    /// skeptical-review-cycle-15 M-1 / M-2: routed through
+    /// `store.mutateProfile` so the read-modify-write happens inside one
+    /// AnalysisStore actor turn. Two earlier defects this closes:
+    ///
+    ///   • M-1 (lost-update race): the previous body did `await
+    ///     store.fetchProfile()` then `await store.upsertProfile()` as
+    ///     two independent actor hops. A concurrent
+    ///     `TrustScoringService.recordFalseSkipSignal` (which is itself
+    ///     atomic via `updateProfileIfExistsCapturing`) landing between
+    ///     those hops would be silently overwritten by the carry-forward
+    ///     upsert below — defeating the Bug 4a fix that made
+    ///     TrustScoringService the sole writer of `skipTrustScore`.
+    ///
+    ///   • M-2 (traitProfileJSON clobber): the previous
+    ///     `PodcastProfile(...)` constructor here omitted
+    ///     `traitProfileJSON`. The default initializer parameter is
+    ///     `nil`, and `upsertProfile`'s SQL writes
+    ///     `traitProfileJSON = excluded.traitProfileJSON` (NOT
+    ///     COALESCE), so every priors update silently nilled the
+    ///     persisted trait profile. The `update` closure below
+    ///     explicitly carries `existing.traitProfileJSON` forward.
+    ///     (`title` was COALESCE-safe but is also passed through for
+    ///     symmetry / defensiveness.)
     private func updatePriors(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
@@ -4494,33 +4558,12 @@ actor AdDetectionService {
     ) async throws {
         guard !nonSuppressedWindows.isEmpty, episodeDuration > 0 else { return }
 
-        let existingProfile = try await store.fetchProfile(podcastId: podcastId)
-
         // Compute normalized ad slot positions from confirmed windows.
+        // These do not depend on the existing profile so we compute them
+        // once outside the closure (also keeps the closure simple).
         let newSlotPositions = nonSuppressedWindows.map { window in
             let center = (window.startTime + window.endTime) / 2.0
             return center / episodeDuration
-        }
-
-        // Merge with existing slot positions (exponential moving average).
-        let mergedSlots: [Double]
-        if let existing = existingProfile,
-           let json = existing.normalizedAdSlotPriors,
-           let data = json.data(using: .utf8),
-           let existingSlots = try? JSONDecoder().decode([Double].self, from: data) {
-            mergedSlots = mergeSlotPositions(
-                existing: existingSlots,
-                new: newSlotPositions
-            )
-        } else {
-            mergedSlots = newSlotPositions
-        }
-
-        let slotsJSON: String?
-        if let data = try? JSONEncoder().encode(mergedSlots) {
-            slotsJSON = String(data: data, encoding: .utf8)
-        } else {
-            slotsJSON = nil
         }
 
         // Collect advertiser names from confirmed windows with metadata.
@@ -4528,59 +4571,110 @@ actor AdDetectionService {
             .compactMap(\.advertiser)
             .map { $0.lowercased() }
 
-        let mergedSponsorLexicon: String?
-        if let existing = existingProfile?.sponsorLexicon {
-            let existingNames = Set(
-                existing.components(separatedBy: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-                    .filter { !$0.isEmpty }
+        let updatedProfile: PodcastProfile
+        do {
+            updatedProfile = try await store.mutateProfile(
+                podcastId: podcastId,
+                create: {
+                    let initialSlotsJSON: String?
+                    if let data = try? JSONEncoder().encode(newSlotPositions) {
+                        initialSlotsJSON = String(data: data, encoding: .utf8)
+                    } else {
+                        initialSlotsJSON = nil
+                    }
+                    let initialSponsors: String? = newSponsors.isEmpty
+                        ? nil
+                        : Set(newSponsors).sorted().joined(separator: ",")
+                    // Bug 4a default: brand-new profile gets trust=0.5
+                    // (matches `setUserOverride`'s new-profile default).
+                    // TrustScoringService.recordSuccessfulObservation
+                    // owns subsequent trust adjustments.
+                    return PodcastProfile(
+                        podcastId: podcastId,
+                        sponsorLexicon: initialSponsors,
+                        normalizedAdSlotPriors: initialSlotsJSON,
+                        repeatedCTAFragments: nil,
+                        jingleFingerprints: nil,
+                        implicitFalsePositiveCount: 0,
+                        skipTrustScore: 0.5,
+                        observationCount: 1,
+                        mode: "shadow",
+                        recentFalseSkipSignals: 0
+                    )
+                },
+                update: { existing in
+                    // Merge slot positions (exponential moving average).
+                    let existingSlots: [Double]
+                    if let json = existing.normalizedAdSlotPriors,
+                       let data = json.data(using: .utf8),
+                       let decoded = try? JSONDecoder().decode([Double].self, from: data) {
+                        existingSlots = decoded
+                    } else {
+                        existingSlots = []
+                    }
+                    let mergedSlots = Self.mergeSlotPositions(
+                        existing: existingSlots,
+                        new: newSlotPositions
+                    )
+                    let slotsJSON: String?
+                    if let data = try? JSONEncoder().encode(mergedSlots) {
+                        slotsJSON = String(data: data, encoding: .utf8)
+                    } else {
+                        slotsJSON = nil
+                    }
+
+                    // Merge sponsor lexicon.
+                    let mergedSponsorLexicon: String?
+                    if let lex = existing.sponsorLexicon {
+                        let existingNames = Set(
+                            lex.components(separatedBy: ",")
+                                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                                .filter { !$0.isEmpty }
+                        )
+                        let allNames = existingNames.union(newSponsors)
+                        mergedSponsorLexicon = allNames.sorted().joined(separator: ",")
+                    } else if !newSponsors.isEmpty {
+                        mergedSponsorLexicon = Set(newSponsors).sorted().joined(separator: ",")
+                    } else {
+                        mergedSponsorLexicon = existing.sponsorLexicon
+                    }
+
+                    // Bug 4a (trust carry-forward): updatePriors does not
+                    // touch `skipTrustScore`. TrustScoringService is the
+                    // sole writer; we copy the existing value through.
+                    return PodcastProfile(
+                        podcastId: existing.podcastId,
+                        sponsorLexicon: mergedSponsorLexicon,
+                        normalizedAdSlotPriors: slotsJSON,
+                        repeatedCTAFragments: existing.repeatedCTAFragments,
+                        jingleFingerprints: existing.jingleFingerprints,
+                        implicitFalsePositiveCount: existing.implicitFalsePositiveCount,
+                        skipTrustScore: existing.skipTrustScore,
+                        observationCount: existing.observationCount + 1,
+                        mode: existing.mode,
+                        recentFalseSkipSignals: existing.recentFalseSkipSignals,
+                        traitProfileJSON: existing.traitProfileJSON,
+                        title: existing.title
+                    )
+                }
             )
-            let allNames = existingNames.union(newSponsors)
-            mergedSponsorLexicon = allNames.sorted().joined(separator: ",")
-        } else if !newSponsors.isEmpty {
-            mergedSponsorLexicon = Set(newSponsors).sorted().joined(separator: ",")
-        } else {
-            mergedSponsorLexicon = existingProfile?.sponsorLexicon
         }
-
-        let observationCount = (existingProfile?.observationCount ?? 0) + 1
-        // Bug 4a (trust-clobber fix): updatePriors is responsible for lexical/slot
-        // priors and observationCount only. `skipTrustScore` is owned exclusively
-        // by `TrustScoringService` (see `recordSuccessfulObservation`,
-        // `recordFalseSkipSignal`, `recordFalseNegativeSignal`). Recomputing trust
-        // here from `implicitFalsePositiveCount` clobbered every user-FP
-        // decrement that TrustScoringService had persisted, so user corrections
-        // never durably moved trust down. Carry the stored value forward
-        // unchanged; default to 0.5 only when no profile exists yet (matches
-        // `setUserOverride`'s new-profile default).
-        let trustScore = existingProfile?.skipTrustScore ?? 0.5
-
-        let updatedProfile = PodcastProfile(
-            podcastId: podcastId,
-            sponsorLexicon: mergedSponsorLexicon,
-            normalizedAdSlotPriors: slotsJSON,
-            repeatedCTAFragments: existingProfile?.repeatedCTAFragments,
-            jingleFingerprints: existingProfile?.jingleFingerprints,
-            implicitFalsePositiveCount: existingProfile?.implicitFalsePositiveCount ?? 0,
-            skipTrustScore: trustScore,
-            observationCount: observationCount,
-            mode: existingProfile?.mode ?? "shadow",
-            recentFalseSkipSignals: existingProfile?.recentFalseSkipSignals ?? 0
-        )
-
-        try await store.upsertProfile(updatedProfile)
 
         // Refresh the in-memory priors for subsequent use.
         showPriors = ShowPriors.from(profile: updatedProfile)
         scanner = LexicalScanner(podcastProfile: updatedProfile)
         currentPodcastProfile = updatedProfile
 
-        logger.info("Updated priors for podcast \(podcastId): observations=\(observationCount) trust=\(trustScore, format: .fixed(precision: 2))")
+        logger.info("Updated priors for podcast \(podcastId): observations=\(updatedProfile.observationCount) trust=\(updatedProfile.skipTrustScore, format: .fixed(precision: 2))")
     }
 
     /// Merge new slot positions with existing ones. Deduplicates slots that
     /// are within 5% of each other (same ad slot across episodes).
-    private func mergeSlotPositions(
+    ///
+    /// skeptical-review-cycle-15 M-1: declared `static` so the
+    /// `store.mutateProfile` closure (which runs inside the AnalysisStore
+    /// actor) can call it without capturing `self`.
+    private static func mergeSlotPositions(
         existing: [Double],
         new: [Double]
     ) -> [Double] {

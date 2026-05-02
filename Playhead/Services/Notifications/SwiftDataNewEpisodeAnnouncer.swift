@@ -76,6 +76,17 @@ struct SwiftDataNewEpisodeAnnouncer: NewEpisodeAnnouncing {
         context: ModelContext
     ) -> [NewEpisodeCandidate] {
         guard !keys.isEmpty else { return [] }
+        // skeptical-review-cycle-8 M3: `keys` MUST stay typed as
+        // `[String]` (Array). SwiftData's `#Predicate` translator
+        // handles `Array.contains` reliably across iOS / macOS Catalyst
+        // builds, but `Set.contains` can fall back to a linear scan or
+        // fail to translate at all on some toolchain combinations
+        // (witnessed during cycle-7 H1 work in
+        // `ActivitySnapshotProvider.swift:163`, fixed at
+        // `PlayheadApp.swift:159-169`). Do not "tighten" this signature
+        // to `Set<String>` for nicer semantics — the new-episode
+        // notification path silently breaks if the predicate stops
+        // matching.
         let descriptor = FetchDescriptor<Episode>(
             predicate: #Predicate { keys.contains($0.canonicalEpisodeKey) }
         )

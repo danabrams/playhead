@@ -712,7 +712,31 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 19
+    nonisolated private static let currentSchemaVersion = 20
+
+    /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
+    /// row stuck in `status='running'` must reach before the launch-time
+    /// reaper resets it to `queued`. The window must be larger than any
+    /// legitimate single in-process work step so a foreground runner
+    /// holding a row mid-drain is never racy with a same-process
+    /// BGProcessingTask reentry into the reconciler. 10 minutes is well
+    /// above the worst observed FM scan duration (sub-second to a few
+    /// seconds per window); a stranded row from a crashed prior process
+    /// will have an `updatedAt` from before the crash and trivially clear
+    /// this floor by the time the next launch fires.
+    ///
+    /// skeptical-review-cycle-3 M-E: callers that may run for an
+    /// indefinite duration (a foreground runner against a degraded device
+    /// or large legacy episode) MUST refresh `updatedAt` at intervals
+    /// shorter than this floor. `markBackfillJobRunning` and
+    /// `markFinalPassJobRunning` both bump `updatedAt` to the current
+    /// timestamp on entry, but a job that holds the lease past the floor
+    /// without checkpointing risks duplicate-FM-call dispatch when the
+    /// reaper flips the row back to `queued`. The runners enforce this
+    /// via cooperative checkpoints; long-running shards should call
+    /// `markBackfillJobRunning(jobId:)` (which is idempotent and only
+    /// rewrites `updatedAt`) on a schedule shorter than this floor.
+    nonisolated static let strandedJobFreshnessSeconds: Int = 600
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
     /// samples retained for the `stable_recall_flag` ring. Must match the
@@ -1229,6 +1253,9 @@ actor AnalysisStore {
             // Bug 5 (skip-cues-deletion): drop the vestigial `skip_cues`
             // table on existing DBs. Bumps schema_version to 19.
             try migrateDropSkipCuesV19IfNeeded()
+            // H1+M3: add `updatedAt` to job tables so the stranded reaper
+            // can apply a freshness filter. Bumps schema_version to 20.
+            try migrateAddJobUpdatedAtV20IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1466,6 +1493,10 @@ actor AnalysisStore {
                 definition: "REAL"
             )
         }
+        // H1+M3 (v20): mirror the job-tables `updatedAt` migration so the
+        // ladder seam reaches the same shape as production. The helper is
+        // already self-guarded on `tableExists` for both job tables.
+        try migrateAddJobUpdatedAtV20IfNeeded()
     }
     #endif
 
@@ -2748,6 +2779,50 @@ actor AnalysisStore {
         try setSchemaVersion(19)
     }
 
+    /// H1+M3 (v20): adds the `updatedAt` liveness column to `backfill_jobs`
+    /// and `final_pass_jobs`, and bumps `_meta.schema_version` to 20 so the
+    /// monotonic-version invariant is preserved (it had silently slipped
+    /// when Bug 9 added `analysis_assets.finalPassCoverageEndTime` without
+    /// a version bump).
+    ///
+    /// Both job tables historically lacked any clock column, so the
+    /// stranded-running reaper had to assume "any prior process is dead"
+    /// to be safe. With `updatedAt` in place the reaper can apply a
+    /// freshness floor (`Self.strandedJobFreshnessSeconds`), making
+    /// same-process BGProcessingTask reentry safe even when a foreground
+    /// runner is mid-drain on a long shard.
+    ///
+    /// Backfill of existing rows: `updatedAt = createdAt` so a `running`
+    /// row stranded at v19 ages out of the freshness window the moment the
+    /// upgrade lands (the row is, by definition, older than 10 minutes by
+    /// the time the next launch fires) — which is exactly the behavior the
+    /// pre-v20 unconditional reaper had. New writes from v20 forward set
+    /// `updatedAt = strftime('%s','now')` on every transition.
+    ///
+    /// Idempotent: `addColumnIfNeeded` short-circuits when the column
+    /// already exists, the backfill UPDATE only fires on rows still at
+    /// the `0` sentinel, and `setSchemaVersion(20)` is a row-replace.
+    private func migrateAddJobUpdatedAtV20IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 20 else { return }
+        if try tableExists("backfill_jobs") {
+            try addColumnIfNeeded(
+                table: "backfill_jobs",
+                column: "updatedAt",
+                definition: "REAL NOT NULL DEFAULT 0"
+            )
+            try exec("UPDATE backfill_jobs SET updatedAt = createdAt WHERE updatedAt = 0")
+        }
+        if try tableExists("final_pass_jobs") {
+            try addColumnIfNeeded(
+                table: "final_pass_jobs",
+                column: "updatedAt",
+                definition: "REAL NOT NULL DEFAULT 0"
+            )
+            try exec("UPDATE final_pass_jobs SET updatedAt = createdAt WHERE updatedAt = 0")
+        }
+        try setSchemaVersion(20)
+    }
+
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
     /// is missing (only possible on a corrupted store, since `migrate()` writes
     /// it on first run).
@@ -3067,6 +3142,18 @@ actor AnalysisStore {
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_backfill_jobs_status_priority ON backfill_jobs(status, priority DESC, createdAt ASC)")
         try exec("CREATE INDEX IF NOT EXISTS idx_backfill_jobs_asset_phase ON backfill_jobs(analysisAssetId, phase)")
+        // H1 (v20): liveness clock for the stranded-job reaper. Added via
+        // `addColumnIfNeeded` so fresh and upgraded DBs reach the same
+        // shape — fresh installs get the column from the migration helper
+        // below, upgrades pick it up via `migrateAddJobUpdatedAtV20IfNeeded`.
+        // Default 0 is a sentinel meaning "older than any reaper threshold,"
+        // which is the safe choice for backfilled rows on first upgrade
+        // (any pre-v20 row stranded in `running` was already orphaned).
+        try addColumnIfNeeded(
+            table: "backfill_jobs",
+            column: "updatedAt",
+            definition: "REAL NOT NULL DEFAULT 0"
+        )
 
         // final_pass_jobs (Bug 9)
         // Sibling table to backfill_jobs. Per-AdWindow grain so admission and
@@ -3089,6 +3176,12 @@ actor AnalysisStore {
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_final_pass_jobs_status ON final_pass_jobs(status, createdAt ASC)")
         try exec("CREATE INDEX IF NOT EXISTS idx_final_pass_jobs_asset ON final_pass_jobs(analysisAssetId)")
+        // H1 (v20): liveness clock — see `backfill_jobs.updatedAt` above.
+        try addColumnIfNeeded(
+            table: "final_pass_jobs",
+            column: "updatedAt",
+            definition: "REAL NOT NULL DEFAULT 0"
+        )
 
         // semantic_scan_results
         // C5: `reuseKeyHash` is a SHA-256 over the canonical concatenation of
@@ -3310,8 +3403,8 @@ actor AnalysisStore {
             (id, episodeId, assetFingerprint, weakFingerprint, sourceURL,
              featureCoverageEndTime, fastTranscriptCoverageEndTime, confirmedAdCoverageEndTime,
              analysisState, analysisVersion, capabilitySnapshot, artifact_class,
-             episodeDurationSec, episodeTitle)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             episodeDurationSec, episodeTitle, finalPassCoverageEndTime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -3329,6 +3422,7 @@ actor AnalysisStore {
         bind(stmt, 12, asset.artifactClass.rawValue)
         bind(stmt, 13, asset.episodeDurationSec)
         bind(stmt, 14, asset.episodeTitle)
+        bind(stmt, 15, asset.finalPassCoverageEndTime)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -4705,6 +4799,23 @@ actor AnalysisStore {
         // title. `COALESCE(excluded.title, podcast_profiles.title)`
         // keeps the existing column when the new write is NULL and
         // overwrites only when the new write carries a non-NULL value.
+        //
+        // skeptical-review-cycle-17 L-1: ALL OTHER COLUMNS overwrite
+        // unconditionally — `excluded.<col>` is written verbatim. In
+        // particular, `traitProfileJSON` is NOT COALESCE-protected, so
+        // a constructor that defaults it to `nil` will silently nil the
+        // persisted trait profile on every upsert. Cycles 15-M-2
+        // (`updatePriors`) and 17-M-1 (`recordListenRewind`) both
+        // closed instances of that bug. New callers MUST either:
+        //   • carry `existing.traitProfileJSON` (and any future
+        //     non-COALESCE column) forward inside the closure of an
+        //     atomic `mutateProfile` / `updateProfileIfExists` helper, OR
+        //   • use a column-specific setter (e.g. `updateProfileTitle`)
+        //     that writes only the columns it owns.
+        // Adding new non-COALESCE columns to this upsert? Update the
+        // canary at PlayheadTests/Services/AdDetection/
+        // AdDetectionServiceUpdatePriorsAtomicityCanaryTests.swift to
+        // pin the new column's carry-forward invariant in every caller.
         let sql = """
             INSERT INTO podcast_profiles
             (podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
@@ -4740,6 +4851,72 @@ actor AnalysisStore {
         bind(stmt, 11, profile.traitProfileJSON)
         bind(stmt, 12, profile.title)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// skeptical-review-cycle-1: atomic read-modify-write helper for
+    /// `podcast_profiles`. The pre-existing TrustScoringService pattern
+    /// awaited `fetchProfile` then `upsertProfile`, opening an actor-
+    /// reentrancy window where a concurrent call could fetch the same
+    /// row and overwrite the first writer's increment (lost-update on
+    /// `observationCount` / `skipTrustScore`). This helper runs the
+    /// fetch + mutate + upsert as a single synchronous body inside the
+    /// `AnalysisStore` actor, so no other actor call can interleave
+    /// against the same row.
+    ///
+    /// - Parameters:
+    ///   - podcastId: profile key to merge.
+    ///   - create: builder for the brand-new row when no profile exists.
+    ///   - update: pure transform applied to the existing profile.
+    /// - Returns: the resulting `PodcastProfile` that was persisted.
+    @discardableResult
+    func mutateProfile(
+        podcastId: String,
+        create: () -> PodcastProfile,
+        update: (PodcastProfile) -> PodcastProfile
+    ) throws -> PodcastProfile {
+        let existing = try fetchProfile(podcastId: podcastId)
+        let merged: PodcastProfile = existing.map(update) ?? create()
+        try upsertProfile(merged)
+        return merged
+    }
+
+    /// Sister to `mutateProfile` for callers that must NOT lazy-create
+    /// a row — e.g. `recordFalseSkipSignal` only mutates an existing
+    /// profile because a missing one means the show has never been
+    /// observed and a stub would corrupt the trust priors. Returns
+    /// `nil` when no row exists.
+    @discardableResult
+    func updateProfileIfExists(
+        podcastId: String,
+        update: (PodcastProfile) -> PodcastProfile
+    ) throws -> PodcastProfile? {
+        guard let existing = try fetchProfile(podcastId: podcastId) else {
+            return nil
+        }
+        let merged = update(existing)
+        try upsertProfile(merged)
+        return merged
+    }
+
+    /// skeptical-review-cycle-5 L-Y4: tuple-returning variant that lets
+    /// the closure surface arbitrary `Sendable` metadata derived from
+    /// the pre/post-update transition (e.g. a SkipMode demotion tuple)
+    /// without forcing the caller to capture a `nonisolated(unsafe)
+    /// var` across the actor hop into `AnalysisStore`. The closure runs
+    /// inside the store actor; the captured value rides back across the
+    /// hop on the return value, so all data flow is value-typed and
+    /// strict-concurrency clean.
+    @discardableResult
+    func updateProfileIfExistsCapturing<T: Sendable>(
+        podcastId: String,
+        update: (PodcastProfile) -> (PodcastProfile, T)
+    ) throws -> (profile: PodcastProfile, captured: T)? {
+        guard let existing = try fetchProfile(podcastId: podcastId) else {
+            return nil
+        }
+        let (merged, captured) = update(existing)
+        try upsertProfile(merged)
+        return (merged, captured)
     }
 
     func fetchProfile(podcastId: String) throws -> PodcastProfile? {
@@ -6537,8 +6714,8 @@ actor AnalysisStore {
             INSERT INTO backfill_jobs
             (jobId, analysisAssetId, podcastId, phase, coveragePolicy, priority,
              progressCursor, retryCount, deferReason, status, scanCohortJSON,
-             createdAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -6554,6 +6731,9 @@ actor AnalysisStore {
         bind(stmt, 10, job.status.rawValue)
         bind(stmt, 11, job.scanCohortJSON)
         bind(stmt, 12, job.createdAt)
+        // H1: liveness clock seeded to createdAt; subsequent transitions
+        // refresh it via `strftime('%s','now')` in the mark* helpers.
+        bind(stmt, 13, job.createdAt)
         do {
             try step(stmt, expecting: SQLITE_DONE)
         } catch {
@@ -6599,7 +6779,9 @@ actor AnalysisStore {
     ) throws {
         let sql = """
             UPDATE backfill_jobs
-            SET progressCursor = ?, retryCount = COALESCE(?, retryCount)
+            SET progressCursor = ?,
+                retryCount = COALESCE(?, retryCount),
+                updatedAt = strftime('%s', 'now')
             WHERE jobId = ?
             """
         let stmt = try prepare(sql)
@@ -6631,7 +6813,9 @@ actor AnalysisStore {
     ) throws {
         let sql = """
             UPDATE backfill_jobs
-            SET status = 'deferred', deferReason = ?
+            SET status = 'deferred',
+                deferReason = ?,
+                updatedAt = strftime('%s', 'now')
             WHERE jobId = ? AND status IN ('queued', 'running')
             """
         let stmt = try prepare(sql)
@@ -6646,7 +6830,8 @@ actor AnalysisStore {
                 // cause is visible to operators, but leave status untouched.
                 let refreshSQL = """
                     UPDATE backfill_jobs
-                    SET deferReason = ?
+                    SET deferReason = ?,
+                        updatedAt = strftime('%s', 'now')
                     WHERE jobId = ? AND status = 'deferred'
                     """
                 let refreshStmt = try prepare(refreshSQL)
@@ -6693,7 +6878,8 @@ actor AnalysisStore {
     func markBackfillJobRunning(jobId: String) throws {
         let sql = """
             UPDATE backfill_jobs
-            SET status = 'running'
+            SET status = 'running',
+                updatedAt = strftime('%s', 'now')
             WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
             """
         let stmt = try prepare(sql)
@@ -6737,7 +6923,9 @@ actor AnalysisStore {
     ) throws {
         let sql = """
             UPDATE backfill_jobs
-            SET status = 'complete', progressCursor = ?
+            SET status = 'complete',
+                progressCursor = ?,
+                updatedAt = strftime('%s', 'now')
             WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
             """
         let stmt = try prepare(sql)
@@ -6789,7 +6977,10 @@ actor AnalysisStore {
     ) throws {
         let sql = """
             UPDATE backfill_jobs
-            SET status = 'failed', deferReason = ?, retryCount = ?
+            SET status = 'failed',
+                deferReason = ?,
+                retryCount = ?,
+                updatedAt = strftime('%s', 'now')
             WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
             """
         let stmt = try prepare(sql)
@@ -6828,26 +7019,27 @@ actor AnalysisStore {
     }
 
     /// stranded-backfill-reaper: reaper for `backfill_jobs` rows stranded in
-    /// `status='running'` across a process death. Process restart implies
-    /// strand — there is no `updatedAt` / `leaseExpiresAt` column on
-    /// `backfill_jobs`, and the runner only writes `running` immediately
-    /// before dispatching FM (see `BackfillJobRunner.markBackfillJobRunning`
-    /// at the top of the drain loop). If a row is observed in `running` at
-    /// process launch, the prior process necessarily failed to reach a
-    /// terminal transition for it, so the safe move is to flip it back to
-    /// `queued` so the next `runPendingBackfill` invocation's M-5
-    /// idempotency check (`BackfillJobRunner.swift:386-403`) can re-enqueue
-    /// it through the admission controller.
+    /// `status='running'` across a process death. The runner writes
+    /// `status='running'` (and bumps `updatedAt`) immediately before
+    /// dispatching FM; if the process dies before reaching a terminal
+    /// transition the row stays in `running` with an `updatedAt` from
+    /// before the crash. The reaper flips such rows back to `queued` so
+    /// the next `runPendingBackfill` invocation's M-5 idempotency check
+    /// (`BackfillJobRunner.swift:386-403`) can re-enqueue them through
+    /// the admission controller.
     ///
-    /// The UPDATE is unconditional (no `WHERE status='running' AND ...`
-    /// freshness filter) because the existing schema has no clock/lease
-    /// column to filter against, AND this method is invoked from
-    /// `AnalysisJobReconciler.reconcile()`, which is itself called exactly
-    /// once at app launch from `PlayheadRuntime` and from the
-    /// BGProcessingTask handler. Both call sites guarantee the prior
-    /// process is dead by the time this UPDATE runs — there is no live
-    /// runner that could be holding a `running` row legitimately when the
-    /// reaper executes.
+    /// H1: freshness filter `updatedAt < now - strandedJobFreshnessSeconds`
+    /// keeps the reaper safe under same-process BGProcessingTask reentry.
+    /// `BGProcessingTaskHandler` runs inside the live app process; if the
+    /// foreground runner is mid-drain on a long shard, the BG-task path
+    /// would otherwise rewind a legitimately-`running` row to `queued`
+    /// while the runner still holds the admission ticket. With the floor,
+    /// any row whose `updatedAt` was bumped recently (by `markBackfillJobRunning`
+    /// or `checkpointBackfillJobProgress`) is exempt; only genuinely
+    /// stranded rows from a prior crashed process clear the threshold.
+    ///
+    /// The freshness window must be larger than any legitimate single
+    /// in-process work step (see `Self.strandedJobFreshnessSeconds`).
     ///
     /// Returns the number of rows reset. Callers (the reconciler) report
     /// the count in `ReconciliationReport` so a stranded-fleet event leaves
@@ -6856,11 +7048,14 @@ actor AnalysisStore {
     func resetStrandedBackfillJobs() throws -> Int {
         let sql = """
             UPDATE backfill_jobs
-            SET status = 'queued'
+            SET status = 'queued',
+                updatedAt = strftime('%s', 'now')
             WHERE status = 'running'
+              AND updatedAt < strftime('%s', 'now') - ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Self.strandedJobFreshnessSeconds)
         try step(stmt, expecting: SQLITE_DONE)
         return Int(sqlite3_changes(db))
     }
@@ -6877,8 +7072,8 @@ actor AnalysisStore {
             INSERT OR IGNORE INTO final_pass_jobs
             (jobId, analysisAssetId, podcastId, adWindowId,
              windowStartTime, windowEndTime, status, retryCount,
-             deferReason, createdAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             deferReason, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -6892,6 +7087,9 @@ actor AnalysisStore {
         bind(stmt, 8, job.retryCount)
         bind(stmt, 9, job.deferReason)
         bind(stmt, 10, job.createdAt)
+        // H1: liveness clock seeded to createdAt; subsequent transitions
+        // refresh it via `strftime('%s','now')` in the mark* helpers.
+        bind(stmt, 11, job.createdAt)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -6909,11 +7107,28 @@ actor AnalysisStore {
         return try readFinalPassJob(stmt)
     }
 
+    /// H2: `'failed'` is included in the IN clause so a previously-failed
+    /// row can re-enter the running state on the next run. Final-pass jobs
+    /// are append-only re-renders of an existing AdWindow's transcript;
+    /// retrying after a transient failure is the desired behavior. Retry
+    /// volume is bounded in practice by the per-launch admission gates
+    /// (`FinalPassRetranscriptionRunner.currentDeferReason` — charge,
+    /// thermal, low-power, disk), not by a `retryCount` cap: each launch
+    /// re-promotes a `failed` row to `running` here, and a subsequent
+    /// failure bumps `retryCount` by 1 in `markFinalPassJobFailed`.
+    /// `retryCount` is therefore a diagnostic counter, not a gate; nothing
+    /// in `FinalPassRetranscriptionRunner` reads it to short-circuit.
+    /// Without this clause, a `'failed'` row was permanently stuck:
+    /// `markFinalPassJobRunning` was a silent no-op, the runner did the
+    /// transcription work anyway (idempotent on chunk fingerprint), but
+    /// `markFinalPassJobComplete` was also a silent no-op, so the row
+    /// remained `failed` forever.
     func markFinalPassJobRunning(jobId: String) throws {
         let sql = """
             UPDATE final_pass_jobs
-            SET status = 'running'
-            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
+            SET status = 'running',
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running', 'failed')
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -6927,11 +7142,20 @@ actor AnalysisStore {
     /// silently leaving a `.complete` row alone when the runner attempts a
     /// late defer is the correct behavior because the work has already
     /// landed.
+    ///
+    /// skeptical-review-cycle-3 L-E: `'failed'` is included alongside
+    /// the other H2-allowed states so a thermal/charge pause that
+    /// arrives just after a row was marked failed (mid-recovery) still
+    /// records the deferred state. Without this, an `.failed → .running
+    /// → .deferred (silent no-op) → ...` sequence would leave the row
+    /// stuck `running` while logically deferred.
     func markFinalPassJobDeferred(jobId: String, reason: String) throws {
         let sql = """
             UPDATE final_pass_jobs
-            SET status = 'deferred', deferReason = ?
-            WHERE jobId = ? AND status IN ('queued', 'running', 'deferred')
+            SET status = 'deferred',
+                deferReason = ?,
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ? AND status IN ('queued', 'running', 'deferred', 'failed')
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -6940,11 +7164,15 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// H2: `'failed'` is included so a recovered re-attempt can promote the
+    /// row to `'complete'` on success. See `markFinalPassJobRunning` doc
+    /// for the parallel rationale.
     func markFinalPassJobComplete(jobId: String) throws {
         let sql = """
             UPDATE final_pass_jobs
-            SET status = 'complete'
-            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running', 'complete')
+            SET status = 'complete',
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running', 'complete', 'failed')
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -6952,10 +7180,49 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// skeptical-review-cycle-7 M1: this IN-clause INTENTIONALLY excludes
+    /// `'failed'`, in contrast to the H2-allowed siblings
+    /// `markFinalPassJobRunning`, `markFinalPassJobDeferred`, and
+    /// `markFinalPassJobComplete`. The asymmetry is load-bearing: this
+    /// method increments `retryCount` unconditionally on every match, so
+    /// allowing `failed → failed` re-entry would let `retryCount` climb
+    /// arbitrarily on every re-attempt within a single drain (e.g. a
+    /// runner that catches and retries an inner error without an
+    /// intervening `markFinalPassJobRunning`). Excluding `'failed'` caps
+    /// the in-drain bump at +1.
+    ///
+    /// Cross-launch climb is intentionally NOT capped here: each launch
+    /// re-promotes a `'failed'` row to `'running'` via
+    /// `markFinalPassJobRunning` (whose IN-clause includes `'failed'`),
+    /// and a subsequent failure bumps `retryCount` by 1. Persistent
+    /// failures therefore see retryCount climb 1 per launch. This is
+    /// considered acceptable because the per-launch admission gate
+    /// (`FinalPassRetranscriptionRunner.currentDeferReason`) keeps the
+    /// re-attempt rate low: most launches abort immediately on charge or
+    /// thermal state. `retryCount` is a diagnostic counter; no caller
+    /// reads it to short-circuit. If a hard cap is added later, it MUST
+    /// gate enqueuing in `FinalPassRetranscriptionRunner` (read
+    /// `retryCount` before `markFinalPassJobRunning` for already-existing
+    /// rows) — not by adding `'failed'` to this IN-clause.
+    ///
+    /// skeptical-review-cycle-10 M-1: re-promotion of a `failed` row back
+    /// to `running` (so a retry can land) is handled SOLELY by
+    /// `markFinalPassJobRunning`'s IN-clause, which includes `'failed'`.
+    /// `FinalPassRetranscriptionRunner.runFinalPassBackfill` calls
+    /// `markFinalPassJobRunning` directly on rows that
+    /// `insertOrIgnoreFinalPassJob` left in their previous state; that's
+    /// the production retry path. `resetStrandedFinalPassJobs` is a
+    /// SEPARATE reaper that ONLY resets stranded `running` rows
+    /// (post-crash recovery), not `failed` ones — so it is NOT a safety
+    /// net for failed→running re-promotion. The second `failed` arrival
+    /// here is therefore a silent no-op by design.
     func markFinalPassJobFailed(jobId: String, reason: String) throws {
         let sql = """
             UPDATE final_pass_jobs
-            SET status = 'failed', deferReason = ?, retryCount = retryCount + 1
+            SET status = 'failed',
+                deferReason = ?,
+                retryCount = retryCount + 1,
+                updatedAt = strftime('%s', 'now')
             WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
             """
         let stmt = try prepare(sql)
@@ -6965,19 +7232,22 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
-    /// Reaper sibling to `resetStrandedBackfillJobs`. Same rationale: at
-    /// process launch a `running` row necessarily belongs to a dead prior
-    /// process — flip it back to `queued` so the next reconcile can pick
-    /// it up.
+    /// Reaper sibling to `resetStrandedBackfillJobs`. See that method's
+    /// doc comment for the H1 freshness-filter rationale — same precondition
+    /// (no live runner has touched this row in the past
+    /// `Self.strandedJobFreshnessSeconds`), same safe-to-flip-back behavior.
     @discardableResult
     func resetStrandedFinalPassJobs() throws -> Int {
         let sql = """
             UPDATE final_pass_jobs
-            SET status = 'queued'
+            SET status = 'queued',
+                updatedAt = strftime('%s', 'now')
             WHERE status = 'running'
+              AND updatedAt < strftime('%s', 'now') - ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Self.strandedJobFreshnessSeconds)
         try step(stmt, expecting: SQLITE_DONE)
         return Int(sqlite3_changes(db))
     }
@@ -7071,19 +7341,29 @@ actor AnalysisStore {
     /// `progressCursor` is written unconditionally: passing `nil` clears the
     /// column to NULL. `retryCount` and `deferReason` use COALESCE so nil
     /// leaves the existing row values untouched.
+    ///
+    /// `updatedAtOverride` lets tests backdate the `updatedAt` column so
+    /// the row clears the H1 stranded-row freshness floor
+    /// (`strandedJobFreshnessSeconds`). When nil, the row gets a fresh
+    /// `strftime('%s','now')` stamp — which is correct for tests that
+    /// don't exercise the reaper, but means the reaper will skip the row
+    /// as too-fresh-to-strand. Pass a value < `now() - 600` to simulate
+    /// a prior-process row that crashed and is now genuinely stranded.
     func forceBackfillJobStateForTesting(
         jobId: String,
         status: BackfillJobStatus,
         progressCursor: BackfillProgressCursor?,
         retryCount: Int? = nil,
-        deferReason: String? = nil
+        deferReason: String? = nil,
+        updatedAtOverride: Int? = nil
     ) throws {
         let sql = """
             UPDATE backfill_jobs
             SET status = ?,
                 progressCursor = ?,
                 retryCount = COALESCE(?, retryCount),
-                deferReason = COALESCE(?, deferReason)
+                deferReason = COALESCE(?, deferReason),
+                updatedAt = COALESCE(?, strftime('%s', 'now'))
             WHERE jobId = ?
             """
         let stmt = try prepare(sql)
@@ -7092,6 +7372,41 @@ actor AnalysisStore {
         bind(stmt, 2, try encodeJSONString(progressCursor))
         bind(stmt, 3, retryCount)
         bind(stmt, 4, deferReason)
+        bind(stmt, 5, updatedAtOverride)
+        bind(stmt, 6, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// skeptical-review-cycle-5 test-helper: sibling to
+    /// `forceBackfillJobStateForTesting` for the `final_pass_jobs`
+    /// table. Lets H1 freshness-floor parity tests backdate
+    /// `updatedAt` so a row clears
+    /// `strandedJobFreshnessSeconds` (10 min) and the reaper
+    /// (`resetStrandedFinalPassJobs`) actually fires. Production code
+    /// MUST NOT call this — use the documented `markFinalPassJob*`
+    /// transitions instead. `retryCount` and `deferReason` use
+    /// `COALESCE` so nil preserves existing values.
+    func forceFinalPassJobStateForTesting(
+        jobId: String,
+        status: BackfillJobStatus,
+        retryCount: Int? = nil,
+        deferReason: String? = nil,
+        updatedAtOverride: Int? = nil
+    ) throws {
+        let sql = """
+            UPDATE final_pass_jobs
+            SET status = ?,
+                retryCount = COALESCE(?, retryCount),
+                deferReason = COALESCE(?, deferReason),
+                updatedAt = COALESCE(?, strftime('%s', 'now'))
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, status.rawValue)
+        bind(stmt, 2, retryCount)
+        bind(stmt, 3, deferReason)
+        bind(stmt, 4, updatedAtOverride)
         bind(stmt, 5, jobId)
         try step(stmt, expecting: SQLITE_DONE)
     }
@@ -7106,7 +7421,11 @@ actor AnalysisStore {
     ) throws -> Bool {
         let sql = """
             UPDATE backfill_jobs
-            SET phase = ?, progressCursor = NULL, status = ?, deferReason = NULL
+            SET phase = ?,
+                progressCursor = NULL,
+                status = ?,
+                deferReason = NULL,
+                updatedAt = strftime('%s', 'now')
             WHERE jobId = ? AND phase = ?
             """
         let stmt = try prepare(sql)
@@ -7306,16 +7625,36 @@ actor AnalysisStore {
         // Rank: `.success` outranks everything else. Same-rank collisions
         // fall through to the REPLACE path (last write wins), matching the
         // existing C5 contract for success-vs-success retries.
+        // M5 (skeptical-review-cycle-1): when a non-success row replaces an
+        // existing non-success row at the same reuseKeyHash, preserve the
+        // attempt counter by incrementing the existing value instead of
+        // overwriting with the caller's (typically 1) initial count. The
+        // Bug 11 sentinel path always builds rows with `attemptCount: 1`,
+        // so a re-attempt of the same logical work — replay through M5
+        // idempotency, H13 short-circuit re-entry, etc. — would otherwise
+        // mask repeated failures behind a forever-1 counter.
+        //
+        // skeptical-review-cycle-3 M-D: the preservation key is
+        // `reuseKeyHash`, NOT `id`. If a caller deletes the existing row
+        // (no current production caller does — tests sometimes seed and
+        // tear down rows directly) and then re-inserts at the same
+        // reuseKeyHash, the count restarts from the caller-provided
+        // value because the probe finds nothing. This is the intended
+        // semantics: a deletion is treated as cohort wipe, not retry.
+        var effectiveAttemptCount = result.attemptCount
         if result.status != .success {
-            let probe = try prepare("SELECT status FROM semantic_scan_results WHERE reuseKeyHash = ? LIMIT 1")
+            let probe = try prepare("SELECT status, attemptCount FROM semantic_scan_results WHERE reuseKeyHash = ? LIMIT 1")
             defer { sqlite3_finalize(probe) }
             bind(probe, 1, reuseKeyHash)
             if sqlite3_step(probe) == SQLITE_ROW,
-               let existingStatus = optionalText(probe, 0),
-               existingStatus == SemanticScanStatus.success.rawValue {
-                // Silently skip: the cached success is the canonical answer
-                // and a later refusal must not destroy it.
-                return
+               let existingStatus = optionalText(probe, 0) {
+                if existingStatus == SemanticScanStatus.success.rawValue {
+                    // Silently skip: the cached success is the canonical
+                    // answer and a later refusal must not destroy it.
+                    return
+                }
+                let existingAttempt = Int(sqlite3_column_int(probe, 1))
+                effectiveAttemptCount = max(existingAttempt + 1, result.attemptCount)
             }
         }
 
@@ -7341,7 +7680,7 @@ actor AnalysisStore {
         bind(stmt, 9, result.disposition.rawValue)
         bind(stmt, 10, result.spansJSON)
         bind(stmt, 11, result.status.rawValue)
-        bind(stmt, 12, result.attemptCount)
+        bind(stmt, 12, effectiveAttemptCount)
         bind(stmt, 13, result.errorContext)
         bind(stmt, 14, result.inputTokenCount)
         bind(stmt, 15, result.outputTokenCount)

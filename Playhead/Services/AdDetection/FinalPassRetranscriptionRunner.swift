@@ -249,6 +249,8 @@ actor FinalPassRetranscriptionRunner {
 
         // Materialize the existing pass='final' chunks so the per-window
         // inner check can run without an extra DB hop per window.
+        // skeptical-review-cycle-16 L-3: declared `let` because neither
+        // branch mutates the binding after assignment.
         let existingFinalChunks: [TranscriptChunk]
         do {
             existingFinalChunks = try await store.fetchTranscriptChunks(
@@ -257,6 +259,17 @@ actor FinalPassRetranscriptionRunner {
         } catch {
             existingFinalChunks = []
         }
+        // skeptical-review-cycle-5 M-Y1: track windows successfully
+        // re-transcribed in this drain. If two eligible AdWindows are
+        // spatially overlapping, the second iteration's `coversWindow`
+        // check at line ~430 cannot see chunks the first iteration just
+        // wrote (the snapshot above is loop-stale). Carry the in-drain
+        // coverage forward as `(start, end)` intervals and OR it with
+        // the persisted-chunks check so overlapping windows skip the
+        // redundant ASR pass. Per-segment dedupe in
+        // `hasTranscriptChunk(segmentFingerprint:)` was the only safety
+        // net previously; this avoids the wasted FM/ASR work upstream.
+        var inDrainCoveredIntervals: [(Double, Double)] = []
 
         // Step 4 — enqueue + run each window. Each window is its own row
         // in `final_pass_jobs` so admission and retry tracking are
@@ -290,6 +303,11 @@ actor FinalPassRetranscriptionRunner {
         var maxRetranscribedEnd: Double = watermark
 
         for job in jobs {
+            // skeptical-review-cycle-1: cooperative cancellation. If the
+            // surrounding Task is cancelled (app shutdown, bootstrap
+            // teardown), abandon the drain promptly instead of churning
+            // through every remaining window.
+            try Task.checkCancellation()
             // Re-check the gates before every window. A device unplug or
             // thermal spike mid-drain must terminate the loop promptly
             // without loading a new shard.
@@ -316,14 +334,29 @@ actor FinalPassRetranscriptionRunner {
                 let didRun = try await retranscribeWindow(
                     job: job,
                     input: input,
-                    existingFinalChunks: existingFinalChunks
+                    existingFinalChunks: existingFinalChunks,
+                    inDrainCoveredIntervals: inDrainCoveredIntervals
                 )
                 try await store.markFinalPassJobComplete(jobId: job.jobId)
                 admittedJobIds.append(job.jobId)
                 if didRun {
                     reTranscribedWindowIds.append(job.adWindowId)
                     maxRetranscribedEnd = max(maxRetranscribedEnd, job.windowEndTime)
+                    inDrainCoveredIntervals.append((job.windowStartTime, job.windowEndTime))
                 }
+            } catch is CancellationError {
+                // skeptical-review-cycle-1 / cycle-4 M2: cancellation
+                // must NOT be logged as a job failure. Mark the row
+                // `deferred` so the next launch sweep re-admits it via
+                // `markFinalPassJobRunning`'s `IN ('queued','deferred',
+                // 'failed')` clause — that path bypasses the
+                // stranded-row reaper's 10-minute freshness floor
+                // entirely. Then rethrow to break the drain promptly.
+                try? await store.markFinalPassJobDeferred(
+                    jobId: job.jobId,
+                    reason: "cancelled"
+                )
+                throw CancellationError()
             } catch {
                 logger.warning("Final-pass: retranscribe failed for \(job.jobId, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 try? await store.markFinalPassJobFailed(
@@ -404,14 +437,21 @@ actor FinalPassRetranscriptionRunner {
     private func retranscribeWindow(
         job: FinalPassJob,
         input: AssetInput,
-        existingFinalChunks: [TranscriptChunk]
+        existingFinalChunks: [TranscriptChunk],
+        inDrainCoveredIntervals: [(Double, Double)]
     ) async throws -> Bool {
         // Inner idempotency rail: skip if existing pass='final' chunks
         // already cover this window. The outer watermark check usually
         // already bails on this, but we keep the inner check as defense.
+        // skeptical-review-cycle-5 M-Y1: also OR with `inDrainCoveredIntervals`
+        // — windows the prior iterations of this same drain re-transcribed.
+        // The persisted snapshot is loop-stale and won't reflect them.
         let coversWindow = existingFinalChunks.contains { chunk in
             chunk.startTime <= job.windowStartTime
                 && chunk.endTime >= job.windowEndTime
+        } || inDrainCoveredIntervals.contains { interval in
+            interval.0 <= job.windowStartTime
+                && interval.1 >= job.windowEndTime
         }
         if coversWindow {
             logger.debug("Final-pass: window \(job.adWindowId, privacy: .public) already covered by pass='final' chunks")
@@ -449,7 +489,26 @@ actor FinalPassRetranscriptionRunner {
         var nextChunkIndex = await nextFinalChunkIndex(
             forAsset: input.analysisAssetId
         )
+        // skeptical-review-cycle-3 M-E: lease-freshness heartbeat. The
+        // stranded-row reaper flips a `running` row back to `queued`
+        // after `strandedJobFreshnessSeconds` (10 min) without a touch.
+        // On degraded hardware a multi-shard window can exceed that
+        // floor, opening a duplicate-FM-call race window. Refreshing
+        // `updatedAt` between shards keeps the lease alive without
+        // changing semantics — `markFinalPassJobRunning` is idempotent
+        // for an already-`running` row at the same jobId.
+        var lastHeartbeatTick = ContinuousClock.now
+        let heartbeatInterval = Duration.seconds(300) // half the floor
         for shard in intersectingShards {
+            // skeptical-review-cycle-1: cooperative cancellation in the
+            // hot per-shard loop. Speech transcription is the heaviest
+            // operation in the runner; a missed cancellation here lets a
+            // shutdown stall on a 30 s shard.
+            try Task.checkCancellation()
+            if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
+                try? await store.markFinalPassJobRunning(jobId: job.jobId)
+                lastHeartbeatTick = ContinuousClock.now
+            }
             let segments = try await speechService.transcribe(
                 shard: shard,
                 podcastId: input.podcastId

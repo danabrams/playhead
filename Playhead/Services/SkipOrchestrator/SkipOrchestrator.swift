@@ -47,7 +47,7 @@ struct AdDecisionResult: Sendable {
 /// Lifecycle of an AdWindow through the skip orchestrator.
 /// Extends the detection-side states (candidate, confirmed, suppressed)
 /// with skip-execution states.
-enum SkipDecisionState: String, Sendable {
+enum SkipDecisionState: String, Sendable, CaseIterable {
     /// Detection produced a candidate -- not yet actionable.
     case candidate
     /// Detection confirmed the window -- eligible for skip policy.
@@ -149,6 +149,40 @@ actor SkipOrchestrator {
     /// actor — the only consumer is `beginEpisode`.
     private static let preloadConfidenceThreshold: Double = 0.7
 
+    /// Cycle-21 H-1: returns whether a decision state is allowed to
+    /// flow through the `beginEpisode` preload into `receiveAdWindows`.
+    /// `.candidate`, `.confirmed`, `.applied` are eligible; `.suppressed`
+    /// (terminal "no-skip") and `.reverted` (user chose "Listen") are
+    /// not. `.applied` is eligible so a previously-skipped ad pushes
+    /// its cue on the next app launch (cross-launch auto-skip
+    /// continuity); banner re-emission for those rows is suppressed in
+    /// `beginEpisode` by pre-populating `banneredWindowIds`.
+    ///
+    /// Cycle-22 M-1: implemented as an exhaustive `switch` over
+    /// `SkipDecisionState` (rather than an array of three cases) so
+    /// the compiler forces a deliberate decision when a new case is
+    /// added — the new case won't silently default to ineligible
+    /// without an author choice.
+    private static func isPreloadEligible(_ state: SkipDecisionState) -> Bool {
+        switch state {
+        case .candidate, .confirmed, .applied:
+            return true
+        case .suppressed, .reverted:
+            return false
+        }
+    }
+
+    /// Cycle-21 L-1: derived from `SkipDecisionState.allCases` (cycle-22
+    /// M-1 made the enum `CaseIterable`) so the on-disk filter cannot
+    /// drift from the in-actor enum across renames, rawValue changes,
+    /// or new cases. The exhaustive partition lives in
+    /// `isPreloadEligible(_:)`.
+    private static let preloadEligibleDecisionStates: Set<String> = Set(
+        SkipDecisionState.allCases
+            .filter(SkipOrchestrator.isPreloadEligible)
+            .map(\.rawValue)
+    )
+
     // MARK: - Dependencies
 
     private let store: AnalysisStore
@@ -209,6 +243,31 @@ actor SkipOrchestrator {
 
     /// Window IDs for which a banner has already been emitted. Prevents re-fires.
     private var banneredWindowIds: Set<String> = []
+
+    /// Cycle-23 H-1: window IDs for which `emitBannerItem` was actually
+    /// invoked this episode (not merely "banner suppression flagged").
+    /// `banneredWindowIds` is populated both BY emission AND by
+    /// `beginEpisode`'s pre-population for preloaded `.applied` rows
+    /// — meaning a snapshot of `banneredWindowIds` cannot distinguish
+    /// "the gate was pre-populated" from "the eval loop emitted and
+    /// then inserted." This separate set records ONLY actual auto-
+    /// skip-tier banner emissions, so tests can deterministically
+    /// assert "no auto-skip banner was emitted for window X" without
+    /// any iteration-order coupling.
+    ///
+    /// **Cycle-26 L-1: TEST-ONLY OBSERVABILITY.** Production logic does
+    /// NOT read this set — the gate that suppresses re-emission is
+    /// `banneredWindowIds`, not this. The only reader is
+    /// `emittedAutoSkipBannersSnapshot()`, called from
+    /// `SkipOrchestratorPreloadTests`. Three operations on this set are
+    /// load-bearing for those tests; do NOT delete any of them as "dead
+    /// state":
+    ///   • the `insert` in `emitBannerItem` (records actual emissions),
+    ///   • the `removeAll` in `beginEpisode` (resets per-episode state),
+    ///   • the `removeAll` in `endEpisode` (the cross-episode regression
+    ///     test `testEmittedAutoSkipBannersDoesNotLeakAcrossEpisodes`
+    ///     fails if this clear is dropped).
+    private var emittedAutoSkipBannerWindowIds: Set<String> = []
 
     /// playhead-gtt9.23: window IDs for which a `.suggest` tier banner has
     /// already been emitted. Tracked separately from `banneredWindowIds`
@@ -399,6 +458,18 @@ actor SkipOrchestrator {
             evidenceCatalogEntries: entries,
             tier: .autoSkipped
         )
+        // Cycle-26 L-1 / Cycle-27 L-2: this insert is consumed by
+        // `emittedAutoSkipBannersSnapshot()` from canary tests. The
+        // production gate that prevents re-fires is `banneredWindowIds`
+        // — NOT this set. The gate is written at four production sites
+        // (pinned by source canary `BanneredWindowIdsInsertSiteCount`):
+        // `evaluateAndPush`'s terminal-state branch and its promotion
+        // branch (each before calling this method), `injectUserMarkedAd`
+        // (also before calling this method), and `beginEpisode`'s
+        // preload pre-population for `.applied` rows (which suppresses
+        // without ever calling this method). Do not remove this line as
+        // "dead state"; see field doc.
+        emittedAutoSkipBannerWindowIds.insert(adWindow.id)
         for (_, continuation) in bannerContinuations {
             continuation.yield(item)
         }
@@ -485,6 +556,7 @@ actor SkipOrchestrator {
         currentPlayheadTime = 0
         decisionLog.removeAll()
         banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
 
@@ -507,13 +579,43 @@ actor SkipOrchestrator {
         // unmodified row preserves any auto-skip / markOnly precision
         // gate stamped at write-time, which a synthesized "confirmed"
         // shape would silently strip.
+        //
+        // Cycle-21 H-1: preload `ad_windows` and forward through
+        // `receiveAdWindows`. Filter excludes only `.suppressed`
+        // (terminal "no-skip" — replay wastes memory) and `.reverted`
+        // (user explicitly chose "Listen" — replay would risk pushing
+        // a cue the user rejected). `.candidate` and `.confirmed` are
+        // forwarded so the orchestrator can re-evaluate them.
+        // `.applied` is forwarded so a previously-skipped ad pushes its
+        // cue again on the next app launch — `evaluateAndPush`'s
+        // terminal-state branch (the `decisionState == .applied` arm)
+        // appends the row to `eligible` and `pushMergedCues` fires the
+        // skip cue. Without that forwarding, cross-launch auto-skip
+        // would silently regress: pre-pivot the `skip_cues` table re-
+        // cued every confidence-passing row at episode start; now the
+        // `ad_windows` rows must do the same job.
+        //
+        // Banner re-emission for the forwarded `.applied` rows is
+        // suppressed by pre-populating `banneredWindowIds` BEFORE the
+        // `receiveAdWindows` call. The terminal-state branch in
+        // `evaluateAndPush` only emits a banner when
+        // `!banneredWindowIds.contains(id)`; pre-populating the set
+        // turns the banner emission off for an already-skipped ad
+        // without affecting the cue push (the cue push happens via
+        // `eligible.append` regardless of the banner gate).
         do {
             let preWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
             let eligible = preWindows.filter {
                 $0.confidence >= Self.preloadConfidenceThreshold
                     && $0.endTime > $0.startTime
+                    && Self.preloadEligibleDecisionStates.contains($0.decisionState)
             }
             if !eligible.isEmpty {
+                let appliedRawValue = SkipDecisionState.applied.rawValue
+                for window in eligible where window.decisionState == appliedRawValue {
+                    // Cycle-27 T-3 production-writer site (1 of 4): preload pre-population.
+                    banneredWindowIds.insert(window.id)
+                }
                 await receiveAdWindows(eligible)
             }
         } catch {
@@ -536,6 +638,7 @@ actor SkipOrchestrator {
         activeEvidenceCatalog = nil
         inAdState = false
         banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
         recentlyAcceptedSuggestIds.removeAll()
@@ -1156,6 +1259,41 @@ actor SkipOrchestrator {
         Set(windows.keys)
     }
 
+    /// Snapshot of window IDs for which `emitBannerItem` actually
+    /// reached the yield-to-subscriber path this episode. The set is
+    /// populated ONLY by emission to active subscribers, never by
+    /// pre-population — so a `.contains(id) == false` assertion proves
+    /// no banner was emitted regardless of `evaluateAndPush` iteration
+    /// order. Used by `testPreloadedAppliedWindowDoesNotEmitBanner` and
+    /// `testEndEpisodeResetsEmittedAutoSkipBannersSet`.
+    ///
+    /// Cycle-25 L-2 precision: `emitBannerItem` early-returns when
+    /// `bannerContinuations` is empty (no UI listening). The set is
+    /// therefore populated only when emission has both a window AND
+    /// a subscriber. Tests that rely on `.contains(id) == true` must
+    /// subscribe to `bannerItemStream()` BEFORE `beginEpisode`,
+    /// otherwise the emission never reaches the insert site and the
+    /// snapshot stays empty (correctly — no banner was actually shown).
+    ///
+    /// Cycle-23 L-2: this is test-only observability — production
+    /// callers must not couple to it.
+    ///
+    /// Cycle-28 L-C / Cycle-29 L-1 cross-reference: see the field doc
+    /// on `emittedAutoSkipBannerWindowIds` for *why* this set exists
+    /// instead of a snapshot of `banneredWindowIds`. The 4 production
+    /// writers of `banneredWindowIds` are enumerated in `emitBannerItem`'s
+    /// comment; of those, only `beginEpisode`'s preload pre-population
+    /// inserts WITHOUT a corresponding `emitBannerItem` call, so it is
+    /// the unique source of gate-snapshot ambiguity: a `banneredWindowIds`
+    /// snapshot cannot distinguish "preload pre-populated this id" from
+    /// "eval-loop emitted then inserted." This emission set is populated
+    /// only by `emitBannerItem` and only after the subscriber-gate, so
+    /// its absence/presence is unambiguous emission evidence regardless
+    /// of preload state.
+    func emittedAutoSkipBannersSnapshot() -> Set<String> {
+        emittedAutoSkipBannerWindowIds
+    }
+
     // MARK: - Core Skip Policy
 
     /// Evaluate all managed windows and determine which should have active
@@ -1176,6 +1314,7 @@ actor SkipOrchestrator {
                 if managed.decisionState == .applied {
                     // Emit a banner on first encounter (e.g. after applyManualSkip).
                     if !banneredWindowIds.contains(managed.adWindow.id) {
+                        // Cycle-27 T-3 production-writer site (2 of 4): evaluateAndPush terminal-state branch.
                         banneredWindowIds.insert(managed.adWindow.id)
                         emitBannerItem(for: managed)
                     }
@@ -1194,6 +1333,7 @@ actor SkipOrchestrator {
             // Emit a banner the first time a window reaches .confirmed or .applied.
             if (decision == .confirmed || decision == .applied),
                !banneredWindowIds.contains(managed.adWindow.id) {
+                // Cycle-27 T-3 production-writer site (3 of 4): evaluateAndPush promotion branch.
                 banneredWindowIds.insert(managed.adWindow.id)
                 emitBannerItem(for: managed)
             }
@@ -1488,6 +1628,7 @@ actor SkipOrchestrator {
         // even in shadow/manual mode where evaluateAndPush may not promote
         // to .applied.
         if !banneredWindowIds.contains(windowId) {
+            // Cycle-27 T-3 production-writer site (4 of 4): injectUserMarkedAd manual entry point.
             banneredWindowIds.insert(windowId)
             emitBannerItem(for: managed)
         }

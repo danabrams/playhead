@@ -187,6 +187,31 @@ final class PlayheadRuntime {
     @ObservationIgnored
     private var playbackPositionPersistenceHandler: (@MainActor (PlaybackPositionPersistenceTrigger) async -> Void)?
 
+    /// Resolves an `Episode.canonicalEpisodeKey` to its parent
+    /// `Podcast.feedURL.absoluteString`. Installed by `PlayheadApp` once
+    /// the SwiftData `ModelContainer` is available so the launch-time
+    /// final-pass sweep can populate `FinalPassJob.podcastId` instead of
+    /// the hard-coded `nil` it shipped with — without `nil`, per-podcast
+    /// trust telemetry and SponsorKnowledge keying both miss show
+    /// context they need.
+    ///
+    /// Boxed in an `OSAllocatedUnfairLock` so the deferred bootstrap
+    /// `Task` (which captures stored values at construction time, before
+    /// `PlayheadApp.task` has had a chance to install the resolver) can
+    /// still read the latest installed closure when the final-pass sweep
+    /// runs after the migrate / reconciler chain.
+    @ObservationIgnored
+    private let episodePodcastIdResolverBox = OSAllocatedUnfairLock<(@Sendable (String) async -> String?)?>(initialState: nil)
+
+    /// skeptical-review-cycle-3 M-B: batch resolver for the launch
+    /// sweep. A single MainActor hop returns the full episodeId →
+    /// podcastFeedURL mapping for all requested ids, instead of N hops
+    /// — one per asset — that would briefly stutter UI rendering on
+    /// devices with hundreds of episodes. The per-episode resolver
+    /// above is retained as a fallback for callers that don't have
+    /// a batch context.
+    private let episodePodcastIdBatchResolverBox = OSAllocatedUnfairLock<(@Sendable ([String]) async -> [String: String])?>(initialState: nil)
+
     private(set) var currentEpisodeId: String?
     private(set) var currentPodcastId: String?
     /// MainActor-confined observable property. External readers go through
@@ -240,6 +265,15 @@ final class PlayheadRuntime {
     private let shadowRetryObserver: ShadowRetryObserver?
     @ObservationIgnored
     private var shadowRetryObserverStartupTask: Task<Void, Never>?
+    /// skeptical-review-cycle-5 H-Y1: tracked handle for the detached
+    /// final-pass launch sweep spawned in `start()`. Held so `shutdown()`
+    /// can cancel it cleanly. Without this, an in-flight sweep keeps
+    /// running past `shutdown()` (the runner's per-shard
+    /// `Task.checkCancellation()` is dead code on a detached task whose
+    /// parent is never cancelled), which surfaces as battery/thermal
+    /// drift on real devices when SwiftUI tears down the runtime mid-sweep.
+    @ObservationIgnored
+    private var finalPassLaunchSweepTask: Task<Void, Never>?
     private var isShutdown = false
 
     /// True when an episode is actively loaded for playback.
@@ -1119,7 +1153,23 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox] in
+            // skeptical-review-cycle-9 L-4: pin the implicit MainActor
+            // isolation that cycle-8 M1 relies on. PlayheadRuntime is
+            // declared `@MainActor` (file:line 19), and an unannotated
+            // `Task { ... }` body in a `@MainActor` context inherits
+            // that isolation under SE-0420. The cycle-8 M1 fix below
+            // (`if !isShutdown { ... }` guard around the launch-sweep
+            // install) depends on this inheritance for the check +
+            // assignment to be atomic relative to a concurrent
+            // `shutdown()` call. If a future refactor breaks isolation
+            // inheritance (e.g. swapping to `Task.detached`, adding an
+            // explicit `@Sendable` that strips actor capture, or hoisting
+            // the body into a free function), the M1 atomicity claim
+            // silently lapses. The runtime assertion below trips at
+            // launch on debug builds rather than letting the regression
+            // ship as a hard-to-spot race.
+            MainActor.assertIsolated()
             // playhead-8u3i: inject pre-analysis services FIRST, before any
             // migrate calls. The BG-task handlers registered in
             // `BackgroundProcessingService.registerBackgroundTasks()` race
@@ -1412,18 +1462,86 @@ final class PlayheadRuntime {
             // both this launch hook and any future BG-task entry.
             // Errors are intentionally swallowed; final-pass is best-
             // effort — a failure here must not block the scheduler loop.
+            // skeptical-review-cycle-4 H2: launch sweep moves to a
+            // detached follow-on Task so the resolver wait does NOT
+            // gate `startSchedulerLoop()`. Pre-fix, the bootstrap Task
+            // would block 2-2.5s on every cold launch (and the full
+            // budget on any BG wake without a SwiftUI scene), eating a
+            // meaningful chunk of the 30s BG-task budget and delaying
+            // the dispatcher from picking up queued work. The launch
+            // sweep is best-effort and not on any user-visible path,
+            // so detaching is correct.
             if let finalPassRetranscriptionRunner {
-                _ = await Self.runFinalPassBackfillForAllAssetsAtLaunch(
-                    runner: finalPassRetranscriptionRunner,
-                    analysisStore: analysisStore,
-                    downloadManager: downloadManager
-                )
+                // skeptical-review-cycle-5 H-Y1: capture the detached
+                // task into `finalPassLaunchSweepTask` so `shutdown()`
+                // can cancel it. A detached task whose handle is
+                // discarded is unreachable for cancellation; the inner
+                // `try Task.checkCancellation()` calls in the runner
+                // become dead code.
+                //
+                // skeptical-review-cycle-8 M1: this bootstrap Task body
+                // is long — it suspends at every `await` above. If
+                // `shutdown()` lands during one of those suspensions,
+                // it cancels `finalPassLaunchSweepTask` (currently nil)
+                // and sets `isShutdown = true`, then we resume here
+                // and would otherwise install a fresh detached sweep
+                // that nothing cancels. PlayheadRuntime is `@MainActor`
+                // (file:line 19); both this body and `shutdown()` run
+                // on MainActor, so the check + assignment below is
+                // atomic relative to a concurrent shutdown — there is
+                // no suspension point between `if !isShutdown` and the
+                // assignment. If shutdown already ran, skip the install.
+                if !isShutdown {
+                    finalPassLaunchSweepTask = Task.detached { [analysisStore, downloadManager, finalPassRetranscriptionRunner, episodePodcastIdBatchResolverBox, episodePodcastIdResolverBox] in
+                        let batchResolver = await Self.awaitEpisodePodcastIdBatchResolver(
+                            box: episodePodcastIdBatchResolverBox,
+                            timeoutSec: 2.0
+                        )
+                        let perEpisodeResolver = batchResolver == nil
+                            ? await Self.awaitEpisodePodcastIdResolver(
+                                box: episodePodcastIdResolverBox,
+                                timeoutSec: 0.5
+                            )
+                            : nil
+                        // skeptical-review-cycle-8 L3: if cancellation
+                        // landed during the resolver waits (above),
+                        // those helpers return whatever the box held
+                        // (nil if the resolver was never installed).
+                        // Proceeding here would silently re-introduce
+                        // the H3 regression — every asset would get
+                        // `podcastId = nil`. Bail instead so cancel
+                        // means no work, not corrupt work.
+                        if Task.isCancelled { return }
+                        _ = await Self.runFinalPassBackfillForAllAssetsAtLaunch(
+                            runner: finalPassRetranscriptionRunner,
+                            analysisStore: analysisStore,
+                            downloadManager: downloadManager,
+                            podcastIdResolver: perEpisodeResolver,
+                            podcastIdBatchResolver: batchResolver
+                        )
+                    }
+                }
             }
 
             await analysisWorkScheduler.startSchedulerLoop()
         }
 
         Task { [playbackService, analysisCoordinator, skipOrchestrator, shadowCaptureCoordinator, analysisWorkScheduler, currentEpisodeIdMirror] in
+            // skeptical-review-cycle-10 L-4 / cycle-11 L-4: applied to
+            // the bootstrap `Task { }` bodies whose semantics actually
+            // depend on MainActor isolation — currently the launch-sweep
+            // installer at line ~1156 (M1 atomicity) and this Task body,
+            // which uses `lastForwardedContext`, `lastStatus`,
+            // `lastSpeed` etc. as mutable locals across `await`
+            // boundaries (single-mutator-via-suspension). Other bare
+            // bootstrap Tasks (e.g. the capabilityUpdates listener at
+            // line ~1142, the playback-state observer at the bottom of
+            // this init) are isolation-incidental: they don't carry
+            // MainActor-coupled invariants the way these two do, so the
+            // assertion would be cargo-cult there. Trips at launch on
+            // debug builds if a future refactor breaks isolation
+            // inheritance.
+            MainActor.assertIsolated()
             await skipOrchestrator.setSkipCueHandler { cues in
                 Task { @PlaybackServiceActor in
                     playbackService.setSkipCues(cues)
@@ -1668,10 +1786,63 @@ final class PlayheadRuntime {
     ///
     /// Idempotent. Re-runs against an asset whose watermark already
     /// covers every eligible AdWindow are no-ops.
+    /// skeptical-review-cycle-3 H-A / cycle-4 H1: bounded wait for the
+    /// `setEpisodePodcastIdResolver` install. Polls the lock-protected
+    /// box at 50ms intervals up to `timeoutSec`.
+    ///
+    /// Cycle-4 H1 fix: a `try? await Task.sleep(...)` swallows
+    /// `CancellationError`, which would otherwise turn this into a
+    /// busy-spin under Task cancellation (BG-task budget exhaustion,
+    /// app teardown). Surface cancellation by checking `Task.isCancelled`
+    /// on every iteration AND by letting the throw propagate when
+    /// sleep's CancellationError lands; either path returns the current
+    /// box value rather than burning CPU.
+    static func awaitEpisodePodcastIdResolver(
+        box: OSAllocatedUnfairLock<(@Sendable (String) async -> String?)?>,
+        timeoutSec: Double
+    ) async -> (@Sendable (String) async -> String?)? {
+        let pollNs: UInt64 = 50_000_000 // 50ms
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeoutSec))
+        while ContinuousClock.now < deadline {
+            if let resolver = box.withLock({ $0 }) {
+                return resolver
+            }
+            if Task.isCancelled { return box.withLock { $0 } }
+            do {
+                try await Task.sleep(nanoseconds: pollNs)
+            } catch {
+                return box.withLock { $0 }
+            }
+        }
+        return box.withLock { $0 }
+    }
+
+    static func awaitEpisodePodcastIdBatchResolver(
+        box: OSAllocatedUnfairLock<(@Sendable ([String]) async -> [String: String])?>,
+        timeoutSec: Double
+    ) async -> (@Sendable ([String]) async -> [String: String])? {
+        let pollNs: UInt64 = 50_000_000
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeoutSec))
+        while ContinuousClock.now < deadline {
+            if let resolver = box.withLock({ $0 }) {
+                return resolver
+            }
+            if Task.isCancelled { return box.withLock { $0 } }
+            do {
+                try await Task.sleep(nanoseconds: pollNs)
+            } catch {
+                return box.withLock { $0 }
+            }
+        }
+        return box.withLock { $0 }
+    }
+
     static func runFinalPassBackfillForAllAssetsAtLaunch(
         runner: FinalPassRetranscriptionRunner,
         analysisStore: AnalysisStore,
-        downloadManager: DownloadManager
+        downloadManager: DownloadManager,
+        podcastIdResolver: (@Sendable (String) async -> String?)? = nil,
+        podcastIdBatchResolver: (@Sendable ([String]) async -> [String: String])? = nil
     ) async -> Int {
         let log = Logger(subsystem: "com.playhead", category: "FinalPassRetranscription")
         let assets: [AnalysisAsset]
@@ -1682,8 +1853,24 @@ final class PlayheadRuntime {
             return 0
         }
 
+        // skeptical-review-cycle-3 M-B: prefer batch resolution. One
+        // MainActor hop returns the full episodeId → podcastFeedURL
+        // mapping; per-episode lookups during the loop hit the in-memory
+        // dict instead of bouncing back to MainActor for every asset.
+        let batchMap: [String: String]?
+        if let podcastIdBatchResolver {
+            let episodeIds = assets.map(\.episodeId)
+            batchMap = await podcastIdBatchResolver(episodeIds)
+        } else {
+            batchMap = nil
+        }
+
         var driven = 0
         for asset in assets {
+            // skeptical-review-cycle-6 H-Z1: shutdown() cancels this task
+            // mid-sweep; honor it between assets so we stop issuing FM/ASR
+            // work, and don't let the catch below swallow CancellationError.
+            if Task.isCancelled { break }
             // Resolve audio URL via the download cache. If the file was
             // evicted, no re-transcription can run anyway — skip silently.
             guard let cachedURL = await downloadManager.cachedFileURL(for: asset.episodeId) else {
@@ -1691,9 +1878,15 @@ final class PlayheadRuntime {
             }
             guard let localURL = LocalAudioURL(cachedURL) else { continue }
 
+            let resolvedPodcastId: String?
+            if let batchMap {
+                resolvedPodcastId = batchMap[asset.episodeId]
+            } else {
+                resolvedPodcastId = await podcastIdResolver?(asset.episodeId)
+            }
             let input = FinalPassRetranscriptionRunner.AssetInput(
                 analysisAssetId: asset.id,
-                podcastId: nil,
+                podcastId: resolvedPodcastId,
                 audioURL: localURL,
                 episodeId: asset.episodeId
             )
@@ -1707,6 +1900,10 @@ final class PlayheadRuntime {
                     log.info("Top-level deferred (\(reason.rawValue, privacy: .public)) — abandoning sweep")
                     break
                 }
+            } catch is CancellationError {
+                // Cancellation is the H-Z1 termination signal — not a
+                // per-asset failure. Stop the sweep cleanly.
+                break
             } catch {
                 log.warning("Run failed for \(asset.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
@@ -1721,6 +1918,35 @@ final class PlayheadRuntime {
         isShutdown = true
         shadowRetryObserverStartupTask?.cancel()
         shadowRetryObserverStartupTask = nil
+        // skeptical-review-cycle-5 H-Y1: cancel the launch sweep so a
+        // mid-drain teardown stops issuing FM/ASR work the user no
+        // longer needs. We don't await — the runner will surface the
+        // cancellation at its next checkpoint and unwind naturally.
+        finalPassLaunchSweepTask?.cancel()
+        finalPassLaunchSweepTask = nil
+        // skeptical-review-cycle-7 M2: the audio prefetch task is the
+        // third long-lived `Task` field on the runtime. The episode-
+        // change path at :1995 and `stopPlayback` at :2127 already
+        // cancel it on user-initiated transitions, but a teardown
+        // outside those paths (deinit, app suspension during prefetch,
+        // explicit shutdown for tests) used to leak it — the task
+        // would continue writing to the disk cache against a runtime
+        // that had already declared itself shut down.
+        //
+        // skeptical-review-cycle-8 L1: cancellation here narrows but
+        // does not close the gap. The task body has only two
+        // `Task.isCancelled` checkpoints (after `streamingDownload`
+        // and after `result.downloadComplete()`); the intermediate
+        // `playbackService.load` / `analysisCoordinator.handlePlaybackEvent`
+        // / `skipOrchestrator.beginEpisode` calls are not cancellation
+        // points. A shutdown that lands mid-`playbackService.load`
+        // still finishes that load against services that are otherwise
+        // being torn down. We accept that residual window — it is
+        // bounded by the duration of those individual awaits — and
+        // ensure the next checkpoint terminates the task before any
+        // further work is issued.
+        audioCacheTask?.cancel()
+        audioCacheTask = nil
         await shadowRetryObserver?.stop()
     }
 
@@ -1773,6 +1999,18 @@ final class PlayheadRuntime {
         _ handler: @escaping @MainActor (PlaybackPositionPersistenceTrigger) async -> Void
     ) {
         playbackPositionPersistenceHandler = handler
+    }
+
+    func setEpisodePodcastIdResolver(
+        _ resolver: @escaping @Sendable (String) async -> String?
+    ) {
+        episodePodcastIdResolverBox.withLock { $0 = resolver }
+    }
+
+    func setEpisodePodcastIdBatchResolver(
+        _ resolver: @escaping @Sendable ([String]) async -> [String: String]
+    ) {
+        episodePodcastIdBatchResolverBox.withLock { $0 = resolver }
     }
 
     private func requestPlaybackPositionPersistence(

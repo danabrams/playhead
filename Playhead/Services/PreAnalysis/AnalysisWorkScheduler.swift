@@ -1706,6 +1706,50 @@ actor AnalysisWorkScheduler {
     func pendingCancelCauseForTesting() -> InternalMissCause? {
         pendingCancelCause
     }
+
+    /// skeptical-review-cycle-5 #48 test-only entry point. The
+    /// `emitJournalPreempted` helper carries a `guard !lostOwnership
+    /// else { return }` defense-in-depth gate so a future edit that
+    /// adds a new `.preempted` emission site cannot accidentally
+    /// bypass the lostOwnership skip even if the umbrella check at
+    /// `processJob` line ~2893 is moved or removed. Production code
+    /// paths reach `emitJournalPreempted` only after that umbrella
+    /// check, so the per-emit gate is impossible to exercise from a
+    /// black-box test that drives the real scheduler. This entry
+    /// flips `lostOwnership` and invokes the private helper directly,
+    /// letting the test pin the per-emit gate behavior for each new
+    /// M4 pause-arm cause (`.thermal`,
+    /// `.modelTemporarilyUnavailable`, `.pipelineError`). Production
+    /// code MUST NOT call this — the saved/restore pattern keeps the
+    /// scheduler's lostOwnership state untouched after the call.
+    func emitJournalPreemptedForTesting(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String,
+        underLostOwnership: Bool
+    ) async {
+        // skeptical-review-cycle-7 L1: the save/restore brackets cross
+        // an `await emitJournalPreempted(...)`. On an actor, an `await`
+        // is a re-entrancy point: a concurrent caller invoking any
+        // OTHER actor method during the suspension will observe the
+        // test-installed `lostOwnership` value, not the caller's
+        // saved one. That is benign for the current test pattern
+        // (single test serially poking this entry) but would silently
+        // bleed into a future stress-test harness that drove the
+        // production scheduler in parallel. Callers must therefore
+        // treat this entry as a single-test-at-a-time hook: do NOT
+        // invoke it concurrently with any production scheduler activity
+        // on the same instance, and do NOT fan it out across multiple
+        // tasks against a shared scheduler.
+        let saved = lostOwnership
+        lostOwnership = underLostOwnership
+        await emitJournalPreempted(
+            episodeId: episodeId,
+            cause: cause,
+            metadataJSON: metadataJSON
+        )
+        lostOwnership = saved
+    }
     #endif
 
     /// Install the WorkJournal recorder the scheduler uses on the
@@ -1968,9 +2012,17 @@ actor AnalysisWorkScheduler {
                 await preempt.preemptLowerLanes(for: job.schedulerLane)
             }
 
+            // skeptical-review-cycle-3 H-B: pair didStart with `defer
+            // didFinish` so a future thrown error or actor-injected
+            // CancellationError between the two cannot leak the lane
+            // counter. A leaked increment permanently saturates the lane
+            // (Now-cap is 1) and produces the user-visible "Now: nothing
+            // running, Up next: a lot of rows" stall. processJob
+            // currently swallows internal errors, but the defer is
+            // structural insurance against future refactors.
             didStart(job: job)
+            defer { didFinish(job: job) }
             await processJob(job, cascadeWindow: dispatchedCascadeWindow)
-            didFinish(job: job)
         }
     }
 
@@ -2081,9 +2133,10 @@ actor AnalysisWorkScheduler {
             transcribedAheadSec: opportunity.transcribedAheadSec
         )
 
+        // skeptical-review-cycle-3 H-B: defer-paired lane accounting.
         didStart(job: job)
+        defer { didFinish(job: job) }
         await processJob(job, cascadeWindow: nil)
-        didFinish(job: job)
     }
 
     // MARK: - Acoustic-triggered promotion dispatch (playhead-gtt9.24)
@@ -2202,9 +2255,10 @@ actor AnalysisWorkScheduler {
             score: opportunity.triggerWindowScore
         )
 
+        // skeptical-review-cycle-3 H-B: defer-paired lane accounting.
         didStart(job: job)
+        defer { didFinish(job: job) }
         await processJob(job, cascadeWindow: nil)
-        didFinish(job: job)
     }
 
     // MARK: - Lane concurrency accounting (playhead-r835)
@@ -3083,6 +3137,30 @@ actor AnalysisWorkScheduler {
                         )
                     )
                 )
+                // skeptical-review-cycle-1: emit a `.preempted` journal
+                // row so forensic debugging can distinguish a
+                // model-unavailable pause from a thermal pause. Pre-fix,
+                // these arms updated `analysis_jobs.state` only and the
+                // journal carried no record of the transition.
+                let modelBlockedMetadata = await SliceCompletionInstrumentation
+                    .recordPaused(
+                        cause: .modelTemporarilyUnavailable,
+                        deviceClass: DeviceClass.detect(),
+                        sliceDurationMs: 0,
+                        bytesProcessed: 0,
+                        shardsCompleted: 0,
+                        extras: [
+                            "stage": "analysisWorkScheduler.blockedByModel",
+                            "job_id": job.jobId,
+                            "nextEligibleAt": "\(nextEligible)",
+                        ]
+                    )
+                    .encodeJSON()
+                await emitJournalPreempted(
+                    episodeId: job.episodeId,
+                    cause: .modelTemporarilyUnavailable,
+                    metadataJSON: modelBlockedMetadata
+                )
                 logger.info("Job \(job.jobId) blocked: model unavailable, retry in 300s")
 
             case .pausedForThermal, .memoryPressure:
@@ -3098,6 +3176,39 @@ actor AnalysisWorkScheduler {
                             lastErrorCode: nil
                         )
                     )
+                )
+                // skeptical-review-cycle-1: emit a `.preempted` row.
+                // Distinguish thermal vs memory at the cause level —
+                // `.thermal` for the thermal arm, `.pipelineError` for
+                // memory pressure (no dedicated cause exists in the
+                // 16-row taxonomy yet, so the metadata stage carries
+                // the discriminator).
+                let isThermal: Bool = {
+                    if case .pausedForThermal = outcome.stopReason { return true }
+                    return false
+                }()
+                let pauseCause: InternalMissCause = isThermal ? .thermal : .pipelineError
+                let pauseStage = isThermal
+                    ? "analysisWorkScheduler.pausedForThermal"
+                    : "analysisWorkScheduler.memoryPressure"
+                let pauseMetadata = await SliceCompletionInstrumentation
+                    .recordPaused(
+                        cause: pauseCause,
+                        deviceClass: DeviceClass.detect(),
+                        sliceDurationMs: 0,
+                        bytesProcessed: 0,
+                        shardsCompleted: 0,
+                        extras: [
+                            "stage": pauseStage,
+                            "job_id": job.jobId,
+                            "nextEligibleAt": "\(nextEligible)",
+                        ]
+                    )
+                    .encodeJSON()
+                await emitJournalPreempted(
+                    episodeId: job.episodeId,
+                    cause: pauseCause,
+                    metadataJSON: pauseMetadata
                 )
                 logger.info("Job \(job.jobId) paused for thermal/memory, retry in 30s")
 
@@ -3484,12 +3595,21 @@ actor AnalysisWorkScheduler {
     // review-cycle-1 expansion below covers the full outcome-arm
     // taxonomy in `processJob` so the journal stays complete on
     // every terminal/recoverable transition (tracked arms enumerated
-    // on `commitOutcomeArm` above). Pause-only arms
-    // (`blockedByModel`, `pausedThermalOrMemory`) deliberately do
-    // NOT emit — those states are awaiting an external precondition
-    // (model availability, thermal headroom) and the slot has not
-    // released. Orphan recovery already disambiguates these via the
-    // `analysis_jobs.state` column. Each helper is a thin wrapper
+    // on `commitOutcomeArm` above).
+    //
+    // skeptical-review-cycle-3 M-A: the policy on pause-only arms
+    // flipped during cycle-1. Originally those arms (`blockedByModel`,
+    // `pausedThermalOrMemory`) deliberately did NOT emit on the
+    // theory that orphan recovery + `analysis_jobs.state` was enough
+    // to disambiguate them. Cycle-1 M4 added `.preempted` rows to
+    // both arms after a forensic-debugging gap was identified — the
+    // captured DB on a stuck device showed `state='blocked:modelUnavailable'`
+    // but the journal carried no record of the pause transition,
+    // forcing operators to cross-reference logs. The new emission is
+    // structurally safe: `requeueOrphanedLease` preserves non-`'running'`
+    // states (AnalysisStore.swift:6485), and a `decisionEvent ==
+    // .preempted` resume branch is identical to `decisionEvent == nil`
+    // for these state strings. Each helper is a thin wrapper
     // around the matching `WorkJournalRecording` method that:
     //
     //   - Captures the recorder + episodeId on the actor (snapshot

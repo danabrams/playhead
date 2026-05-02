@@ -1948,6 +1948,17 @@ actor AnalysisCoordinator {
         // legitimately-larger-than-row live shard sum still wins (e.g.
         // the row was set to a small placeholder before decode).
         //
+        // L4 (skeptical-review-cycle-1): the `max(...)` is intentionally
+        // asymmetric — it never accepts a SHRINK. If the true audio runs
+        // shorter than a previously-persisted/decoded value (rare, but
+        // possible with re-encoded feeds or replaced assets), we keep the
+        // larger value. The denominator stays optimistic-large, which
+        // means coverage thresholds harder to satisfy rather than easier.
+        // We accept that asymmetry as a defensive choice: an unexpectedly
+        // shrinking duration is more likely to be a regression in the
+        // probe path than a legitimate shrink, and a too-large denominator
+        // delays a false `completeFull` rather than producing one.
+        //
         // Real-world: asset 8A9DFC82 closed `completeFull` at ~13% true
         // coverage because the stale 748s shard sum was used as the
         // denominator while the row already carried 5645s. The same
