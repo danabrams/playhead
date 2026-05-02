@@ -7236,11 +7236,26 @@ actor AnalysisStore {
     /// doc comment for the H1 freshness-filter rationale — same precondition
     /// (no live runner has touched this row in the past
     /// `Self.strandedJobFreshnessSeconds`), same safe-to-flip-back behavior.
+    ///
+    /// playhead-6fk1: also clears `deferReason` on the flip back to
+    /// `queued`. A stranded `running` row may carry a `deferReason` left
+    /// over from an earlier `deferred → running` transition (preserved
+    /// intentionally by `markBackfillJobRunning` / its final-pass sibling
+    /// as an audit trail per the comment at `markBackfillJobRunning`).
+    /// Once the reaper re-queues the row, that audit trail has served its
+    /// purpose: leaving the stale reason in place reads to operators
+    /// inspecting the DB as if the row is stuck on a thermal/charge block
+    /// when it is actually freshly re-queued and ready for the next drain.
+    /// Cosmetic-only — no caller routes on `final_pass_jobs.deferReason`
+    /// (the column is bind-only on inserts and bind-only via mark*
+    /// helpers; the value is decoded into `FinalPassJob.deferReason` for
+    /// observability but never read for routing).
     @discardableResult
     func resetStrandedFinalPassJobs() throws -> Int {
         let sql = """
             UPDATE final_pass_jobs
             SET status = 'queued',
+                deferReason = NULL,
                 updatedAt = strftime('%s', 'now')
             WHERE status = 'running'
               AND updatedAt < strftime('%s', 'now') - ?

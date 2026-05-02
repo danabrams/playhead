@@ -1007,10 +1007,18 @@ struct AnalysisJobReconcilerTests {
         let resurrected = try await store.fetchFinalPassJob(byId: strandedJobId)
         #expect(resurrected?.status == .queued,
                 "stranded `.running` row must be flipped back to `.queued`")
-        // Audit trail (retryCount / deferReason) is preserved — the reaper
-        // only touches `status` and `updatedAt`.
+        // playhead-6fk1: `retryCount` is preserved (the failure-counter
+        // audit trail still matters after a re-queue), but `deferReason`
+        // is cleared because the row is no longer blocked. Leaving a
+        // stale `prior-defer-reason` in place after the reaper re-queues
+        // the row reads to operators as if it is still on a thermal /
+        // charge gate when it is actually ready for the next drain.
+        // The dedicated `resetStrandedFinalPassJobsClearsDeferReason`
+        // test in `AnalysisStoreReviewFollowupTests` pins this two-part
+        // contract directly at the SQL boundary.
         #expect(resurrected?.retryCount == 1)
-        #expect(resurrected?.deferReason == "prior-defer-reason")
+        #expect(resurrected?.deferReason == nil,
+                "reaper must clear deferReason on flip back to queued (playhead-6fk1)")
 
         let stillComplete = try await store.fetchFinalPassJob(byId: completeJobId)
         #expect(stillComplete?.status == .complete,

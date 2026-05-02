@@ -479,6 +479,86 @@ struct AnalysisStoreReviewFollowupTests {
         // resetCount would indicate the bug.
         #expect(resetCount >= 0)
     }
+
+    /// playhead-6fk1: pin that `resetStrandedFinalPassJobs` also clears
+    /// `deferReason` when it flips a stranded `running` row back to
+    /// `queued`. A stranded row can legitimately carry a non-nil
+    /// `deferReason` (left over from an earlier `deferred → running`
+    /// transition that intentionally preserved the audit trail). Once
+    /// the reaper re-queues the row, the audit trail has served its
+    /// purpose; leaving a stale reason in place reads confusingly to
+    /// operators inspecting the DB as if the row is still blocked.
+    ///
+    /// The two-part assertion (status AND deferReason) is load-bearing:
+    /// a future "fix" that drops the `deferReason = NULL` clause from
+    /// the UPDATE would still pass a status-only check.
+    @Test("resetStrandedFinalPassJobs: clears deferReason on flip back to queued")
+    func resetStrandedFinalPassJobsClearsDeferReason() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-6fk1-clear"
+        try await store.insertAsset(AnalysisAsset(
+            id: assetId,
+            episodeId: "ep-6fk1-clear",
+            assetFingerprint: "fp-6fk1-clear",
+            weakFingerprint: nil,
+            sourceURL: "file:///6fk1-clear.m4a",
+            featureCoverageEndTime: 30.0,
+            fastTranscriptCoverageEndTime: 30.0,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 600
+        ))
+
+        // Seed a stranded `running` row carrying the audit-trail
+        // `deferReason='thermalThrottled'` left over from an earlier
+        // deferred→running transition. Backdate `updatedAt` so the
+        // reaper's freshness gate passes (strandedJobFreshnessSeconds
+        // is 600s; we use 3600s in the past).
+        let jobId = "fpj-6fk1-clear-window1"
+        try await store.insertOrIgnoreFinalPassJob(FinalPassJob(
+            jobId: jobId,
+            analysisAssetId: assetId,
+            podcastId: nil,
+            adWindowId: "win-6fk1-clear",
+            windowStartTime: 100.0,
+            windowEndTime: 130.0,
+            status: .running,
+            retryCount: 0,
+            deferReason: nil,
+            createdAt: Date().timeIntervalSince1970
+        ))
+        try await store.forceFinalPassJobStateForTesting(
+            jobId: jobId,
+            status: .running,
+            deferReason: "thermalThrottled",
+            updatedAtOverride: Int(Date().timeIntervalSince1970) - 3600
+        )
+
+        // Sanity: the stranded row is `running` with the audit-trail
+        // `deferReason` populated before the reaper runs.
+        let beforeReap = try #require(await store.fetchFinalPassJob(byId: jobId))
+        #expect(beforeReap.status == .running)
+        #expect(beforeReap.deferReason == "thermalThrottled")
+
+        let resetCount = try await store.resetStrandedFinalPassJobs()
+        #expect(resetCount >= 1, "reaper must have flipped at least our stranded row")
+
+        let afterReap = try #require(await store.fetchFinalPassJob(byId: jobId))
+        #expect(afterReap.status == .queued, "reaper must flip status to queued")
+        #expect(
+            afterReap.deferReason == nil,
+            """
+            `resetStrandedFinalPassJobs` MUST clear `deferReason` when it \
+            flips a stranded `running` row to `queued`. A stale audit-trail \
+            reason left in place after re-queue reads to operators as if \
+            the row is still blocked on a thermal/charge gate when it is \
+            actually ready for the next drain. If this fails, the \
+            `deferReason = NULL` clause was dropped from the UPDATE.
+            """
+        )
+    }
 }
 
 #endif
