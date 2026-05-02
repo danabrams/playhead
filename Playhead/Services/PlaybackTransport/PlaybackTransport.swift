@@ -102,6 +102,25 @@ final class PlaybackService: NSObject, Sendable {
     private var isLocalAsset: Bool = false
     private var isHandlingSkip: Bool = false
 
+    /// playhead-epii: rate multiplier currently applied on top of the
+    /// user's `_state.playbackSpeed`. `1.0` means "no compression
+    /// override". Set transiently by `SilenceCompressor` while the
+    /// playhead is inside a non-content gap (music bed, dead air).
+    /// Cleared on `endCompression()` and on every user-initiated speed
+    /// change (`setSpeed`) so a manual speed flip mid-compression takes
+    /// effect immediately and is preserved when the override clears.
+    ///
+    /// Effective `player.rate` while playing is
+    /// `_state.playbackSpeed * compressionMultiplier`, clamped to
+    /// `[Self.minSpeed, Self.maxSpeed]`.
+    private var compressionMultiplier: Float = 1.0
+
+    /// playhead-epii: name of the time-pitch algorithm currently in
+    /// force on the active `AVPlayerItem`. Tracked so we don't churn
+    /// the property on every periodic time observer tick — only set
+    /// when the desired algorithm changes.
+    private var currentTimePitchAlgorithm: AVAudioTimePitchAlgorithm = .spectral
+
     // MARK: - Streams
 
     /// Active state observers. Each observer receives the current snapshot
@@ -230,6 +249,17 @@ final class PlaybackService: NSObject, Sendable {
         let block = makeItemStatusBlock()
         itemStatusObservation = item.observe(\.status, options: [.new], changeHandler: block)
 
+        // playhead-epii: a new item carries the platform default
+        // (`.lowQualityZeroLatency` per AVFoundation) which produces
+        // audible artifacts above ~1.5×. Stamp `.spectral` immediately
+        // so even baseline 2.0× listening sounds clean, and drop any
+        // residual compression override left over from the previous
+        // item (different episode / asset id ⇒ different feature
+        // window plan).
+        compressionMultiplier = 1.0
+        currentTimePitchAlgorithm = .spectral
+        item.audioTimePitchAlgorithm = .spectral
+
         updateState { $0.status = .loading }
         player.replaceCurrentItem(with: item)
     }
@@ -265,7 +295,15 @@ final class PlaybackService: NSObject, Sendable {
 
     func play() {
         guard playerItem != nil else { return }
-        player.playImmediately(atRate: _state.playbackSpeed)
+        // playhead-epii: factor in any active compression multiplier so
+        // resuming inside a compressed region doesn't snap to base
+        // speed for one observer cycle. Clamp identically to the
+        // setSpeed/applyEffectiveRateIfPlaying paths.
+        let target = min(
+            max(_state.playbackSpeed * compressionMultiplier, Self.minSpeed),
+            Self.maxSpeed
+        )
+        player.playImmediately(atRate: target)
         updateState { $0.status = .playing }
         updateNowPlayingInfo()
     }
@@ -330,14 +368,98 @@ final class PlaybackService: NSObject, Sendable {
     // MARK: - Speed Control
 
     /// Set playback speed, clamped to 0.5x–3.0x.
+    ///
+    /// playhead-epii: a manual speed change always wins over an active
+    /// silence-compression override. We clear the multiplier and the
+    /// `.varispeed` algorithm here so the user's flip from 1.0×→1.25×
+    /// (for example) lands at exactly 1.25×, even if the playhead was
+    /// inside a 2.5× compressed music bed at the time. The compressor
+    /// will re-engage on the next lookahead tick if appropriate.
     func setSpeed(_ speed: Float) {
         let clamped = min(max(speed, Self.minSpeed), Self.maxSpeed)
         _state.playbackSpeed = clamped
+        compressionMultiplier = 1.0
+        applyTimePitchAlgorithm(.spectral)
         if case .playing = _state.status {
             player.rate = clamped
         }
         updateState { $0.playbackSpeed = clamped }
         updateNowPlayingInfo()
+    }
+
+    // MARK: - Silence Compression Surface (playhead-epii)
+
+    /// Engage a compression override: multiply the user's base speed by
+    /// `multiplier` and switch the time-pitch algorithm to `algorithm`.
+    /// Idempotent — calling with identical values is a no-op.
+    ///
+    /// The multiplier is bounded by `setSpeed`'s overall clamp; the
+    /// effective player rate becomes
+    /// `clamp(_state.playbackSpeed * multiplier, minSpeed, maxSpeed)`,
+    /// so a 1.5× user speed × 2.0× compression saturates at 3.0× rather
+    /// than escaping the documented bounds.
+    ///
+    /// Only mutates `player.rate` when the transport is actively
+    /// playing. While paused, the multiplier is recorded but not
+    /// realized — `play()` reads `_state.playbackSpeed` directly, so we
+    /// re-apply on the next observer tick after playback resumes.
+    func beginCompression(
+        multiplier: Float,
+        algorithm: AVAudioTimePitchAlgorithm
+    ) {
+        let clampedMultiplier = max(1.0, multiplier)
+        guard
+            clampedMultiplier != compressionMultiplier
+                || algorithm != currentTimePitchAlgorithm
+        else { return }
+        compressionMultiplier = clampedMultiplier
+        applyTimePitchAlgorithm(algorithm)
+        applyEffectiveRateIfPlaying()
+    }
+
+    /// Disengage compression: drop the multiplier to 1.0 and restore
+    /// the `.spectral` algorithm. If the user changed their base speed
+    /// during compression, this method correctly restores to the new
+    /// base speed (not the pre-compression base) — `setSpeed` already
+    /// stamped the new value into `_state.playbackSpeed`.
+    func endCompression() {
+        guard
+            compressionMultiplier != 1.0
+                || currentTimePitchAlgorithm != .spectral
+        else { return }
+        compressionMultiplier = 1.0
+        applyTimePitchAlgorithm(.spectral)
+        applyEffectiveRateIfPlaying()
+    }
+
+    /// Test/coordinator-facing read of the current effective compression
+    /// multiplier. `1.0` means no compression. Sendable scalar.
+    var currentCompressionMultiplier: Float { compressionMultiplier }
+
+    /// Test/coordinator-facing read of the algorithm currently applied
+    /// to the active `AVPlayerItem`'s audio mix.
+    var currentTimePitchAlgorithmName: AVAudioTimePitchAlgorithm {
+        currentTimePitchAlgorithm
+    }
+
+    private func applyEffectiveRateIfPlaying() {
+        guard case .playing = _state.status else { return }
+        let target = min(
+            max(_state.playbackSpeed * compressionMultiplier, Self.minSpeed),
+            Self.maxSpeed
+        )
+        player.rate = target
+    }
+
+    private func applyTimePitchAlgorithm(_ algorithm: AVAudioTimePitchAlgorithm) {
+        guard let item = playerItem else {
+            currentTimePitchAlgorithm = algorithm
+            return
+        }
+        if item.audioTimePitchAlgorithm != algorithm {
+            item.audioTimePitchAlgorithm = algorithm
+        }
+        currentTimePitchAlgorithm = algorithm
     }
 
     // MARK: - Skip Cues
