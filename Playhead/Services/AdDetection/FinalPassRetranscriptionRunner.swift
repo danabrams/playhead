@@ -79,6 +79,29 @@ import CryptoKit
 import Foundation
 import OSLog
 
+// MARK: - FinalPassDeferredMidWindow
+
+/// Typed sentinel thrown by `retranscribeWindow` when a per-shard
+/// admission gate (thermal / charge / LPM) trips mid-window. The outer
+/// `runFinalPassBackfill` catches this distinct from `CancellationError`
+/// and from a generic `retranscribeFailed` failure path:
+///
+///   • The current job has ALREADY been marked `.deferred` (with partial
+///     chunks persisted) inside `retranscribeWindow`. The catch site
+///     therefore MUST NOT call `markFinalPassJobFailed` (that would bump
+///     `retryCount`) or `markFinalPassJobDeferred` again on the same row.
+///   • Remaining sibling jobs in the same drain ARE still queued; the
+///     catch site walks them and marks each `.deferred` with the same
+///     reason. This prevents a row from being orphaned in `running`
+///     state when the surrounding for-loop is broken out of.
+///
+/// `retryCount` is preserved across a clean defer (the runner makes no
+/// `markFinalPassJobFailed` call on this path), so the launch retry
+/// cap — if added later — does not see a spurious bump.
+struct FinalPassDeferredMidWindow: Error, Equatable {
+    let reason: AdmissionDeferReason
+}
+
 // MARK: - FinalPassRetranscriptionRunner
 
 /// Runs the charge-gated final-pass re-transcription phase for one asset.
@@ -357,6 +380,47 @@ actor FinalPassRetranscriptionRunner {
                     reason: "cancelled"
                 )
                 throw CancellationError()
+            } catch let deferred as FinalPassDeferredMidWindow {
+                // playhead-5147: a per-shard gate trip mid-window. The
+                // current job SHOULD have already been marked deferred
+                // and any partial chunks SHOULD have already been
+                // persisted by `retranscribeWindow`. Do NOT call
+                // `markFinalPassJobFailed` here — that would bump
+                // `retryCount` on a clean defer.
+                //
+                // Defensive double-tap: cycle-1 H-1 — if the inner
+                // `markFinalPassJobDeferred` raised (e.g. SQLite I/O
+                // error), the row would otherwise be left `running`
+                // here, orphaning it in EXACTLY the way this bead is
+                // supposed to fix. `markFinalPassJobDeferred` is
+                // idempotent on a `deferred` row (its IN-clause covers
+                // `'queued', 'running', 'deferred', 'failed'`), so a
+                // second call is safe whether the first one succeeded
+                // (no-op apart from refreshing `updatedAt`) or failed
+                // (this is the rescue). Keep it `try?` because the
+                // outer rescue is itself best-effort — if BOTH writes
+                // fail, the stranded-row reaper is the final safety
+                // net.
+                try? await store.markFinalPassJobDeferred(
+                    jobId: job.jobId,
+                    reason: deferred.reason.rawValue
+                )
+                deferredJobIds.append(job.jobId)
+                logger.info("Final-pass: gate failed mid-window (\(deferred.reason.rawValue, privacy: .public)) for \(job.jobId, privacy: .public); deferring remaining siblings")
+                for remainingJob in jobs where !admittedJobIds.contains(remainingJob.jobId)
+                    && !deferredJobIds.contains(remainingJob.jobId)
+                {
+                    do {
+                        try await store.markFinalPassJobDeferred(
+                            jobId: remainingJob.jobId,
+                            reason: deferred.reason.rawValue
+                        )
+                        deferredJobIds.append(remainingJob.jobId)
+                    } catch {
+                        logger.warning("Final-pass: failed to mark sibling deferred for \(remainingJob.jobId, privacy: .public)")
+                    }
+                }
+                break
             } catch {
                 logger.warning("Final-pass: retranscribe failed for \(job.jobId, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 try? await store.markFinalPassJobFailed(
@@ -504,7 +568,57 @@ actor FinalPassRetranscriptionRunner {
             // hot per-shard loop. Speech transcription is the heaviest
             // operation in the runner; a missed cancellation here lets a
             // shutdown stall on a 30 s shard.
+            //
+            // Cancellation is checked BEFORE the thermal gate. If the
+            // surrounding Task is already cancelled (e.g. app shutdown)
+            // and the device is also throttling, callers expect a
+            // `CancellationError` (the existing contract honored by
+            // `runFinalPassBackfill`'s `catch is CancellationError`),
+            // not a `FinalPassDeferredMidWindow`. Cancellation is
+            // strictly stronger — once the Task is cancelled, no more
+            // work should happen, period.
             try Task.checkCancellation()
+            // playhead-5147: per-shard cooperative thermal/charge/LPM
+            // check. Without this, a window that started on a nominal
+            // device and warmed mid-transcribe would burn through every
+            // remaining shard before the OUTER per-window gate could
+            // notice. Worst case the row is left `running` until the
+            // 10-min stranded-row reaper unsticks it on next cold
+            // launch, surfacing as user-visible "doesn't finish
+            // processing".
+            //
+            // Exit path on a tripped gate:
+            //   1. Persist any chunks accumulated so far so partial
+            //      work isn't lost (next admission wave re-enters the
+            //      same window and de-dupes via segmentFingerprint).
+            //   2. Mark THIS job `.deferred` with the gate reason.
+            //   3. Throw `FinalPassDeferredMidWindow` so the outer
+            //      catch site can defer remaining siblings WITHOUT
+            //      bumping retryCount on the deferred row (which is
+            //      what `markFinalPassJobFailed` would do).
+            if let reason = await currentDeferReason() {
+                logger.info("Final-pass: gate failed mid-window (\(reason.rawValue, privacy: .public)) for \(job.adWindowId, privacy: .public); persisting \(newChunks.count, privacy: .public) partial chunks and deferring")
+                if !newChunks.isEmpty {
+                    do {
+                        try await store.insertTranscriptChunks(newChunks)
+                    } catch {
+                        logger.warning("Final-pass: failed to persist partial chunks on mid-window defer for \(job.adWindowId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+                // Mark the row deferred BEFORE throwing so the outer
+                // catch path does not need to know whether this row's
+                // bookkeeping was already done. (`markFinalPassJobDeferred`
+                // is idempotent on a `deferred` row — see its IN-clause.)
+                do {
+                    try await store.markFinalPassJobDeferred(
+                        jobId: job.jobId,
+                        reason: reason.rawValue
+                    )
+                } catch {
+                    logger.warning("Final-pass: failed to mark job deferred on mid-window gate trip for \(job.jobId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+                throw FinalPassDeferredMidWindow(reason: reason)
+            }
             if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
                 try? await store.markFinalPassJobRunning(jobId: job.jobId)
                 lastHeartbeatTick = ContinuousClock.now
