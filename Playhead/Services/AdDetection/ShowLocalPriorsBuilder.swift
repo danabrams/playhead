@@ -55,11 +55,25 @@ struct AdDurationStats: Codable, Sendable, Equatable {
     /// `meanDuration`. The same value gates the show-local override in
     /// `ShowLocalPriorsBuilder.build` — when below `minSampleCount`, the
     /// builder returns nil and the hierarchy falls back to global defaults.
+    /// Clamped to [0, `maxSampleCount`] on read.
     let sampleCount: Int
+
+    /// cycle-1 L2: hard ceiling on `sampleCount` so the Welford-style
+    /// streaming mean update (`mean += (d - mean) / Double(count)`) can't
+    /// silently round to a no-op once `count` grows past the resolution
+    /// of `Double` integer-step. At 100_000 samples each new observation
+    /// still moves the mean by at least 1e-5 seconds (10 microseconds),
+    /// well above the precision floor. A daily-listener show won't reach
+    /// this in years; the ceiling exists for pathological / corrupt
+    /// payloads (Int.max written by a hand-edited JSON file, or a
+    /// runaway loop that persisted millions of synthetic durations).
+    /// Beyond the ceiling we stop counting — the running mean is already
+    /// well-converged and further updates would be sub-precision.
+    static let maxSampleCount: Int = 100_000
 
     init(meanDuration: TimeInterval, sampleCount: Int) {
         self.meanDuration = max(0, meanDuration)
-        self.sampleCount = max(0, sampleCount)
+        self.sampleCount = min(Self.maxSampleCount, max(0, sampleCount))
     }
 
     /// Custom `Decodable.init` that funnels decoded values back through the
@@ -174,6 +188,15 @@ enum ShowLocalPriorsBuilder {
     /// (it would still be counted toward `sampleCount` while pulling the
     /// running mean toward zero) — guarding here is belt-and-suspenders
     /// in case a future caller forgets to pre-filter.
+    ///
+    /// cycle-1 L2: stop accumulating once `count` reaches
+    /// `AdDurationStats.maxSampleCount`. Past the ceiling the mean is
+    /// already well-converged and further updates would be sub-precision
+    /// (`Double` integer-step rounding makes them no-ops). Short-
+    /// circuiting in the loop keeps `mean` and `count` coherent — if we
+    /// kept folding samples in but the init-time clamp caps `count`, the
+    /// mean would drift while the count silently froze, producing an
+    /// inconsistent aggregate.
     static func mergeDurations(
         existing: AdDurationStats,
         newDurations: [TimeInterval]
@@ -184,6 +207,7 @@ enum ShowLocalPriorsBuilder {
         var count = existing.sampleCount
 
         for d in newDurations where d.isFinite && d > 0 {
+            if count >= AdDurationStats.maxSampleCount { break }
             count += 1
             mean += (d - mean) / Double(count)
         }

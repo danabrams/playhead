@@ -115,6 +115,46 @@ struct PriorHierarchyWireUpTests {
         #expect(stats.sampleCount == 0)
     }
 
+    @Test("AdDurationStats clamps huge sampleCount on decode (cycle-1 L2)")
+    func adDurationStatsClampsHugeSampleCount() throws {
+        // A corrupt or runaway payload could land Int.max on disk;
+        // without a ceiling, the Welford-style streaming mean update
+        // (`mean += (d - mean) / Double(count)`) eventually rounds new
+        // samples to no-ops once `count` exceeds Double's integer-step
+        // resolution, but `sampleCount` keeps climbing — leaving an
+        // inconsistent aggregate. Clamp to `maxSampleCount`.
+        let huge = #"{"meanDuration":42.0,"sampleCount":999999999}"#
+        let data = Data(huge.utf8)
+        let stats = try JSONDecoder().decode(AdDurationStats.self, from: data)
+        #expect(stats.sampleCount == AdDurationStats.maxSampleCount)
+        #expect(stats.meanDuration == 42.0)
+    }
+
+    @Test("mergeDurations short-circuits at maxSampleCount (cycle-1 L2)")
+    func mergeDurationsRespectsCeiling() {
+        // Seed the aggregate just below the ceiling, then merge enough
+        // durations to (in absence of the ceiling) push count well past
+        // it. We expect mergeDurations to break out of the fold once
+        // count == maxSampleCount so the mean and count stay coherent.
+        let seed = AdDurationStats(
+            meanDuration: 30,
+            sampleCount: AdDurationStats.maxSampleCount - 2
+        )
+        let newDurations = Array(repeating: 60.0, count: 100)
+        let merged = ShowLocalPriorsBuilder.mergeDurations(
+            existing: seed,
+            newDurations: newDurations
+        )
+        #expect(merged.sampleCount == AdDurationStats.maxSampleCount)
+        // Mean should have moved toward 60 by exactly 2 samples'
+        // worth, not 100. With seed mean 30, two 60s observations
+        // bring mean to ~30 + (30/(N-1)) + (30/N), all sub-precision
+        // for N≈100k. The mean must remain within sane bounds (didn't
+        // run away).
+        #expect(merged.meanDuration >= 30)
+        #expect(merged.meanDuration < 31)
+    }
+
     @Test("builder passes observationCount through verbatim (cycle-1 L1)")
     func builderDoesNotFloorEpisodeCount() {
         // cycle-1 L1: previously the builder floored `episodeCount` at
