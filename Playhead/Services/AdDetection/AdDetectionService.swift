@@ -4014,6 +4014,22 @@ actor AdDetectionService {
         // returned result without losing input ordering.
         var inputIndexByCandidate: [String: Int] = [:]
         var cacheHits: [String: ClassifierResult] = [:]
+        // playhead-43ed C2: candidates whose cache lookup MISSED. We
+        // intentionally do NOT call `recordOutcome(false)` at miss time
+        // because most lexical candidates are non-ads — recording a miss
+        // for a candidate the classifier ultimately rejects below the
+        // store-confidence floor would saturate the rolling-window
+        // hit-rate metric with noise on every fresh show, tripping the
+        // 5% auto-disable floor on the very first session before the
+        // cache has had any chance to warm.
+        //
+        // Instead we defer the outcome to AFTER classification and only
+        // record `recordOutcome(false)` when the classifier verdict
+        // clears the same gate that controls `store(...)`
+        // (`adProbability >= storeConfidenceThreshold`). That makes the
+        // metric "out of confirmed-ad candidates, how many were answered
+        // from cache" — the actual signal the auto-disable guard wants.
+        var deferredMissCandidateIds: [String] = []
 
         let cacheShowId = currentPodcastProfile?.podcastId
 
@@ -4073,13 +4089,28 @@ actor AdDetectionService {
                                     priorScore: 0
                                 )
                             )
+                            // playhead-43ed C2: A hit's synthesized
+                            // adProbability is `entry.confidence`, which
+                            // `store(...)` guarantees is
+                            // ≥ storeConfidenceThreshold. So a hit here
+                            // is unambiguously a confirmed-ad-shaped
+                            // outcome and we can record it immediately.
                             try? await cache.recordOutcome(hit: true)
                             // Skip building a ClassifierInput for this
                             // candidate — the cache hit replaces the
                             // classifier round-trip outright.
                             continue
                         case .miss:
-                            try? await cache.recordOutcome(hit: false)
+                            // playhead-43ed C2: defer the miss outcome
+                            // until classification finishes. We only
+                            // record `recordOutcome(false)` if the
+                            // classifier verdict clears the same
+                            // `storeConfidenceThreshold` gate that
+                            // controls `store(...)`. Pre-fix this fired
+                            // for every lexical candidate (mostly non-
+                            // ads) and tripped the 5% auto-disable floor
+                            // on the first session.
+                            deferredMissCandidateIds.append(candidate.id)
                         case .skippedDisabled:
                             // Cache is currently disabled (kill-switch or
                             // auto-disable). Do NOT record an outcome —
@@ -4103,6 +4134,24 @@ actor AdDetectionService {
 
         // Layer 2: Classify the candidates that didn't hit the cache.
         let classifierResults = classifier.classify(inputs: inputs, priors: showPriors)
+
+        // playhead-43ed C2: now that classification is done, replay any
+        // deferred miss outcomes — but only for candidates whose verdict
+        // clears the same `storeConfidenceThreshold` gate that controls
+        // `store(...)`. A non-ad candidate with low classifier
+        // probability is noise, not signal, and must not feed the
+        // rolling-window auto-disable metric.
+        if let cache = repeatedAdCache, !deferredMissCandidateIds.isEmpty {
+            let storeFloor = cache.config.storeConfidenceThreshold
+            for candidateId in deferredMissCandidateIds {
+                guard let idx = inputIndexByCandidate[candidateId],
+                      idx < classifierResults.count else { continue }
+                let result = classifierResults[idx]
+                if result.adProbability >= storeFloor {
+                    try? await cache.recordOutcome(hit: false)
+                }
+            }
+        }
 
         // Reassemble in the original candidate order: hits first replaced
         // by their synthesized result, misses by their classifier output.

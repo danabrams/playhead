@@ -370,4 +370,227 @@ struct RepeatedAdCacheWiringTests {
             episodeDuration: 200.0
         )
     }
+
+    // MARK: - C2/C4 — auto-disable feedback loop must not fire on miss-only
+    // traffic against a fresh, empty cache. Pre-fix, every lexical candidate
+    // that didn't hit the cache called `recordOutcome(hit: false)` regardless
+    // of whether the classifier ultimately said "this is an ad", so a fresh
+    // show with N candidates would saturate the rolling window with N misses
+    // and trip the 5% floor permanently. Post-fix, misses are only recorded
+    // when the classifier verdict for that candidate clears the same gate
+    // that controls `store(...)` (`adProbability >= storeConfidenceThreshold`).
+    // A non-ad candidate (a miss against an empty cache + low classifier
+    // probability) is noise, not signal.
+
+    @Test("miss-only traffic on a fresh empty cache must not trip auto-disable when classifier rejects below threshold")
+    func missOnlyTrafficDoesNotAutoDisableFreshCache() async throws {
+        let analysisStore = try await makeTestStore()
+        let assetId = "asset-43ed-c2-miss-only"
+        try await analysisStore.insertAsset(makeAsset(id: assetId))
+        try await analysisStore.insertFeatureWindows(syntheticAdWindows(assetId: assetId))
+
+        // Tiny min-sample threshold so a single deferred miss outcome
+        // would be enough to trip auto-disable IF the C2 fix were not in
+        // place. Pre-fix: every lexical candidate (most of which the
+        // classifier would reject below the storeConfidenceThreshold
+        // floor) calls `recordOutcome(false)` regardless of verdict, so
+        // the auto-disable guard fires on the very first run. Post-fix:
+        // only candidates whose classifier verdict clears the same gate
+        // that controls `store(...)` count as miss outcomes.
+        let cfg = RepeatedAdCacheConfig(
+            storeConfidenceThreshold: 0.85,
+            hammingDistanceThreshold: 6,
+            perShowCap: 3,
+            globalCap: 5,
+            entryMaxAge: 90 * 24 * 60 * 60,
+            autoDisableWindow: 14 * 24 * 60 * 60,
+            autoDisableHitRateFloor: 0.05,
+            autoDisableMinSamples: 1
+        )
+        let storage = AnalysisStoreRepeatedAdCacheStorage(store: analysisStore)
+        let cache = RepeatedAdCacheService(
+            config: cfg,
+            storage: storage,
+            initiallyEnabled: true
+        )
+
+        let profile = PodcastProfile(
+            podcastId: "show-43ed-c2-miss-only",
+            sponsorLexicon: nil,
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 0.5,
+            observationCount: 0,
+            mode: SkipMode.auto.rawValue,
+            recentFalseSkipSignals: 0
+        )
+
+        // Stub classifier that returns probability strictly below the
+        // store-confidence floor (0.85). Models the production reality
+        // that most lexical candidates are non-ads — the classifier
+        // does its job and rejects them. Under the pre-C2 wiring, every
+        // such miss recorded `recordOutcome(false)`, saturating the
+        // rolling-window metric on the first session. Under C2 the
+        // miss outcomes are gated by classifier verdict against the
+        // same threshold that controls `store(...)`, so a fresh cache
+        // sees zero noise from non-ad traffic.
+        struct BelowThresholdStubClassifier: ClassifierService {
+            func classify(inputs: [ClassifierInput], priors: ShowPriors) -> [ClassifierResult] {
+                inputs.map { classify(input: $0, priors: priors) }
+            }
+            func classify(input: ClassifierInput, priors: ShowPriors) -> ClassifierResult {
+                ClassifierResult(
+                    candidateId: input.candidate.id,
+                    analysisAssetId: input.candidate.analysisAssetId,
+                    startTime: input.candidate.startTime,
+                    endTime: input.candidate.endTime,
+                    adProbability: 0.50, // below storeConfidenceThreshold (0.85)
+                    startAdjustment: 0,
+                    endAdjustment: 0,
+                    signalBreakdown: SignalBreakdown(
+                        lexicalScore: 0,
+                        rmsDropScore: 0,
+                        spectralChangeScore: 0,
+                        musicScore: 0,
+                        speakerChangeScore: 0,
+                        priorScore: 0
+                    )
+                )
+            }
+        }
+
+        let config = AdDetectionConfig(
+            candidateThreshold: 0.40,
+            confirmationThreshold: 0.70,
+            suppressionThreshold: 0.25,
+            hotPathLookahead: 90.0,
+            detectorVersion: "playhead-43ed-c2-test",
+            fmBackfillMode: .off
+        )
+        let service = AdDetectionService(
+            store: analysisStore,
+            classifier: BelowThresholdStubClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: config,
+            podcastProfile: profile,
+            repeatedAdCache: cache
+        )
+
+        _ = try await service.runHotPath(
+            chunks: lexicalAdChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            episodeDuration: 200.0
+        )
+
+        // The cache must remain enabled — a fresh cache with miss-only
+        // traffic against candidates the classifier rejected below the
+        // store-confidence floor MUST NOT auto-disable. The deferred
+        // miss outcomes are noise, not signal.
+        #expect(await cache.isEnabled() == true,
+                "fresh cache must not auto-disable from miss-only traffic where the classifier verdict didn't clear the storeConfidenceThreshold gate")
+        let reason = await cache.currentDisableReason()
+        #expect(reason == nil, "expected no disable reason, got \(String(describing: reason))")
+
+        // No outcome samples should have been recorded at all — the
+        // miss path is fully gated by classifier verdict and the
+        // classifier rejected every candidate below threshold.
+        let snapshot = try await cache.currentHitRateSnapshot()
+        #expect(snapshot.totalSamples == 0,
+                "expected no recorded outcomes for miss-only traffic below the storeConfidenceThreshold gate; got \(snapshot.totalSamples)")
+    }
+
+    // MARK: - C2 — confirmed-ad miss DOES record an outcome
+    //
+    // Companion to `missOnlyTrafficDoesNotAutoDisableFreshCache`: when
+    // the classifier verdict for a cache-miss candidate clears the
+    // `storeConfidenceThreshold` gate, the miss outcome IS recorded so
+    // the auto-disable guard can act on real signal.
+
+    @Test("classifier-confirmed miss DOES record an outcome (C2 contract symmetry)")
+    func classifierConfirmedMissRecordsOutcome() async throws {
+        let analysisStore = try await makeTestStore()
+        let assetId = "asset-43ed-c2-confirmed-miss"
+        try await analysisStore.insertAsset(makeAsset(id: assetId))
+        try await analysisStore.insertFeatureWindows(syntheticAdWindows(assetId: assetId))
+
+        let storage = AnalysisStoreRepeatedAdCacheStorage(store: analysisStore)
+        let cache = RepeatedAdCacheService(
+            config: .production,
+            storage: storage,
+            initiallyEnabled: true
+        )
+
+        let profile = PodcastProfile(
+            podcastId: "show-43ed-c2-confirmed-miss",
+            sponsorLexicon: nil,
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 0.5,
+            observationCount: 0,
+            mode: SkipMode.auto.rawValue,
+            recentFalseSkipSignals: 0
+        )
+
+        // Stub that returns ABOVE the storeConfidenceThreshold so the
+        // miss path's deferred outcome IS recorded.
+        struct AboveThresholdStubClassifier: ClassifierService {
+            func classify(inputs: [ClassifierInput], priors: ShowPriors) -> [ClassifierResult] {
+                inputs.map { classify(input: $0, priors: priors) }
+            }
+            func classify(input: ClassifierInput, priors: ShowPriors) -> ClassifierResult {
+                ClassifierResult(
+                    candidateId: input.candidate.id,
+                    analysisAssetId: input.candidate.analysisAssetId,
+                    startTime: input.candidate.startTime,
+                    endTime: input.candidate.endTime,
+                    adProbability: 0.95, // above storeConfidenceThreshold
+                    startAdjustment: 0,
+                    endAdjustment: 0,
+                    signalBreakdown: SignalBreakdown(
+                        lexicalScore: 0,
+                        rmsDropScore: 0,
+                        spectralChangeScore: 0,
+                        musicScore: 0,
+                        speakerChangeScore: 0,
+                        priorScore: 0
+                    )
+                )
+            }
+        }
+
+        let config = AdDetectionConfig(
+            candidateThreshold: 0.40,
+            confirmationThreshold: 0.70,
+            suppressionThreshold: 0.25,
+            hotPathLookahead: 90.0,
+            detectorVersion: "playhead-43ed-c2-confirmed-test",
+            fmBackfillMode: .off
+        )
+        let service = AdDetectionService(
+            store: analysisStore,
+            classifier: AboveThresholdStubClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: config,
+            podcastProfile: profile,
+            repeatedAdCache: cache
+        )
+
+        _ = try await service.runHotPath(
+            chunks: lexicalAdChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            episodeDuration: 200.0
+        )
+
+        // At least one miss outcome should have been recorded — the
+        // candidate's classifier verdict cleared the gate.
+        let snapshot = try await cache.currentHitRateSnapshot()
+        #expect(snapshot.totalSamples >= 1,
+                "expected at least one outcome for a classifier-confirmed miss; got \(snapshot.totalSamples)")
+        #expect(snapshot.hitCount == 0,
+                "miss path must not record a hit; got \(snapshot.hitCount) hits")
+    }
 }
