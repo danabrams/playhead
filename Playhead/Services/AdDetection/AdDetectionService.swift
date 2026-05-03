@@ -1665,6 +1665,20 @@ actor AdDetectionService {
         let assetCohortJSON = (try? JSONEncoder().encode(assetDecisionCohort))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
 
+        // playhead-084j: resolve the 4-level prior hierarchy ONCE per episode.
+        // Up to this bead, `DurationPrior.standard` was hard-coded inside the
+        // per-span fusion loop, so every show ran with the global default
+        // typicalAdDuration of 30...90s. We now resolve global + trait + show-
+        // local priors here (network priors are filed as a separate bead —
+        // see PR for follow-up IDs) and feed `DurationPrior(resolvedPriors:)`
+        // into the DecisionMapper.
+        //
+        // Performance: resolution is a few arithmetic blends, well under a
+        // millisecond. Computing it once per episode (outside the per-span
+        // loop) is a deliberate perf invariant locked by the wire-up tests.
+        let resolvedEpisodePriors = resolveEpisodePriors()
+        let episodeDurationPrior = DurationPrior(resolvedPriors: resolvedEpisodePriors)
+
         for span in decodedSpans {
             try Task.checkCancellation()
 
@@ -1812,11 +1826,12 @@ actor AdDetectionService {
                 config: fusionConfig,
                 transcriptQuality: transcriptQuality,
                 correctionFactor: assetCorrectionFactor,
-                // playhead-p2iv: Consume the typical-ad-duration prior as a soft
-                // monotonic multiplier. Until the full 4-level PriorHierarchyResolver
-                // is wired into this actor, use the resolved-global default (30...90s).
-                // When resolver plumbing lands, pass `DurationPrior(resolvedPriors:)`.
-                durationPrior: .standard
+                // playhead-084j: Consume the typical-ad-duration prior as a soft
+                // monotonic multiplier, derived from the per-episode resolved
+                // priors (global + trait + show-local). Resolution happened
+                // once outside the per-span loop above; this is a struct-by-
+                // value pass, no recomputation.
+                durationPrior: episodeDurationPrior
             )
             let rawDecision = mapper.map()
 
@@ -3091,7 +3106,13 @@ actor AdDetectionService {
                 mode: existing.mode,
                 recentFalseSkipSignals: existing.recentFalseSkipSignals + 1,
                 traitProfileJSON: existing.traitProfileJSON,
-                title: existing.title
+                title: existing.title,
+                // playhead-084j: carry-forward (mirror of `traitProfileJSON`).
+                // Belt-and-suspenders: `upsertProfile` already COALESCEs nil
+                // writes against the persisted column, but explicit symmetry
+                // with the other carry-forwards keeps every constructor in
+                // this file's pattern recognizable to future readers.
+                adDurationStatsJSON: existing.adDurationStatsJSON
             )
         }
         if merged == nil {
@@ -4546,6 +4567,72 @@ actor AdDetectionService {
         }
     }
 
+    // MARK: - Prior Hierarchy Resolution (playhead-084j)
+
+    /// Resolve the 4-level prior hierarchy for the current episode.
+    ///
+    /// Called from `runBackfill` exactly once per episode (outside the
+    /// per-span loop). The result feeds `DurationPrior(resolvedPriors:)` so
+    /// fusion is show-aware, not stuck on `GlobalPriorDefaults.standard`.
+    ///
+    /// Audit (as of 084j):
+    ///   • Global: always `GlobalPriorDefaults.standard`.
+    ///   • Network: `nil` — no production aggregator yet (filed separately).
+    ///   • Trait: `currentPodcastProfile?.traitProfile ?? .unknown`. The
+    ///     persistence layer reads cleanly; a writer for `EpisodeTraitSnapshot`
+    ///     is a separate gap (filed separately). Profiles without a writer
+    ///     fall through to `.unknown`, which is non-reliable, so the trait
+    ///     level stays inactive — graceful degradation.
+    ///   • Show-local: derived from `currentPodcastProfile.adDurationStatsJSON`
+    ///     via `ShowLocalPriorsBuilder.build`. Returns nil for shows below
+    ///     `ShowLocalPriorsBuilder.minSampleCount`, which keeps the resolver
+    ///     at global defaults until enough confirmed ads have been observed.
+    ///
+    /// Failure semantics: this method does not throw. Corrupt JSON, missing
+    /// columns, or any other malformed input results in `nil` show-local
+    /// priors, which causes the resolver to fall through to global defaults
+    /// — the same behavior as a brand-new show.
+    private func resolveEpisodePriors() -> ResolvedPriors {
+        let traitProfile = currentPodcastProfile?.traitProfile ?? .unknown
+        let showLocal = ShowLocalPriorsBuilder.build(from: currentPodcastProfile)
+        return PriorHierarchyResolver.resolve(
+            globalDefaults: .standard,
+            networkPriors: nil,
+            networkDecay: 0,
+            traitProfile: traitProfile,
+            showLocalPriors: showLocal
+        )
+    }
+
+    #if DEBUG
+    /// Test-only entry point that mirrors the resolver call inside
+    /// `runBackfill` without requiring a full backfill setup. Locks the
+    /// invariant that the production wire-up uses the in-actor profile and
+    /// produces a `ResolvedPriors` matching what the fusion path consumes.
+    ///
+    /// `#if DEBUG` matches the existing pattern for other `*ForTesting`
+    /// entry points in this file (see `acousticFunnelForTesting` etc.).
+    func resolveEpisodePriorsForTesting() -> ResolvedPriors {
+        resolveEpisodePriors()
+    }
+
+    /// Test-only entry point that drives `updatePriors` end-to-end.
+    /// Locks the wire-up of `adDurationStatsJSON` accumulation through the
+    /// actual create / update closures inside `mutateProfile` — the same
+    /// path `runBackfill` exercises post-fusion.
+    func updatePriorsForTesting(
+        podcastId: String,
+        nonSuppressedWindows: [AdWindow],
+        episodeDuration: Double
+    ) async throws {
+        try await updatePriors(
+            podcastId: podcastId,
+            nonSuppressedWindows: nonSuppressedWindows,
+            episodeDuration: episodeDuration
+        )
+    }
+    #endif
+
     // MARK: - Prior Updates
 
     /// Update PodcastProfile priors from confirmed ad windows.
@@ -4594,6 +4681,17 @@ actor AdDetectionService {
             .compactMap(\.advertiser)
             .map { $0.lowercased() }
 
+        // playhead-084j: capture the per-window durations of every confirmed
+        // ad in this episode so the show-local `AdDurationStats` aggregate
+        // can extend with a streaming-mean update inside the mutate closure.
+        // We filter to finite, positive durations to keep the EMA from being
+        // perturbed by malformed window rows.
+        let newAdDurations: [TimeInterval] = nonSuppressedWindows.compactMap { window in
+            let d = window.endTime - window.startTime
+            guard d.isFinite, d > 0 else { return nil }
+            return d
+        }
+
         let updatedProfile: PodcastProfile
         do {
             updatedProfile = try await store.mutateProfile(
@@ -4608,6 +4706,18 @@ actor AdDetectionService {
                     let initialSponsors: String? = newSponsors.isEmpty
                         ? nil
                         : Set(newSponsors).sorted().joined(separator: ",")
+
+                    // playhead-084j: encode the brand-new ad-duration aggregate
+                    // from this episode's observations. nil if no usable
+                    // durations were captured (the COALESCE in upsertProfile
+                    // will then leave the persisted column NULL — which is
+                    // also what `ShowLocalPriorsBuilder.build` expects for a
+                    // fresh show).
+                    let initialAdDurationStatsJSON = Self.encodeAdDurationStats(
+                        merging: .empty,
+                        with: newAdDurations
+                    )
+
                     // Bug 4a default: brand-new profile gets trust=0.5
                     // (matches `setUserOverride`'s new-profile default).
                     // TrustScoringService.recordSuccessfulObservation
@@ -4622,7 +4732,8 @@ actor AdDetectionService {
                         skipTrustScore: 0.5,
                         observationCount: 1,
                         mode: "shadow",
-                        recentFalseSkipSignals: 0
+                        recentFalseSkipSignals: 0,
+                        adDurationStatsJSON: initialAdDurationStatsJSON
                     )
                 },
                 update: { existing in
@@ -4662,6 +4773,26 @@ actor AdDetectionService {
                         mergedSponsorLexicon = existing.sponsorLexicon
                     }
 
+                    // playhead-084j: extend the persisted `AdDurationStats`
+                    // aggregate with this episode's confirmed-ad durations.
+                    // We carry the existing JSON forward when no new
+                    // observations were captured AND no decode-able prior
+                    // exists, so a `nil` or corrupt prior value is recovered
+                    // on the next episode that DOES carry observations.
+                    let mergedAdDurationStatsJSON: String? = {
+                        let existingStats = Self.decodeAdDurationStats(existing.adDurationStatsJSON)
+                            ?? .empty
+                        if newAdDurations.isEmpty {
+                            // Preserve prior column verbatim so a backfill
+                            // with no new ads doesn't blank out history.
+                            return existing.adDurationStatsJSON
+                        }
+                        return Self.encodeAdDurationStats(
+                            merging: existingStats,
+                            with: newAdDurations
+                        )
+                    }()
+
                     // Bug 4a (trust carry-forward): updatePriors does not
                     // touch `skipTrustScore`. TrustScoringService is the
                     // sole writer; we copy the existing value through.
@@ -4677,7 +4808,8 @@ actor AdDetectionService {
                         mode: existing.mode,
                         recentFalseSkipSignals: existing.recentFalseSkipSignals,
                         traitProfileJSON: existing.traitProfileJSON,
-                        title: existing.title
+                        title: existing.title,
+                        adDurationStatsJSON: mergedAdDurationStatsJSON
                     )
                 }
             )
@@ -4720,6 +4852,42 @@ actor AdDetectionService {
         }
 
         return merged.sorted()
+    }
+
+    // playhead-084j: declared `private static` so the `store.mutateProfile`
+    // closures can call them without capturing `self` (the closures run
+    // inside the AnalysisStore actor, not the AdDetectionService actor —
+    // same constraint as `mergeSlotPositions` above). `private` matches
+    // `mergeSlotPositions`'s access level so neither helper leaks to the
+    // app target's public surface.
+
+    /// Decode a persisted `AdDurationStatsJSON` value into the typed struct,
+    /// or `nil` when the column is empty / malformed.
+    private static func decodeAdDurationStats(_ json: String?) -> AdDurationStats? {
+        guard let json,
+              !json.isEmpty,
+              let data = json.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(AdDurationStats.self, from: data)
+        else { return nil }
+        return decoded
+    }
+
+    /// Encode a freshly-merged `AdDurationStats` for persistence, or `nil`
+    /// when no new observations would change the aggregate AND the existing
+    /// aggregate is empty (so we don't write `{"meanDuration":0,"sampleCount":0}`).
+    private static func encodeAdDurationStats(
+        merging existing: AdDurationStats,
+        with newDurations: [TimeInterval]
+    ) -> String? {
+        let merged = ShowLocalPriorsBuilder.mergeDurations(
+            existing: existing,
+            newDurations: newDurations
+        )
+        guard merged.sampleCount > 0 else { return nil }
+        guard let data = try? JSONEncoder().encode(merged),
+              let json = String(data: data, encoding: .utf8)
+        else { return nil }
+        return json
     }
 }
 

@@ -164,7 +164,15 @@ actor TrustScoringService {
                         mode: newMode.rawValue,
                         recentFalseSkipSignals: profile.recentFalseSkipSignals,
                         traitProfileJSON: profile.traitProfileJSON,
-                        title: profile.title
+                        title: profile.title,
+                        // playhead-084j: explicit carry-forward of the ad-
+                        // duration-stats column. Belt-and-suspenders: the
+                        // upsert SQL already COALESCEs nil writes against the
+                        // persisted column, but matching the established
+                        // `traitProfileJSON` pattern keeps this constructor
+                        // self-explanatory to future readers and survives
+                        // a hypothetical future change to the COALESCE rule.
+                        adDurationStatsJSON: profile.adDurationStatsJSON
                     )
                 }
             )
@@ -226,7 +234,10 @@ actor TrustScoringService {
                         mode: newMode.rawValue,
                         recentFalseSkipSignals: newFalseSignals,
                         traitProfileJSON: profile.traitProfileJSON,
-                        title: profile.title
+                        title: profile.title,
+                        // playhead-084j: see explanatory comment in
+                        // `recordSuccessfulObservation` above.
+                        adDurationStatsJSON: profile.adDurationStatsJSON
                     )
                     return (merged, demotion)
                 }
@@ -282,7 +293,10 @@ actor TrustScoringService {
                         mode: mode.rawValue,
                         recentFalseSkipSignals: profile.recentFalseSkipSignals,
                         traitProfileJSON: profile.traitProfileJSON,
-                        title: profile.title
+                        title: profile.title,
+                        // playhead-084j: see explanatory comment in
+                        // `recordSuccessfulObservation` above.
+                        adDurationStatsJSON: profile.adDurationStatsJSON
                     )
                 }
             )
@@ -330,7 +344,10 @@ actor TrustScoringService {
                         mode: profile.mode,
                         recentFalseSkipSignals: profile.recentFalseSkipSignals,
                         traitProfileJSON: profile.traitProfileJSON,
-                        title: profile.title
+                        title: profile.title,
+                        // playhead-084j: see explanatory comment in
+                        // `recordSuccessfulObservation` above.
+                        adDurationStatsJSON: profile.adDurationStatsJSON
                     )
                 }
             )
@@ -376,7 +393,10 @@ actor TrustScoringService {
                         mode: profile.mode,
                         recentFalseSkipSignals: decayed,
                         traitProfileJSON: profile.traitProfileJSON,
-                        title: profile.title
+                        title: profile.title,
+                        // playhead-084j: see explanatory comment in
+                        // `recordSuccessfulObservation` above.
+                        adDurationStatsJSON: profile.adDurationStatsJSON
                     )
                 }
             )
