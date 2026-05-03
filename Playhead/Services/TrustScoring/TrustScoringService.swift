@@ -172,7 +172,13 @@ actor TrustScoringService {
                         // `traitProfileJSON` pattern keeps this constructor
                         // self-explanatory to future readers and survives
                         // a hypothetical future change to the COALESCE rule.
-                        adDurationStatsJSON: profile.adDurationStatsJSON
+                        adDurationStatsJSON: profile.adDurationStatsJSON,
+                        // playhead-spxs: explicit carry-forward of the
+                        // network-identity column. COALESCE-protected in
+                        // upsertProfile, but matched here for parity with
+                        // the established traitProfileJSON / adDurationStatsJSON
+                        // patterns.
+                        networkId: profile.networkId
                     )
                 }
             )
@@ -237,7 +243,10 @@ actor TrustScoringService {
                         title: profile.title,
                         // playhead-084j: see explanatory comment in
                         // `recordSuccessfulObservation` above.
-                        adDurationStatsJSON: profile.adDurationStatsJSON
+                        adDurationStatsJSON: profile.adDurationStatsJSON,
+                        // playhead-spxs: see explanatory comment in
+                        // `recordSuccessfulObservation` above.
+                        networkId: profile.networkId
                     )
                     return (merged, demotion)
                 }
@@ -296,7 +305,10 @@ actor TrustScoringService {
                         title: profile.title,
                         // playhead-084j: see explanatory comment in
                         // `recordSuccessfulObservation` above.
-                        adDurationStatsJSON: profile.adDurationStatsJSON
+                        adDurationStatsJSON: profile.adDurationStatsJSON,
+                        // playhead-spxs: see explanatory comment in
+                        // `recordSuccessfulObservation` above.
+                        networkId: profile.networkId
                     )
                 }
             )
@@ -347,7 +359,10 @@ actor TrustScoringService {
                         title: profile.title,
                         // playhead-084j: see explanatory comment in
                         // `recordSuccessfulObservation` above.
-                        adDurationStatsJSON: profile.adDurationStatsJSON
+                        adDurationStatsJSON: profile.adDurationStatsJSON,
+                        // playhead-spxs: see explanatory comment in
+                        // `recordSuccessfulObservation` above.
+                        networkId: profile.networkId
                     )
                 }
             )
@@ -396,7 +411,10 @@ actor TrustScoringService {
                         title: profile.title,
                         // playhead-084j: see explanatory comment in
                         // `recordSuccessfulObservation` above.
-                        adDurationStatsJSON: profile.adDurationStatsJSON
+                        adDurationStatsJSON: profile.adDurationStatsJSON,
+                        // playhead-spxs: see explanatory comment in
+                        // `recordSuccessfulObservation` above.
+                        networkId: profile.networkId
                     )
                 }
             )
