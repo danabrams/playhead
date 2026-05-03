@@ -875,4 +875,74 @@ struct FinalPassRetranscriptionRunnerTests {
         // → failed transition.
         #expect(job.retryCount == 1)
     }
+
+    // MARK: - cycle-1 L5: heartbeat jitter
+
+    @Test("computeHeartbeatInterval returns base at roll=0")
+    func heartbeatJitterCenter() {
+        let interval = FinalPassRetranscriptionRunner.computeHeartbeatInterval(
+            base: 300,
+            jitter: 30,
+            roll: 0
+        )
+        #expect(interval == .seconds(300))
+    }
+
+    @Test("computeHeartbeatInterval reaches exact bounds at extreme rolls")
+    func heartbeatJitterBounds() {
+        let lower = FinalPassRetranscriptionRunner.computeHeartbeatInterval(
+            base: 300,
+            jitter: 30,
+            roll: -1
+        )
+        let upper = FinalPassRetranscriptionRunner.computeHeartbeatInterval(
+            base: 300,
+            jitter: 30,
+            roll: +1
+        )
+        #expect(lower == .seconds(270))
+        #expect(upper == .seconds(330))
+    }
+
+    @Test("computeHeartbeatInterval clamps out-of-range rolls")
+    func heartbeatJitterClampsOutOfRange() {
+        // A buggy caller supplying roll=2.0 must not produce a 360s
+        // interval that crosses the reaper-floor safety margin.
+        let interval = FinalPassRetranscriptionRunner.computeHeartbeatInterval(
+            base: 300,
+            jitter: 30,
+            roll: 2.0
+        )
+        #expect(interval == .seconds(330))
+
+        // Symmetric clamp on the negative side prevents a negative
+        // interval that would heartbeat every shard.
+        let lower = FinalPassRetranscriptionRunner.computeHeartbeatInterval(
+            base: 300,
+            jitter: 30,
+            roll: -2.0
+        )
+        #expect(lower == .seconds(270))
+    }
+
+    @Test("jitteredHeartbeatInterval stays within ±jitter of base")
+    func heartbeatJitterBoundedByConstants() {
+        // The runtime variant uses Double.random; sample 50 rolls and
+        // assert every one stays in [base-jitter, base+jitter]. Pure
+        // sanity check that the random-draw range matches the
+        // deterministic helper's contract.
+        for _ in 0..<50 {
+            let interval = FinalPassRetranscriptionRunner.jitteredHeartbeatInterval()
+            let lower = Duration.seconds(
+                FinalPassRetranscriptionRunner.heartbeatBaseSeconds
+                    - FinalPassRetranscriptionRunner.heartbeatJitterSeconds
+            )
+            let upper = Duration.seconds(
+                FinalPassRetranscriptionRunner.heartbeatBaseSeconds
+                    + FinalPassRetranscriptionRunner.heartbeatJitterSeconds
+            )
+            #expect(interval >= lower)
+            #expect(interval <= upper)
+        }
+    }
 }
