@@ -255,4 +255,90 @@ struct SilenceCompressionCoordinatorTests {
         let endCount = await playback.endCallCount
         #expect(endCount >= 2)
     }
+
+    /// cycle-1 M4 regression test: when `beginEpisode` is called with a
+    /// new asset while the previous asset's lookahead refresh is still
+    /// in flight, the previous Task must be cancelled. Without the
+    /// cancellation, the in-flight Task can outlive its asset, complete
+    /// after `currentAssetId` has been overwritten, and (in the worst
+    /// case) write stale windows into the compressor before the
+    /// `assetId == currentAssetId` guard rejects them — wasted work and
+    /// a brief inverted-state window.
+    ///
+    /// We pin the contract by using a `BlockingAnalysisSource` whose
+    /// `fetchWindows` suspends on a stream until the test wakes it.
+    /// The first `notePlayhead` kicks an in-flight refresh into the
+    /// blocking source. We then call `beginEpisode("asset-2")`, which
+    /// must cancel the prior Task. We unblock the source and assert
+    /// that the cancellation was observed (`Task.isCancelled` checked
+    /// inside the source).
+    @Test("beginEpisode cancels prior asset's in-flight lookahead refresh")
+    func beginEpisodeCancelsInFlightRefresh() async {
+        // Source that suspends inside fetchWindows until `release()` is
+        // called, so we can deterministically observe cancellation
+        // before the Task body completes.
+        actor BlockingAnalysisSource: SilenceCompressionAnalysisSourcing {
+            private var continuation: CheckedContinuation<Void, Never>?
+            private(set) var fetchStarted = false
+            private(set) var observedCancellation = false
+
+            func waitForFetch() async {
+                while !fetchStarted {
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+            }
+
+            func release() {
+                continuation?.resume()
+                continuation = nil
+            }
+
+            func fetchWindows(
+                assetId: String, from: Double, to: Double
+            ) async throws -> [FeatureWindow] {
+                fetchStarted = true
+                await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                    self.continuation = c
+                }
+                if Task.isCancelled {
+                    observedCancellation = true
+                }
+                return []
+            }
+        }
+
+        let playback = RecordingPlaybackController()
+        let source = BlockingAnalysisSource()
+        let coord = SilenceCompressionCoordinator(playback: playback, source: source)
+
+        await coord.beginEpisode(assetId: "asset-old", keepFullMusic: false)
+        // Kick a refresh — `notePlayhead(time: 0)` triggers
+        // `inFlightWindowsRefresh = Task { ... fetchWindows ... }` because
+        // refreshDelta is treated as past-cadence on first tick.
+        await coord.notePlayhead(time: 0)
+        // Wait for the Task to land inside fetchWindows (so the
+        // cancellation has someone to cancel — otherwise the test
+        // races the Task spawn).
+        await source.waitForFetch()
+
+        // Swap to a new asset; this should cancel the in-flight Task.
+        await coord.beginEpisode(assetId: "asset-new", keepFullMusic: false)
+
+        // Release the suspended fetch so the Task body resumes and
+        // observes Task.isCancelled.
+        await source.release()
+
+        // Give the resumed Task a moment to reach the
+        // `Task.isCancelled` check inside `fetchWindows`.
+        for _ in 0..<50 {
+            if await source.observedCancellation { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        let cancelled = await source.observedCancellation
+        #expect(
+            cancelled,
+            "beginEpisode must cancel the prior asset's in-flight refresh; the suspended Task should observe Task.isCancelled when it resumes"
+        )
+    }
 }
