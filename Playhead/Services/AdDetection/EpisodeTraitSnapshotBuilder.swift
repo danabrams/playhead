@@ -69,7 +69,9 @@ enum EpisodeTraitSnapshotBuilder {
             confirmedAdWindows: confirmedAdWindows,
             existingProfile: existingProfile
         )
+        // TODO(playhead-iv4l): real volatility signal — currently 1 - structureRegularity is post-EMA redundant
         let insertionVolatility = 1.0 - structureRegularity
+        // TODO(playhead-snat): wire from real ASR confidence — currently a constant placeholder
         let transcriptReliability: Float = 0.7
 
         return EpisodeTraitSnapshot(
@@ -114,6 +116,7 @@ enum EpisodeTraitSnapshotBuilder {
     ) -> (turnsPerMinute: Float, dominantFraction: Float) {
         let speakerIds = chunks.compactMap(\.speakerId)
         guard !speakerIds.isEmpty else {
+            // TODO(playhead-wmy6): diarization not yet wired; 0.5 sentinel will become real fraction once speakerId populates
             return (0, 0.5)
         }
 
