@@ -435,6 +435,16 @@ struct PodcastProfile: Sendable {
     /// ``AnalysisStore/updateProfileTitle(podcastId:title:)`` setter from
     /// the call site that owns the SwiftData `Podcast`.
     let title: String?
+    /// playhead-084j: JSON-encoded `AdDurationStats` aggregate of confirmed
+    /// ad-window durations observed for this show. Drives the show-local
+    /// override in `PriorHierarchyResolver`.
+    ///
+    /// `nil` on pre-084j rows that have not been touched, and on
+    /// transient profile values that bounce through other rebuild paths
+    /// without the stats in scope. `upsertProfile` uses
+    /// `COALESCE(excluded.adDurationStatsJSON, podcast_profiles.adDurationStatsJSON)`
+    /// so a `nil` write never clobbers persisted observations.
+    let adDurationStatsJSON: String?
 
     init(
         podcastId: String,
@@ -448,7 +458,8 @@ struct PodcastProfile: Sendable {
         mode: String,
         recentFalseSkipSignals: Int,
         traitProfileJSON: String? = nil,
-        title: String? = nil
+        title: String? = nil,
+        adDurationStatsJSON: String? = nil
     ) {
         self.podcastId = podcastId
         self.sponsorLexicon = sponsorLexicon
@@ -462,6 +473,7 @@ struct PodcastProfile: Sendable {
         self.recentFalseSkipSignals = recentFalseSkipSignals
         self.traitProfileJSON = traitProfileJSON
         self.title = title
+        self.adDurationStatsJSON = adDurationStatsJSON
     }
 
     /// Convenience: decode the stored trait profile, falling back to
@@ -1192,6 +1204,17 @@ actor AnalysisStore {
             try addColumnIfNeeded(
                 table: "podcast_profiles",
                 column: "traitProfileJSON",
+                definition: "TEXT"
+            )
+            // playhead-084j: `adDurationStatsJSON` on podcast_profiles.
+            // JSON-encoded `AdDurationStats` aggregate (mean + sample count)
+            // accumulated from confirmed AdWindow durations. Drives the
+            // show-local override in `PriorHierarchyResolver`. NULL on
+            // pre-084j rows; populated lazily by the next `updatePriors`
+            // backfill that observes confirmed ad windows.
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "adDurationStatsJSON",
                 definition: "TEXT"
             )
             // playhead-7mq: model/policy/feature-schema version columns on
@@ -4816,13 +4839,19 @@ actor AnalysisStore {
         // canary at PlayheadTests/Services/AdDetection/
         // AdDetectionServiceUpdatePriorsAtomicityCanaryTests.swift to
         // pin the new column's carry-forward invariant in every caller.
+        // playhead-084j: `adDurationStatsJSON` carries the per-show observed
+        // ad-duration aggregate. Wrapped in COALESCE on the conflict path so a
+        // `nil` write (from older callers that pre-date the column) cannot
+        // clobber an established aggregate. Same defensive pattern as `title`
+        // and the explicit `existing.X` carry-forwards in `mutateProfile`
+        // closures.
         let sql = """
             INSERT INTO podcast_profiles
             (podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
              jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
              observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-             title)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             title, adDurationStatsJSON)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(podcastId) DO UPDATE SET
                 sponsorLexicon = excluded.sponsorLexicon,
                 normalizedAdSlotPriors = excluded.normalizedAdSlotPriors,
@@ -4834,7 +4863,11 @@ actor AnalysisStore {
                 mode = excluded.mode,
                 recentFalseSkipSignals = excluded.recentFalseSkipSignals,
                 traitProfileJSON = excluded.traitProfileJSON,
-                title = COALESCE(excluded.title, podcast_profiles.title)
+                title = COALESCE(excluded.title, podcast_profiles.title),
+                adDurationStatsJSON = COALESCE(
+                    excluded.adDurationStatsJSON,
+                    podcast_profiles.adDurationStatsJSON
+                )
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -4850,6 +4883,7 @@ actor AnalysisStore {
         bind(stmt, 10, profile.recentFalseSkipSignals)
         bind(stmt, 11, profile.traitProfileJSON)
         bind(stmt, 12, profile.title)
+        bind(stmt, 13, profile.adDurationStatsJSON)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -4923,11 +4957,12 @@ actor AnalysisStore {
         // playhead-i9dj: explicit column list (not `SELECT *`) so future
         // additive migrations don't shift the positional indices the
         // decoder reads. `title` lands at index 11 — append-only.
+        // playhead-084j: `adDurationStatsJSON` lands at index 12.
         let sql = """
             SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
                    jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
                    observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-                   title
+                   title, adDurationStatsJSON
             FROM podcast_profiles WHERE podcastId = ?
             """
         let stmt = try prepare(sql)
@@ -4946,7 +4981,8 @@ actor AnalysisStore {
             mode: text(stmt, 8),
             recentFalseSkipSignals: Int(sqlite3_column_int(stmt, 9)),
             traitProfileJSON: optionalText(stmt, 10),
-            title: optionalText(stmt, 11)
+            title: optionalText(stmt, 11),
+            adDurationStatsJSON: optionalText(stmt, 12)
         )
     }
 

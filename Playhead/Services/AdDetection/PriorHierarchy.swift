@@ -178,6 +178,12 @@ enum PriorHierarchyResolver {
         }
 
         // Level 3: Show-local priors (wins at >= 5 episodes).
+        // Coupling note (see `ShowLocalPriorsBuilder.swift` `build`): the
+        // builder floors `episodeCount` to `showLocalThreshold` whenever it
+        // emits a non-nil value, so this check is effectively a no-op for
+        // builder-produced priors. It still matters as an independent floor
+        // for any test or future caller that constructs `ShowLocalPriors`
+        // directly without going through the builder.
         if let local = showLocalPriors, local.episodeCount >= showLocalThreshold {
             let localWeight = showLocalBlendWeight(episodeCount: local.episodeCount)
 
