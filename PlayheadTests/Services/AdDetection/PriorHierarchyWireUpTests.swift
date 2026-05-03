@@ -637,6 +637,61 @@ struct PriorHierarchyWireUpTests {
         #expect(updatedStats.meanDuration > 10)
     }
 
+    // MARK: - traitProfileJSON round-trip through AnalysisStore
+
+    @Test("traitProfileJSON survives AnalysisStore upsert/fetch round-trip with all fields intact")
+    func traitProfileJSONRoundTripsThroughAnalysisStore() async throws {
+        // Cycle-2 L2: the persisted column is `String?` (raw JSON). Encode a
+        // ShowTraitProfile carrying non-default values for every field,
+        // upsert through the production `AnalysisStore.upsertProfile` SQL
+        // path, fetch the row back, decode, and assert the snapshot is
+        // bit-equivalent. This locks in the schema/SQL bind/SQL read path
+        // so a future column rename or accidental COALESCE wrap can't
+        // silently drop or corrupt trait fields.
+        let store = try await makeTestStore()
+        let podcastId = "podcast-trait-roundtrip-1"
+        let original = ShowTraitProfile(
+            musicDensity: 0.31,
+            speakerTurnRate: 0.62,
+            singleSpeakerDominance: 0.43,
+            structureRegularity: 0.74,
+            sponsorRecurrence: 0.25,
+            insertionVolatility: 0.86,
+            transcriptReliability: 0.57,
+            episodesObserved: 7
+        )
+        let encoded = try JSONEncoder().encode(original)
+        let json = try #require(String(data: encoded, encoding: .utf8))
+
+        let seed = PodcastProfile(
+            podcastId: podcastId,
+            sponsorLexicon: nil,
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 0.5,
+            observationCount: 7,
+            mode: SkipMode.shadow.rawValue,
+            recentFalseSkipSignals: 0,
+            traitProfileJSON: json,
+            title: nil,
+            adDurationStatsJSON: nil
+        )
+        try await store.upsertProfile(seed)
+
+        let fetched = try #require(await store.fetchProfile(podcastId: podcastId))
+        let fetchedJSON = try #require(
+            fetched.traitProfileJSON,
+            "traitProfileJSON must survive the upsert/fetch round-trip"
+        )
+        let decoded = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(fetchedJSON.utf8)
+        )
+        #expect(decoded == original)
+    }
+
     // MARK: - Helpers
 
     private func makeProfile(
