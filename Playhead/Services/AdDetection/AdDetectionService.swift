@@ -1673,9 +1673,18 @@ actor AdDetectionService {
         // see PR for follow-up IDs) and feed `DurationPrior(resolvedPriors:)`
         // into the DecisionMapper.
         //
-        // Performance: resolution is a few arithmetic blends, well under a
-        // millisecond. Computing it once per episode (outside the per-span
-        // loop) is a deliberate perf invariant locked by the wire-up tests.
+        // Why-it-lives-here (cycle-1 M1): the hoist out of the per-span
+        // loop is primarily a SNAPSHOT-CONSISTENCY guarantee, not a
+        // performance optimization. Every span in this episode must see
+        // the SAME resolved priors — even if a sibling task were to
+        // mutate `PodcastProfile.adDurationStatsJSON` mid-run (e.g.
+        // another episode's backfill completing concurrently), the
+        // per-span DecisionMapper inputs would otherwise drift partway
+        // through the fusion loop and produce non-deterministic decision
+        // boundaries within a single episode. The arithmetic cost
+        // (a few blends, well under a millisecond) is genuinely
+        // negligible; the shape is locked by the wire-up tests so the
+        // consistency invariant can't regress silently.
         let resolvedEpisodePriors = resolveEpisodePriors()
         let episodeDurationPrior = DurationPrior(resolvedPriors: resolvedEpisodePriors)
 
