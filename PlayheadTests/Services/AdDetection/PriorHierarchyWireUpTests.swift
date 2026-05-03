@@ -412,7 +412,15 @@ struct PriorHierarchyWireUpTests {
             try await service.updatePriorsForTesting(
                 podcastId: podcastId,
                 nonSuppressedWindows: [window],
-                episodeDuration: 600
+                episodeDuration: 600,
+                // cycle-1 L4: this test only verifies that
+                // `episodesObserved` increments enough to flip
+                // `isReliable`, not that real signals shape the trait
+                // values. The companion test
+                // `updatePriorsActivatesTraitDerivedTierWithRealSignal`
+                // exercises the producer math with non-empty inputs.
+                featureWindows: [],
+                chunks: []
             )
         }
 
@@ -436,6 +444,81 @@ struct PriorHierarchyWireUpTests {
         // End-to-end resolver assertion: the service's resolver entry
         // point must report `.traitDerived` as the dominant level when
         // it sees this profile.
+        let service = makeService(store: store, profile: after)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .traitDerived)
+    }
+
+    /// cycle-1 L4 companion: drive `updatePriorsForTesting` with realistic
+    /// non-empty `featureWindows` (high `musicProbability`) so the trait
+    /// snapshot derivations actually run on real signal — not the
+    /// no-signal neutral defaults that the ergonomic-default version of
+    /// `updatePriorsForTesting` silently fed in. After 3 episodes the
+    /// resolved profile must have `musicDensity > 0.5`, locking in that
+    /// the producer math reaches `traitProfileJSON` end-to-end. Without
+    /// this gate, a future refactor could disconnect the producer from
+    /// the persisted profile and the existing
+    /// `updatePriorsActivatesTraitDerivedTier` test would still pass
+    /// because the EMA-on-empty path increments `episodesObserved` from
+    /// the neutral 0.5 defaults.
+    @Test("updatePriors with real feature signal flows trait values into traitProfileJSON")
+    func updatePriorsActivatesTraitDerivedTierWithRealSignal() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-v7v8-trait-real-signal-1"
+        let assetId = "asset-v7v8-trait-real-signal-1"
+        try await store.insertAsset(makeAsset(id: assetId, episodeId: "ep-v7v8-real-1"))
+
+        // Realistic feature signal: 5 windows in a row, each with a
+        // high `musicProbability` of 0.8. The producer's
+        // `deriveMusicDensity` averages these → trait snapshot's
+        // `musicDensity` ≈ 0.8. EMA-blended over 3 episodes against
+        // identical inputs converges to 0.8 (the first-episode branch
+        // replaces the sentinel directly; subsequent EMA passes with
+        // alpha=0.3 against the same target leave the value stationary).
+        let highMusicWindows: [FeatureWindow] = (0..<5).map { i in
+            makeFeatureWindow(
+                assetId: assetId,
+                startTime: Double(i),
+                endTime: Double(i + 1),
+                musicProbability: 0.8
+            )
+        }
+        let chunks: [TranscriptChunk] = [
+            makeChunk(assetId: assetId, chunkIndex: 0, start: 0, end: 5, speakerId: 1),
+            makeChunk(assetId: assetId, chunkIndex: 1, start: 5, end: 10, speakerId: 2)
+        ]
+
+        for episodeIndex in 0..<3 {
+            let window = makeAdWindow(
+                id: "win-real-\(episodeIndex)",
+                assetId: assetId,
+                startTime: Double(episodeIndex) * 100,
+                endTime: Double(episodeIndex) * 100 + 30
+            )
+            let current = try await store.fetchProfile(podcastId: podcastId)
+            let service = makeService(store: store, profile: current)
+            try await service.updatePriorsForTesting(
+                podcastId: podcastId,
+                nonSuppressedWindows: [window],
+                episodeDuration: 600,
+                featureWindows: highMusicWindows,
+                chunks: chunks
+            )
+        }
+
+        let after = try #require(await store.fetchProfile(podcastId: podcastId))
+        let traitJSON = try #require(after.traitProfileJSON)
+        let trait = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(traitJSON.utf8)
+        )
+        #expect(trait.episodesObserved >= 3)
+        #expect(trait.isReliable)
+        // High-music windows must surface as a high `musicDensity` —
+        // the no-signal default would yield 0 here. > 0.5 proves the
+        // real signal threaded all the way to `traitProfileJSON`.
+        #expect(trait.musicDensity > 0.5)
+
         let service = makeService(store: store, profile: after)
         let resolved = await service.resolveEpisodePriorsForTesting()
         #expect(resolved.activeLevel == .traitDerived)
@@ -479,7 +562,14 @@ struct PriorHierarchyWireUpTests {
         try await service.updatePriorsForTesting(
             podcastId: podcastId,
             nonSuppressedWindows: [window],
-            episodeDuration: 600
+            episodeDuration: 600,
+            // cycle-1 L4: this test exercises only the
+            // `adDurationStatsJSON` accumulation path, which is fed by
+            // the confirmed-ad windows above; trait-snapshot inputs are
+            // intentionally empty so the duration aggregate isn't
+            // entangled with the trait merge.
+            featureWindows: [],
+            chunks: []
         )
 
         // The persisted profile should now reflect a 6-sample aggregate with
@@ -561,6 +651,56 @@ struct PriorHierarchyWireUpTests {
             metadataPromptVersion: nil,
             wasSkipped: true,
             userDismissedBanner: false
+        )
+    }
+
+    private func makeFeatureWindow(
+        assetId: String,
+        startTime: Double,
+        endTime: Double,
+        musicProbability: Double
+    ) -> FeatureWindow {
+        FeatureWindow(
+            analysisAssetId: assetId,
+            startTime: startTime,
+            endTime: endTime,
+            rms: 0,
+            spectralFlux: 0,
+            musicProbability: musicProbability,
+            speakerChangeProxyScore: 0,
+            musicBedChangeScore: 0,
+            musicBedOnsetScore: 0,
+            musicBedOffsetScore: 0,
+            musicBedLevel: .none,
+            pauseProbability: 0,
+            speakerClusterId: nil,
+            jingleHash: nil,
+            featureVersion: 1
+        )
+    }
+
+    private func makeChunk(
+        assetId: String,
+        chunkIndex: Int,
+        start: Double,
+        end: Double,
+        speakerId: Int?
+    ) -> TranscriptChunk {
+        TranscriptChunk(
+            id: "chunk-\(assetId)-\(chunkIndex)",
+            analysisAssetId: assetId,
+            segmentFingerprint: "fp-\(chunkIndex)",
+            chunkIndex: chunkIndex,
+            startTime: start,
+            endTime: end,
+            text: "stub",
+            normalizedText: "stub",
+            pass: "final",
+            modelVersion: "test-model",
+            transcriptVersion: "v1",
+            atomOrdinal: chunkIndex,
+            weakAnchorMetadata: nil,
+            speakerId: speakerId
         )
     }
 

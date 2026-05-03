@@ -4642,15 +4642,26 @@ actor AdDetectionService {
     /// Locks the wire-up of `adDurationStatsJSON` accumulation through the
     /// actual create / update closures inside `mutateProfile` — the same
     /// path `runBackfill` exercises post-fusion.
+    ///
+    /// cycle-1 L4: accepts `featureWindows` and `chunks` so tests can drive
+    /// the trait-snapshot derivations with realistic signal (rather than
+    /// defaulting to empty arrays, which collapse every snapshot to the
+    /// no-signal neutral defaults and never exercise the real producer
+    /// math). No defaults — callers without a real signal pass `[]`
+    /// explicitly so the choice is visible at the call site.
     func updatePriorsForTesting(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
-        episodeDuration: Double
+        episodeDuration: Double,
+        featureWindows: [FeatureWindow],
+        chunks: [TranscriptChunk]
     ) async throws {
         try await updatePriors(
             podcastId: podcastId,
             nonSuppressedWindows: nonSuppressedWindows,
-            episodeDuration: episodeDuration
+            episodeDuration: episodeDuration,
+            featureWindows: featureWindows,
+            chunks: chunks
         )
     }
     #endif
@@ -4683,12 +4694,22 @@ actor AdDetectionService {
     ///     explicitly carries `existing.traitProfileJSON` forward.
     ///     (`title` was COALESCE-safe but is also passed through for
     ///     symmetry / defensiveness.)
+    /// cycle-1 L3: `featureWindows` and `chunks` are REQUIRED — no
+    /// defaults. The single production caller (`runBackfill`) always has
+    /// the full signal vector in scope and must thread it through; the
+    /// `updatePriorsForTesting` shim explicitly forwards them. Defaults
+    /// of `[]` previously made it possible for a future refactor to
+    /// introduce a new caller that silently dropped the signal and
+    /// regressed the trait-tier activation back to the no-signal neutral
+    /// defaults — invisible to most behavioral tests because the EMA
+    /// path still increments `episodesObserved`. Required parameters
+    /// surface the choice at the call site.
     private func updatePriors(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
         episodeDuration: Double,
-        featureWindows: [FeatureWindow] = [],
-        chunks: [TranscriptChunk] = []
+        featureWindows: [FeatureWindow],
+        chunks: [TranscriptChunk]
     ) async throws {
         guard !nonSuppressedWindows.isEmpty, episodeDuration > 0 else { return }
 
