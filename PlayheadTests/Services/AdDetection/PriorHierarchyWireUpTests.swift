@@ -115,6 +115,98 @@ struct PriorHierarchyWireUpTests {
         #expect(stats.sampleCount == 0)
     }
 
+    @Test("AdDurationStats clamps huge sampleCount on decode (cycle-1 L2)")
+    func adDurationStatsClampsHugeSampleCount() throws {
+        // A corrupt or runaway payload could land Int.max on disk;
+        // without a ceiling, the Welford-style streaming mean update
+        // (`mean += (d - mean) / Double(count)`) eventually rounds new
+        // samples to no-ops once `count` exceeds Double's integer-step
+        // resolution, but `sampleCount` keeps climbing — leaving an
+        // inconsistent aggregate. Clamp to `maxSampleCount`.
+        let huge = #"{"meanDuration":42.0,"sampleCount":999999999}"#
+        let data = Data(huge.utf8)
+        let stats = try JSONDecoder().decode(AdDurationStats.self, from: data)
+        #expect(stats.sampleCount == AdDurationStats.maxSampleCount)
+        #expect(stats.meanDuration == 42.0)
+    }
+
+    @Test("mergeDurations rejects sub-1s durations (cycle-1 L3)")
+    func mergeDurationsFiltersUnrealisticDurations() {
+        // Sub-second "ads" are almost always boundary-snap artifacts
+        // rather than real pre-roll/mid-roll. Folding them into the
+        // mean would drag the show-local typical toward zero.
+        let seed = AdDurationStats(meanDuration: 30, sampleCount: 5)
+        let merged = ShowLocalPriorsBuilder.mergeDurations(
+            existing: seed,
+            newDurations: [0.5, 0.99, -1.0, 0.0]
+        )
+        // None of these durations should count; aggregate unchanged.
+        #expect(merged.sampleCount == seed.sampleCount)
+        #expect(merged.meanDuration == seed.meanDuration)
+
+        // A duration AT the floor (1.0s) is still suspicious but
+        // accepted — the boundary is "anything under 1s rejected".
+        let acceptedFloor = ShowLocalPriorsBuilder.mergeDurations(
+            existing: seed,
+            newDurations: [1.0]
+        )
+        #expect(acceptedFloor.sampleCount == seed.sampleCount + 1)
+    }
+
+    @Test("mergeDurations short-circuits at maxSampleCount (cycle-1 L2)")
+    func mergeDurationsRespectsCeiling() {
+        // Seed the aggregate just below the ceiling, then merge enough
+        // durations to (in absence of the ceiling) push count well past
+        // it. We expect mergeDurations to break out of the fold once
+        // count == maxSampleCount so the mean and count stay coherent.
+        let seed = AdDurationStats(
+            meanDuration: 30,
+            sampleCount: AdDurationStats.maxSampleCount - 2
+        )
+        let newDurations = Array(repeating: 60.0, count: 100)
+        let merged = ShowLocalPriorsBuilder.mergeDurations(
+            existing: seed,
+            newDurations: newDurations
+        )
+        #expect(merged.sampleCount == AdDurationStats.maxSampleCount)
+        // Mean should have moved toward 60 by exactly 2 samples'
+        // worth, not 100. With seed mean 30, two 60s observations
+        // bring mean to ~30 + (30/(N-1)) + (30/N), all sub-precision
+        // for N≈100k. The mean must remain within sane bounds (didn't
+        // run away).
+        #expect(merged.meanDuration >= 30)
+        #expect(merged.meanDuration < 31)
+    }
+
+    @Test("builder passes observationCount through verbatim (cycle-1 L1)")
+    func builderDoesNotFloorEpisodeCount() {
+        // cycle-1 L1: previously the builder floored `episodeCount` at
+        // `PriorHierarchyResolver.showLocalThreshold` (5) so the resolver
+        // gate was guaranteed to clear. That papered over a real
+        // inconsistency: a profile with sampleCount >= 5 but
+        // observationCount < 5 (one episode yielding many ads) wouldn't
+        // have enough cross-episode generality to justify activating
+        // show-local priors. The builder now passes `observationCount`
+        // through verbatim and lets the resolver enforce its own gate.
+        //
+        // Construct a profile with sampleCount >= minSampleCount but a
+        // small `observationCount=2`, and assert the builder emits
+        // episodeCount=2 (not 5).
+        let stats = AdDurationStats(
+            meanDuration: 30,
+            sampleCount: ShowLocalPriorsBuilder.minSampleCount
+        )
+        let profile = makeProfile(
+            adDurationStatsJSON: stats.encodeForTesting(),
+            observationCount: 2
+        )
+        // Builder still requires sampleCount >= minSampleCount, which
+        // we satisfy. The observationCount value should flow through
+        // unchanged so the resolver can gate the activation.
+        let local = ShowLocalPriorsBuilder.build(from: profile)
+        #expect(local?.episodeCount == 2)
+    }
+
     @Test("builder with mean 60 (typical ad) keeps a normal range")
     func builderShapesTypicalDuration() {
         let stats = AdDurationStats(meanDuration: 60, sampleCount: 30)
@@ -207,6 +299,13 @@ struct PriorHierarchyWireUpTests {
         // Falls back to global defaults rather than crashing.
         #expect(resolved.activeLevel == .global)
         #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
+        // cycle-1 M2: a malformed payload should ALSO fire a `.error` log
+        // through `AdDetectionService.staticLogger` so the corruption is
+        // visible in DiagnosticReports / `log show` queries. We can't
+        // assert that from a unit test (Logger writes to OSLog, not a
+        // capturable sink), and adding a Logger test seam for this one
+        // call site would over-engineer the diagnostic — the contract is
+        // verified by reading `decodeAdDurationStats`'s body.
     }
 
     // MARK: - PodcastProfile.adDurationStatsJSON column round-trip
@@ -226,6 +325,48 @@ struct PriorHierarchyWireUpTests {
 
         let fetched = try await store.fetchProfile(podcastId: podcastId)
         #expect(fetched?.adDurationStatsJSON == json)
+    }
+
+    /// cycle-1 #192: COALESCE no-op pin for `adDurationStatsJSON`.
+    ///
+    /// `upsertProfile` wraps the column in
+    /// `COALESCE(excluded.adDurationStatsJSON, podcast_profiles.adDurationStatsJSON)`
+    /// so that a profile rebuild that doesn't carry the stats forward
+    /// (e.g. trust-scoring, which builds a profile without this column
+    /// in scope) preserves the previously-recorded aggregate rather
+    /// than clobbering it with NULL. Without the COALESCE clause the
+    /// per-show ad-duration mean would be wiped on every trust-score
+    /// recompute, defeating the point of persisting it across launches.
+    /// This test pins the contract end-to-end: seed → upsert with
+    /// nil → reload still has the seed's stats.
+    @Test("upsertProfile with nil adDurationStatsJSON preserves previously-recorded aggregate (COALESCE)")
+    func upsertNilAdDurationStatsPreservesExisting() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-coalesce-stats"
+        let stats = AdDurationStats(meanDuration: 27.5, sampleCount: 11)
+        let json = stats.encodeForTesting()
+        let seed = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: json,
+            observationCount: 4
+        )
+        try await store.upsertProfile(seed)
+
+        // Re-upsert with adDurationStatsJSON: nil (e.g. trust-scoring
+        // rebuilding the profile without this column in scope).
+        let rebuilt = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: nil,
+            observationCount: 5
+        )
+        try await store.upsertProfile(rebuilt)
+
+        let reloaded = try await store.fetchProfile(podcastId: podcastId)
+        #expect(reloaded?.adDurationStatsJSON == json)
+        // Confirms the upsert applied (observationCount changed) — so
+        // the COALESCE clause is what saved the aggregate, not a
+        // silent no-op upsert.
+        #expect(reloaded?.observationCount == 5)
     }
 
     @Test("updatePriors merges new ad-window durations into adDurationStatsJSON")

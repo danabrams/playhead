@@ -562,7 +562,15 @@ actor FinalPassRetranscriptionRunner {
         // changing semantics — `markFinalPassJobRunning` is idempotent
         // for an already-`running` row at the same jobId.
         var lastHeartbeatTick = ContinuousClock.now
-        let heartbeatInterval = Duration.seconds(300) // half the floor
+        // cycle-1 L5: jitter the heartbeat interval by ±10% (±30s)
+        // around the 300s base. Without jitter, two runners that
+        // started in lockstep (e.g. two devices that synced their
+        // schema migration on the same wall clock) would heartbeat
+        // every 300s in lockstep, doubling the database write rate
+        // at predictable beat moments. The random offset spreads
+        // those writes across a 60s window. Re-rolled per cycle so
+        // a long shard chain doesn't stay phase-locked.
+        var heartbeatInterval = Self.jitteredHeartbeatInterval()
         for shard in intersectingShards {
             // skeptical-review-cycle-1: cooperative cancellation in the
             // hot per-shard loop. Speech transcription is the heaviest
@@ -622,6 +630,9 @@ actor FinalPassRetranscriptionRunner {
             if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
                 try? await store.markFinalPassJobRunning(jobId: job.jobId)
                 lastHeartbeatTick = ContinuousClock.now
+                // Re-jitter the next interval so a long shard chain
+                // doesn't stay phase-locked to the first roll.
+                heartbeatInterval = Self.jitteredHeartbeatInterval()
             }
             let segments = try await speechService.transcribe(
                 shard: shard,
@@ -696,6 +707,60 @@ actor FinalPassRetranscriptionRunner {
         let key = "fp-final-\(text)|\(startTime)|\(endTime)"
         let digest = SHA256.hash(data: Data(key.utf8))
         return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: - cycle-1 L5: heartbeat jitter
+
+    /// Base heartbeat interval (seconds). Half the
+    /// `strandedJobFreshnessSeconds` reaper floor (10 min) so a
+    /// heartbeat fires twice per reaper cycle in the worst case,
+    /// preventing a long shard chain from being mistakenly reaped as
+    /// stranded.
+    static let heartbeatBaseSeconds: Double = 300
+
+    /// Maximum absolute jitter in seconds added to or subtracted from
+    /// `heartbeatBaseSeconds`. ±30s = ±10% of the 300s base. Wide
+    /// enough to spread heartbeat writes across a 60s window when
+    /// many runners start in lockstep, narrow enough that the
+    /// effective interval stays well below the 600s reaper floor
+    /// (worst case here is 330s, two beats = 660s, but the reaper
+    /// only fires at boot and when re-checked, not strictly every
+    /// 600s — practical safety margin is fine).
+    static let heartbeatJitterSeconds: Double = 30
+
+    /// Build a jittered heartbeat interval in [base-jitter, base+jitter].
+    /// Uses the system RNG so each runner cycle re-rolls independently.
+    /// Pure-functional variant `computeHeartbeatInterval(base:jitter:roll:)`
+    /// below is what tests exercise — passing a deterministic `roll` in
+    /// `[-1, +1]` lets the bounds be asserted without RNG flakiness.
+    static func jitteredHeartbeatInterval() -> Duration {
+        // Roll is normalized in [-1, +1]; computeHeartbeatInterval handles
+        // the actual base ± jitter math and clamps any out-of-range input.
+        let roll = Double.random(in: -1.0...1.0)
+        return computeHeartbeatInterval(
+            base: heartbeatBaseSeconds,
+            jitter: heartbeatJitterSeconds,
+            roll: roll
+        )
+    }
+
+    /// Pure helper: `base + roll * jitter`, returned as a `Duration`.
+    /// `roll` must be in `[-1, +1]`; values outside that range are
+    /// clamped so a buggy caller can't produce a negative or
+    /// reaper-floor-crossing interval.
+    ///
+    /// Test contract:
+    ///   - `roll = -1` ⇒ 270s
+    ///   - `roll = 0`  ⇒ 300s
+    ///   - `roll = +1` ⇒ 330s
+    static func computeHeartbeatInterval(
+        base: Double,
+        jitter: Double,
+        roll: Double
+    ) -> Duration {
+        let clampedRoll = min(1.0, max(-1.0, roll))
+        let seconds = base + clampedRoll * jitter
+        return Duration.seconds(seconds)
     }
 }
 

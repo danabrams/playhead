@@ -1666,23 +1666,31 @@ final class PlayheadRuntime {
             // inheritance.
             MainActor.assertIsolated()
             await skipOrchestrator.setSkipCueHandler { [silenceCompressionCoordinator] cues in
-                Task { @PlaybackServiceActor in
-                    playbackService.setSkipCues(cues)
-                }
-                // playhead-epii: also publish the cue ranges to the
-                // silence-compression coordinator so its planner
-                // refuses to compress regions the skip path will
-                // jump past wholesale. Hopping to MainActor mirrors
-                // the coordinator's isolation; the call is a thin
-                // in-memory filter (no I/O).
+                // cycle-1 H2: publish the skip-range fan-out to PlaybackService
+                // and SilenceCompressionCoordinator in a deterministic order
+                // (PlaybackService FIRST, coordinator SECOND) so downstream
+                // consumers see a single coherent transition. The two consumers
+                // hold the same logical skip-range data on separate actors;
+                // the prior shape (two independent unstructured Tasks) made the
+                // relative order between the hops non-deterministic, leaving a
+                // brief inter-actor window where one consumer reflected the new
+                // ranges and the other did not. A single Task that awaits each
+                // hop sequentially pins ordering for any consumer that observes
+                // both sides.
+                //
+                // playhead-epii: silence-compression hop is a thin in-memory
+                // filter (no I/O); MainActor isolation mirrors the coordinator.
                 let plain = cues.map { range -> (start: Double, end: Double) in
                     (
                         start: CMTimeGetSeconds(range.start),
                         end: CMTimeGetSeconds(CMTimeRangeGetEnd(range))
                     )
                 }
-                Task { @MainActor in
-                    silenceCompressionCoordinator.updateSkipRanges(plain)
+                Task { @PlaybackServiceActor in
+                    playbackService.setSkipCues(cues)
+                    await MainActor.run {
+                        silenceCompressionCoordinator.updateSkipRanges(plain)
+                    }
                 }
             }
 

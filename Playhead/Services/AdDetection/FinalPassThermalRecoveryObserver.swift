@@ -316,6 +316,20 @@ actor FinalPassThermalRecoveryObserver {
 
     // MARK: - Sweep dispatch
 
+    /// Possibly kick a final-pass recovery sweep on a runnable transition.
+    ///
+    /// Cooldown semantics (cycle-1 M3): the `lastSweepAt` timestamp lives
+    /// only on this actor instance — it is process-local and intentionally
+    /// NOT persisted across launches. A re-launch resets the cooldown to
+    /// "no prior sweep", so the very first runnable transition in a new
+    /// process always fires a sweep regardless of how recently the
+    /// previous process kicked one. This is deliberate: the Phase-1 launch
+    /// sweep already runs once per cold-start, and pairing this observer
+    /// with that launch sweep would over-kick if the cooldown carried
+    /// forward. The downside (a thermal-trapped run that crashes and
+    /// re-launches inside the cooldown window will sweep on its first
+    /// runnable transition rather than waiting) is acceptable — a crash
+    /// loop is a louder failure than a re-kicked sweep.
     private func maybeFireSweep() async {
         // cycle-2 H1: short-circuit if `stop()` has begun (didShutdown=true)
         // but the consumer is processing a capability event that was buffered

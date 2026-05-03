@@ -26,6 +26,15 @@
 // GUARDRAIL: The builder is pure. Persistence (column + accumulator) lives
 // in `AnalysisStore` and `AdDetectionService.updatePriors` respectively.
 //
+// CURRENT CONSUMPTION (cycle-1 H1, 2026-05-03): the only `ShowLocalPriors`
+// field this builder populates is `typicalAdDuration` (driven by the
+// `meanDuration` column on `AdDurationStats`). The other ShowLocalPriors
+// fields (`musicBracketTrust`, `metadataTrust`, `fmBudgetBias`,
+// `fingerprintTransferConfidence`, `sponsorRecurrenceExpectation`) are
+// emitted as `nil` because no production aggregator exists for them yet
+// and the resolver short-circuits on `nil` per-field. Pairs with the
+// downstream consumption note in `PriorHierarchy.swift`.
+//
 // Network priors and trait writers are filed as separate beads — see the
 // PR description for IDs.
 
@@ -46,11 +55,25 @@ struct AdDurationStats: Codable, Sendable, Equatable {
     /// `meanDuration`. The same value gates the show-local override in
     /// `ShowLocalPriorsBuilder.build` — when below `minSampleCount`, the
     /// builder returns nil and the hierarchy falls back to global defaults.
+    /// Clamped to [0, `maxSampleCount`] on read.
     let sampleCount: Int
+
+    /// cycle-1 L2: hard ceiling on `sampleCount` so the Welford-style
+    /// streaming mean update (`mean += (d - mean) / Double(count)`) can't
+    /// silently round to a no-op once `count` grows past the resolution
+    /// of `Double` integer-step. At 100_000 samples each new observation
+    /// still moves the mean by at least 1e-5 seconds (10 microseconds),
+    /// well above the precision floor. A daily-listener show won't reach
+    /// this in years; the ceiling exists for pathological / corrupt
+    /// payloads (Int.max written by a hand-edited JSON file, or a
+    /// runaway loop that persisted millions of synthetic durations).
+    /// Beyond the ceiling we stop counting — the running mean is already
+    /// well-converged and further updates would be sub-precision.
+    static let maxSampleCount: Int = 100_000
 
     init(meanDuration: TimeInterval, sampleCount: Int) {
         self.meanDuration = max(0, meanDuration)
-        self.sampleCount = max(0, sampleCount)
+        self.sampleCount = min(Self.maxSampleCount, max(0, sampleCount))
     }
 
     /// Custom `Decodable.init` that funnels decoded values back through the
@@ -93,6 +116,15 @@ enum ShowLocalPriorsBuilder {
     /// enough slack to absorb 1σ sample-mean noise once `sampleCount ≥ 5`.
     static let durationRangeHalfWidth: TimeInterval = 12
 
+    /// cycle-1 L3: minimum realistic ad duration (seconds). Anything
+    /// shorter is almost certainly a boundary-snap artifact — real
+    /// pre-roll / mid-roll ads run at minimum several seconds. Folding
+    /// sub-second "ads" into the mean would silently drag the show-
+    /// local typical down. Used by `mergeDurations` as a hard filter
+    /// in addition to the caller-side filter in
+    /// `AdDetectionService.updatePriors`.
+    static let minRealisticDuration: TimeInterval = 1.0
+
     /// Build show-local priors from the current `PodcastProfile`, or `nil`
     /// when the profile has no usable aggregate yet.
     ///
@@ -121,19 +153,26 @@ enum ShowLocalPriorsBuilder {
 
         // Episode count drives the resolver's blend weight via
         // `PriorHierarchyResolver.showLocalBlendWeight`. We use the
-        // profile's `observationCount` (number of episodes processed) as
-        // the canonical "episodes observed" signal. The threshold gate
-        // here is the sample count (number of observed ads); the blend
-        // weight scales with observed episodes. Both grow together in
-        // practice, so this keeps the resolver's contract intact.
+        // profile's `observationCount` (number of episodes processed)
+        // as the canonical "episodes observed" signal. The threshold
+        // gate here is the sample count (number of observed ads); the
+        // blend weight scales with observed episodes.
         //
-        // Coupling note (see `PriorHierarchy.swift` `showLocalThreshold`):
-        // we floor `episodeCount` at the resolver's `showLocalThreshold` so
-        // any value the builder produces is guaranteed to clear the
-        // resolver's `episodeCount >= showLocalThreshold` gate. The
-        // independent gate here is `sampleCount >= minSampleCount` above;
-        // the resolver-side check becomes a no-op when the builder emits
-        // a non-nil value at all.
+        // cycle-1 L1: pass `observationCount` through verbatim. The
+        // previous implementation floored episodeCount at
+        // `PriorHierarchyResolver.showLocalThreshold` "so the resolver
+        // gate is guaranteed to clear", which papered over a real
+        // inconsistency: a profile with sampleCount >= 5 but
+        // observationCount < 5 (e.g. one episode that yielded 5
+        // confirmed ads) wouldn't actually have enough cross-episode
+        // generality to justify activating show-local priors, and the
+        // resolver's `episodeCount >= showLocalThreshold` check is the
+        // gate that catches this. By passing the raw value, we let the
+        // resolver enforce its own contract instead of having the
+        // builder lie about it. In the common case the two grow
+        // together, so this only changes behavior on the pathological
+        // single-episode-many-ads pattern that should fall back to
+        // global defaults anyway.
         return ShowLocalPriors(
             musicBracketTrust: nil,
             metadataTrust: nil,
@@ -141,7 +180,7 @@ enum ShowLocalPriorsBuilder {
             fingerprintTransferConfidence: nil,
             sponsorRecurrenceExpectation: nil,
             typicalAdDuration: range,
-            episodeCount: max(profile.observationCount, PriorHierarchyResolver.showLocalThreshold)
+            episodeCount: profile.observationCount
         )
     }
 
@@ -152,12 +191,30 @@ enum ShowLocalPriorsBuilder {
     /// extend that to a batch by folding each new sample sequentially, so
     /// callers can pass either a single duration or a full episode's worth.
     ///
-    /// Filter: positive-and-finite (`d.isFinite && d > 0`). Matches the
-    /// caller-side filter in `AdDetectionService.updatePriors` so the two
-    /// gates can't drift independently. A zero-second "ad" is meaningless
-    /// (it would still be counted toward `sampleCount` while pulling the
-    /// running mean toward zero) — guarding here is belt-and-suspenders
-    /// in case a future caller forgets to pre-filter.
+    /// Filter: finite-and-realistic (`d.isFinite && d >= minRealisticDuration`).
+    /// The inner gate here is intentionally stricter than the caller's
+    /// pre-filter in `AdDetectionService.updatePriors` (which still permits
+    /// `d > 0`); belt-and-suspenders in case a future caller forgets to
+    /// pre-filter or relaxes its own gate. A zero-or-near-zero-second "ad"
+    /// is meaningless (it would still be counted toward `sampleCount` while
+    /// pulling the running mean toward zero), which is why we tighten here
+    /// rather than mirror the caller's looser gate.
+    ///
+    /// cycle-1 L3: tightened from `d > 0` to
+    /// `d >= minRealisticDuration` (1.0s). A sub-second AdWindow is
+    /// almost certainly a boundary-snap artifact rather than a real
+    /// ad; counting it would understate the running mean. Real-world
+    /// pre-roll/mid-roll ads are at minimum a few seconds, so 1.0s is
+    /// a generous floor that still rejects degenerate detections.
+    ///
+    /// cycle-1 L2: stop accumulating once `count` reaches
+    /// `AdDurationStats.maxSampleCount`. Past the ceiling the mean is
+    /// already well-converged and further updates would be sub-precision
+    /// (`Double` integer-step rounding makes them no-ops). Short-
+    /// circuiting in the loop keeps `mean` and `count` coherent — if we
+    /// kept folding samples in but the init-time clamp caps `count`, the
+    /// mean would drift while the count silently froze, producing an
+    /// inconsistent aggregate.
     static func mergeDurations(
         existing: AdDurationStats,
         newDurations: [TimeInterval]
@@ -167,7 +224,8 @@ enum ShowLocalPriorsBuilder {
         var mean = existing.meanDuration
         var count = existing.sampleCount
 
-        for d in newDurations where d.isFinite && d > 0 {
+        for d in newDurations where d.isFinite && d >= minRealisticDuration {
+            if count >= AdDurationStats.maxSampleCount { break }
             count += 1
             mean += (d - mean) / Double(count)
         }

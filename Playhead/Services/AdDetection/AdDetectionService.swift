@@ -330,6 +330,17 @@ actor AdDetectionService {
 
     private let logger = Logger(subsystem: "com.playhead", category: "AdDetectionService")
 
+    /// cycle-1 M2: Static logger for `private static` helpers that can't
+    /// reach the instance `logger` (specifically `decodeAdDurationStats`,
+    /// which runs inside `store.mutateProfile` closures on the
+    /// AnalysisStore actor and must not capture `self`). Same subsystem
+    /// as the instance logger so DiagnosticReports group both streams
+    /// under the AdDetectionService category.
+    private static let staticLogger = Logger(
+        subsystem: "com.playhead",
+        category: "AdDetectionService"
+    )
+
     // MARK: - Dependencies
 
     private let store: AnalysisStore
@@ -1673,9 +1684,18 @@ actor AdDetectionService {
         // see PR for follow-up IDs) and feed `DurationPrior(resolvedPriors:)`
         // into the DecisionMapper.
         //
-        // Performance: resolution is a few arithmetic blends, well under a
-        // millisecond. Computing it once per episode (outside the per-span
-        // loop) is a deliberate perf invariant locked by the wire-up tests.
+        // Why-it-lives-here (cycle-1 M1): the hoist out of the per-span
+        // loop is primarily a SNAPSHOT-CONSISTENCY guarantee, not a
+        // performance optimization. Every span in this episode must see
+        // the SAME resolved priors — even if a sibling task were to
+        // mutate `PodcastProfile.adDurationStatsJSON` mid-run (e.g.
+        // another episode's backfill completing concurrently), the
+        // per-span DecisionMapper inputs would otherwise drift partway
+        // through the fusion loop and produce non-deterministic decision
+        // boundaries within a single episode. The arithmetic cost
+        // (a few blends, well under a millisecond) is genuinely
+        // negligible; the shape is locked by the wire-up tests so the
+        // consistency invariant can't regress silently.
         let resolvedEpisodePriors = resolveEpisodePriors()
         let episodeDurationPrior = DurationPrior(resolvedPriors: resolvedEpisodePriors)
 
@@ -4863,18 +4883,43 @@ actor AdDetectionService {
 
     /// Decode a persisted `AdDurationStatsJSON` value into the typed struct,
     /// or `nil` when the column is empty / malformed.
+    ///
+    /// cycle-1 M2: a malformed payload silently returns `nil`, which lets
+    /// the resolver fall through to global defaults — but the corrupt
+    /// JSON stays on the column and every backfill thereafter pays the
+    /// same decode cost without ever surfacing the corruption to a
+    /// diagnostic report. Log decode failures at `.error` so the corruption
+    /// is visible in DiagnosticReports / `log show` queries. Empty/nil
+    /// payloads are NOT logged (the column is unset for any new show
+    /// and that is the expected steady state, not a failure).
     private static func decodeAdDurationStats(_ json: String?) -> AdDurationStats? {
-        guard let json,
-              !json.isEmpty,
-              let data = json.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode(AdDurationStats.self, from: data)
-        else { return nil }
-        return decoded
+        guard let json, !json.isEmpty else { return nil }
+        guard let data = json.data(using: .utf8) else {
+            staticLogger.error(
+                "[AdDurationStats] decode failed: utf8 conversion produced no data"
+            )
+            return nil
+        }
+        do {
+            return try JSONDecoder().decode(AdDurationStats.self, from: data)
+        } catch {
+            staticLogger.error(
+                "[AdDurationStats] decode failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
     }
 
     /// Encode a freshly-merged `AdDurationStats` for persistence, or `nil`
     /// when no new observations would change the aggregate AND the existing
     /// aggregate is empty (so we don't write `{"meanDuration":0,"sampleCount":0}`).
+    ///
+    /// cycle-1 L4: uses the default `JSONEncoder` formatting (compact,
+    /// no pretty-printing). The column footprint is intentionally
+    /// minimal — two scalar fields — and pretty-printed output would
+    /// only add bytes without benefiting any consumer (the value is
+    /// never inspected by humans through the column). DiagnosticsExport
+    /// pretty-prints separately at export time when readability matters.
     private static func encodeAdDurationStats(
         merging existing: AdDurationStats,
         with newDurations: [TimeInterval]

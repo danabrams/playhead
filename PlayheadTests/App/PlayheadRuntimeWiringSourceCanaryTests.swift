@@ -466,6 +466,120 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
     /// assertion. That's the right failure mode in DEBUG, but a
     /// stronger source-level pin guards release builds (where the
     /// assertion is `#if DEBUG`-stripped) too.
+    /// cycle-1 H2 regression canary: the `setSkipCueHandler` closure
+    /// in `PlayheadRuntime` must serialize the skip-range fan-out into
+    /// PlaybackService FIRST and SilenceCompressionCoordinator SECOND,
+    /// inside a SINGLE Task body. The prior shape spawned two
+    /// independent unstructured Tasks (one to `playbackService.setSkipCues`,
+    /// one to `silenceCompressionCoordinator.updateSkipRanges`), making
+    /// the relative order between the two hops non-deterministic.
+    /// The coordinator's planner reads PlaybackService's marked-skip
+    /// view on its next refresh; if the coordinator updates first and
+    /// the playback service updates second, the planner can refuse
+    /// compression on a region the skip path no longer claims (a brief
+    /// window of inverted state).
+    ///
+    /// What we pin:
+    ///   1. Inside the `setSkipCueHandler` closure body, both
+    ///      `playbackService.setSkipCues(` and
+    ///      `silenceCompressionCoordinator.updateSkipRanges(` appear.
+    ///   2. They appear IN THAT ORDER (setSkipCues precedes updateSkipRanges).
+    ///   3. Between them, there is exactly ONE `Task` opener — i.e. they
+    ///      live in the same Task body. A regression that splits them
+    ///      back into two separate `Task { ... }` blocks fails (3).
+    func testSkipCueFanOutIsSerialized() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        guard let handlerRange = stripped.range(of: "setSkipCueHandler") else {
+            XCTFail(
+                """
+                `setSkipCueHandler` no longer appears in PlayheadRuntime.swift. \
+                The skip-cue fan-out hook has moved or been removed; update \
+                this canary anchor.
+                """
+            )
+            return
+        }
+
+        // Search a bounded window starting from the handler call so we
+        // don't accidentally pick up unrelated `setSkipCues` calls
+        // elsewhere in the file.
+        let searchStart = handlerRange.upperBound
+        // Window of ~3000 chars is enough to span the whole closure body
+        // (the prior shape was ~25 lines) without bleeding into siblings.
+        let windowEnd = stripped.index(
+            searchStart,
+            offsetBy: min(3000, stripped.distance(from: searchStart, to: stripped.endIndex))
+        )
+        let window = stripped[searchStart..<windowEnd]
+
+        guard let setSkipCuesRange = window.range(of: "playbackService.setSkipCues(") else {
+            XCTFail(
+                """
+                Inside `setSkipCueHandler` body in PlayheadRuntime.swift, the \
+                call `playbackService.setSkipCues(` is missing. Either the \
+                fan-out has been removed or the binding name has changed. \
+                Update the canary.
+                """
+            )
+            return
+        }
+        guard let updateSkipRangesRange = window.range(of: "silenceCompressionCoordinator.updateSkipRanges(") else {
+            XCTFail(
+                """
+                Inside `setSkipCueHandler` body in PlayheadRuntime.swift, the \
+                call `silenceCompressionCoordinator.updateSkipRanges(` is missing. \
+                playhead-epii requires the silence-compression coordinator to \
+                receive cue updates. Update the canary or restore the call.
+                """
+            )
+            return
+        }
+
+        XCTAssertLessThan(
+            setSkipCuesRange.lowerBound, updateSkipRangesRange.lowerBound,
+            """
+            cycle-1 H2: `playbackService.setSkipCues(...)` must be invoked \
+            BEFORE `silenceCompressionCoordinator.updateSkipRanges(...)` \
+            inside the `setSkipCueHandler` closure. The coordinator's \
+            planner reads PlaybackService's marked-skip view on its \
+            next refresh; updating the coordinator first leaves a \
+            brief window of inverted state. Reorder the two calls.
+            """
+        )
+
+        // Count Task openers between the two calls. A single Task body
+        // shared by both calls means there should be ZERO Task openers
+        // strictly between them. (The Task opener is BEFORE setSkipCues
+        // in the new shape.)
+        let between = window[setSkipCuesRange.upperBound..<updateSkipRangesRange.lowerBound]
+        let taskOpenerRegex = try NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9_.])Task\s*\{"#
+        )
+        let nsBetween = String(between)
+        let matches = taskOpenerRegex.matches(
+            in: nsBetween,
+            range: NSRange(nsBetween.startIndex..., in: nsBetween)
+        )
+        XCTAssertEqual(
+            matches.count, 0,
+            """
+            cycle-1 H2: between `playbackService.setSkipCues(...)` and \
+            `silenceCompressionCoordinator.updateSkipRanges(...)` inside \
+            the `setSkipCueHandler` closure, found \(matches.count) `Task` \
+            opener(s). The prior buggy shape spawned two independent \
+            unstructured Tasks — one for each call — making the relative \
+            order non-deterministic. The fix is to put both calls inside \
+            ONE Task with sequential awaits. If the fan-out is still \
+            structured but uses a different shape (e.g. a TaskGroup), \
+            update this canary; otherwise restore the single-Task ordering.
+            """
+        )
+    }
+
     func testMainActorAssertIsolatedRemainsInBootstrapTasks() throws {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
