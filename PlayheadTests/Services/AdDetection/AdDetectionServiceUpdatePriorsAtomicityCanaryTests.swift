@@ -789,6 +789,84 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         )
     }
 
+    /// cycle-3 L-3 positive control: a fixture body that contains a
+    /// `/* ... */` block comment mentioning `PodcastProfile(` MUST NOT
+    /// cause `bodyConstructsPodcastProfile` to return `true`. The block-
+    /// comment neutralisation happens upstream in
+    /// `SwiftSourceInspector.strippingCommentsAndStrings` (which
+    /// blanks block-comment content while preserving Character length);
+    /// this control pins the end-to-end protection so a future change
+    /// to the shared stripper that drops block-comment support is
+    /// caught by the trait-carry-forward whole-file canary's
+    /// dependency surface, not just by the inspector's own tests.
+    func testBodyConstructsPodcastProfileSkipsBlockCommentMentions() throws {
+        // Mirror cycle-2 L5's positive-control shape, swapping the `///`
+        // line comment for a `/* ... */` block comment. The fixture
+        // first goes through `strippingCommentsAndStrings` (which is
+        // what production callers do — the production source is fed
+        // through that stripper before `bodyConstructsPodcastProfile`
+        // runs on the result). Inline block-comment content must be
+        // gone after stripping, so the regex must NOT match.
+        let bodyWithOnlyBlockComment = SwiftSourceInspector.strippingCommentsAndStrings("""
+        /* PodcastProfile( in a block comment is not a real construction. */
+        let x = 1
+        """)
+        XCTAssertFalse(
+            Self.bodyConstructsPodcastProfile(bodyWithOnlyBlockComment),
+            """
+            cycle-3 L-3: a `/* ... */` block-comment mention of \
+            `PodcastProfile(` slipped past the shared \
+            `SwiftSourceInspector.strippingCommentsAndStrings` upstream \
+            stripper. The whole-file canary would scope the trait-\
+            carry-forward check to a body that does not actually \
+            construct a profile. Fix the shared stripper (this filter \
+            does NOT extend to block comments by design — see \
+            `strippingDocCommentLines` doc).
+            """
+        )
+
+        // Multi-line block comment (a future PR could span the literal
+        // across lines): the shared stripper preserves newlines and
+        // blanks content, so the regex must NOT match here either.
+        let bodyWithMultiLineBlockComment = SwiftSourceInspector.strippingCommentsAndStrings("""
+        /*
+         * PodcastProfile( spanning multiple lines
+         * is also not a real construction.
+         */
+        let y = 2
+        """)
+        XCTAssertFalse(
+            Self.bodyConstructsPodcastProfile(bodyWithMultiLineBlockComment),
+            """
+            cycle-3 L-3: a multi-line `/* ... */` block-comment mention \
+            of `PodcastProfile(` slipped past the shared \
+            `SwiftSourceInspector.strippingCommentsAndStrings` upstream \
+            stripper. The shared stripper must blank block-comment \
+            content while preserving newlines — a regression that lets \
+            multi-line block comments leak into "code" position would \
+            re-open the cycle-2 L5 false-trip risk.
+            """
+        )
+
+        // Negative control: a real `PodcastProfile(` constructor
+        // alongside a block-comment mention MUST still match. Confirms
+        // the shared stripper isn't over-aggressively erasing real
+        // constructors that appear adjacent to block comments.
+        let bodyWithRealConstructor = SwiftSourceInspector.strippingCommentsAndStrings("""
+        /* PodcastProfile( in a block comment is not real. */
+        return PodcastProfile(podcastId: "id")
+        """)
+        XCTAssertTrue(
+            Self.bodyConstructsPodcastProfile(bodyWithRealConstructor),
+            """
+            cycle-3 L-3: a real `PodcastProfile(` constructor was \
+            erased along with the adjacent block-comment mention. The \
+            shared stripper is too aggressive; tighten \
+            `SwiftSourceInspector.strippingCommentsAndStrings`.
+            """
+        )
+    }
+
     /// Cycle-19 L-1 sibling canary: pin that `AdDetectionService.swift`
     /// never aliases the `store` property to a different local
     /// (`let s = store`, `let analysisStore = self.store`, etc.). The
@@ -1123,23 +1201,50 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         // triple-slash case would silently let doc-comment mentions of
         // `PodcastProfile(` slip into the regex match. Filtering here
         // makes the protection explicit per finding L5.
+        //
+        // cycle-3 L-2 / L-3: `strippingDocCommentLines` does NOT preserve
+        // byte offsets — it drops whole `///` lines. Use the result ONLY
+        // for offset-independent regex existence checks (the
+        // `regex.firstMatch(...) != nil` line directly below). DO NOT
+        // feed it into a walk-back that depends on `String.distance`
+        // alignment with the original source. Block comments
+        // (`/* ... */`) are handled upstream by
+        // `SwiftSourceInspector.strippingCommentsAndStrings` — this
+        // helper does not need to extend to them.
         let withoutDocComments = Self.strippingDocCommentLines(bodyStripped)
         let range = NSRange(withoutDocComments.startIndex..., in: withoutDocComments)
         return regex.firstMatch(in: withoutDocComments, range: range) != nil
     }
 
-    /// cycle-2 L5: drop every line whose first non-whitespace characters
-    /// are `///` (Swift doc-comment marker). The shared
-    /// `strippingCommentsAndStrings` already blanks `//` line comments
-    /// so doc-comments arrive here as runs of spaces, but this filter
-    /// is the explicit defense the cycle-2 L5 finding asked for: even
-    /// if the shared stripper later misses a doc-comment edge case,
-    /// the `\bPodcastProfile\s*\(` scan won't false-trip on
-    /// documentation references. Length is NOT preserved (lines
-    /// dropped), so callers must not feed the result back into a
-    /// walk-back that depends on `String.distance` alignment to the
-    /// original source — `bodyConstructsPodcastProfile` only does a
-    /// presence check, which is offset-independent.
+    /// cycle-2 L5 / cycle-3 L-3: drop every line whose first
+    /// non-whitespace characters are `///` (Swift doc-comment marker).
+    /// The shared `strippingCommentsAndStrings` already blanks `//` line
+    /// comments AND `/* ... */` block comments (with character-length
+    /// preserved) so both `///` doc comments and `/* PodcastProfile( */`
+    /// block-comment mentions arrive here as runs of spaces. This filter
+    /// is the explicit belt-and-suspenders defense the cycle-2 L5
+    /// finding asked for: even if a future shared-stripper change
+    /// misses the triple-slash case, the `\bPodcastProfile\s*\(` scan
+    /// won't false-trip on doc-comment references.
+    ///
+    /// Block-comment coverage (cycle-3 L-3): block comments are NOT
+    /// handled here. They are handled upstream by
+    /// `SwiftSourceInspector.strippingCommentsAndStrings`, which
+    /// replaces `/* ... */` content with same-length whitespace
+    /// (Character-length-preserving — see the length-invariant doc on
+    /// the inspector). A future PR that puts `PodcastProfile(` inside a
+    /// `/* ... */` block comment will already be neutralised by the
+    /// shared stripper before this filter runs. Extending this filter
+    /// to also handle block comments would be redundant; if the shared
+    /// stripper ever drops block-comment support, fix it there rather
+    /// than duplicating the logic here. (`SwiftSourceInspectorStringStrippingTests`
+    /// pins the block-comment behaviour with explicit fixtures.)
+    ///
+    /// Length is NOT preserved (whole `///` lines are dropped), so
+    /// callers must not feed the result back into a walk-back that
+    /// depends on `String.distance` alignment to the original source —
+    /// `bodyConstructsPodcastProfile` only does a presence check, which
+    /// is offset-independent.
     fileprivate static func strippingDocCommentLines(_ source: String) -> String {
         source
             .split(separator: "\n", omittingEmptySubsequences: false)
