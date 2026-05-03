@@ -213,6 +213,25 @@ struct EpisodeTraitSnapshotBuilderTests {
         #expect(snap.structureRegularity == 0.5)
     }
 
+    @Test("structureRegularity is neutral 0.5 when normalizedAdSlotPriors JSON is malformed")
+    func structureRegularityNeutralOnMalformedPriors() {
+        // Cycle-2 M-T2: corrupt JSON in the persisted prior must not propagate
+        // a misleading regularity score; `decodeSlotPriors` returning nil
+        // should fall back to the documented neutral default rather than 0.
+        let existing = makeProfile(normalizedAdSlotPriors: "{ not valid json")
+        let ads: [AdWindow] = [
+            makeAdWindow(start: 60, end: 90)
+        ]
+        let snap = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: [],
+            chunks: [],
+            confirmedAdWindows: ads,
+            existingProfile: existing,
+            episodeDuration: 600
+        )
+        #expect(snap.structureRegularity == 0.5)
+    }
+
     // MARK: - sponsorRecurrence
 
     @Test("sponsorRecurrence is fraction of advertisers seen in existing lexicon")
@@ -280,6 +299,27 @@ struct EpisodeTraitSnapshotBuilderTests {
             chunks: [],
             confirmedAdWindows: [],
             existingProfile: nil,
+            episodeDuration: 600
+        )
+        #expect(snap.transcriptReliability == 0.7)
+    }
+
+    @Test("transcriptReliability is the 0.7 placeholder regardless of inputs")
+    func transcriptReliabilityIsPlaceholderConstant() {
+        // Locks in M4 placeholder; remove this assertion once playhead-snat lands.
+        // The producer currently hard-codes `transcriptReliability: Float = 0.7`,
+        // so any combination of inputs must surface the same constant. When
+        // playhead-snat replaces the placeholder with a real ASR-confidence
+        // signal, this test should be deleted (not weakened to a tolerance).
+        let chunks: [TranscriptChunk] = [
+            makeChunk(start: 0, end: 10, speakerId: 1),
+            makeChunk(start: 10, end: 20, speakerId: 2)
+        ]
+        let snap = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: [makeFeatureWindow(musicProbability: 0.42)],
+            chunks: chunks,
+            confirmedAdWindows: [makeAdWindow(start: 60, end: 90, advertiser: "ACME")],
+            existingProfile: makeProfile(sponsorLexicon: "acme"),
             episodeDuration: 600
         )
         #expect(snap.transcriptReliability == 0.7)
