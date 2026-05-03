@@ -734,9 +734,8 @@ actor FinalPassRetranscriptionRunner {
     /// below is what tests exercise — passing a deterministic `roll` in
     /// `[-1, +1]` lets the bounds be asserted without RNG flakiness.
     static func jitteredHeartbeatInterval() -> Duration {
-        // Double.random(in:) is half-open, so ask for a slightly wider
-        // upper bound and clamp via `computeHeartbeatInterval` which
-        // accepts a normalized roll in [-1, +1].
+        // Roll is normalized in [-1, +1]; computeHeartbeatInterval handles
+        // the actual base ± jitter math and clamps any out-of-range input.
         let roll = Double.random(in: -1.0...1.0)
         return computeHeartbeatInterval(
             base: heartbeatBaseSeconds,

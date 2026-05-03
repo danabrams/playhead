@@ -192,12 +192,13 @@ enum ShowLocalPriorsBuilder {
     /// callers can pass either a single duration or a full episode's worth.
     ///
     /// Filter: finite-and-realistic (`d.isFinite && d >= minRealisticDuration`).
-    /// Matches the caller-side filter in `AdDetectionService.updatePriors`
-    /// so the two gates can't drift independently. A zero-or-near-zero-
-    /// second "ad" is meaningless (it would still be counted toward
-    /// `sampleCount` while pulling the running mean toward zero) — guarding
-    /// here is belt-and-suspenders in case a future caller forgets to
-    /// pre-filter.
+    /// The inner gate here is intentionally stricter than the caller's
+    /// pre-filter in `AdDetectionService.updatePriors` (which still permits
+    /// `d > 0`); belt-and-suspenders in case a future caller forgets to
+    /// pre-filter or relaxes its own gate. A zero-or-near-zero-second "ad"
+    /// is meaningless (it would still be counted toward `sampleCount` while
+    /// pulling the running mean toward zero), which is why we tighten here
+    /// rather than mirror the caller's looser gate.
     ///
     /// cycle-1 L3: tightened from `d > 0` to
     /// `d >= minRealisticDuration` (1.0s). A sub-second AdWindow is

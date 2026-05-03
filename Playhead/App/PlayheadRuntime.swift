@@ -1666,17 +1666,17 @@ final class PlayheadRuntime {
             // inheritance.
             MainActor.assertIsolated()
             await skipOrchestrator.setSkipCueHandler { [silenceCompressionCoordinator] cues in
-                // cycle-1 H2: serialize the skip-range fan-out so PlaybackService
-                // (the orchestrator's marked-skip view) is updated FIRST and
-                // SilenceCompressionCoordinator is updated SECOND. The
-                // coordinator's planner reads the playback service's view on
-                // its next refresh; updating the coordinator before the
-                // playback service is updated would let the coordinator
-                // refuse to compress a region the skip path no longer claims,
-                // a brief window of inverted state. The prior shape (two
-                // independent unstructured Tasks) made the relative order
-                // between the two hops non-deterministic; a single Task that
-                // awaits each hop sequentially pins it.
+                // cycle-1 H2: publish the skip-range fan-out to PlaybackService
+                // and SilenceCompressionCoordinator in a deterministic order
+                // (PlaybackService FIRST, coordinator SECOND) so downstream
+                // consumers see a single coherent transition. The two consumers
+                // hold the same logical skip-range data on separate actors;
+                // the prior shape (two independent unstructured Tasks) made the
+                // relative order between the hops non-deterministic, leaving a
+                // brief inter-actor window where one consumer reflected the new
+                // ranges and the other did not. A single Task that awaits each
+                // hop sequentially pins ordering for any consumer that observes
+                // both sides.
                 //
                 // playhead-epii: silence-compression hop is a thin in-memory
                 // filter (no I/O); MainActor isolation mirrors the coordinator.
