@@ -4721,7 +4721,7 @@ actor AdDetectionService {
         // attached. Counts only — no payload content — so privacy-public is
         // safe.
         logger.debug(
-            "[v7v8] traitSnapshot featureWindows=\(featureWindows.count, privacy: .public) chunks=\(chunks.count, privacy: .public)"
+            "[traitSnapshot] featureWindows=\(featureWindows.count, privacy: .public) chunks=\(chunks.count, privacy: .public)"
         )
 
         // Compute normalized ad slot positions from confirmed windows.
@@ -4968,10 +4968,25 @@ actor AdDetectionService {
             episodeDuration: episodeDuration
         )
         let mergedProfile = existing.traitProfile.updated(from: snapshot)
-        guard let data = try? JSONEncoder().encode(mergedProfile),
-              let json = String(data: data, encoding: .utf8)
-        else { return nil }
-        return json
+        // cycle-2 M1: surface encode failures so a silent `nil` return
+        // (which leaves the existing `traitProfileJSON` undisturbed) is
+        // still visible in DiagnosticReports / `log show` queries. The
+        // `nil` semantic is preserved because callers depend on it.
+        do {
+            let data = try JSONEncoder().encode(mergedProfile)
+            guard let json = String(data: data, encoding: .utf8) else {
+                staticLogger.error(
+                    "[traitSnapshot] mergedTraitProfileJSON: utf8 conversion produced no string"
+                )
+                return nil
+            }
+            return json
+        } catch {
+            staticLogger.error(
+                "[traitSnapshot] mergedTraitProfileJSON: encode failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
     }
 
     /// Build the seed trait snapshot for a brand-new profile and encode
@@ -4992,10 +5007,24 @@ actor AdDetectionService {
             episodeDuration: episodeDuration
         )
         let seedProfile = ShowTraitProfile.unknown.updated(from: snapshot)
-        guard let data = try? JSONEncoder().encode(seedProfile),
-              let json = String(data: data, encoding: .utf8)
-        else { return nil }
-        return json
+        // cycle-2 M1: surface encode failures so the bootstrap-skip path
+        // (column persisted as nil) is observable in DiagnosticReports
+        // rather than disappearing silently.
+        do {
+            let data = try JSONEncoder().encode(seedProfile)
+            guard let json = String(data: data, encoding: .utf8) else {
+                staticLogger.error(
+                    "[traitSnapshot] initialTraitProfileJSON: utf8 conversion produced no string"
+                )
+                return nil
+            }
+            return json
+        } catch {
+            staticLogger.error(
+                "[traitSnapshot] initialTraitProfileJSON: encode failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
     }
 
     /// Merge new slot positions with existing ones. Deduplicates slots that
