@@ -4713,6 +4713,17 @@ actor AdDetectionService {
     ) async throws {
         guard !nonSuppressedWindows.isEmpty, episodeDuration > 0 else { return }
 
+        // cycle-1 residual log: surface the trait-snapshot input cardinalities
+        // at the point of consumption so an empty-input regression (a future
+        // caller that drops the signal vector and silently regresses the
+        // trait tier to no-signal neutral defaults) is visible in
+        // DiagnosticReports / `log show` queries without a debugger
+        // attached. Counts only — no payload content — so privacy-public is
+        // safe.
+        logger.debug(
+            "[v7v8] traitSnapshot featureWindows=\(featureWindows.count, privacy: .public) chunks=\(chunks.count, privacy: .public)"
+        )
+
         // Compute normalized ad slot positions from confirmed windows.
         // These do not depend on the existing profile so we compute them
         // once outside the closure (also keeps the closure simple).
