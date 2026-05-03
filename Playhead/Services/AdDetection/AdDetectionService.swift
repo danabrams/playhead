@@ -486,6 +486,17 @@ actor AdDetectionService {
     /// integration level. Reset at the start of every backfill run.
     private var lastBracketRefinementCounts = BracketRefinementCounts()
 
+    /// playhead-43ed: optional repeated-ad cache. When non-nil and enabled,
+    /// `classifyCandidates` derives a 128-bit perceptual fingerprint from
+    /// each candidate's feature windows and looks it up against entries
+    /// stored for the current podcast. A cache hit synthesizes a
+    /// `ClassifierResult` from the cached `(boundaryStart, boundaryEnd,
+    /// confidence)` and skips the FM classifier round-trip for that
+    /// candidate. Cache misses fall through to the normal classifier.
+    /// `nil` preserves pre-43ed behaviour exactly. Production wires a
+    /// real `RepeatedAdCacheService`; tests inject deterministic seams.
+    private let repeatedAdCache: RepeatedAdCacheService?
+
     // MARK: - Init
 
     init(
@@ -503,7 +514,8 @@ actor AdDetectionService {
         adCatalogStore: AdCatalogStore? = nil,
         episodeMetadataProvider: EpisodeMetadataProvider = NullEpisodeMetadataProvider(),
         decisionLogger: DecisionLoggerProtocol? = nil,
-        classifierCalibrationProfile: ClassifierCalibrationProfile = .production
+        classifierCalibrationProfile: ClassifierCalibrationProfile = .production,
+        repeatedAdCache: RepeatedAdCacheService? = nil
     ) {
         self.store = store
         self.classifier = classifier
@@ -529,6 +541,7 @@ actor AdDetectionService {
             self.decisionLogger = decisionLogger
         }
         self.classifierCalibrationProfile = classifierCalibrationProfile
+        self.repeatedAdCache = repeatedAdCache
     }
 
     #if DEBUG
@@ -1913,6 +1926,47 @@ actor AdDetectionService {
                     logger.debug("Backfill: inserted catalog entry for autoSkipEligible span \(refinedSpan.id, privacy: .public) show=\(catalogShowId ?? "<none>", privacy: .public)")
                 } catch {
                     logger.warning("Backfill: catalog insert failed for span \(refinedSpan.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+
+            // playhead-43ed: B3 RepeatedAdCache ingress. Same trigger
+            // condition as the catalog insert above (`autoSkipEligible`
+            // backfill verdict), but writes to the per-show RepeatedAdCache
+            // so the next episode of THIS show can short-circuit the
+            // classifier on a fingerprint hit. Three guards:
+            //   1. Service wired (nil-default in init).
+            //   2. Non-empty showId — cache rows are per-show-scoped; an
+            //      anonymous span has nowhere to land.
+            //   3. RepeatedAdFingerprint derives non-zero from the span's
+            //      feature windows. The cache uses a different fingerprint
+            //      kind than `AdCatalogStore` (128-bit median-binarized
+            //      vs the legacy 64-bit catalog fingerprint), so we
+            //      recompute here rather than reusing `spanFingerprint`.
+            //   4. Confidence ≥ store threshold is enforced inside
+            //      `RepeatedAdCacheService.store` so we don't duplicate
+            //      it here.
+            // Errors are swallowed — a cache write failure must never bring
+            // down the backfill pipeline; missed cache writes degrade to
+            // a future cache miss, never to a wrong skip.
+            if let repeatedAdCache,
+               policyAction == .autoSkipEligible,
+               let cacheShowId = catalogShowId,
+               !cacheShowId.isEmpty {
+                let repeatedFp = RepeatedAdFingerprint.from(
+                    featureWindows: spanFeatureWindows
+                )
+                if !repeatedFp.isZero {
+                    do {
+                        _ = try await repeatedAdCache.store(
+                            showId: cacheShowId,
+                            fingerprint: repeatedFp,
+                            boundaryStart: refinedSpan.startTime,
+                            boundaryEnd: refinedSpan.endTime,
+                            confidence: decision.skipConfidence
+                        )
+                    } catch {
+                        logger.warning("RepeatedAdCache: store failed for span \(refinedSpan.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
                 }
             }
 
@@ -3942,11 +3996,26 @@ actor AdDetectionService {
     }
 
     /// Fetch feature windows for each lexical candidate and run the classifier.
+    ///
+    /// playhead-43ed: when `repeatedAdCache` is wired and an entry for the
+    /// current show matches a candidate's perceptual fingerprint, the
+    /// classifier round-trip is skipped and the cached
+    /// `(boundaryStart, boundaryEnd, confidence)` is replayed as a
+    /// synthesized `ClassifierResult`. The cache lookup is per-candidate;
+    /// hits and misses interleave freely. Misses fall through to the
+    /// usual classifier path.
     private func classifyCandidates(
         _ candidates: [LexicalCandidate],
         analysisAssetId: String
     ) async throws -> [ClassifierResult] {
         var inputs: [ClassifierInput] = []
+        // Index back from the in-order `inputs` array to its candidate so
+        // we can splice cached hits back into the same positions in the
+        // returned result without losing input ordering.
+        var inputIndexByCandidate: [String: Int] = [:]
+        var cacheHits: [String: ClassifierResult] = [:]
+
+        let cacheShowId = currentPodcastProfile?.podcastId
 
         for candidate in candidates {
             // Layer 0: Fetch acoustic features overlapping this candidate.
@@ -3958,6 +4027,73 @@ actor AdDetectionService {
                 to: candidate.endTime + margin
             )
 
+            // playhead-43ed: cache lookup BEFORE invoking the classifier.
+            // Three guards keep the cache strictly opt-in and side-effect-
+            // safe: (1) a real RepeatedAdCacheService has been wired,
+            // (2) the current podcast profile carries a non-empty showId,
+            // (3) the fingerprint derives to a non-zero value (zero is a
+            // documented "do not cache" sentinel — see
+            // RepeatedAdFingerprint.zero).
+            if let cache = repeatedAdCache,
+               let showId = cacheShowId,
+               !showId.isEmpty {
+                let fp = RepeatedAdFingerprint.from(featureWindows: featureWindows)
+                if !fp.isZero {
+                    // Both lookup and outcome recording are best-effort:
+                    // a transient SQLite hiccup must not bring down the
+                    // hot path. Failures are logged once and the candidate
+                    // falls through to the classifier as if the cache had
+                    // missed.
+                    do {
+                        let outcome = try await cache.lookup(showId: showId, fingerprint: fp)
+                        switch outcome {
+                        case let .hit(entry):
+                            // Synthesize a ClassifierResult that the rest
+                            // of the hot path can consume identically to a
+                            // real classifier output. Boundary times come
+                            // from the cached entry; `adProbability` is
+                            // the cached detection confidence (always
+                            // ≥ 0.85 — `store` enforces that floor). The
+                            // signal breakdown is zeroed — the cache
+                            // doesn't preserve individual contributors.
+                            cacheHits[candidate.id] = ClassifierResult(
+                                candidateId: candidate.id,
+                                analysisAssetId: analysisAssetId,
+                                startTime: entry.boundaryStart,
+                                endTime: entry.boundaryEnd,
+                                adProbability: entry.confidence,
+                                startAdjustment: 0,
+                                endAdjustment: 0,
+                                signalBreakdown: SignalBreakdown(
+                                    lexicalScore: 0,
+                                    rmsDropScore: 0,
+                                    spectralChangeScore: 0,
+                                    musicScore: 0,
+                                    speakerChangeScore: 0,
+                                    priorScore: 0
+                                )
+                            )
+                            try? await cache.recordOutcome(hit: true)
+                            // Skip building a ClassifierInput for this
+                            // candidate — the cache hit replaces the
+                            // classifier round-trip outright.
+                            continue
+                        case .miss:
+                            try? await cache.recordOutcome(hit: false)
+                        case .skippedDisabled:
+                            // Cache is currently disabled (kill-switch or
+                            // auto-disable). Do NOT record an outcome —
+                            // the rolling window only counts samples taken
+                            // while the cache is live.
+                            break
+                        }
+                    } catch {
+                        logger.error("RepeatedAdCache lookup failed; falling through to classifier: \(String(describing: error))")
+                    }
+                }
+            }
+
+            inputIndexByCandidate[candidate.id] = inputs.count
             inputs.append(ClassifierInput(
                 candidate: candidate,
                 featureWindows: featureWindows,
@@ -3965,8 +4101,25 @@ actor AdDetectionService {
             ))
         }
 
-        // Layer 2: Classify all candidates.
-        return classifier.classify(inputs: inputs, priors: showPriors)
+        // Layer 2: Classify the candidates that didn't hit the cache.
+        let classifierResults = classifier.classify(inputs: inputs, priors: showPriors)
+
+        // Reassemble in the original candidate order: hits first replaced
+        // by their synthesized result, misses by their classifier output.
+        // Iterating `candidates` (rather than `classifierResults`)
+        // preserves the input ordering that the rest of the hot path
+        // assumes (`runHotPathResult` indexes by `candidatesByID`, which
+        // is order-agnostic, but emit-decision-logs is positional).
+        var combined: [ClassifierResult] = []
+        combined.reserveCapacity(candidates.count)
+        for candidate in candidates {
+            if let hit = cacheHits[candidate.id] {
+                combined.append(hit)
+            } else if let idx = inputIndexByCandidate[candidate.id], idx < classifierResults.count {
+                combined.append(classifierResults[idx])
+            }
+        }
+        return combined
     }
 
     // MARK: - Hot-path Decision Logging

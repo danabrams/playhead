@@ -724,7 +724,7 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 20
+    nonisolated private static let currentSchemaVersion = 21
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1279,6 +1279,9 @@ actor AnalysisStore {
             // H1+M3: add `updatedAt` to job tables so the stranded reaper
             // can apply a freshness filter. Bumps schema_version to 20.
             try migrateAddJobUpdatedAtV20IfNeeded()
+            // playhead-43ed (B3): RepeatedAdCache table for memoising
+            // high-confidence ad-span fingerprints. Bumps schema_version to 21.
+            try migrateRepeatedAdCacheV21IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1520,6 +1523,10 @@ actor AnalysisStore {
         // ladder seam reaches the same shape as production. The helper is
         // already self-guarded on `tableExists` for both job tables.
         try migrateAddJobUpdatedAtV20IfNeeded()
+        // playhead-43ed (v21): mirror RepeatedAdCache migration into the
+        // ladder seam. Helper is fully idempotent so it is safe to call
+        // here even on fresh fixtures that have no prior `repeated_ad_cache`.
+        try migrateRepeatedAdCacheV21IfNeeded()
     }
     #endif
 
@@ -2844,6 +2851,250 @@ actor AnalysisStore {
             try exec("UPDATE final_pass_jobs SET updatedAt = createdAt WHERE updatedAt = 0")
         }
         try setSchemaVersion(20)
+    }
+
+    /// playhead-43ed (v21): introduce the `repeated_ad_cache` table and a
+    /// companion `repeated_ad_cache_outcomes` table for the auto-disable
+    /// rolling-window samples. Both are local-only and never replicated.
+    ///
+    /// Schema:
+    ///   `repeated_ad_cache`
+    ///     showId TEXT NOT NULL                — opaque per-show key
+    ///     fingerprint TEXT NOT NULL           — 32-char hex (128-bit)
+    ///     boundaryStart REAL NOT NULL         — seconds, episode-relative
+    ///     boundaryEnd REAL NOT NULL           — seconds, episode-relative
+    ///     confidence REAL NOT NULL            — original detection confidence ∈ [0,1]
+    ///     lastSeenAt REAL NOT NULL            — UNIX seconds (LRU clock)
+    ///     PRIMARY KEY (showId, fingerprint)
+    ///
+    ///   `repeated_ad_cache_outcomes`
+    ///     timestamp REAL NOT NULL             — UNIX seconds
+    ///     isHit INTEGER NOT NULL              — 0/1
+    ///
+    /// Idempotent: `CREATE TABLE IF NOT EXISTS` is a no-op on existing
+    /// DBs and `tableExists` is unnecessary because both tables only
+    /// arrived here.
+    private func migrateRepeatedAdCacheV21IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 21 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS repeated_ad_cache (
+                showId TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                boundaryStart REAL NOT NULL,
+                boundaryEnd REAL NOT NULL,
+                confidence REAL NOT NULL,
+                lastSeenAt REAL NOT NULL,
+                PRIMARY KEY (showId, fingerprint)
+            );
+        """)
+        // LRU eviction needs an index on lastSeenAt for the global
+        // "evict-oldest" path. The (showId, lastSeenAt) index lets the
+        // per-show eviction path use the index too.
+        try exec("CREATE INDEX IF NOT EXISTS idx_repeated_ad_cache_lastseen ON repeated_ad_cache(lastSeenAt);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_repeated_ad_cache_show_lastseen ON repeated_ad_cache(showId, lastSeenAt);")
+        try exec("""
+            CREATE TABLE IF NOT EXISTS repeated_ad_cache_outcomes (
+                timestamp REAL NOT NULL,
+                isHit INTEGER NOT NULL
+            );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_repeated_ad_cache_outcomes_ts ON repeated_ad_cache_outcomes(timestamp);")
+        try setSchemaVersion(21)
+    }
+
+    // MARK: - Repeated-ad cache (playhead-43ed, schema v21)
+    //
+    // These methods are the persistence-layer surface used by the
+    // `AnalysisStoreRepeatedAdCacheStorage` adapter. They live on the
+    // actor (rather than as free functions) because they need direct
+    // access to the private `prepare` / `exec` / `bind` / `step`
+    // SQLite helpers, and because the actor's serial executor is what
+    // gives us write-isolation across concurrent ad-detection passes.
+    //
+    // Time is stored as `REAL` UNIX-seconds (consistent with the rest
+    // of the schema — `lastPlayedAt`, `createdAt`, etc. all use this
+    // representation).
+
+    func repeatedAdCacheUpsert(_ entry: RepeatedAdCacheEntry) throws {
+        let sql = """
+            INSERT INTO repeated_ad_cache
+            (showId, fingerprint, boundaryStart, boundaryEnd, confidence, lastSeenAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(showId, fingerprint) DO UPDATE SET
+                boundaryStart = excluded.boundaryStart,
+                boundaryEnd = excluded.boundaryEnd,
+                confidence = excluded.confidence,
+                lastSeenAt = excluded.lastSeenAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, entry.showId)
+        bind(stmt, 2, entry.fingerprint.hexString)
+        bind(stmt, 3, entry.boundaryStart)
+        bind(stmt, 4, entry.boundaryEnd)
+        bind(stmt, 5, entry.confidence)
+        bind(stmt, 6, entry.lastSeenAt.timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func repeatedAdCacheFetchAll(showId: String) throws -> [RepeatedAdCacheEntry] {
+        let sql = """
+            SELECT showId, fingerprint, boundaryStart, boundaryEnd, confidence, lastSeenAt
+            FROM repeated_ad_cache
+            WHERE showId = ?
+            ORDER BY lastSeenAt DESC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, showId)
+        var rows: [RepeatedAdCacheEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let show = try requireText(stmt, 0)
+            let hex = try requireText(stmt, 1)
+            guard let fp = RepeatedAdFingerprint(hexString: hex) else {
+                // Corrupted row — skip rather than throw, since one bad
+                // row should not poison the whole show's cache. The next
+                // detection that hits this fingerprint will overwrite it.
+                continue
+            }
+            let bStart = sqlite3_column_double(stmt, 2)
+            let bEnd = sqlite3_column_double(stmt, 3)
+            let conf = sqlite3_column_double(stmt, 4)
+            let last = sqlite3_column_double(stmt, 5)
+            rows.append(RepeatedAdCacheEntry(
+                showId: show,
+                fingerprint: fp,
+                boundaryStart: bStart,
+                boundaryEnd: bEnd,
+                confidence: conf,
+                lastSeenAt: Date(timeIntervalSince1970: last)
+            ))
+        }
+        return rows
+    }
+
+    func repeatedAdCacheTouch(showId: String, fingerprintHex: String, at: Date) throws {
+        let sql = """
+            UPDATE repeated_ad_cache
+            SET lastSeenAt = ?
+            WHERE showId = ? AND fingerprint = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, at.timeIntervalSince1970)
+        bind(stmt, 2, showId)
+        bind(stmt, 3, fingerprintHex)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func repeatedAdCacheCount(showId: String) throws -> Int {
+        let stmt = try prepare("SELECT COUNT(*) FROM repeated_ad_cache WHERE showId = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, showId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    func repeatedAdCacheTotalCount() throws -> Int {
+        let stmt = try prepare("SELECT COUNT(*) FROM repeated_ad_cache")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    func repeatedAdCacheEvictOldest(showId: String) throws -> Bool {
+        // Two-step delete-by-rowid keeps us inside the index — we never
+        // scan the whole table. The `idx_repeated_ad_cache_show_lastseen`
+        // index (showId, lastSeenAt) gives us O(log n) lookup of the
+        // oldest row for the show.
+        let sel = try prepare("""
+            SELECT rowid FROM repeated_ad_cache
+            WHERE showId = ?
+            ORDER BY lastSeenAt ASC
+            LIMIT 1
+        """)
+        defer { sqlite3_finalize(sel) }
+        bind(sel, 1, showId)
+        guard sqlite3_step(sel) == SQLITE_ROW else { return false }
+        let rowid = sqlite3_column_int64(sel, 0)
+        let del = try prepare("DELETE FROM repeated_ad_cache WHERE rowid = ?")
+        defer { sqlite3_finalize(del) }
+        sqlite3_bind_int64(del, 1, rowid)
+        try step(del, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    func repeatedAdCacheEvictOldestGlobal() throws -> Bool {
+        let sel = try prepare("""
+            SELECT rowid FROM repeated_ad_cache
+            ORDER BY lastSeenAt ASC
+            LIMIT 1
+        """)
+        defer { sqlite3_finalize(sel) }
+        guard sqlite3_step(sel) == SQLITE_ROW else { return false }
+        let rowid = sqlite3_column_int64(sel, 0)
+        let del = try prepare("DELETE FROM repeated_ad_cache WHERE rowid = ?")
+        defer { sqlite3_finalize(del) }
+        sqlite3_bind_int64(del, 1, rowid)
+        try step(del, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    @discardableResult
+    func repeatedAdCachePurgeStale(olderThan: Date) throws -> Int {
+        let stmt = try prepare("DELETE FROM repeated_ad_cache WHERE lastSeenAt < ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, olderThan.timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
+    }
+
+    func repeatedAdCacheClearEntries() throws {
+        try exec("DELETE FROM repeated_ad_cache")
+    }
+
+    func repeatedAdCacheAppendOutcome(_ sample: RepeatedAdCacheOutcomeSample) throws {
+        let stmt = try prepare("""
+            INSERT INTO repeated_ad_cache_outcomes (timestamp, isHit) VALUES (?, ?)
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, sample.timestamp.timeIntervalSince1970)
+        bind(stmt, 2, sample.isHit ? 1 : 0)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    func repeatedAdCacheFetchOutcomes(newerThan: Date) throws -> [RepeatedAdCacheOutcomeSample] {
+        let sql = """
+            SELECT timestamp, isHit FROM repeated_ad_cache_outcomes
+            WHERE timestamp >= ?
+            ORDER BY timestamp ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, newerThan.timeIntervalSince1970)
+        var rows: [RepeatedAdCacheOutcomeSample] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let ts = sqlite3_column_double(stmt, 0)
+            let hit = sqlite3_column_int(stmt, 1) != 0
+            rows.append(RepeatedAdCacheOutcomeSample(
+                timestamp: Date(timeIntervalSince1970: ts),
+                isHit: hit
+            ))
+        }
+        return rows
+    }
+
+    @discardableResult
+    func repeatedAdCachePurgeOutcomes(olderThan: Date) throws -> Int {
+        let stmt = try prepare("DELETE FROM repeated_ad_cache_outcomes WHERE timestamp < ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, olderThan.timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
+    }
+
+    func repeatedAdCacheClearOutcomes() throws {
+        try exec("DELETE FROM repeated_ad_cache_outcomes")
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row

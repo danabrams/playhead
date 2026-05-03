@@ -823,6 +823,50 @@ final class PlayheadRuntime {
             adCatalogStore = nil
         }
 
+        // playhead-43ed (B3): build the per-show RepeatedAdCache service
+        // backed by AnalysisStore. Honors the user kill-switch via
+        // `RepeatedAdCacheFeatureFlag.userDefaultsKey`. When the flag is
+        // off (UserDefaults `false`), we still construct the service so
+        // toggling on at runtime works without restarting; we just hand
+        // it `initiallyEnabled: false` so every `store`/`lookup` is a
+        // no-op until the user flips the switch.
+        //
+        // Auto-disable persistence (bead §4): the service notifies its
+        // `onAutoDisable` closure when the rolling-window guard trips.
+        // We persist that into a companion UserDefaults key so the next
+        // launch starts the service disabled, even though the user-facing
+        // kill-switch is still ON. The user toggling the kill-switch off-
+        // then-on resets the auto-disable key (handled in the observer
+        // task below).
+        let repeatedAdCacheStorage = AnalysisStoreRepeatedAdCacheStorage(
+            store: analysisStore
+        )
+        let repeatedAdCacheKillSwitchOn: Bool = {
+            // UserDefaults returns `false` for an unregistered key — but
+            // bead §6 ships the cache ON by default. Distinguish "never
+            // set" from "explicitly off" with `object(forKey:)`.
+            let key = RepeatedAdCacheFeatureFlag.userDefaultsKey
+            if let value = UserDefaults.standard.object(forKey: key) as? Bool {
+                return value
+            }
+            return RepeatedAdCacheFeatureFlag.defaultValue
+        }()
+        let repeatedAdCacheAutoDisabled = UserDefaults.standard
+            .bool(forKey: RepeatedAdCacheFeatureFlag.autoDisabledKey)
+        let repeatedAdCacheFlagOn = repeatedAdCacheKillSwitchOn && !repeatedAdCacheAutoDisabled
+        let repeatedAdCache = RepeatedAdCacheService(
+            config: .production,
+            storage: repeatedAdCacheStorage,
+            initiallyEnabled: repeatedAdCacheFlagOn,
+            onAutoDisable: { _, _ in
+                // Persist the auto-disable so it survives a launch
+                // (bead §4 implied persistence). The user can clear it
+                // by toggling the kill-switch off-then-on (the observer
+                // below resets the key on a kill-switch flip).
+                UserDefaults.standard.set(true, forKey: RepeatedAdCacheFeatureFlag.autoDisabledKey)
+            }
+        )
+
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
             metadataExtractor: FallbackExtractor(),
@@ -850,7 +894,11 @@ final class PlayheadRuntime {
             // playhead-gtt9.17: on-device catalog for catalog ingress
             // (autoSkipEligible → insert) and egress (fingerprint → match).
             adCatalogStore: adCatalogStore,
-            decisionLogger: preBuiltDecisionLogger
+            decisionLogger: preBuiltDecisionLogger,
+            // playhead-43ed (B3): per-show RepeatedAdCache. Lookup runs
+            // before the classifier in the hot path; store runs after a
+            // backfill verdict gates to autoSkipEligible.
+            repeatedAdCache: repeatedAdCache
         )
         self.downloadManager = DownloadManager()
 
@@ -1250,6 +1298,54 @@ final class PlayheadRuntime {
             for await snapshot in await capabilitiesService.capabilityUpdates() {
                 eligibilityCache.set(snapshot)
                 evaluator.invalidate()
+            }
+        }
+
+        // playhead-43ed (B3): observe the `b3_repeated_ad_cache_enabled`
+        // UserDefaults key (the SettingsView toggle). The toggle writes
+        // straight to UserDefaults via `@AppStorage`; we forward each
+        // change into the actor-isolated `setEnabled(_:)` so the cache
+        // is cleared when the user disables it (bead §6) and re-enabled
+        // (without rehydrating) when toggled back on. UserDefaults posts
+        // `didChangeNotification` synchronously on every write; we filter
+        // by reading the current key value and only act when it differs
+        // from the last observed value to avoid recursive setEnabled
+        // calls when the cache itself flips state for unrelated reasons.
+        //
+        // We also clear the auto-disable companion key when the user
+        // re-enables the kill-switch — that's the documented "off-then-
+        // on" reset path that recovers from a persisted auto-disable.
+        // `lastSeen` mirrors the kill-switch key (NOT the actor's live
+        // `enabled` flag) because the actor's flag is also influenced
+        // by auto-disable; comparing apples-to-apples on the kill-switch
+        // key is what makes "user toggled on" detectable.
+        Task { [repeatedAdCache] in
+            let key = RepeatedAdCacheFeatureFlag.userDefaultsKey
+            var lastSeenKillSwitch: Bool = {
+                if let value = UserDefaults.standard.object(forKey: key) as? Bool {
+                    return value
+                }
+                return RepeatedAdCacheFeatureFlag.defaultValue
+            }()
+            let center = NotificationCenter.default
+            for await _ in center.notifications(named: UserDefaults.didChangeNotification) {
+                let current: Bool = {
+                    if let value = UserDefaults.standard.object(forKey: key) as? Bool {
+                        return value
+                    }
+                    return RepeatedAdCacheFeatureFlag.defaultValue
+                }()
+                if current != lastSeenKillSwitch {
+                    lastSeenKillSwitch = current
+                    if current {
+                        // Re-enabling clears the persistent auto-disable
+                        // so a future launch respects the user's choice.
+                        UserDefaults.standard.removeObject(
+                            forKey: RepeatedAdCacheFeatureFlag.autoDisabledKey
+                        )
+                    }
+                    await repeatedAdCache.setEnabled(current)
+                }
             }
         }
 

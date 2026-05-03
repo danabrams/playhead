@@ -90,6 +90,13 @@ struct SettingsView: View {
     /// flippable in TestFlight builds for dogfood-only debugging.
     @AppStorage(DebugFlagKeys.showPipelineStrip) private var showPipelineStrip = false
 
+    // playhead-43ed (B3): user-facing kill-switch for the local
+    // RepeatedAdCache. Default `true` (the cache ships on); flipping to
+    // `false` propagates through `RepeatedAdCacheService.setEnabled`
+    // (PlayheadRuntime observes the change) and clears the cache.
+    @AppStorage(RepeatedAdCacheFeatureFlag.userDefaultsKey)
+    private var repeatedAdCacheEnabled = RepeatedAdCacheFeatureFlag.defaultValue
+
     /// playhead-2jo: OPML import/export state. Owns the file picker /
     /// share-sheet plumbing for the Subscriptions group; the actual
     /// parse + import work lives on `OPMLImportExportViewModel`.
@@ -822,10 +829,20 @@ private extension SettingsView {
             .tint(AppColors.accent)
             .listRowBackground(AppColors.surface)
             .accessibilityIdentifier("Settings.debug.showPipelineStrip")
+
+            // playhead-43ed (B3): kill-switch for the local RepeatedAdCache.
+            Toggle(isOn: $repeatedAdCacheEnabled) {
+                Text("Repeated-ad cache")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+            }
+            .tint(AppColors.accent)
+            .listRowBackground(AppColors.surface)
+            .accessibilityIdentifier("Settings.debug.repeatedAdCacheEnabled")
         } header: {
             sectionHeader("Debug Overlays")
         } footer: {
-            Text("Renders DL / TX / AN per-episode progress under each Activity row.")
+            Text("Renders DL / TX / AN per-episode progress under each Activity row. Repeated-ad cache memoizes high-confidence ad-span detections per show; turning it off clears the cache.")
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.textTertiary)
         }
