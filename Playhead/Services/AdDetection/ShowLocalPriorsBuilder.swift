@@ -53,6 +53,25 @@ struct AdDurationStats: Codable, Sendable, Equatable {
         self.sampleCount = max(0, sampleCount)
     }
 
+    /// Custom `Decodable.init` that funnels decoded values back through the
+    /// clamping memberwise initializer. Without this, a hand-edited or
+    /// version-skewed JSON payload like `{"meanDuration":-5,"sampleCount":10}`
+    /// would round-trip as a negative mean — `JSONDecoder`'s synthesized
+    /// init writes directly to the stored `let` properties, bypassing the
+    /// `max(0, ...)` clamp. Funneling through `init(meanDuration:sampleCount:)`
+    /// makes the clamp authoritative across every construction path.
+    private enum CodingKeys: String, CodingKey {
+        case meanDuration
+        case sampleCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawMean = try container.decode(TimeInterval.self, forKey: .meanDuration)
+        let rawCount = try container.decode(Int.self, forKey: .sampleCount)
+        self.init(meanDuration: rawMean, sampleCount: rawCount)
+    }
+
     /// Sentinel for a brand-new show with no observations yet.
     static let empty = AdDurationStats(meanDuration: 0, sampleCount: 0)
 }
@@ -107,6 +126,14 @@ enum ShowLocalPriorsBuilder {
         // here is the sample count (number of observed ads); the blend
         // weight scales with observed episodes. Both grow together in
         // practice, so this keeps the resolver's contract intact.
+        //
+        // Coupling note (see `PriorHierarchy.swift` `showLocalThreshold`):
+        // we floor `episodeCount` at the resolver's `showLocalThreshold` so
+        // any value the builder produces is guaranteed to clear the
+        // resolver's `episodeCount >= showLocalThreshold` gate. The
+        // independent gate here is `sampleCount >= minSampleCount` above;
+        // the resolver-side check becomes a no-op when the builder emits
+        // a non-nil value at all.
         return ShowLocalPriors(
             musicBracketTrust: nil,
             metadataTrust: nil,

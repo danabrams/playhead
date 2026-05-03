@@ -91,6 +91,30 @@ struct PriorHierarchyWireUpTests {
         #expect(width < 60)
     }
 
+    @Test("AdDurationStats clamps negative meanDuration on decode")
+    func adDurationStatsDecodeClampsNegativeMean() throws {
+        // A hand-edited or version-skewed JSON payload with a negative
+        // mean must not survive decode — the custom `init(from:)` funnels
+        // raw values through `init(meanDuration:sampleCount:)` so the
+        // `max(0, ...)` clamp is authoritative across every construction
+        // path. Without this, `JSONDecoder`'s synthesized init would
+        // write the negative value directly to the stored property.
+        let corrupt = #"{"meanDuration":-5,"sampleCount":10}"#
+        let data = Data(corrupt.utf8)
+        let stats = try JSONDecoder().decode(AdDurationStats.self, from: data)
+        #expect(stats.meanDuration == 0)
+        #expect(stats.sampleCount == 10)
+    }
+
+    @Test("AdDurationStats clamps negative sampleCount on decode")
+    func adDurationStatsDecodeClampsNegativeCount() throws {
+        let corrupt = #"{"meanDuration":12.5,"sampleCount":-7}"#
+        let data = Data(corrupt.utf8)
+        let stats = try JSONDecoder().decode(AdDurationStats.self, from: data)
+        #expect(stats.meanDuration == 12.5)
+        #expect(stats.sampleCount == 0)
+    }
+
     @Test("builder with mean 60 (typical ad) keeps a normal range")
     func builderShapesTypicalDuration() {
         let stats = AdDurationStats(meanDuration: 60, sampleCount: 30)
