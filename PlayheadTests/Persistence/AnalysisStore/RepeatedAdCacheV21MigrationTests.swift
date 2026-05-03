@@ -116,8 +116,8 @@ struct RepeatedAdCacheV21MigrationTests {
         try await store.migrate()
         let storage = AnalysisStoreRepeatedAdCacheStorage(store: store)
 
-        let fp1 = RepeatedAdFingerprint(high: 0x1111_2222_3333_4444, low: 0xAAAA_BBBB_CCCC_DDDD)
-        let fp2 = RepeatedAdFingerprint(high: 0x5555_6666_7777_8888, low: 0xEEEE_FFFF_0000_1111)
+        let fp1 = RepeatedAdFingerprint(bits: 0x1111_2222_3333_4444)
+        let fp2 = RepeatedAdFingerprint(bits: 0x5555_6666_7777_8888)
         let t0 = Date(timeIntervalSince1970: 1_700_000_000)
         let t1 = Date(timeIntervalSince1970: 1_700_001_000)
 

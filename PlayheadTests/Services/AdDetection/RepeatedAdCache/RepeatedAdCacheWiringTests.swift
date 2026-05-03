@@ -399,7 +399,7 @@ struct RepeatedAdCacheWiringTests {
         // that controls `store(...)` count as miss outcomes.
         let cfg = RepeatedAdCacheConfig(
             storeConfidenceThreshold: 0.85,
-            hammingDistanceThreshold: 6,
+            hammingDistanceThreshold: 3,
             perShowCap: 3,
             globalCap: 5,
             entryMaxAge: 90 * 24 * 60 * 60,

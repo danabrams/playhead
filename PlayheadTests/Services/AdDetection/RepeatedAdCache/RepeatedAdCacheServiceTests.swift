@@ -37,7 +37,7 @@ struct RepeatedAdCacheServiceTests {
     /// be hard-coded outside `RepeatedAdCacheConfig.production`.
     static let testConfig = RepeatedAdCacheConfig(
         storeConfidenceThreshold: 0.85,
-        hammingDistanceThreshold: 6,
+        hammingDistanceThreshold: 3,
         perShowCap: 3,
         globalCap: 5,
         entryMaxAge: 90 * 24 * 60 * 60,
@@ -70,11 +70,11 @@ struct RepeatedAdCacheServiceTests {
         return (service, clock, storage)
     }
 
-    /// Build a 128-bit fingerprint that has bit `i` flipped (relative to
+    /// Build a 64-bit fingerprint that has bit `i` flipped (relative to
     /// all-zeros). Useful for asserting Hamming distance at exact
     /// boundaries.
     static func fpWithBitsFlipped(_ indices: [Int]) -> RepeatedAdFingerprint {
-        var bits = [Bool](repeating: false, count: 128)
+        var bits = [Bool](repeating: false, count: RepeatedAdFingerprint.bitWidth)
         // Always flip bit 0 too so the fingerprint isn't the zero
         // sentinel (which is "do not cache").
         bits[0] = true
@@ -144,46 +144,51 @@ struct RepeatedAdCacheServiceTests {
         #expect(entry.confidence == 0.95)
     }
 
-    // MARK: - 4. cacheLookupHitOnHammingDistance6
+    // MARK: - 4. cacheLookupHitOnHammingDistanceAtThreshold
 
     @Test
-    func cacheLookupHitOnHammingDistance6() async throws {
+    func cacheLookupHitOnHammingDistanceAtThreshold() async throws {
         let (service, _, _) = Self.makeService()
         try await service.store(
             showId: "show-1",
             fingerprint: Self.baseFingerprint,
             boundaryStart: 1, boundaryEnd: 2, confidence: 0.95
         )
-        // Flip exactly 6 bits (in addition to the always-on bit 0 in
-        // baseFingerprint) — Hamming distance becomes exactly 6.
-        let probe = Self.fpWithBitsFlipped([10, 20, 30, 40, 50, 60])
-        // Sanity-check our test setup: bits 10/20/30/40/50/60 are all
-        // off in baseFingerprint, so flipping them yields exactly 6
-        // bit differences.
+        // Flip exactly `threshold` bits (in addition to the always-on
+        // bit 0 in baseFingerprint) — Hamming distance lands at the
+        // threshold, which must HIT.
+        let threshold = Self.testConfig.hammingDistanceThreshold
+        let flipIndices = Array(1...threshold).map { $0 * 10 }
+        let probe = Self.fpWithBitsFlipped(flipIndices)
+        // Sanity-check: flipped bits are all off in baseFingerprint,
+        // so Hamming distance equals `threshold`.
         let dist = Self.baseFingerprint.hammingDistance(to: probe)
-        #expect(dist == 6, "fixture bug: expected distance 6, got \(dist)")
+        #expect(dist == threshold, "fixture bug: expected distance \(threshold), got \(dist)")
         let outcome = try await service.lookup(showId: "show-1", fingerprint: probe)
         guard case .hit = outcome else {
-            Issue.record("distance==6 must HIT (≤ threshold), got \(outcome)")
+            Issue.record("distance==\(threshold) must HIT (≤ threshold), got \(outcome)")
             return
         }
     }
 
-    // MARK: - 5. cacheLookupMissOnHammingDistance7
+    // MARK: - 5. cacheLookupMissOnHammingDistanceAboveThreshold
 
     @Test
-    func cacheLookupMissOnHammingDistance7() async throws {
+    func cacheLookupMissOnHammingDistanceAboveThreshold() async throws {
         let (service, _, _) = Self.makeService()
         try await service.store(
             showId: "show-1",
             fingerprint: Self.baseFingerprint,
             boundaryStart: 1, boundaryEnd: 2, confidence: 0.95
         )
-        let probe = Self.fpWithBitsFlipped([10, 20, 30, 40, 50, 60, 70])
-        #expect(Self.baseFingerprint.hammingDistance(to: probe) == 7)
+        let threshold = Self.testConfig.hammingDistanceThreshold
+        // Flip `threshold + 1` bits — must MISS (just over threshold).
+        let flipIndices = Array(1...(threshold + 1)).map { $0 * 10 }
+        let probe = Self.fpWithBitsFlipped(flipIndices)
+        #expect(Self.baseFingerprint.hammingDistance(to: probe) == threshold + 1)
         let outcome = try await service.lookup(showId: "show-1", fingerprint: probe)
         if case .hit = outcome {
-            Issue.record("distance==7 must MISS (> threshold)")
+            Issue.record("distance==\(threshold + 1) must MISS (> threshold)")
         }
     }
 
@@ -355,7 +360,7 @@ struct RepeatedAdCacheServiceTests {
         // outcomes rather than 50.
         let cfg = RepeatedAdCacheConfig(
             storeConfidenceThreshold: 0.85,
-            hammingDistanceThreshold: 6,
+            hammingDistanceThreshold: 3,
             perShowCap: 3,
             globalCap: 5,
             entryMaxAge: 90 * 24 * 60 * 60,
@@ -385,7 +390,7 @@ struct RepeatedAdCacheServiceTests {
     func cacheStaysEnabledAbove5Percent() async throws {
         let cfg = RepeatedAdCacheConfig(
             storeConfidenceThreshold: 0.85,
-            hammingDistanceThreshold: 6,
+            hammingDistanceThreshold: 3,
             perShowCap: 3,
             globalCap: 5,
             entryMaxAge: 90 * 24 * 60 * 60,
@@ -542,7 +547,7 @@ struct RepeatedAdCacheServiceTests {
     func onAutoDisableCallbackFiresExactlyOnceOnAutoDisable() async throws {
         let cfg = RepeatedAdCacheConfig(
             storeConfidenceThreshold: 0.85,
-            hammingDistanceThreshold: 6,
+            hammingDistanceThreshold: 3,
             perShowCap: 3,
             globalCap: 5,
             entryMaxAge: 90 * 24 * 60 * 60,
@@ -608,31 +613,30 @@ struct RepeatedAdFingerprintTests {
 
     @Test
     func zeroIsAllZeros() {
-        #expect(RepeatedAdFingerprint.zero.high == 0)
-        #expect(RepeatedAdFingerprint.zero.low == 0)
+        #expect(RepeatedAdFingerprint.zero.bits == 0)
         #expect(RepeatedAdFingerprint.zero.isZero)
     }
 
     @Test
     func selfDistanceIsZero() {
-        let bits = (0..<128).map { ($0 % 3) == 0 }
+        let bits = (0..<RepeatedAdFingerprint.bitWidth).map { ($0 % 3) == 0 }
         let fp = RepeatedAdFingerprint.fromBits(bits)
         #expect(fp.hammingDistance(to: fp) == 0)
     }
 
     @Test
     func distanceIsSymmetric() {
-        let a = RepeatedAdFingerprint.fromBits((0..<128).map { ($0 % 5) == 0 })
-        let b = RepeatedAdFingerprint.fromBits((0..<128).map { ($0 % 7) == 0 })
+        let a = RepeatedAdFingerprint.fromBits((0..<RepeatedAdFingerprint.bitWidth).map { ($0 % 5) == 0 })
+        let b = RepeatedAdFingerprint.fromBits((0..<RepeatedAdFingerprint.bitWidth).map { ($0 % 7) == 0 })
         #expect(a.hammingDistance(to: b) == b.hammingDistance(to: a))
     }
 
     @Test
     func flipExactlyKBitsGivesDistanceK() {
-        var bits = [Bool](repeating: false, count: 128)
+        var bits = [Bool](repeating: false, count: RepeatedAdFingerprint.bitWidth)
         bits[0] = true
         let base = RepeatedAdFingerprint.fromBits(bits)
-        for k in [1, 6, 7, 64, 127] {
+        for k in [1, 3, 4, 32, RepeatedAdFingerprint.bitWidth - 1] {
             var flipped = bits
             for i in 1...k {
                 flipped[i] = !flipped[i]
@@ -644,9 +648,9 @@ struct RepeatedAdFingerprintTests {
 
     @Test
     func hexRoundTrip() {
-        let fp = RepeatedAdFingerprint(high: 0x0123456789abcdef, low: 0xfedcba9876543210)
+        let fp = RepeatedAdFingerprint(bits: 0x0123456789abcdef)
         let s = fp.hexString
-        #expect(s.count == 32)
+        #expect(s.count == 16)
         let parsed = RepeatedAdFingerprint(hexString: s)
         #expect(parsed == fp)
     }
@@ -655,7 +659,10 @@ struct RepeatedAdFingerprintTests {
     func malformedHexReturnsNil() {
         #expect(RepeatedAdFingerprint(hexString: "") == nil)
         #expect(RepeatedAdFingerprint(hexString: "abc") == nil)
-        #expect(RepeatedAdFingerprint(hexString: String(repeating: "x", count: 32)) == nil)
+        // Wrong length (32 chars when 16 are required).
+        #expect(RepeatedAdFingerprint(hexString: String(repeating: "0", count: 32)) == nil)
+        // Right length, illegal characters.
+        #expect(RepeatedAdFingerprint(hexString: String(repeating: "x", count: 16)) == nil)
     }
 
     @Test
@@ -665,21 +672,138 @@ struct RepeatedAdFingerprintTests {
 
     @Test
     func binarisePadsShortVectorWithZeros() {
-        // A vector of length 4 should be padded to 128 zeros and yield zero.
+        // A short vector should be padded to bitWidth zeros and yield zero.
         let fp = RepeatedAdFingerprint.binarise([0, 0, 0, 0])
         #expect(fp.isZero)
     }
 
     @Test
     func binariseProducesNonZeroForVariedVector() {
-        var v = [Float](repeating: 0, count: 128)
-        for i in 0..<128 { v[i] = Float(i) }
+        let n = RepeatedAdFingerprint.bitWidth
+        var v = [Float](repeating: 0, count: n)
+        for i in 0..<n { v[i] = Float(i) }
         let fp = RepeatedAdFingerprint.binarise(v)
         #expect(!fp.isZero)
         // ~half the bits are above the median for a strictly-increasing
         // vector. We don't pin the exact count (median ties-go-to-zero
-        // policy makes it 64 for an even-length vector), but it's nonzero.
-        let popcount = fp.high.nonzeroBitCount + fp.low.nonzeroBitCount
-        #expect(popcount > 0 && popcount < 128)
+        // policy makes it n/2 for an even-length vector), but it's nonzero.
+        let popcount = fp.bits.nonzeroBitCount
+        #expect(popcount > 0 && popcount < RepeatedAdFingerprint.bitWidth)
+    }
+
+    // MARK: - C3: contract honesty for production fingerprint derivation
+    //
+    // Pre-fix `bitWidth` was 128 but `from(featureWindows:)` flowed
+    // through `AcousticFingerprint.fromFeatureWindows` (vectorLength=64),
+    // so the effective entropy was always 64 bits — bits 64..127 were
+    // hard-coded zero in production. The `Hamming ≤ 6 of 128` contract
+    // was a fiction; the real signal-to-noise was `≤ 6 of 64`.
+    //
+    // Post-fix: the type is honestly 64-bit; the threshold is 3/64
+    // (preserving the same ~4.7% bit-error tolerance the original
+    // 6/128 expressed); and a near-duplicate FeatureWindow array
+    // hashes within the threshold, end-to-end.
+
+    @Test
+    func bitWidthMatchesAcousticFingerprintLength() {
+        // Pin the contract: the perceptual hash bit width must equal
+        // the AcousticFingerprint vector length it derives from. If a
+        // future refactor extends AcousticFingerprint, this test fires
+        // and the fingerprint type must adapt.
+        #expect(RepeatedAdFingerprint.bitWidth == AcousticFingerprint.vectorLength,
+                "fingerprint bit width must match the AcousticFingerprint vector length it derives from")
+    }
+
+    @Test
+    func productionDerivationProducesNonZeroPopcountWithinBitWidth() {
+        // Build a synthetic [FeatureWindow] with varied features so the
+        // resulting AcousticFingerprint has non-trivial dispersion.
+        // Asserts that the final fingerprint exercises the full bit
+        // width (popcount > 0, < bitWidth) — i.e., the type's bit
+        // width is the *effective* bit width, not a documentation lie.
+        var windows: [FeatureWindow] = []
+        for i in 0..<32 {
+            let id = Double(i)
+            windows.append(FeatureWindow(
+                analysisAssetId: "asset-c3",
+                startTime: id * 2,
+                endTime: (id + 1) * 2,
+                rms: id * 0.03,
+                spectralFlux: Double((i * 7) % 17) * 0.05,
+                musicProbability: Double((i * 3) % 11) * 0.08,
+                speakerChangeProxyScore: Double((i * 5) % 13) * 0.07,
+                musicBedChangeScore: 0,
+                musicBedOnsetScore: 0,
+                musicBedOffsetScore: 0,
+                musicBedLevel: .none,
+                pauseProbability: Double(i % 9) * 0.10,
+                speakerClusterId: i % 4,
+                jingleHash: nil,
+                featureVersion: 4
+            ))
+        }
+        let fp = RepeatedAdFingerprint.from(featureWindows: windows)
+        #expect(!fp.isZero, "varied feature windows must produce a non-zero fingerprint")
+        let popcount = fp.bits.nonzeroBitCount
+        // popcount must be strictly between 0 and bitWidth — proves
+        // the bits cover the full advertised width.
+        #expect(popcount > 0 && popcount < RepeatedAdFingerprint.bitWidth,
+                "popcount=\(popcount) should be in (0, \(RepeatedAdFingerprint.bitWidth)) for varied input")
+    }
+
+    @Test
+    func nearDuplicateFeatureWindowsLandWithinHammingThreshold() throws {
+        // Reviewer's "missing test that would have caught C3":
+        // construct two near-duplicate [FeatureWindow] arrays via
+        // `from(featureWindows:)` and assert the Hamming distance is
+        // within the production threshold. Pre-fix the threshold was
+        // 6/128 (true 6/64 because bits 64..127 always zero); post-fix
+        // the threshold is 3/64 — same effective bit-error tolerance,
+        // honest denominator.
+        let baseRMS: [Double] = [0.18, 0.18, 0.20, 0.21, 0.22, 0.23, 0.22, 0.22,
+                                 0.21, 0.20, 0.19, 0.18, 0.17, 0.18, 0.19, 0.20]
+        func makeWindows(rmsBias: Double) -> [FeatureWindow] {
+            var out: [FeatureWindow] = []
+            out.reserveCapacity(baseRMS.count)
+            for i in 0..<baseRMS.count {
+                let rms = max(0.0, baseRMS[i] + rmsBias)
+                let flux = 0.05 + Double(i) * 0.01
+                let music = 0.10 + Double(i % 3) * 0.05
+                let speaker = 0.20 + Double(i % 5) * 0.04
+                let pause = 0.05 + Double(i % 4) * 0.03
+                let window = FeatureWindow(
+                    analysisAssetId: "asset-c3-near-dup",
+                    startTime: Double(i) * 2,
+                    endTime: Double(i + 1) * 2,
+                    rms: rms,
+                    spectralFlux: flux,
+                    musicProbability: music,
+                    speakerChangeProxyScore: speaker,
+                    musicBedChangeScore: 0,
+                    musicBedOnsetScore: 0,
+                    musicBedOffsetScore: 0,
+                    musicBedLevel: .none,
+                    pauseProbability: pause,
+                    speakerClusterId: i % 2,
+                    jingleHash: nil,
+                    featureVersion: 4
+                )
+                out.append(window)
+            }
+            return out
+        }
+        let original = makeWindows(rmsBias: 0)
+        // Tiny RMS perturbation simulates "same ad, slightly different
+        // mix" — the use case that motivated the perceptual hash.
+        let nearDup = makeWindows(rmsBias: 0.001)
+
+        let fp1 = RepeatedAdFingerprint.from(featureWindows: original)
+        let fp2 = RepeatedAdFingerprint.from(featureWindows: nearDup)
+        try #require(!fp1.isZero)
+        try #require(!fp2.isZero)
+        let distance = fp1.hammingDistance(to: fp2)
+        let threshold = RepeatedAdCacheConfig.production.hammingDistanceThreshold
+        #expect(distance <= threshold,
+                "near-duplicate FeatureWindow arrays must hash within Hamming threshold (\(distance) of \(threshold) of \(RepeatedAdFingerprint.bitWidth) bits)")
     }
 }

@@ -2860,7 +2860,7 @@ actor AnalysisStore {
     /// Schema:
     ///   `repeated_ad_cache`
     ///     showId TEXT NOT NULL                — opaque per-show key
-    ///     fingerprint TEXT NOT NULL           — 32-char hex (128-bit)
+    ///     fingerprint TEXT NOT NULL           — 16-char hex (64-bit, see RepeatedAdFingerprint)
     ///     boundaryStart REAL NOT NULL         — seconds, episode-relative
     ///     boundaryEnd REAL NOT NULL           — seconds, episode-relative
     ///     confidence REAL NOT NULL            — original detection confidence ∈ [0,1]

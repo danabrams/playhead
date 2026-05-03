@@ -24,8 +24,12 @@ struct RepeatedAdCacheConfig: Sendable, Hashable {
     let storeConfidenceThreshold: Double
 
     /// Maximum permitted Hamming distance (in bits) between two
-    /// 128-bit fingerprints for a `lookup` to count as a match.
-    /// Bead §2 fixes this at `≤ 6`.
+    /// 64-bit fingerprints for a `lookup` to count as a match.
+    /// Bead §2 originally specified `≤ 6 of 128`, but the upstream
+    /// `AcousticFingerprint.vectorLength` is 64 so the effective
+    /// width was always 64; we honestly express the same ~4.7%
+    /// bit-error tolerance as `≤ 3 of 64` (see playhead-43ed C3
+    /// fix in `RepeatedAdFingerprint.swift`).
     let hammingDistanceThreshold: Int
 
     // MARK: Eviction (bead §3)
@@ -74,7 +78,7 @@ struct RepeatedAdCacheConfig: Sendable, Hashable {
         autoDisableMinSamples: Int
     ) {
         precondition(storeConfidenceThreshold >= 0 && storeConfidenceThreshold <= 1)
-        precondition(hammingDistanceThreshold >= 0 && hammingDistanceThreshold <= 128)
+        precondition(hammingDistanceThreshold >= 0 && hammingDistanceThreshold <= RepeatedAdFingerprint.bitWidth)
         precondition(perShowCap >= 1)
         precondition(globalCap >= 1)
         precondition(entryMaxAge > 0)
@@ -91,10 +95,13 @@ struct RepeatedAdCacheConfig: Sendable, Hashable {
         self.autoDisableMinSamples = autoDisableMinSamples
     }
 
-    /// Production defaults — matches the bead spec verbatim.
+    /// Production defaults. Threshold honestly reflects the 64-bit
+    /// fingerprint width (see playhead-43ed C3 in
+    /// `RepeatedAdFingerprint.swift`); other knobs match the bead spec
+    /// verbatim.
     static let production = RepeatedAdCacheConfig(
         storeConfidenceThreshold: 0.85,
-        hammingDistanceThreshold: 6,
+        hammingDistanceThreshold: 3,
         perShowCap: 200,
         globalCap: 2000,
         entryMaxAge: 90 * 24 * 60 * 60,
