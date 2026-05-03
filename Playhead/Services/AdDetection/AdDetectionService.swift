@@ -4875,12 +4875,15 @@ actor AdDetectionService {
                     // atomicity contract that cycles 15/17 enforced for the
                     // sponsorLexicon/slot priors.
                     //
-                    // After the merge, we shadow `existing` with a profile
-                    // alias whose `traitProfileJSON` is the freshly-encoded
-                    // value. The constructor below then carries
-                    // `existing.traitProfileJSON` forward — both satisfying
-                    // the cycle-22 L-5 whole-file canary and writing the
-                    // updated trait profile in the same upsert.
+                    // cycle-2 L1: compute the resolved trait JSON once via
+                    // nil-coalescing (`merged ?? existing.traitProfileJSON`)
+                    // rather than rebinding `existing` to an alias profile.
+                    // The carry-forward is still load-bearing — the
+                    // cycle-22 L-5 whole-file canary requires every
+                    // PodcastProfile-constructing `existing in` closure to
+                    // mention `<ident>.traitProfileJSON` somewhere in its
+                    // body, which the `?? existing.traitProfileJSON`
+                    // fallback satisfies on both branches.
                     let mergedTraitProfileJSON = Self.mergedTraitProfileJSON(
                         existing: existing,
                         featureWindows: featureWindows,
@@ -4888,24 +4891,26 @@ actor AdDetectionService {
                         confirmedAdWindows: nonSuppressedWindows,
                         episodeDuration: episodeDuration
                     )
-                    var existing = existing
-                    if let mergedTraitProfileJSON {
-                        existing = PodcastProfile(
-                            podcastId: existing.podcastId,
-                            sponsorLexicon: existing.sponsorLexicon,
-                            normalizedAdSlotPriors: existing.normalizedAdSlotPriors,
-                            repeatedCTAFragments: existing.repeatedCTAFragments,
-                            jingleFingerprints: existing.jingleFingerprints,
-                            implicitFalsePositiveCount: existing.implicitFalsePositiveCount,
-                            skipTrustScore: existing.skipTrustScore,
-                            observationCount: existing.observationCount,
-                            mode: existing.mode,
-                            recentFalseSkipSignals: existing.recentFalseSkipSignals,
-                            traitProfileJSON: mergedTraitProfileJSON,
-                            title: existing.title,
-                            adDurationStatsJSON: existing.adDurationStatsJSON
+                    let resolvedTraitProfileJSON = mergedTraitProfileJSON ?? existing.traitProfileJSON
+
+                    // cycle-2 M2: in DEBUG, assert that a successful merge
+                    // never regresses `episodesObserved`. The EMA path
+                    // (`ShowTraitProfile.updated(from:)`) increments by 1
+                    // on each call, so any drop signals a serialization or
+                    // version-skew bug that would otherwise silently
+                    // corrupt the persisted profile.
+                    #if DEBUG
+                    if let merged = mergedTraitProfileJSON,
+                       let mergedData = merged.data(using: .utf8),
+                       let mergedProfile = try? JSONDecoder().decode(
+                           ShowTraitProfile.self, from: mergedData
+                       ) {
+                        assert(
+                            mergedProfile.episodesObserved >= existing.traitProfile.episodesObserved,
+                            "cycle-2 M2: merged traitProfile.episodesObserved (\(mergedProfile.episodesObserved)) regressed below existing (\(existing.traitProfile.episodesObserved)) for podcast \(podcastId)"
                         )
                     }
+                    #endif
 
                     // Bug 4a (trust carry-forward): updatePriors does not
                     // touch `skipTrustScore`. TrustScoringService is the
@@ -4921,7 +4926,7 @@ actor AdDetectionService {
                         observationCount: existing.observationCount + 1,
                         mode: existing.mode,
                         recentFalseSkipSignals: existing.recentFalseSkipSignals,
-                        traitProfileJSON: existing.traitProfileJSON,
+                        traitProfileJSON: resolvedTraitProfileJSON,
                         title: existing.title,
                         adDurationStatsJSON: mergedAdDurationStatsJSON
                     )

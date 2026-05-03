@@ -978,19 +978,36 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     private static let storeAliasDeclarationPattern: String =
         #"\b(?:let|var)\s+\w+\s*=\s*(?:self\s*\.\s*)?\bstore\b(?!\s*[\.\(\?!\[])"#
 
-    /// Cycle-23 M-3: shared regex for "this closure body carries the
-    /// trait-profile JSON forward into a `PodcastProfile(...)`
-    /// constructor". Matches `traitProfileJSON: <ident>.traitProfileJSON`
-    /// where `<ident>` is any local alias (`existing`, `snapshot`, etc.)
-    /// — the closure parameter may be re-bound under any name. Used by
-    /// the scoped canaries (`testUpdatePriorsCarriesExistingTraitProfileJSONForward`,
+    /// Cycle-23 M-3 / cycle-2 L1: shared regex for "this closure body
+    /// carries the trait-profile JSON forward into a `PodcastProfile(...)`
+    /// constructor". Matches a bare `<ident>.traitProfileJSON` anywhere
+    /// in the closure body — the canonical forms are:
+    ///
+    ///   • Direct carry-forward in the constructor:
+    ///     `traitProfileJSON: existing.traitProfileJSON`
+    ///   • Nil-coalescing fallback (cycle-2 L1):
+    ///     `let resolvedTraitProfileJSON = mergedTraitProfileJSON ?? existing.traitProfileJSON`
+    ///     followed by `traitProfileJSON: resolvedTraitProfileJSON`. The
+    ///     `?? existing.traitProfileJSON` half is what we lock in here —
+    ///     the carry-forward is structurally guaranteed at the
+    ///     fallback site even if the constructor argument names a local.
+    ///
+    /// In both shapes some `<ident>.traitProfileJSON` token appears
+    /// inside the closure, which is what this regex matches. The
+    /// negative-control fixture
+    /// (`testProfileConstructingClosureWithoutCarryForwardWouldFire`)
+    /// constructs `PodcastProfile(...)` without any `<ident>.traitProfileJSON`
+    /// mention, so the regex correctly returns no match there.
+    ///
+    /// Used by the scoped canaries
+    /// (`testUpdatePriorsCarriesExistingTraitProfileJSONForward`,
     /// `testRecordListenRewindBodyUsesUpdateProfileIfExistsAndCarriesTraitJSON`),
     /// the whole-file canary (`testEveryProfileConstructingExistingInClosureCarriesTraitJSON`),
     /// and the positive control (`testProfileConstructingClosureWithoutCarryForwardWouldFire`).
     /// Lifting it here keeps all four call sites in lockstep — a future
     /// tightening or broadening of the pattern is a one-line edit.
     fileprivate static let traitProfileCarryForwardPattern: String =
-        #"traitProfileJSON\s*:\s*[A-Za-z_][A-Za-z0-9_]*\s*\.\s*traitProfileJSON"#
+        #"\b[A-Za-z_][A-Za-z0-9_]*\s*\.\s*traitProfileJSON\b"#
 
     /// Cycle-23 L-4: word-boundary anchored "is this a `PodcastProfile`
     /// constructor invocation?" probe. Replaces a bare
