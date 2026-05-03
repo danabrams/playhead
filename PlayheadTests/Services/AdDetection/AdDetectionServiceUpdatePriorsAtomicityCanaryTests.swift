@@ -680,6 +680,234 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         )
     }
 
+    /// playhead-spxs: parity canary for the `networkId` column. Every
+    /// `existing in` closure in `AdDetectionService.swift` that
+    /// constructs `PodcastProfile(...)` MUST carry `existing.networkId`
+    /// forward (or assign it via an alias `<ident>.networkId`).
+    ///
+    /// `networkId` differs from `traitProfileJSON` in one important way:
+    /// the column IS currently COALESCE-protected in
+    /// `AnalysisStore.upsertProfile`, so a missing carry-forward will
+    /// not silently nil the persisted value today. The canary still
+    /// matters because:
+    ///
+    /// 1. The COALESCE protection is a single SQL line away from being
+    ///    refactored away (the cycle-15 M-2 silent-clobber regression
+    ///    on `traitProfileJSON` happened the same way).
+    /// 2. `NetworkPriorsBuilder` reads sibling profiles via
+    ///    `fetchProfiles(forNetworkId:)`. If a constructor accidentally
+    ///    nils `networkId` for the *current* show, that show drops out
+    ///    of its own network-priors aggregate the next time the column
+    ///    changes (or persists at all without COALESCE), measurably
+    ///    weakening the network tier.
+    ///
+    /// Mirrors the structure of
+    /// `testEveryProfileConstructingExistingInClosureCarriesTraitJSON`
+    /// exactly so a future widening or tightening of one canary
+    /// flows naturally to the other.
+    func testEveryProfileConstructingExistingInClosureCarriesNetworkId() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/AdDetection/AdDetectionService.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+
+        var searchStart = stripped.startIndex
+        var profileConstructingClosureCount = 0
+        var totalExistingInCount = 0
+
+        while let tokenRange = stripped.range(
+            of: "existing in",
+            range: searchStart..<stripped.endIndex
+        ) {
+            totalExistingInCount += 1
+            guard let bodyStripped = Self.closureBodyStripped(
+                forExistingInTokenAt: tokenRange,
+                sourceText: source,
+                strippedText: stripped
+            ) else {
+                XCTFail(
+                    """
+                    Could not locate the opening `{` for an `existing in` \
+                    occurrence at offset \
+                    \(stripped.distance(from: stripped.startIndex, to: tokenRange.lowerBound)). \
+                    The whole-file networkId canary cannot run if any \
+                    closure's bracket structure is unparseable; tighten \
+                    the source or extend `bracedBody` / this walk-back.
+                    """
+                )
+                return
+            }
+
+            if Self.bodyConstructsPodcastProfile(bodyStripped) {
+                profileConstructingClosureCount += 1
+                let bodyRange = NSRange(
+                    bodyStripped.startIndex..., in: bodyStripped
+                )
+                XCTAssertNotNil(
+                    networkCarryRegex.firstMatch(in: bodyStripped, range: bodyRange),
+                    """
+                    playhead-spxs: a closure in AdDetectionService.swift \
+                    constructs `PodcastProfile(...)` but does NOT carry \
+                    `existing.networkId` forward. The canary exists \
+                    because `NetworkPriorsBuilder` keys aggregates by \
+                    `networkId`; a constructor that drops the column \
+                    silently removes the show from its own network's \
+                    aggregate the next time the COALESCE protection in \
+                    `upsertProfile` is refactored (same shape as the \
+                    cycle-15 M-2 trait-profile silent-clobber).
+
+                    Closure body (comment/string-stripped) was:
+                    \(bodyStripped)
+
+                    Restore the carry-forward (`networkId: \
+                    existing.networkId`, or any `<ident>.networkId` \
+                    form via an alias). If this closure is intentionally \
+                    writing `networkId: nil` for a documented reason, \
+                    extend this canary with an explicit allow-list and \
+                    pin the rationale.
+                    """
+                )
+            }
+
+            searchStart = tokenRange.upperBound
+        }
+
+        XCTAssertGreaterThanOrEqual(
+            totalExistingInCount, 2,
+            """
+            playhead-spxs floor: expected at least 2 `existing in` \
+            closures in AdDetectionService.swift; found \
+            \(totalExistingInCount). If the file genuinely no longer has \
+            any `existing in` closures, delete this canary; otherwise \
+            the whole-file scan has gone blind.
+            """
+        )
+        XCTAssertGreaterThanOrEqual(
+            profileConstructingClosureCount, 2,
+            """
+            playhead-spxs floor: expected at least 2 `existing in` \
+            closures that construct `PodcastProfile(...)` — one in \
+            `recordListenRewind` and one in `updatePriors`. Found \
+            \(profileConstructingClosureCount). The whole-file networkId \
+            scan has gone blind to its target; either restore the \
+            constructors OR move this floor down with an explanation \
+            of where the profile-mutation entry points have moved.
+            """
+        )
+    }
+
+    /// playhead-spxs positive control: mirrors
+    /// `testProfileConstructingClosureWithoutCarryForwardWouldFire` but
+    /// for the `networkIdCarryForwardPattern`. A synthetic source that
+    /// constructs `PodcastProfile(...)` WITHOUT a `networkId`
+    /// carry-forward MUST produce no regex match — otherwise the
+    /// production canary has gone blind because the regex over-accepts.
+    func testProfileConstructingClosureWithoutNetworkIdCarryForwardWouldFire() throws {
+        let regressionFixture = """
+        do {
+            try await store.mutateProfile(podcastId: id) {
+                fresh()
+            } update: { existing in
+                PodcastProfile(
+                    podcastId: existing.podcastId,
+                    name: existing.name
+                )
+            }
+        }
+        """
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(regressionFixture)
+
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+
+        guard let tokenRange = stripped.range(of: "existing in") else {
+            XCTFail("Fixture is missing `existing in` — pattern has drifted.")
+            return
+        }
+        guard let bodyStripped = Self.closureBodyStripped(
+            forExistingInTokenAt: tokenRange,
+            sourceText: regressionFixture,
+            strippedText: stripped
+        ) else {
+            XCTFail("Walk-back failed to find the closure brace in the fixture.")
+            return
+        }
+
+        XCTAssertTrue(
+            Self.bodyConstructsPodcastProfile(bodyStripped),
+            "Fixture must contain a `PodcastProfile(` constructor for the canary to be in scope."
+        )
+        let bodyRange = NSRange(bodyStripped.startIndex..., in: bodyStripped)
+        XCTAssertNil(
+            networkCarryRegex.firstMatch(in: bodyStripped, range: bodyRange),
+            """
+            playhead-spxs positive-control failure: the networkId \
+            carry-forward regex `\(networkCarryRegex.pattern)` MATCHED \
+            a fixture that deliberately omits the carry-forward. The \
+            production canary has gone blind because the regex \
+            over-accepts; tighten it (and update this fixture together).
+            """
+        )
+    }
+
+    /// playhead-spxs positive control: confirm the networkId regex
+    /// MATCHES a synthetic fixture that DOES carry the column forward.
+    /// Pairs with the negative control above so a regex that
+    /// over-restricts (e.g. accidentally requires a specific alias
+    /// name) is caught immediately rather than silently passing the
+    /// production canary by virtue of always-no-match.
+    func testProfileConstructingClosureWithNetworkIdCarryForwardMatches() throws {
+        let happyPathFixture = """
+        do {
+            try await store.mutateProfile(podcastId: id) {
+                fresh()
+            } update: { existing in
+                PodcastProfile(
+                    podcastId: existing.podcastId,
+                    name: existing.name,
+                    networkId: existing.networkId
+                )
+            }
+        }
+        """
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(happyPathFixture)
+
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+
+        guard let tokenRange = stripped.range(of: "existing in") else {
+            XCTFail("Fixture is missing `existing in` — pattern has drifted.")
+            return
+        }
+        guard let bodyStripped = Self.closureBodyStripped(
+            forExistingInTokenAt: tokenRange,
+            sourceText: happyPathFixture,
+            strippedText: stripped
+        ) else {
+            XCTFail("Walk-back failed to find the closure brace in the fixture.")
+            return
+        }
+
+        let bodyRange = NSRange(bodyStripped.startIndex..., in: bodyStripped)
+        XCTAssertNotNil(
+            networkCarryRegex.firstMatch(in: bodyStripped, range: bodyRange),
+            """
+            playhead-spxs positive control: regex \
+            `\(networkCarryRegex.pattern)` did NOT match a fixture that \
+            DOES carry `existing.networkId` forward. The pattern has \
+            over-restricted; the production canary will now flag every \
+            constructor as a failure. Loosen the regex (and update both \
+            controls together).
+            """
+        )
+    }
+
     /// Cycle-22 L-5 positive control: confirm the whole-file canary
     /// above actually catches a profile-constructing closure that
     /// OMITS the carry-forward. Without this control, a future change
@@ -1156,6 +1384,21 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     /// tightening or broadening of the pattern is a one-line edit.
     fileprivate static let traitProfileCarryForwardPattern: String =
         #"(?:traitProfileJSON\s*:|\?\?)\s*[A-Za-z_][A-Za-z0-9_]*\s*\.\s*traitProfileJSON\b"#
+
+    /// playhead-spxs: same shape as `traitProfileCarryForwardPattern`,
+    /// but for the `networkId` column. The `networkId` column on
+    /// `podcast_profiles` is COALESCE-protected in `upsertProfile`, so a
+    /// missing carry-forward won't immediately silently nil the value
+    /// (unlike `traitProfileJSON`, which is non-COALESCE). The reason
+    /// the carry-forward still matters: if a future patch ever drops
+    /// the COALESCE clause on `networkId` (or rewrites `upsertProfile`
+    /// to a non-COALESCE form), the constructor sites would silently
+    /// clobber the persisted column to NULL — same regression shape as
+    /// `traitProfileJSON`. The canary keeps the explicit carry-forward
+    /// in every constructor so the COALESCE protection is belt-and-
+    /// suspenders, not the only defense.
+    fileprivate static let networkIdCarryForwardPattern: String =
+        #"(?:networkId\s*:|\?\?)\s*[A-Za-z_][A-Za-z0-9_]*\s*\.\s*networkId\b"#
 
     /// Cycle-23 L-4: word-boundary anchored "is this a `PodcastProfile`
     /// constructor invocation?" probe. Replaces a bare

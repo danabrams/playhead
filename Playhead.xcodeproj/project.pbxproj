@@ -109,6 +109,7 @@
 		1F2827DD99FCE4F2387DE4CA /* LexicalScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D508BCA6030C4D8FCBEEC51D /* LexicalScanner.swift */; };
 		1F5499FD8C09D8E2B958AD11 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8402BA8379CC649522667AB1 /* OnboardingView.swift */; };
 		1FCE674DA1CADD6D862C1464 /* SponsorKnowledgeStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0751E488FFBCE71F658F353 /* SponsorKnowledgeStoreTests.swift */; };
+		207C298266CB273ED689F352 /* NetworkPriorsBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBB67D3B510262D3124B18EC /* NetworkPriorsBuilder.swift */; };
 		20D785808B9DC102352B6F0C /* DeviceClassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6BC7EED088D1E62C9F21326 /* DeviceClassTests.swift */; };
 		20F29A04368E425D64450A83 /* AnalysisWorkSchedulerStorageAdmissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13B9E7A6D30ACC5EF1F1E430 /* AnalysisWorkSchedulerStorageAdmissionTests.swift */; };
 		21352E1F798159DAA9FEA833 /* BroadCorrectionEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B5EBCEEA3FAFA44B8220C3E /* BroadCorrectionEvaluator.swift */; };
@@ -166,6 +167,7 @@
 		2C5BF1312C256FC5ACE708BB /* FeedTextNormalizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D480BBC360EDBA176488930D /* FeedTextNormalizerTests.swift */; };
 		2C6199F831A1DA6ED502A608 /* RegionShadowPhase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DCB1ADEDC6A82DAFC8F1947 /* RegionShadowPhase.swift */; };
 		2E11802F4762DC47B3E1CF98 /* CauseAttributionPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFC796B09661BDE128DCFE42 /* CauseAttributionPolicyTests.swift */; };
+		2E20352AF4B33009F10396D5 /* NetworkPriorsBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBA85F3310A5284C8B570A6E /* NetworkPriorsBuilderTests.swift */; };
 		2E3C60CCD0CEC24C18F1061D /* EpisodeLeaseAndWorkJournalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C8C2092BFFB988226C0C150 /* EpisodeLeaseAndWorkJournalTests.swift */; };
 		2E67B86764A9F5CAD39771E6 /* AcousticFingerprintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD3C9BB5CCC7FCFA23A13932 /* AcousticFingerprintTests.swift */; };
 		2EC659F048024D2C1E8DFB07 /* ReplayMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85361C153508BAB634696458 /* ReplayMetrics.swift */; };
@@ -1677,6 +1679,8 @@
 		FAEF6DFDDFE30A874BBA8647 /* AnalysisUnavailableReasonTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisUnavailableReasonTests.swift; sourceTree = "<group>"; };
 		FAF12976FD30CA6C95B1E7D4 /* EpisodeSummaryBackfillCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeSummaryBackfillCoordinator.swift; sourceTree = "<group>"; };
 		FB7B69F2B42F47732E48CDBB /* RecentFeedSponsorAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentFeedSponsorAtlasTests.swift; sourceTree = "<group>"; };
+		FBA85F3310A5284C8B570A6E /* NetworkPriorsBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkPriorsBuilderTests.swift; sourceTree = "<group>"; };
+		FBB67D3B510262D3124B18EC /* NetworkPriorsBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkPriorsBuilder.swift; sourceTree = "<group>"; };
 		FBC21E1B53301F903BDBD3AA /* FrozenTrace-71F0C2AE-7260-4D1E-B41A-BCFD5103A641.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "FrozenTrace-71F0C2AE-7260-4D1E-B41A-BCFD5103A641.json"; sourceTree = "<group>"; };
 		FBC89EAA12A076E690BB655E /* Cycle2FixesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Cycle2FixesTests.swift; sourceTree = "<group>"; };
 		FC01A898A195026C336AA1E8 /* StreamingDownloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingDownloadTests.swift; sourceTree = "<group>"; };
@@ -2418,6 +2422,7 @@
 				738948F6E82CA823583583BA /* MusicBracketTrustStore.swift */,
 				B8F5ECED7539FBDB8EAD9758 /* NetworkIdentity.swift */,
 				02316220ED85344FCEFD2A6A /* NetworkPriors.swift */,
+				FBB67D3B510262D3124B18EC /* NetworkPriorsBuilder.swift */,
 				9437D4F6C3F62A2562CBCADF /* OwnershipGraph.swift */,
 				A1AD4DBC4E0F6B815194B816 /* PermissiveAdClassifier.swift */,
 				92C4B8717F556DC220D822EC /* Phase5ProjectorObserver.swift */,
@@ -2981,6 +2986,7 @@
 				3D35489638B801FE56E26574 /* MusicBedClassifierTests.swift */,
 				77C761B8AD4B6C521E9983C9 /* MusicBedLedgerEvaluatorTests.swift */,
 				C8FAD1E6CE4670E1014BAE85 /* NetworkIdentityTests.swift */,
+				FBA85F3310A5284C8B570A6E /* NetworkPriorsBuilderTests.swift */,
 				4BDEFFCEECD3702CCA7AA3B4 /* NetworkPriorTests.swift */,
 				677DB61B7256EB19B3A6AF76 /* OwnershipGraphTests.swift */,
 				EC64CF958B92F0DB39273628 /* PermissiveAdClassifierTests.swift */,
@@ -3788,6 +3794,7 @@
 				A67C40D69790CD8111419AAC /* MusicBracketTrustStore.swift in Sources */,
 				C65FB307E9424E35D34E11CC /* NetworkIdentity.swift in Sources */,
 				B9B40A004A42D4E959D62073 /* NetworkPriors.swift in Sources */,
+				207C298266CB273ED689F352 /* NetworkPriorsBuilder.swift in Sources */,
 				A662975EEFF98E8411026D43 /* NewEpisodeNotificationScheduler.swift in Sources */,
 				2BC20FA22262833732CC6D4D /* NewEpisodeNotificationTapHandler.swift in Sources */,
 				D6053BAEE2452F28EB4CC025 /* NewEpisodeNotificationsSettingsBinding.swift in Sources */,
@@ -4216,6 +4223,7 @@
 				0FDB59B728443A5F189EB764 /* NetworkIdentityTests.swift in Sources */,
 				B33BDD96B27AF47DB067964B /* NetworkIsolationTests.swift in Sources */,
 				8CBF60589623EB200C138793 /* NetworkPriorTests.swift in Sources */,
+				2E20352AF4B33009F10396D5 /* NetworkPriorsBuilderTests.swift in Sources */,
 				AF39F8F9604CCB259B96013F /* NewEpisodeNotificationSchedulerTests.swift in Sources */,
 				3219ADD40B2D08EE72347C8C /* NewEpisodeNotificationSchemaTests.swift in Sources */,
 				8B8E9DFA577CDBE198C54346 /* NewEpisodeNotificationTapHandlerTests.swift in Sources */,

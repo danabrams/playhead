@@ -308,6 +308,267 @@ struct PriorHierarchyWireUpTests {
         // verified by reading `decodeAdDurationStats`'s body.
     }
 
+    // MARK: - Network priors wire-up (playhead-spxs)
+
+    /// playhead-spxs: when the current show has a `networkId` but is itself
+    /// brand-new (no `adDurationStatsJSON`, no traitProfileJSON), and there
+    /// are sibling profiles in the same network with usable
+    /// `adDurationStatsJSON`, the resolver must surface
+    /// `activeLevel == .network`. That is the load-bearing wire-up signal —
+    /// without it, the network tier would still be the no-op it was before
+    /// this bead.
+    @Test("resolveEpisodePriors activates network tier when siblings carry stats")
+    func wireUpNetworkTierActivates() async throws {
+        let store = try await makeTestStore()
+        let networkId = "pod-net-spxs-active"
+
+        // Seed two sibling shows with usable `adDurationStatsJSON`.
+        // Each well above the per-show sample threshold so the builder
+        // accepts them, and clustered around 10s so the network typical
+        // ad-duration center lands far from the global (60s) midpoint.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        let sibling1 = makeProfile(
+            podcastId: "pod-sibling-1",
+            adDurationStatsJSON: siblingStats.encodeForTesting(),
+            observationCount: 12,
+            networkId: networkId
+        )
+        let sibling2 = makeProfile(
+            podcastId: "pod-sibling-2",
+            adDurationStatsJSON: siblingStats.encodeForTesting(),
+            observationCount: 8,
+            networkId: networkId
+        )
+        try await store.upsertProfile(sibling1)
+        try await store.upsertProfile(sibling2)
+
+        // Current show: same network, but brand-new — no own stats yet.
+        // observationCount 0 keeps the network decay weight at its peak
+        // (0.5), so the network tier blends in at full strength.
+        let current = makeProfile(
+            podcastId: "pod-current-spxs",
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: networkId
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .network)
+    }
+
+    /// playhead-spxs: the wire-up's load-bearing claim. With the network
+    /// tier active, the resolved typicalAdDuration must measurably move
+    /// toward the network's converging mean — not stay parked on the
+    /// global default (30...90, midpoint 60s). Sibling shows here all
+    /// average ~10s, so the resolver's blend should drop the typical
+    /// duration center well below the global midpoint.
+    @Test("network priors measurably narrow resolved typicalAdDuration vs global")
+    func wireUpNetworkNarrowsDurationRange() async throws {
+        let store = try await makeTestStore()
+        let networkId = "pod-net-spxs-narrow"
+
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        for i in 0..<3 {
+            let sibling = makeProfile(
+                podcastId: "pod-sibling-narrow-\(i)",
+                adDurationStatsJSON: siblingStats.encodeForTesting(),
+                observationCount: 8,
+                networkId: networkId
+            )
+            try await store.upsertProfile(sibling)
+        }
+
+        // Current show has the network identity but no own observations.
+        let current = makeProfile(
+            podcastId: "pod-current-narrow",
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: networkId
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+
+        // Global midpoint is 60s. After blending in the network's ~10s
+        // mean at the peak decay weight (0.5), the resolved center must
+        // sit below the global default's midpoint — a measurable shift.
+        let globalCenter = (GlobalPriorDefaults.standard.typicalAdDuration.lowerBound +
+                            GlobalPriorDefaults.standard.typicalAdDuration.upperBound) / 2.0
+        let resolvedCenter = (resolved.typicalAdDuration.lowerBound +
+                              resolved.typicalAdDuration.upperBound) / 2.0
+        #expect(resolvedCenter < globalCenter)
+    }
+
+    /// playhead-spxs: graceful fallback. When the current show has no
+    /// `networkId`, the network-priors lookup is skipped entirely and the
+    /// resolver behaves identically to the pre-spxs wire-up — global
+    /// defaults when nothing else is available, show-local when it is.
+    @Test("resolveEpisodePriors with networkId == nil falls back to global (no network tier)")
+    func wireUpNoNetworkIdFallsBackToGlobal() async throws {
+        let store = try await makeTestStore()
+
+        // Sibling shows exist, but the current show has no networkId, so
+        // the lookup is never made. activeLevel must remain `.global`.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        let sibling = makeProfile(
+            podcastId: "pod-sibling-no-net",
+            adDurationStatsJSON: siblingStats.encodeForTesting(),
+            observationCount: 8,
+            networkId: "some-other-network"
+        )
+        try await store.upsertProfile(sibling)
+
+        let current = makeProfile(
+            podcastId: "pod-current-no-net",
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: nil
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .global)
+        #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
+    }
+
+    /// playhead-spxs: precedence preserved. When both network-tier and
+    /// show-local data exist, show-local must dominate (its weight is
+    /// 0.6+ vs network's 0.5 peak, and it's a higher level in the
+    /// hierarchy enum). Without this, the network tier could undermine
+    /// the more specific per-show signal.
+    @Test("show-local priors still dominate when both tiers are available")
+    func wireUpShowLocalDominatesNetwork() async throws {
+        let store = try await makeTestStore()
+        let networkId = "pod-net-spxs-precedence"
+
+        // Network siblings cluster around 10s.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        for i in 0..<2 {
+            let sibling = makeProfile(
+                podcastId: "pod-sibling-prec-\(i)",
+                adDurationStatsJSON: siblingStats.encodeForTesting(),
+                observationCount: 8,
+                networkId: networkId
+            )
+            try await store.upsertProfile(sibling)
+        }
+
+        // Current show has its own observations clustered around 60s
+        // and meets the show-local threshold (sampleCount >= 5,
+        // observationCount >= 5).
+        let ownStats = AdDurationStats(meanDuration: 60, sampleCount: 20)
+        let current = makeProfile(
+            podcastId: "pod-current-prec",
+            adDurationStatsJSON: ownStats.encodeForTesting(),
+            observationCount: 12,
+            networkId: networkId
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .showLocal)
+    }
+
+    /// playhead-spxs: round-trip persistence for the new `networkId`
+    /// column. Locks the SQL bind/read path so a future migration can't
+    /// silently drop the column.
+    @Test("networkId survives upsertProfile round-trip")
+    func networkIdPersists() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-spxs-roundtrip"
+        let seed = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: "wondery"
+        )
+        try await store.upsertProfile(seed)
+
+        let fetched = try await store.fetchProfile(podcastId: podcastId)
+        #expect(fetched?.networkId == "wondery")
+    }
+
+    /// playhead-spxs: COALESCE protection for `networkId`. Once a
+    /// network identity is recorded, subsequent upserts that don't carry
+    /// the column forward must NOT clobber the persisted value to NULL.
+    /// Mirrors the cycle-1 #192 contract for `adDurationStatsJSON`.
+    @Test("upsertProfile with nil networkId preserves previously-recorded value (COALESCE)")
+    func upsertNilNetworkIdPreservesExisting() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-spxs-coalesce"
+        let seed = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: "iheart"
+        )
+        try await store.upsertProfile(seed)
+
+        // Re-upsert with networkId == nil, simulating a writer that
+        // doesn't have the column in scope.
+        let rebuilt = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: nil,
+            observationCount: 1,
+            networkId: nil
+        )
+        try await store.upsertProfile(rebuilt)
+
+        let reloaded = try await store.fetchProfile(podcastId: podcastId)
+        #expect(reloaded?.networkId == "iheart")
+        // Confirm the upsert applied (observationCount changed) — so
+        // the COALESCE clause is what saved the column, not a no-op.
+        #expect(reloaded?.observationCount == 1)
+    }
+
+    /// playhead-spxs: `fetchProfiles(forNetworkId:)` returns only profiles
+    /// whose `networkId` matches the supplied id, and an empty array when
+    /// no profile matches. The SQL is the only entry point the resolver
+    /// uses to build a network aggregate, so a regression here would
+    /// silently disable the network tier.
+    @Test("fetchProfiles(forNetworkId:) filters by networkId")
+    func fetchProfilesForNetworkIdFiltersCorrectly() async throws {
+        let store = try await makeTestStore()
+        let networkA = "spotify-studios"
+        let networkB = "iheart"
+
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-A1", adDurationStatsJSON: nil,
+            observationCount: 1, networkId: networkA
+        ))
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-A2", adDurationStatsJSON: nil,
+            observationCount: 2, networkId: networkA
+        ))
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-B1", adDurationStatsJSON: nil,
+            observationCount: 3, networkId: networkB
+        ))
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-noNetwork", adDurationStatsJSON: nil,
+            observationCount: 4, networkId: nil
+        ))
+
+        let aProfiles = try await store.fetchProfiles(forNetworkId: networkA)
+        #expect(aProfiles.count == 2)
+        let aIds = Set(aProfiles.map(\.podcastId))
+        #expect(aIds == ["p-A1", "p-A2"])
+
+        let bProfiles = try await store.fetchProfiles(forNetworkId: networkB)
+        #expect(bProfiles.count == 1)
+        #expect(bProfiles.first?.podcastId == "p-B1")
+
+        // Unknown network id returns empty; nil-network profiles never
+        // show up under any concrete networkId lookup.
+        let cProfiles = try await store.fetchProfiles(forNetworkId: "no-such-network")
+        #expect(cProfiles.isEmpty)
+    }
+
     // MARK: - PodcastProfile.adDurationStatsJSON column round-trip
 
     @Test("adDurationStatsJSON survives upsertProfile round-trip")
@@ -796,7 +1057,8 @@ struct PriorHierarchyWireUpTests {
     private func makeProfile(
         podcastId: String = "podcast-test-1",
         adDurationStatsJSON: String?,
-        observationCount: Int
+        observationCount: Int,
+        networkId: String? = nil
     ) -> PodcastProfile {
         PodcastProfile(
             podcastId: podcastId,
@@ -811,7 +1073,8 @@ struct PriorHierarchyWireUpTests {
             recentFalseSkipSignals: 0,
             traitProfileJSON: nil,
             title: nil,
-            adDurationStatsJSON: adDurationStatsJSON
+            adDurationStatsJSON: adDurationStatsJSON,
+            networkId: networkId
         )
     }
 

@@ -1698,7 +1698,7 @@ actor AdDetectionService {
         // (a few blends, well under a millisecond) is genuinely
         // negligible; the shape is locked by the wire-up tests so the
         // consistency invariant can't regress silently.
-        let resolvedEpisodePriors = resolveEpisodePriors()
+        let resolvedEpisodePriors = await resolveEpisodePriors()
         let episodeDurationPrior = DurationPrior(resolvedPriors: resolvedEpisodePriors)
 
         for span in decodedSpans {
@@ -3136,7 +3136,14 @@ actor AdDetectionService {
                 // writes against the persisted column, but explicit symmetry
                 // with the other carry-forwards keeps every constructor in
                 // this file's pattern recognizable to future readers.
-                adDurationStatsJSON: existing.adDurationStatsJSON
+                adDurationStatsJSON: existing.adDurationStatsJSON,
+                // playhead-spxs: carry-forward (mirror of
+                // `adDurationStatsJSON`). `networkId` is COALESCE-protected
+                // in `upsertProfile`, but explicit carry-forward keeps every
+                // constructor in this file consistent with the canary
+                // contract — see
+                // `AdDetectionServiceUpdatePriorsAtomicityCanaryTests`.
+                networkId: existing.networkId
             )
         }
         if merged == nil {
@@ -4599,12 +4606,19 @@ actor AdDetectionService {
     /// per-span loop). The result feeds `DurationPrior(resolvedPriors:)` so
     /// fusion is show-aware, not stuck on `GlobalPriorDefaults.standard`.
     ///
-    /// Audit (as of 084j):
+    /// Audit (as of spxs):
     ///   • Global: always `GlobalPriorDefaults.standard`.
-    ///   • Network: `nil` — no production aggregator yet (filed separately).
+    ///   • Network: derived via `NetworkPriorsBuilder.build` from all
+    ///     `PodcastProfile` rows that share the current show's `networkId`.
+    ///     `nil` when the current show has no `networkId` recorded yet
+    ///     (RSS-metadata writer lands in a follow-up bead) or when no
+    ///     sibling shows in the network meet the per-show sample-count
+    ///     threshold. The network fetch happens in this same actor turn —
+    ///     `resolveEpisodePriors` is `async` precisely because of that hop,
+    ///     and the `await` chain keeps fetch + resolve atomic relative to
+    ///     concurrent profile mutations.
     ///   • Trait: `currentPodcastProfile?.traitProfile ?? .unknown`. The
-    ///     persistence layer reads cleanly; a writer for `EpisodeTraitSnapshot`
-    ///     is a separate gap (filed separately). Profiles without a writer
+    ///     persistence layer reads cleanly; profiles without a writer
     ///     fall through to `.unknown`, which is non-reliable, so the trait
     ///     level stays inactive — graceful degradation.
     ///   • Show-local: derived from `currentPodcastProfile.adDurationStatsJSON`
@@ -4613,16 +4627,43 @@ actor AdDetectionService {
     ///     at global defaults until enough confirmed ads have been observed.
     ///
     /// Failure semantics: this method does not throw. Corrupt JSON, missing
-    /// columns, or any other malformed input results in `nil` show-local
-    /// priors, which causes the resolver to fall through to global defaults
-    /// — the same behavior as a brand-new show.
-    private func resolveEpisodePriors() -> ResolvedPriors {
+    /// columns, network-fetch errors, or any other malformed input results
+    /// in `nil` priors at that tier, and the resolver falls through to the
+    /// next tier (graceful degradation).
+    ///
+    /// Atomicity: this method MUST remain a single actor turn from the
+    /// caller's view. The `await` on `store.fetchProfiles(forNetworkId:)`
+    /// is the only suspension; the resolver call below is pure. Tests
+    /// pin this contract via the `mutateProfile`-style canaries in
+    /// `AdDetectionServiceUpdatePriorsAtomicityCanaryTests`.
+    private func resolveEpisodePriors() async -> ResolvedPriors {
         let traitProfile = currentPodcastProfile?.traitProfile ?? .unknown
         let showLocal = ShowLocalPriorsBuilder.build(from: currentPodcastProfile)
+
+        // playhead-spxs: gather the network tier. Skipped when the current
+        // show has no networkId recorded — falls back to nil which the
+        // resolver treats as "tier inactive". Errors in the SQL fetch are
+        // also treated as "tier inactive" (logged then dropped) so a
+        // transient persistence failure can't block ad detection.
+        var networkPriors: NetworkPriors? = nil
+        var networkDecay: Float = 0
+        if let networkId = currentPodcastProfile?.networkId, !networkId.isEmpty {
+            do {
+                let siblings = try await store.fetchProfiles(forNetworkId: networkId)
+                if let priors = NetworkPriorsBuilder.build(from: siblings) {
+                    networkPriors = priors
+                    let observed = currentPodcastProfile?.observationCount ?? 0
+                    networkDecay = NetworkPriors.decayedWeight(episodesObserved: observed)
+                }
+            } catch {
+                logger.warning("Failed to fetch network siblings for networkId=\(networkId): \(error.localizedDescription)")
+            }
+        }
+
         return PriorHierarchyResolver.resolve(
             globalDefaults: .standard,
-            networkPriors: nil,
-            networkDecay: 0,
+            networkPriors: networkPriors,
+            networkDecay: networkDecay,
             traitProfile: traitProfile,
             showLocalPriors: showLocal
         )
@@ -4636,8 +4677,8 @@ actor AdDetectionService {
     ///
     /// `#if DEBUG` matches the existing pattern for other `*ForTesting`
     /// entry points in this file (see `acousticFunnelForTesting` etc.).
-    func resolveEpisodePriorsForTesting() -> ResolvedPriors {
-        resolveEpisodePriors()
+    func resolveEpisodePriorsForTesting() async -> ResolvedPriors {
+        await resolveEpisodePriors()
     }
 
     /// Test-only entry point that drives `updatePriors` end-to-end.
@@ -4808,7 +4849,13 @@ actor AdDetectionService {
                         mode: "shadow",
                         recentFalseSkipSignals: 0,
                         traitProfileJSON: initialTraitProfileJSON,
-                        adDurationStatsJSON: initialAdDurationStatsJSON
+                        adDurationStatsJSON: initialAdDurationStatsJSON,
+                        // playhead-spxs: brand-new profile starts with
+                        // `networkId == nil`. A future bead populates it
+                        // from RSS metadata via NetworkIdentityExtractor;
+                        // until then the network-priors tier remains a
+                        // graceful no-op for first-observation profiles.
+                        networkId: nil
                     )
                 },
                 update: { existing in
@@ -4930,7 +4977,15 @@ actor AdDetectionService {
                         recentFalseSkipSignals: existing.recentFalseSkipSignals,
                         traitProfileJSON: resolvedTraitProfileJSON,
                         title: existing.title,
-                        adDurationStatsJSON: mergedAdDurationStatsJSON
+                        adDurationStatsJSON: mergedAdDurationStatsJSON,
+                        // playhead-spxs: carry-forward (mirror of
+                        // `adDurationStatsJSON`). `networkId` is
+                        // COALESCE-protected in `upsertProfile`, but
+                        // explicit carry-forward keeps every constructor
+                        // in this file consistent with the canary
+                        // contract — see
+                        // `AdDetectionServiceUpdatePriorsAtomicityCanaryTests`.
+                        networkId: existing.networkId
                     )
                 }
             )
