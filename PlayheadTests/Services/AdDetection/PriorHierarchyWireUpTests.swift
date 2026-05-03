@@ -369,6 +369,212 @@ struct PriorHierarchyWireUpTests {
         #expect(reloaded?.observationCount == 5)
     }
 
+    /// playhead-v7v8: After `updatePriorsForTesting` runs three times for
+    /// the same show, the persisted `traitProfileJSON` must decode to a
+    /// `ShowTraitProfile` whose `episodesObserved` >= 3, which in turn
+    /// flips `traitProfile.isReliable` to true. The resolver wired into
+    /// `resolveEpisodePriorsForTesting()` reads that profile and reports
+    /// `ResolvedPriors.activeLevel == .traitDerived`. This test fails if
+    /// the producer or persistence step is missing — the canonical
+    /// failure mode that the bead is designed to close.
+    @Test("updatePriors traits feed traitDerived activeLevel after 3 episodes")
+    func updatePriorsActivatesTraitDerivedTier() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-v7v8-trait-derived-1"
+        let assetId = "asset-v7v8-trait-derived-1"
+        try await store.insertAsset(makeAsset(id: assetId, episodeId: "ep-v7v8-1"))
+
+        // Seed a starter profile so the create-branch isn't exercised
+        // (the resolver works either way; this just keeps the loop
+        // exclusively on the update path so the EMA increment is
+        // observable from episode 1).
+        let seed = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: nil,
+            observationCount: 0
+        )
+        try await store.upsertProfile(seed)
+
+        // Drive three "episodes" through updatePriors. Each call provides
+        // distinct confirmed ad windows so the snapshot derivations have
+        // signal (rather than landing on the no-signal neutral defaults).
+        for episodeIndex in 0..<3 {
+            let window = makeAdWindow(
+                id: "win-v7v8-\(episodeIndex)",
+                assetId: assetId,
+                startTime: Double(episodeIndex) * 100,
+                endTime: Double(episodeIndex) * 100 + 30
+            )
+            // Reload the profile each iteration so the service's snapshot
+            // mirrors what runBackfill would carry forward.
+            let current = try await store.fetchProfile(podcastId: podcastId)
+            let service = makeService(store: store, profile: current)
+            try await service.updatePriorsForTesting(
+                podcastId: podcastId,
+                nonSuppressedWindows: [window],
+                episodeDuration: 600,
+                // cycle-1 L4: this test only verifies that
+                // `episodesObserved` increments enough to flip
+                // `isReliable`, not that real signals shape the trait
+                // values. The companion test
+                // `updatePriorsActivatesTraitDerivedTierWithRealSignal`
+                // exercises the producer math with non-empty inputs.
+                featureWindows: [],
+                chunks: []
+            )
+        }
+
+        // Direct read of the persisted profile: episodesObserved should
+        // now be >= 3, which is the gate `ShowTraitProfile.isReliable`
+        // checks. Without the v7v8 producer + persistence wire-up,
+        // `traitProfileJSON` would be nil and `traitProfile` would
+        // decode as `.unknown` (episodesObserved == 0).
+        let after = try #require(await store.fetchProfile(podcastId: podcastId))
+        let traitJSON = try #require(
+            after.traitProfileJSON,
+            "Expected traitProfileJSON to be persisted after 3 updatePriors calls"
+        )
+        let trait = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(traitJSON.utf8)
+        )
+        #expect(trait.episodesObserved >= 3)
+        #expect(trait.isReliable)
+
+        // End-to-end resolver assertion: the service's resolver entry
+        // point must report `.traitDerived` as the dominant level when
+        // it sees this profile.
+        let service = makeService(store: store, profile: after)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .traitDerived)
+    }
+
+    /// cycle-1 L4 companion: drive `updatePriorsForTesting` with realistic
+    /// non-empty `featureWindows` (high `musicProbability`) so the trait
+    /// snapshot derivations actually run on real signal — not the
+    /// no-signal neutral defaults that the ergonomic-default version of
+    /// `updatePriorsForTesting` silently fed in. After 3 episodes the
+    /// resolved profile must have `musicDensity > 0.5`, locking in that
+    /// the producer math reaches `traitProfileJSON` end-to-end. Without
+    /// this gate, a future refactor could disconnect the producer from
+    /// the persisted profile and the existing
+    /// `updatePriorsActivatesTraitDerivedTier` test would still pass
+    /// because the EMA-on-empty path increments `episodesObserved` from
+    /// the neutral 0.5 defaults.
+    @Test("updatePriors with real feature signal flows trait values into traitProfileJSON")
+    func updatePriorsActivatesTraitDerivedTierWithRealSignal() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-v7v8-trait-real-signal-1"
+        let assetId = "asset-v7v8-trait-real-signal-1"
+        try await store.insertAsset(makeAsset(id: assetId, episodeId: "ep-v7v8-real-1"))
+
+        // Realistic feature signal: 5 windows in a row, each with a
+        // high `musicProbability` of 0.8. The producer's
+        // `deriveMusicDensity` averages these → trait snapshot's
+        // `musicDensity` ≈ 0.8. EMA-blended over 3 episodes against
+        // identical inputs converges to 0.8 (the first-episode branch
+        // replaces the sentinel directly; subsequent EMA passes with
+        // alpha=0.3 against the same target leave the value stationary).
+        let highMusicWindows: [FeatureWindow] = (0..<5).map { i in
+            makeFeatureWindow(
+                assetId: assetId,
+                startTime: Double(i),
+                endTime: Double(i + 1),
+                musicProbability: 0.8
+            )
+        }
+        let chunks: [TranscriptChunk] = [
+            makeChunk(assetId: assetId, chunkIndex: 0, start: 0, end: 5, speakerId: 1),
+            makeChunk(assetId: assetId, chunkIndex: 1, start: 5, end: 10, speakerId: 2)
+        ]
+
+        for episodeIndex in 0..<3 {
+            let window = makeAdWindow(
+                id: "win-real-\(episodeIndex)",
+                assetId: assetId,
+                startTime: Double(episodeIndex) * 100,
+                endTime: Double(episodeIndex) * 100 + 30
+            )
+            let current = try await store.fetchProfile(podcastId: podcastId)
+            let service = makeService(store: store, profile: current)
+            try await service.updatePriorsForTesting(
+                podcastId: podcastId,
+                nonSuppressedWindows: [window],
+                episodeDuration: 600,
+                featureWindows: highMusicWindows,
+                chunks: chunks
+            )
+        }
+
+        let after = try #require(await store.fetchProfile(podcastId: podcastId))
+        let traitJSON = try #require(after.traitProfileJSON)
+        let trait = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(traitJSON.utf8)
+        )
+        #expect(trait.episodesObserved >= 3)
+        #expect(trait.isReliable)
+        // High-music windows must surface as a high `musicDensity` —
+        // the no-signal default would yield 0 here. > 0.5 proves the
+        // real signal threaded all the way to `traitProfileJSON`.
+        #expect(trait.musicDensity > 0.5)
+
+        let service = makeService(store: store, profile: after)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .traitDerived)
+    }
+
+    /// cycle-1 missing test (#1): the *first* call to `updatePriors` for
+    /// a podcast with no persisted profile must take the create-branch
+    /// inside `mutateProfile` and write a non-nil `traitProfileJSON`
+    /// derived from `ShowTraitProfile.unknown.updated(from: snapshot)`.
+    /// Without this, a fresh show's first backfill would silently miss
+    /// the trait-profile bootstrap and the EMA path would never start.
+    @Test("updatePriors bootstraps traitProfileJSON for a show with no prior profile")
+    func updatePriorsBootstrapsTraitProfileForFreshShow() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-v7v8-fresh-bootstrap-1"
+        let assetId = "asset-v7v8-fresh-bootstrap-1"
+        try await store.insertAsset(makeAsset(id: assetId, episodeId: "ep-v7v8-fresh-1"))
+
+        // Crucially: NO seed profile. The first updatePriors call must
+        // exercise `mutateProfile`'s `create` branch, which is the only
+        // place the bootstrap path
+        // `ShowTraitProfile.unknown.updated(from: snapshot)` lives.
+        let preExisting = try await store.fetchProfile(podcastId: podcastId)
+        #expect(preExisting == nil)
+
+        let window = makeAdWindow(
+            id: "win-fresh-bootstrap-1",
+            assetId: assetId,
+            startTime: 100,
+            endTime: 130
+        )
+        let service = makeService(store: store, profile: nil)
+        try await service.updatePriorsForTesting(
+            podcastId: podcastId,
+            nonSuppressedWindows: [window],
+            episodeDuration: 600,
+            featureWindows: [],
+            chunks: []
+        )
+
+        let after = try #require(await store.fetchProfile(podcastId: podcastId))
+        let traitJSON = try #require(
+            after.traitProfileJSON,
+            "First updatePriors call on a fresh show must write a non-nil traitProfileJSON via the create branch"
+        )
+        let trait = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(traitJSON.utf8)
+        )
+        // The bootstrap path replaces the sentinel directly with the
+        // first snapshot, so episodesObserved should be exactly 1
+        // — not still 0 (sentinel) and not >= 3 (already reliable).
+        #expect(trait.episodesObserved == 1)
+        #expect(trait.isReliable == false)
+    }
+
     @Test("updatePriors merges new ad-window durations into adDurationStatsJSON")
     func updatePriorsAccumulatesDurations() async throws {
         let store = try await makeTestStore()
@@ -407,7 +613,14 @@ struct PriorHierarchyWireUpTests {
         try await service.updatePriorsForTesting(
             podcastId: podcastId,
             nonSuppressedWindows: [window],
-            episodeDuration: 600
+            episodeDuration: 600,
+            // cycle-1 L4: this test exercises only the
+            // `adDurationStatsJSON` accumulation path, which is fed by
+            // the confirmed-ad windows above; trait-snapshot inputs are
+            // intentionally empty so the duration aggregate isn't
+            // entangled with the trait merge.
+            featureWindows: [],
+            chunks: []
         )
 
         // The persisted profile should now reflect a 6-sample aggregate with
@@ -422,6 +635,160 @@ struct PriorHierarchyWireUpTests {
         // The mean must move toward the new observation, but not all the way.
         #expect(updatedStats.meanDuration < initial.meanDuration)
         #expect(updatedStats.meanDuration > 10)
+    }
+
+    // MARK: - traitProfileJSON round-trip through AnalysisStore
+
+    @Test("traitProfileJSON survives AnalysisStore upsert/fetch round-trip with all fields intact")
+    func traitProfileJSONRoundTripsThroughAnalysisStore() async throws {
+        // Cycle-2 L2: the persisted column is `String?` (raw JSON). Encode a
+        // ShowTraitProfile carrying non-default values for every field,
+        // upsert through the production `AnalysisStore.upsertProfile` SQL
+        // path, fetch the row back, decode, and assert the snapshot is
+        // bit-equivalent. This locks in the schema/SQL bind/SQL read path
+        // so a future column rename or accidental COALESCE wrap can't
+        // silently drop or corrupt trait fields.
+        let store = try await makeTestStore()
+        let podcastId = "podcast-trait-roundtrip-1"
+        let original = ShowTraitProfile(
+            musicDensity: 0.31,
+            speakerTurnRate: 0.62,
+            singleSpeakerDominance: 0.43,
+            structureRegularity: 0.74,
+            sponsorRecurrence: 0.25,
+            insertionVolatility: 0.86,
+            transcriptReliability: 0.57,
+            episodesObserved: 7
+        )
+        let encoded = try JSONEncoder().encode(original)
+        let json = try #require(String(data: encoded, encoding: .utf8))
+
+        let seed = PodcastProfile(
+            podcastId: podcastId,
+            sponsorLexicon: nil,
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 0.5,
+            observationCount: 7,
+            mode: SkipMode.shadow.rawValue,
+            recentFalseSkipSignals: 0,
+            traitProfileJSON: json,
+            title: nil,
+            adDurationStatsJSON: nil
+        )
+        try await store.upsertProfile(seed)
+
+        let fetched = try #require(await store.fetchProfile(podcastId: podcastId))
+        let fetchedJSON = try #require(
+            fetched.traitProfileJSON,
+            "traitProfileJSON must survive the upsert/fetch round-trip"
+        )
+        let decoded = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(fetchedJSON.utf8)
+        )
+        #expect(decoded == original)
+    }
+
+    @Test("traitProfileJSON UPDATE overwrites the prior value (no COALESCE on the column)")
+    func traitProfileJSONUpsertOverwritesPriorValue() async throws {
+        // Cycle-3 M-2: pin the SQL contract that
+        // `AnalysisStore.upsertProfile`'s UPDATE branch writes
+        // `traitProfileJSON = excluded.traitProfileJSON` (overwrite, not
+        // COALESCE). The cycle-15 M-2 / cycle-17 M-1 atomicity canaries
+        // assume this contract — they pin the carry-forward in the
+        // closure as the load-bearing safety net because a default-`nil`
+        // would silently nil the persisted column. If the SQL is ever
+        // changed to `COALESCE(excluded.traitProfileJSON, traitProfileJSON)`,
+        // those canaries lose their meaning (a default-nil constructor
+        // would no longer clobber the persisted JSON). This test catches
+        // a quiet COALESCE drift directly.
+        let store = try await makeTestStore()
+        let podcastId = "podcast-trait-overwrite-1"
+
+        // First upsert: write `traitProfileJSON = A` (musicDensity=0.3).
+        let profileA = ShowTraitProfile(
+            musicDensity: 0.3,
+            speakerTurnRate: 4.0,
+            singleSpeakerDominance: 0.5,
+            structureRegularity: 0.6,
+            sponsorRecurrence: 0.2,
+            insertionVolatility: 0.4,
+            transcriptReliability: 0.7,
+            episodesObserved: 1
+        )
+        let jsonA = try #require(
+            String(data: try JSONEncoder().encode(profileA), encoding: .utf8)
+        )
+        try await store.upsertProfile(
+            PodcastProfile(
+                podcastId: podcastId,
+                sponsorLexicon: nil,
+                normalizedAdSlotPriors: nil,
+                repeatedCTAFragments: nil,
+                jingleFingerprints: nil,
+                implicitFalsePositiveCount: 0,
+                skipTrustScore: 0.5,
+                observationCount: 1,
+                mode: SkipMode.shadow.rawValue,
+                recentFalseSkipSignals: 0,
+                traitProfileJSON: jsonA,
+                title: nil,
+                adDurationStatsJSON: nil
+            )
+        )
+
+        // Second upsert with the same podcastId: write a DIFFERENT
+        // `traitProfileJSON = B` (musicDensity=0.7). If the column is
+        // overwriting (the contract this test pins), the persisted value
+        // must decode to B. If the column ever becomes COALESCE-wrapped,
+        // the second write would lose any nil-only fields and a future
+        // `traitProfileJSON: nil` would silently retain A — exactly the
+        // shape the atomicity canaries assume can't happen.
+        let profileB = ShowTraitProfile(
+            musicDensity: 0.7,
+            speakerTurnRate: 4.0,
+            singleSpeakerDominance: 0.5,
+            structureRegularity: 0.6,
+            sponsorRecurrence: 0.2,
+            insertionVolatility: 0.4,
+            transcriptReliability: 0.7,
+            episodesObserved: 2
+        )
+        let jsonB = try #require(
+            String(data: try JSONEncoder().encode(profileB), encoding: .utf8)
+        )
+        try await store.upsertProfile(
+            PodcastProfile(
+                podcastId: podcastId,
+                sponsorLexicon: nil,
+                normalizedAdSlotPriors: nil,
+                repeatedCTAFragments: nil,
+                jingleFingerprints: nil,
+                implicitFalsePositiveCount: 0,
+                skipTrustScore: 0.5,
+                observationCount: 2,
+                mode: SkipMode.shadow.rawValue,
+                recentFalseSkipSignals: 0,
+                traitProfileJSON: jsonB,
+                title: nil,
+                adDurationStatsJSON: nil
+            )
+        )
+
+        let fetched = try #require(await store.fetchProfile(podcastId: podcastId))
+        let fetchedJSON = try #require(
+            fetched.traitProfileJSON,
+            "second upsert must leave traitProfileJSON populated"
+        )
+        let decoded = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(fetchedJSON.utf8)
+        )
+        #expect(decoded == profileB, "UPDATE must overwrite, not COALESCE")
+        #expect(abs(decoded.musicDensity - 0.7) < 0.001)
     }
 
     // MARK: - Helpers
@@ -489,6 +856,56 @@ struct PriorHierarchyWireUpTests {
             metadataPromptVersion: nil,
             wasSkipped: true,
             userDismissedBanner: false
+        )
+    }
+
+    private func makeFeatureWindow(
+        assetId: String,
+        startTime: Double,
+        endTime: Double,
+        musicProbability: Double
+    ) -> FeatureWindow {
+        FeatureWindow(
+            analysisAssetId: assetId,
+            startTime: startTime,
+            endTime: endTime,
+            rms: 0,
+            spectralFlux: 0,
+            musicProbability: musicProbability,
+            speakerChangeProxyScore: 0,
+            musicBedChangeScore: 0,
+            musicBedOnsetScore: 0,
+            musicBedOffsetScore: 0,
+            musicBedLevel: .none,
+            pauseProbability: 0,
+            speakerClusterId: nil,
+            jingleHash: nil,
+            featureVersion: 1
+        )
+    }
+
+    private func makeChunk(
+        assetId: String,
+        chunkIndex: Int,
+        start: Double,
+        end: Double,
+        speakerId: Int?
+    ) -> TranscriptChunk {
+        TranscriptChunk(
+            id: "chunk-\(assetId)-\(chunkIndex)",
+            analysisAssetId: assetId,
+            segmentFingerprint: "fp-\(chunkIndex)",
+            chunkIndex: chunkIndex,
+            startTime: start,
+            endTime: end,
+            text: "stub",
+            normalizedText: "stub",
+            pass: "final",
+            modelVersion: "test-model",
+            transcriptVersion: "v1",
+            atomOrdinal: chunkIndex,
+            weakAnchorMetadata: nil,
+            speakerId: speakerId
         )
     }
 

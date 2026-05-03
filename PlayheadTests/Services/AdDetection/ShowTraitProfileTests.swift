@@ -371,4 +371,125 @@ struct ShowTraitProfileTests {
         #expect(snapshot.insertionVolatility == 1.0)
         #expect(snapshot.transcriptReliability == 0.0)
     }
+
+    // MARK: - Codable decode clamping (cycle-1 L5)
+    //
+    // Mirrors the cycle-1 084j fix on `AdDurationStats`: a hand-edited or
+    // version-skewed JSON payload must not slip past the `[0,1]` clamp.
+    // `JSONDecoder`'s synthesized `init(from:)` writes raw values directly
+    // to the stored `let` properties, bypassing the `min(max(..., 0), 1)`
+    // clamp at the memberwise initializer. The custom `init(from:)` funnels
+    // raw values through `init(...)` so the clamp is authoritative across
+    // every construction path.
+
+    @Test("EpisodeTraitSnapshot decode clamps out-of-range values")
+    func episodeTraitSnapshotDecodeClampsOutOfRangeValues() throws {
+        // Every clamped field set above 1.0 — must decode clamped to 1.0.
+        let payload = #"""
+        {
+            "musicDensity": 1.5,
+            "speakerTurnRate": 4.0,
+            "singleSpeakerDominance": 1.2,
+            "structureRegularity": 2.0,
+            "sponsorRecurrence": 1.7,
+            "insertionVolatility": 5.0,
+            "transcriptReliability": 1.1
+        }
+        """#
+        let snap = try JSONDecoder().decode(
+            EpisodeTraitSnapshot.self,
+            from: Data(payload.utf8)
+        )
+        #expect(snap.musicDensity == 1.0)
+        #expect(snap.speakerTurnRate == 4.0)
+        #expect(snap.singleSpeakerDominance == 1.0)
+        #expect(snap.structureRegularity == 1.0)
+        #expect(snap.sponsorRecurrence == 1.0)
+        #expect(snap.insertionVolatility == 1.0)
+        #expect(snap.transcriptReliability == 1.0)
+    }
+
+    @Test("EpisodeTraitSnapshot decode clamps negative values")
+    func episodeTraitSnapshotDecodeClampsNegativeValues() throws {
+        // Every clamped field set below 0 — must decode clamped to 0.
+        // speakerTurnRate is also clamped non-negative.
+        let payload = #"""
+        {
+            "musicDensity": -0.3,
+            "speakerTurnRate": -1.5,
+            "singleSpeakerDominance": -0.1,
+            "structureRegularity": -2.0,
+            "sponsorRecurrence": -0.5,
+            "insertionVolatility": -0.7,
+            "transcriptReliability": -0.9
+        }
+        """#
+        let snap = try JSONDecoder().decode(
+            EpisodeTraitSnapshot.self,
+            from: Data(payload.utf8)
+        )
+        #expect(snap.musicDensity == 0.0)
+        #expect(snap.speakerTurnRate == 0.0)
+        #expect(snap.singleSpeakerDominance == 0.0)
+        #expect(snap.structureRegularity == 0.0)
+        #expect(snap.sponsorRecurrence == 0.0)
+        #expect(snap.insertionVolatility == 0.0)
+        #expect(snap.transcriptReliability == 0.0)
+    }
+
+    @Test("ShowTraitProfile decode clamps out-of-range values")
+    func showTraitProfileDecodeClampsOutOfRangeValues() throws {
+        let payload = #"""
+        {
+            "musicDensity": 1.8,
+            "speakerTurnRate": 3.0,
+            "singleSpeakerDominance": 1.4,
+            "structureRegularity": 2.5,
+            "sponsorRecurrence": 1.1,
+            "insertionVolatility": 9.0,
+            "transcriptReliability": 1.3,
+            "episodesObserved": 7
+        }
+        """#
+        let profile = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(payload.utf8)
+        )
+        #expect(profile.musicDensity == 1.0)
+        #expect(profile.speakerTurnRate == 3.0)
+        #expect(profile.singleSpeakerDominance == 1.0)
+        #expect(profile.structureRegularity == 1.0)
+        #expect(profile.sponsorRecurrence == 1.0)
+        #expect(profile.insertionVolatility == 1.0)
+        #expect(profile.transcriptReliability == 1.0)
+        #expect(profile.episodesObserved == 7)
+    }
+
+    @Test("ShowTraitProfile decode clamps negative values")
+    func showTraitProfileDecodeClampsNegativeValues() throws {
+        let payload = #"""
+        {
+            "musicDensity": -0.5,
+            "speakerTurnRate": -2.0,
+            "singleSpeakerDominance": -0.1,
+            "structureRegularity": -1.5,
+            "sponsorRecurrence": -0.3,
+            "insertionVolatility": -3.0,
+            "transcriptReliability": -0.4,
+            "episodesObserved": 2
+        }
+        """#
+        let profile = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(payload.utf8)
+        )
+        #expect(profile.musicDensity == 0.0)
+        #expect(profile.speakerTurnRate == 0.0)
+        #expect(profile.singleSpeakerDominance == 0.0)
+        #expect(profile.structureRegularity == 0.0)
+        #expect(profile.sponsorRecurrence == 0.0)
+        #expect(profile.insertionVolatility == 0.0)
+        #expect(profile.transcriptReliability == 0.0)
+        #expect(profile.episodesObserved == 2)
+    }
 }

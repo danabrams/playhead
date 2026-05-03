@@ -330,12 +330,14 @@ actor AdDetectionService {
 
     private let logger = Logger(subsystem: "com.playhead", category: "AdDetectionService")
 
-    /// cycle-1 M2: Static logger for `private static` helpers that can't
-    /// reach the instance `logger` (specifically `decodeAdDurationStats`,
-    /// which runs inside `store.mutateProfile` closures on the
-    /// AnalysisStore actor and must not capture `self`). Same subsystem
-    /// as the instance logger so DiagnosticReports group both streams
-    /// under the AdDetectionService category.
+    /// cycle-1 M2 / cycle-2 M1 / cycle-3 L-1: Static logger for `private
+    /// static` helpers that need to log without `self` (callers today:
+    /// `decodeAdDurationStats`, `mergedTraitProfileJSON`,
+    /// `initialTraitProfileJSON`). These helpers run inside
+    /// `store.mutateProfile` closures on the AnalysisStore actor and
+    /// must not capture `self`. Same subsystem as the instance logger
+    /// so DiagnosticReports group both streams under the
+    /// AdDetectionService category.
     private static let staticLogger = Logger(
         subsystem: "com.playhead",
         category: "AdDetectionService"
@@ -2105,7 +2107,9 @@ actor AdDetectionService {
             try await updatePriors(
                 podcastId: podcastId,
                 nonSuppressedWindows: nonSuppressedWindows,
-                episodeDuration: episodeDuration
+                episodeDuration: episodeDuration,
+                featureWindows: featureWindows,
+                chunks: finalChunks
             )
         }
 
@@ -4640,15 +4644,26 @@ actor AdDetectionService {
     /// Locks the wire-up of `adDurationStatsJSON` accumulation through the
     /// actual create / update closures inside `mutateProfile` — the same
     /// path `runBackfill` exercises post-fusion.
+    ///
+    /// cycle-1 L4: accepts `featureWindows` and `chunks` so tests can drive
+    /// the trait-snapshot derivations with realistic signal (rather than
+    /// defaulting to empty arrays, which collapse every snapshot to the
+    /// no-signal neutral defaults and never exercise the real producer
+    /// math). No defaults — callers without a real signal pass `[]`
+    /// explicitly so the choice is visible at the call site.
     func updatePriorsForTesting(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
-        episodeDuration: Double
+        episodeDuration: Double,
+        featureWindows: [FeatureWindow],
+        chunks: [TranscriptChunk]
     ) async throws {
         try await updatePriors(
             podcastId: podcastId,
             nonSuppressedWindows: nonSuppressedWindows,
-            episodeDuration: episodeDuration
+            episodeDuration: episodeDuration,
+            featureWindows: featureWindows,
+            chunks: chunks
         )
     }
     #endif
@@ -4681,12 +4696,35 @@ actor AdDetectionService {
     ///     explicitly carries `existing.traitProfileJSON` forward.
     ///     (`title` was COALESCE-safe but is also passed through for
     ///     symmetry / defensiveness.)
+    /// cycle-1 L3: `featureWindows` and `chunks` are REQUIRED — no
+    /// defaults. The single production caller (`runBackfill`) always has
+    /// the full signal vector in scope and must thread it through; the
+    /// `updatePriorsForTesting` shim explicitly forwards them. Defaults
+    /// of `[]` previously made it possible for a future refactor to
+    /// introduce a new caller that silently dropped the signal and
+    /// regressed the trait-tier activation back to the no-signal neutral
+    /// defaults — invisible to most behavioral tests because the EMA
+    /// path still increments `episodesObserved`. Required parameters
+    /// surface the choice at the call site.
     private func updatePriors(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
-        episodeDuration: Double
+        episodeDuration: Double,
+        featureWindows: [FeatureWindow],
+        chunks: [TranscriptChunk]
     ) async throws {
         guard !nonSuppressedWindows.isEmpty, episodeDuration > 0 else { return }
+
+        // cycle-1 residual log: surface the trait-snapshot input cardinalities
+        // at the point of consumption so an empty-input regression (a future
+        // caller that drops the signal vector and silently regresses the
+        // trait tier to no-signal neutral defaults) is visible in
+        // DiagnosticReports / `log show` queries without a debugger
+        // attached. Counts only — no payload content — so privacy-public is
+        // safe.
+        logger.debug(
+            "[traitSnapshot] featureWindows=\(featureWindows.count, privacy: .public) chunks=\(chunks.count, privacy: .public)"
+        )
 
         // Compute normalized ad slot positions from confirmed windows.
         // These do not depend on the existing profile so we compute them
@@ -4738,6 +4776,22 @@ actor AdDetectionService {
                         with: newAdDurations
                     )
 
+                    // playhead-v7v8: bootstrap the trait profile from this
+                    // episode's signal. Without this seed, a fresh show
+                    // would walk through `episodesObserved == 1` carrying a
+                    // .unknown profile (since the EMA only fires on
+                    // `update:` rebases), forcing the resolver back to the
+                    // global tier even though we already have one
+                    // observation in hand. The first-episode merge below
+                    // mirrors `ShowTraitProfile.updated(from:)` for the
+                    // sentinel case (replace, don't blend).
+                    let initialTraitProfileJSON = Self.initialTraitProfileJSON(
+                        featureWindows: featureWindows,
+                        chunks: chunks,
+                        confirmedAdWindows: nonSuppressedWindows,
+                        episodeDuration: episodeDuration
+                    )
+
                     // Bug 4a default: brand-new profile gets trust=0.5
                     // (matches `setUserOverride`'s new-profile default).
                     // TrustScoringService.recordSuccessfulObservation
@@ -4753,6 +4807,7 @@ actor AdDetectionService {
                         observationCount: 1,
                         mode: "shadow",
                         recentFalseSkipSignals: 0,
+                        traitProfileJSON: initialTraitProfileJSON,
                         adDurationStatsJSON: initialAdDurationStatsJSON
                     )
                 },
@@ -4813,6 +4868,52 @@ actor AdDetectionService {
                         )
                     }()
 
+                    // playhead-v7v8: derive the per-episode trait snapshot
+                    // from the live signal that flowed into this backfill,
+                    // then advance the persisted ShowTraitProfile via the
+                    // existing EMA path on `ShowTraitProfile.updated(from:)`.
+                    // Done INSIDE the mutate closure so the read-modify-write
+                    // is part of the same AnalysisStore actor turn — same
+                    // atomicity contract that cycles 15/17 enforced for the
+                    // sponsorLexicon/slot priors.
+                    //
+                    // cycle-2 L1: compute the resolved trait JSON once via
+                    // nil-coalescing (`merged ?? existing.traitProfileJSON`)
+                    // rather than rebinding `existing` to an alias profile.
+                    // The carry-forward is still load-bearing — the
+                    // cycle-22 L-5 whole-file canary requires every
+                    // PodcastProfile-constructing `existing in` closure to
+                    // mention `<ident>.traitProfileJSON` somewhere in its
+                    // body, which the `?? existing.traitProfileJSON`
+                    // fallback satisfies on both branches.
+                    let mergedTraitProfileJSON = Self.mergedTraitProfileJSON(
+                        existing: existing,
+                        featureWindows: featureWindows,
+                        chunks: chunks,
+                        confirmedAdWindows: nonSuppressedWindows,
+                        episodeDuration: episodeDuration
+                    )
+                    let resolvedTraitProfileJSON = mergedTraitProfileJSON ?? existing.traitProfileJSON
+
+                    // cycle-2 M2: in DEBUG, assert that a successful merge
+                    // never regresses `episodesObserved`. The EMA path
+                    // (`ShowTraitProfile.updated(from:)`) increments by 1
+                    // on each call, so any drop signals a serialization or
+                    // version-skew bug that would otherwise silently
+                    // corrupt the persisted profile.
+                    #if DEBUG
+                    if let merged = mergedTraitProfileJSON,
+                       let mergedData = merged.data(using: .utf8),
+                       let mergedProfile = try? JSONDecoder().decode(
+                           ShowTraitProfile.self, from: mergedData
+                       ) {
+                        assert(
+                            mergedProfile.episodesObserved >= existing.traitProfile.episodesObserved,
+                            "cycle-2 M2: merged traitProfile.episodesObserved (\(mergedProfile.episodesObserved)) regressed below existing (\(existing.traitProfile.episodesObserved)) for podcast \(podcastId)"
+                        )
+                    }
+                    #endif
+
                     // Bug 4a (trust carry-forward): updatePriors does not
                     // touch `skipTrustScore`. TrustScoringService is the
                     // sole writer; we copy the existing value through.
@@ -4827,7 +4928,7 @@ actor AdDetectionService {
                         observationCount: existing.observationCount + 1,
                         mode: existing.mode,
                         recentFalseSkipSignals: existing.recentFalseSkipSignals,
-                        traitProfileJSON: existing.traitProfileJSON,
+                        traitProfileJSON: resolvedTraitProfileJSON,
                         title: existing.title,
                         adDurationStatsJSON: mergedAdDurationStatsJSON
                     )
@@ -4841,6 +4942,96 @@ actor AdDetectionService {
         currentPodcastProfile = updatedProfile
 
         logger.info("Updated priors for podcast \(podcastId): observations=\(updatedProfile.observationCount) trust=\(updatedProfile.skipTrustScore, format: .fixed(precision: 2))")
+    }
+
+    // MARK: - Trait profile merge helpers (playhead-v7v8)
+    //
+    // Both helpers are `private static` so the `store.mutateProfile`
+    // closures (which run inside the `AnalysisStore` actor) can call them
+    // without capturing `self`. Same constraint and rationale as
+    // `mergeSlotPositions` and the `AdDurationStats` helpers below.
+
+    /// Build the trait snapshot for this episode and merge it into the
+    /// existing profile's persisted `ShowTraitProfile` via the standard
+    /// EMA path (`ShowTraitProfile.updated(from:)`). Returns the encoded
+    /// JSON, or `nil` if encoding fails (which leaves the existing
+    /// `traitProfileJSON` undisturbed in the carry-forward path).
+    ///
+    /// Called inside the `update` closure of `mutateProfile`, where the
+    /// snapshot is derived from THIS episode's signal but the EMA target
+    /// is the stored profile's prior trait state.
+    private static func mergedTraitProfileJSON(
+        existing: PodcastProfile,
+        featureWindows: [FeatureWindow],
+        chunks: [TranscriptChunk],
+        confirmedAdWindows: [AdWindow],
+        episodeDuration: Double
+    ) -> String? {
+        let snapshot = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: featureWindows,
+            chunks: chunks,
+            confirmedAdWindows: confirmedAdWindows,
+            existingProfile: existing,
+            episodeDuration: episodeDuration
+        )
+        let mergedProfile = existing.traitProfile.updated(from: snapshot)
+        // cycle-2 M1: surface encode failures so a silent `nil` return
+        // (which leaves the existing `traitProfileJSON` undisturbed) is
+        // still visible in DiagnosticReports / `log show` queries. The
+        // `nil` semantic is preserved because callers depend on it.
+        do {
+            let data = try JSONEncoder().encode(mergedProfile)
+            guard let json = String(data: data, encoding: .utf8) else {
+                staticLogger.error(
+                    "[traitSnapshot] mergedTraitProfileJSON: utf8 conversion produced no string"
+                )
+                return nil
+            }
+            return json
+        } catch {
+            staticLogger.error(
+                "[traitSnapshot] mergedTraitProfileJSON: encode failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    /// Build the seed trait snapshot for a brand-new profile and encode
+    /// it. The first-episode merge of `ShowTraitProfile.unknown.updated(
+    /// from: snapshot)` replaces the sentinel directly (no blending), so
+    /// the result is just the snapshot promoted to a one-episode profile.
+    private static func initialTraitProfileJSON(
+        featureWindows: [FeatureWindow],
+        chunks: [TranscriptChunk],
+        confirmedAdWindows: [AdWindow],
+        episodeDuration: Double
+    ) -> String? {
+        let snapshot = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: featureWindows,
+            chunks: chunks,
+            confirmedAdWindows: confirmedAdWindows,
+            existingProfile: nil,
+            episodeDuration: episodeDuration
+        )
+        let seedProfile = ShowTraitProfile.unknown.updated(from: snapshot)
+        // cycle-2 M1: surface encode failures so the bootstrap-skip path
+        // (column persisted as nil) is observable in DiagnosticReports
+        // rather than disappearing silently.
+        do {
+            let data = try JSONEncoder().encode(seedProfile)
+            guard let json = String(data: data, encoding: .utf8) else {
+                staticLogger.error(
+                    "[traitSnapshot] initialTraitProfileJSON: utf8 conversion produced no string"
+                )
+                return nil
+            }
+            return json
+        } catch {
+            staticLogger.error(
+                "[traitSnapshot] initialTraitProfileJSON: encode failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
     }
 
     /// Merge new slot positions with existing ones. Deduplicates slots that

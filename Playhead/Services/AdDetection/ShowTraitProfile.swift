@@ -52,6 +52,38 @@ struct EpisodeTraitSnapshot: Sendable, Codable, Equatable {
         self.insertionVolatility = min(max(insertionVolatility, 0), 1)
         self.transcriptReliability = min(max(transcriptReliability, 0), 1)
     }
+
+    // MARK: - Codable
+    //
+    // cycle-1 L5: explicit `init(from:)` so a hand-edited or version-skewed
+    // JSON payload can't slip past the [0,1] / non-negative clamps. The
+    // synthesized `Codable.init(from:)` writes raw decoded values directly
+    // to the stored `let` properties, bypassing the clamping memberwise
+    // init above. Mirrors the cycle-1 084j fix on `AdDurationStats` —
+    // funnel decoded values back through `init(...)` so the clamps are
+    // authoritative across every construction path.
+    private enum CodingKeys: String, CodingKey {
+        case musicDensity
+        case speakerTurnRate
+        case singleSpeakerDominance
+        case structureRegularity
+        case sponsorRecurrence
+        case insertionVolatility
+        case transcriptReliability
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            musicDensity: try container.decode(Float.self, forKey: .musicDensity),
+            speakerTurnRate: try container.decode(Float.self, forKey: .speakerTurnRate),
+            singleSpeakerDominance: try container.decode(Float.self, forKey: .singleSpeakerDominance),
+            structureRegularity: try container.decode(Float.self, forKey: .structureRegularity),
+            sponsorRecurrence: try container.decode(Float.self, forKey: .sponsorRecurrence),
+            insertionVolatility: try container.decode(Float.self, forKey: .insertionVolatility),
+            transcriptReliability: try container.decode(Float.self, forKey: .transcriptReliability)
+        )
+    }
 }
 
 // MARK: - ShowTraitProfile
@@ -83,6 +115,31 @@ struct ShowTraitProfile: Sendable, Codable, Equatable {
 
     /// Number of episodes that have contributed to this profile.
     let episodesObserved: Int
+
+    // MARK: Init
+
+    /// Memberwise initializer with clamping. Every construction path
+    /// (sentinel, EMA update, custom `init(from:)`) routes through here
+    /// so the [0,1] / non-negative invariants are authoritative.
+    init(
+        musicDensity: Float,
+        speakerTurnRate: Float,
+        singleSpeakerDominance: Float,
+        structureRegularity: Float,
+        sponsorRecurrence: Float,
+        insertionVolatility: Float,
+        transcriptReliability: Float,
+        episodesObserved: Int
+    ) {
+        self.musicDensity = min(max(musicDensity, 0), 1)
+        self.speakerTurnRate = max(speakerTurnRate, 0)
+        self.singleSpeakerDominance = min(max(singleSpeakerDominance, 0), 1)
+        self.structureRegularity = min(max(structureRegularity, 0), 1)
+        self.sponsorRecurrence = min(max(sponsorRecurrence, 0), 1)
+        self.insertionVolatility = min(max(insertionVolatility, 0), 1)
+        self.transcriptReliability = min(max(transcriptReliability, 0), 1)
+        self.episodesObserved = max(0, episodesObserved)
+    }
 
     // MARK: Reliability gate
 
@@ -186,6 +243,40 @@ struct ShowTraitProfile: Sendable, Codable, Equatable {
             return "general"
         }
         return labels.joined(separator: " ")
+    }
+
+    // MARK: - Codable
+    //
+    // cycle-1 L5: explicit `init(from:)` so a hand-edited or version-skewed
+    // JSON payload can't slip past the [0,1] / non-negative clamps in the
+    // memberwise init above. The synthesized `Codable.init(from:)` writes
+    // raw decoded values directly to the stored `let` properties,
+    // bypassing the clamps. Mirrors the cycle-1 084j fix on
+    // `AdDurationStats` — funnel decoded values back through `init(...)`
+    // so the clamps are authoritative across every construction path.
+    private enum CodingKeys: String, CodingKey {
+        case musicDensity
+        case speakerTurnRate
+        case singleSpeakerDominance
+        case structureRegularity
+        case sponsorRecurrence
+        case insertionVolatility
+        case transcriptReliability
+        case episodesObserved
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            musicDensity: try container.decode(Float.self, forKey: .musicDensity),
+            speakerTurnRate: try container.decode(Float.self, forKey: .speakerTurnRate),
+            singleSpeakerDominance: try container.decode(Float.self, forKey: .singleSpeakerDominance),
+            structureRegularity: try container.decode(Float.self, forKey: .structureRegularity),
+            sponsorRecurrence: try container.decode(Float.self, forKey: .sponsorRecurrence),
+            insertionVolatility: try container.decode(Float.self, forKey: .insertionVolatility),
+            transcriptReliability: try container.decode(Float.self, forKey: .transcriptReliability),
+            episodesObserved: try container.decode(Int.self, forKey: .episodesObserved)
+        )
     }
 
     // MARK: Private
