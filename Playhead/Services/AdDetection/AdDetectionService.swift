@@ -330,12 +330,14 @@ actor AdDetectionService {
 
     private let logger = Logger(subsystem: "com.playhead", category: "AdDetectionService")
 
-    /// cycle-1 M2: Static logger for `private static` helpers that can't
-    /// reach the instance `logger` (specifically `decodeAdDurationStats`,
-    /// which runs inside `store.mutateProfile` closures on the
-    /// AnalysisStore actor and must not capture `self`). Same subsystem
-    /// as the instance logger so DiagnosticReports group both streams
-    /// under the AdDetectionService category.
+    /// cycle-1 M2 / cycle-2 M1 / cycle-3 L-1: Static logger for `private
+    /// static` helpers that need to log without `self` (callers today:
+    /// `decodeAdDurationStats`, `mergedTraitProfileJSON`,
+    /// `initialTraitProfileJSON`). These helpers run inside
+    /// `store.mutateProfile` closures on the AnalysisStore actor and
+    /// must not capture `self`. Same subsystem as the instance logger
+    /// so DiagnosticReports group both streams under the
+    /// AdDetectionService category.
     private static let staticLogger = Logger(
         subsystem: "com.playhead",
         category: "AdDetectionService"
