@@ -692,6 +692,105 @@ struct PriorHierarchyWireUpTests {
         #expect(decoded == original)
     }
 
+    @Test("traitProfileJSON UPDATE overwrites the prior value (no COALESCE on the column)")
+    func traitProfileJSONUpsertOverwritesPriorValue() async throws {
+        // Cycle-3 M-2: pin the SQL contract that
+        // `AnalysisStore.upsertProfile`'s UPDATE branch writes
+        // `traitProfileJSON = excluded.traitProfileJSON` (overwrite, not
+        // COALESCE). The cycle-15 M-2 / cycle-17 M-1 atomicity canaries
+        // assume this contract — they pin the carry-forward in the
+        // closure as the load-bearing safety net because a default-`nil`
+        // would silently nil the persisted column. If the SQL is ever
+        // changed to `COALESCE(excluded.traitProfileJSON, traitProfileJSON)`,
+        // those canaries lose their meaning (a default-nil constructor
+        // would no longer clobber the persisted JSON). This test catches
+        // a quiet COALESCE drift directly.
+        let store = try await makeTestStore()
+        let podcastId = "podcast-trait-overwrite-1"
+
+        // First upsert: write `traitProfileJSON = A` (musicDensity=0.3).
+        let profileA = ShowTraitProfile(
+            musicDensity: 0.3,
+            speakerTurnRate: 4.0,
+            singleSpeakerDominance: 0.5,
+            structureRegularity: 0.6,
+            sponsorRecurrence: 0.2,
+            insertionVolatility: 0.4,
+            transcriptReliability: 0.7,
+            episodesObserved: 1
+        )
+        let jsonA = try #require(
+            String(data: try JSONEncoder().encode(profileA), encoding: .utf8)
+        )
+        try await store.upsertProfile(
+            PodcastProfile(
+                podcastId: podcastId,
+                sponsorLexicon: nil,
+                normalizedAdSlotPriors: nil,
+                repeatedCTAFragments: nil,
+                jingleFingerprints: nil,
+                implicitFalsePositiveCount: 0,
+                skipTrustScore: 0.5,
+                observationCount: 1,
+                mode: SkipMode.shadow.rawValue,
+                recentFalseSkipSignals: 0,
+                traitProfileJSON: jsonA,
+                title: nil,
+                adDurationStatsJSON: nil
+            )
+        )
+
+        // Second upsert with the same podcastId: write a DIFFERENT
+        // `traitProfileJSON = B` (musicDensity=0.7). If the column is
+        // overwriting (the contract this test pins), the persisted value
+        // must decode to B. If the column ever becomes COALESCE-wrapped,
+        // the second write would lose any nil-only fields and a future
+        // `traitProfileJSON: nil` would silently retain A — exactly the
+        // shape the atomicity canaries assume can't happen.
+        let profileB = ShowTraitProfile(
+            musicDensity: 0.7,
+            speakerTurnRate: 4.0,
+            singleSpeakerDominance: 0.5,
+            structureRegularity: 0.6,
+            sponsorRecurrence: 0.2,
+            insertionVolatility: 0.4,
+            transcriptReliability: 0.7,
+            episodesObserved: 2
+        )
+        let jsonB = try #require(
+            String(data: try JSONEncoder().encode(profileB), encoding: .utf8)
+        )
+        try await store.upsertProfile(
+            PodcastProfile(
+                podcastId: podcastId,
+                sponsorLexicon: nil,
+                normalizedAdSlotPriors: nil,
+                repeatedCTAFragments: nil,
+                jingleFingerprints: nil,
+                implicitFalsePositiveCount: 0,
+                skipTrustScore: 0.5,
+                observationCount: 2,
+                mode: SkipMode.shadow.rawValue,
+                recentFalseSkipSignals: 0,
+                traitProfileJSON: jsonB,
+                title: nil,
+                adDurationStatsJSON: nil
+            )
+        )
+
+        let fetched = try #require(await store.fetchProfile(podcastId: podcastId))
+        let fetchedJSON = try #require(
+            fetched.traitProfileJSON,
+            "second upsert must leave traitProfileJSON populated"
+        )
+        let decoded = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(fetchedJSON.utf8)
+        )
+        #expect(decoded == profileB, "UPDATE must overwrite, not COALESCE")
+        #expect(abs(decoded.musicDensity - 0.7) < 0.001)
+    }
+
     // MARK: - Helpers
 
     private func makeProfile(
