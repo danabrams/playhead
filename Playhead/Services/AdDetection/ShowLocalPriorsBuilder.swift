@@ -26,6 +26,15 @@
 // GUARDRAIL: The builder is pure. Persistence (column + accumulator) lives
 // in `AnalysisStore` and `AdDetectionService.updatePriors` respectively.
 //
+// CURRENT CONSUMPTION (cycle-1 H1, 2026-05-03): the only `ShowLocalPriors`
+// field this builder populates is `typicalAdDuration` (driven by the
+// `meanDuration` column on `AdDurationStats`). The other ShowLocalPriors
+// fields (`musicBracketTrust`, `metadataTrust`, `fmBudgetBias`,
+// `fingerprintTransferConfidence`, `sponsorRecurrenceExpectation`) are
+// emitted as `nil` because no production aggregator exists for them yet
+// and the resolver short-circuits on `nil` per-field. Pairs with the
+// downstream consumption note in `PriorHierarchy.swift`.
+//
 // Network priors and trait writers are filed as separate beads — see the
 // PR description for IDs.
 

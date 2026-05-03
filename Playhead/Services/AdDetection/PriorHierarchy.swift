@@ -14,6 +14,18 @@
 // priorScore only. They do NOT grant auto-skip authority and do NOT
 // directly modify evidence fusion weights. The fusion layer and skip
 // policy matrix remain the sole decision-makers for skip actions.
+//
+// CURRENT CONSUMPTION (cycle-1 H1, 2026-05-03): only the
+// `typicalAdDuration` field on `ResolvedPriors` is consumed in
+// production today, via `DurationPrior(resolvedPriors:)`. The other
+// scalar fields (`musicBracketTrust`, `metadataTrust`, `fmBudgetBias`,
+// `fingerprintTransferConfidence`, `sponsorRecurrenceExpectation`) are
+// computed and discarded — their consumers are filed as separate beads.
+// The hierarchy structure is still load-bearing: future consumers
+// inherit the same global → network → trait → show-local resolution
+// without re-implementing the blending math. Don't read this comment
+// as gating multiple production knobs today; it gates one (duration)
+// and reserves the rest.
 
 import Foundation
 
@@ -73,20 +85,40 @@ struct ShowLocalPriors: Sendable, Equatable {
 /// The output of prior resolution: a fully-populated set of priors with
 /// provenance tracking showing which level determined each value.
 ///
+/// **Field consumption (cycle-1 H1, 2026-05-03):** Today only
+/// `typicalAdDuration` is wired into a production knob — `DurationPrior`
+/// reads it via `DurationPrior(resolvedPriors:)` inside the backfill fusion
+/// loop. The other five scalar fields (`musicBracketTrust`, `metadataTrust`,
+/// `fmBudgetBias`, `fingerprintTransferConfidence`,
+/// `sponsorRecurrenceExpectation`) are computed by the resolver but
+/// currently have no production consumer; they are reserved for future
+/// callers (filed as separate beads) and intentionally kept here so the
+/// resolver contract doesn't churn when those consumers land. The
+/// `activeLevel` and `levelContributions` provenance fields are read by
+/// telemetry / debug logging only.
+///
 /// These priors feed into ranking, prioritization, and classifier priorScore.
 /// They do NOT grant auto-skip authority or modify fusion weights directly.
 struct ResolvedPriors: Sendable, Equatable {
     /// How much to trust music bracket signals (0-1).
+    /// **Reserved for future consumers** — not currently consumed in production.
     let musicBracketTrust: Float
     /// Expected metadata reliability (0-1).
+    /// **Reserved for future consumers** — not currently consumed in production.
     let metadataTrust: Float
     /// Bias toward using more/less FM budget (0 = minimal FM, 1 = max FM).
+    /// **Reserved for future consumers** — not currently consumed in production.
     let fmBudgetBias: Float
     /// Confidence in fingerprint transfer across episodes (0-1).
+    /// **Reserved for future consumers** — not currently consumed in production.
     let fingerprintTransferConfidence: Float
     /// Expected sponsor recurrence rate (0-1).
+    /// **Reserved for future consumers** — not currently consumed in production.
     let sponsorRecurrenceExpectation: Float
     /// Expected ad duration range.
+    /// **Load-bearing** — read by `DurationPrior(resolvedPriors:)` inside
+    /// `AdDetectionService.runBackfill` and folded into the per-span
+    /// duration prior used by the DecisionMapper.
     let typicalAdDuration: ClosedRange<TimeInterval>
     /// Which hierarchy level determined these values (the highest active level).
     let activeLevel: PriorLevel
