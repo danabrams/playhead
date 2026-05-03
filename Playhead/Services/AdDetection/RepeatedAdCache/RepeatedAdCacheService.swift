@@ -188,8 +188,16 @@ actor RepeatedAdCacheService {
         for candidate in candidates {
             if candidate.fingerprint.hammingDistance(to: fingerprint) <= config.hammingDistanceThreshold {
                 // Bead §2 requires confidence ≥ 0.85 at original
-                // detection. We never write a row that doesn't satisfy
-                // that, but defend in depth:
+                // detection. `store(...)` already enforces this gate so
+                // a low-confidence row cannot enter through the
+                // documented path — but `RepeatedAdCacheStorage` is a
+                // protocol with multiple impls, and a future sync
+                // restore, schema downgrade, or `store` regression
+                // could resurrect a stale row. The
+                // `lookupSkipsRowsBelowStoreConfidenceThreshold` test
+                // pins this branch as live defense in depth, not dead
+                // code: write a low-confidence row through the storage
+                // seam, lookup, assert miss.
                 guard candidate.confidence >= config.storeConfidenceThreshold else { continue }
 
                 // Bump LRU clock and return. Note: we do NOT call
@@ -224,6 +232,20 @@ actor RepeatedAdCacheService {
     /// Record a single user-facing outcome (hit or miss). Drives the
     /// 14-day rolling window and triggers auto-disable when the
     /// configured floor is breached.
+    ///
+    /// Write-rate envelope (playhead-43ed M2): each call is one
+    /// SQLite INSERT into `repeated_ad_cache_outcomes` plus a bounded
+    /// `purgeOutcomes` DELETE. After the C2 fix, the
+    /// `AdDetectionService` hot path only records a miss when the
+    /// classifier verdict clears `storeConfidenceThreshold` (i.e. an
+    /// actual ad the cache failed to recognise). On a typical episode
+    /// that's O(adCount) writes — single-digit per episode — well
+    /// inside the unbatched-INSERT envelope (<1ms each on iPhone 17
+    /// Pro). No transaction/batching wrapper is needed; the bottleneck
+    /// would be the classifier itself, which already runs at >100ms
+    /// per candidate. If a future change removes the C2 verdict gate
+    /// — which would resurrect the original "every miss writes a
+    /// row" behaviour — revisit batching here.
     func recordOutcome(hit: Bool) async throws {
         guard enabled else { return }
         let now = clock()

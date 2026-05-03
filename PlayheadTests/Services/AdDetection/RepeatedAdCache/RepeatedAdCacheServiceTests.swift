@@ -523,6 +523,47 @@ struct RepeatedAdCacheServiceTests {
         #expect(snap.hitCount == 0)
     }
 
+    // MARK: - L1: defense-in-depth — low-confidence row in storage is ignored on lookup
+
+    /// `RepeatedAdCacheService.store(...)` enforces
+    /// `confidence >= storeConfidenceThreshold` and only persists rows
+    /// that satisfy it. Belt-and-braces, `lookup(...)` re-checks the
+    /// same gate so a corrupted row, an out-of-band SQLite write (e.g.
+    /// a sync conflict resolution bug), or a future `store` regression
+    /// cannot resurrect a low-confidence entry. Pre-fix this `guard`
+    /// branch was un-tested; the reviewer flagged it as dead code. We
+    /// pin the contract by writing a low-confidence row through the
+    /// storage seam and asserting the service returns `.miss`.
+    @Test
+    func lookupSkipsRowsBelowStoreConfidenceThreshold() async throws {
+        let (service, _, storage) = Self.makeService()
+        // Bypass service.store() — write directly into storage with a
+        // confidence below the threshold. Any future code path (sync
+        // restore, schema downgrade, a fresh `store` regression) that
+        // can introduce a low-confidence row will look like this.
+        let belowThreshold = Self.testConfig.storeConfidenceThreshold - 0.10
+        try await storage.upsert(.init(
+            showId: "show-1",
+            fingerprint: Self.baseFingerprint,
+            boundaryStart: 1,
+            boundaryEnd: 2,
+            confidence: belowThreshold,
+            lastSeenAt: Date(timeIntervalSince1970: 100)
+        ))
+        // Sanity: storage actually has the row.
+        #expect(try await storage.totalCount() == 1)
+
+        // Lookup against the exact-matching fingerprint must MISS — the
+        // confidence guard rejects the candidate.
+        let outcome = try await service.lookup(
+            showId: "show-1",
+            fingerprint: Self.baseFingerprint
+        )
+        if case .hit = outcome {
+            Issue.record("low-confidence row must be ignored by lookup, got \(outcome)")
+        }
+    }
+
     // MARK: - Extra: re-enable does NOT magically restore data (kill switch is destructive)
 
     @Test
