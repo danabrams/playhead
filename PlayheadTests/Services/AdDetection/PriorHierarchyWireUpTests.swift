@@ -327,6 +327,48 @@ struct PriorHierarchyWireUpTests {
         #expect(fetched?.adDurationStatsJSON == json)
     }
 
+    /// cycle-1 #192: COALESCE no-op pin for `adDurationStatsJSON`.
+    ///
+    /// `upsertProfile` wraps the column in
+    /// `COALESCE(excluded.adDurationStatsJSON, podcast_profiles.adDurationStatsJSON)`
+    /// so that a profile rebuild that doesn't carry the stats forward
+    /// (e.g. trust-scoring, which builds a profile without this column
+    /// in scope) preserves the previously-recorded aggregate rather
+    /// than clobbering it with NULL. Without the COALESCE clause the
+    /// per-show ad-duration mean would be wiped on every trust-score
+    /// recompute, defeating the point of persisting it across launches.
+    /// This test pins the contract end-to-end: seed → upsert with
+    /// nil → reload still has the seed's stats.
+    @Test("upsertProfile with nil adDurationStatsJSON preserves previously-recorded aggregate (COALESCE)")
+    func upsertNilAdDurationStatsPreservesExisting() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-coalesce-stats"
+        let stats = AdDurationStats(meanDuration: 27.5, sampleCount: 11)
+        let json = stats.encodeForTesting()
+        let seed = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: json,
+            observationCount: 4
+        )
+        try await store.upsertProfile(seed)
+
+        // Re-upsert with adDurationStatsJSON: nil (e.g. trust-scoring
+        // rebuilding the profile without this column in scope).
+        let rebuilt = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: nil,
+            observationCount: 5
+        )
+        try await store.upsertProfile(rebuilt)
+
+        let reloaded = try await store.fetchProfile(podcastId: podcastId)
+        #expect(reloaded?.adDurationStatsJSON == json)
+        // Confirms the upsert applied (observationCount changed) — so
+        // the COALESCE clause is what saved the aggregate, not a
+        // silent no-op upsert.
+        #expect(reloaded?.observationCount == 5)
+    }
+
     @Test("updatePriors merges new ad-window durations into adDurationStatsJSON")
     func updatePriorsAccumulatesDurations() async throws {
         let store = try await makeTestStore()
