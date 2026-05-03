@@ -162,6 +162,35 @@ struct EpisodeTraitSnapshotBuilderTests {
         #expect(snap.singleSpeakerDominance == 0.5)
     }
 
+    @Test("no-speakerId fall-through returns both neutral defaults atomically")
+    func noSpeakerIdFallThroughReturnsBothNeutrals() {
+        // Cycle-3 missing-test #4: when chunks carry NO speakerId at all
+        // (today's reality before diarization lands — TODO playhead-wmy6),
+        // the producer's `deriveSpeakerSignals` falls through to a single
+        // hard-coded `(0, 0.5)` return tuple. This test pins BOTH neutral
+        // defaults in a single assertion so a future refactor that splits
+        // the return values across paths (or mixes neutral with computed)
+        // can't pass the existing single-field tests while silently
+        // breaking the fall-through invariant. When real diarization is
+        // wired and chunks always carry a speakerId, this fall-through
+        // path becomes unreachable and the test should be deleted (not
+        // weakened).
+        let chunks: [TranscriptChunk] = [
+            makeChunk(start: 0, end: 10, speakerId: nil),
+            makeChunk(start: 10, end: 20, speakerId: nil),
+            makeChunk(start: 20, end: 30, speakerId: nil)
+        ]
+        let snap = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: [],
+            chunks: chunks,
+            confirmedAdWindows: [],
+            existingProfile: nil,
+            episodeDuration: 60
+        )
+        #expect(snap.singleSpeakerDominance == 0.5)
+        #expect(snap.speakerTurnRate == 0.0)
+    }
+
     // MARK: - structureRegularity
 
     @Test("structureRegularity is high when ad slots align with prior slots")
@@ -326,6 +355,52 @@ struct EpisodeTraitSnapshotBuilderTests {
     }
 
     // MARK: - End-to-end: producer feeds EMA merge into ShowTraitProfile.updated
+
+    @Test("first-episode update equals snapshot field-for-field")
+    func firstEpisodeUpdateEqualsSnapshot() {
+        // Cycle-3 missing-test #2: bootstrap-replace invariant. When the
+        // unknown sentinel absorbs its first episode, the EMA path is
+        // intentionally skipped — `ShowTraitProfile.updated(from:)`
+        // returns a profile whose every trait equals the snapshot's
+        // (no blending against the 0.5 sentinel, which would dilute
+        // real signal). Pin this field-for-field so a future EMA
+        // refactor that "normalises" the first-episode path back into
+        // the blended form (e.g. `0.3 * episode + 0.7 * 0.5`) can't
+        // silently regress the bootstrap.
+        let windows: [FeatureWindow] = [
+            makeFeatureWindow(musicProbability: 0.3),
+            makeFeatureWindow(musicProbability: 0.5)
+        ]
+        let chunks: [TranscriptChunk] = [
+            makeChunk(start: 0, end: 30, speakerId: 1),
+            makeChunk(start: 30, end: 60, speakerId: 2)
+        ]
+        let ads: [AdWindow] = [
+            makeAdWindow(start: 60, end: 90, advertiser: "ACME")
+        ]
+        let snapshot = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: windows,
+            chunks: chunks,
+            confirmedAdWindows: ads,
+            existingProfile: nil,
+            episodeDuration: 600
+        )
+
+        let profile = ShowTraitProfile.unknown.updated(from: snapshot)
+
+        // Every trait dimension must mirror the snapshot's exactly.
+        #expect(profile.musicDensity == snapshot.musicDensity)
+        #expect(profile.speakerTurnRate == snapshot.speakerTurnRate)
+        #expect(profile.singleSpeakerDominance == snapshot.singleSpeakerDominance)
+        #expect(profile.structureRegularity == snapshot.structureRegularity)
+        #expect(profile.sponsorRecurrence == snapshot.sponsorRecurrence)
+        #expect(profile.insertionVolatility == snapshot.insertionVolatility)
+        #expect(profile.transcriptReliability == snapshot.transcriptReliability)
+        // First-episode bootstrap → episodesObserved == 1.
+        #expect(profile.episodesObserved == 1)
+        // And the profile is NOT yet reliable (gate is >= 3).
+        #expect(!profile.isReliable)
+    }
 
     @Test("snapshot from real signal updates an unknown profile to a reliable one after 3 episodes")
     func snapshotPipelineProducesReliableProfile() {
