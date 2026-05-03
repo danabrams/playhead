@@ -210,12 +210,14 @@ enum PriorHierarchyResolver {
         }
 
         // Level 3: Show-local priors (wins at >= 5 episodes).
-        // Coupling note (see `ShowLocalPriorsBuilder.swift` `build`): the
-        // builder floors `episodeCount` to `showLocalThreshold` whenever it
-        // emits a non-nil value, so this check is effectively a no-op for
-        // builder-produced priors. It still matters as an independent floor
-        // for any test or future caller that constructs `ShowLocalPriors`
-        // directly without going through the builder.
+        // cycle-1 L1: this gate is now load-bearing for builder-produced
+        // priors too. The builder no longer floors `episodeCount`; it
+        // passes `PodcastProfile.observationCount` through verbatim.
+        // A profile with enough confirmed ad samples (>= 5) but few
+        // distinct episodes (e.g. one episode yielding many ads) will
+        // be rejected here and fall back to the trait/global blend,
+        // which is the right behavior for low-cross-episode-generality
+        // shows.
         if let local = showLocalPriors, local.episodeCount >= showLocalThreshold {
             let localWeight = showLocalBlendWeight(episodeCount: local.episodeCount)
 

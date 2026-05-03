@@ -115,6 +115,35 @@ struct PriorHierarchyWireUpTests {
         #expect(stats.sampleCount == 0)
     }
 
+    @Test("builder passes observationCount through verbatim (cycle-1 L1)")
+    func builderDoesNotFloorEpisodeCount() {
+        // cycle-1 L1: previously the builder floored `episodeCount` at
+        // `PriorHierarchyResolver.showLocalThreshold` (5) so the resolver
+        // gate was guaranteed to clear. That papered over a real
+        // inconsistency: a profile with sampleCount >= 5 but
+        // observationCount < 5 (one episode yielding many ads) wouldn't
+        // have enough cross-episode generality to justify activating
+        // show-local priors. The builder now passes `observationCount`
+        // through verbatim and lets the resolver enforce its own gate.
+        //
+        // Construct a profile with sampleCount >= minSampleCount but a
+        // small `observationCount=2`, and assert the builder emits
+        // episodeCount=2 (not 5).
+        let stats = AdDurationStats(
+            meanDuration: 30,
+            sampleCount: ShowLocalPriorsBuilder.minSampleCount
+        )
+        let profile = makeProfile(
+            adDurationStatsJSON: stats.encodeForTesting(),
+            observationCount: 2
+        )
+        // Builder still requires sampleCount >= minSampleCount, which
+        // we satisfy. The observationCount value should flow through
+        // unchanged so the resolver can gate the activation.
+        let local = ShowLocalPriorsBuilder.build(from: profile)
+        #expect(local?.episodeCount == 2)
+    }
+
     @Test("builder with mean 60 (typical ad) keeps a normal range")
     func builderShapesTypicalDuration() {
         let stats = AdDurationStats(meanDuration: 60, sampleCount: 30)

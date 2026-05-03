@@ -130,19 +130,26 @@ enum ShowLocalPriorsBuilder {
 
         // Episode count drives the resolver's blend weight via
         // `PriorHierarchyResolver.showLocalBlendWeight`. We use the
-        // profile's `observationCount` (number of episodes processed) as
-        // the canonical "episodes observed" signal. The threshold gate
-        // here is the sample count (number of observed ads); the blend
-        // weight scales with observed episodes. Both grow together in
-        // practice, so this keeps the resolver's contract intact.
+        // profile's `observationCount` (number of episodes processed)
+        // as the canonical "episodes observed" signal. The threshold
+        // gate here is the sample count (number of observed ads); the
+        // blend weight scales with observed episodes.
         //
-        // Coupling note (see `PriorHierarchy.swift` `showLocalThreshold`):
-        // we floor `episodeCount` at the resolver's `showLocalThreshold` so
-        // any value the builder produces is guaranteed to clear the
-        // resolver's `episodeCount >= showLocalThreshold` gate. The
-        // independent gate here is `sampleCount >= minSampleCount` above;
-        // the resolver-side check becomes a no-op when the builder emits
-        // a non-nil value at all.
+        // cycle-1 L1: pass `observationCount` through verbatim. The
+        // previous implementation floored episodeCount at
+        // `PriorHierarchyResolver.showLocalThreshold` "so the resolver
+        // gate is guaranteed to clear", which papered over a real
+        // inconsistency: a profile with sampleCount >= 5 but
+        // observationCount < 5 (e.g. one episode that yielded 5
+        // confirmed ads) wouldn't actually have enough cross-episode
+        // generality to justify activating show-local priors, and the
+        // resolver's `episodeCount >= showLocalThreshold` check is the
+        // gate that catches this. By passing the raw value, we let the
+        // resolver enforce its own contract instead of having the
+        // builder lie about it. In the common case the two grow
+        // together, so this only changes behavior on the pathological
+        // single-episode-many-ads pattern that should fall back to
+        // global defaults anyway.
         return ShowLocalPriors(
             musicBracketTrust: nil,
             metadataTrust: nil,
@@ -150,7 +157,7 @@ enum ShowLocalPriorsBuilder {
             fingerprintTransferConfidence: nil,
             sponsorRecurrenceExpectation: nil,
             typicalAdDuration: range,
-            episodeCount: max(profile.observationCount, PriorHierarchyResolver.showLocalThreshold)
+            episodeCount: profile.observationCount
         )
     }
 
