@@ -4913,6 +4913,13 @@ actor AdDetectionService {
     /// Encode a freshly-merged `AdDurationStats` for persistence, or `nil`
     /// when no new observations would change the aggregate AND the existing
     /// aggregate is empty (so we don't write `{"meanDuration":0,"sampleCount":0}`).
+    ///
+    /// cycle-1 L4: uses the default `JSONEncoder` formatting (compact,
+    /// no pretty-printing). The column footprint is intentionally
+    /// minimal — two scalar fields — and pretty-printed output would
+    /// only add bytes without benefiting any consumer (the value is
+    /// never inspected by humans through the column). DiagnosticsExport
+    /// pretty-prints separately at export time when readability matters.
     private static func encodeAdDurationStats(
         merging existing: AdDurationStats,
         with newDurations: [TimeInterval]
