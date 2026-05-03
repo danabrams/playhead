@@ -130,6 +130,29 @@ struct PriorHierarchyWireUpTests {
         #expect(stats.meanDuration == 42.0)
     }
 
+    @Test("mergeDurations rejects sub-1s durations (cycle-1 L3)")
+    func mergeDurationsFiltersUnrealisticDurations() {
+        // Sub-second "ads" are almost always boundary-snap artifacts
+        // rather than real pre-roll/mid-roll. Folding them into the
+        // mean would drag the show-local typical toward zero.
+        let seed = AdDurationStats(meanDuration: 30, sampleCount: 5)
+        let merged = ShowLocalPriorsBuilder.mergeDurations(
+            existing: seed,
+            newDurations: [0.5, 0.99, -1.0, 0.0]
+        )
+        // None of these durations should count; aggregate unchanged.
+        #expect(merged.sampleCount == seed.sampleCount)
+        #expect(merged.meanDuration == seed.meanDuration)
+
+        // A duration AT the floor (1.0s) is still suspicious but
+        // accepted — the boundary is "anything under 1s rejected".
+        let acceptedFloor = ShowLocalPriorsBuilder.mergeDurations(
+            existing: seed,
+            newDurations: [1.0]
+        )
+        #expect(acceptedFloor.sampleCount == seed.sampleCount + 1)
+    }
+
     @Test("mergeDurations short-circuits at maxSampleCount (cycle-1 L2)")
     func mergeDurationsRespectsCeiling() {
         // Seed the aggregate just below the ceiling, then merge enough

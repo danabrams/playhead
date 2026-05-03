@@ -116,6 +116,15 @@ enum ShowLocalPriorsBuilder {
     /// enough slack to absorb 1σ sample-mean noise once `sampleCount ≥ 5`.
     static let durationRangeHalfWidth: TimeInterval = 12
 
+    /// cycle-1 L3: minimum realistic ad duration (seconds). Anything
+    /// shorter is almost certainly a boundary-snap artifact — real
+    /// pre-roll / mid-roll ads run at minimum several seconds. Folding
+    /// sub-second "ads" into the mean would silently drag the show-
+    /// local typical down. Used by `mergeDurations` as a hard filter
+    /// in addition to the caller-side filter in
+    /// `AdDetectionService.updatePriors`.
+    static let minRealisticDuration: TimeInterval = 1.0
+
     /// Build show-local priors from the current `PodcastProfile`, or `nil`
     /// when the profile has no usable aggregate yet.
     ///
@@ -182,12 +191,20 @@ enum ShowLocalPriorsBuilder {
     /// extend that to a batch by folding each new sample sequentially, so
     /// callers can pass either a single duration or a full episode's worth.
     ///
-    /// Filter: positive-and-finite (`d.isFinite && d > 0`). Matches the
-    /// caller-side filter in `AdDetectionService.updatePriors` so the two
-    /// gates can't drift independently. A zero-second "ad" is meaningless
-    /// (it would still be counted toward `sampleCount` while pulling the
-    /// running mean toward zero) — guarding here is belt-and-suspenders
-    /// in case a future caller forgets to pre-filter.
+    /// Filter: finite-and-realistic (`d.isFinite && d >= minRealisticDuration`).
+    /// Matches the caller-side filter in `AdDetectionService.updatePriors`
+    /// so the two gates can't drift independently. A zero-or-near-zero-
+    /// second "ad" is meaningless (it would still be counted toward
+    /// `sampleCount` while pulling the running mean toward zero) — guarding
+    /// here is belt-and-suspenders in case a future caller forgets to
+    /// pre-filter.
+    ///
+    /// cycle-1 L3: tightened from `d > 0` to
+    /// `d >= minRealisticDuration` (1.0s). A sub-second AdWindow is
+    /// almost certainly a boundary-snap artifact rather than a real
+    /// ad; counting it would understate the running mean. Real-world
+    /// pre-roll/mid-roll ads are at minimum a few seconds, so 1.0s is
+    /// a generous floor that still rejects degenerate detections.
     ///
     /// cycle-1 L2: stop accumulating once `count` reaches
     /// `AdDurationStats.maxSampleCount`. Past the ceiling the mean is
@@ -206,7 +223,7 @@ enum ShowLocalPriorsBuilder {
         var mean = existing.meanDuration
         var count = existing.sampleCount
 
-        for d in newDurations where d.isFinite && d > 0 {
+        for d in newDurations where d.isFinite && d >= minRealisticDuration {
             if count >= AdDurationStats.maxSampleCount { break }
             count += 1
             mean += (d - mean) / Double(count)
