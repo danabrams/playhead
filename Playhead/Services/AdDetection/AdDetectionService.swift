@@ -330,6 +330,17 @@ actor AdDetectionService {
 
     private let logger = Logger(subsystem: "com.playhead", category: "AdDetectionService")
 
+    /// cycle-1 M2: Static logger for `private static` helpers that can't
+    /// reach the instance `logger` (specifically `decodeAdDurationStats`,
+    /// which runs inside `store.mutateProfile` closures on the
+    /// AnalysisStore actor and must not capture `self`). Same subsystem
+    /// as the instance logger so DiagnosticReports group both streams
+    /// under the AdDetectionService category.
+    private static let staticLogger = Logger(
+        subsystem: "com.playhead",
+        category: "AdDetectionService"
+    )
+
     // MARK: - Dependencies
 
     private let store: AnalysisStore
@@ -4872,13 +4883,31 @@ actor AdDetectionService {
 
     /// Decode a persisted `AdDurationStatsJSON` value into the typed struct,
     /// or `nil` when the column is empty / malformed.
+    ///
+    /// cycle-1 M2: a malformed payload silently returns `nil`, which lets
+    /// the resolver fall through to global defaults — but the corrupt
+    /// JSON stays on the column and every backfill thereafter pays the
+    /// same decode cost without ever surfacing the corruption to a
+    /// diagnostic report. Log decode failures at `.error` so the corruption
+    /// is visible in DiagnosticReports / `log show` queries. Empty/nil
+    /// payloads are NOT logged (the column is unset for any new show
+    /// and that is the expected steady state, not a failure).
     private static func decodeAdDurationStats(_ json: String?) -> AdDurationStats? {
-        guard let json,
-              !json.isEmpty,
-              let data = json.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode(AdDurationStats.self, from: data)
-        else { return nil }
-        return decoded
+        guard let json, !json.isEmpty else { return nil }
+        guard let data = json.data(using: .utf8) else {
+            staticLogger.error(
+                "[AdDurationStats] decode failed: utf8 conversion produced no data"
+            )
+            return nil
+        }
+        do {
+            return try JSONDecoder().decode(AdDurationStats.self, from: data)
+        } catch {
+            staticLogger.error(
+                "[AdDurationStats] decode failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
     }
 
     /// Encode a freshly-merged `AdDurationStats` for persistence, or `nil`

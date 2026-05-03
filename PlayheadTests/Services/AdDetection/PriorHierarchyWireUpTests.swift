@@ -207,6 +207,13 @@ struct PriorHierarchyWireUpTests {
         // Falls back to global defaults rather than crashing.
         #expect(resolved.activeLevel == .global)
         #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
+        // cycle-1 M2: a malformed payload should ALSO fire a `.error` log
+        // through `AdDetectionService.staticLogger` so the corruption is
+        // visible in DiagnosticReports / `log show` queries. We can't
+        // assert that from a unit test (Logger writes to OSLog, not a
+        // capturable sink), and adding a Logger test seam for this one
+        // call site would over-engineer the diagnostic — the contract is
+        // verified by reading `decodeAdDurationStats`'s body.
     }
 
     // MARK: - PodcastProfile.adDurationStatsJSON column round-trip
