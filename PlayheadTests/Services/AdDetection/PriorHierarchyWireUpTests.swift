@@ -369,6 +369,78 @@ struct PriorHierarchyWireUpTests {
         #expect(reloaded?.observationCount == 5)
     }
 
+    /// playhead-v7v8: After `updatePriorsForTesting` runs three times for
+    /// the same show, the persisted `traitProfileJSON` must decode to a
+    /// `ShowTraitProfile` whose `episodesObserved` >= 3, which in turn
+    /// flips `traitProfile.isReliable` to true. The resolver wired into
+    /// `resolveEpisodePriorsForTesting()` reads that profile and reports
+    /// `ResolvedPriors.activeLevel == .traitDerived`. This test fails if
+    /// the producer or persistence step is missing — the canonical
+    /// failure mode that the bead is designed to close.
+    @Test("updatePriors traits feed traitDerived activeLevel after 3 episodes")
+    func updatePriorsActivatesTraitDerivedTier() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-v7v8-trait-derived-1"
+        let assetId = "asset-v7v8-trait-derived-1"
+        try await store.insertAsset(makeAsset(id: assetId, episodeId: "ep-v7v8-1"))
+
+        // Seed a starter profile so the create-branch isn't exercised
+        // (the resolver works either way; this just keeps the loop
+        // exclusively on the update path so the EMA increment is
+        // observable from episode 1).
+        let seed = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: nil,
+            observationCount: 0
+        )
+        try await store.upsertProfile(seed)
+
+        // Drive three "episodes" through updatePriors. Each call provides
+        // distinct confirmed ad windows so the snapshot derivations have
+        // signal (rather than landing on the no-signal neutral defaults).
+        for episodeIndex in 0..<3 {
+            let window = makeAdWindow(
+                id: "win-v7v8-\(episodeIndex)",
+                assetId: assetId,
+                startTime: Double(episodeIndex) * 100,
+                endTime: Double(episodeIndex) * 100 + 30
+            )
+            // Reload the profile each iteration so the service's snapshot
+            // mirrors what runBackfill would carry forward.
+            let current = try await store.fetchProfile(podcastId: podcastId)
+            let service = makeService(store: store, profile: current)
+            try await service.updatePriorsForTesting(
+                podcastId: podcastId,
+                nonSuppressedWindows: [window],
+                episodeDuration: 600
+            )
+        }
+
+        // Direct read of the persisted profile: episodesObserved should
+        // now be >= 3, which is the gate `ShowTraitProfile.isReliable`
+        // checks. Without the v7v8 producer + persistence wire-up,
+        // `traitProfileJSON` would be nil and `traitProfile` would
+        // decode as `.unknown` (episodesObserved == 0).
+        let after = try #require(await store.fetchProfile(podcastId: podcastId))
+        let traitJSON = try #require(
+            after.traitProfileJSON,
+            "Expected traitProfileJSON to be persisted after 3 updatePriors calls"
+        )
+        let trait = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(traitJSON.utf8)
+        )
+        #expect(trait.episodesObserved >= 3)
+        #expect(trait.isReliable)
+
+        // End-to-end resolver assertion: the service's resolver entry
+        // point must report `.traitDerived` as the dominant level when
+        // it sees this profile.
+        let service = makeService(store: store, profile: after)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .traitDerived)
+    }
+
     @Test("updatePriors merges new ad-window durations into adDurationStatsJSON")
     func updatePriorsAccumulatesDurations() async throws {
         let store = try await makeTestStore()
