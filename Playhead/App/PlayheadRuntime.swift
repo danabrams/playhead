@@ -306,6 +306,17 @@ final class PlayheadRuntime {
     private let finalPassSweepInFlightFlag: FinalPassSweepInFlightFlag?
     private var isShutdown = false
 
+    /// playhead-43ed M1: handle to the
+    /// `b3_repeated_ad_cache_enabled` UserDefaults observer Task. The
+    /// observer drives `RepeatedAdCacheService.setEnabled(...)` from
+    /// `Settings → Debug Overlays → Repeated-ad cache`. Without a stored
+    /// handle the `Task { for await _ in NotificationCenter.notifications }`
+    /// loop outlived `shutdown()` and leaked the captured cache actor
+    /// across runtime teardown. `shutdown()` cancels this task so the
+    /// loop terminates promptly.
+    @ObservationIgnored
+    private var repeatedAdCacheKillSwitchObserverTask: Task<Void, Never>?
+
     /// True when an episode is actively loaded for playback.
     var isPlayingEpisode: Bool {
         currentEpisodeId != nil
@@ -1319,7 +1330,12 @@ final class PlayheadRuntime {
         // `enabled` flag) because the actor's flag is also influenced
         // by auto-disable; comparing apples-to-apples on the kill-switch
         // key is what makes "user toggled on" detectable.
-        Task { [repeatedAdCache] in
+        // playhead-43ed M1: store the Task handle so `shutdown()` can
+        // cancel it. The cooperative `for await` loop honours
+        // cancellation by exiting at the next notification boundary
+        // (or immediately if cancelled before its first iteration via
+        // the `try Task.checkCancellation()` at the top).
+        repeatedAdCacheKillSwitchObserverTask = Task { [repeatedAdCache] in
             let key = RepeatedAdCacheFeatureFlag.userDefaultsKey
             var lastSeenKillSwitch: Bool = {
                 if let value = UserDefaults.standard.object(forKey: key) as? Bool {
@@ -1329,6 +1345,7 @@ final class PlayheadRuntime {
             }()
             let center = NotificationCenter.default
             for await _ in center.notifications(named: UserDefaults.didChangeNotification) {
+                if Task.isCancelled { return }
                 let current: Bool = {
                     if let value = UserDefaults.standard.object(forKey: key) as? Bool {
                         return value
@@ -2017,6 +2034,13 @@ final class PlayheadRuntime {
     func _shadowRetryObserverForTesting() -> ShadowRetryObserver? {
         shadowRetryObserver
     }
+
+    /// playhead-43ed M1: DEBUG-only accessor so
+    /// `RuntimeShutdownLifecycleTests` can assert that the RepeatedAdCache
+    /// kill-switch observer Task is cancelled after `shutdown()`.
+    func _repeatedAdCacheKillSwitchObserverTaskForTesting() -> Task<Void, Never>? {
+        repeatedAdCacheKillSwitchObserverTask
+    }
     #endif
 
     // MARK: - Final-pass re-transcription (Bug 9)
@@ -2199,6 +2223,13 @@ final class PlayheadRuntime {
         // further work is issued.
         audioCacheTask?.cancel()
         audioCacheTask = nil
+        // playhead-43ed M1: cancel the RepeatedAdCache kill-switch
+        // observer Task so its `for await` loop terminates and the
+        // captured `repeatedAdCache` strong reference is released.
+        // Pre-fix the loop ran forever, leaking across runtime
+        // teardown.
+        repeatedAdCacheKillSwitchObserverTask?.cancel()
+        repeatedAdCacheKillSwitchObserverTask = nil
         // playhead-l8dz: cancel the recovery observer's startup task and
         // stop the observer itself. Mirrors the shadowRetryObserver
         // teardown above so the loop task is awaited to completion before
