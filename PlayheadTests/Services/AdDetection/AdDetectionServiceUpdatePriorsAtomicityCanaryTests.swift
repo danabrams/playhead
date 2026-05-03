@@ -1026,26 +1026,48 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     private static let storeAliasDeclarationPattern: String =
         #"\b(?:let|var)\s+\w+\s*=\s*(?:self\s*\.\s*)?\bstore\b(?!\s*[\.\(\?!\[])"#
 
-    /// Cycle-23 M-3 / cycle-2 L1: shared regex for "this closure body
-    /// carries the trait-profile JSON forward into a `PodcastProfile(...)`
-    /// constructor". Matches a bare `<ident>.traitProfileJSON` anywhere
-    /// in the closure body — the canonical forms are:
+    /// Cycle-23 M-3 / cycle-2 L1 / cycle-3 M-1: shared regex for "this
+    /// closure body carries the trait-profile JSON forward into the
+    /// `PodcastProfile(...)` constructor's `traitProfileJSON:` argument".
+    ///
+    /// Cycle-3 M-1 tightened the pattern: the previous form
+    /// `\b[A-Za-z_][A-Za-z0-9_]*\s*\.\s*traitProfileJSON\b` matched ANY
+    /// `<ident>.traitProfileJSON` occurrence — including a hypothetical
+    /// `logger.debug("\(other.traitProfileJSON)")` log call that doesn't
+    /// actually carry the value forward into the constructor. The canary
+    /// would silently pass against a closure that *mentions*
+    /// `traitProfileJSON` somewhere but never feeds it into the new
+    /// profile.
+    ///
+    /// The new pattern requires the value to appear as the value passed
+    /// to the `traitProfileJSON:` constructor argument. It matches:
     ///
     ///   • Direct carry-forward in the constructor:
     ///     `traitProfileJSON: existing.traitProfileJSON`
     ///   • Nil-coalescing fallback (cycle-2 L1):
     ///     `let resolvedTraitProfileJSON = mergedTraitProfileJSON ?? existing.traitProfileJSON`
     ///     followed by `traitProfileJSON: resolvedTraitProfileJSON`. The
-    ///     `?? existing.traitProfileJSON` half is what we lock in here —
-    ///     the carry-forward is structurally guaranteed at the
-    ///     fallback site even if the constructor argument names a local.
+    ///     `?? existing.traitProfileJSON` half (which is the actual
+    ///     production code shape today) is what we lock in here — the
+    ///     carry-forward is structurally guaranteed at the fallback
+    ///     site even if the constructor argument names a local.
     ///
-    /// In both shapes some `<ident>.traitProfileJSON` token appears
-    /// inside the closure, which is what this regex matches. The
-    /// negative-control fixture
+    /// We match either:
+    ///   (a) `traitProfileJSON: <ident>.traitProfileJSON` — the keyword
+    ///       arg `traitProfileJSON:` immediately precedes the value
+    ///       (covers a future direct-pass form), OR
+    ///   (b) `?? <ident>.traitProfileJSON` — the nil-coalescing fallback
+    ///       form (covers the current production shape:
+    ///       `mergedTraitProfileJSON ?? existing.traitProfileJSON`).
+    ///
+    /// Whitespace is tolerated multi-line-robustly via `\s*` between
+    /// every meaningful token so a swift-format reflow that wraps the
+    /// constructor argument across lines doesn't break the canary.
+    ///
+    /// The negative-control fixture
     /// (`testProfileConstructingClosureWithoutCarryForwardWouldFire`)
-    /// constructs `PodcastProfile(...)` without any `<ident>.traitProfileJSON`
-    /// mention, so the regex correctly returns no match there.
+    /// constructs `PodcastProfile(...)` without either form, so the
+    /// regex correctly returns no match there.
     ///
     /// Used by the scoped canaries
     /// (`testUpdatePriorsCarriesExistingTraitProfileJSONForward`,
@@ -1055,7 +1077,7 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     /// Lifting it here keeps all four call sites in lockstep — a future
     /// tightening or broadening of the pattern is a one-line edit.
     fileprivate static let traitProfileCarryForwardPattern: String =
-        #"\b[A-Za-z_][A-Za-z0-9_]*\s*\.\s*traitProfileJSON\b"#
+        #"(?:traitProfileJSON\s*:|\?\?)\s*[A-Za-z_][A-Za-z0-9_]*\s*\.\s*traitProfileJSON\b"#
 
     /// Cycle-23 L-4: word-boundary anchored "is this a `PodcastProfile`
     /// constructor invocation?" probe. Replaces a bare
