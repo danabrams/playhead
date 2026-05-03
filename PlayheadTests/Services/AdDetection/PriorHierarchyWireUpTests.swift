@@ -524,6 +524,57 @@ struct PriorHierarchyWireUpTests {
         #expect(resolved.activeLevel == .traitDerived)
     }
 
+    /// cycle-1 missing test (#1): the *first* call to `updatePriors` for
+    /// a podcast with no persisted profile must take the create-branch
+    /// inside `mutateProfile` and write a non-nil `traitProfileJSON`
+    /// derived from `ShowTraitProfile.unknown.updated(from: snapshot)`.
+    /// Without this, a fresh show's first backfill would silently miss
+    /// the trait-profile bootstrap and the EMA path would never start.
+    @Test("updatePriors bootstraps traitProfileJSON for a show with no prior profile")
+    func updatePriorsBootstrapsTraitProfileForFreshShow() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-v7v8-fresh-bootstrap-1"
+        let assetId = "asset-v7v8-fresh-bootstrap-1"
+        try await store.insertAsset(makeAsset(id: assetId, episodeId: "ep-v7v8-fresh-1"))
+
+        // Crucially: NO seed profile. The first updatePriors call must
+        // exercise `mutateProfile`'s `create` branch, which is the only
+        // place the bootstrap path
+        // `ShowTraitProfile.unknown.updated(from: snapshot)` lives.
+        let preExisting = try await store.fetchProfile(podcastId: podcastId)
+        #expect(preExisting == nil)
+
+        let window = makeAdWindow(
+            id: "win-fresh-bootstrap-1",
+            assetId: assetId,
+            startTime: 100,
+            endTime: 130
+        )
+        let service = makeService(store: store, profile: nil)
+        try await service.updatePriorsForTesting(
+            podcastId: podcastId,
+            nonSuppressedWindows: [window],
+            episodeDuration: 600,
+            featureWindows: [],
+            chunks: []
+        )
+
+        let after = try #require(await store.fetchProfile(podcastId: podcastId))
+        let traitJSON = try #require(
+            after.traitProfileJSON,
+            "First updatePriors call on a fresh show must write a non-nil traitProfileJSON via the create branch"
+        )
+        let trait = try JSONDecoder().decode(
+            ShowTraitProfile.self,
+            from: Data(traitJSON.utf8)
+        )
+        // The bootstrap path replaces the sentinel directly with the
+        // first snapshot, so episodesObserved should be exactly 1
+        // — not still 0 (sentinel) and not >= 3 (already reliable).
+        #expect(trait.episodesObserved == 1)
+        #expect(trait.isReliable == false)
+    }
+
     @Test("updatePriors merges new ad-window durations into adDurationStatsJSON")
     func updatePriorsAccumulatesDurations() async throws {
         let store = try await makeTestStore()
