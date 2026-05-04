@@ -1264,6 +1264,19 @@ actor AnalysisStore {
                 column: "networkId",
                 definition: "TEXT"
             )
+            // playhead-spxs cycle-3 M-1: index the cross-show fetch.
+            // `fetchProfiles(forNetworkId:)` runs `WHERE networkId = ?` on
+            // every `resolveEpisodePriors()` call. Without an index this
+            // is a full table scan; once a network has many sibling shows
+            // (or the user accretes thousands of profile rows across many
+            // networks), every episode-prior resolution becomes O(n).
+            // The column is sparsely populated today (no production
+            // writer sets it yet — see NetworkPriorsBuilder header), so
+            // the index is small; SQLite skips NULL rows in non-partial
+            // indexes by default, but to be explicit we use a partial
+            // index restricted to non-NULL networkIds. Same shape as
+            // `idx_ske_podcast` etc. above.
+            try exec("CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId ON podcast_profiles(networkId) WHERE networkId IS NOT NULL")
             // playhead-7mq: model/policy/feature-schema version columns on
             // the six tables whose row validity depends on model, policy,
             // or feature-schema versions. Foundation for B4 fast

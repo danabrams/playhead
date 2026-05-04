@@ -949,11 +949,21 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     ///      either.
     ///
     /// This per-method canary slices the source into one chunk per
-    /// known mutation method (bounded by `func <name>(` … next `func`
-    /// or EOF) and asserts the `networkIdCarryForwardPattern` matches
-    /// inside each chunk — independent of closure-parameter naming or
+    /// known mutation method (bounded by `update:` … next `func` or EOF)
+    /// and asserts the `networkIdCarryForwardPattern` matches inside
+    /// each chunk — independent of closure-parameter naming or
     /// formatting. If any one of the 5 methods drops the carry-forward,
     /// the test fails *attributing* the failure to that method.
+    ///
+    /// Slice anchor (cycle-3 L-4): start at the `update:` label, NOT at
+    /// the method body. All five mutation methods call either
+    /// `mutateProfile(create:update:)` or `updateProfileIfExists(update:)`;
+    /// in both shapes the closure that reconstructs the profile sits
+    /// after the `update:` label. Slicing from the method body would
+    /// allow a stray `?? other.networkId` ANYWHERE inside the method —
+    /// including the create branch — to satisfy the assertion, even if
+    /// the actual update closure dropped the carry-forward. Anchoring
+    /// at `update:` eliminates that escape hatch.
     ///
     /// Allow-list: the 5 mutation entry points were enumerated by hand
     /// from the `playhead-084j` and `playhead-spxs` plumbing; renaming
@@ -961,6 +971,12 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     /// adds a 6th mutation entry point, append it to `mutationMethods`
     /// in the same change that introduces the new method, so the
     /// canary follows the production surface.
+    ///
+    /// Regex hardening (cycle-3 L-3): all regex compilations live
+    /// outside the loop and propagate via `throws`. A failed compile
+    /// fails the whole test, not just one method — there is no
+    /// XCTFail+continue path that could let four siblings silently pass
+    /// when one method's regex is broken.
     func testEachTrustScoringMutationMethodCarriesNetworkIdForward() throws {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/Services/TrustScoring/TrustScoringService.swift"
@@ -979,20 +995,14 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
             pattern: Self.networkIdCarryForwardPattern
         )
         let nextFuncRegex = try NSRegularExpression(pattern: #"\bfunc\s+\w+\s*\("#)
+        let updateLabelRegex = try NSRegularExpression(pattern: #"\bupdate\s*:"#)
         let nsAll = NSRange(stripped.startIndex..., in: stripped)
 
         for methodName in mutationMethods {
             let funcDeclPattern = #"\bfunc\s+\#(methodName)\s*\("#
-            let funcDeclRegex: NSRegularExpression
-            do {
-                funcDeclRegex = try NSRegularExpression(pattern: funcDeclPattern)
-            } catch {
-                XCTFail(
-                    "playhead-spxs cycle-2 M-2: failed to compile " +
-                    "func-declaration regex for `\(methodName)`: \(error)"
-                )
-                continue
-            }
+            // Cycle-3 L-3: compile via `try` so a malformed pattern
+            // fails the whole test loud, not silently per-method.
+            let funcDeclRegex = try NSRegularExpression(pattern: funcDeclPattern)
 
             guard let funcMatch = funcDeclRegex.firstMatch(in: stripped, range: nsAll),
                   let funcRange = Range(funcMatch.range, in: stripped)
@@ -1012,6 +1022,7 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
                 continue
             }
 
+            // Method end: next top-level `func` after this one, or EOF.
             let afterFunc = funcRange.upperBound
             let restNSRange = NSRange(afterFunc..<stripped.endIndex, in: stripped)
             let methodEnd: String.Index
@@ -1022,7 +1033,33 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
                 methodEnd = stripped.endIndex
             }
 
-            let methodSlice = String(stripped[funcRange.lowerBound..<methodEnd])
+            // Cycle-3 L-4: slice from `update:` (not `func`). The
+            // assertion target is the update closure's body — nowhere
+            // else in the method should a `<ident>.networkId` count as
+            // satisfying the carry-forward contract.
+            let bodyNSRange = NSRange(afterFunc..<methodEnd, in: stripped)
+            guard let updateMatch = updateLabelRegex.firstMatch(in: stripped, range: bodyNSRange),
+                  let updateRange = Range(updateMatch.range, in: stripped)
+            else {
+                XCTFail(
+                    """
+                    playhead-spxs cycle-3 L-4: could not locate the \
+                    `update:` label inside `func \(methodName)(`. The \
+                    canary needs that label as a slice anchor so the \
+                    carry-forward assertion targets only the update \
+                    branch (not the lazy-create branch or other call \
+                    sites). Either the call shape has changed (named \
+                    arg `update:` replaced with positional or different \
+                    label) or the method no longer routes through \
+                    `mutateProfile`/`updateProfileIfExists`. Restore the \
+                    `update:` label or update `mutationMethods` to \
+                    reflect the new shape.
+                    """
+                )
+                continue
+            }
+
+            let methodSlice = String(stripped[updateRange.upperBound..<methodEnd])
             let sliceRange = NSRange(methodSlice.startIndex..., in: methodSlice)
 
             XCTAssertNotNil(
@@ -1030,19 +1067,19 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
                 """
                 playhead-spxs cycle-2 M-2: TrustScoringService.\(methodName) \
                 does NOT carry `<ident>.networkId` forward into its \
-                `PodcastProfile(...)` constructor. Each of the 5 \
-                mutation methods reconstructs the full profile from its \
-                closure parameter; missing the carry-forward in any one \
-                of them silently nils the column the next time the \
-                COALESCE protection in `upsertProfile` is refactored \
-                away — same regression shape as the cycle-15 M-2 \
-                trait-profile clobber. Restore the carry-forward (the \
-                pattern is `networkId: <ident>.networkId` for any \
-                closure-parameter name) or, if the omission is \
-                deliberate, document the rationale here and in \
-                `mutationMethods`.
+                `update:` closure's `PodcastProfile(...)` constructor. \
+                Each of the 5 mutation methods reconstructs the full \
+                profile from the update-closure parameter; missing the \
+                carry-forward in any one of them silently nils the \
+                column the next time the COALESCE protection in \
+                `upsertProfile` is refactored away — same regression \
+                shape as the cycle-15 M-2 trait-profile clobber. \
+                Restore the carry-forward (the pattern is \
+                `networkId: <ident>.networkId` for any closure-parameter \
+                name) or, if the omission is deliberate, document the \
+                rationale here and in `mutationMethods`.
 
-                Method slice (first 200 chars, comment-stripped):
+                Update-branch slice (first 200 chars, comment-stripped):
                 \(methodSlice.prefix(200))…
                 """
             )

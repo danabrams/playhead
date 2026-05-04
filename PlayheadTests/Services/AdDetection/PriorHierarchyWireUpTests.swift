@@ -989,8 +989,22 @@ struct PriorHierarchyWireUpTests {
         // without matching `private func`, the slice would otherwise
         // wrap that helper's body and pollute the column set with
         // columns it adds (e.g. `title`).
+        //
+        // Cycle-3 L-1: enumerate every Swift modifier that can precede
+        // `func` in a class body, not just the access-modifier set. A
+        // future helper declared `static func`, `nonisolated func`,
+        // `final override func`, etc. between the two ladder methods
+        // would otherwise be missed by the boundary, and the slice would
+        // bleed into that helper's body — silently scanning more text
+        // than the canary claims to. The `{0,4}` repeat covers
+        // combinations like `private static final override func`
+        // (rarely written, but legal); five+ modifiers is implausible
+        // and stops the regex from being unbounded.
         let bodyStart = signatureRange.upperBound
-        let boundaryPattern = #"\n    (?:private |internal |public |fileprivate |open )?func "#
+        let modifierAlternation = "(?:private|internal|public|fileprivate|open"
+            + "|static|nonisolated|final|class|override|dynamic"
+            + "|mutating|nonmutating)"
+        let boundaryPattern = #"\n    (?:"# + modifierAlternation + #" ){0,4}func "#
         let boundaryRegex = try NSRegularExpression(pattern: boundaryPattern)
         let scanRange = NSRange(bodyStart..<sourceText.endIndex, in: sourceText)
         let firstBoundary = boundaryRegex.firstMatch(in: sourceText, range: scanRange)
@@ -1019,6 +1033,128 @@ struct PriorHierarchyWireUpTests {
             columns.insert(String(bodyNoComments[nameRange]))
         }
         return columns
+    }
+
+    /// playhead-spxs cycle-3 L-5: pin that `actor NetworkPriorStore`
+    /// remains a future-caching stub with no production callers.
+    ///
+    /// Cycle-2 marked the actor as UNUSED STUB in its docstring (see
+    /// `NetworkPriors.swift` near line 232) and explicitly told future
+    /// callers "do not wire new call sites through this type" — but a
+    /// docstring alone is advisory. This canary makes the constraint
+    /// load-bearing: any non-test, non-declaration reference to
+    /// `NetworkPriorStore` from production code (under `Playhead/`,
+    /// excluding the file that *declares* the actor) trips the test and
+    /// forces the engineer to either delete the unused stub or
+    /// document the reactivation deliberately.
+    ///
+    /// The production path goes through `NetworkPriorsBuilder.build(...)`
+    /// (called from `AdDetectionService.resolveEpisodePriors`); a parallel
+    /// path through this in-memory cache would diverge from the SQL-
+    /// backed `fetchProfiles(forNetworkId:)` source of truth and create
+    /// a memoization staleness problem before any profile shows it's
+    /// needed.
+    @Test("NetworkPriorStore actor has no production callers (cycle-3 L-5)")
+    func networkPriorStoreHasNoProductionCallers() throws {
+        let thisFile = URL(fileURLWithPath: #filePath)
+        // .../PlayheadTests/Services/AdDetection/PriorHierarchyWireUpTests.swift
+        //   -> AdDetection -> Services -> PlayheadTests -> repo root
+        let repoRoot = thisFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let appRoot = repoRoot.appendingPathComponent("Playhead", isDirectory: true)
+
+        // The single source-of-truth declaration. Other production files
+        // that match this exact suffix are the only ones allowed to
+        // reference `NetworkPriorStore` — and that file does so
+        // exclusively in its own type declaration.
+        let declarationFileSuffix = "/Services/AdDetection/NetworkPriors.swift"
+
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: appRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            Issue.record("Could not enumerate \(appRoot.path)")
+            return
+        }
+
+        var offendingReferences: [String] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "swift" else { continue }
+            // Skip the declaring file — it legitimately mentions the
+            // type in its `actor NetworkPriorStore { ... }` declaration.
+            if url.path.hasSuffix(declarationFileSuffix) { continue }
+
+            let source = try String(contentsOf: url, encoding: .utf8)
+            // Strip comments AND strings: we want to catch real call
+            // sites, not mentions in headers / strings / doc comments.
+            let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+            guard stripped.contains("NetworkPriorStore") else { continue }
+
+            offendingReferences.append(
+                url.path.replacingOccurrences(of: repoRoot.path + "/", with: "")
+            )
+        }
+
+        #expect(
+            offendingReferences.isEmpty,
+            """
+            playhead-spxs cycle-3 L-5: production code now references \
+            `NetworkPriorStore` outside its declaring file. The actor is \
+            an UNUSED STUB intentionally kept for future caching; the \
+            production path runs through `NetworkPriorsBuilder.build(...)`. \
+            If you genuinely need the in-memory cache, update this canary \
+            with the new call sites AND the docstring on \
+            `actor NetworkPriorStore` (currently warns "do not wire new \
+            call sites through this type"); otherwise remove the call \
+            site.
+
+            Offending files: \(offendingReferences.sorted())
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-3 M-1: pin that `podcast_profiles.networkId`
+    /// has a SQL index. `fetchProfiles(forNetworkId:)` runs
+    /// `WHERE networkId = ?` on every `resolveEpisodePriors()` call;
+    /// without the index this is a full table scan that grows linearly
+    /// with profile-row count. The index is created by
+    /// `runSchemaMigration()` next to the column add.
+    ///
+    /// Source canary (regex over `AnalysisStore.swift`) rather than
+    /// behavioral test: `sqlite_master` would also work but the index
+    /// existence is a static-source contract — and a behavioral test
+    /// that opens a store + queries `sqlite_master` is heavier than a
+    /// regex match on the migration SQL.
+    @Test("podcast_profiles.networkId has SQL index in runSchemaMigration (cycle-3 M-1)")
+    func networkIdColumnHasSqlIndex() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Persistence/AnalysisStore/AnalysisStore.swift"
+        )
+        // Allow flexibility on quoting, whitespace, and the partial-WHERE
+        // clause — the load-bearing claim is "an index named
+        // `idx_podcast_profiles_networkId` is created on the column".
+        let pattern = #"CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId\s+ON podcast_profiles\(networkId\)"#
+        let regex = try NSRegularExpression(pattern: pattern)
+        let nsRange = NSRange(source.startIndex..., in: source)
+        let matches = regex.numberOfMatches(in: source, range: nsRange)
+        #expect(
+            matches == 1,
+            """
+            playhead-spxs cycle-3 M-1: expected exactly one \
+            `CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId \
+            ON podcast_profiles(networkId)` in AnalysisStore.swift; \
+            found \(matches). Without the index, every \
+            `resolveEpisodePriors()` does a full scan of \
+            `podcast_profiles`, becoming O(n) in library size. If the \
+            index name has been renamed, update this canary AND verify \
+            the new index actually covers the (networkId) lookup.
+            """
+        )
     }
 
     // MARK: - PodcastProfile.adDurationStatsJSON column round-trip
