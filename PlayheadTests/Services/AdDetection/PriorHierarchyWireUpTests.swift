@@ -441,6 +441,18 @@ struct PriorHierarchyWireUpTests {
     /// 0.6+ vs network's 0.5 peak, and it's a higher level in the
     /// hierarchy enum). Without this, the network tier could undermine
     /// the more specific per-show signal.
+    ///
+    /// cycle-12 M-1: observationCount lives in [5, 10) so BOTH tiers are
+    /// simultaneously active. At observationCount >= 10
+    /// `NetworkPriors.decayedWeight` returns 0 and the resolver short-
+    /// circuits the network blend, so a precedence test with
+    /// observationCount=12 only proves show-local wins when network was
+    /// already off — a vacuous result. With observationCount=7 the
+    /// network tier is genuinely contributing
+    /// (`decayedWeight = 0.5 × (1 - 7/10) = 0.15`), so asserting
+    /// `activeLevel == .showLocal` AND that `typicalAdDuration` reflects
+    /// the show-local center (60 s) demonstrates show-local actually
+    /// wins the blend rather than network being absent.
     @Test("show-local priors still dominate when both tiers are available")
     func wireUpShowLocalDominatesNetwork() async throws {
         let store = try await makeTestStore()
@@ -460,12 +472,14 @@ struct PriorHierarchyWireUpTests {
 
         // Current show has its own observations clustered around 60s
         // and meets the show-local threshold (sampleCount >= 5,
-        // observationCount >= 5).
+        // observationCount >= 5). observationCount=7 sits in [5, 10) so
+        // the network tier is also active (decayedWeight = 0.15) — see
+        // docstring above.
         let ownStats = AdDurationStats(meanDuration: 60, sampleCount: 20)
         let current = makeProfile(
             podcastId: "pod-current-prec",
             adDurationStatsJSON: ownStats.encodeForTesting(),
-            observationCount: 12,
+            observationCount: 7,
             networkId: networkId
         )
         try await store.upsertProfile(current)
@@ -473,6 +487,23 @@ struct PriorHierarchyWireUpTests {
         let service = makeService(store: store, profile: current)
         let resolved = await service.resolveEpisodePriorsForTesting()
         #expect(resolved.activeLevel == .showLocal)
+
+        // Prove show-local actually wins the blend rather than
+        // observing a vacuous result from network being off. With
+        // showLocalBlendWeight at episodeCount=7 equal to
+        // `0.6 + 0.2 × (7-5)/5 = 0.68`, the show-local center (60 s)
+        // contributes 68% to the final midpoint. The network-only
+        // intermediate state (after global×network blend) has midpoint
+        // ~52.5 s; a show-local-dominated result has midpoint > 55 s,
+        // visibly distinguishing the two regimes. We assert the
+        // resolved midpoint sits much closer to 60 than to 30 (global
+        // floor) or 10 (network mean).
+        let resolvedMidpoint =
+            (resolved.typicalAdDuration.lowerBound + resolved.typicalAdDuration.upperBound) / 2
+        #expect(resolvedMidpoint > 55,
+                "show-local should dominate; midpoint=\(resolvedMidpoint) but expected > 55 (toward 60)")
+        #expect(abs(resolvedMidpoint - 60) < 6,
+                "show-local center is 60; midpoint=\(resolvedMidpoint) drifted too far")
     }
 
     /// playhead-spxs cycle-1 L-3: pin the empty-string guard in

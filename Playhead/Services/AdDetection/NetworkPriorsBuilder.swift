@@ -37,10 +37,15 @@
 //     blend pulls `sponsorRecurrenceExpectation` toward 0 with weight
 //     `networkDecay`. The global default for this axis is 0.3 (NOT 0,
 //     see `GlobalPriorDefaults.standard.sponsorRecurrenceExpectation`),
-//     so the blend is *materially* pulling this axis toward 0 today —
-//     this is the load-bearing axis where the network tier currently
-//     changes a scalar value (alongside `typicalAdDuration`). Pinned
-//     in `PriorHierarchyWireUpTests.globalPriorDefaultsStandardValuesArePinned`.
+//     so the blend is *materially* changing the scalar that flows out
+//     of the resolver today — but only on this one axis is the math
+//     non-trivial. Note: "mathematically active" is NOT the same as
+//     "load-bearing on a production knob". `ResolvedPriors.sponsor-
+//     RecurrenceExpectation` is currently flagged "Reserved for future
+//     consumers" in `PriorHierarchy.swift` and is not read by any
+//     downstream production code, so the blend's effect on this axis
+//     does not influence detector behavior today. Pinned in
+//     `PriorHierarchyWireUpTests.globalPriorDefaultsStandardValuesArePinned`.
 //   • `typicalSlotPositions` — computed by the aggregator but NOT
 //     consumed by `PriorHierarchy.resolve`. Truly dormant.
 //   • `musicBracketPrevalence`, `metadataTrustAverage` — DO flow through
@@ -51,13 +56,16 @@
 //     no-op (`0.5 → 0.5` regardless of `networkDecay` weight). The
 //     network tier is therefore *active* on these axes — it just
 //     contributes a value identical to the global baseline today.
-// What this means in practice: the network tier is currently load-
-// bearing only on `typicalAdDuration` and (implicitly) any cross-show
-// sponsor recurrence that future PRs might surface. The dormant axes
-// are wired correctly so a future producer that lights them up
-// (e.g. a producer that fills `sponsors` from sibling profiles, or
-// switches the snapshot's `musicBracketRate` to a real-data value) will
-// flow through to `ResolvedPriors` without any further plumbing.
+// What this means in practice: the network tier currently influences
+// detector behavior on exactly one axis — `typicalAdDuration` —
+// because that is the only axis whose `ResolvedPriors` field is read
+// by a downstream consumer (`DurationPrior(resolvedPriors:)`). The
+// other axes are wired correctly so a future producer that lights
+// them up (e.g. a producer that fills `sponsors` from sibling
+// profiles, or switches the snapshot's `musicBracketRate` to a
+// real-data value) AND a future consumer that reads
+// `sponsorRecurrenceExpectation` / `musicBracketTrust` /
+// `metadataTrust` will flow through without any further plumbing.
 
 import Foundation
 

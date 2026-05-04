@@ -35,8 +35,10 @@
 // and the resolver short-circuits on `nil` per-field. Pairs with the
 // downstream consumption note in `PriorHierarchy.swift`.
 //
-// Network priors and trait writers are filed as separate beads — see the
-// PR description for IDs.
+// Trait writers landed in playhead-v7v8 (`ShowTraitProfileBuilder`) and
+// network priors landed in playhead-spxs (`NetworkPriorsBuilder`). The
+// per-tier source-of-truth is documented in the audit block on
+// `AdDetectionService.resolveEpisodePriors(...)`.
 
 import Foundation
 
