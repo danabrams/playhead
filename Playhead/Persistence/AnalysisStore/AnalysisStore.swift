@@ -445,6 +445,20 @@ struct PodcastProfile: Sendable {
     /// `COALESCE(excluded.adDurationStatsJSON, podcast_profiles.adDurationStatsJSON)`
     /// so a `nil` write never clobbers persisted observations.
     let adDurationStatsJSON: String?
+    /// playhead-spxs: derived `NetworkIdentity.networkId` for this show
+    /// — the lowercase grouping key produced by
+    /// `NetworkIdentityExtractor`. `nil` until the next feed-metadata
+    /// pass populates it (or for shows whose RSS metadata yields no
+    /// usable network signal). Used by
+    /// `AnalysisStore.fetchProfiles(forNetworkId:)` to find sibling
+    /// shows so `NetworkPriorsBuilder` can roll up cross-show
+    /// `adDurationStatsJSON` aggregates into a `NetworkPriors`. The
+    /// resolver consumes that aggregate as the level-1 (network) tier
+    /// of the 4-level prior hierarchy. Carries COALESCE-preserve
+    /// semantics in `upsertProfile` so a profile rebuild that doesn't
+    /// know the network (trust-scoring, etc.) does NOT clobber the
+    /// previously-recorded value.
+    let networkId: String?
 
     init(
         podcastId: String,
@@ -459,7 +473,8 @@ struct PodcastProfile: Sendable {
         recentFalseSkipSignals: Int,
         traitProfileJSON: String? = nil,
         title: String? = nil,
-        adDurationStatsJSON: String? = nil
+        adDurationStatsJSON: String? = nil,
+        networkId: String? = nil
     ) {
         self.podcastId = podcastId
         self.sponsorLexicon = sponsorLexicon
@@ -474,6 +489,7 @@ struct PodcastProfile: Sendable {
         self.traitProfileJSON = traitProfileJSON
         self.title = title
         self.adDurationStatsJSON = adDurationStatsJSON
+        self.networkId = networkId
     }
 
     /// Convenience: decode the stored trait profile, falling back to
@@ -1217,6 +1233,64 @@ actor AnalysisStore {
                 column: "adDurationStatsJSON",
                 definition: "TEXT"
             )
+            // playhead-spxs: `networkId` on podcast_profiles.
+            // Lowercase identifier produced by
+            // `NetworkIdentityExtractor.extractIdentity(...)` from RSS
+            // metadata. Groups sibling shows so the network-priors tier
+            // of the 4-level prior hierarchy can aggregate cross-show
+            // `adDurationStatsJSON` rows into a `NetworkPriors` value.
+            // NULL on pre-spxs rows and on shows whose RSS metadata
+            // yields no signal; the resolver gracefully falls through
+            // to trait/show-local/global tiers when nil.
+            //
+            // Drift note (spxs cycle-2 L-1): `migrateOnlyForTesting()`
+            // mirrors the *versioned* `migrate*V<N>IfNeeded()` ladder
+            // but does NOT replay this `addColumnIfNeeded` call (or
+            // its siblings for `adDurationStatsJSON` from playhead-084j
+            // and `traitProfileJSON` from ef2.5.1, both above). The
+            // ladder-only test seam is used exclusively by schema-
+            // version migration tests that don't seed real podcast-
+            // profile rows, so the gap is theoretical today; if a
+            // future migration test starts driving real `upsertProfile`
+            // calls through the ladder-only seam it must replay all
+            // three of `addColumnIfNeeded(... traitProfileJSON ...)`,
+            // `addColumnIfNeeded(... adDurationStatsJSON ...)`, and
+            // `addColumnIfNeeded(... networkId ...)` in
+            // `migrateOnlyForTesting()` or the bind/read code paths
+            // will fail at runtime. Pinned by
+            // `PriorHierarchyWireUpTests.migrateLadderDriftMatchesDocumentation`.
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "networkId",
+                definition: "TEXT"
+            )
+            // playhead-spxs cycle-3 M-1: index the cross-show fetch.
+            // `fetchProfiles(forNetworkId:)` runs `WHERE networkId = ?` on
+            // every `resolveEpisodePriors()` call. Without an index this
+            // is a full table scan; once a network has many sibling shows
+            // (or the user accretes thousands of profile rows across many
+            // networks), every episode-prior resolution becomes O(n).
+            // The column is sparsely populated today (no production
+            // writer sets it yet — see NetworkPriorsBuilder header), so
+            // the index is small. A non-partial index would still
+            // contain entries for NULL rows, but SQLite's `WHERE
+            // networkId = ?` lookup never matches NULLs (per SQL three-
+            // valued logic — `NULL = ?` is unknown, not true), so a
+            // partial index restricted to `WHERE networkId IS NOT NULL`
+            // is both smaller and equivalent for this query shape. Same
+            // shape as `idx_ske_podcast` etc. above.
+            //
+            // CAUTION: do NOT add a NULL-tolerant predicate (e.g.
+            // `WHERE networkId = ? OR networkId IS NULL`, or `WHERE
+            // networkId IS NOT DISTINCT FROM ?`) to a query that uses
+            // this index. The partial `WHERE networkId IS NOT NULL`
+            // clause excludes NULL rows entirely, so any predicate that
+            // can match NULL would silently regress to a full table
+            // scan on the NULL branch. If you need NULL-matching, drop
+            // the partial WHERE clause from this index definition (and
+            // accept the larger index footprint), or add a separate
+            // index over the NULL subset.
+            try exec("CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId ON podcast_profiles(networkId) WHERE networkId IS NOT NULL")
             // playhead-7mq: model/policy/feature-schema version columns on
             // the six tables whose row validity depends on model, policy,
             // or feature-schema versions. Foundation for B4 fast
@@ -4845,13 +4919,17 @@ actor AnalysisStore {
         // clobber an established aggregate. Same defensive pattern as `title`
         // and the explicit `existing.X` carry-forwards in `mutateProfile`
         // closures.
+        // playhead-spxs: `networkId` carries COALESCE-preserve semantics —
+        // a profile rebuild that doesn't know the network identity (e.g.
+        // trust-scoring) MUST NOT clobber a previously-recorded value.
+        // Same defensive shape as `title` and `adDurationStatsJSON`.
         let sql = """
             INSERT INTO podcast_profiles
             (podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
              jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
              observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-             title, adDurationStatsJSON)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             title, adDurationStatsJSON, networkId)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(podcastId) DO UPDATE SET
                 sponsorLexicon = excluded.sponsorLexicon,
                 normalizedAdSlotPriors = excluded.normalizedAdSlotPriors,
@@ -4867,6 +4945,10 @@ actor AnalysisStore {
                 adDurationStatsJSON = COALESCE(
                     excluded.adDurationStatsJSON,
                     podcast_profiles.adDurationStatsJSON
+                ),
+                networkId = COALESCE(
+                    excluded.networkId,
+                    podcast_profiles.networkId
                 )
             """
         let stmt = try prepare(sql)
@@ -4884,6 +4966,7 @@ actor AnalysisStore {
         bind(stmt, 11, profile.traitProfileJSON)
         bind(stmt, 12, profile.title)
         bind(stmt, 13, profile.adDurationStatsJSON)
+        bind(stmt, 14, profile.networkId)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -4958,11 +5041,12 @@ actor AnalysisStore {
         // additive migrations don't shift the positional indices the
         // decoder reads. `title` lands at index 11 — append-only.
         // playhead-084j: `adDurationStatsJSON` lands at index 12.
+        // playhead-spxs: `networkId` lands at index 13.
         let sql = """
             SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
                    jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
                    observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-                   title, adDurationStatsJSON
+                   title, adDurationStatsJSON, networkId
             FROM podcast_profiles WHERE podcastId = ?
             """
         let stmt = try prepare(sql)
@@ -4982,8 +5066,64 @@ actor AnalysisStore {
             recentFalseSkipSignals: Int(sqlite3_column_int(stmt, 9)),
             traitProfileJSON: optionalText(stmt, 10),
             title: optionalText(stmt, 11),
-            adDurationStatsJSON: optionalText(stmt, 12)
+            adDurationStatsJSON: optionalText(stmt, 12),
+            networkId: optionalText(stmt, 13)
         )
+    }
+
+    /// playhead-spxs: fetch all profiles whose `networkId` matches.
+    /// Used by `AdDetectionService.resolveEpisodePriors` to gather the
+    /// per-show inputs that `NetworkPriorsBuilder` rolls up into a
+    /// network-level `NetworkPriors` aggregate.
+    ///
+    /// Returns an empty array when no profile in the store has been
+    /// tagged with the supplied `networkId` (the resolver gracefully
+    /// falls through to trait/show-local/global tiers in that case).
+    /// Same column ordering as `fetchProfile` so the positional decoder
+    /// matches.
+    ///
+    /// Defense-in-depth: an empty-string `networkId` short-circuits
+    /// before the SQL bind. The production caller in
+    /// `AdDetectionService.resolveEpisodePriors` already guards on
+    /// `!networkId.isEmpty`, but a future caller or a corrupted profile
+    /// row that decoded `networkId` as `""` would otherwise match every
+    /// row whose column is the empty string — producing a phantom
+    /// network of mis-grouped shows. Empty-string is never a valid
+    /// network identifier, so we treat it as "no network".
+    func fetchProfiles(forNetworkId networkId: String) throws -> [PodcastProfile] {
+        guard !networkId.isEmpty else { return [] }
+        let sql = """
+            SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
+                   jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
+                   observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
+                   title, adDurationStatsJSON, networkId
+            FROM podcast_profiles WHERE networkId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, networkId)
+        var profiles: [PodcastProfile] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            profiles.append(
+                PodcastProfile(
+                    podcastId: text(stmt, 0),
+                    sponsorLexicon: optionalText(stmt, 1),
+                    normalizedAdSlotPriors: optionalText(stmt, 2),
+                    repeatedCTAFragments: optionalText(stmt, 3),
+                    jingleFingerprints: optionalText(stmt, 4),
+                    implicitFalsePositiveCount: Int(sqlite3_column_int(stmt, 5)),
+                    skipTrustScore: sqlite3_column_double(stmt, 6),
+                    observationCount: Int(sqlite3_column_int(stmt, 7)),
+                    mode: text(stmt, 8),
+                    recentFalseSkipSignals: Int(sqlite3_column_int(stmt, 9)),
+                    traitProfileJSON: optionalText(stmt, 10),
+                    title: optionalText(stmt, 11),
+                    adDurationStatsJSON: optionalText(stmt, 12),
+                    networkId: optionalText(stmt, 13)
+                )
+            )
+        }
+        return profiles
     }
 
     /// playhead-i9dj: persist the human-readable show title on the

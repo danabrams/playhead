@@ -228,6 +228,18 @@ enum NetworkPriorAggregator {
 
 /// In-memory cache of network priors, keyed by networkId.
 /// Thread-safe via actor isolation.
+///
+/// **STATUS (playhead-spxs, 2026-05-03): UNUSED STUB.**
+/// The production network-tier wire-up in
+/// `AdDetectionService.resolveEpisodePriors` calls
+/// `AnalysisStore.fetchProfiles(forNetworkId:)` directly and rebuilds
+/// `NetworkPriors` on every resolve via `NetworkPriorsBuilder.build`.
+/// Nothing in production reads or writes this actor — it is intentionally
+/// kept as a future caching layer for the case where rebuilding from
+/// per-show profiles becomes hot enough to warrant memoization. Until
+/// that producer exists, do not wire new call sites through this type;
+/// add the cache *only* when you have a profile showing the rebuild
+/// is the bottleneck.
 actor NetworkPriorStore {
 
     private var cache: [String: NetworkPriors] = [:]

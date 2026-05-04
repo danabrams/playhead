@@ -120,9 +120,49 @@ struct ResolvedPriors: Sendable, Equatable {
     /// `AdDetectionService.runBackfill` and folded into the per-span
     /// duration prior used by the DecisionMapper.
     let typicalAdDuration: ClosedRange<TimeInterval>
-    /// Which hierarchy level determined these values (the highest active level).
+    /// The highest hierarchy level whose blend was executed during
+    /// resolution.
+    ///
+    /// **Semantics (cycle-2 M3 clarification):** `activeLevel` records
+    /// the highest tier that was *consulted* — i.e. whose conditional
+    /// branch in `PriorHierarchyResolver.resolve` ran and applied its
+    /// `blend(...)` calls. It does NOT promise that the tier
+    /// materially changed any specific output; a tier whose inputs
+    /// happen to equal the running value at every blended axis (e.g.
+    /// the network tier with snapshot defaults of `musicBracketRate:
+    /// 0.5` and `metadataTrust: 0.5` against the matching global
+    /// defaults) leaves those two scalar fields numerically unchanged
+    /// while still being the active level. The `typicalAdDuration`
+    /// axis almost always changes when network is active because the
+    /// snapshot range comes from real data, and
+    /// `sponsorRecurrenceExpectation` *is* materially pulled away from
+    /// the global default of 0.3 toward 0 today — the network builder
+    /// derives `netSponsorRecurrence` from `commonSponsors` (currently
+    /// always empty), so the blend pulls toward 0 with weight
+    /// `networkDecay`. None of these scalar drifts influence detector
+    /// behavior today because no production knob reads
+    /// `sponsorRecurrenceExpectation` (it is "Reserved for future
+    /// consumers"; see field doc above and the audit block in
+    /// `NetworkPriorsBuilder.swift`).
+    ///
+    /// Consumers asking "did tier X influence the output?" should not
+    /// compare `activeLevel == .X`. Instead:
+    ///   • Inspect `levelContributions[.X]` — nonzero exactly when the
+    ///     tier's blend ran.
+    ///   • Compare individual axes against the global baseline if
+    ///     per-axis influence matters.
+    ///
+    /// Today's known consumers: telemetry / debug logging only. If a
+    /// future production knob wants "did tier X actually change a
+    /// value", add a derived helper rather than overloading this
+    /// field, since changing the meaning here would silently rewrite
+    /// the assertions in `PriorHierarchyWireUpTests`.
     let activeLevel: PriorLevel
     /// Blend weights showing how much each level contributed (sums to ~1.0).
+    /// Nonzero entries correspond exactly to the tiers whose blends
+    /// were executed; this is the structured form of `activeLevel` for
+    /// consumers that care about every consulted tier rather than just
+    /// the highest.
     let levelContributions: [PriorLevel: Float]
 }
 

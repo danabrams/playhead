@@ -20,6 +20,7 @@
 //   • No regression on shows without accumulated priors (graceful fallback).
 
 import Foundation
+import SQLite3
 import Testing
 @testable import Playhead
 
@@ -306,6 +307,1998 @@ struct PriorHierarchyWireUpTests {
         // capturable sink), and adding a Logger test seam for this one
         // call site would over-engineer the diagnostic — the contract is
         // verified by reading `decodeAdDurationStats`'s body.
+    }
+
+    // MARK: - Network priors wire-up (playhead-spxs)
+
+    /// playhead-spxs: when the current show has a `networkId` but is itself
+    /// brand-new (no `adDurationStatsJSON`, no traitProfileJSON), and there
+    /// are sibling profiles in the same network with usable
+    /// `adDurationStatsJSON`, the resolver must surface
+    /// `activeLevel == .network`. That is the load-bearing wire-up signal —
+    /// without it, the network tier would still be the no-op it was before
+    /// this bead.
+    @Test("resolveEpisodePriors activates network tier when siblings carry stats")
+    func wireUpNetworkTierActivates() async throws {
+        let store = try await makeTestStore()
+        let networkId = "pod-net-spxs-active"
+
+        // Seed two sibling shows with usable `adDurationStatsJSON`.
+        // Each well above the per-show sample threshold so the builder
+        // accepts them, and clustered around 10s so the network typical
+        // ad-duration center lands far from the global (60s) midpoint.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        let sibling1 = makeProfile(
+            podcastId: "pod-sibling-1",
+            adDurationStatsJSON: siblingStats.encodeForTesting(),
+            observationCount: 12,
+            networkId: networkId
+        )
+        let sibling2 = makeProfile(
+            podcastId: "pod-sibling-2",
+            adDurationStatsJSON: siblingStats.encodeForTesting(),
+            observationCount: 8,
+            networkId: networkId
+        )
+        try await store.upsertProfile(sibling1)
+        try await store.upsertProfile(sibling2)
+
+        // Current show: same network, but brand-new — no own stats yet.
+        // observationCount 0 keeps the network decay weight at its peak
+        // (0.5), so the network tier blends in at full strength.
+        let current = makeProfile(
+            podcastId: "pod-current-spxs",
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: networkId
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .network)
+    }
+
+    /// playhead-spxs cycle-14 missing-test #1: pin the
+    /// `sponsorRecurrenceExpectation` blend documented in
+    /// `PriorHierarchy.activeLevel`. With the network tier active and
+    /// `NetworkPriorsBuilder` feeding `commonSponsors: [:]` (the current
+    /// producer's homogeneous default), the resolver derives
+    /// `netSponsorRecurrence = 0` and blends `0.3 (global default) → 0`
+    /// at weight `networkDecay`. Resolved value must therefore land
+    /// strictly below the global default 0.3 — proves the docstring
+    /// claim "the network tier IS materially blending this axis away
+    /// from 0.3 toward 0 today". A regression that switched
+    /// `netSponsorRecurrence` to default to the global value (turning
+    /// the blend into a no-op) would silently make the docstring false
+    /// without breaking any other behavioral test.
+    ///
+    /// Note: this axis has no production consumer today
+    /// (`ResolvedPriors.sponsorRecurrenceExpectation` is "Reserved for
+    /// future consumers"), so a regression here would not change
+    /// detector behavior — it would only break a contract that the
+    /// next consumer will rely on. The test is therefore documentation-
+    /// adjacent: it locks the blend math against accidental drift
+    /// between the spxs commit and whichever future bead lights up the
+    /// downstream knob.
+    @Test("network tier blends sponsorRecurrenceExpectation below global default when commonSponsors empty")
+    func wireUpNetworkBlendsSponsorRecurrenceTowardZero() async throws {
+        let store = try await makeTestStore()
+        let networkId = "pod-net-spxs-sponsor-blend"
+
+        // Two siblings carry stats so the network builder produces a
+        // valid `NetworkPriors` with `commonSponsors: [:]` (the current
+        // builder's homogeneous default — see `NetworkPriorsBuilder.swift`).
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        for i in 0..<2 {
+            let sibling = makeProfile(
+                podcastId: "pod-sibling-sponsor-\(i)",
+                adDurationStatsJSON: siblingStats.encodeForTesting(),
+                observationCount: 8,
+                networkId: networkId
+            )
+            try await store.upsertProfile(sibling)
+        }
+
+        // Current show: brand-new (no own stats), peak network decay (0.5).
+        let current = makeProfile(
+            podcastId: "pod-current-sponsor-blend",
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: networkId
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+
+        // First, the network branch must have actually executed — without
+        // this, the blend assertion below could pass with `.global` active
+        // (no blend at all, value sitting at the global default) if some
+        // future change quietly disabled the network tier and drifted the
+        // global default downward. Guarding `activeLevel == .network`
+        // makes the blend assertion a faithful test of the network blend,
+        // not an accident of unrelated defaults.
+        #expect(resolved.activeLevel == .network,
+                "expected activeLevel == .network for current-show=peak-decay + siblings-with-stats fixture; got \(resolved.activeLevel). A regression that disabled the network branch would land on .global.")
+
+        // Pin: with global default 0.3, network's empty-sponsors-derived 0,
+        // and the network decay weight at observationCount=0 (the curve's
+        // maximum value, 0.5 today), the deterministic blend is
+        // `0.3 × (1 - 0.5) + 0 × 0.5 = 0.15`. Sourcing `decayWeight` via
+        // `NetworkPriors.decayedWeight(episodesObserved:)` rather than a
+        // hard-coded 0.5 keeps the assertion self-tracking — if a future
+        // change to the decay curve raises or lowers the maximum, the
+        // expected value here moves with it instead of silently drifting
+        // out of agreement with the resolver. The ±0.02 tolerance handles
+        // FP wobble without admitting a meaningful blend regression: a
+        // halved decay weight (0.25) would produce 0.225 (still strictly
+        // < the global 0.3, so a loose `< globalDefault` bound would miss
+        // it) and is caught here by the tight tolerance band.
+        let globalDefault = GlobalPriorDefaults.standard.sponsorRecurrenceExpectation
+        let decayWeight = NetworkPriors.decayedWeight(episodesObserved: 0)
+        let netSponsorRecurrence: Float = 0.0
+        let expected = globalDefault * (1 - decayWeight) + netSponsorRecurrence * decayWeight
+        #expect(abs(resolved.sponsorRecurrenceExpectation - expected) < 0.02,
+                """
+                Network blend of sponsorRecurrenceExpectation should be \
+                ≈ \(expected) (= \(globalDefault) × \(1 - decayWeight) \
+                + \(netSponsorRecurrence) × \(decayWeight), the formula-\
+                derived blend at the obsCount=0 network decay with empty \
+                commonSponsors); got \(resolved.sponsorRecurrenceExpectation). \
+                A regression that halved the decay weight would still \
+                produce a value strictly < the global default, but is \
+                caught here by the tight ±0.02 tolerance.
+                """)
+    }
+
+    /// playhead-spxs: the wire-up's load-bearing claim. With the network
+    /// tier active, the resolved typicalAdDuration must measurably move
+    /// toward the network's converging mean — not stay parked on the
+    /// global default (30...90, midpoint 60s). Sibling shows here all
+    /// average ~10s, so the resolver's blend should drop the typical
+    /// duration center well below the global midpoint.
+    @Test("network priors measurably narrow resolved typicalAdDuration vs global")
+    func wireUpNetworkNarrowsDurationRange() async throws {
+        let store = try await makeTestStore()
+        let networkId = "pod-net-spxs-narrow"
+
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        for i in 0..<3 {
+            let sibling = makeProfile(
+                podcastId: "pod-sibling-narrow-\(i)",
+                adDurationStatsJSON: siblingStats.encodeForTesting(),
+                observationCount: 8,
+                networkId: networkId
+            )
+            try await store.upsertProfile(sibling)
+        }
+
+        // Current show has the network identity but no own observations.
+        let current = makeProfile(
+            podcastId: "pod-current-narrow",
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: networkId
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+
+        // Global midpoint is 60s. After blending in the network's ~10s
+        // mean at the peak decay weight (0.5), the resolved center must
+        // sit below the global default's midpoint — a measurable shift.
+        let globalCenter = (GlobalPriorDefaults.standard.typicalAdDuration.lowerBound +
+                            GlobalPriorDefaults.standard.typicalAdDuration.upperBound) / 2.0
+        let resolvedCenter = (resolved.typicalAdDuration.lowerBound +
+                              resolved.typicalAdDuration.upperBound) / 2.0
+        #expect(resolvedCenter < globalCenter)
+    }
+
+    /// playhead-spxs: graceful fallback. When the current show has no
+    /// `networkId`, the network-priors lookup is skipped entirely and the
+    /// resolver behaves identically to the pre-spxs wire-up — global
+    /// defaults when nothing else is available, show-local when it is.
+    @Test("resolveEpisodePriors with networkId == nil falls back to global (no network tier)")
+    func wireUpNoNetworkIdFallsBackToGlobal() async throws {
+        let store = try await makeTestStore()
+
+        // Sibling shows exist, but the current show has no networkId, so
+        // the lookup is never made. activeLevel must remain `.global`.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        let sibling = makeProfile(
+            podcastId: "pod-sibling-no-net",
+            adDurationStatsJSON: siblingStats.encodeForTesting(),
+            observationCount: 8,
+            networkId: "some-other-network"
+        )
+        try await store.upsertProfile(sibling)
+
+        let current = makeProfile(
+            podcastId: "pod-current-no-net",
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: nil
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .global)
+        #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
+    }
+
+    /// playhead-spxs: precedence preserved. When both network-tier and
+    /// show-local data exist, show-local must dominate (its weight is
+    /// 0.6+ vs network's 0.5 peak, and it's a higher level in the
+    /// hierarchy enum). Without this, the network tier could undermine
+    /// the more specific per-show signal.
+    ///
+    /// cycle-12 M-1: observationCount lives in [5, 10) so BOTH tiers are
+    /// simultaneously active. At observationCount >= 10
+    /// `NetworkPriors.decayedWeight` returns 0 and the resolver short-
+    /// circuits the network blend, so a precedence test with
+    /// observationCount=12 only proves show-local wins when network was
+    /// already off — a vacuous result. With observationCount=7 the
+    /// network tier is genuinely contributing
+    /// (`decayedWeight = 0.5 × (1 - 7/10) = 0.15`).
+    ///
+    /// cycle-13 M-1: switched the dominance assertion from a
+    /// midpoint-of-typicalAdDuration band to a direct comparison of
+    /// `levelContributions[.showLocal]` vs `levelContributions[.network]`.
+    /// The midpoint band turned out to be vacuous: with the fixture
+    /// below, the global-only midpoint is 60.0, network-only is 56.25,
+    /// and the full network+show-local result is 58.8 — all three
+    /// regimes pass `midpoint > 55` AND `|midpoint - 60| < 6`, so the
+    /// midpoint asserts nothing about which tier is active.
+    /// `levelContributions` records each tier's actual blend weight, so
+    /// asserting `showLocal > network > 0` is the structurally correct
+    /// "show-local dominates an active network blend" claim. Expected
+    /// values: `network = 0.15 × 0.32 = 0.048` (rescaled when show-local
+    /// runs) and `showLocal = 0.68`.
+    ///
+    /// Fixture caveat: `NetworkPriorsBuilder.build` aggregates ALL
+    /// profiles with the matching `networkId`, including the current
+    /// show. The two siblings (mean 10) plus the current show (mean 60)
+    /// produce a network range of 10...60 (the
+    /// `NetworkPriorAggregator.aggregateDuration` minimum-width branch
+    /// does not fire because `maxVal - minVal = 50 >= 10`, AND
+    /// `trimOutliers` is a no-op at count=3 < 4 — see the early return
+    /// in `NetworkPriorAggregator.trimOutliers`), not the 5...15 a
+    /// "siblings only" aggregator would emit. If a future fixture
+    /// expansion crosses the 4-profile threshold, the trimmer fires
+    /// (`trimCount = max(1, 0.1 × n)` clips both ends) and the resulting
+    /// range can collapse to the minimum-width branch — re-derive the
+    /// expected `levelContributions` numbers in this docstring before
+    /// trusting the cycle-14 floor at line ~534. The precedence claim
+    /// holds either way; the contributions check is robust to both.
+    ///
+    /// cycle-14 L-C: `levelContributions[.network]` is set in exactly
+    /// one place — the dictionary literal at PriorHierarchy.swift line
+    /// ~225, inside the `if let net = networkPriors, networkDecay > 0`
+    /// branch. There is no subscript-form write elsewhere, so the
+    /// `network > 0` assertion below is a faithful proxy for "the
+    /// network branch executed". The cycle-14 source canary
+    /// `resolverContributionsNetworkWriteIsBranchGated` pins this
+    /// invariant — if a future refactor adds a second writer outside
+    /// the gated branch, that canary fails before this test silently
+    /// loses its grip on what it is asserting.
+    @Test("show-local priors still dominate when both tiers are available")
+    func wireUpShowLocalDominatesNetwork() async throws {
+        let store = try await makeTestStore()
+        let networkId = "pod-net-spxs-precedence"
+
+        // Network siblings cluster around 10s.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        for i in 0..<2 {
+            let sibling = makeProfile(
+                podcastId: "pod-sibling-prec-\(i)",
+                adDurationStatsJSON: siblingStats.encodeForTesting(),
+                observationCount: 8,
+                networkId: networkId
+            )
+            try await store.upsertProfile(sibling)
+        }
+
+        // Current show has its own observations clustered around 60s
+        // and meets the show-local threshold (sampleCount >= 5,
+        // observationCount >= 5). observationCount=7 sits in [5, 10) so
+        // the network tier is also active (decayedWeight = 0.15) — see
+        // docstring above.
+        let ownStats = AdDurationStats(meanDuration: 60, sampleCount: 20)
+        let current = makeProfile(
+            podcastId: "pod-current-prec",
+            adDurationStatsJSON: ownStats.encodeForTesting(),
+            observationCount: 7,
+            networkId: networkId
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .showLocal)
+
+        // Prove show-local actually wins the blend rather than
+        // observing a vacuous result from network being off.
+        // `levelContributions[.network]` is non-zero exactly when the
+        // network blend ran (gated by `networkDecay > 0`); after the
+        // show-local blend, all prior contributions are rescaled by
+        // `(1 - showLocalBlendWeight)` and `levelContributions[.showLocal]`
+        // is set to `showLocalBlendWeight`. So `network > 0` proves the
+        // network tier was consulted, and `showLocal > network` proves
+        // show-local dominated the blend — neither passes if network
+        // was short-circuited or if show-local was inactive.
+        let networkContribution = resolved.levelContributions[.network] ?? 0
+        let showLocalContribution = resolved.levelContributions[.showLocal] ?? 0
+        #expect(networkContribution > 0,
+                "network tier must be active for this precedence test; contribution=\(networkContribution)")
+        #expect(showLocalContribution > networkContribution,
+                "show-local must dominate active network; showLocal=\(showLocalContribution) network=\(networkContribution)")
+
+        // cycle-14 L-A belt-and-suspenders: also pin the *value* effect on
+        // `typicalAdDuration`, not just the structured blend weights.
+        // levelContributions proves the resolver _called_ each tier's
+        // blend; this floor proves show-local's value (mean=60, range
+        // 48...72) actually moved the resolved range UP from the global
+        // default (30...90 lower bound = 30) and from the network-only
+        // regime (lowerBound = 27 after blending global 30 with network 10
+        // at decay 0.15). Full-stack lowerBound lands at ~41.3, which
+        // clears 35 by a wide margin while excluding both fall-back
+        // regimes — a regression that quietly disabled the show-local
+        // blend (e.g. by zeroing `showLocalBlendWeight`) would land at
+        // 27 or 30 and fail this floor.
+        #expect(resolved.typicalAdDuration.lowerBound > 35,
+                """
+                show-local value-blend must pull typicalAdDuration upward; \
+                got lowerBound=\(resolved.typicalAdDuration.lowerBound). \
+                Network-only regime lands at ~27, global-only at 30, \
+                full-stack at ~41.3 — values <= 35 indicate show-local \
+                did not actually move the duration range.
+                """)
+    }
+
+    /// playhead-spxs cycle-1 L-3: pin the empty-string guard in
+    /// `resolveEpisodePriors`. Production guards `!networkId.isEmpty` so
+    /// a row written with `networkId == ""` (e.g. a corrupt import or a
+    /// future bug that bypasses the COALESCE upsert) doesn't trigger a
+    /// pointless `fetchProfiles(forNetworkId: "")` SQL fetch — and, more
+    /// importantly, can't accidentally activate the network tier when
+    /// no real network identity exists. Without this guard, every
+    /// row with empty `networkId` would group into the same "" bucket
+    /// and pollute the cross-show signal across unrelated shows.
+    @Test("resolveEpisodePriors with networkId == \"\" falls back to global (no network tier)")
+    func wireUpEmptyStringNetworkIdFallsBackToGlobal() async throws {
+        let store = try await makeTestStore()
+
+        // Sibling exists with empty-string networkId — the same value
+        // the current show has. If the production guard regressed, the
+        // resolver would group these into a "" bucket and activate the
+        // network tier from this fake aggregate.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        let sibling = makeProfile(
+            podcastId: "pod-sibling-empty-net",
+            adDurationStatsJSON: siblingStats.encodeForTesting(),
+            observationCount: 8,
+            networkId: ""
+        )
+        try await store.upsertProfile(sibling)
+
+        let current = makeProfile(
+            podcastId: "pod-current-empty-net",
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: ""
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .global)
+        #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
+    }
+
+    /// playhead-spxs cycle-1 missing-test: the decay-weight contract.
+    /// Once a show has accumulated >= 10 episodes of its own observations,
+    /// `NetworkPriors.decayedWeight(episodesObserved:)` returns 0 and the
+    /// resolver's `if let net = networkPriors, networkDecay > 0` guard
+    /// skips the entire network blend. Activation must collapse back to
+    /// global even though `networkPriors` is non-nil and siblings exist
+    /// — the cross-show signal is no longer needed once enough self-data
+    /// has accrued.
+    ///
+    /// Pins the load-bearing arithmetic in `decayedWeight`: a future
+    /// change that swaps the formula (e.g. removes the `max(0, ...)`
+    /// floor or extends decay past 10) would activate the network tier
+    /// here and flip `activeLevel` away from `.global`.
+    @Test("high observationCount decays network weight to 0 and falls back to global")
+    func wireUpHighObservationCountDecaysNetworkTierToZero() async throws {
+        let store = try await makeTestStore()
+        let networkId = "pod-net-spxs-decay"
+
+        // Network siblings cluster around 10s — the same fixture as
+        // `wireUpNetworkNarrowsDurationRange`.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        for i in 0..<3 {
+            let sibling = makeProfile(
+                podcastId: "pod-sibling-decay-\(i)",
+                adDurationStatsJSON: siblingStats.encodeForTesting(),
+                observationCount: 8,
+                networkId: networkId
+            )
+            try await store.upsertProfile(sibling)
+        }
+
+        // Current show has the network identity but observationCount
+        // is at the decay floor (10). The resolver computes
+        // networkDecay = 0.5 * max(0, 1 - 10/10) = 0, so the network
+        // blend's `networkDecay > 0` guard short-circuits.
+        // adDurationStatsJSON is nil so show-local is also inactive,
+        // which leaves only the global tier — the test of record.
+        let current = makeProfile(
+            podcastId: "pod-current-decay",
+            adDurationStatsJSON: nil,
+            observationCount: 10,
+            networkId: networkId
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .global)
+        // Resolved typicalAdDuration must equal the global default
+        // exactly — no blend happened.
+        #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
+    }
+
+    /// playhead-spxs cycle-2 L-2: `decayedWeight(episodesObserved:)`
+    /// must clamp negative inputs to 0 episodes — i.e. return the
+    /// max-weight 0.5 floor, not a value > 0.5 from a misimplemented
+    /// negative-arithmetic path. The production formula is
+    /// `0.5 * max(0, 1 - max(0, episodesObserved) / 10.0)`; without
+    /// the inner `max(episodesObserved, 0)`, a negative input would
+    /// flip the linear ramp's sign and weight network priors HIGHER
+    /// than the at-zero floor.
+    ///
+    /// This pins the inner clamp specifically — separate from the
+    /// existing `wireUpHighObservationCountDecaysNetworkTierToZero`
+    /// test which pins the outer `max(0, ...)` floor at 10+
+    /// observations.
+    @Test("decayedWeight clamps negative observationCount to 0 (= 0.5)")
+    func decayedWeightClampsNegativeToZero() {
+        #expect(NetworkPriors.decayedWeight(episodesObserved: -1) == 0.5)
+        #expect(NetworkPriors.decayedWeight(episodesObserved: -100) == 0.5)
+        // Anchor point: the same value as observationCount = 0.
+        #expect(
+            NetworkPriors.decayedWeight(episodesObserved: -1) ==
+            NetworkPriors.decayedWeight(episodesObserved: 0)
+        )
+    }
+
+    /// playhead-spxs cycle-2 L-3 (cycle-11 L-2 honesty pass): pin the
+    /// aggregator's GUARDED short-circuits under weight 0. The aggregator
+    /// has three weighted divides: `aggregateSponsors`, `weightedAverage`
+    /// (used for `musicBracketPrevalence` and `metadataTrustAverage`),
+    /// and `clusterPositions`. The first two early-return on
+    /// `totalWeight == 0`; the third does NOT (see
+    /// `clusterPositionsDivideIsUnguardedUnderZeroWeight` for that
+    /// path). This test pins finiteness only for the two guarded paths
+    /// — by passing `slotPositions: []` it intentionally keeps
+    /// `clusterPositions` out of scope.
+    ///
+    /// Cycle-11 L-2 honesty: this test does NOT pin the role of
+    /// `NetworkPriorsBuilder.build`'s `weight: max(1.0, Float(...))`
+    /// clamp. The clamp is purely defense-in-depth today: the
+    /// `sampleCount >= ShowLocalPriorsBuilder.minSampleCount` (=5)
+    /// filter upstream of the snapshot constructor already rejects every
+    /// `sampleCount < 5` profile, so production never propagates
+    /// `weight: 0` to the aggregator regardless of the clamp. If a
+    /// future change either drops the threshold below 1 OR lights up
+    /// `slotPositions` in the snapshot, that clamp becomes load-bearing
+    /// — and the companion test
+    /// `clusterPositionsDivideIsUnguardedUnderZeroWeight` makes the
+    /// failure mode concrete.
+    @Test("NetworkPriorAggregator.aggregate with weight=0 produces 0 (not NaN) for guarded weighted axes")
+    func aggregateWithZeroWeightSnapshotIsFinite() {
+        // Single snapshot with weight: 0 — the aggregator's
+        // `weightedAverage` and `aggregateSponsors` paths both
+        // early-return on `totalWeight == 0`. With `slotPositions: []`
+        // the unguarded `clusterPositions` divide never fires. The
+        // resulting priors are finite and 0-valued for the weighted
+        // scalar axes, not NaN.
+        let snap = ShowPriorSnapshot(
+            sponsors: [:],
+            slotPositions: [],
+            averageAdDuration: 30,
+            musicBracketRate: 0.5,
+            metadataTrust: 0.5,
+            weight: 0
+        )
+        let priors = try! #require(NetworkPriorAggregator.aggregate([snap]))
+        #expect(!priors.musicBracketPrevalence.isNaN,
+                "aggregator must short-circuit divide-by-zero, not produce NaN")
+        #expect(!priors.metadataTrustAverage.isNaN,
+                "aggregator must short-circuit divide-by-zero, not produce NaN")
+        // Cycle-11 L-2: also pin the value the guarded short-circuit
+        // returns — `weightedAverage` returns 0 on totalWeight == 0,
+        // which is the documented degenerate-case answer when no
+        // network signal is available.
+        #expect(priors.musicBracketPrevalence == 0,
+                "weightedAverage short-circuit on totalWeight == 0 returns 0")
+        #expect(priors.metadataTrustAverage == 0,
+                "weightedAverage short-circuit on totalWeight == 0 returns 0")
+    }
+
+    /// playhead-spxs cycle-11 L-2: pin the unguarded divide in
+    /// `NetworkPriorAggregator.clusterPositions` that the
+    /// `NetworkPriorsBuilder` source comment calls out. Today this path
+    /// is unreachable because the builder hardcodes `slotPositions: []`
+    /// in every snapshot it produces, so the aggregator never receives
+    /// non-empty positions. This test bypasses the builder and drives
+    /// `clusterPositions` directly with weight-0 inputs that fall within
+    /// the merge radius — proving the divide IS unguarded today and
+    /// would emit NaN if a future producer ever propagated `weight: 0`
+    /// alongside non-empty `slotPositions`.
+    ///
+    /// If this test starts failing because `clusterPositions` got a
+    /// `guard newWeight > 0` short-circuit, that is a strict improvement
+    /// — delete this test and the corresponding cautionary comment in
+    /// `NetworkPriorsBuilder.swift`. Until then, the comment and this
+    /// test are paired evidence that the builder's
+    /// `weight: max(1.0, Float(stats.sampleCount))` clamp is the load-
+    /// bearing defense the moment `slotPositions` flips on.
+    @Test("clusterPositions divides by zero under weight=0 — unguarded by design")
+    func clusterPositionsDivideIsUnguardedUnderZeroWeight() {
+        // Two positions within radius 0.05 force the merge branch
+        // (`old.totalWeight + weight` divisor). Both weights are 0, so
+        // `newWeight = 0` and `(0 * 0 + 0.3 * 0) / 0` is NaN.
+        let positions: [(position: Float, weight: Float)] = [
+            (0.30, 0),
+            (0.31, 0)
+        ]
+        let result = NetworkPriorAggregator.clusterPositions(positions, radius: 0.05)
+        #expect(result.count == 1,
+                "two positions within radius must collapse into one cluster")
+        let centroid = try! #require(result.first)
+        #expect(
+            centroid.isNaN,
+            """
+            playhead-spxs cycle-11 L-2: clusterPositions is documented as \
+            having an unguarded divide under weight=0. If this `isNaN` \
+            assertion has flipped, the divide got a guard — strictly \
+            safer. Delete this test and the cautionary comment block in \
+            NetworkPriorsBuilder.swift that flags the unreachable NaN \
+            path. Centroid was: \(centroid)
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-2 L-4: pin the `GlobalPriorDefaults.standard`
+    /// values that interact with the network tier's blend math. Three
+    /// values matter:
+    ///
+    ///   • `musicBracketTrust = 0.5` — matches the
+    ///     `NetworkPriorsBuilder` snapshot default of 0.5, so the
+    ///     blend on this axis is currently a numeric no-op for any
+    ///     network of arbitrary size. Pinning this value here surfaces
+    ///     a test failure if either the global default OR the snapshot
+    ///     default changes — a future producer that lights up real
+    ///     `musicBracketRate` data will then materially flow through.
+    ///   • `metadataTrust = 0.5` — same shape as above.
+    ///   • `sponsorRecurrenceExpectation = 0.3` — does NOT match the
+    ///     network's derived value (which is 0 when `commonSponsors`
+    ///     is empty, as it always is today). The blend therefore
+    ///     materially pulls this axis toward 0 with weight
+    ///     `networkDecay`. Pinning the value documents the asymmetry.
+    ///
+    /// The blend behavior is described in
+    /// `NetworkPriorsBuilder.swift`'s file header. This test makes the
+    /// load-bearing constants concrete so a refactor can't drift any
+    /// of them without flipping this assertion.
+    @Test("GlobalPriorDefaults.standard pins values the network tier blends against")
+    func globalPriorDefaultsStandardValuesArePinned() {
+        let g = GlobalPriorDefaults.standard
+        #expect(g.musicBracketTrust == 0.5,
+                "matches NetworkPriorsBuilder snapshot default — keeps the network blend a numeric no-op on this axis until a real producer lights up musicBracketRate")
+        #expect(g.metadataTrust == 0.5,
+                "matches NetworkPriorsBuilder snapshot default — same shape as musicBracketTrust")
+        #expect(g.sponsorRecurrenceExpectation == 0.3,
+                "differs from the network-derived 0 — the blend pulls this axis materially toward 0 with weight networkDecay")
+    }
+
+    /// playhead-spxs cycle-14 missing-test #3: source canary that
+    /// `levelContributions[.network]` is written EXCLUSIVELY inside the
+    /// `if let net = networkPriors, networkDecay > 0` branch in
+    /// `PriorHierarchyResolver.resolve`.
+    ///
+    /// Why this matters: the cycle-14 wireUp dominance check
+    /// (`wireUpShowLocalDominatesNetwork`) asserts
+    /// `levelContributions[.network] > 0` is a faithful proxy for "the
+    /// network tier's blend executed". That proxy holds only because
+    /// the resolver writes `.network` to `contributions` in a single
+    /// place: the dictionary literal at the tail of the gated branch.
+    /// A regression that pre-seeded `contributions[.network] = 0` (or
+    /// any other value) outside the gated branch — for instance, in a
+    /// metrics-init pass that ran before the conditional — would land
+    /// the proxy in a state where the dominance test passes regardless
+    /// of whether the network blend ran. This canary catches that
+    /// silent-revert window.
+    @Test("PriorHierarchyResolver.resolve writes .network into contributions only inside the networkPriors-gated branch")
+    func resolverContributionsNetworkWriteIsBranchGated() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/AdDetection/PriorHierarchy.swift"
+        )
+        // Strip comments AND string literals so a future docstring
+        // reference to `.network` doesn't false-positive.
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+        let strippedNS = stripped as NSString
+
+        // Anchor the resolver implementation: `static func resolve(`.
+        let funcAnchor = "static func resolve("
+        let funcRange = try #require(stripped.range(of: funcAnchor),
+                                     "could not locate `\(funcAnchor)` — resolver was renamed; update this canary's anchor")
+        let funcOpenIdx = try #require(
+            SwiftSourceInspector.findOpenBrace(in: stripped, after: funcRange.upperBound),
+            "could not locate opening `{` of `static func resolve(...)` — signature drift?"
+        )
+        let resolveBody = SwiftSourceInspector.bracedBody(in: stripped, startingAt: funcOpenIdx)
+        let resolveBodyNS = resolveBody as NSString
+        #expect(resolveBodyNS.length > 0,
+                "resolveBody is empty — `bracedBody` failed (unbalanced braces?)")
+
+        // Locate the gated branch opener — whitespace-tolerant for
+        // future swift-format reflows.
+        let gateOpenerPattern = #"if\s+let\s+net\s*=\s*networkPriors\s*,\s*networkDecay\s*>\s*0\s*\{"#
+        let gateOpenerRegex = try NSRegularExpression(pattern: gateOpenerPattern)
+        let gateMatch = try #require(
+            gateOpenerRegex.firstMatch(in: resolveBody, range: NSRange(location: 0, length: resolveBodyNS.length)),
+            """
+            Could not find the network-gated branch opener \
+            `if let net = networkPriors, networkDecay > 0 {` in \
+            PriorHierarchyResolver.resolve. Either the gate condition \
+            was rewritten or the resolver no longer threads networkPriors \
+            through this branch — re-derive the cycle-14 invariant before \
+            updating this anchor.
+            """
+        )
+
+        // gateMatch.range covers the entire `if ... {` opener including
+        // the open brace. Inside that brace we are at depth 1; walk
+        // forward until depth returns to 0 to find the matching close.
+        // Comments and strings have already been stripped, so depth
+        // tracking is just `{`/`}` counting.
+        var depth = 1
+        var idx = gateMatch.range.location + gateMatch.range.length
+        let openBrace: unichar = 0x7B  // {
+        let closeBrace: unichar = 0x7D // }
+        while idx < resolveBodyNS.length && depth > 0 {
+            let ch = resolveBodyNS.character(at: idx)
+            if ch == openBrace { depth += 1 }
+            else if ch == closeBrace { depth -= 1 }
+            idx += 1
+        }
+        #expect(depth == 0,
+                "could not find matching close brace for the gated branch — unbalanced braces in resolveBody")
+        // [gateMatch.range.location, idx) covers the gated branch
+        // including its braces. Anything outside this half-open range
+        // is OUTSIDE the gated branch.
+        let gateStart = gateMatch.range.location
+        let gateEndExclusive = idx
+
+        // Find every `.network` reference in the resolve body. Word
+        // boundary keeps `.network` from matching `.networking` etc.
+        let dotNetworkRegex = try NSRegularExpression(pattern: #"\.network\b"#)
+        let allMatches = dotNetworkRegex.matches(
+            in: resolveBody,
+            range: NSRange(location: 0, length: resolveBodyNS.length)
+        )
+
+        var insideCount = 0
+        var outsideCount = 0
+        var outsideOffsets: [Int] = []
+        for match in allMatches {
+            let loc = match.range.location
+            if loc >= gateStart && loc < gateEndExclusive {
+                insideCount += 1
+            } else {
+                outsideCount += 1
+                outsideOffsets.append(loc)
+            }
+        }
+
+        #expect(outsideCount == 0,
+                """
+                PriorHierarchyResolver.resolve contains \(outsideCount) \
+                `.network` reference(s) OUTSIDE the \
+                `if let net = networkPriors, networkDecay > 0` branch \
+                (offsets in resolveBody: \(outsideOffsets)). The cycle-14 \
+                wireUpShowLocalDominatesNetwork test treats \
+                `levelContributions[.network] > 0` as proof the gated \
+                branch ran — a write outside the branch (e.g. a \
+                metrics-init pre-seed) would falsify that proxy and let \
+                the dominance test pass even when the network blend was \
+                short-circuited. Either remove the out-of-branch write or \
+                update the dominance test to use a stricter proxy before \
+                relaxing this canary.
+                """)
+        #expect(insideCount >= 1,
+                """
+                PriorHierarchyResolver.resolve has 0 `.network` references \
+                inside the gated branch — the network tier write may have \
+                been removed entirely. Either the production code is \
+                broken or this canary's anchor signature has drifted.
+                """)
+    }
+
+    // playhead-spxs cycle-2 M-1 (DEFERRED with architectural rationale):
+    // the fall-through path when `store.fetchProfiles(forNetworkId:)`
+    // THROWS (rather than returns empty) is documented in
+    // `resolveEpisodePriors`'s do-catch block but is not exercised by
+    // a behavioral test here.
+    //
+    // Why deferred: the production `AnalysisStore` is a concrete actor
+    // (~50 methods, no protocol seam). Injecting a throwing mock would
+    // require either:
+    //   (a) introducing an `AnalysisStoreProtocol` abstraction for
+    //       AdDetectionService's dependency, or
+    //   (b) adding a test-only `forceCloseForTesting()` (or similar
+    //       fault-injection seam) on the real store under #if DEBUG.
+    // Both are architectural changes — option (a) is a wide protocol
+    // surface across an actor; option (b) widens the public test
+    // surface of a load-bearing persistence type. CLAUDE.md's
+    // "Decision Authority" section says: "Never swap frameworks, APIs,
+    // or architectural approaches without explicit approval. Present
+    // the options and tradeoffs, then wait for a decision."
+    //
+    // The cycle-2 reviewer characterized this as "a one-stub job" but
+    // that framing assumed an existing protocol. There is no such
+    // protocol; `StubAnalysisStore` in PlayheadTests/Helpers/Stubs.swift
+    // is a thin wrapper around the real store, not a substitutable
+    // mock. The do-catch remains verified by code reading only.
+    //
+    // Mitigation: the catch path's only behavior is to log and continue
+    // with `networkPriors = nil` / `networkDecay = 0` — both already
+    // exercised by the empty-fetch path
+    // (`wireUpEmptyStringNetworkIdFallsBackToGlobal` and
+    // `wireUpNoNetworkIdFallsBackToGlobalForNewShows`). The branch the
+    // missing test would cover is the `logger.warning` call only.
+    //
+    // To activate this test in a future cycle: either pick option (a)
+    // or (b) above, get explicit user approval, then add a test that
+    // verifies `activeLevel != .network` and no error escapes when
+    // `fetchProfiles` throws.
+
+    /// playhead-spxs: round-trip persistence for the new `networkId`
+    /// column. Locks the SQL bind/read path so a future migration can't
+    /// silently drop the column.
+    @Test("networkId survives upsertProfile round-trip")
+    func networkIdPersists() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-spxs-roundtrip"
+        let seed = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: "wondery"
+        )
+        try await store.upsertProfile(seed)
+
+        let fetched = try await store.fetchProfile(podcastId: podcastId)
+        #expect(fetched?.networkId == "wondery")
+    }
+
+    /// playhead-spxs: COALESCE protection for `networkId`. Once a
+    /// network identity is recorded, subsequent upserts that don't carry
+    /// the column forward must NOT clobber the persisted value to NULL.
+    /// Mirrors the cycle-1 #192 contract for `adDurationStatsJSON`.
+    @Test("upsertProfile with nil networkId preserves previously-recorded value (COALESCE)")
+    func upsertNilNetworkIdPreservesExisting() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-spxs-coalesce"
+        let seed = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: "iheart"
+        )
+        try await store.upsertProfile(seed)
+
+        // Re-upsert with networkId == nil, simulating a writer that
+        // doesn't have the column in scope.
+        let rebuilt = makeProfile(
+            podcastId: podcastId,
+            adDurationStatsJSON: nil,
+            observationCount: 1,
+            networkId: nil
+        )
+        try await store.upsertProfile(rebuilt)
+
+        let reloaded = try await store.fetchProfile(podcastId: podcastId)
+        #expect(reloaded?.networkId == "iheart")
+        // Confirm the upsert applied (observationCount changed) — so
+        // the COALESCE clause is what saved the column, not a no-op.
+        #expect(reloaded?.observationCount == 1)
+    }
+
+    /// playhead-spxs: `fetchProfiles(forNetworkId:)` returns only profiles
+    /// whose `networkId` matches the supplied id, and an empty array when
+    /// no profile matches. The SQL is the only entry point the resolver
+    /// uses to build a network aggregate, so a regression here would
+    /// silently disable the network tier.
+    @Test("fetchProfiles(forNetworkId:) filters by networkId")
+    func fetchProfilesForNetworkIdFiltersCorrectly() async throws {
+        let store = try await makeTestStore()
+        let networkA = "spotify-studios"
+        let networkB = "iheart"
+
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-A1", adDurationStatsJSON: nil,
+            observationCount: 1, networkId: networkA
+        ))
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-A2", adDurationStatsJSON: nil,
+            observationCount: 2, networkId: networkA
+        ))
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-B1", adDurationStatsJSON: nil,
+            observationCount: 3, networkId: networkB
+        ))
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-noNetwork", adDurationStatsJSON: nil,
+            observationCount: 4, networkId: nil
+        ))
+
+        let aProfiles = try await store.fetchProfiles(forNetworkId: networkA)
+        #expect(aProfiles.count == 2)
+        let aIds = Set(aProfiles.map(\.podcastId))
+        #expect(aIds == ["p-A1", "p-A2"])
+
+        let bProfiles = try await store.fetchProfiles(forNetworkId: networkB)
+        #expect(bProfiles.count == 1)
+        #expect(bProfiles.first?.podcastId == "p-B1")
+
+        // Unknown network id returns empty; nil-network profiles never
+        // show up under any concrete networkId lookup.
+        let cProfiles = try await store.fetchProfiles(forNetworkId: "no-such-network")
+        #expect(cProfiles.isEmpty)
+    }
+
+    /// playhead-spxs cycle-2 H-2: defense-in-depth for empty-string
+    /// networkId at the AnalysisStore layer. The production caller in
+    /// `AdDetectionService.resolveEpisodePriors` already guards on
+    /// `!networkId.isEmpty`, but a future caller, a corrupted profile
+    /// row, or a refactor that bypasses the AdDetection guard would
+    /// otherwise issue a `WHERE networkId = ''` SQL fetch that matches
+    /// every row whose column was written as the empty string — a
+    /// phantom network of mis-grouped shows.
+    ///
+    /// This test pins the AnalysisStore-layer early-return: even if the
+    /// store contains rows with empty-string networkIds, the fetch
+    /// returns `[]` and the resolver short-circuits before
+    /// `NetworkPriorsBuilder` ever sees them. Pair with the wire-up
+    /// test `wireUpEmptyStringNetworkIdFallsBackToGlobal`, which pins
+    /// the same guard at the AdDetectionService layer — the two tests
+    /// together pin both layers of the defense-in-depth.
+    @Test("fetchProfiles(forNetworkId: \"\") returns empty even when \"\"-network rows exist")
+    func fetchProfilesForEmptyNetworkIdReturnsEmpty() async throws {
+        let store = try await makeTestStore()
+
+        // Seed the store with two profiles whose networkId is the
+        // empty string. Without the guard, fetchProfiles(forNetworkId:
+        // "") would return both — the phantom-network scenario.
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-empty-1", adDurationStatsJSON: nil,
+            observationCount: 1, networkId: ""
+        ))
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-empty-2", adDurationStatsJSON: nil,
+            observationCount: 2, networkId: ""
+        ))
+
+        // Sanity-check the seed: the empty-string value must actually
+        // round-trip into the column (not get coerced to NULL by the
+        // COALESCE-preserve path), or the test below would pass for
+        // the wrong reason.
+        let seeded = try await store.fetchProfile(podcastId: "p-empty-1")
+        #expect(seeded?.networkId == "",
+                "test depends on empty-string networkId surviving upsert")
+
+        let result = try await store.fetchProfiles(forNetworkId: "")
+        #expect(result.isEmpty,
+                "empty-string networkId must short-circuit before the SQL bind")
+    }
+
+    /// playhead-spxs cycle-5 missing-test: pin that the current show's
+    /// own profile IS included in the network aggregate.
+    ///
+    /// The resolver flow is: read `currentPodcastProfile.networkId`, then
+    /// `fetchProfiles(forNetworkId:)`. The fetch's `WHERE networkId = ?`
+    /// has no SQL-side exclusion of the current `podcastId`, so the
+    /// builder ALWAYS sees the current show's own row alongside its
+    /// siblings. This is the intended behavior — the network priors
+    /// represent "what this network looks like at observation time,
+    /// including this show," not "siblings only" — but it has no test
+    /// pinning it. A future refactor that excludes the current show
+    /// (e.g. `WHERE networkId = ? AND podcastId != ?`) would
+    /// silently shrink the aggregate by one show; for a 2-show network
+    /// with one observed show, that drops the network tier from
+    /// `showCount = 2` to `showCount = 1` (the cycle-2 minShows-1
+    /// fallback would still produce something, but with weaker
+    /// signal). This test pins the inclusion contract.
+    @Test("fetchProfiles(forNetworkId:) includes the queried show's own profile")
+    func fetchProfilesIncludesSelfRow() async throws {
+        let store = try await makeTestStore()
+        let networkId = "self-incl-network"
+
+        // Seed the "current show" plus one sibling — the network has
+        // exactly two profiles. If the fetch ever excludes the row
+        // matching some implicit "current podcastId", the count would
+        // drop below 2.
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-current",
+            adDurationStatsJSON: nil,
+            observationCount: 5,
+            networkId: networkId
+        ))
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-sibling",
+            adDurationStatsJSON: nil,
+            observationCount: 7,
+            networkId: networkId
+        ))
+
+        let profiles = try await store.fetchProfiles(forNetworkId: networkId)
+        #expect(profiles.count == 2,
+                "network fetch must include the current show; got \(profiles.count) rows")
+        let podcastIds = Set(profiles.map(\.podcastId))
+        #expect(podcastIds == ["p-current", "p-sibling"],
+                "expected both rows; got \(podcastIds)")
+    }
+
+    /// playhead-spxs cycle-2 L-1: source canary that pins the
+    /// documented drift between `AnalysisStore.migrate()` and
+    /// `AnalysisStore.migrateOnlyForTesting()` for `podcast_profiles`
+    /// columns added via direct `addColumnIfNeeded(...)` calls
+    /// (i.e. NOT through the versioned `migrate*V<N>IfNeeded()` ladder).
+    ///
+    /// The drift is documented in-source on `migrate()` (search for
+    /// "Drift note (spxs cycle-2 L-1)"). The ladder-only test seam
+    /// `migrateOnlyForTesting()` intentionally does NOT replay the
+    /// three direct `addColumnIfNeeded` calls (`traitProfileJSON`,
+    /// `adDurationStatsJSON`, `networkId`) because the migration-ladder
+    /// tests don't seed real podcast-profile rows and so don't need
+    /// the new columns. This test pins that the diff is exactly
+    /// `{traitProfileJSON, adDurationStatsJSON, networkId}` — and ONLY
+    /// those — so a future change that adds a fourth direct
+    /// `addColumnIfNeeded` for podcast_profiles to `migrate()` without
+    /// mirroring it in `migrateOnlyForTesting()` will trip this canary
+    /// and force the engineer to choose: either (a) replay it in the
+    /// ladder seam too, or (b) extend this allow-list with a
+    /// justification.
+    ///
+    /// Source canary (regex over `AnalysisStore.swift`) rather than
+    /// behavioral test: a behavioral comparison would need to open
+    /// two stores in parallel against different seed shapes — costly
+    /// in test setup, and the static check is sufficient because the
+    /// drift is purely a static-source asymmetry.
+    @Test("migrate() vs migrateOnlyForTesting() drift on podcast_profiles direct addColumnIfNeeded calls")
+    func migrateLadderDriftMatchesDocumentation() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Persistence/AnalysisStore/AnalysisStore.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        // Inspect `runSchemaMigration()` — the private helper that
+        // `migrate()` delegates to via `ensureOpen()`. The public
+        // `migrate()` is a thin wrapper that just calls `ensureOpen()`,
+        // so the addColumnIfNeeded calls live in `runSchemaMigration()`.
+        let migrateColumns = try Self.podcastProfileAddColumnSet(
+            inFunctionNamed: "runSchemaMigration",
+            sourceText: source,
+            strippedText: stripped
+        )
+        let ladderColumns = try Self.podcastProfileAddColumnSet(
+            inFunctionNamed: "migrateOnlyForTesting",
+            sourceText: source,
+            strippedText: stripped
+        )
+
+        let drift = migrateColumns.subtracting(ladderColumns)
+        // Three direct podcast_profiles `addColumnIfNeeded` calls live in
+        // `migrate()` but not in `migrateOnlyForTesting()` (which only
+        // mirrors the versioned ladder steps): `traitProfileJSON`
+        // (ef2.5.1), `adDurationStatsJSON` (playhead-084j), and
+        // `networkId` (playhead-spxs). The drift note in `migrate()`
+        // documents the latter two; the canary catches the older
+        // `traitProfileJSON` gap as well so the engineer renaming/adding
+        // a fourth column has to update *this* allow-list deliberately.
+        let documentedDrift: Set<String> = [
+            "traitProfileJSON",
+            "adDurationStatsJSON",
+            "networkId"
+        ]
+
+        #expect(
+            drift == documentedDrift,
+            """
+            playhead-spxs cycle-2 L-1: drift between `migrate()` and \
+            `migrateOnlyForTesting()` for `podcast_profiles` direct \
+            addColumnIfNeeded(...) columns has changed. Expected \
+            drift: \(documentedDrift.sorted()). Actual drift: \
+            \(drift.sorted()). \
+            \
+            If a new column was added to `migrate()` without mirroring \
+            in `migrateOnlyForTesting()`, either: \
+            (a) mirror the addColumnIfNeeded call in the ladder seam \
+            (preferred — closes the ghost-test risk), OR \
+            (b) extend this canary's `documentedDrift` set with a \
+            comment justifying why the new column doesn't belong in \
+            the ladder seam (e.g. "ladder tests don't seed rows that \
+            bind this column"). \
+            \
+            Reverse drift (columns in ladder but not migrate) is also \
+            wrong — every ladder-seam addColumnIfNeeded should have a \
+            counterpart in production migrate() so the two paths \
+            converge on the same column set. \
+            \
+            migrate() set: \(migrateColumns.sorted()) \
+            migrateOnlyForTesting() set: \(ladderColumns.sorted())
+            """
+        )
+
+        // Reverse-drift sanity check: nothing in the ladder seam that
+        // isn't also in migrate(). If the ladder ever gains a column
+        // that migrate() lacks, the production migrate() is missing a
+        // shipped column — a worse failure mode than the forward drift.
+        let reverseDrift = ladderColumns.subtracting(migrateColumns)
+        #expect(
+            reverseDrift.isEmpty,
+            """
+            playhead-spxs cycle-2 L-1: REVERSE drift detected. \
+            `migrateOnlyForTesting()` adds podcast_profiles columns \
+            that `migrate()` does NOT add: \(reverseDrift.sorted()). \
+            Production migrate() is missing a shipped column — fix \
+            migrate() to add this column too, then re-run.
+            """
+        )
+    }
+
+    /// Cycle-2 L-1 helper: extract the set of `podcast_profiles`
+    /// columns added via direct `addColumnIfNeeded(table: "podcast_profiles", column: "<NAME>", ...)`
+    /// calls inside a named function's body.
+    ///
+    /// Implementation: locate the function signature by literal substring
+    /// `"func <name>(`", slice from there to the next top-level `func ` or
+    /// to end-of-file (whichever comes first), strip comments via
+    /// `SwiftSourceInspector.strippingComments` (which preserves string
+    /// literals — required so the regex can match `"podcast_profiles"`),
+    /// then regex-extract column names. The next-`func ` boundary is
+    /// imperfect (a closure `func` reference would terminate early), but
+    /// `AnalysisStore` has no such occurrence in the body of either
+    /// `migrate()` or `migrateOnlyForTesting()`. Disambiguates `migrate`
+    /// vs `migrateOnlyForTesting` by anchoring to `func <name>(` (the `(`
+    /// rules out the longer name).
+    private static func podcastProfileAddColumnSet(
+        inFunctionNamed funcName: String,
+        sourceText: String,
+        strippedText: String
+    ) throws -> Set<String> {
+        let signature = "func \(funcName)("
+        // Cycle-4 L-1: anchor the signature lookup on `strippedText`
+        // (comments + strings blanked out) so a doc-comment mention like
+        // `/// see func runSchemaMigration(` cannot beat the real
+        // declaration to the first match. `strippingCommentsAndStrings`
+        // preserves length character-for-character (cycle-26 M-3), so we
+        // can round-trip through NSRange to obtain an index range valid in
+        // `sourceText`. (Swift's `String.Index` instances are not directly
+        // interchangeable across String values even when the underlying
+        // bytes match, hence the explicit conversion.)
+        guard let strippedSignatureRange = strippedText.range(of: signature) else {
+            throw NSError(
+                domain: "MigrateDriftCanary",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not locate `\(signature)` in AnalysisStore.swift"]
+            )
+        }
+        let strippedSignatureNSRange = NSRange(strippedSignatureRange, in: strippedText)
+        guard let signatureRange = Range(strippedSignatureNSRange, in: sourceText) else {
+            throw NSError(
+                domain: "MigrateDriftCanary",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not project signature range from strippedText into sourceText for `\(signature)`"]
+            )
+        }
+
+        // Slice runs from *after* the signature to the next column-4
+        // method declaration (`func ` or `private func `, etc.) or
+        // end-of-file. The leading `\n    ` ensures we don't accidentally
+        // split on a nested `func` keyword inside a string literal or
+        // doc comment; `AnalysisStore` methods are uniformly indented at
+        // 4 spaces. The access-modifier alternation is required because
+        // `migrateOnlyForTesting()` is followed by
+        // `private func migrateSelfDescribingTitlesV15IfNeeded()` —
+        // without matching `private func`, the slice would otherwise
+        // wrap that helper's body and pollute the column set with
+        // columns it adds (e.g. `title`).
+        //
+        // Cycle-3 L-1 / cycle-4 L-4: enumerate every Swift modifier that
+        // can precede `func` in a class body, not just the access-modifier
+        // set. A future helper declared `static func`, `nonisolated func`,
+        // `final override func`, `required convenience init` (the
+        // initializer modifiers travel together with `func` siblings),
+        // etc. between the two ladder methods would otherwise be missed
+        // by the boundary, and the slice would bleed into that helper's
+        // body — silently scanning more text than the canary claims to.
+        // The `{0,4}` repeat covers combinations like
+        // `private static final override func` (rarely written, but
+        // legal); five+ modifiers is implausible and stops the regex
+        // from being unbounded.
+        let bodyStart = signatureRange.upperBound
+        let modifierAlternation = "(?:private|internal|public|fileprivate|open"
+            + "|static|nonisolated|final|class|override|dynamic"
+            + "|mutating|nonmutating|required|convenience)"
+        let boundaryPattern = #"\n    (?:"# + modifierAlternation + #" ){0,4}func "#
+        let boundaryRegex = try NSRegularExpression(pattern: boundaryPattern)
+        let scanRange = NSRange(bodyStart..<sourceText.endIndex, in: sourceText)
+        let firstBoundary = boundaryRegex.firstMatch(in: sourceText, range: scanRange)
+        let bodyEnd: String.Index
+        if let firstBoundary,
+           let boundaryRange = Range(firstBoundary.range, in: sourceText) {
+            bodyEnd = boundaryRange.lowerBound
+        } else {
+            bodyEnd = sourceText.endIndex
+        }
+        let body = String(sourceText[bodyStart..<bodyEnd])
+
+        // Strip comments only — strings must remain intact so the regex
+        // can match `"podcast_profiles"` and `"<NAME>"`.
+        let bodyNoComments = SwiftSourceInspector.strippingComments(body)
+
+        let pattern = #"addColumnIfNeeded\(\s*table:\s*"podcast_profiles"\s*,\s*column:\s*"([^"]+)""#
+        let regex = try NSRegularExpression(pattern: pattern)
+        let bodyNS = NSRange(bodyNoComments.startIndex..., in: bodyNoComments)
+        var columns: Set<String> = []
+        regex.enumerateMatches(in: bodyNoComments, range: bodyNS) { match, _, _ in
+            guard let match,
+                  let nameRange = Range(match.range(at: 1), in: bodyNoComments) else {
+                return
+            }
+            columns.insert(String(bodyNoComments[nameRange]))
+        }
+        return columns
+    }
+
+    /// playhead-spxs cycle-3 L-5: pin that `actor NetworkPriorStore`
+    /// remains a future-caching stub with no production callers.
+    ///
+    /// Cycle-2 marked the actor as UNUSED STUB in its docstring (see
+    /// the docstring above `actor NetworkPriorStore` in
+    /// `NetworkPriors.swift`) and explicitly told future callers
+    /// "do not wire new call sites through this type" — but a
+    /// docstring alone is advisory. This canary makes the constraint
+    /// load-bearing: any non-test, non-declaration reference to
+    /// `NetworkPriorStore` from production code (under `Playhead/`,
+    /// excluding the file that *declares* the actor) trips the test and
+    /// forces the engineer to either delete the unused stub or
+    /// document the reactivation deliberately.
+    ///
+    /// The production path goes through `NetworkPriorsBuilder.build(...)`
+    /// (called from `AdDetectionService.resolveEpisodePriors`); a parallel
+    /// path through this in-memory cache would diverge from the SQL-
+    /// backed `fetchProfiles(forNetworkId:)` source of truth and create
+    /// a memoization staleness problem before any profile shows it's
+    /// needed.
+    @Test("NetworkPriorStore actor has no production callers (cycle-3 L-5)")
+    func networkPriorStoreHasNoProductionCallers() throws {
+        let thisFile = URL(fileURLWithPath: #filePath)
+        // .../PlayheadTests/Services/AdDetection/PriorHierarchyWireUpTests.swift
+        //   -> AdDetection -> Services -> PlayheadTests -> repo root
+        let repoRoot = thisFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let appRoot = repoRoot.appendingPathComponent("Playhead", isDirectory: true)
+
+        // The single source-of-truth declaration. Other production files
+        // that match this exact suffix are the only ones allowed to
+        // reference `NetworkPriorStore` — and that file does so
+        // exclusively in its own type declaration.
+        let declarationFileSuffix = "/Services/AdDetection/NetworkPriors.swift"
+
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: appRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            Issue.record("Could not enumerate \(appRoot.path)")
+            return
+        }
+
+        var offendingReferences: [String] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "swift" else { continue }
+            // Skip the declaring file — it legitimately mentions the
+            // type in its `actor NetworkPriorStore { ... }` declaration.
+            if url.path.hasSuffix(declarationFileSuffix) { continue }
+
+            let source = try String(contentsOf: url, encoding: .utf8)
+            // Strip comments AND strings: we want to catch real call
+            // sites, not mentions in headers / strings / doc comments.
+            let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+            guard stripped.contains("NetworkPriorStore") else { continue }
+
+            offendingReferences.append(
+                url.path.replacingOccurrences(of: repoRoot.path + "/", with: "")
+            )
+        }
+
+        #expect(
+            offendingReferences.isEmpty,
+            """
+            playhead-spxs cycle-3 L-5: production code now references \
+            `NetworkPriorStore` outside its declaring file. The actor is \
+            an UNUSED STUB intentionally kept for future caching; the \
+            production path runs through `NetworkPriorsBuilder.build(...)`. \
+            If you genuinely need the in-memory cache, update this canary \
+            with the new call sites AND the docstring on \
+            `actor NetworkPriorStore` (currently warns "do not wire new \
+            call sites through this type"); otherwise remove the call \
+            site.
+
+            Offending files: \(offendingReferences.sorted())
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-4 M-2 positive control for the C3 L-5
+    /// canary: prove the
+    /// `strippingCommentsAndStrings(...).contains("NetworkPriorStore")`
+    /// predicate ACTUALLY flags a real call site. Without this control,
+    /// a future refactor of `strippingCommentsAndStrings` (e.g. one
+    /// that over-strips identifiers, accidentally drops `NetworkPriorStore`
+    /// tokens, or returns an empty string on certain inputs) would let
+    /// the canary go silently green even against a regressed source.
+    ///
+    /// The control runs the exact predicate the production canary uses
+    /// — strip, then `.contains` — against a synthetic Swift source
+    /// where `NetworkPriorStore` appears as a real reference (not in a
+    /// comment, not in a string), and asserts the predicate returns
+    /// `true`. We also pin a negative shape: the same identifier
+    /// embedded *only* in a `//` comment and a `"…"` string literal
+    /// must be filtered away by the stripper.
+    @Test("NetworkPriorStore canary predicate fires on synthetic call site (cycle-4 M-2)")
+    func networkPriorStoreCanaryPredicateFiresOnSyntheticCallSite() {
+        // Real reference: instantiating the actor in a function body.
+        // After comment + string stripping, the identifier MUST remain.
+        let regressionFixture = """
+        import Foundation
+
+        @MainActor
+        final class SomeProductionType {
+            func wireUp() async {
+                let store = NetworkPriorStore()
+                await store.fetch()
+            }
+        }
+        """
+        let strippedReal = SwiftSourceInspector.strippingCommentsAndStrings(regressionFixture)
+        #expect(
+            strippedReal.contains("NetworkPriorStore"),
+            """
+            playhead-spxs cycle-4 M-2 positive control failure: the C3 \
+            L-5 canary's predicate (`strippingCommentsAndStrings(source) \
+            .contains("NetworkPriorStore")`) did NOT flag a synthetic \
+            source whose function body instantiates the actor. The \
+            stripper is now over-aggressive — it is dropping bare \
+            identifiers — which means the production canary has gone \
+            blind. Audit `strippingCommentsAndStrings` and either \
+            tighten its scope to comments + strings only or replace \
+            this predicate with a regex that does not depend on the \
+            stripper.
+            """
+        )
+
+        // Negative shape: identifier only inside a comment + string.
+        // The stripper must remove BOTH so the predicate returns false.
+        // If this side fails, the canary will *over*-trip on benign
+        // mentions in headers / log messages.
+        let benignMentionsFixture = """
+        // This comment mentions NetworkPriorStore but it is not a call site.
+        let docs = "See NetworkPriorStore in NetworkPriors.swift for details."
+        """
+        let strippedBenign = SwiftSourceInspector.strippingCommentsAndStrings(benignMentionsFixture)
+        #expect(
+            !strippedBenign.contains("NetworkPriorStore"),
+            """
+            playhead-spxs cycle-4 M-2 negative control failure: the C3 \
+            L-5 canary's predicate FLAGGED a fixture where \
+            `NetworkPriorStore` appears ONLY inside a `//` comment and a \
+            `"…"` string literal. The stripper is now under-aggressive \
+            — it is leaving comment / string identifiers in place — \
+            which means the production canary will trip on doc-comment \
+            mentions and log-line strings even when production code is \
+            clean. Audit `strippingCommentsAndStrings`.
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-3 M-1: pin that `podcast_profiles.networkId`
+    /// has a SQL index. `fetchProfiles(forNetworkId:)` runs
+    /// `WHERE networkId = ?` on every `resolveEpisodePriors()` call;
+    /// without the index this is a full table scan that grows linearly
+    /// with profile-row count. The index is created by
+    /// `runSchemaMigration()` next to the column add.
+    ///
+    /// Source canary (regex over `AnalysisStore.swift`) rather than
+    /// behavioral test: `sqlite_master` would also work but the index
+    /// existence is a static-source contract — and a behavioral test
+    /// that opens a store + queries `sqlite_master` is heavier than a
+    /// regex match on the migration SQL.
+    @Test("podcast_profiles.networkId has SQL index in runSchemaMigration (cycle-3 M-1)")
+    func networkIdColumnHasSqlIndex() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Persistence/AnalysisStore/AnalysisStore.swift"
+        )
+        // cycle-5 L-1: require the partial WHERE clause. Most rows in
+        // `podcast_profiles` have NULL `networkId` (the column was added
+        // late and most shows have no recorded network); a partial index
+        // keyed on `WHERE networkId IS NOT NULL` skips those NULL rows
+        // entirely, halving index size in the typical library. A
+        // regression that drops the partial clause would leave the index
+        // bloated with NULL entries the planner cannot use anyway, so
+        // this canary anchors on the full DDL shape.
+        let pattern = #"CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId\s+ON podcast_profiles\(networkId\)\s+WHERE networkId IS NOT NULL"#
+        let regex = try NSRegularExpression(pattern: pattern)
+        let nsRange = NSRange(source.startIndex..., in: source)
+        let matches = regex.numberOfMatches(in: source, range: nsRange)
+        #expect(
+            matches == 1,
+            """
+            playhead-spxs cycle-3 M-1 / cycle-5 L-1: expected exactly one \
+            `CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId \
+            ON podcast_profiles(networkId) WHERE networkId IS NOT NULL` \
+            in AnalysisStore.swift; found \(matches). Without the index, \
+            every `resolveEpisodePriors()` does a full scan of \
+            `podcast_profiles`, becoming O(n) in library size. The \
+            partial WHERE is required so the index isn't bloated with \
+            NULL entries the planner can't use anyway. If the index \
+            name has been renamed, update this canary AND verify the \
+            new index actually covers the (networkId) lookup with the \
+            same partial-WHERE shape.
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-4 L-2: behavioral complement to the cycle-3
+    /// M-1 source canary. Source canary pins that the `CREATE INDEX`
+    /// statement EXISTS in production; this test pins that SQLite's
+    /// query planner ACTUALLY USES the index for the production query
+    /// shape (`SELECT … FROM podcast_profiles WHERE networkId = ?`).
+    ///
+    /// Why both: a partial index (`WHERE networkId IS NOT NULL`) is
+    /// only consulted when the planner can prove the query predicate
+    /// implies the partial. A future refactor that changes the production
+    /// SQL to e.g. `WHERE networkId IS ?` (NULL-tolerant) or
+    /// `WHERE networkId = ? OR networkId IS NULL` would silently bypass
+    /// the index — the source canary would still pass (the index still
+    /// exists) but the production read would scan the table.
+    ///
+    /// Test strategy: open a fresh in-memory SQLite database (avoids
+    /// any AnalysisStore instantiation cost), apply just the schema
+    /// shape that matters for the index — `podcast_profiles(networkId)`
+    /// — recreate the partial index with the exact production DDL,
+    /// then run `EXPLAIN QUERY PLAN` against the production query
+    /// shape. Assert the plan output mentions `idx_podcast_profiles_networkId`.
+    @Test("EXPLAIN QUERY PLAN for fetchProfiles(forNetworkId:) uses idx_podcast_profiles_networkId (cycle-4 L-2)")
+    func explainQueryPlanUsesNetworkIdIndex() throws {
+        var db: OpaquePointer?
+        let openRC = sqlite3_open_v2(
+            ":memory:",
+            &db,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE,
+            nil
+        )
+        #expect(openRC == SQLITE_OK)
+        defer { if let db { sqlite3_close(db) } }
+
+        // Minimal schema shape: only what the index needs. Production
+        // `podcast_profiles` has many more columns, but the planner's
+        // partial-index decision turns on (a) the indexed column type
+        // and (b) the partial WHERE clause matching the query predicate.
+        let ddl = """
+            CREATE TABLE podcast_profiles (
+                podcastId TEXT PRIMARY KEY,
+                networkId TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId
+                ON podcast_profiles(networkId)
+                WHERE networkId IS NOT NULL;
+            """
+        var errMsg: UnsafeMutablePointer<CChar>?
+        let execRC = sqlite3_exec(db, ddl, nil, nil, &errMsg)
+        #expect(execRC == SQLITE_OK, "DDL exec failed: \(errMsg.map { String(cString: $0) } ?? "")")
+
+        // Production query shape — pull from
+        // `AnalysisStore.fetchProfiles(forNetworkId:)`. We mirror the
+        // `WHERE networkId = ?` predicate; column list is irrelevant
+        // to the planner's index decision so we use `*`.
+        let plan = try collectExplainQueryPlan(
+            db: db,
+            sql: "EXPLAIN QUERY PLAN SELECT * FROM podcast_profiles WHERE networkId = ?"
+        )
+
+        // The planner's text contains either "USING INDEX" or
+        // "USING COVERING INDEX" followed by the index name. We just
+        // need the index name to appear somewhere in the plan rows.
+        let combined = plan.joined(separator: "\n")
+        #expect(
+            combined.contains("idx_podcast_profiles_networkId"),
+            """
+            playhead-spxs cycle-4 L-2: SQLite's query planner did NOT \
+            choose `idx_podcast_profiles_networkId` for the production \
+            `WHERE networkId = ?` shape. The partial index \
+            (`WHERE networkId IS NOT NULL`) is only used when the query \
+            predicate implies the partial — which `=` does (NULL is \
+            never equal to anything in SQL). If the production query \
+            has been refactored to a NULL-tolerant predicate (e.g. \
+            `IS ?`), restore the equality predicate or drop the \
+            partial WHERE clause from the index. The cycle-3 M-1 \
+            source canary alone is no longer sufficient — it pins the \
+            index DDL, not its use.
+
+            EXPLAIN QUERY PLAN output:
+            \(plan.joined(separator: "\\n"))
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-6 missing-test (residual L-2 gap): source
+    /// canary that pins the snapshot-consistency invariant in
+    /// `resolveEpisodePriors`. The cycle-5 L-2 fix snapshots
+    /// `observationCount` from `currentPodcastProfile` BEFORE the
+    /// `store.fetchProfiles(forNetworkId:)` await so that an interleaving
+    /// actor turn that mutates `currentPodcastProfile` cannot corrupt
+    /// the decay weight. A behavioral test for actor reentry timing
+    /// would be inherently flaky; instead, this canary asserts the
+    /// pre-await capture pattern at the source level — a regression
+    /// that moves the `observationCount` read to AFTER the await would
+    /// flip the canary.
+    ///
+    /// Test strategy: load `AdDetectionService.swift`, locate the
+    /// `resolveEpisodePriors` body, and verify that the literal
+    /// `let observedAtSnapshot = snapshotProfile.observationCount`
+    /// appears textually BEFORE the `try await store.fetchProfiles`
+    /// line within the same function body.
+    @Test("resolveEpisodePriors snapshots observationCount before fetchProfiles await (cycle-6)")
+    func resolveEpisodePriorsSnapshotsObservationCountPreAwait() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/AdDetection/AdDetectionService.swift"
+        )
+
+        // Slice from the resolver method signature to the next top-level
+        // `func ` (or end of file). Mirrors the boundary heuristic used
+        // by `podcastProfileAddColumnSet`.
+        let signature = "func resolveEpisodePriors("
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+        guard let strippedSigRange = stripped.range(of: signature) else {
+            Issue.record("Could not locate `\(signature)` in AdDetectionService.swift")
+            return
+        }
+        let modifierAlternation = "(?:private|internal|public|fileprivate|open"
+            + "|static|nonisolated|final|class|override|dynamic"
+            + "|mutating|nonmutating|required|convenience)"
+        let boundaryPattern = #"\n    (?:"# + modifierAlternation + #" ){0,4}func "#
+        let boundaryRegex = try NSRegularExpression(pattern: boundaryPattern)
+        // cycle-9 L-4: scan the stripped form for the boundary so a
+        // future doc comment containing the literal `\n    func foo()`
+        // can't falsely terminate the body slice. We then project the
+        // stripped boundary index back into `source` via NSRange,
+        // which is safe because stripping is UTF-16 length-preserving.
+        let strippedBodyStart = strippedSigRange.upperBound
+        let scanRangeNS = NSRange(strippedBodyStart..<stripped.endIndex, in: stripped)
+        let firstBoundary = boundaryRegex.firstMatch(in: stripped, range: scanRangeNS)
+        let bodyEnd: String.Index
+        if let firstBoundary,
+           let boundaryRange = Range(firstBoundary.range, in: source) {
+            bodyEnd = boundaryRange.lowerBound
+        } else {
+            bodyEnd = source.endIndex
+        }
+        // Project the body-start back into `source` for slicing.
+        guard let signatureRange = Range(NSRange(strippedSigRange, in: stripped), in: source) else {
+            Issue.record("Could not project signature range from strippedText into sourceText")
+            return
+        }
+        let bodyStart = signatureRange.upperBound
+        let rawBody = String(source[bodyStart..<bodyEnd])
+        // cycle-7 L-1: search the comment/string-stripped form so a
+        // future refactor that quotes the snapshot literal in a doc
+        // comment above an awaited fetch can't satisfy the ordering
+        // check. Stripping only blanks comment/string contents — code
+        // anchors are preserved verbatim, so anchor ordering inside
+        // `body` reflects the true source ordering.
+        let body = SwiftSourceInspector.strippingCommentsAndStrings(rawBody)
+
+        // The pre-await snapshot anchor and the await line. The snapshot
+        // line must come strictly before the await.
+        let snapshotAnchor = "let observedAtSnapshot = snapshotProfile.observationCount"
+        let awaitAnchor = "try await store.fetchProfiles(forNetworkId:"
+
+        guard let snapshotIdx = body.range(of: snapshotAnchor)?.lowerBound else {
+            Issue.record(
+                """
+                playhead-spxs cycle-6 (cycle-5 L-2 residual): expected \
+                `\(snapshotAnchor)` in `resolveEpisodePriors`. The L-2 fix \
+                requires snapshotting `observationCount` into a local \
+                BEFORE the `fetchProfiles` await so an interleaving \
+                actor turn can't corrupt the decay weight. If the \
+                snapshot variable was renamed, update this canary to \
+                match.
+                """
+            )
+            return
+        }
+        guard let awaitIdx = body.range(of: awaitAnchor)?.lowerBound else {
+            Issue.record(
+                """
+                playhead-spxs cycle-6 (cycle-5 L-2 residual): expected \
+                `\(awaitAnchor)` in `resolveEpisodePriors`. If the \
+                fetch call shape was refactored, update this canary.
+                """
+            )
+            return
+        }
+
+        #expect(
+            snapshotIdx < awaitIdx,
+            """
+            playhead-spxs cycle-6 (cycle-5 L-2 residual): \
+            `observationCount` snapshot must appear BEFORE the \
+            `fetchProfiles` await. Found snapshot at offset \
+            \(body.distance(from: body.startIndex, to: snapshotIdx)) \
+            and await at offset \
+            \(body.distance(from: body.startIndex, to: awaitIdx)). \
+            Moving the snapshot AFTER the await re-introduces the \
+            reentrancy hazard the L-2 fix closed.
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-7 L-1 positive control for the cycle-6
+    /// canary: prove that
+    /// `strippingCommentsAndStrings(...)` actually removes the
+    /// snapshot literal when it appears ONLY inside a `//` comment
+    /// or a `"…"` string. Without this control, a future regression
+    /// in the stripper would let a refactor that quotes
+    /// `let observedAtSnapshot = snapshotProfile.observationCount`
+    /// in a doc comment ABOVE an awaited fetch falsely satisfy the
+    /// cycle-6 canary's ordering predicate.
+    @Test("Pre-await snapshot canary stripper survives comment-spoof (cycle-7 L-1)")
+    func preAwaitSnapshotCanaryStripperSurvivesCommentSpoof() {
+        // Positive control: real source pattern (snapshot precedes await
+        // in code, no comment spoofing). Stripping must preserve both
+        // anchors so the cycle-6 canary still finds them.
+        let realFixture = """
+        do {
+            let observedAtSnapshot = snapshotProfile.observationCount
+            let siblings = try await store.fetchProfiles(forNetworkId: networkId)
+            _ = (observedAtSnapshot, siblings)
+        }
+        """
+        let strippedReal = SwiftSourceInspector.strippingCommentsAndStrings(realFixture)
+        #expect(
+            strippedReal.contains("let observedAtSnapshot = snapshotProfile.observationCount"),
+            """
+            playhead-spxs cycle-7 L-1 positive control failure: \
+            `strippingCommentsAndStrings` dropped the snapshot literal \
+            from a real code body. The stripper has gone over-aggressive \
+            on identifiers, which would make the cycle-6 canary blind to \
+            real regressions.
+            """
+        )
+        #expect(
+            strippedReal.contains("try await store.fetchProfiles(forNetworkId:"),
+            """
+            playhead-spxs cycle-7 L-1 positive control failure: \
+            `strippingCommentsAndStrings` dropped the await literal from \
+            a real code body. The stripper has gone over-aggressive on \
+            identifiers, which would make the cycle-6 canary blind to \
+            real regressions.
+            """
+        )
+
+        // Negative control: spoof fixture where the snapshot literal
+        // appears ONLY in a doc comment ABOVE the await, with no real
+        // pre-await read. Stripping must remove the commented-out
+        // literal so the cycle-6 canary's `<` ordering check fails on
+        // this shape (rather than passing on a comment).
+        let spoofFixture = """
+        do {
+            // let observedAtSnapshot = snapshotProfile.observationCount
+            let siblings = try await store.fetchProfiles(forNetworkId: networkId)
+            let observedAtSnapshot = snapshotProfile.observationCount
+            _ = (observedAtSnapshot, siblings)
+        }
+        """
+        let strippedSpoof = SwiftSourceInspector.strippingCommentsAndStrings(spoofFixture)
+        let snapshotIdx = strippedSpoof.range(of: "let observedAtSnapshot = snapshotProfile.observationCount")?.lowerBound
+        let awaitIdx = strippedSpoof.range(of: "try await store.fetchProfiles(forNetworkId:")?.lowerBound
+        #expect(
+            snapshotIdx != nil && awaitIdx != nil,
+            "spoof fixture should still contain both anchors after stripping"
+        )
+        if let snapshotIdx, let awaitIdx {
+            #expect(
+                snapshotIdx > awaitIdx,
+                """
+                playhead-spxs cycle-7 L-1 negative control failure: in the \
+                spoof fixture the only real `observedAtSnapshot` read is \
+                AFTER the await; the stripper must have removed the \
+                commented-out literal so that the cycle-6 canary's \
+                pre-await ordering check correctly fails. Instead, the \
+                stripper preserved the comment, which means a future \
+                refactor could pass the cycle-6 canary while still \
+                violating snapshot consistency.
+                """
+            )
+        }
+    }
+
+    /// playhead-spxs cycle-8 missing-test: source canary on the
+    /// graceful-degradation contract for the network tier's
+    /// `fetchProfiles(forNetworkId:)` call. When the SQL hop throws,
+    /// `resolveEpisodePriors` MUST log and fall through with the
+    /// network-tier locals at their defaults (`networkPriors == nil`,
+    /// `networkDecay == 0`) — never propagating the error to callers.
+    /// Otherwise a transient store failure cascades into a global
+    /// ad-detection outage, since this resolver is on the hot path
+    /// for every episode start.
+    ///
+    /// A behavioral test would require injecting a throwing
+    /// `AnalysisStore` stub through the actor's persistence
+    /// interface, which the current architecture doesn't expose.
+    /// This canary asserts the structural invariants at the source
+    /// level instead. Three checks:
+    ///   1. `do {` precedes the `fetchProfiles` await (the call is
+    ///      wrapped, not a bare `try await` that escapes the actor).
+    ///   2. `} catch` follows the await (errors are caught locally).
+    ///   3. The catch body calls `logger.warning(` AND does NOT
+    ///      `throw`, assign to `networkPriors`, or assign to
+    ///      `networkDecay` — the locals must retain their pre-`do`
+    ///      defaults so the resolver falls through cleanly.
+    @Test("resolveEpisodePriors fetchProfiles error falls through to log-and-continue (cycle-8 missing-test)")
+    func resolveEpisodePriorsCatchLogsAndFallsThrough() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/AdDetection/AdDetectionService.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+        let signature = "func resolveEpisodePriors("
+        guard let sigRange = stripped.range(of: signature) else {
+            Issue.record("could not locate `\(signature)` in AdDetectionService.swift")
+            return
+        }
+        let bodyStart = sigRange.upperBound
+        let modifierAlternation = "(?:private|internal|public|fileprivate|open"
+            + "|static|nonisolated|final|class|override|dynamic"
+            + "|mutating|nonmutating|required|convenience)"
+        let boundaryPattern = #"\n    (?:"# + modifierAlternation + #" ){0,4}func "#
+        let boundaryRegex = try NSRegularExpression(pattern: boundaryPattern)
+        let scanRange = NSRange(bodyStart..<stripped.endIndex, in: stripped)
+        let firstBoundary = boundaryRegex.firstMatch(in: stripped, range: scanRange)
+        let bodyEnd: String.Index
+        if let firstBoundary, let r = Range(firstBoundary.range, in: stripped) {
+            bodyEnd = r.lowerBound
+        } else {
+            bodyEnd = stripped.endIndex
+        }
+        let body = String(stripped[bodyStart..<bodyEnd])
+
+        let awaitAnchor = "try await store.fetchProfiles(forNetworkId:"
+        guard let awaitRange = body.range(of: awaitAnchor) else {
+            Issue.record(
+                """
+                playhead-spxs cycle-8 missing-test: expected \
+                `\(awaitAnchor)` in `resolveEpisodePriors`. If the \
+                fetch call shape was refactored, update this canary.
+                """
+            )
+            return
+        }
+
+        // Step 1: `do {` must precede the await — the call must be
+        // wrapped, not a bare `try await` that propagates errors.
+        let preAwait = body[..<awaitRange.lowerBound]
+        #expect(
+            preAwait.range(of: "do {", options: .backwards) != nil,
+            """
+            playhead-spxs cycle-8 missing-test: expected `do {` \
+            before the `fetchProfiles(forNetworkId:)` await. The \
+            graceful-degradation contract requires the SQL hop to \
+            throw into a local catch so a transient store failure \
+            falls through to network-tier-disabled, not all the \
+            way up the resolver's stack.
+            """
+        )
+
+        // Step 2: `} catch` must follow the await.
+        let postAwait = body[awaitRange.upperBound...]
+        guard let catchOpenRange = postAwait.range(of: "} catch") else {
+            Issue.record(
+                """
+                playhead-spxs cycle-8 missing-test: expected `} catch` \
+                after the `fetchProfiles(forNetworkId:)` await — \
+                without it, a thrown SQL error escapes the resolver \
+                entirely and the network tier becomes a hot-path \
+                liability instead of best-effort augmentation.
+                """
+            )
+            return
+        }
+
+        // Step 3: extract the catch body (from the brace after
+        // `catch` to the matching `}`). The current catch is
+        // single-statement with no nested braces, so the next `}`
+        // closes it. Cycle-9 L-1: explicitly assert that property
+        // before relying on it — a future change like
+        // `catch { if x { networkPriors = nil } throw e }` would have
+        // the next `}` close the inner if-block, hiding the outer
+        // `throw` from the forbidden-needle scan.
+        let afterCatch = postAwait[catchOpenRange.upperBound...]
+        guard let catchOpenBrace = afterCatch.range(of: "{") else {
+            Issue.record("could not find `{` opening the catch body")
+            return
+        }
+        let catchInteriorStart = catchOpenBrace.upperBound
+        guard let catchCloseBrace = afterCatch[catchInteriorStart...].range(of: "}") else {
+            Issue.record("could not find `}` closing the catch body")
+            return
+        }
+        let catchInterior = String(afterCatch[catchInteriorStart..<catchCloseBrace.lowerBound])
+
+        // Cycle-9 L-1: reject nested braces inside the catch body.
+        // The simple `range(of: "}")` extractor only works when the
+        // catch is single-statement with no inner blocks. If a future
+        // refactor introduces an `if let { … }` / `do { … }` /
+        // `Task { … }` / closure inside the catch, the extractor would
+        // close at the inner `}` and miss the rest. Rather than build
+        // a brace-balanced walker, force the engineer to update this
+        // canary deliberately when the shape changes.
+        #expect(
+            !catchInterior.contains("{"),
+            """
+            playhead-spxs cycle-9 L-1: catch body for \
+            `fetchProfiles(forNetworkId:)` contains a nested `{`. The \
+            simple brace-extraction in this canary only works for a \
+            single-statement catch — a nested block would let \
+            forbidden statements (rethrow / `networkPriors =` / \
+            `networkDecay =`) hide past the inner `}`. If you've \
+            intentionally added a block inside the catch, replace the \
+            extractor here with a brace-balanced walker. Catch \
+            interior was: \(catchInterior)
+            """
+        )
+
+        // Step 3a: catch logs (graceful degradation, not silent swallow).
+        #expect(
+            catchInterior.contains("logger.warning("),
+            """
+            playhead-spxs cycle-8 missing-test: expected \
+            `logger.warning(` inside the `fetchProfiles` catch. \
+            Removing the log turns network-tier failures invisible \
+            — at minimum an `os_log`/`.warning` must remain so \
+            on-device debugging can observe the fall-through path.
+            """
+        )
+
+        // Step 3b: catch must not rethrow or assign the network-tier
+        // locals — those defaults (`nil` / `0`) are what produce the
+        // graceful resolver fall-through to trait+showLocal+global.
+        let forbiddenInCatch: [(needle: String, why: String)] = [
+            ("throw ", "rethrowing escalates a single-show transient SQL miss into a global resolver failure"),
+            ("networkPriors =", "assigning here breaks the contract that fetch failure leaves the network tier disabled (nil)"),
+            ("networkDecay =", "assigning here breaks the contract that fetch failure leaves the network tier disabled (0)"),
+        ]
+        for (needle, why) in forbiddenInCatch {
+            #expect(
+                !catchInterior.contains(needle),
+                """
+                playhead-spxs cycle-8 missing-test: catch body for \
+                `fetchProfiles(forNetworkId:)` must not contain \
+                `\(needle)`. \(why). Catch interior was: \
+                \(catchInterior)
+                """
+            )
+        }
+    }
+
+    /// playhead-spxs cycle-10 L-2: control fixtures for the catch-canary
+    /// brace-extraction logic used by
+    /// `resolveEpisodePriorsCatchLogsAndFallsThrough`. Mirrors the canary's
+    /// `try await` / `} catch` / `{` / `}` walk against synthetic source
+    /// strings, then asserts the canary's downstream checks fire on
+    /// known-bad shapes and stay quiet on the real shape. If a future
+    /// stripper regression (e.g. cycle-7's `strippingCommentsAndStrings`
+    /// going over-aggressive on `}`) silently broke the canary's
+    /// extraction, this test would fail before the canary itself
+    /// degenerates into a no-op.
+    @Test
+    func resolveEpisodePriorsCatchExtractorWorksOnControlFixtures() throws {
+        // Mirror the catch-canary's brace-extraction logic against a
+        // raw source string. Returns nil when the shape is structurally
+        // unrecognizable (no `try await`, no `} catch`, no `{`, no `}`).
+        func extractCatchInterior(from body: String) -> String? {
+            guard let awaitRange = body.range(of: "try await") else {
+                return nil
+            }
+            let postAwait = body[awaitRange.upperBound...]
+            guard let catchOpenRange = postAwait.range(of: "} catch") else {
+                return nil
+            }
+            let afterCatch = postAwait[catchOpenRange.upperBound...]
+            guard let catchOpenBrace = afterCatch.range(of: "{") else {
+                return nil
+            }
+            let interiorStart = catchOpenBrace.upperBound
+            guard let catchCloseBrace = afterCatch[interiorStart...].range(of: "}") else {
+                return nil
+            }
+            return String(afterCatch[interiorStart..<catchCloseBrace.lowerBound])
+        }
+
+        // Positive control: real-shape catch (single-statement,
+        // logger.warning, no nested braces, no forbidden needles).
+        // The canary's downstream assertions must all PASS on this.
+        let positiveControl = """
+        do {
+            let rows = try await store.fetchProfiles(forNetworkId: id)
+            networkPriors = NetworkPriorsBuilder.build(from: rows)
+        } catch {
+            logger.warning("fetch failed: \\(error)")
+        }
+        """
+        let positiveInterior = try #require(
+            extractCatchInterior(from: positiveControl),
+            """
+            playhead-spxs cycle-10 L-2 positive control: extractor failed \
+            on real-shape catch. If this guard trips, the canary's brace \
+            walk no longer recognizes the production catch shape and must \
+            be revisited.
+            """
+        )
+        #expect(
+            !positiveInterior.contains("{"),
+            """
+            playhead-spxs cycle-10 L-2 positive control: real-shape catch \
+            interior must not contain `{`. Interior was: \(positiveInterior)
+            """
+        )
+        #expect(
+            positiveInterior.contains("logger.warning("),
+            """
+            playhead-spxs cycle-10 L-2 positive control: real-shape catch \
+            interior must contain `logger.warning(`. Interior was: \
+            \(positiveInterior)
+            """
+        )
+        for needle in ["throw ", "networkPriors =", "networkDecay ="] {
+            #expect(
+                !positiveInterior.contains(needle),
+                """
+                playhead-spxs cycle-10 L-2 positive control: real-shape \
+                catch must not contain forbidden needle `\(needle)`. \
+                Interior was: \(positiveInterior)
+                """
+            )
+        }
+
+        // Negative control A: catch contains a forbidden assignment
+        // (`networkPriors = nil`). The canary's forbidden-needle scan
+        // must detect this — if not, cycle-7's stripper regressed and
+        // the canary would silently no-op while still appearing green.
+        let negativeAssignment = """
+        do {
+            let rows = try await store.fetchProfiles(forNetworkId: id)
+        } catch {
+            networkPriors = nil
+        }
+        """
+        let assignmentInterior = try #require(
+            extractCatchInterior(from: negativeAssignment),
+            "negative control (assignment): extractor failed"
+        )
+        #expect(
+            assignmentInterior.contains("networkPriors ="),
+            """
+            playhead-spxs cycle-10 L-2 negative control (assignment): a \
+            `networkPriors = nil` assignment in the catch body must be \
+            visible to the canary's forbidden-needle scan. Interior was: \
+            \(assignmentInterior)
+            """
+        )
+
+        // Negative control B: catch rethrows. Same threat model — the
+        // `throw ` needle must be detectable in the extracted interior.
+        let negativeRethrow = """
+        do {
+            let rows = try await store.fetchProfiles(forNetworkId: id)
+        } catch {
+            throw error
+        }
+        """
+        let rethrowInterior = try #require(
+            extractCatchInterior(from: negativeRethrow),
+            "negative control (rethrow): extractor failed"
+        )
+        #expect(
+            rethrowInterior.contains("throw "),
+            """
+            playhead-spxs cycle-10 L-2 negative control (rethrow): a \
+            `throw error` in the catch body must be visible to the \
+            canary's forbidden-needle scan. Interior was: \(rethrowInterior)
+            """
+        )
+
+        // Negative control C: nested-brace shape. Cycle-9 L-1's
+        // `!catchInterior.contains("{")` assertion exists precisely
+        // because the simple `range(of: "}")` extractor would close at
+        // the inner `}` and miss the outer `throw error`. The L-1 guard
+        // can only fire if our extraction surfaces the inner `{` — this
+        // verifies it does.
+        let negativeNestedBrace = """
+        do {
+            let rows = try await store.fetchProfiles(forNetworkId: id)
+        } catch {
+            if condition { networkPriors = nil }
+            throw error
+        }
+        """
+        let nestedInterior = try #require(
+            extractCatchInterior(from: negativeNestedBrace),
+            "negative control (nested brace): extractor failed"
+        )
+        #expect(
+            nestedInterior.contains("{"),
+            """
+            playhead-spxs cycle-10 L-2 negative control (nested brace): \
+            a nested `{` inside the catch must surface in the extracted \
+            interior so cycle-9 L-1's nested-brace assertion can fire. \
+            Without it, forbidden statements past the inner `}` would \
+            hide from the needle scan. Interior was: \(nestedInterior)
+            """
+        )
+    }
+
+    /// Helper for cycle-4 L-2: collect the plain-text rows of an
+    /// `EXPLAIN QUERY PLAN` statement.
+    private func collectExplainQueryPlan(
+        db: OpaquePointer?,
+        sql: String
+    ) throws -> [String] {
+        var stmt: OpaquePointer?
+        let prepareRC = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard prepareRC == SQLITE_OK else {
+            throw NSError(
+                domain: "ExplainQueryPlanCanary",
+                code: Int(prepareRC),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "sqlite3_prepare_v2 failed (\(prepareRC)) for `\(sql)`"]
+            )
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        // EXPLAIN QUERY PLAN columns: id, parent, notused, detail
+        var rows: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let detailCol = 3
+            if let cstr = sqlite3_column_text(stmt, Int32(detailCol)) {
+                rows.append(String(cString: cstr))
+            }
+        }
+        return rows
     }
 
     // MARK: - PodcastProfile.adDurationStatsJSON column round-trip
@@ -796,7 +2789,8 @@ struct PriorHierarchyWireUpTests {
     private func makeProfile(
         podcastId: String = "podcast-test-1",
         adDurationStatsJSON: String?,
-        observationCount: Int
+        observationCount: Int,
+        networkId: String? = nil
     ) -> PodcastProfile {
         PodcastProfile(
             podcastId: podcastId,
@@ -811,7 +2805,8 @@ struct PriorHierarchyWireUpTests {
             recentFalseSkipSignals: 0,
             traitProfileJSON: nil,
             title: nil,
-            adDurationStatsJSON: adDurationStatsJSON
+            adDurationStatsJSON: adDurationStatsJSON,
+            networkId: networkId
         )
     }
 
