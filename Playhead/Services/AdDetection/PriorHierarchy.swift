@@ -131,11 +131,19 @@ struct ResolvedPriors: Sendable, Equatable {
     /// happen to equal the running value at every blended axis (e.g.
     /// the network tier with snapshot defaults of `musicBracketRate:
     /// 0.5` and `metadataTrust: 0.5` against the matching global
-    /// defaults) leaves the scalar fields numerically unchanged while
-    /// still being the active level. The `typicalAdDuration` axis
-    /// almost always changes when network is active because the
-    /// snapshot range comes from real data, but the scalar axes are
-    /// noisier.
+    /// defaults) leaves those two scalar fields numerically unchanged
+    /// while still being the active level. The `typicalAdDuration`
+    /// axis almost always changes when network is active because the
+    /// snapshot range comes from real data, and
+    /// `sponsorRecurrenceExpectation` *is* materially pulled away from
+    /// the global default of 0.3 toward 0 today — the network builder
+    /// derives `netSponsorRecurrence` from `commonSponsors` (currently
+    /// always empty), so the blend pulls toward 0 with weight
+    /// `networkDecay`. None of these scalar drifts influence detector
+    /// behavior today because no production knob reads
+    /// `sponsorRecurrenceExpectation` (it is "Reserved for future
+    /// consumers"; see field doc above and the audit block in
+    /// `NetworkPriorsBuilder.swift`).
     ///
     /// Consumers asking "did tier X influence the output?" should not
     /// compare `activeLevel == .X`. Instead:

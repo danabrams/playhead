@@ -449,10 +449,31 @@ struct PriorHierarchyWireUpTests {
     /// observationCount=12 only proves show-local wins when network was
     /// already off — a vacuous result. With observationCount=7 the
     /// network tier is genuinely contributing
-    /// (`decayedWeight = 0.5 × (1 - 7/10) = 0.15`), so asserting
-    /// `activeLevel == .showLocal` AND that `typicalAdDuration` reflects
-    /// the show-local center (60 s) demonstrates show-local actually
-    /// wins the blend rather than network being absent.
+    /// (`decayedWeight = 0.5 × (1 - 7/10) = 0.15`).
+    ///
+    /// cycle-13 M-1: switched the dominance assertion from a
+    /// midpoint-of-typicalAdDuration band to a direct comparison of
+    /// `levelContributions[.showLocal]` vs `levelContributions[.network]`.
+    /// The midpoint band turned out to be vacuous: with the fixture
+    /// below, the global-only midpoint is 60.0, network-only is 56.25,
+    /// and the full network+show-local result is 58.8 — all three
+    /// regimes pass `midpoint > 55` AND `|midpoint - 60| < 6`, so the
+    /// midpoint asserts nothing about which tier is active.
+    /// `levelContributions` records each tier's actual blend weight, so
+    /// asserting `showLocal > network > 0` is the structurally correct
+    /// "show-local dominates an active network blend" claim. Expected
+    /// values: `network = 0.15 × 0.32 = 0.048` (rescaled when show-local
+    /// runs) and `showLocal = 0.68`.
+    ///
+    /// Fixture caveat: `NetworkPriorsBuilder.build` aggregates ALL
+    /// profiles with the matching `networkId`, including the current
+    /// show. The two siblings (mean 10) plus the current show (mean 60)
+    /// produce a network range of 10...60 (the
+    /// `NetworkPriorAggregator.aggregateDuration` minimum-width branch
+    /// does not fire because `maxVal - minVal = 50 >= 10`), not the
+    /// 5...15 a "siblings only" aggregator would emit. The precedence
+    /// claim holds either way; the contributions check is robust to
+    /// both.
     @Test("show-local priors still dominate when both tiers are available")
     func wireUpShowLocalDominatesNetwork() async throws {
         let store = try await makeTestStore()
@@ -489,21 +510,21 @@ struct PriorHierarchyWireUpTests {
         #expect(resolved.activeLevel == .showLocal)
 
         // Prove show-local actually wins the blend rather than
-        // observing a vacuous result from network being off. With
-        // showLocalBlendWeight at episodeCount=7 equal to
-        // `0.6 + 0.2 × (7-5)/5 = 0.68`, the show-local center (60 s)
-        // contributes 68% to the final midpoint. The network-only
-        // intermediate state (after global×network blend) has midpoint
-        // ~52.5 s; a show-local-dominated result has midpoint > 55 s,
-        // visibly distinguishing the two regimes. We assert the
-        // resolved midpoint sits much closer to 60 than to 30 (global
-        // floor) or 10 (network mean).
-        let resolvedMidpoint =
-            (resolved.typicalAdDuration.lowerBound + resolved.typicalAdDuration.upperBound) / 2
-        #expect(resolvedMidpoint > 55,
-                "show-local should dominate; midpoint=\(resolvedMidpoint) but expected > 55 (toward 60)")
-        #expect(abs(resolvedMidpoint - 60) < 6,
-                "show-local center is 60; midpoint=\(resolvedMidpoint) drifted too far")
+        // observing a vacuous result from network being off.
+        // `levelContributions[.network]` is non-zero exactly when the
+        // network blend ran (gated by `networkDecay > 0`); after the
+        // show-local blend, all prior contributions are rescaled by
+        // `(1 - showLocalBlendWeight)` and `levelContributions[.showLocal]`
+        // is set to `showLocalBlendWeight`. So `network > 0` proves the
+        // network tier was consulted, and `showLocal > network` proves
+        // show-local dominated the blend — neither passes if network
+        // was short-circuited or if show-local was inactive.
+        let networkContribution = resolved.levelContributions[.network] ?? 0
+        let showLocalContribution = resolved.levelContributions[.showLocal] ?? 0
+        #expect(networkContribution > 0,
+                "network tier must be active for this precedence test; contribution=\(networkContribution)")
+        #expect(showLocalContribution > networkContribution,
+                "show-local must dominate active network; showLocal=\(showLocalContribution) network=\(networkContribution)")
     }
 
     /// playhead-spxs cycle-1 L-3: pin the empty-string guard in

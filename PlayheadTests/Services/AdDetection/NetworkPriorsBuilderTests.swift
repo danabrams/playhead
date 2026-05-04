@@ -148,14 +148,15 @@ struct NetworkPriorsBuilderTests {
     ///
     /// This test instead targets the aggregator directly, with two
     /// snapshots whose weights differ by 4 orders of magnitude AND
-    /// whose `musicBracketRate` values differ. The weighted-average
-    /// path inside `aggregateMusicBracketPrevalence` (and the
-    /// `metadataTrustAverage` sibling) MUST favor the heavier-weighted
-    /// snapshot's value. If the producer is ever changed to surface
-    /// real (non-uniform) `musicBracketRate` snapshots through the
-    /// builder, this favoritism becomes load-bearing on a production
-    /// knob — pinning it now keeps the contract honest in advance of
-    /// that producer.
+    /// whose `musicBracketRate` values differ. The inline
+    /// `weightedAverage(...)` call that produces `musicBracketPrevalence`
+    /// (and the `metadataTrustAverage` sibling — both call sites in
+    /// `NetworkPriorAggregator.aggregate`) MUST favor the heavier-
+    /// weighted snapshot's value. If the producer is ever changed to
+    /// surface real (non-uniform) `musicBracketRate` snapshots through
+    /// the builder, this favoritism becomes load-bearing on a
+    /// production knob — pinning it now keeps the contract honest in
+    /// advance of that producer.
     @Test("aggregator weighted-average favors heavier-weighted snapshot")
     func aggregatorWeightedAverageFavorsHeavier() {
         let lightweight = ShowPriorSnapshot(
