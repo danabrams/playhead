@@ -423,28 +423,32 @@ struct PriorHierarchyWireUpTests {
                 "expected activeLevel == .network for current-show=peak-decay + siblings-with-stats fixture; got \(resolved.activeLevel). A regression that disabled the network branch would land on .global.")
 
         // Pin: with global default 0.3, network's empty-sponsors-derived 0,
-        // and peak network decay weight 0.5, the deterministic blend is
-        // `0.3 × (1 - 0.5) + 0 × 0.5 = 0.15`. Asserting the formula-
-        // derived value (with a tight ±0.02 tolerance for FP wobble) keeps
-        // the test from passing silently if a regression halved the
-        // network decay weight (which would still produce 0.225 < 0.3 and
-        // satisfy a loose `< globalDefault` bound). The bound width of
-        // 0.04 is large vs FP noise but tighter than any meaningful
-        // regression in the blend formula.
+        // and the network decay weight at observationCount=0 (the curve's
+        // maximum value, 0.5 today), the deterministic blend is
+        // `0.3 × (1 - 0.5) + 0 × 0.5 = 0.15`. Sourcing `decayWeight` via
+        // `NetworkPriors.decayedWeight(episodesObserved:)` rather than a
+        // hard-coded 0.5 keeps the assertion self-tracking — if a future
+        // change to the decay curve raises or lowers the maximum, the
+        // expected value here moves with it instead of silently drifting
+        // out of agreement with the resolver. The ±0.02 tolerance handles
+        // FP wobble without admitting a meaningful blend regression: a
+        // halved decay weight (0.25) would produce 0.225 (still strictly
+        // < the global 0.3, so a loose `< globalDefault` bound would miss
+        // it) and is caught here by the tight tolerance band.
         let globalDefault = GlobalPriorDefaults.standard.sponsorRecurrenceExpectation
-        let peakDecay: Float = 0.5
+        let decayWeight = NetworkPriors.decayedWeight(episodesObserved: 0)
         let netSponsorRecurrence: Float = 0.0
-        let expected = globalDefault * (1 - peakDecay) + netSponsorRecurrence * peakDecay
+        let expected = globalDefault * (1 - decayWeight) + netSponsorRecurrence * decayWeight
         #expect(abs(resolved.sponsorRecurrenceExpectation - expected) < 0.02,
                 """
                 Network blend of sponsorRecurrenceExpectation should be \
-                ≈ \(expected) (= \(globalDefault) × \(1 - peakDecay) \
-                + \(netSponsorRecurrence) × \(peakDecay), the formula-\
-                derived blend at peak network decay with empty \
+                ≈ \(expected) (= \(globalDefault) × \(1 - decayWeight) \
+                + \(netSponsorRecurrence) × \(decayWeight), the formula-\
+                derived blend at the obsCount=0 network decay with empty \
                 commonSponsors); got \(resolved.sponsorRecurrenceExpectation). \
-                A regression that halved network decay (0.25) would land \
-                at 0.225 — still strictly < the global default of 0.3, \
-                but caught here.
+                A regression that halved the decay weight would still \
+                produce a value strictly < the global default, but is \
+                caught here by the tight ±0.02 tolerance.
                 """)
     }
 
