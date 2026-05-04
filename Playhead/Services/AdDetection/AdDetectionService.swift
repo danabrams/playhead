@@ -1681,10 +1681,11 @@ actor AdDetectionService {
         // playhead-084j: resolve the 4-level prior hierarchy ONCE per episode.
         // Up to this bead, `DurationPrior.standard` was hard-coded inside the
         // per-span fusion loop, so every show ran with the global default
-        // typicalAdDuration of 30...90s. We now resolve global + trait + show-
-        // local priors here (network priors are filed as a separate bead —
-        // see PR for follow-up IDs) and feed `DurationPrior(resolvedPriors:)`
-        // into the DecisionMapper.
+        // typicalAdDuration of 30...90s. As of playhead-spxs all four tiers —
+        // global + network + trait + show-local — are resolved here and fed
+        // into `DurationPrior(resolvedPriors:)`. See the audit block on
+        // `resolveEpisodePriors(...)` for the current per-tier source-of-truth
+        // and which axes each tier is load-bearing on.
         //
         // Why-it-lives-here (cycle-1 M1): the hoist out of the per-span
         // loop is primarily a SNAPSHOT-CONSISTENCY guarantee, not a

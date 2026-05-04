@@ -592,29 +592,37 @@ struct PriorHierarchyWireUpTests {
         )
     }
 
-    /// playhead-spxs cycle-2 L-3: NaN guard test for the
-    /// `weight: max(1.0, Float(stats.sampleCount))` clamp inside
-    /// `NetworkPriorsBuilder.build`. The `NetworkPriorAggregator`'s
-    /// weighted-average code path divides by total weight; if every
-    /// surviving snapshot reported weight 0, the divisor would be 0
-    /// and the result would be NaN. The clamp ensures every snapshot
-    /// contributes at least weight 1, so the aggregate stays finite.
+    /// playhead-spxs cycle-2 L-3 (cycle-11 L-2 honesty pass): pin the
+    /// aggregator's GUARDED short-circuits under weight 0. The aggregator
+    /// has three weighted divides: `aggregateSponsors`, `weightedAverage`
+    /// (used for `musicBracketPrevalence` and `metadataTrustAverage`),
+    /// and `clusterPositions`. The first two early-return on
+    /// `totalWeight == 0`; the third does NOT (see
+    /// `clusterPositionsDivideIsUnguardedUnderZeroWeight` for that
+    /// path). This test pins finiteness only for the two guarded paths
+    /// — by passing `slotPositions: []` it intentionally keeps
+    /// `clusterPositions` out of scope.
     ///
-    /// This test calls `NetworkPriorAggregator.aggregate` directly with
-    /// a hand-built snapshot whose `weight: 0` so the divide-by-zero
-    /// path is exercised in isolation. The aggregator's behavior under
-    /// `weight: 0` confirms the producer needs the clamp — without the
-    /// clamp, a future builder that propagates `weight: 0` through
-    /// would silently produce NaN priors. Pair with the `min` clamp
-    /// in `NetworkPriorsBuilder.build` to make the chain end-to-end
-    /// safe.
-    @Test("NetworkPriorAggregator.aggregate with weight=0 produces 0 (not NaN) for weighted axes")
+    /// Cycle-11 L-2 honesty: this test does NOT pin the role of
+    /// `NetworkPriorsBuilder.build`'s `weight: max(1.0, Float(...))`
+    /// clamp. The clamp is purely defense-in-depth today: the
+    /// `sampleCount >= ShowLocalPriorsBuilder.minSampleCount` (=5)
+    /// filter upstream of the snapshot constructor already rejects every
+    /// `sampleCount < 5` profile, so production never propagates
+    /// `weight: 0` to the aggregator regardless of the clamp. If a
+    /// future change either drops the threshold below 1 OR lights up
+    /// `slotPositions` in the snapshot, that clamp becomes load-bearing
+    /// — and the companion test
+    /// `clusterPositionsDivideIsUnguardedUnderZeroWeight` makes the
+    /// failure mode concrete.
+    @Test("NetworkPriorAggregator.aggregate with weight=0 produces 0 (not NaN) for guarded weighted axes")
     func aggregateWithZeroWeightSnapshotIsFinite() {
-        // Single snapshot with weight: 0 — the divide-by-zero scenario
-        // the builder's max(1.0, ...) clamp guards against. The
-        // aggregator's `weightedAverage` returns 0 on totalWeight == 0
-        // (its own short-circuit), so the resulting priors should be
-        // finite and 0-valued for the weighted scalar axes — not NaN.
+        // Single snapshot with weight: 0 — the aggregator's
+        // `weightedAverage` and `aggregateSponsors` paths both
+        // early-return on `totalWeight == 0`. With `slotPositions: []`
+        // the unguarded `clusterPositions` divide never fires. The
+        // resulting priors are finite and 0-valued for the weighted
+        // scalar axes, not NaN.
         let snap = ShowPriorSnapshot(
             sponsors: [:],
             slotPositions: [],
@@ -628,6 +636,58 @@ struct PriorHierarchyWireUpTests {
                 "aggregator must short-circuit divide-by-zero, not produce NaN")
         #expect(!priors.metadataTrustAverage.isNaN,
                 "aggregator must short-circuit divide-by-zero, not produce NaN")
+        // Cycle-11 L-2: also pin the value the guarded short-circuit
+        // returns — `weightedAverage` returns 0 on totalWeight == 0,
+        // which is the documented degenerate-case answer when no
+        // network signal is available.
+        #expect(priors.musicBracketPrevalence == 0,
+                "weightedAverage short-circuit on totalWeight == 0 returns 0")
+        #expect(priors.metadataTrustAverage == 0,
+                "weightedAverage short-circuit on totalWeight == 0 returns 0")
+    }
+
+    /// playhead-spxs cycle-11 L-2: pin the unguarded divide in
+    /// `NetworkPriorAggregator.clusterPositions` that the
+    /// `NetworkPriorsBuilder` source comment calls out. Today this path
+    /// is unreachable because the builder hardcodes `slotPositions: []`
+    /// in every snapshot it produces, so the aggregator never receives
+    /// non-empty positions. This test bypasses the builder and drives
+    /// `clusterPositions` directly with weight-0 inputs that fall within
+    /// the merge radius — proving the divide IS unguarded today and
+    /// would emit NaN if a future producer ever propagated `weight: 0`
+    /// alongside non-empty `slotPositions`.
+    ///
+    /// If this test starts failing because `clusterPositions` got a
+    /// `guard newWeight > 0` short-circuit, that is a strict improvement
+    /// — delete this test and the corresponding cautionary comment in
+    /// `NetworkPriorsBuilder.swift`. Until then, the comment and this
+    /// test are paired evidence that the builder's
+    /// `weight: max(1.0, Float(stats.sampleCount))` clamp is the load-
+    /// bearing defense the moment `slotPositions` flips on.
+    @Test("clusterPositions divides by zero under weight=0 — unguarded by design")
+    func clusterPositionsDivideIsUnguardedUnderZeroWeight() {
+        // Two positions within radius 0.05 force the merge branch
+        // (`old.totalWeight + weight` divisor). Both weights are 0, so
+        // `newWeight = 0` and `(0 * 0 + 0.3 * 0) / 0` is NaN.
+        let positions: [(position: Float, weight: Float)] = [
+            (0.30, 0),
+            (0.31, 0)
+        ]
+        let result = NetworkPriorAggregator.clusterPositions(positions, radius: 0.05)
+        #expect(result.count == 1,
+                "two positions within radius must collapse into one cluster")
+        let centroid = try! #require(result.first)
+        #expect(
+            centroid.isNaN,
+            """
+            playhead-spxs cycle-11 L-2: clusterPositions is documented as \
+            having an unguarded divide under weight=0. If this `isNaN` \
+            assertion has flipped, the divide got a guard — strictly \
+            safer. Delete this test and the cautionary comment block in \
+            NetworkPriorsBuilder.swift that flags the unreachable NaN \
+            path. Centroid was: \(centroid)
+            """
+        )
     }
 
     /// playhead-spxs cycle-2 L-4: pin the `GlobalPriorDefaults.standard`
