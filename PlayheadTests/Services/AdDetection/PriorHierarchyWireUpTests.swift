@@ -1421,19 +1421,19 @@ struct PriorHierarchyWireUpTests {
             Issue.record("Could not locate `\(signature)` in AdDetectionService.swift")
             return
         }
-        let strippedSigNS = NSRange(strippedSigRange, in: stripped)
-        guard let signatureRange = Range(strippedSigNS, in: source) else {
-            Issue.record("Could not project signature range from strippedText into sourceText")
-            return
-        }
-        let bodyStart = signatureRange.upperBound
         let modifierAlternation = "(?:private|internal|public|fileprivate|open"
             + "|static|nonisolated|final|class|override|dynamic"
             + "|mutating|nonmutating|required|convenience)"
         let boundaryPattern = #"\n    (?:"# + modifierAlternation + #" ){0,4}func "#
         let boundaryRegex = try NSRegularExpression(pattern: boundaryPattern)
-        let scanRange = NSRange(bodyStart..<source.endIndex, in: source)
-        let firstBoundary = boundaryRegex.firstMatch(in: source, range: scanRange)
+        // cycle-9 L-4: scan the stripped form for the boundary so a
+        // future doc comment containing the literal `\n    func foo()`
+        // can't falsely terminate the body slice. We then project the
+        // stripped boundary index back into `source` via NSRange,
+        // which is safe because stripping is UTF-16 length-preserving.
+        let strippedBodyStart = strippedSigRange.upperBound
+        let scanRangeNS = NSRange(strippedBodyStart..<stripped.endIndex, in: stripped)
+        let firstBoundary = boundaryRegex.firstMatch(in: stripped, range: scanRangeNS)
         let bodyEnd: String.Index
         if let firstBoundary,
            let boundaryRange = Range(firstBoundary.range, in: source) {
@@ -1441,6 +1441,12 @@ struct PriorHierarchyWireUpTests {
         } else {
             bodyEnd = source.endIndex
         }
+        // Project the body-start back into `source` for slicing.
+        guard let signatureRange = Range(NSRange(strippedSigRange, in: stripped), in: source) else {
+            Issue.record("Could not project signature range from strippedText into sourceText")
+            return
+        }
+        let bodyStart = signatureRange.upperBound
         let rawBody = String(source[bodyStart..<bodyEnd])
         // cycle-7 L-1: search the comment/string-stripped form so a
         // future refactor that quotes the snapshot literal in a doc
@@ -1669,7 +1675,11 @@ struct PriorHierarchyWireUpTests {
         // Step 3: extract the catch body (from the brace after
         // `catch` to the matching `}`). The current catch is
         // single-statement with no nested braces, so the next `}`
-        // closes it.
+        // closes it. Cycle-9 L-1: explicitly assert that property
+        // before relying on it — a future change like
+        // `catch { if x { networkPriors = nil } throw e }` would have
+        // the next `}` close the inner if-block, hiding the outer
+        // `throw` from the forbidden-needle scan.
         let afterCatch = postAwait[catchOpenRange.upperBound...]
         guard let catchOpenBrace = afterCatch.range(of: "{") else {
             Issue.record("could not find `{` opening the catch body")
@@ -1681,6 +1691,29 @@ struct PriorHierarchyWireUpTests {
             return
         }
         let catchInterior = String(afterCatch[catchInteriorStart..<catchCloseBrace.lowerBound])
+
+        // Cycle-9 L-1: reject nested braces inside the catch body.
+        // The simple `range(of: "}")` extractor only works when the
+        // catch is single-statement with no inner blocks. If a future
+        // refactor introduces an `if let { … }` / `do { … }` /
+        // `Task { … }` / closure inside the catch, the extractor would
+        // close at the inner `}` and miss the rest. Rather than build
+        // a brace-balanced walker, force the engineer to update this
+        // canary deliberately when the shape changes.
+        #expect(
+            !catchInterior.contains("{"),
+            """
+            playhead-spxs cycle-9 L-1: catch body for \
+            `fetchProfiles(forNetworkId:)` contains a nested `{`. The \
+            simple brace-extraction in this canary only works for a \
+            single-statement catch — a nested block would let \
+            forbidden statements (rethrow / `networkPriors =` / \
+            `networkDecay =`) hide past the inner `}`. If you've \
+            intentionally added a block inside the catch, replace the \
+            extractor here with a brace-balanced walker. Catch \
+            interior was: \(catchInterior)
+            """
+        )
 
         // Step 3a: catch logs (graceful degradation, not silent swallow).
         #expect(
@@ -1713,6 +1746,163 @@ struct PriorHierarchyWireUpTests {
                 """
             )
         }
+    }
+
+    /// playhead-spxs cycle-10 L-2: control fixtures for the catch-canary
+    /// brace-extraction logic used by
+    /// `resolveEpisodePriorsCatchLogsAndFallsThrough`. Mirrors the canary's
+    /// `try await` / `} catch` / `{` / `}` walk against synthetic source
+    /// strings, then asserts the canary's downstream checks fire on
+    /// known-bad shapes and stay quiet on the real shape. If a future
+    /// stripper regression (e.g. cycle-7's `strippingCommentsAndStrings`
+    /// going over-aggressive on `}`) silently broke the canary's
+    /// extraction, this test would fail before the canary itself
+    /// degenerates into a no-op.
+    @Test
+    func resolveEpisodePriorsCatchExtractorWorksOnControlFixtures() throws {
+        // Mirror the catch-canary's brace-extraction logic against a
+        // raw source string. Returns nil when the shape is structurally
+        // unrecognizable (no `try await`, no `} catch`, no `{`, no `}`).
+        func extractCatchInterior(from body: String) -> String? {
+            guard let awaitRange = body.range(of: "try await") else {
+                return nil
+            }
+            let postAwait = body[awaitRange.upperBound...]
+            guard let catchOpenRange = postAwait.range(of: "} catch") else {
+                return nil
+            }
+            let afterCatch = postAwait[catchOpenRange.upperBound...]
+            guard let catchOpenBrace = afterCatch.range(of: "{") else {
+                return nil
+            }
+            let interiorStart = catchOpenBrace.upperBound
+            guard let catchCloseBrace = afterCatch[interiorStart...].range(of: "}") else {
+                return nil
+            }
+            return String(afterCatch[interiorStart..<catchCloseBrace.lowerBound])
+        }
+
+        // Positive control: real-shape catch (single-statement,
+        // logger.warning, no nested braces, no forbidden needles).
+        // The canary's downstream assertions must all PASS on this.
+        let positiveControl = """
+        do {
+            let rows = try await store.fetchProfiles(forNetworkId: id)
+            networkPriors = NetworkPriorsBuilder.build(from: rows)
+        } catch {
+            logger.warning("fetch failed: \\(error)")
+        }
+        """
+        let positiveInterior = try #require(
+            extractCatchInterior(from: positiveControl),
+            """
+            playhead-spxs cycle-10 L-2 positive control: extractor failed \
+            on real-shape catch. If this guard trips, the canary's brace \
+            walk no longer recognizes the production catch shape and must \
+            be revisited.
+            """
+        )
+        #expect(
+            !positiveInterior.contains("{"),
+            """
+            playhead-spxs cycle-10 L-2 positive control: real-shape catch \
+            interior must not contain `{`. Interior was: \(positiveInterior)
+            """
+        )
+        #expect(
+            positiveInterior.contains("logger.warning("),
+            """
+            playhead-spxs cycle-10 L-2 positive control: real-shape catch \
+            interior must contain `logger.warning(`. Interior was: \
+            \(positiveInterior)
+            """
+        )
+        for needle in ["throw ", "networkPriors =", "networkDecay ="] {
+            #expect(
+                !positiveInterior.contains(needle),
+                """
+                playhead-spxs cycle-10 L-2 positive control: real-shape \
+                catch must not contain forbidden needle `\(needle)`. \
+                Interior was: \(positiveInterior)
+                """
+            )
+        }
+
+        // Negative control A: catch contains a forbidden assignment
+        // (`networkPriors = nil`). The canary's forbidden-needle scan
+        // must detect this — if not, cycle-7's stripper regressed and
+        // the canary would silently no-op while still appearing green.
+        let negativeAssignment = """
+        do {
+            let rows = try await store.fetchProfiles(forNetworkId: id)
+        } catch {
+            networkPriors = nil
+        }
+        """
+        let assignmentInterior = try #require(
+            extractCatchInterior(from: negativeAssignment),
+            "negative control (assignment): extractor failed"
+        )
+        #expect(
+            assignmentInterior.contains("networkPriors ="),
+            """
+            playhead-spxs cycle-10 L-2 negative control (assignment): a \
+            `networkPriors = nil` assignment in the catch body must be \
+            visible to the canary's forbidden-needle scan. Interior was: \
+            \(assignmentInterior)
+            """
+        )
+
+        // Negative control B: catch rethrows. Same threat model — the
+        // `throw ` needle must be detectable in the extracted interior.
+        let negativeRethrow = """
+        do {
+            let rows = try await store.fetchProfiles(forNetworkId: id)
+        } catch {
+            throw error
+        }
+        """
+        let rethrowInterior = try #require(
+            extractCatchInterior(from: negativeRethrow),
+            "negative control (rethrow): extractor failed"
+        )
+        #expect(
+            rethrowInterior.contains("throw "),
+            """
+            playhead-spxs cycle-10 L-2 negative control (rethrow): a \
+            `throw error` in the catch body must be visible to the \
+            canary's forbidden-needle scan. Interior was: \(rethrowInterior)
+            """
+        )
+
+        // Negative control C: nested-brace shape. Cycle-9 L-1's
+        // `!catchInterior.contains("{")` assertion exists precisely
+        // because the simple `range(of: "}")` extractor would close at
+        // the inner `}` and miss the outer `throw error`. The L-1 guard
+        // can only fire if our extraction surfaces the inner `{` — this
+        // verifies it does.
+        let negativeNestedBrace = """
+        do {
+            let rows = try await store.fetchProfiles(forNetworkId: id)
+        } catch {
+            if condition { networkPriors = nil }
+            throw error
+        }
+        """
+        let nestedInterior = try #require(
+            extractCatchInterior(from: negativeNestedBrace),
+            "negative control (nested brace): extractor failed"
+        )
+        #expect(
+            nestedInterior.contains("{"),
+            """
+            playhead-spxs cycle-10 L-2 negative control (nested brace): \
+            a nested `{` inside the catch must surface in the extracted \
+            interior so cycle-9 L-1's nested-brace assertion can fire. \
+            Without it, forbidden statements past the inner `}` would \
+            hide from the needle scan. Interior was: \(nestedInterior)
+            """
+        )
     }
 
     /// Helper for cycle-4 L-2: collect the plain-text rows of an

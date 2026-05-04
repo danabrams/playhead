@@ -1279,6 +1279,17 @@ actor AnalysisStore {
             // partial index restricted to `WHERE networkId IS NOT NULL`
             // is both smaller and equivalent for this query shape. Same
             // shape as `idx_ske_podcast` etc. above.
+            //
+            // CAUTION: do NOT add a NULL-tolerant predicate (e.g.
+            // `WHERE networkId = ? OR networkId IS NULL`, or `WHERE
+            // networkId IS NOT DISTINCT FROM ?`) to a query that uses
+            // this index. The partial `WHERE networkId IS NOT NULL`
+            // clause excludes NULL rows entirely, so any predicate that
+            // can match NULL would silently regress to a full table
+            // scan on the NULL branch. If you need NULL-matching, drop
+            // the partial WHERE clause from this index definition (and
+            // accept the larger index footprint), or add a separate
+            // index over the NULL subset.
             try exec("CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId ON podcast_profiles(networkId) WHERE networkId IS NOT NULL")
             // playhead-7mq: model/policy/feature-schema version columns on
             // the six tables whose row validity depends on model, policy,

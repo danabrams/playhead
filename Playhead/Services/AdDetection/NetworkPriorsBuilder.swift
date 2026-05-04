@@ -108,10 +108,16 @@ enum NetworkPriorsBuilder {
             // `weight: max(1.0, ...)` guards against a future change to
             // `minSampleCount` that drops below 1 (e.g. an experiment
             // that loosens the threshold to 0). With the threshold at 5
-            // today, the clamp is a no-op for live data, but the
-            // `NetworkPriorAggregator` weighted-average code path
-            // divides by total weight and would produce NaN if every
-            // surviving snapshot reported weight 0. Defense-in-depth.
+            // today, the clamp is a no-op for live data. The guarded
+            // aggregators (`aggregateSponsors`, `weightedAverage`) early-
+            // return on `totalWeight == 0`, so they're safe — but
+            // `NetworkPriorAggregator.clusterPositions` divides by
+            // `(old.totalWeight + weight)` with no guard, which would
+            // produce NaN if both addends were 0. That path is
+            // unreachable today because `slotPositions: []` is always
+            // empty, but a future producer that lights up real slot
+            // positions would expose it. Defense-in-depth: clamp the
+            // input weight before it can flow there.
             return ShowPriorSnapshot(
                 sponsors: [:],
                 slotPositions: [],
