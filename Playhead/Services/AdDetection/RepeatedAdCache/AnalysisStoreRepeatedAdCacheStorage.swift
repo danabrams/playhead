@@ -28,6 +28,14 @@ struct AnalysisStoreRepeatedAdCacheStorage: RepeatedAdCacheStorage {
     // MARK: Entries
 
     func upsert(_ entry: RepeatedAdCacheEntry) async throws {
+        // Defense in depth (review/v0.5-head-polish L3):
+        // `RepeatedAdCacheService.store(...)` already refuses zero-
+        // fingerprint entries, but the storage protocol can be reached
+        // through other call paths (test fixtures, future migration
+        // restores, hypothetical batch importers). Drop the row at the
+        // storage boundary so the "zero is a sentinel, never persisted"
+        // invariant is enforced at every entry point — not just one.
+        guard !entry.fingerprint.isZero else { return }
         try await store.repeatedAdCacheUpsert(entry)
     }
 

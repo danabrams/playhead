@@ -87,6 +87,14 @@ actor InMemoryRepeatedAdCacheStorage: RepeatedAdCacheStorage {
     init() {}
 
     func upsert(_ entry: RepeatedAdCacheEntry) async throws {
+        // Mirror the production-storage zero-fingerprint guard
+        // (review/v0.5-head-polish L3) so service-layer tests
+        // running against the in-memory storage observe the same
+        // drop-on-zero semantics as the production SQLite-backed
+        // storage. The mirror is silent (matching production); for
+        // tests that want to *assert* the drop, see the dedicated
+        // tests in `RepeatedAdCacheStorageZeroFingerprintTests`.
+        guard !entry.fingerprint.isZero else { return }
         let key = Key(showId: entry.showId, fingerprint: entry.fingerprint)
         entries[key] = entry
     }

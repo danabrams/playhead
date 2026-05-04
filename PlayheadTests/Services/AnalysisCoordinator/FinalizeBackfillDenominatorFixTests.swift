@@ -374,4 +374,57 @@ struct FinalizeBackfillDenominatorFixTests {
             "When live shard sum exceeds persisted, max() must still resolve to live. Got: \(sessionAfter?.state ?? "nil")"
         )
     }
+
+    // MARK: - episodeDurationsDiverge predicate (review/v0.5-head-polish C2 MT-1)
+
+    /// The divergence-warning predicate is extracted to a static
+    /// helper so the threshold and both-positive guards can be pinned
+    /// without standing up the full coordinator. These tests exist
+    /// because a future tweak to the threshold or to the both-positive
+    /// guard would otherwise land silently — defensive logging is
+    /// useless if no one notices it stopped firing.
+
+    @Test("episodeDurationsDiverge returns false when either input is non-positive")
+    func divergenceFalseOnZeroOrNegativeInputs() {
+        // Both zero (no data either side).
+        #expect(AnalysisCoordinator.episodeDurationsDiverge(live: 0, persisted: 0) == false)
+        // Live missing, persisted present: not a divergence (we only have one signal).
+        #expect(AnalysisCoordinator.episodeDurationsDiverge(live: 0, persisted: 5000) == false)
+        // Persisted missing, live present.
+        #expect(AnalysisCoordinator.episodeDurationsDiverge(live: 5000, persisted: 0) == false)
+        // Negative live (pathological — should never happen, but the
+        // guard must hold).
+        #expect(AnalysisCoordinator.episodeDurationsDiverge(live: -1, persisted: 5000) == false)
+    }
+
+    @Test("episodeDurationsDiverge returns false when relative difference is at or below threshold")
+    func divergenceFalseAtOrBelowThreshold() {
+        // 5645 (probed truth) vs 5640: relative diff 0.000885 — well
+        // below the 5% threshold; the harmless rounding case.
+        #expect(AnalysisCoordinator.episodeDurationsDiverge(live: 5645, persisted: 5640) == false)
+        // Exactly at threshold: 1000 vs 950 → rel diff 0.05 — boundary
+        // is non-strict (must be > 0.05, not >=).
+        #expect(AnalysisCoordinator.episodeDurationsDiverge(live: 1000, persisted: 950) == false)
+    }
+
+    @Test("episodeDurationsDiverge returns true above threshold in both directions")
+    func divergenceTrueAboveThreshold() {
+        // The asset 8A9DFC82 case: 5645s probed truth vs 748s stale
+        // shard sum — the exact pattern the cycle-1 M2 finding was
+        // about.
+        #expect(AnalysisCoordinator.episodeDurationsDiverge(live: 5645, persisted: 748) == true)
+        // Symmetric: live shrinks (a re-encode produced a shorter
+        // file); persisted is the old longer probe.
+        #expect(AnalysisCoordinator.episodeDurationsDiverge(live: 748, persisted: 5645) == true)
+        // Just above threshold: 1000 vs 949 → rel diff 0.051.
+        #expect(AnalysisCoordinator.episodeDurationsDiverge(live: 1000, persisted: 949) == true)
+    }
+
+    @Test("episodeDurationDivergenceWarnRatio is the documented 5% constant")
+    func divergenceThresholdConstantIsFivePercent() {
+        // Pin the constant: a future bump to e.g. 0.10 would trigger
+        // this test and force the author to update both the threshold
+        // and the docstring on `finalizeBackfill`.
+        #expect(AnalysisCoordinator.episodeDurationDivergenceWarnRatio == 0.05)
+    }
 }

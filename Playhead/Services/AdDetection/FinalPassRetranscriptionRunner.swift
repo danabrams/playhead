@@ -722,10 +722,14 @@ actor FinalPassRetranscriptionRunner {
     /// `heartbeatBaseSeconds`. ±30s = ±10% of the 300s base. Wide
     /// enough to spread heartbeat writes across a 60s window when
     /// many runners start in lockstep, narrow enough that the
-    /// effective interval stays well below the 600s reaper floor
-    /// (worst case here is 330s, two beats = 660s, but the reaper
-    /// only fires at boot and when re-checked, not strictly every
-    /// 600s — practical safety margin is fine).
+    /// effective interval stays well below the
+    /// `AnalysisStore.strandedJobFreshnessSeconds` reaper floor
+    /// (currently 600s — see `AnalysisStore.swift`'s constant). Worst
+    /// case here is 330s; two beats = 660s, but the reaper only fires
+    /// at boot and when re-checked, not strictly every
+    /// `strandedJobFreshnessSeconds`, so the practical safety margin
+    /// holds. If either constant moves, re-derive both: heartbeat
+    /// max-jitter must stay below `strandedJobFreshnessSeconds / 2`.
     static let heartbeatJitterSeconds: Double = 30
 
     /// Build a jittered heartbeat interval in [base-jitter, base+jitter].
