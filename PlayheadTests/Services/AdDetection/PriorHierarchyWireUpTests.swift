@@ -1389,6 +1389,105 @@ struct PriorHierarchyWireUpTests {
         )
     }
 
+    /// playhead-spxs cycle-6 missing-test (residual L-2 gap): source
+    /// canary that pins the snapshot-consistency invariant in
+    /// `resolveEpisodePriors`. The cycle-5 L-2 fix snapshots
+    /// `observationCount` from `currentPodcastProfile` BEFORE the
+    /// `store.fetchProfiles(forNetworkId:)` await so that an interleaving
+    /// actor turn that mutates `currentPodcastProfile` cannot corrupt
+    /// the decay weight. A behavioral test for actor reentry timing
+    /// would be inherently flaky; instead, this canary asserts the
+    /// pre-await capture pattern at the source level — a regression
+    /// that moves the `observationCount` read to AFTER the await would
+    /// flip the canary.
+    ///
+    /// Test strategy: load `AdDetectionService.swift`, locate the
+    /// `resolveEpisodePriors` body, and verify that the literal
+    /// `let observedAtSnapshot = snapshotProfile.observationCount`
+    /// appears textually BEFORE the `try await store.fetchProfiles`
+    /// line within the same function body.
+    @Test("resolveEpisodePriors snapshots observationCount before fetchProfiles await (cycle-6)")
+    func resolveEpisodePriorsSnapshotsObservationCountPreAwait() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/AdDetection/AdDetectionService.swift"
+        )
+
+        // Slice from the resolver method signature to the next top-level
+        // `func ` (or end of file). Mirrors the boundary heuristic used
+        // by `podcastProfileAddColumnSet`.
+        let signature = "func resolveEpisodePriors("
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+        guard let strippedSigRange = stripped.range(of: signature) else {
+            Issue.record("Could not locate `\(signature)` in AdDetectionService.swift")
+            return
+        }
+        let strippedSigNS = NSRange(strippedSigRange, in: stripped)
+        guard let signatureRange = Range(strippedSigNS, in: source) else {
+            Issue.record("Could not project signature range from strippedText into sourceText")
+            return
+        }
+        let bodyStart = signatureRange.upperBound
+        let modifierAlternation = "(?:private|internal|public|fileprivate|open"
+            + "|static|nonisolated|final|class|override|dynamic"
+            + "|mutating|nonmutating|required|convenience)"
+        let boundaryPattern = #"\n    (?:"# + modifierAlternation + #" ){0,4}func "#
+        let boundaryRegex = try NSRegularExpression(pattern: boundaryPattern)
+        let scanRange = NSRange(bodyStart..<source.endIndex, in: source)
+        let firstBoundary = boundaryRegex.firstMatch(in: source, range: scanRange)
+        let bodyEnd: String.Index
+        if let firstBoundary,
+           let boundaryRange = Range(firstBoundary.range, in: source) {
+            bodyEnd = boundaryRange.lowerBound
+        } else {
+            bodyEnd = source.endIndex
+        }
+        let body = String(source[bodyStart..<bodyEnd])
+
+        // The pre-await snapshot anchor and the await line. The snapshot
+        // line must come strictly before the await.
+        let snapshotAnchor = "let observedAtSnapshot = snapshotProfile.observationCount"
+        let awaitAnchor = "try await store.fetchProfiles(forNetworkId:"
+
+        guard let snapshotIdx = body.range(of: snapshotAnchor)?.lowerBound else {
+            Issue.record(
+                """
+                playhead-spxs cycle-6 (cycle-5 L-2 residual): expected \
+                `\(snapshotAnchor)` in `resolveEpisodePriors`. The L-2 fix \
+                requires snapshotting `observationCount` into a local \
+                BEFORE the `fetchProfiles` await so an interleaving \
+                actor turn can't corrupt the decay weight. If the \
+                snapshot variable was renamed, update this canary to \
+                match.
+                """
+            )
+            return
+        }
+        guard let awaitIdx = body.range(of: awaitAnchor)?.lowerBound else {
+            Issue.record(
+                """
+                playhead-spxs cycle-6 (cycle-5 L-2 residual): expected \
+                `\(awaitAnchor)` in `resolveEpisodePriors`. If the \
+                fetch call shape was refactored, update this canary.
+                """
+            )
+            return
+        }
+
+        #expect(
+            snapshotIdx < awaitIdx,
+            """
+            playhead-spxs cycle-6 (cycle-5 L-2 residual): \
+            `observationCount` snapshot must appear BEFORE the \
+            `fetchProfiles` await. Found snapshot at offset \
+            \(body.distance(from: body.startIndex, to: snapshotIdx)) \
+            and await at offset \
+            \(body.distance(from: body.startIndex, to: awaitIdx)). \
+            Moving the snapshot AFTER the await re-introduces the \
+            reentrancy hazard the L-2 fix closed.
+            """
+        )
+    }
+
     /// Helper for cycle-4 L-2: collect the plain-text rows of an
     /// `EXPLAIN QUERY PLAN` statement.
     private func collectExplainQueryPlan(
