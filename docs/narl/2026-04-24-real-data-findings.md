@@ -109,13 +109,23 @@ Note: the 04-24 row above ("Pred=0, Sec-F1=0") in Finding 1 was a **different fi
 |---|---|
 | Fresh fixture exists with `capturedAt` after 2026-04-24 03:28 UTC for 71F0C2AE | ✅ `capturedAt: 2026-04-25T11:50:03Z` |
 | Harness re-run shows whether labelling fix alone moves Sec-F1 | ✅ Answered: it does not — it moves _candidate coverage_ but not _promotion_, leaving Sec-F1 flat |
-| Decision: do we still need 9.4.1 (boundary expansion)? | ✅ Yes — see below |
+| Decision: what's the actual next ceiling? | ✅ Promotion-gate score for classifier-seeded candidates — see correction below |
 
-### Decision: 9.4.1 still needed
+### Correction: 9.4.1 was already live in this fixture
 
-The shipped fixes broke the **scored-coverage** bottleneck on this episode (the bigger wall) but exposed the **promotion-gate** bottleneck as the next ceiling. The 7006-7037.34 GT span now has candidate windows but those windows can't clear the auto-skip eligibility threshold — they sit just below 0.80 in this borderline region.
+**Previously this section concluded "9.4.1 (boundary expansion) remains the right next move." That was wrong.** `playhead-gtt9.4.1` shipped at merge `d3bb935` on 2026-04-24 11:22 EDT — ~20 hours before the 04-25 capture (`capturedAt: 2026-04-25T11:50:03Z`). Boundary expansion was already in production for the post-fix fixture. So the "candidate windows present but none promoted" FN happens **with 9.4.1 already running**, not as a problem 9.4.1 would fix.
 
-**9.4.1 (boundary expansion) remains the right next move**: widening the candidate evidence in the immediate neighborhood of borderline classifications is the proximate path to converting `promotionRecall` FNs into TPs. An alternative would be lowering the auto-skip threshold or routing classifier-seeded candidates through a second-tier promotion path, but those are bigger architectural moves than 9.4.1's targeted boundary widen.
+What 9.4.1 actually does is expand the persisted `AdWindow.[startTime, endTime]` outward to the nearest `AcousticBreak` *after* the AdWindow has been admitted. The unpromoted candidates in the [7006, 7037.34] span never become AdWindows in the first place — they fail the upstream promotion gate (`adProbability < 0.80` after fusion). 9.4.1's logic doesn't apply to them.
+
+### Actual next ceiling: promotion-gate score on classifier-seeded candidates
+
+The remaining bottleneck is upstream of 9.4.1: classifier-only seeded candidates (a4ea4ca) that reach BackfillEvidenceFusion but score below the auto-skip eligibility threshold. Real next moves (none of these are filed beads yet):
+
+1. **Score-boost path** — give classifier-seeded candidates additional fusion evidence (acoustic-break alignment bonus, transcript-coverage confidence) so borderline regions can clear 0.80 without lowering the global threshold.
+2. **Second-tier promotion path** — route classifier-seeded candidates through a separate eligibility track with looser thresholds but tighter precision controls (e.g., require both classifier ≥0.70 AND acoustic-break alignment).
+3. **Threshold tuning** — lower the global auto-skip threshold under specific conditions (high-trust shows, fully-transcribed episodes). Bigger architectural move; risks precision regression.
+
+Filed today as follow-up beads. The doc above is preserved for the diagnostic value of "we observed the FN-reason change and that ruled out scored-coverage as the bottleneck on this episode."
 
 ### Caveats / honest limits
 
@@ -128,3 +138,6 @@ The shipped fixes broke the **scored-coverage** bottleneck on this episode (the 
 - Harness run: `.eval-out/narl/20260504-174000-93AB6B/` (current `main` HEAD `cde03285`).
 - Episodes inspected: indices 34/35 (pre-fix capture, no shadow), 90/91 (post-fix capture, shadow coverage live).
 - Bead: `playhead-gtt9.4.3` — closes with this finding.
+- Follow-up beads filed 2026-05-04:
+  - `playhead-fqc8` (P1) — Promotion-gate score path for classifier-seeded candidates (the actual remaining ceiling on this episode).
+  - `playhead-d56i` (P2) — FrozenTrace lifecycle threading (corpus-builder extension named in Finding 3).
