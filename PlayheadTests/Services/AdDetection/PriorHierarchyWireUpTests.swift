@@ -412,20 +412,39 @@ struct PriorHierarchyWireUpTests {
         let service = makeService(store: store, profile: current)
         let resolved = await service.resolveEpisodePriorsForTesting()
 
+        // First, the network branch must have actually executed — without
+        // this, the blend assertion below could pass with `.global` active
+        // (no blend at all, value sitting at the global default) if some
+        // future change quietly disabled the network tier and drifted the
+        // global default downward. Guarding `activeLevel == .network`
+        // makes the blend assertion a faithful test of the network blend,
+        // not an accident of unrelated defaults.
+        #expect(resolved.activeLevel == .network,
+                "expected activeLevel == .network for current-show=peak-decay + siblings-with-stats fixture; got \(resolved.activeLevel). A regression that disabled the network branch would land on .global.")
+
         // Pin: with global default 0.3, network's empty-sponsors-derived 0,
-        // and decay weight 0.5, the blend lands at 0.15. The exact value
-        // is brittle if the global default moves, so the test asserts the
-        // strictly-less-than relation that the docstring promises.
-        #expect(resolved.sponsorRecurrenceExpectation < GlobalPriorDefaults.standard.sponsorRecurrenceExpectation,
+        // and peak network decay weight 0.5, the deterministic blend is
+        // `0.3 × (1 - 0.5) + 0 × 0.5 = 0.15`. Asserting the formula-
+        // derived value (with a tight ±0.02 tolerance for FP wobble) keeps
+        // the test from passing silently if a regression halved the
+        // network decay weight (which would still produce 0.225 < 0.3 and
+        // satisfy a loose `< globalDefault` bound). The bound width of
+        // 0.04 is large vs FP noise but tighter than any meaningful
+        // regression in the blend formula.
+        let globalDefault = GlobalPriorDefaults.standard.sponsorRecurrenceExpectation
+        let peakDecay: Float = 0.5
+        let netSponsorRecurrence: Float = 0.0
+        let expected = globalDefault * (1 - peakDecay) + netSponsorRecurrence * peakDecay
+        #expect(abs(resolved.sponsorRecurrenceExpectation - expected) < 0.02,
                 """
-                Network tier must blend sponsorRecurrenceExpectation strictly \
-                below the global default \
-                \(GlobalPriorDefaults.standard.sponsorRecurrenceExpectation); \
-                got \(resolved.sponsorRecurrenceExpectation). The current \
-                NetworkPriorsBuilder feeds commonSponsors: [:], producing \
-                netSponsorRecurrence=0, so any active network decay > 0 \
-                must pull the value downward. A no-op result here means \
-                the blend has been silently disabled.
+                Network blend of sponsorRecurrenceExpectation should be \
+                ≈ \(expected) (= \(globalDefault) × \(1 - peakDecay) \
+                + \(netSponsorRecurrence) × \(peakDecay), the formula-\
+                derived blend at peak network decay with empty \
+                commonSponsors); got \(resolved.sponsorRecurrenceExpectation). \
+                A regression that halved network decay (0.25) would land \
+                at 0.225 — still strictly < the global default of 0.3, \
+                but caught here.
                 """)
     }
 
@@ -557,7 +576,7 @@ struct PriorHierarchyWireUpTests {
     /// branch. There is no subscript-form write elsewhere, so the
     /// `network > 0` assertion below is a faithful proxy for "the
     /// network branch executed". The cycle-14 source canary
-    /// `wireUpResolverContributionsNetworkWriteIsBranchGated` pins this
+    /// `resolverContributionsNetworkWriteIsBranchGated` pins this
     /// invariant — if a future refactor adds a second writer outside
     /// the gated branch, that canary fails before this test silently
     /// loses its grip on what it is asserting.

@@ -255,7 +255,7 @@ struct NetworkPriorsBuilderTests {
     /// but the builder itself must stay current-show-agnostic, and
     /// this test is the contract pin.
     @Test("builder aggregates every matching profile passed in (no self-filter)")
-    func builderIncludesAllProfilesWithMatchingNetworkId() {
+    func builderAggregatesAllSuppliedProfilesWithoutSelfFilter() {
         // Current-show profile (heavy sample count, distinctive mean
         // far from siblings — would be detectable as an outlier).
         let currentStats = AdDurationStats(meanDuration: 60, sampleCount: 50)
