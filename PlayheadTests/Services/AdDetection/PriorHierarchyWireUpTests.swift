@@ -1441,7 +1441,13 @@ struct PriorHierarchyWireUpTests {
         } else {
             bodyEnd = source.endIndex
         }
-        let body = String(source[bodyStart..<bodyEnd])
+        let rawBody = String(source[bodyStart..<bodyEnd])
+        // cycle-7 L-1: search the comment/string-stripped form so a
+        // future refactor that quotes the snapshot literal in a doc
+        // comment above an awaited fetch can't satisfy the ordering
+        // check. `strippingCommentsAndStrings` is length-preserving so
+        // index ordering between stripped and raw forms is identical.
+        let body = SwiftSourceInspector.strippingCommentsAndStrings(rawBody)
 
         // The pre-await snapshot anchor and the await line. The snapshot
         // line must come strictly before the await.
@@ -1486,6 +1492,86 @@ struct PriorHierarchyWireUpTests {
             reentrancy hazard the L-2 fix closed.
             """
         )
+    }
+
+    /// playhead-spxs cycle-7 L-1 positive control for the cycle-6
+    /// canary: prove that
+    /// `strippingCommentsAndStrings(...)` actually removes the
+    /// snapshot literal when it appears ONLY inside a `//` comment
+    /// or a `"…"` string. Without this control, a future regression
+    /// in the stripper would let a refactor that quotes
+    /// `let observedAtSnapshot = snapshotProfile.observationCount`
+    /// in a doc comment ABOVE an awaited fetch falsely satisfy the
+    /// cycle-6 canary's ordering predicate.
+    @Test("Pre-await snapshot canary stripper survives comment-spoof (cycle-7 L-1)")
+    func preAwaitSnapshotCanaryStripperSurvivesCommentSpoof() {
+        // Positive control: real source pattern (snapshot precedes await
+        // in code, no comment spoofing). Stripping must preserve both
+        // anchors so the cycle-6 canary still finds them.
+        let realFixture = """
+        do {
+            let observedAtSnapshot = snapshotProfile.observationCount
+            let siblings = try await store.fetchProfiles(forNetworkId: networkId)
+            _ = (observedAtSnapshot, siblings)
+        }
+        """
+        let strippedReal = SwiftSourceInspector.strippingCommentsAndStrings(realFixture)
+        #expect(
+            strippedReal.contains("let observedAtSnapshot = snapshotProfile.observationCount"),
+            """
+            playhead-spxs cycle-7 L-1 positive control failure: \
+            `strippingCommentsAndStrings` dropped the snapshot literal \
+            from a real code body. The stripper has gone over-aggressive \
+            on identifiers, which would make the cycle-6 canary blind to \
+            real regressions.
+            """
+        )
+        #expect(
+            strippedReal.contains("try await store.fetchProfiles(forNetworkId:"),
+            """
+            playhead-spxs cycle-7 L-1 positive control failure: \
+            `strippingCommentsAndStrings` dropped the await literal from \
+            a real code body. The stripper has gone over-aggressive on \
+            identifiers, which would make the cycle-6 canary blind to \
+            real regressions.
+            """
+        )
+
+        // Negative control: spoof fixture where the snapshot literal
+        // appears ONLY in a doc comment ABOVE the await, with no real
+        // pre-await read. Stripping must remove the commented-out
+        // literal so the cycle-6 canary's `<` ordering check fails on
+        // this shape (rather than passing on a comment).
+        let spoofFixture = """
+        do {
+            // let observedAtSnapshot = snapshotProfile.observationCount
+            let siblings = try await store.fetchProfiles(forNetworkId: networkId)
+            let observedAtSnapshot = snapshotProfile.observationCount
+            _ = (observedAtSnapshot, siblings)
+        }
+        """
+        let strippedSpoof = SwiftSourceInspector.strippingCommentsAndStrings(spoofFixture)
+        let snapshotIdx = strippedSpoof.range(of: "let observedAtSnapshot = snapshotProfile.observationCount")?.lowerBound
+        let awaitIdx = strippedSpoof.range(of: "try await store.fetchProfiles(forNetworkId:")?.lowerBound
+        #expect(
+            snapshotIdx != nil && awaitIdx != nil,
+            "spoof fixture should still contain both anchors after stripping"
+        )
+        if let snapshotIdx, let awaitIdx {
+            #expect(
+                snapshotIdx > awaitIdx,
+                """
+                playhead-spxs cycle-7 L-1 negative control failure: in the \
+                spoof fixture the only real `observedAtSnapshot` read is \
+                AFTER the await; the stripper must have removed the \
+                commented-out literal so that the cycle-6 canary's \
+                pre-await ordering check correctly fails. Instead, the \
+                stripper preserved the comment, which means a future \
+                refactor could pass the cycle-6 canary while still \
+                violating snapshot consistency.
+                """
+            )
+        }
     }
 
     /// Helper for cycle-4 L-2: collect the plain-text rows of an

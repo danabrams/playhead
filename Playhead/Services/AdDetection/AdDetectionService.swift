@@ -4613,10 +4613,12 @@ actor AdDetectionService {
     ///     `nil` when the current show has no `networkId` recorded yet
     ///     (RSS-metadata writer lands in a follow-up bead) or when no
     ///     sibling shows in the network meet the per-show sample-count
-    ///     threshold. The network fetch happens in this same actor turn —
-    ///     `resolveEpisodePriors` is `async` precisely because of that hop,
-    ///     and the `await` chain keeps fetch + resolve atomic relative to
-    ///     concurrent profile mutations.
+    ///     threshold. The network fetch is `async` because of the SQL hop;
+    ///     the `await` is a real reentrancy point on this actor, NOT an
+    ///     atomicity guarantee. The cycle-5 L-2 fix snapshots
+    ///     `networkId` and `observationCount` into locals BEFORE the await
+    ///     so an interleaving turn that rewrites `currentPodcastProfile`
+    ///     can't desync the network tier's inputs.
     ///   • Trait: `currentPodcastProfile?.traitProfile ?? .unknown`. The
     ///     persistence layer reads cleanly; profiles without a writer
     ///     fall through to `.unknown`, which is non-reliable, so the trait
@@ -4631,10 +4633,14 @@ actor AdDetectionService {
     /// in `nil` priors at that tier, and the resolver falls through to the
     /// next tier (graceful degradation).
     ///
-    /// Atomicity: this method MUST remain a single actor turn from the
-    /// caller's view. The `await` on `store.fetchProfiles(forNetworkId:)`
-    /// is the only suspension; the resolver call below is pure. Tests
-    /// pin this contract via the `mutateProfile`-style canaries in
+    /// Snapshot consistency: the `await` on `store.fetchProfiles(forNetworkId:)`
+    /// can interleave with other turns on this actor, so this method does
+    /// NOT execute as a single uninterrupted actor turn. Instead, the
+    /// network tier's two inputs (`networkId` and `observationCount`) are
+    /// snapshotted into locals before the await; the resolver call below
+    /// is pure. Tests pin the snapshot pattern via
+    /// `resolveEpisodePriorsSnapshotsObservationCountPreAwait` (cycle-6)
+    /// and the `mutateProfile`-style write-side canaries in
     /// `AdDetectionServiceUpdatePriorsAtomicityCanaryTests`.
     private func resolveEpisodePriors() async -> ResolvedPriors {
         let traitProfile = currentPodcastProfile?.traitProfile ?? .unknown
