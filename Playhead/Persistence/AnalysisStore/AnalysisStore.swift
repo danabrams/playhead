@@ -1272,10 +1272,13 @@ actor AnalysisStore {
             // networks), every episode-prior resolution becomes O(n).
             // The column is sparsely populated today (no production
             // writer sets it yet — see NetworkPriorsBuilder header), so
-            // the index is small; SQLite skips NULL rows in non-partial
-            // indexes by default, but to be explicit we use a partial
-            // index restricted to non-NULL networkIds. Same shape as
-            // `idx_ske_podcast` etc. above.
+            // the index is small. A non-partial index would still
+            // contain entries for NULL rows, but SQLite's `WHERE
+            // networkId = ?` lookup never matches NULLs (per SQL three-
+            // valued logic — `NULL = ?` is unknown, not true), so a
+            // partial index restricted to `WHERE networkId IS NOT NULL`
+            // is both smaller and equivalent for this query shape. Same
+            // shape as `idx_ske_podcast` etc. above.
             try exec("CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId ON podcast_profiles(networkId) WHERE networkId IS NOT NULL")
             // playhead-7mq: model/policy/feature-schema version columns on
             // the six tables whose row validity depends on model, policy,

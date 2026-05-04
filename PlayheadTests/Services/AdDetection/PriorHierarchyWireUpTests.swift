@@ -1445,8 +1445,9 @@ struct PriorHierarchyWireUpTests {
         // cycle-7 L-1: search the comment/string-stripped form so a
         // future refactor that quotes the snapshot literal in a doc
         // comment above an awaited fetch can't satisfy the ordering
-        // check. `strippingCommentsAndStrings` is length-preserving so
-        // index ordering between stripped and raw forms is identical.
+        // check. Stripping only blanks comment/string contents — code
+        // anchors are preserved verbatim, so anchor ordering inside
+        // `body` reflects the true source ordering.
         let body = SwiftSourceInspector.strippingCommentsAndStrings(rawBody)
 
         // The pre-await snapshot anchor and the await line. The snapshot
@@ -1569,6 +1570,146 @@ struct PriorHierarchyWireUpTests {
                 stripper preserved the comment, which means a future \
                 refactor could pass the cycle-6 canary while still \
                 violating snapshot consistency.
+                """
+            )
+        }
+    }
+
+    /// playhead-spxs cycle-8 missing-test: source canary on the
+    /// graceful-degradation contract for the network tier's
+    /// `fetchProfiles(forNetworkId:)` call. When the SQL hop throws,
+    /// `resolveEpisodePriors` MUST log and fall through with the
+    /// network-tier locals at their defaults (`networkPriors == nil`,
+    /// `networkDecay == 0`) — never propagating the error to callers.
+    /// Otherwise a transient store failure cascades into a global
+    /// ad-detection outage, since this resolver is on the hot path
+    /// for every episode start.
+    ///
+    /// A behavioral test would require injecting a throwing
+    /// `AnalysisStore` stub through the actor's persistence
+    /// interface, which the current architecture doesn't expose.
+    /// This canary asserts the structural invariants at the source
+    /// level instead. Three checks:
+    ///   1. `do {` precedes the `fetchProfiles` await (the call is
+    ///      wrapped, not a bare `try await` that escapes the actor).
+    ///   2. `} catch` follows the await (errors are caught locally).
+    ///   3. The catch body calls `logger.warning(` AND does NOT
+    ///      `throw`, assign to `networkPriors`, or assign to
+    ///      `networkDecay` — the locals must retain their pre-`do`
+    ///      defaults so the resolver falls through cleanly.
+    @Test("resolveEpisodePriors fetchProfiles error falls through to log-and-continue (cycle-8 missing-test)")
+    func resolveEpisodePriorsCatchLogsAndFallsThrough() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/AdDetection/AdDetectionService.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+        let signature = "func resolveEpisodePriors("
+        guard let sigRange = stripped.range(of: signature) else {
+            Issue.record("could not locate `\(signature)` in AdDetectionService.swift")
+            return
+        }
+        let bodyStart = sigRange.upperBound
+        let modifierAlternation = "(?:private|internal|public|fileprivate|open"
+            + "|static|nonisolated|final|class|override|dynamic"
+            + "|mutating|nonmutating|required|convenience)"
+        let boundaryPattern = #"\n    (?:"# + modifierAlternation + #" ){0,4}func "#
+        let boundaryRegex = try NSRegularExpression(pattern: boundaryPattern)
+        let scanRange = NSRange(bodyStart..<stripped.endIndex, in: stripped)
+        let firstBoundary = boundaryRegex.firstMatch(in: stripped, range: scanRange)
+        let bodyEnd: String.Index
+        if let firstBoundary, let r = Range(firstBoundary.range, in: stripped) {
+            bodyEnd = r.lowerBound
+        } else {
+            bodyEnd = stripped.endIndex
+        }
+        let body = String(stripped[bodyStart..<bodyEnd])
+
+        let awaitAnchor = "try await store.fetchProfiles(forNetworkId:"
+        guard let awaitRange = body.range(of: awaitAnchor) else {
+            Issue.record(
+                """
+                playhead-spxs cycle-8 missing-test: expected \
+                `\(awaitAnchor)` in `resolveEpisodePriors`. If the \
+                fetch call shape was refactored, update this canary.
+                """
+            )
+            return
+        }
+
+        // Step 1: `do {` must precede the await — the call must be
+        // wrapped, not a bare `try await` that propagates errors.
+        let preAwait = body[..<awaitRange.lowerBound]
+        #expect(
+            preAwait.range(of: "do {", options: .backwards) != nil,
+            """
+            playhead-spxs cycle-8 missing-test: expected `do {` \
+            before the `fetchProfiles(forNetworkId:)` await. The \
+            graceful-degradation contract requires the SQL hop to \
+            throw into a local catch so a transient store failure \
+            falls through to network-tier-disabled, not all the \
+            way up the resolver's stack.
+            """
+        )
+
+        // Step 2: `} catch` must follow the await.
+        let postAwait = body[awaitRange.upperBound...]
+        guard let catchOpenRange = postAwait.range(of: "} catch") else {
+            Issue.record(
+                """
+                playhead-spxs cycle-8 missing-test: expected `} catch` \
+                after the `fetchProfiles(forNetworkId:)` await — \
+                without it, a thrown SQL error escapes the resolver \
+                entirely and the network tier becomes a hot-path \
+                liability instead of best-effort augmentation.
+                """
+            )
+            return
+        }
+
+        // Step 3: extract the catch body (from the brace after
+        // `catch` to the matching `}`). The current catch is
+        // single-statement with no nested braces, so the next `}`
+        // closes it.
+        let afterCatch = postAwait[catchOpenRange.upperBound...]
+        guard let catchOpenBrace = afterCatch.range(of: "{") else {
+            Issue.record("could not find `{` opening the catch body")
+            return
+        }
+        let catchInteriorStart = catchOpenBrace.upperBound
+        guard let catchCloseBrace = afterCatch[catchInteriorStart...].range(of: "}") else {
+            Issue.record("could not find `}` closing the catch body")
+            return
+        }
+        let catchInterior = String(afterCatch[catchInteriorStart..<catchCloseBrace.lowerBound])
+
+        // Step 3a: catch logs (graceful degradation, not silent swallow).
+        #expect(
+            catchInterior.contains("logger.warning("),
+            """
+            playhead-spxs cycle-8 missing-test: expected \
+            `logger.warning(` inside the `fetchProfiles` catch. \
+            Removing the log turns network-tier failures invisible \
+            — at minimum an `os_log`/`.warning` must remain so \
+            on-device debugging can observe the fall-through path.
+            """
+        )
+
+        // Step 3b: catch must not rethrow or assign the network-tier
+        // locals — those defaults (`nil` / `0`) are what produce the
+        // graceful resolver fall-through to trait+showLocal+global.
+        let forbiddenInCatch: [(needle: String, why: String)] = [
+            ("throw ", "rethrowing escalates a single-show transient SQL miss into a global resolver failure"),
+            ("networkPriors =", "assigning here breaks the contract that fetch failure leaves the network tier disabled (nil)"),
+            ("networkDecay =", "assigning here breaks the contract that fetch failure leaves the network tier disabled (0)"),
+        ]
+        for (needle, why) in forbiddenInCatch {
+            #expect(
+                !catchInterior.contains(needle),
+                """
+                playhead-spxs cycle-8 missing-test: catch body for \
+                `fetchProfiles(forNetworkId:)` must not contain \
+                `\(needle)`. \(why). Catch interior was: \
+                \(catchInterior)
                 """
             )
         }
