@@ -234,6 +234,57 @@ struct NetworkPriorsBuilderTests {
                 "expected metadataTrustAverage = 0.5; got \(result.metadataTrustAverage)")
     }
 
+    /// playhead-spxs cycle-14 missing-test #4: pin the documented
+    /// "builder aggregates ALL matching profiles, including the current
+    /// show" contract that the `wireUpShowLocalDominatesNetwork`
+    /// fixture-caveat docstring depends on.
+    ///
+    /// `NetworkPriorsBuilder.build(from:)` is a pure aggregator over an
+    /// already-filtered profile collection; it does NOT know which row
+    /// corresponds to the "current show" being scored. The resolver
+    /// (`AdDetectionService.resolveEpisodePriors`) calls
+    /// `AnalysisStore.fetchProfiles(forNetworkId:)` which returns ALL
+    /// rows whose `networkId` matches — the current show included. This
+    /// test pins that no silent self-filter has been introduced into
+    /// the builder (e.g. an "ignore the heaviest weight" outlier rule
+    /// that would coincidentally elide the current show when its
+    /// sample count exceeds siblings).
+    ///
+    /// If a future change adds a "remove the current show before
+    /// aggregating" pre-filter at the resolver layer, that's fine —
+    /// but the builder itself must stay current-show-agnostic, and
+    /// this test is the contract pin.
+    @Test("builder aggregates every matching profile passed in (no self-filter)")
+    func builderIncludesAllProfilesWithMatchingNetworkId() {
+        // Current-show profile (heavy sample count, distinctive mean
+        // far from siblings — would be detectable as an outlier).
+        let currentStats = AdDurationStats(meanDuration: 60, sampleCount: 50)
+        // Two sibling profiles tightly clustered at 10s — a builder that
+        // "intelligently" dropped the highest-weight row would land on a
+        // narrow ~10s aggregate.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        let profiles = [
+            makeProfile(podcastId: "pod-current", adDurationStatsJSON: currentStats.encodeForTesting(), observationCount: 50),
+            makeProfile(podcastId: "pod-sibling-1", adDurationStatsJSON: siblingStats.encodeForTesting(), observationCount: 20),
+            makeProfile(podcastId: "pod-sibling-2", adDurationStatsJSON: siblingStats.encodeForTesting(), observationCount: 20)
+        ]
+        let result = try! #require(NetworkPriorsBuilder.build(from: profiles))
+
+        // showCount counts every qualifying profile, including the
+        // current-show row.
+        #expect(result.showCount == 3,
+                "builder must include all matching profiles in showCount; got \(result.showCount). A self-filter on the current show would land at 2.")
+
+        // typicalAdDuration must span both regimes — current at 60 must
+        // not have been silently elided. With NetworkPriorAggregator
+        // count=3 (trimOutliers no-op) and aggregateDuration min/max of
+        // means [60, 10, 10], the range is exactly 10...60.
+        #expect(result.typicalAdDuration.lowerBound <= 12,
+                "lowerBound should be near 10 (siblings'); got \(result.typicalAdDuration.lowerBound)")
+        #expect(result.typicalAdDuration.upperBound >= 55,
+                "upperBound should be near 60 (current show); got \(result.typicalAdDuration.upperBound). A regression that elided the current show would land near 20 (the 10s minimum-width bracket around the siblings' mean).")
+    }
+
     @Test("network aggregate is measurably narrower than global default")
     func builderNarrowsRangeBelowGlobal() {
         // A network whose shows all average around 10s should yield a

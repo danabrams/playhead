@@ -359,6 +359,76 @@ struct PriorHierarchyWireUpTests {
         #expect(resolved.activeLevel == .network)
     }
 
+    /// playhead-spxs cycle-14 missing-test #1: pin the
+    /// `sponsorRecurrenceExpectation` blend documented in
+    /// `PriorHierarchy.activeLevel`. With the network tier active and
+    /// `NetworkPriorsBuilder` feeding `commonSponsors: [:]` (the current
+    /// producer's homogeneous default), the resolver derives
+    /// `netSponsorRecurrence = 0` and blends `0.3 (global default) → 0`
+    /// at weight `networkDecay`. Resolved value must therefore land
+    /// strictly below the global default 0.3 — proves the docstring
+    /// claim "the network tier IS materially blending this axis away
+    /// from 0.3 toward 0 today". A regression that switched
+    /// `netSponsorRecurrence` to default to the global value (turning
+    /// the blend into a no-op) would silently make the docstring false
+    /// without breaking any other behavioral test.
+    ///
+    /// Note: this axis has no production consumer today
+    /// (`ResolvedPriors.sponsorRecurrenceExpectation` is "Reserved for
+    /// future consumers"), so a regression here would not change
+    /// detector behavior — it would only break a contract that the
+    /// next consumer will rely on. The test is therefore documentation-
+    /// adjacent: it locks the blend math against accidental drift
+    /// between the spxs commit and whichever future bead lights up the
+    /// downstream knob.
+    @Test("network tier blends sponsorRecurrenceExpectation below global default when commonSponsors empty")
+    func wireUpNetworkBlendsSponsorRecurrenceTowardZero() async throws {
+        let store = try await makeTestStore()
+        let networkId = "pod-net-spxs-sponsor-blend"
+
+        // Two siblings carry stats so the network builder produces a
+        // valid `NetworkPriors` with `commonSponsors: [:]` (the current
+        // builder's homogeneous default — see `NetworkPriorsBuilder.swift`).
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        for i in 0..<2 {
+            let sibling = makeProfile(
+                podcastId: "pod-sibling-sponsor-\(i)",
+                adDurationStatsJSON: siblingStats.encodeForTesting(),
+                observationCount: 8,
+                networkId: networkId
+            )
+            try await store.upsertProfile(sibling)
+        }
+
+        // Current show: brand-new (no own stats), peak network decay (0.5).
+        let current = makeProfile(
+            podcastId: "pod-current-sponsor-blend",
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: networkId
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+
+        // Pin: with global default 0.3, network's empty-sponsors-derived 0,
+        // and decay weight 0.5, the blend lands at 0.15. The exact value
+        // is brittle if the global default moves, so the test asserts the
+        // strictly-less-than relation that the docstring promises.
+        #expect(resolved.sponsorRecurrenceExpectation < GlobalPriorDefaults.standard.sponsorRecurrenceExpectation,
+                """
+                Network tier must blend sponsorRecurrenceExpectation strictly \
+                below the global default \
+                \(GlobalPriorDefaults.standard.sponsorRecurrenceExpectation); \
+                got \(resolved.sponsorRecurrenceExpectation). The current \
+                NetworkPriorsBuilder feeds commonSponsors: [:], producing \
+                netSponsorRecurrence=0, so any active network decay > 0 \
+                must pull the value downward. A no-op result here means \
+                the blend has been silently disabled.
+                """)
+    }
+
     /// playhead-spxs: the wire-up's load-bearing claim. With the network
     /// tier active, the resolved typicalAdDuration must measurably move
     /// toward the network's converging mean — not stay parked on the
@@ -470,10 +540,27 @@ struct PriorHierarchyWireUpTests {
     /// show. The two siblings (mean 10) plus the current show (mean 60)
     /// produce a network range of 10...60 (the
     /// `NetworkPriorAggregator.aggregateDuration` minimum-width branch
-    /// does not fire because `maxVal - minVal = 50 >= 10`), not the
-    /// 5...15 a "siblings only" aggregator would emit. The precedence
-    /// claim holds either way; the contributions check is robust to
-    /// both.
+    /// does not fire because `maxVal - minVal = 50 >= 10`, AND
+    /// `trimOutliers` is a no-op at count=3 < 4 — see the early return
+    /// in `NetworkPriorAggregator.trimOutliers`), not the 5...15 a
+    /// "siblings only" aggregator would emit. If a future fixture
+    /// expansion crosses the 4-profile threshold, the trimmer fires
+    /// (`trimCount = max(1, 0.1 × n)` clips both ends) and the resulting
+    /// range can collapse to the minimum-width branch — re-derive the
+    /// expected `levelContributions` numbers in this docstring before
+    /// trusting the cycle-14 floor at line ~534. The precedence claim
+    /// holds either way; the contributions check is robust to both.
+    ///
+    /// cycle-14 L-C: `levelContributions[.network]` is set in exactly
+    /// one place — the dictionary literal at PriorHierarchy.swift line
+    /// ~225, inside the `if let net = networkPriors, networkDecay > 0`
+    /// branch. There is no subscript-form write elsewhere, so the
+    /// `network > 0` assertion below is a faithful proxy for "the
+    /// network branch executed". The cycle-14 source canary
+    /// `wireUpResolverContributionsNetworkWriteIsBranchGated` pins this
+    /// invariant — if a future refactor adds a second writer outside
+    /// the gated branch, that canary fails before this test silently
+    /// loses its grip on what it is asserting.
     @Test("show-local priors still dominate when both tiers are available")
     func wireUpShowLocalDominatesNetwork() async throws {
         let store = try await makeTestStore()
@@ -525,6 +612,27 @@ struct PriorHierarchyWireUpTests {
                 "network tier must be active for this precedence test; contribution=\(networkContribution)")
         #expect(showLocalContribution > networkContribution,
                 "show-local must dominate active network; showLocal=\(showLocalContribution) network=\(networkContribution)")
+
+        // cycle-14 L-A belt-and-suspenders: also pin the *value* effect on
+        // `typicalAdDuration`, not just the structured blend weights.
+        // levelContributions proves the resolver _called_ each tier's
+        // blend; this floor proves show-local's value (mean=60, range
+        // 48...72) actually moved the resolved range UP from the global
+        // default (30...90 lower bound = 30) and from the network-only
+        // regime (lowerBound = 27 after blending global 30 with network 10
+        // at decay 0.15). Full-stack lowerBound lands at ~41.3, which
+        // clears 35 by a wide margin while excluding both fall-back
+        // regimes — a regression that quietly disabled the show-local
+        // blend (e.g. by zeroing `showLocalBlendWeight`) would land at
+        // 27 or 30 and fail this floor.
+        #expect(resolved.typicalAdDuration.lowerBound > 35,
+                """
+                show-local value-blend must pull typicalAdDuration upward; \
+                got lowerBound=\(resolved.typicalAdDuration.lowerBound). \
+                Network-only regime lands at ~27, global-only at 30, \
+                full-stack at ~41.3 — values <= 35 indicate show-local \
+                did not actually move the duration range.
+                """)
     }
 
     /// playhead-spxs cycle-1 L-3: pin the empty-string guard in
@@ -773,6 +881,130 @@ struct PriorHierarchyWireUpTests {
                 "matches NetworkPriorsBuilder snapshot default — same shape as musicBracketTrust")
         #expect(g.sponsorRecurrenceExpectation == 0.3,
                 "differs from the network-derived 0 — the blend pulls this axis materially toward 0 with weight networkDecay")
+    }
+
+    /// playhead-spxs cycle-14 missing-test #3: source canary that
+    /// `levelContributions[.network]` is written EXCLUSIVELY inside the
+    /// `if let net = networkPriors, networkDecay > 0` branch in
+    /// `PriorHierarchyResolver.resolve`.
+    ///
+    /// Why this matters: the cycle-14 wireUp dominance check
+    /// (`wireUpShowLocalDominatesNetwork`) asserts
+    /// `levelContributions[.network] > 0` is a faithful proxy for "the
+    /// network tier's blend executed". That proxy holds only because
+    /// the resolver writes `.network` to `contributions` in a single
+    /// place: the dictionary literal at the tail of the gated branch.
+    /// A regression that pre-seeded `contributions[.network] = 0` (or
+    /// any other value) outside the gated branch — for instance, in a
+    /// metrics-init pass that ran before the conditional — would land
+    /// the proxy in a state where the dominance test passes regardless
+    /// of whether the network blend ran. This canary catches that
+    /// silent-revert window.
+    @Test("PriorHierarchyResolver.resolve writes .network into contributions only inside the networkPriors-gated branch")
+    func resolverContributionsNetworkWriteIsBranchGated() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/AdDetection/PriorHierarchy.swift"
+        )
+        // Strip comments AND string literals so a future docstring
+        // reference to `.network` doesn't false-positive.
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+        let strippedNS = stripped as NSString
+
+        // Anchor the resolver implementation: `static func resolve(`.
+        let funcAnchor = "static func resolve("
+        let funcRange = try #require(stripped.range(of: funcAnchor),
+                                     "could not locate `\(funcAnchor)` — resolver was renamed; update this canary's anchor")
+        let funcOpenIdx = try #require(
+            SwiftSourceInspector.findOpenBrace(in: stripped, after: funcRange.upperBound),
+            "could not locate opening `{` of `static func resolve(...)` — signature drift?"
+        )
+        let resolveBody = SwiftSourceInspector.bracedBody(in: stripped, startingAt: funcOpenIdx)
+        let resolveBodyNS = resolveBody as NSString
+        #expect(resolveBodyNS.length > 0,
+                "resolveBody is empty — `bracedBody` failed (unbalanced braces?)")
+
+        // Locate the gated branch opener — whitespace-tolerant for
+        // future swift-format reflows.
+        let gateOpenerPattern = #"if\s+let\s+net\s*=\s*networkPriors\s*,\s*networkDecay\s*>\s*0\s*\{"#
+        let gateOpenerRegex = try NSRegularExpression(pattern: gateOpenerPattern)
+        let gateMatch = try #require(
+            gateOpenerRegex.firstMatch(in: resolveBody, range: NSRange(location: 0, length: resolveBodyNS.length)),
+            """
+            Could not find the network-gated branch opener \
+            `if let net = networkPriors, networkDecay > 0 {` in \
+            PriorHierarchyResolver.resolve. Either the gate condition \
+            was rewritten or the resolver no longer threads networkPriors \
+            through this branch — re-derive the cycle-14 invariant before \
+            updating this anchor.
+            """
+        )
+
+        // gateMatch.range covers the entire `if ... {` opener including
+        // the open brace. Inside that brace we are at depth 1; walk
+        // forward until depth returns to 0 to find the matching close.
+        // Comments and strings have already been stripped, so depth
+        // tracking is just `{`/`}` counting.
+        var depth = 1
+        var idx = gateMatch.range.location + gateMatch.range.length
+        let openBrace: unichar = 0x7B  // {
+        let closeBrace: unichar = 0x7D // }
+        while idx < resolveBodyNS.length && depth > 0 {
+            let ch = resolveBodyNS.character(at: idx)
+            if ch == openBrace { depth += 1 }
+            else if ch == closeBrace { depth -= 1 }
+            idx += 1
+        }
+        #expect(depth == 0,
+                "could not find matching close brace for the gated branch — unbalanced braces in resolveBody")
+        // [gateMatch.range.location, idx) covers the gated branch
+        // including its braces. Anything outside this half-open range
+        // is OUTSIDE the gated branch.
+        let gateStart = gateMatch.range.location
+        let gateEndExclusive = idx
+
+        // Find every `.network` reference in the resolve body. Word
+        // boundary keeps `.network` from matching `.networking` etc.
+        let dotNetworkRegex = try NSRegularExpression(pattern: #"\.network\b"#)
+        let allMatches = dotNetworkRegex.matches(
+            in: resolveBody,
+            range: NSRange(location: 0, length: resolveBodyNS.length)
+        )
+
+        var insideCount = 0
+        var outsideCount = 0
+        var outsideOffsets: [Int] = []
+        for match in allMatches {
+            let loc = match.range.location
+            if loc >= gateStart && loc < gateEndExclusive {
+                insideCount += 1
+            } else {
+                outsideCount += 1
+                outsideOffsets.append(loc)
+            }
+        }
+
+        #expect(outsideCount == 0,
+                """
+                PriorHierarchyResolver.resolve contains \(outsideCount) \
+                `.network` reference(s) OUTSIDE the \
+                `if let net = networkPriors, networkDecay > 0` branch \
+                (offsets in resolveBody: \(outsideOffsets)). The cycle-14 \
+                wireUpShowLocalDominatesNetwork test treats \
+                `levelContributions[.network] > 0` as proof the gated \
+                branch ran — a write outside the branch (e.g. a \
+                metrics-init pre-seed) would falsify that proxy and let \
+                the dominance test pass even when the network blend was \
+                short-circuited. Either remove the out-of-branch write or \
+                update the dominance test to use a stricter proxy before \
+                relaxing this canary.
+                """)
+        #expect(insideCount >= 1,
+                """
+                PriorHierarchyResolver.resolve has 0 `.network` references \
+                inside the gated branch — the network tier write may have \
+                been removed entirely. Either the production code is \
+                broken or this canary's anchor signature has drifted.
+                """)
     }
 
     // playhead-spxs cycle-2 M-1 (DEFERRED with architectural rationale):
