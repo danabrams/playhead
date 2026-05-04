@@ -73,3 +73,58 @@ Precision ~27% means roughly 3 in 4 auto-skips are wrong from the user's perspec
 ## Aggregate coverage caveat
 
 `ScoredCoverageRatio = 0.044` across ALL fixtures is a mixed number: most fixtures are from pre-9.1.1 captures where transcript stalled at 90 s. The post-9.1.1 subset (2 assets in the new fixtures) is insufficient to compute a clean "post-fix ScoredCov" number. Will improve as more dogfood sessions accumulate under the current build.
+
+---
+
+## 2026-05-04 — gtt9.4.3 follow-up: post-fix capture verification on 71F0C2AE
+
+The 04-24 finding above ("Pred=0, Sec-F1=0") was captured **before** two fixes that targeted exactly this case:
+
+- **6e37335** (2026-04-23 22:29 EDT) — `emitHotPathDecisionLogs` promotes `hotPathCandidate` → `autoSkipEligible` when `adProbability ≥ 0.80`.
+- **a4ea4ca** (2026-04-23 23:28 EDT) — `makeClassifierProposals` seeds classifier-only high-conf regions so they reach BackfillEvidenceFusion.
+
+Captured a fresh dogfood session on 2026-04-25 (fixture `2026-04-25/FrozenTrace-71F0C2AE-7260-4D1E-B41A-BCFD5103A641.json`, `capturedAt: 2026-04-25T11:50:03Z`) and re-ran the harness on 2026-05-04 against current `main` (HEAD `cde03285`).
+
+### Per-fixture comparison (episode `…flightcast:01KM20WJPKVFHRVJZWTNA6Q1XT`)
+
+| Fixture | Config | GT | Pred | Sec-F1 | Precision | Recall | hasShadowCoverage | priorShiftAdds | 7006-7037 GT span FN reason |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-04-24 (pre-fix) | default | 3 | 2 | 0.7612 | 1.000 | 0.6145 | false | 0 | "no scored windows overlap this GT span" |
+| 2026-04-24 (pre-fix) | allEnabled | 3 | 2 | 0.7612 | 1.000 | 0.6145 | false | 0 | "no scored windows overlap this GT span" |
+| **2026-04-25 (post-fix)** | default | 3 | 2 | 0.7612 | 1.000 | 0.6145 | **true** | 0 | **"candidate windows present but none were promoted to auto-skip"** |
+| **2026-04-25 (post-fix)** | allEnabled | 3 | 3 | 0.7500 | 0.9623 | 0.6145 | **true** | **4** | **"candidate windows present but none were promoted to auto-skip"** |
+
+Note: the 04-24 row above ("Pred=0, Sec-F1=0") in Finding 1 was a **different fixture run** with different captured trace data; the harness numbers in this comparison table come from the per-fixture episodes in the harness output, not the rollup. Both pre/post-fix fixtures share the same GT (3 user-marked ads, including `[7006, 7037.34]`) but differ in their captured FrozenTrace contents.
+
+### What changed
+
+1. **a4ea4ca delivered.** Pre-fix capture had **zero scored windows** overlapping the [7006, 7037.34] GT span (FN reason: "no scored windows"). Post-fix capture now has **candidate windows present** in that range (FN reason changed to "candidate windows present but none were promoted to auto-skip"). Classifier-only seeding successfully reached fusion.
+2. **6e37335 partially delivered.** Hot-path candidates now exist in the borderline span, but they don't clear the `autoSkipEligible` threshold on this episode. The promotion fix raised the floor (more candidates) without raising recall (still 0/1 on the third GT span).
+3. **Sec-F1 movement is essentially zero on 71F0C2AE.** Default-config Sec-F1 stayed at 0.7612 (unchanged). allEnabled went 0.7612 → 0.7500 (−1.1pt, one extra prediction in a new region added 2s of FP).
+4. **isAdUnderDefault @ 7006-window:** still false post-fix. Pred count under default config did **not** flip from 2 → 3. Candidate generation works; promotion does not.
+
+### Acceptance gate evaluation
+
+| Acceptance | Status |
+|---|---|
+| Fresh fixture exists with `capturedAt` after 2026-04-24 03:28 UTC for 71F0C2AE | ✅ `capturedAt: 2026-04-25T11:50:03Z` |
+| Harness re-run shows whether labelling fix alone moves Sec-F1 | ✅ Answered: it does not — it moves _candidate coverage_ but not _promotion_, leaving Sec-F1 flat |
+| Decision: do we still need 9.4.1 (boundary expansion)? | ✅ Yes — see below |
+
+### Decision: 9.4.1 still needed
+
+The shipped fixes broke the **scored-coverage** bottleneck on this episode (the bigger wall) but exposed the **promotion-gate** bottleneck as the next ceiling. The 7006-7037.34 GT span now has candidate windows but those windows can't clear the auto-skip eligibility threshold — they sit just below 0.80 in this borderline region.
+
+**9.4.1 (boundary expansion) remains the right next move**: widening the candidate evidence in the immediate neighborhood of borderline classifications is the proximate path to converting `promotionRecall` FNs into TPs. An alternative would be lowering the auto-skip threshold or routing classifier-seeded candidates through a second-tier promotion path, but those are bigger architectural moves than 9.4.1's targeted boundary widen.
+
+### Caveats / honest limits
+
+- **Single-episode result.** This is one episode. Network-wide Sec-F1 movement under `allEnabled` from the harness rollups (8 included DoaC episodes) is also flat-to-slightly-negative (DoaC `default` Sec-F1 = 0.748, `allEnabled` = 0.682 in the 2026-05-02 run; same harness, same fixtures). The fixes' value is in unblocking subsequent work, not in standalone metric movement.
+- **`buildCommitSHA` is empty in fixtures** — couldn't programmatically verify the post-fix capture was taken under a build with both commits, only that `capturedAt` postdates them. The behavioral changes (shadow coverage flipping `true`, priorShiftAdds going 0 → 4, FN reason text change) are sufficient indirect evidence the fix code ran.
+- **Same harness, same prediction code under both replays.** The fixture differences are purely in the captured trace inputs; the prediction logic at HEAD is identical for both. So the metric differences reflect "how the new code's outputs flow through replay," not "how new code differs from old." This is the correct setup for measuring fix-induced upstream signal.
+
+### Provenance
+
+- Harness run: `.eval-out/narl/20260504-174000-93AB6B/` (current `main` HEAD `cde03285`).
+- Episodes inspected: indices 34/35 (pre-fix capture, no shadow), 90/91 (post-fix capture, shadow coverage live).
+- Bead: `playhead-gtt9.4.3` — closes with this finding.
