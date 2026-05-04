@@ -313,6 +313,42 @@ struct RuntimeShutdownLifecycleTests {
         )
     }
 
+    // MARK: - 4. RepeatedAdCache kill-switch observer cancellation (playhead-43ed M1)
+
+    /// The `Task { ... for await _ in NotificationCenter.notifications(...) }`
+    /// observer that watches the `b3_repeated_ad_cache_enabled` UserDefaults
+    /// key was constructed without a cancellation handle pre-fix, so it
+    /// outlived `runtime.shutdown()` — every test that constructed a
+    /// non-preview runtime leaked one observer Task plus its captured
+    /// `repeatedAdCache` strong reference for the rest of the process.
+    /// In production it leaked across teardown of integration-test
+    /// runtimes and would have leaked across any future runtime that
+    /// can be torn down (e.g. SceneDelegate destruction, App Clip
+    /// teardown). Post-fix: `shutdown()` cancels the observer Task and
+    /// the `for await` loop terminates promptly.
+    @MainActor
+    @Test("shutdown() cancels the RepeatedAdCache kill-switch observer task",
+          .timeLimit(.minutes(1)))
+    func shutdownCancelsRepeatedAdCacheKillSwitchObserver() async throws {
+        let runtime = PlayheadRuntime(isPreviewRuntime: false)
+        guard let task = runtime._repeatedAdCacheKillSwitchObserverTaskForTesting() else {
+            Issue.record("non-preview runtime must construct the kill-switch observer task")
+            await runtime.shutdown()
+            return
+        }
+        // Sanity-check: pre-shutdown the task is alive (not cancelled).
+        #expect(!task.isCancelled, "observer task must be running before shutdown()")
+
+        await runtime.shutdown()
+
+        #expect(task.isCancelled, "observer task must be cancelled after shutdown()")
+
+        // Idempotency: a second shutdown() must not crash and the task
+        // remains cancelled.
+        await runtime.shutdown()
+        #expect(task.isCancelled, "observer task must remain cancelled after second shutdown()")
+    }
+
     // MARK: - Helpers
 
     /// Polls the observer until its loop task exists. Mirrors the
