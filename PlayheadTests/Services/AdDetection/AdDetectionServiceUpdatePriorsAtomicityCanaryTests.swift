@@ -995,7 +995,7 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
             pattern: Self.networkIdCarryForwardPattern
         )
         let nextFuncRegex = try NSRegularExpression(pattern: #"\bfunc\s+\w+\s*\("#)
-        let updateLabelRegex = try NSRegularExpression(pattern: #"\bupdate\s*:"#)
+        let updateLabelRegex = try NSRegularExpression(pattern: Self.updateLabelPattern)
         let nsAll = NSRange(stripped.startIndex..., in: stripped)
 
         for methodName in mutationMethods {
@@ -1091,6 +1091,13 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     /// would lack the carry-forward. Synthetic source omits
     /// `networkId:` from its `PodcastProfile(...)` call; the per-method
     /// regex must return no match.
+    ///
+    /// Cycle-4 M-1: this control now mirrors the production canary's
+    /// cycle-3 L-4 slicing — anchor on the `update:` label, not the
+    /// `func` body — so a future regression that loosens the slice
+    /// boundary (e.g. reverting to `funcRange.lowerBound..<methodEnd`)
+    /// will be caught by *this* control's drift, not just by the
+    /// production canary itself.
     func testEachTrustScoringMutationMethodCarriesNetworkIdForward_negativeControl() throws {
         let regressionFixture = """
         actor TrustScoringService {
@@ -1115,6 +1122,7 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
             pattern: #"\bfunc\s+recordSuccessfulObservation\s*\("#
         )
         let nextFuncRegex = try NSRegularExpression(pattern: #"\bfunc\s+\w+\s*\("#)
+        let updateLabelRegex = try NSRegularExpression(pattern: Self.updateLabelPattern)
 
         let nsAll = NSRange(stripped.startIndex..., in: stripped)
         guard let funcMatch = funcDeclRegex.firstMatch(in: stripped, range: nsAll),
@@ -1131,7 +1139,14 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         } else {
             methodEnd = stripped.endIndex
         }
-        let methodSlice = String(stripped[funcRange.lowerBound..<methodEnd])
+        // Cycle-4 M-1: mirror production slicing — anchor on `update:`.
+        let bodyNSRange = NSRange(afterFunc..<methodEnd, in: stripped)
+        guard let updateMatch = updateLabelRegex.firstMatch(in: stripped, range: bodyNSRange),
+              let updateRange = Range(updateMatch.range, in: stripped) else {
+            XCTFail("Fixture missing `update:` label after `func`")
+            return
+        }
+        let methodSlice = String(stripped[updateRange.upperBound..<methodEnd])
         let sliceRange = NSRange(methodSlice.startIndex..., in: methodSlice)
 
         XCTAssertNil(
@@ -1153,6 +1168,12 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     /// closure-parameter names (`existing`, `current`) plus a
     /// multi-line `{ existing\n  in` shape — exactly the cases the
     /// cycle-2 reviewer flagged as fragile in the floor-of-5 design.
+    ///
+    /// Cycle-4 M-1: this control now mirrors the production canary's
+    /// cycle-3 L-4 slicing — anchor on the `update:` label, not the
+    /// `func` body — so a future regression that loosens the slice
+    /// boundary will be caught by *this* control's drift, not just by
+    /// the production canary itself.
     func testEachTrustScoringMutationMethodCarriesNetworkIdForward_positiveControl() throws {
         let happyPathFixture = """
         actor TrustScoringService {
@@ -1178,6 +1199,7 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
             pattern: #"\bfunc\s+recordSuccessfulObservation\s*\("#
         )
         let nextFuncRegex = try NSRegularExpression(pattern: #"\bfunc\s+\w+\s*\("#)
+        let updateLabelRegex = try NSRegularExpression(pattern: Self.updateLabelPattern)
         let nsAll = NSRange(stripped.startIndex..., in: stripped)
         guard let funcMatch = funcDeclRegex.firstMatch(in: stripped, range: nsAll),
               let funcRange = Range(funcMatch.range, in: stripped) else {
@@ -1193,7 +1215,14 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         } else {
             methodEnd = stripped.endIndex
         }
-        let methodSlice = String(stripped[funcRange.lowerBound..<methodEnd])
+        // Cycle-4 M-1: mirror production slicing — anchor on `update:`.
+        let bodyNSRange = NSRange(afterFunc..<methodEnd, in: stripped)
+        guard let updateMatch = updateLabelRegex.firstMatch(in: stripped, range: bodyNSRange),
+              let updateRange = Range(updateMatch.range, in: stripped) else {
+            XCTFail("Fixture missing `update:` label after `func`")
+            return
+        }
+        let methodSlice = String(stripped[updateRange.upperBound..<methodEnd])
         let sliceRange = NSRange(methodSlice.startIndex..., in: methodSlice)
 
         XCTAssertNotNil(
@@ -1206,6 +1235,119 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
             two lines. The pattern has over-restricted; loosen it OR \
             confirm the slice-based approach is independent of closure- \
             parameter naming.
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-4 M-1 specific defense: prove that the
+    /// production canary's cycle-3 L-4 slicing (anchor on `update:`)
+    /// REJECTS a fixture where `networkId:` appears ONLY in the
+    /// `create:` branch, not in the `update:` closure. This is the
+    /// exact regression shape L-4 was built to catch — a future
+    /// reviewer who "fixes" the carry-forward by adding `networkId:`
+    /// to the wrong branch (create instead of update) must not
+    /// satisfy the canary. With the OLD slice (`funcRange.lowerBound`),
+    /// this fixture would falsely pass; with the L-4 slice
+    /// (`updateRange.upperBound`), it correctly fails.
+    func testEachTrustScoringMutationMethodCarriesNetworkIdForward_createOnlyNegativeControl() throws {
+        // `networkId:` lives ONLY in the `create:` branch. The
+        // `update:` closure body has no carry-forward. A canary that
+        // slices from `func` would see the create-branch hit and
+        // falsely pass; the production canary slices from `update:`
+        // and correctly returns no match.
+        let createOnlyFixture = """
+        actor TrustScoringService {
+            func recordSuccessfulObservation() async throws {
+                try await store.mutateProfile(podcastId: id) {
+                    PodcastProfile(
+                        podcastId: id,
+                        networkId: someStaleLocal.networkId
+                    )
+                } update: { profile in
+                    PodcastProfile(
+                        podcastId: profile.podcastId,
+                        skipTrustScore: profile.skipTrustScore
+                    )
+                }
+            }
+            func anotherMethod() {}
+        }
+        """
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(createOnlyFixture)
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+        let funcDeclRegex = try NSRegularExpression(
+            pattern: #"\bfunc\s+recordSuccessfulObservation\s*\("#
+        )
+        let nextFuncRegex = try NSRegularExpression(pattern: #"\bfunc\s+\w+\s*\("#)
+        let updateLabelRegex = try NSRegularExpression(pattern: Self.updateLabelPattern)
+
+        let nsAll = NSRange(stripped.startIndex..., in: stripped)
+        guard let funcMatch = funcDeclRegex.firstMatch(in: stripped, range: nsAll),
+              let funcRange = Range(funcMatch.range, in: stripped) else {
+            XCTFail("Fixture missing `func recordSuccessfulObservation(`")
+            return
+        }
+        let afterFunc = funcRange.upperBound
+        let restNSRange = NSRange(afterFunc..<stripped.endIndex, in: stripped)
+        let methodEnd: String.Index
+        if let nextMatch = nextFuncRegex.firstMatch(in: stripped, range: restNSRange),
+           let nfr = Range(nextMatch.range, in: stripped) {
+            methodEnd = nfr.lowerBound
+        } else {
+            methodEnd = stripped.endIndex
+        }
+
+        // Sanity: with the OLD (pre-L-4) slicing — from `func` to
+        // `methodEnd` — the canary regex WOULD match (because the
+        // create-branch contains `networkId: someStaleLocal.networkId`).
+        // This sanity check pins the fixture as a faithful pre-L-4
+        // false-positive shape. If this ever fails to match, the
+        // fixture has drifted and the L-4 specific defense is no
+        // longer being exercised.
+        let oldSlice = String(stripped[funcRange.lowerBound..<methodEnd])
+        let oldSliceRange = NSRange(oldSlice.startIndex..., in: oldSlice)
+        XCTAssertNotNil(
+            networkCarryRegex.firstMatch(in: oldSlice, range: oldSliceRange),
+            """
+            playhead-spxs cycle-4 M-1 fixture sanity check failed: the \
+            create-only fixture no longer contains a `networkId:` hit \
+            anywhere in the method body, so this control no longer \
+            exercises the L-4 specific defense. Restore the create- \
+            branch `networkId:` reference so the OLD slicing would \
+            falsely pass.
+            """
+        )
+
+        // Now: with the production (L-4) slicing — from `update:` to
+        // `methodEnd` — the canary regex MUST NOT match. The update
+        // closure body has no carry-forward.
+        let bodyNSRange = NSRange(afterFunc..<methodEnd, in: stripped)
+        guard let updateMatch = updateLabelRegex.firstMatch(in: stripped, range: bodyNSRange),
+              let updateRange = Range(updateMatch.range, in: stripped) else {
+            XCTFail("Fixture missing `update:` label after `func`")
+            return
+        }
+        let methodSlice = String(stripped[updateRange.upperBound..<methodEnd])
+        let sliceRange = NSRange(methodSlice.startIndex..., in: methodSlice)
+
+        XCTAssertNil(
+            networkCarryRegex.firstMatch(in: methodSlice, range: sliceRange),
+            """
+            playhead-spxs cycle-4 M-1 specific defense failure: the \
+            production canary's `update:`-anchored slice MATCHED a \
+            fixture whose `networkId:` lives ONLY in the create branch. \
+            The cycle-3 L-4 slice anchor exists precisely to reject \
+            this regression shape; if the assertion fires, either the \
+            slice anchor has drifted back to `funcRange.lowerBound` or \
+            the `updateLabelRegex` pattern is finding a hit *before* \
+            the `update:` label (e.g. matching a closure-parameter name \
+            or a labeled break). Audit `updateLabelPattern` and the \
+            slice math in the production canary.
+
+            Update-anchored slice (first 200 chars):
+            \(methodSlice.prefix(200))…
             """
         )
     }
@@ -1250,7 +1392,7 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         let networkCarryRegex = try NSRegularExpression(
             pattern: Self.networkIdCarryForwardPattern
         )
-        let updateLabelRegex = try NSRegularExpression(pattern: #"\bupdate\s*:"#)
+        let updateLabelRegex = try NSRegularExpression(pattern: Self.updateLabelPattern)
         let nsAll = NSRange(stripped.startIndex..., in: stripped)
 
         for methodName in methodsWithCreatePath {
@@ -1367,7 +1509,7 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         let funcDeclRegex = try NSRegularExpression(
             pattern: #"\bfunc\s+recordSuccessfulObservation\s*\("#
         )
-        let updateLabelRegex = try NSRegularExpression(pattern: #"\bupdate\s*:"#)
+        let updateLabelRegex = try NSRegularExpression(pattern: Self.updateLabelPattern)
 
         let nsAll = NSRange(stripped.startIndex..., in: stripped)
         guard let funcMatch = funcDeclRegex.firstMatch(in: stripped, range: nsAll),
@@ -2105,6 +2247,17 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     /// suspenders, not the only defense.
     fileprivate static let networkIdCarryForwardPattern: String =
         #"(?:networkId\s*:|\?\?)\s*[A-Za-z_][A-Za-z0-9_]*\s*\.\s*networkId\b"#
+
+    /// playhead-spxs cycle-4 L-3: the `update:` label slice anchor.
+    /// Required `\{` after the colon so a closure-parameter named
+    /// `update` (e.g. `{ update in ... }`), an enum case `case .update:`,
+    /// or a labeled break/continue (`update: while ...`) cannot be
+    /// mistaken for the trailing-closure / labeled-arg `update:`
+    /// position that bounds the `mutateProfile` / `updateProfileIfExists`
+    /// update closure's body. Both supported call shapes — comma-form
+    /// `mutateProfile(... update: { ... })` and trailing-closure form
+    /// `} update: { ... }` — have whitespace then `{` after the colon.
+    fileprivate static let updateLabelPattern: String = #"\bupdate\s*:\s*\{"#
 
     /// Cycle-23 L-4: word-boundary anchored "is this a `PodcastProfile`
     /// constructor invocation?" probe. Replaces a bare

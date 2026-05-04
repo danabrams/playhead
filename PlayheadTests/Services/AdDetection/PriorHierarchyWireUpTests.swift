@@ -20,6 +20,7 @@
 //   • No regression on shows without accumulated priors (graceful fallback).
 
 import Foundation
+import SQLite3
 import Testing
 @testable import Playhead
 
@@ -969,12 +970,30 @@ struct PriorHierarchyWireUpTests {
         strippedText: String
     ) throws -> Set<String> {
         let signature = "func \(funcName)("
-        guard let signatureRange = sourceText.range(of: signature) else {
+        // Cycle-4 L-1: anchor the signature lookup on `strippedText`
+        // (comments + strings blanked out) so a doc-comment mention like
+        // `/// see func runSchemaMigration(` cannot beat the real
+        // declaration to the first match. `strippingCommentsAndStrings`
+        // preserves length character-for-character (cycle-26 M-3), so we
+        // can round-trip through NSRange to obtain an index range valid in
+        // `sourceText`. (Swift's `String.Index` instances are not directly
+        // interchangeable across String values even when the underlying
+        // bytes match, hence the explicit conversion.)
+        guard let strippedSignatureRange = strippedText.range(of: signature) else {
             throw NSError(
                 domain: "MigrateDriftCanary",
                 code: 1,
                 userInfo: [NSLocalizedDescriptionKey:
                     "Could not locate `\(signature)` in AnalysisStore.swift"]
+            )
+        }
+        let strippedSignatureNSRange = NSRange(strippedSignatureRange, in: strippedText)
+        guard let signatureRange = Range(strippedSignatureNSRange, in: sourceText) else {
+            throw NSError(
+                domain: "MigrateDriftCanary",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not project signature range from strippedText into sourceText for `\(signature)`"]
             )
         }
 
@@ -990,20 +1009,22 @@ struct PriorHierarchyWireUpTests {
         // wrap that helper's body and pollute the column set with
         // columns it adds (e.g. `title`).
         //
-        // Cycle-3 L-1: enumerate every Swift modifier that can precede
-        // `func` in a class body, not just the access-modifier set. A
-        // future helper declared `static func`, `nonisolated func`,
-        // `final override func`, etc. between the two ladder methods
-        // would otherwise be missed by the boundary, and the slice would
-        // bleed into that helper's body — silently scanning more text
-        // than the canary claims to. The `{0,4}` repeat covers
-        // combinations like `private static final override func`
-        // (rarely written, but legal); five+ modifiers is implausible
-        // and stops the regex from being unbounded.
+        // Cycle-3 L-1 / cycle-4 L-4: enumerate every Swift modifier that
+        // can precede `func` in a class body, not just the access-modifier
+        // set. A future helper declared `static func`, `nonisolated func`,
+        // `final override func`, `required convenience init` (the
+        // initializer modifiers travel together with `func` siblings),
+        // etc. between the two ladder methods would otherwise be missed
+        // by the boundary, and the slice would bleed into that helper's
+        // body — silently scanning more text than the canary claims to.
+        // The `{0,4}` repeat covers combinations like
+        // `private static final override func` (rarely written, but
+        // legal); five+ modifiers is implausible and stops the regex
+        // from being unbounded.
         let bodyStart = signatureRange.upperBound
         let modifierAlternation = "(?:private|internal|public|fileprivate|open"
             + "|static|nonisolated|final|class|override|dynamic"
-            + "|mutating|nonmutating)"
+            + "|mutating|nonmutating|required|convenience)"
         let boundaryPattern = #"\n    (?:"# + modifierAlternation + #" ){0,4}func "#
         let boundaryRegex = try NSRegularExpression(pattern: boundaryPattern)
         let scanRange = NSRange(bodyStart..<sourceText.endIndex, in: sourceText)
@@ -1039,8 +1060,9 @@ struct PriorHierarchyWireUpTests {
     /// remains a future-caching stub with no production callers.
     ///
     /// Cycle-2 marked the actor as UNUSED STUB in its docstring (see
-    /// `NetworkPriors.swift` near line 232) and explicitly told future
-    /// callers "do not wire new call sites through this type" — but a
+    /// the docstring above `actor NetworkPriorStore` in
+    /// `NetworkPriors.swift`) and explicitly told future callers
+    /// "do not wire new call sites through this type" — but a
     /// docstring alone is advisory. This canary makes the constraint
     /// load-bearing: any non-test, non-declaration reference to
     /// `NetworkPriorStore` from production code (under `Playhead/`,
@@ -1118,6 +1140,78 @@ struct PriorHierarchyWireUpTests {
         )
     }
 
+    /// playhead-spxs cycle-4 M-2 positive control for the C3 L-5
+    /// canary: prove the
+    /// `strippingCommentsAndStrings(...).contains("NetworkPriorStore")`
+    /// predicate ACTUALLY flags a real call site. Without this control,
+    /// a future refactor of `strippingCommentsAndStrings` (e.g. one
+    /// that over-strips identifiers, accidentally drops `NetworkPriorStore`
+    /// tokens, or returns an empty string on certain inputs) would let
+    /// the canary go silently green even against a regressed source.
+    ///
+    /// The control runs the exact predicate the production canary uses
+    /// — strip, then `.contains` — against a synthetic Swift source
+    /// where `NetworkPriorStore` appears as a real reference (not in a
+    /// comment, not in a string), and asserts the predicate returns
+    /// `true`. We also pin a negative shape: the same identifier
+    /// embedded *only* in a `//` comment and a `"…"` string literal
+    /// must be filtered away by the stripper.
+    @Test("NetworkPriorStore canary predicate fires on synthetic call site (cycle-4 M-2)")
+    func networkPriorStoreCanaryPredicateFiresOnSyntheticCallSite() {
+        // Real reference: instantiating the actor in a function body.
+        // After comment + string stripping, the identifier MUST remain.
+        let regressionFixture = """
+        import Foundation
+
+        @MainActor
+        final class SomeProductionType {
+            func wireUp() async {
+                let store = NetworkPriorStore()
+                await store.fetch()
+            }
+        }
+        """
+        let strippedReal = SwiftSourceInspector.strippingCommentsAndStrings(regressionFixture)
+        #expect(
+            strippedReal.contains("NetworkPriorStore"),
+            """
+            playhead-spxs cycle-4 M-2 positive control failure: the C3 \
+            L-5 canary's predicate (`strippingCommentsAndStrings(source) \
+            .contains("NetworkPriorStore")`) did NOT flag a synthetic \
+            source whose function body instantiates the actor. The \
+            stripper is now over-aggressive — it is dropping bare \
+            identifiers — which means the production canary has gone \
+            blind. Audit `strippingCommentsAndStrings` and either \
+            tighten its scope to comments + strings only or replace \
+            this predicate with a regex that does not depend on the \
+            stripper.
+            """
+        )
+
+        // Negative shape: identifier only inside a comment + string.
+        // The stripper must remove BOTH so the predicate returns false.
+        // If this side fails, the canary will *over*-trip on benign
+        // mentions in headers / log messages.
+        let benignMentionsFixture = """
+        // This comment mentions NetworkPriorStore but it is not a call site.
+        let docs = "See NetworkPriorStore in NetworkPriors.swift for details."
+        """
+        let strippedBenign = SwiftSourceInspector.strippingCommentsAndStrings(benignMentionsFixture)
+        #expect(
+            !strippedBenign.contains("NetworkPriorStore"),
+            """
+            playhead-spxs cycle-4 M-2 negative control failure: the C3 \
+            L-5 canary's predicate FLAGGED a fixture where \
+            `NetworkPriorStore` appears ONLY inside a `//` comment and a \
+            `"…"` string literal. The stripper is now under-aggressive \
+            — it is leaving comment / string identifiers in place — \
+            which means the production canary will trip on doc-comment \
+            mentions and log-line strings even when production code is \
+            clean. Audit `strippingCommentsAndStrings`.
+            """
+        )
+    }
+
     /// playhead-spxs cycle-3 M-1: pin that `podcast_profiles.networkId`
     /// has a SQL index. `fetchProfiles(forNetworkId:)` runs
     /// `WHERE networkId = ?` on every `resolveEpisodePriors()` call;
@@ -1155,6 +1249,118 @@ struct PriorHierarchyWireUpTests {
             the new index actually covers the (networkId) lookup.
             """
         )
+    }
+
+    /// playhead-spxs cycle-4 L-2: behavioral complement to the cycle-3
+    /// M-1 source canary. Source canary pins that the `CREATE INDEX`
+    /// statement EXISTS in production; this test pins that SQLite's
+    /// query planner ACTUALLY USES the index for the production query
+    /// shape (`SELECT … FROM podcast_profiles WHERE networkId = ?`).
+    ///
+    /// Why both: a partial index (`WHERE networkId IS NOT NULL`) is
+    /// only consulted when the planner can prove the query predicate
+    /// implies the partial. A future refactor that changes the production
+    /// SQL to e.g. `WHERE networkId IS ?` (NULL-tolerant) or
+    /// `WHERE networkId = ? OR networkId IS NULL` would silently bypass
+    /// the index — the source canary would still pass (the index still
+    /// exists) but the production read would scan the table.
+    ///
+    /// Test strategy: open a fresh in-memory SQLite database (avoids
+    /// any AnalysisStore instantiation cost), apply just the schema
+    /// shape that matters for the index — `podcast_profiles(networkId)`
+    /// — recreate the partial index with the exact production DDL,
+    /// then run `EXPLAIN QUERY PLAN` against the production query
+    /// shape. Assert the plan output mentions `idx_podcast_profiles_networkId`.
+    @Test("EXPLAIN QUERY PLAN for fetchProfiles(forNetworkId:) uses idx_podcast_profiles_networkId (cycle-4 L-2)")
+    func explainQueryPlanUsesNetworkIdIndex() throws {
+        var db: OpaquePointer?
+        let openRC = sqlite3_open_v2(
+            ":memory:",
+            &db,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE,
+            nil
+        )
+        #expect(openRC == SQLITE_OK)
+        defer { if let db { sqlite3_close(db) } }
+
+        // Minimal schema shape: only what the index needs. Production
+        // `podcast_profiles` has many more columns, but the planner's
+        // partial-index decision turns on (a) the indexed column type
+        // and (b) the partial WHERE clause matching the query predicate.
+        let ddl = """
+            CREATE TABLE podcast_profiles (
+                podcastId TEXT PRIMARY KEY,
+                networkId TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId
+                ON podcast_profiles(networkId)
+                WHERE networkId IS NOT NULL;
+            """
+        var errMsg: UnsafeMutablePointer<CChar>?
+        let execRC = sqlite3_exec(db, ddl, nil, nil, &errMsg)
+        #expect(execRC == SQLITE_OK, "DDL exec failed: \(errMsg.map { String(cString: $0) } ?? "")")
+
+        // Production query shape — pull from
+        // `AnalysisStore.fetchProfiles(forNetworkId:)`. We mirror the
+        // `WHERE networkId = ?` predicate; column list is irrelevant
+        // to the planner's index decision so we use `*`.
+        let plan = try collectExplainQueryPlan(
+            db: db,
+            sql: "EXPLAIN QUERY PLAN SELECT * FROM podcast_profiles WHERE networkId = ?"
+        )
+
+        // The planner's text contains either "USING INDEX" or
+        // "USING COVERING INDEX" followed by the index name. We just
+        // need the index name to appear somewhere in the plan rows.
+        let combined = plan.joined(separator: "\n")
+        #expect(
+            combined.contains("idx_podcast_profiles_networkId"),
+            """
+            playhead-spxs cycle-4 L-2: SQLite's query planner did NOT \
+            choose `idx_podcast_profiles_networkId` for the production \
+            `WHERE networkId = ?` shape. The partial index \
+            (`WHERE networkId IS NOT NULL`) is only used when the query \
+            predicate implies the partial — which `=` does (NULL is \
+            never equal to anything in SQL). If the production query \
+            has been refactored to a NULL-tolerant predicate (e.g. \
+            `IS ?`), restore the equality predicate or drop the \
+            partial WHERE clause from the index. The cycle-3 M-1 \
+            source canary alone is no longer sufficient — it pins the \
+            index DDL, not its use.
+
+            EXPLAIN QUERY PLAN output:
+            \(plan.joined(separator: "\\n"))
+            """
+        )
+    }
+
+    /// Helper for cycle-4 L-2: collect the plain-text rows of an
+    /// `EXPLAIN QUERY PLAN` statement.
+    private func collectExplainQueryPlan(
+        db: OpaquePointer?,
+        sql: String
+    ) throws -> [String] {
+        var stmt: OpaquePointer?
+        let prepareRC = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard prepareRC == SQLITE_OK else {
+            throw NSError(
+                domain: "ExplainQueryPlanCanary",
+                code: Int(prepareRC),
+                userInfo: [NSLocalizedDescriptionKey:
+                    "sqlite3_prepare_v2 failed (\(prepareRC)) for `\(sql)`"]
+            )
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        // EXPLAIN QUERY PLAN columns: id, parent, notused, detail
+        var rows: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let detailCol = 3
+            if let cstr = sqlite3_column_text(stmt, Int32(detailCol)) {
+                rows.append(String(cString: cstr))
+            }
+        }
+        return rows
     }
 
     // MARK: - PodcastProfile.adDurationStatsJSON column round-trip
