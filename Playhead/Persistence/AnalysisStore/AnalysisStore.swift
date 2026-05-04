@@ -1242,6 +1242,20 @@ actor AnalysisStore {
             // NULL on pre-spxs rows and on shows whose RSS metadata
             // yields no signal; the resolver gracefully falls through
             // to trait/show-local/global tiers when nil.
+            //
+            // Drift note (spxs cycle-1 L-1): `migrateOnlyForTesting()`
+            // mirrors the *versioned* `migrate*V<N>IfNeeded()` ladder
+            // but does NOT replay this `addColumnIfNeeded` call (or its
+            // sibling for `adDurationStatsJSON` from playhead-084j).
+            // The ladder-only test seam is used exclusively by schema-
+            // version migration tests that don't seed real podcast-
+            // profile rows, so the gap is theoretical today; if a
+            // future migration test starts driving real `upsertProfile`
+            // calls through the ladder-only seam it must replay both
+            // `addColumnIfNeeded(... networkId ...)` and
+            // `addColumnIfNeeded(... adDurationStatsJSON ...)` in
+            // `migrateOnlyForTesting()` or the bind/read code paths
+            // will fail at runtime.
             try addColumnIfNeeded(
                 table: "podcast_profiles",
                 column: "networkId",

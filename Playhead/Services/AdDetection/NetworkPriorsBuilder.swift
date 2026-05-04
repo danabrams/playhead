@@ -27,16 +27,33 @@
 // (`fetchProfiles(forNetworkId:)`) lives there too. The builder simply
 // composes them.
 //
-// CURRENT CONSUMPTION (cycle-1, 2026-05-03): only the
-// `typicalAdDuration` field on the produced `NetworkPriors` flows into a
-// production knob via `PriorHierarchyResolver` -> `DurationPrior`. The
-// other aggregated fields (`commonSponsors`, `typicalSlotPositions`,
-// `musicBracketPrevalence`, `metadataTrustAverage`) are computed but not
-// yet consumed in production — they're reserved for future tier
-// upgrades. Snapshots populate the duration field with real data and
-// leave the others at neutral defaults; this matches the
-// `ShowLocalPriorsBuilder` shape (only `typicalAdDuration` lit, others
-// `nil`).
+// CURRENT CONSUMPTION (cycle-1, 2026-05-03):
+//   • `typicalAdDuration` — flows to a production knob via
+//     `PriorHierarchy.resolve` -> `DurationPrior`. Real data.
+//   • `commonSponsors` — flows to `sponsorRecurrenceExpectation` via
+//     `min(1.0, Float(commonSponsors.count) * 0.15)` in
+//     `PriorHierarchy.resolve`. Currently always `[:]` (the snapshot's
+//     `sponsors` map is `[:]`), so the derived recurrence is 0 and the
+//     blend pulls `sponsorRecurrenceExpectation` toward 0 with weight
+//     `networkDecay`. Today this is a structural no-op only when the
+//     global default for `sponsorRecurrenceExpectation` is also 0.
+//   • `typicalSlotPositions` — computed by the aggregator but NOT
+//     consumed by `PriorHierarchy.resolve`. Truly dormant.
+//   • `musicBracketPrevalence`, `metadataTrustAverage` — DO flow through
+//     `PriorHierarchy.resolve` blends into `ResolvedPriors.musicBracketTrust`
+//     and `metadataTrust`. With the snapshot's neutral defaults
+//     (`musicBracketRate: 0.5`, `metadataTrust: 0.5`) and the global
+//     defaults pinned at exactly 0.5, the blend is currently a numeric
+//     no-op (`0.5 → 0.5` regardless of `networkDecay` weight). The
+//     network tier is therefore *active* on these axes — it just
+//     contributes a value identical to the global baseline today.
+// What this means in practice: the network tier is currently load-
+// bearing only on `typicalAdDuration` and (implicitly) any cross-show
+// sponsor recurrence that future PRs might surface. The dormant axes
+// are wired correctly so a future producer that lights them up
+// (e.g. a producer that fills `sponsors` from sibling profiles, or
+// switches the snapshot's `musicBracketRate` to a real-data value) will
+// flow through to `ResolvedPriors` without any further plumbing.
 
 import Foundation
 
@@ -84,6 +101,13 @@ enum NetworkPriorsBuilder {
             // don't fabricate signal from missing data. The
             // duration-driven part of the aggregate is what currently
             // flows to a production knob.
+            // `weight: max(1.0, ...)` guards against a future change to
+            // `minSampleCount` that drops below 1 (e.g. an experiment
+            // that loosens the threshold to 0). With the threshold at 5
+            // today, the clamp is a no-op for live data, but the
+            // `NetworkPriorAggregator` weighted-average code path
+            // divides by total weight and would produce NaN if every
+            // surviving snapshot reported weight 0. Defense-in-depth.
             return ShowPriorSnapshot(
                 sponsors: [:],
                 slotPositions: [],

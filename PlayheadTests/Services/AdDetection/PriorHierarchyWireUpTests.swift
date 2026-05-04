@@ -474,6 +474,112 @@ struct PriorHierarchyWireUpTests {
         #expect(resolved.activeLevel == .showLocal)
     }
 
+    /// playhead-spxs cycle-1 L-3: pin the empty-string guard in
+    /// `resolveEpisodePriors`. Production guards `!networkId.isEmpty` so
+    /// a row written with `networkId == ""` (e.g. a corrupt import or a
+    /// future bug that bypasses the COALESCE upsert) doesn't trigger a
+    /// pointless `fetchProfiles(forNetworkId: "")` SQL fetch — and, more
+    /// importantly, can't accidentally activate the network tier when
+    /// no real network identity exists. Without this guard, every
+    /// row with empty `networkId` would group into the same "" bucket
+    /// and pollute the cross-show signal across unrelated shows.
+    @Test("resolveEpisodePriors with networkId == \"\" falls back to global (no network tier)")
+    func wireUpEmptyStringNetworkIdFallsBackToGlobal() async throws {
+        let store = try await makeTestStore()
+
+        // Sibling exists with empty-string networkId — the same value
+        // the current show has. If the production guard regressed, the
+        // resolver would group these into a "" bucket and activate the
+        // network tier from this fake aggregate.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        let sibling = makeProfile(
+            podcastId: "pod-sibling-empty-net",
+            adDurationStatsJSON: siblingStats.encodeForTesting(),
+            observationCount: 8,
+            networkId: ""
+        )
+        try await store.upsertProfile(sibling)
+
+        let current = makeProfile(
+            podcastId: "pod-current-empty-net",
+            adDurationStatsJSON: nil,
+            observationCount: 0,
+            networkId: ""
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .global)
+        #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
+    }
+
+    /// playhead-spxs cycle-1 missing-test: the decay-weight contract.
+    /// Once a show has accumulated >= 10 episodes of its own observations,
+    /// `NetworkPriors.decayedWeight(episodesObserved:)` returns 0 and the
+    /// resolver's `if let net = networkPriors, networkDecay > 0` guard
+    /// skips the entire network blend. Activation must collapse back to
+    /// global even though `networkPriors` is non-nil and siblings exist
+    /// — the cross-show signal is no longer needed once enough self-data
+    /// has accrued.
+    ///
+    /// Pins the load-bearing arithmetic in `decayedWeight`: a future
+    /// change that swaps the formula (e.g. removes the `max(0, ...)`
+    /// floor or extends decay past 10) would activate the network tier
+    /// here and flip `activeLevel` away from `.global`.
+    @Test("high observationCount decays network weight to 0 and falls back to global")
+    func wireUpHighObservationCountDecaysNetworkTierToZero() async throws {
+        let store = try await makeTestStore()
+        let networkId = "pod-net-spxs-decay"
+
+        // Network siblings cluster around 10s — the same fixture as
+        // `wireUpNetworkNarrowsDurationRange`.
+        let siblingStats = AdDurationStats(meanDuration: 10, sampleCount: 20)
+        for i in 0..<3 {
+            let sibling = makeProfile(
+                podcastId: "pod-sibling-decay-\(i)",
+                adDurationStatsJSON: siblingStats.encodeForTesting(),
+                observationCount: 8,
+                networkId: networkId
+            )
+            try await store.upsertProfile(sibling)
+        }
+
+        // Current show has the network identity but observationCount
+        // is at the decay floor (10). The resolver computes
+        // networkDecay = 0.5 * max(0, 1 - 10/10) = 0, so the network
+        // blend's `networkDecay > 0` guard short-circuits.
+        // adDurationStatsJSON is nil so show-local is also inactive,
+        // which leaves only the global tier — the test of record.
+        let current = makeProfile(
+            podcastId: "pod-current-decay",
+            adDurationStatsJSON: nil,
+            observationCount: 10,
+            networkId: networkId
+        )
+        try await store.upsertProfile(current)
+
+        let service = makeService(store: store, profile: current)
+        let resolved = await service.resolveEpisodePriorsForTesting()
+        #expect(resolved.activeLevel == .global)
+        // Resolved typicalAdDuration must equal the global default
+        // exactly — no blend happened.
+        #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
+    }
+
+    // playhead-spxs cycle-1 L-2 deferred: the fall-through path when
+    // `store.fetchProfiles(forNetworkId:)` THROWS (rather than returns
+    // empty) is documented in `resolveEpisodePriors`'s do-catch block
+    // but is not exercised by a behavioral test here. Reason: the
+    // production `AnalysisStore` is a concrete actor without a protocol
+    // seam, so injecting a throwing mock would require either a new
+    // protocol abstraction (out of spxs scope) or a test-only failure
+    // injection point on the real store. Both are larger than the
+    // bead's mandate. Cycle-1 reviewer flagged this as L-2; deferring
+    // until either (a) a protocol seam is introduced for unrelated
+    // reasons, or (b) a future bead specifically addresses fault
+    // injection. The do-catch itself is verified only by code reading.
+
     /// playhead-spxs: round-trip persistence for the new `networkId`
     /// column. Locks the SQL bind/read path so a future migration can't
     /// silently drop the column.

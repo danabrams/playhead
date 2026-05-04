@@ -800,6 +800,245 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         )
     }
 
+    /// playhead-spxs cycle-1 H-1: TrustScoringService parity for the
+    /// `networkId` carry-forward. Sibling to
+    /// `testEveryProfileConstructingExistingInClosureCarriesNetworkId`,
+    /// scoped to the OTHER Swift file that reconstructs
+    /// `PodcastProfile(...)` from a captured profile parameter.
+    ///
+    /// Why this needs to exist as a separate test: the AdDetectionService
+    /// canary above hardcodes the file path AND the `existing in` closure-
+    /// parameter token. TrustScoringService uses `profile in` for its 5
+    /// `update:` closures (`recordSuccessfulObservation`,
+    /// `recordFalseSkipSignal`, `setUserOverride`,
+    /// `recordFalseNegativeSignal`, `decayFalseSignals`). Those 5 sites
+    /// were unprotected by any source-canary parity check until the
+    /// playhead-spxs cycle-1 review surfaced the gap: every one of them
+    /// reconstructs the full `PodcastProfile(...)` from the closure
+    /// parameter, and any future patch that drops `networkId:
+    /// profile.networkId` from one of them would silently nil the column
+    /// the next time the COALESCE protection in `upsertProfile` is
+    /// refactored away — same regression shape as the cycle-15 M-2
+    /// `traitProfileJSON` clobber.
+    ///
+    /// The two whole-file canaries (this and the AdDetectionService one)
+    /// share the `networkIdCarryForwardPattern` regex constant and the
+    /// `closureBodyStripped(...)` walk-back helper, so a future
+    /// tightening or broadening of either flows naturally to both.
+    func testEveryProfileConstructingProfileInClosureInTrustScoringCarriesNetworkId() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/TrustScoring/TrustScoringService.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+
+        var searchStart = stripped.startIndex
+        var profileConstructingClosureCount = 0
+        var totalProfileInCount = 0
+
+        while let tokenRange = stripped.range(
+            of: "profile in",
+            range: searchStart..<stripped.endIndex
+        ) {
+            totalProfileInCount += 1
+            // Reuse the existing walk-back helper. Its parameter label
+            // says `forExistingInTokenAt` but the body is token-text-
+            // agnostic — it just walks back from the token's lowerBound
+            // to find the closing `{`.
+            guard let bodyStripped = Self.closureBodyStripped(
+                forExistingInTokenAt: tokenRange,
+                sourceText: source,
+                strippedText: stripped
+            ) else {
+                XCTFail(
+                    """
+                    Could not locate the opening `{` for a `profile in` \
+                    occurrence at offset \
+                    \(stripped.distance(from: stripped.startIndex, to: tokenRange.lowerBound)) \
+                    in TrustScoringService.swift. The whole-file networkId \
+                    canary cannot run if any closure's bracket structure \
+                    is unparseable; tighten the source or extend \
+                    `bracedBody` / this walk-back.
+                    """
+                )
+                return
+            }
+
+            if Self.bodyConstructsPodcastProfile(bodyStripped) {
+                profileConstructingClosureCount += 1
+                let bodyRange = NSRange(
+                    bodyStripped.startIndex..., in: bodyStripped
+                )
+                XCTAssertNotNil(
+                    networkCarryRegex.firstMatch(in: bodyStripped, range: bodyRange),
+                    """
+                    playhead-spxs cycle-1 H-1: a closure in \
+                    TrustScoringService.swift constructs \
+                    `PodcastProfile(...)` but does NOT carry \
+                    `profile.networkId` forward. This file reconstructs \
+                    the full profile in 5 separate `update:` closures \
+                    (recordSuccessfulObservation, recordFalseSkipSignal, \
+                    setUserOverride, recordFalseNegativeSignal, \
+                    decayFalseSignals). Any one of them silently dropping \
+                    `networkId` would nil the persisted column the next \
+                    time the COALESCE protection in `upsertProfile` is \
+                    refactored away — same regression shape as the \
+                    cycle-15 M-2 `traitProfileJSON` clobber.
+
+                    Closure body (comment/string-stripped) was:
+                    \(bodyStripped)
+
+                    Restore the carry-forward (`networkId: \
+                    profile.networkId`, or any `<ident>.networkId` form \
+                    via an alias). If this closure is intentionally \
+                    writing `networkId: nil` for a documented reason, \
+                    extend this canary with an explicit allow-list and \
+                    pin the rationale.
+                    """
+                )
+            }
+
+            searchStart = tokenRange.upperBound
+        }
+
+        XCTAssertGreaterThanOrEqual(
+            totalProfileInCount, 5,
+            """
+            playhead-spxs cycle-1 H-1 floor: expected at least 5 \
+            `profile in` closures in TrustScoringService.swift (one per \
+            mutation entry point); found \(totalProfileInCount). If the \
+            file genuinely no longer has 5 `profile in` closures, either \
+            the closure-parameter convention has changed (verify and \
+            update this scan to the new token) OR the entry points have \
+            moved. Either way, do NOT lower this floor without \
+            confirming the underlying closures are still being scanned.
+            """
+        )
+        XCTAssertGreaterThanOrEqual(
+            profileConstructingClosureCount, 5,
+            """
+            playhead-spxs cycle-1 H-1 floor: expected at least 5 \
+            `profile in` closures that construct `PodcastProfile(...)`. \
+            Found \(profileConstructingClosureCount). The whole-file \
+            networkId scan has gone blind to its targets in \
+            TrustScoringService; either restore the constructors OR \
+            move this floor down with an explanation of where the \
+            mutation entry points have moved.
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-1 H-1 positive control: confirm the new
+    /// TrustScoring canary's `profile in` walk-back AND
+    /// `networkIdCarryForwardPattern` correctly catch a profile-
+    /// constructing closure that OMITS the carry-forward. Without this
+    /// control, a future regression that silently weakens the regex OR
+    /// the helper would let the production-source canary pass with zero
+    /// matches even though it has gone blind.
+    func testTrustScoringProfileInClosureWithoutNetworkIdCarryForwardWouldFire() throws {
+        let regressionFixture = """
+        do {
+            try await store.mutateProfile(podcastId: id) {
+                fresh()
+            } update: { profile in
+                PodcastProfile(
+                    podcastId: profile.podcastId,
+                    skipTrustScore: profile.skipTrustScore
+                )
+            }
+        }
+        """
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(regressionFixture)
+
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+
+        guard let tokenRange = stripped.range(of: "profile in") else {
+            XCTFail("Fixture is missing `profile in` — pattern has drifted.")
+            return
+        }
+        guard let bodyStripped = Self.closureBodyStripped(
+            forExistingInTokenAt: tokenRange,
+            sourceText: regressionFixture,
+            strippedText: stripped
+        ) else {
+            XCTFail("Walk-back failed to find the closure brace in the fixture.")
+            return
+        }
+
+        XCTAssertTrue(
+            Self.bodyConstructsPodcastProfile(bodyStripped),
+            "Fixture must contain a `PodcastProfile(` constructor for the canary to be in scope."
+        )
+        let bodyRange = NSRange(bodyStripped.startIndex..., in: bodyStripped)
+        XCTAssertNil(
+            networkCarryRegex.firstMatch(in: bodyStripped, range: bodyRange),
+            """
+            playhead-spxs cycle-1 H-1 positive-control failure: the \
+            networkId carry-forward regex `\(networkCarryRegex.pattern)` \
+            MATCHED a fixture that deliberately omits the carry-forward. \
+            The TrustScoring whole-file canary has gone blind because \
+            the regex over-accepts; tighten it (and update both the \
+            AdDetectionService and TrustScoring controls together).
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-1 H-1 happy-path control: confirm the regex
+    /// MATCHES a `profile in` closure that DOES carry the column
+    /// forward. Pairs with the negative control above so a regex that
+    /// over-restricts (e.g. accidentally requires the closure parameter
+    /// to be named `existing`) is caught immediately.
+    func testTrustScoringProfileInClosureWithNetworkIdCarryForwardMatches() throws {
+        let happyPathFixture = """
+        do {
+            try await store.mutateProfile(podcastId: id) {
+                fresh()
+            } update: { profile in
+                PodcastProfile(
+                    podcastId: profile.podcastId,
+                    skipTrustScore: profile.skipTrustScore,
+                    networkId: profile.networkId
+                )
+            }
+        }
+        """
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(happyPathFixture)
+
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+
+        guard let tokenRange = stripped.range(of: "profile in") else {
+            XCTFail("Fixture is missing `profile in` — pattern has drifted.")
+            return
+        }
+        guard let bodyStripped = Self.closureBodyStripped(
+            forExistingInTokenAt: tokenRange,
+            sourceText: happyPathFixture,
+            strippedText: stripped
+        ) else {
+            XCTFail("Walk-back failed to find the closure brace in the fixture.")
+            return
+        }
+
+        let bodyRange = NSRange(bodyStripped.startIndex..., in: bodyStripped)
+        XCTAssertNotNil(
+            networkCarryRegex.firstMatch(in: bodyStripped, range: bodyRange),
+            """
+            playhead-spxs cycle-1 H-1 positive control: regex \
+            `\(networkCarryRegex.pattern)` did NOT match a fixture that \
+            DOES carry `profile.networkId` forward via `profile in`. \
+            The pattern has over-restricted (perhaps anchored on the \
+            literal `existing` alias); loosen it.
+            """
+        )
+    }
+
     /// playhead-spxs positive control: mirrors
     /// `testProfileConstructingClosureWithoutCarryForwardWouldFire` but
     /// for the `networkIdCarryForwardPattern`. A synthetic source that
