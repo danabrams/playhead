@@ -57,21 +57,60 @@ struct RepeatedAdCacheStorageZeroFingerprintTests {
         try await store.migrate()
         let storage = AnalysisStoreRepeatedAdCacheStorage(store: store)
 
+        // Positive control: a NON-zero fingerprint MUST round-trip
+        // through the same adapter+SQLite path. Without this, the
+        // negative assertions below would also pass against a no-op
+        // adapter that swallowed every upsert — we'd be unable to
+        // distinguish "guard works" from "SQLite never received any
+        // row at all" (review/v0.5-head-polish C3 M-1).
+        let liveEntry = RepeatedAdCacheEntry(
+            showId: Self.testShowId,
+            fingerprint: RepeatedAdFingerprint(bits: 0xDEAD_BEEF_CAFE_F00D),
+            boundaryStart: 1.0,
+            boundaryEnd: 5.0,
+            confidence: 0.9,
+            lastSeenAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        try await storage.upsert(liveEntry)
+        #expect(try await storage.count(showId: Self.testShowId) == 1)
+        #expect(try await storage.fetchAll(showId: Self.testShowId).first?.fingerprint == liveEntry.fingerprint)
+
         try await storage.upsert(Self.makeZeroEntry())
 
-        #expect(try await storage.count(showId: Self.testShowId) == 0)
-        #expect(try await storage.totalCount() == 0)
-        #expect(try await storage.fetchAll(showId: Self.testShowId).isEmpty)
+        // The zero-fp upsert MUST NOT have changed counts: still 1 row
+        // (the live one), zero entries for the zero fingerprint.
+        #expect(try await storage.count(showId: Self.testShowId) == 1)
+        #expect(try await storage.totalCount() == 1)
+        let rows = try await storage.fetchAll(showId: Self.testShowId)
+        #expect(rows.count == 1)
+        #expect(rows.first?.fingerprint == liveEntry.fingerprint)
+        #expect(!rows.contains { $0.fingerprint.isZero })
     }
 
     @Test("InMemory storage silently drops a zero-fingerprint upsert (mirrors production)")
     func inMemoryStorageDropsZeroFingerprint() async throws {
         let storage = InMemoryRepeatedAdCacheStorage()
 
+        // Positive control mirrors production-path test (C3 M-1):
+        // round-trip a non-zero entry to prove the in-memory adapter
+        // is alive before asserting the zero entry is dropped.
+        let liveEntry = RepeatedAdCacheEntry(
+            showId: Self.testShowId,
+            fingerprint: RepeatedAdFingerprint(bits: 0xDEAD_BEEF_CAFE_F00D),
+            boundaryStart: 1.0,
+            boundaryEnd: 5.0,
+            confidence: 0.9,
+            lastSeenAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        try await storage.upsert(liveEntry)
+        #expect(try await storage.count(showId: Self.testShowId) == 1)
+
         try await storage.upsert(Self.makeZeroEntry())
 
-        #expect(try await storage.count(showId: Self.testShowId) == 0)
-        #expect(try await storage.totalCount() == 0)
-        #expect(try await storage.fetchAll(showId: Self.testShowId).isEmpty)
+        #expect(try await storage.count(showId: Self.testShowId) == 1)
+        #expect(try await storage.totalCount() == 1)
+        let rows = try await storage.fetchAll(showId: Self.testShowId)
+        #expect(rows.count == 1)
+        #expect(!rows.contains { $0.fingerprint.isZero })
     }
 }

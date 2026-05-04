@@ -96,6 +96,20 @@ final class NetworkIsolationSchemeSourceCanaryTests: XCTestCase {
 
         let (observedSchemes, firstSightingByScheme) = try Self.scanForSchemes(in: production)
 
+        // Pin the failure-message contract (review/v0.5-head-polish C3
+        // L-2): every observed scheme MUST have a first-sighting entry,
+        // otherwise the canary's failure message degrades to printing
+        // `?` for the regressing scheme — useless for a future
+        // bisector. If `scanForSchemes` is ever refactored to populate
+        // the two collections out of sync, this catches it here, not
+        // at the diagnostic line.
+        for scheme in observedSchemes {
+            XCTAssertNotNil(
+                firstSightingByScheme[scheme],
+                "Observed scheme `\(scheme)` has no first-sighting filename — the failure message would print `?` and obscure the regression source"
+            )
+        }
+
         let unexpected = observedSchemes.subtracting(Self.allowedSchemes)
         XCTAssertTrue(
             unexpected.isEmpty,
@@ -198,6 +212,9 @@ final class NetworkIsolationSchemeSourceCanaryTests: XCTestCase {
     func testRegexCapturesFullPrefixAtIdentifierBoundaries() throws {
         let regex = try NSRegularExpression(pattern: Self.schemePattern, options: [])
         let fixtures: [(input: String, expected: String)] = [
+            // --- Start-of-string-anchored fixtures: the `^` branch of
+            //     the alternation `(?:^|[^A-Za-z0-9+\-.])` fires.
+            //
             // Period: property-access shape — full prefix must be captured
             // so the canary flags `bar.https` as unexpected (not waved
             // through as plain `https`).
@@ -211,6 +228,24 @@ final class NetworkIsolationSchemeSourceCanaryTests: XCTestCase {
             ("foohttps://example.com", "foohttps"),
             // Digit in scheme body (allowed after the leading letter).
             ("v2https://example.com", "v2https"),
+
+            // --- Non-leading fixtures (review/v0.5-head-polish C3 L-1):
+            //     these force the `[^A-Za-z0-9+\-.]` lookbehind branch
+            //     to fire so a regex regression that drops the negated
+            //     class while keeping `^` as the only allowed boundary
+            //     would still be caught here.
+            //
+            // Leading whitespace — most realistic case: a URL literal
+            // following an indent or operator.
+            ("    bar.https://example.com", "bar.https"),
+            // Embedded after another token: the regex MUST find the
+            // `bar.https` match starting at position 8 (after the
+            // space), not be tricked into producing bare `https`.
+            ("let url=bar.https://example.com", "bar.https"),
+            // Quote boundary — typical Swift string-literal embedding.
+            ("\"bar.https://example.com\"", "bar.https"),
+            // Open-paren boundary — typical `URL(string:)` embedding.
+            ("URL(string:\"git+https://example.com\")", "git+https"),
         ]
         for (input, expected) in fixtures {
             let range = NSRange(input.startIndex..., in: input)

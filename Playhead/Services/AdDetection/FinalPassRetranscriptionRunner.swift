@@ -722,14 +722,26 @@ actor FinalPassRetranscriptionRunner {
     /// `heartbeatBaseSeconds`. ±30s = ±10% of the 300s base. Wide
     /// enough to spread heartbeat writes across a 60s window when
     /// many runners start in lockstep, narrow enough that the
-    /// effective interval stays well below the
+    /// effective single-beat interval stays below the
     /// `AnalysisStore.strandedJobFreshnessSeconds` reaper floor
-    /// (currently 600s — see `AnalysisStore.swift`'s constant). Worst
-    /// case here is 330s; two beats = 660s, but the reaper only fires
-    /// at boot and when re-checked, not strictly every
-    /// `strandedJobFreshnessSeconds`, so the practical safety margin
-    /// holds. If either constant moves, re-derive both: heartbeat
-    /// max-jitter must stay below `strandedJobFreshnessSeconds / 2`.
+    /// (currently 600s — see `AnalysisStore.swift:767`).
+    ///
+    /// **Binding invariant** (review/v0.5-head-polish C3 M-2):
+    ///   `heartbeatBaseSeconds + heartbeatJitterSeconds < strandedJobFreshnessSeconds`
+    /// Today: `300 + 30 = 330 < 600` ✓
+    ///
+    /// The single-beat invariant alone is what guarantees a heartbeat
+    /// row is never written *after* the reaper would already consider
+    /// it stranded. The two-beats-vs-floor case (worst-case 660s
+    /// between consecutive heartbeats) is a separate concern, but the
+    /// reaper at `AnalysisStore.resetStrandedJobs` does NOT fire on a
+    /// strict `strandedJobFreshnessSeconds` cadence — it runs at boot
+    /// and when explicitly re-checked. So a 660s gap is tolerated as
+    /// long as the next heartbeat lands before the next reaper sweep.
+    /// If the reaper is ever wired to a wall-clock timer, this margin
+    /// disappears and `heartbeatJitterSeconds` must be re-derived so
+    /// that `2 * (heartbeatBaseSeconds + heartbeatJitterSeconds) <
+    /// strandedJobFreshnessSeconds` also holds.
     static let heartbeatJitterSeconds: Double = 30
 
     /// Build a jittered heartbeat interval in [base-jitter, base+jitter].
