@@ -35,8 +35,12 @@
 //     `PriorHierarchy.resolve`. Currently always `[:]` (the snapshot's
 //     `sponsors` map is `[:]`), so the derived recurrence is 0 and the
 //     blend pulls `sponsorRecurrenceExpectation` toward 0 with weight
-//     `networkDecay`. Today this is a structural no-op only when the
-//     global default for `sponsorRecurrenceExpectation` is also 0.
+//     `networkDecay`. The global default for this axis is 0.3 (NOT 0,
+//     see `GlobalPriorDefaults.standard.sponsorRecurrenceExpectation`),
+//     so the blend is *materially* pulling this axis toward 0 today —
+//     this is the load-bearing axis where the network tier currently
+//     changes a scalar value (alongside `typicalAdDuration`). Pinned
+//     in `PriorHierarchyWireUpTests.globalPriorDefaultsStandardValuesArePinned`.
 //   • `typicalSlotPositions` — computed by the aggregator but NOT
 //     consumed by `PriorHierarchy.resolve`. Truly dormant.
 //   • `musicBracketPrevalence`, `metadataTrustAverage` — DO flow through

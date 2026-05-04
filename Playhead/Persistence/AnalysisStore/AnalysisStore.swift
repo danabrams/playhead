@@ -1243,19 +1243,22 @@ actor AnalysisStore {
             // yields no signal; the resolver gracefully falls through
             // to trait/show-local/global tiers when nil.
             //
-            // Drift note (spxs cycle-1 L-1): `migrateOnlyForTesting()`
+            // Drift note (spxs cycle-2 L-1): `migrateOnlyForTesting()`
             // mirrors the *versioned* `migrate*V<N>IfNeeded()` ladder
-            // but does NOT replay this `addColumnIfNeeded` call (or its
-            // sibling for `adDurationStatsJSON` from playhead-084j).
-            // The ladder-only test seam is used exclusively by schema-
+            // but does NOT replay this `addColumnIfNeeded` call (or
+            // its siblings for `adDurationStatsJSON` from playhead-084j
+            // and `traitProfileJSON` from ef2.5.1, both above). The
+            // ladder-only test seam is used exclusively by schema-
             // version migration tests that don't seed real podcast-
             // profile rows, so the gap is theoretical today; if a
             // future migration test starts driving real `upsertProfile`
-            // calls through the ladder-only seam it must replay both
-            // `addColumnIfNeeded(... networkId ...)` and
-            // `addColumnIfNeeded(... adDurationStatsJSON ...)` in
+            // calls through the ladder-only seam it must replay all
+            // three of `addColumnIfNeeded(... traitProfileJSON ...)`,
+            // `addColumnIfNeeded(... adDurationStatsJSON ...)`, and
+            // `addColumnIfNeeded(... networkId ...)` in
             // `migrateOnlyForTesting()` or the bind/read code paths
-            // will fail at runtime.
+            // will fail at runtime. Pinned by
+            // `PriorHierarchyWireUpTests.migrateLadderDriftMatchesDocumentation`.
             try addColumnIfNeeded(
                 table: "podcast_profiles",
                 column: "networkId",
@@ -5051,7 +5054,17 @@ actor AnalysisStore {
     /// falls through to trait/show-local/global tiers in that case).
     /// Same column ordering as `fetchProfile` so the positional decoder
     /// matches.
+    ///
+    /// Defense-in-depth: an empty-string `networkId` short-circuits
+    /// before the SQL bind. The production caller in
+    /// `AdDetectionService.resolveEpisodePriors` already guards on
+    /// `!networkId.isEmpty`, but a future caller or a corrupted profile
+    /// row that decoded `networkId` as `""` would otherwise match every
+    /// row whose column is the empty string — producing a phantom
+    /// network of mis-grouped shows. Empty-string is never a valid
+    /// network identifier, so we treat it as "no network".
     func fetchProfiles(forNetworkId networkId: String) throws -> [PodcastProfile] {
+        guard !networkId.isEmpty else { return [] }
         let sql = """
             SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
                    jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,

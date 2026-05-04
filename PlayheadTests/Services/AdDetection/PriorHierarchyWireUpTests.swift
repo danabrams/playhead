@@ -567,18 +567,138 @@ struct PriorHierarchyWireUpTests {
         #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
     }
 
-    // playhead-spxs cycle-1 L-2 deferred: the fall-through path when
-    // `store.fetchProfiles(forNetworkId:)` THROWS (rather than returns
-    // empty) is documented in `resolveEpisodePriors`'s do-catch block
-    // but is not exercised by a behavioral test here. Reason: the
-    // production `AnalysisStore` is a concrete actor without a protocol
-    // seam, so injecting a throwing mock would require either a new
-    // protocol abstraction (out of spxs scope) or a test-only failure
-    // injection point on the real store. Both are larger than the
-    // bead's mandate. Cycle-1 reviewer flagged this as L-2; deferring
-    // until either (a) a protocol seam is introduced for unrelated
-    // reasons, or (b) a future bead specifically addresses fault
-    // injection. The do-catch itself is verified only by code reading.
+    /// playhead-spxs cycle-2 L-2: `decayedWeight(episodesObserved:)`
+    /// must clamp negative inputs to 0 episodes — i.e. return the
+    /// max-weight 0.5 floor, not a value > 0.5 from a misimplemented
+    /// negative-arithmetic path. The production formula is
+    /// `0.5 * max(0, 1 - max(0, episodesObserved) / 10.0)`; without
+    /// the inner `max(episodesObserved, 0)`, a negative input would
+    /// flip the linear ramp's sign and weight network priors HIGHER
+    /// than the at-zero floor.
+    ///
+    /// This pins the inner clamp specifically — separate from the
+    /// existing `wireUpHighObservationCountDecaysNetworkTierToZero`
+    /// test which pins the outer `max(0, ...)` floor at 10+
+    /// observations.
+    @Test("decayedWeight clamps negative observationCount to 0 (= 0.5)")
+    func decayedWeightClampsNegativeToZero() {
+        #expect(NetworkPriors.decayedWeight(episodesObserved: -1) == 0.5)
+        #expect(NetworkPriors.decayedWeight(episodesObserved: -100) == 0.5)
+        // Anchor point: the same value as observationCount = 0.
+        #expect(
+            NetworkPriors.decayedWeight(episodesObserved: -1) ==
+            NetworkPriors.decayedWeight(episodesObserved: 0)
+        )
+    }
+
+    /// playhead-spxs cycle-2 L-3: NaN guard test for the
+    /// `weight: max(1.0, Float(stats.sampleCount))` clamp inside
+    /// `NetworkPriorsBuilder.build`. The `NetworkPriorAggregator`'s
+    /// weighted-average code path divides by total weight; if every
+    /// surviving snapshot reported weight 0, the divisor would be 0
+    /// and the result would be NaN. The clamp ensures every snapshot
+    /// contributes at least weight 1, so the aggregate stays finite.
+    ///
+    /// This test calls `NetworkPriorAggregator.aggregate` directly with
+    /// a hand-built snapshot whose `weight: 0` so the divide-by-zero
+    /// path is exercised in isolation. The aggregator's behavior under
+    /// `weight: 0` confirms the producer needs the clamp — without the
+    /// clamp, a future builder that propagates `weight: 0` through
+    /// would silently produce NaN priors. Pair with the `min` clamp
+    /// in `NetworkPriorsBuilder.build` to make the chain end-to-end
+    /// safe.
+    @Test("NetworkPriorAggregator.aggregate with weight=0 produces 0 (not NaN) for weighted axes")
+    func aggregateWithZeroWeightSnapshotIsFinite() {
+        // Single snapshot with weight: 0 — the divide-by-zero scenario
+        // the builder's max(1.0, ...) clamp guards against. The
+        // aggregator's `weightedAverage` returns 0 on totalWeight == 0
+        // (its own short-circuit), so the resulting priors should be
+        // finite and 0-valued for the weighted scalar axes — not NaN.
+        let snap = ShowPriorSnapshot(
+            sponsors: [:],
+            slotPositions: [],
+            averageAdDuration: 30,
+            musicBracketRate: 0.5,
+            metadataTrust: 0.5,
+            weight: 0
+        )
+        let priors = try! #require(NetworkPriorAggregator.aggregate([snap]))
+        #expect(!priors.musicBracketPrevalence.isNaN,
+                "aggregator must short-circuit divide-by-zero, not produce NaN")
+        #expect(!priors.metadataTrustAverage.isNaN,
+                "aggregator must short-circuit divide-by-zero, not produce NaN")
+    }
+
+    /// playhead-spxs cycle-2 L-4: pin the `GlobalPriorDefaults.standard`
+    /// values that interact with the network tier's blend math. Three
+    /// values matter:
+    ///
+    ///   • `musicBracketTrust = 0.5` — matches the
+    ///     `NetworkPriorsBuilder` snapshot default of 0.5, so the
+    ///     blend on this axis is currently a numeric no-op for any
+    ///     network of arbitrary size. Pinning this value here surfaces
+    ///     a test failure if either the global default OR the snapshot
+    ///     default changes — a future producer that lights up real
+    ///     `musicBracketRate` data will then materially flow through.
+    ///   • `metadataTrust = 0.5` — same shape as above.
+    ///   • `sponsorRecurrenceExpectation = 0.3` — does NOT match the
+    ///     network's derived value (which is 0 when `commonSponsors`
+    ///     is empty, as it always is today). The blend therefore
+    ///     materially pulls this axis toward 0 with weight
+    ///     `networkDecay`. Pinning the value documents the asymmetry.
+    ///
+    /// The blend behavior is described in
+    /// `NetworkPriorsBuilder.swift`'s file header. This test makes the
+    /// load-bearing constants concrete so a refactor can't drift any
+    /// of them without flipping this assertion.
+    @Test("GlobalPriorDefaults.standard pins values the network tier blends against")
+    func globalPriorDefaultsStandardValuesArePinned() {
+        let g = GlobalPriorDefaults.standard
+        #expect(g.musicBracketTrust == 0.5,
+                "matches NetworkPriorsBuilder snapshot default — keeps the network blend a numeric no-op on this axis until a real producer lights up musicBracketRate")
+        #expect(g.metadataTrust == 0.5,
+                "matches NetworkPriorsBuilder snapshot default — same shape as musicBracketTrust")
+        #expect(g.sponsorRecurrenceExpectation == 0.3,
+                "differs from the network-derived 0 — the blend pulls this axis materially toward 0 with weight networkDecay")
+    }
+
+    // playhead-spxs cycle-2 M-1 (DEFERRED with architectural rationale):
+    // the fall-through path when `store.fetchProfiles(forNetworkId:)`
+    // THROWS (rather than returns empty) is documented in
+    // `resolveEpisodePriors`'s do-catch block but is not exercised by
+    // a behavioral test here.
+    //
+    // Why deferred: the production `AnalysisStore` is a concrete actor
+    // (~50 methods, no protocol seam). Injecting a throwing mock would
+    // require either:
+    //   (a) introducing an `AnalysisStoreProtocol` abstraction for
+    //       AdDetectionService's dependency, or
+    //   (b) adding a test-only `forceCloseForTesting()` (or similar
+    //       fault-injection seam) on the real store under #if DEBUG.
+    // Both are architectural changes — option (a) is a wide protocol
+    // surface across an actor; option (b) widens the public test
+    // surface of a load-bearing persistence type. CLAUDE.md's
+    // "Decision Authority" section says: "Never swap frameworks, APIs,
+    // or architectural approaches without explicit approval. Present
+    // the options and tradeoffs, then wait for a decision."
+    //
+    // The cycle-2 reviewer characterized this as "a one-stub job" but
+    // that framing assumed an existing protocol. There is no such
+    // protocol; `StubAnalysisStore` in PlayheadTests/Helpers/Stubs.swift
+    // is a thin wrapper around the real store, not a substitutable
+    // mock. The do-catch remains verified by code reading only.
+    //
+    // Mitigation: the catch path's only behavior is to log and continue
+    // with `networkPriors = nil` / `networkDecay = 0` — both already
+    // exercised by the empty-fetch path
+    // (`wireUpEmptyStringNetworkIdFallsBackToGlobal` and
+    // `wireUpNoNetworkIdFallsBackToGlobalForNewShows`). The branch the
+    // missing test would cover is the `logger.warning` call only.
+    //
+    // To activate this test in a future cycle: either pick option (a)
+    // or (b) above, get explicit user approval, then add a test that
+    // verifies `activeLevel != .network` and no error escapes when
+    // `fetchProfiles` throws.
 
     /// playhead-spxs: round-trip persistence for the new `networkId`
     /// column. Locks the SQL bind/read path so a future migration can't
@@ -673,6 +793,232 @@ struct PriorHierarchyWireUpTests {
         // show up under any concrete networkId lookup.
         let cProfiles = try await store.fetchProfiles(forNetworkId: "no-such-network")
         #expect(cProfiles.isEmpty)
+    }
+
+    /// playhead-spxs cycle-2 H-2: defense-in-depth for empty-string
+    /// networkId at the AnalysisStore layer. The production caller in
+    /// `AdDetectionService.resolveEpisodePriors` already guards on
+    /// `!networkId.isEmpty`, but a future caller, a corrupted profile
+    /// row, or a refactor that bypasses the AdDetection guard would
+    /// otherwise issue a `WHERE networkId = ''` SQL fetch that matches
+    /// every row whose column was written as the empty string — a
+    /// phantom network of mis-grouped shows.
+    ///
+    /// This test pins the AnalysisStore-layer early-return: even if the
+    /// store contains rows with empty-string networkIds, the fetch
+    /// returns `[]` and the resolver short-circuits before
+    /// `NetworkPriorsBuilder` ever sees them. Pair with the wire-up
+    /// test `wireUpEmptyStringNetworkIdFallsBackToGlobal`, which pins
+    /// the same guard at the AdDetectionService layer — the two tests
+    /// together pin both layers of the defense-in-depth.
+    @Test("fetchProfiles(forNetworkId: \"\") returns empty even when \"\"-network rows exist")
+    func fetchProfilesForEmptyNetworkIdReturnsEmpty() async throws {
+        let store = try await makeTestStore()
+
+        // Seed the store with two profiles whose networkId is the
+        // empty string. Without the guard, fetchProfiles(forNetworkId:
+        // "") would return both — the phantom-network scenario.
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-empty-1", adDurationStatsJSON: nil,
+            observationCount: 1, networkId: ""
+        ))
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-empty-2", adDurationStatsJSON: nil,
+            observationCount: 2, networkId: ""
+        ))
+
+        // Sanity-check the seed: the empty-string value must actually
+        // round-trip into the column (not get coerced to NULL by the
+        // COALESCE-preserve path), or the test below would pass for
+        // the wrong reason.
+        let seeded = try await store.fetchProfile(podcastId: "p-empty-1")
+        #expect(seeded?.networkId == "",
+                "test depends on empty-string networkId surviving upsert")
+
+        let result = try await store.fetchProfiles(forNetworkId: "")
+        #expect(result.isEmpty,
+                "empty-string networkId must short-circuit before the SQL bind")
+    }
+
+    /// playhead-spxs cycle-2 L-1: source canary that pins the
+    /// documented drift between `AnalysisStore.migrate()` and
+    /// `AnalysisStore.migrateOnlyForTesting()` for `podcast_profiles`
+    /// columns added via direct `addColumnIfNeeded(...)` calls
+    /// (i.e. NOT through the versioned `migrate*V<N>IfNeeded()` ladder).
+    ///
+    /// The drift is documented in-source on `migrate()` (search for
+    /// "Drift note (spxs cycle-2 L-1)"). The ladder-only test seam
+    /// `migrateOnlyForTesting()` intentionally does NOT replay the
+    /// three direct `addColumnIfNeeded` calls (`traitProfileJSON`,
+    /// `adDurationStatsJSON`, `networkId`) because the migration-ladder
+    /// tests don't seed real podcast-profile rows and so don't need
+    /// the new columns. This test pins that the diff is exactly
+    /// `{traitProfileJSON, adDurationStatsJSON, networkId}` — and ONLY
+    /// those — so a future change that adds a fourth direct
+    /// `addColumnIfNeeded` for podcast_profiles to `migrate()` without
+    /// mirroring it in `migrateOnlyForTesting()` will trip this canary
+    /// and force the engineer to choose: either (a) replay it in the
+    /// ladder seam too, or (b) extend this allow-list with a
+    /// justification.
+    ///
+    /// Source canary (regex over `AnalysisStore.swift`) rather than
+    /// behavioral test: a behavioral comparison would need to open
+    /// two stores in parallel against different seed shapes — costly
+    /// in test setup, and the static check is sufficient because the
+    /// drift is purely a static-source asymmetry.
+    @Test("migrate() vs migrateOnlyForTesting() drift on podcast_profiles direct addColumnIfNeeded calls")
+    func migrateLadderDriftMatchesDocumentation() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Persistence/AnalysisStore/AnalysisStore.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        // Inspect `runSchemaMigration()` — the private helper that
+        // `migrate()` delegates to via `ensureOpen()`. The public
+        // `migrate()` is a thin wrapper that just calls `ensureOpen()`,
+        // so the addColumnIfNeeded calls live in `runSchemaMigration()`.
+        let migrateColumns = try Self.podcastProfileAddColumnSet(
+            inFunctionNamed: "runSchemaMigration",
+            sourceText: source,
+            strippedText: stripped
+        )
+        let ladderColumns = try Self.podcastProfileAddColumnSet(
+            inFunctionNamed: "migrateOnlyForTesting",
+            sourceText: source,
+            strippedText: stripped
+        )
+
+        let drift = migrateColumns.subtracting(ladderColumns)
+        // Three direct podcast_profiles `addColumnIfNeeded` calls live in
+        // `migrate()` but not in `migrateOnlyForTesting()` (which only
+        // mirrors the versioned ladder steps): `traitProfileJSON`
+        // (ef2.5.1), `adDurationStatsJSON` (playhead-084j), and
+        // `networkId` (playhead-spxs). The drift note in `migrate()`
+        // documents the latter two; the canary catches the older
+        // `traitProfileJSON` gap as well so the engineer renaming/adding
+        // a fourth column has to update *this* allow-list deliberately.
+        let documentedDrift: Set<String> = [
+            "traitProfileJSON",
+            "adDurationStatsJSON",
+            "networkId"
+        ]
+
+        #expect(
+            drift == documentedDrift,
+            """
+            playhead-spxs cycle-2 L-1: drift between `migrate()` and \
+            `migrateOnlyForTesting()` for `podcast_profiles` direct \
+            addColumnIfNeeded(...) columns has changed. Expected \
+            drift: \(documentedDrift.sorted()). Actual drift: \
+            \(drift.sorted()). \
+            \
+            If a new column was added to `migrate()` without mirroring \
+            in `migrateOnlyForTesting()`, either: \
+            (a) mirror the addColumnIfNeeded call in the ladder seam \
+            (preferred — closes the ghost-test risk), OR \
+            (b) extend this canary's `documentedDrift` set with a \
+            comment justifying why the new column doesn't belong in \
+            the ladder seam (e.g. "ladder tests don't seed rows that \
+            bind this column"). \
+            \
+            Reverse drift (columns in ladder but not migrate) is also \
+            wrong — every ladder-seam addColumnIfNeeded should have a \
+            counterpart in production migrate() so the two paths \
+            converge on the same column set. \
+            \
+            migrate() set: \(migrateColumns.sorted()) \
+            migrateOnlyForTesting() set: \(ladderColumns.sorted())
+            """
+        )
+
+        // Reverse-drift sanity check: nothing in the ladder seam that
+        // isn't also in migrate(). If the ladder ever gains a column
+        // that migrate() lacks, the production migrate() is missing a
+        // shipped column — a worse failure mode than the forward drift.
+        let reverseDrift = ladderColumns.subtracting(migrateColumns)
+        #expect(
+            reverseDrift.isEmpty,
+            """
+            playhead-spxs cycle-2 L-1: REVERSE drift detected. \
+            `migrateOnlyForTesting()` adds podcast_profiles columns \
+            that `migrate()` does NOT add: \(reverseDrift.sorted()). \
+            Production migrate() is missing a shipped column — fix \
+            migrate() to add this column too, then re-run.
+            """
+        )
+    }
+
+    /// Cycle-2 L-1 helper: extract the set of `podcast_profiles`
+    /// columns added via direct `addColumnIfNeeded(table: "podcast_profiles", column: "<NAME>", ...)`
+    /// calls inside a named function's body.
+    ///
+    /// Implementation: locate the function signature by literal substring
+    /// `"func <name>(`", slice from there to the next top-level `func ` or
+    /// to end-of-file (whichever comes first), strip comments via
+    /// `SwiftSourceInspector.strippingComments` (which preserves string
+    /// literals — required so the regex can match `"podcast_profiles"`),
+    /// then regex-extract column names. The next-`func ` boundary is
+    /// imperfect (a closure `func` reference would terminate early), but
+    /// `AnalysisStore` has no such occurrence in the body of either
+    /// `migrate()` or `migrateOnlyForTesting()`. Disambiguates `migrate`
+    /// vs `migrateOnlyForTesting` by anchoring to `func <name>(` (the `(`
+    /// rules out the longer name).
+    private static func podcastProfileAddColumnSet(
+        inFunctionNamed funcName: String,
+        sourceText: String,
+        strippedText: String
+    ) throws -> Set<String> {
+        let signature = "func \(funcName)("
+        guard let signatureRange = sourceText.range(of: signature) else {
+            throw NSError(
+                domain: "MigrateDriftCanary",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "Could not locate `\(signature)` in AnalysisStore.swift"]
+            )
+        }
+
+        // Slice runs from *after* the signature to the next column-4
+        // method declaration (`func ` or `private func `, etc.) or
+        // end-of-file. The leading `\n    ` ensures we don't accidentally
+        // split on a nested `func` keyword inside a string literal or
+        // doc comment; `AnalysisStore` methods are uniformly indented at
+        // 4 spaces. The access-modifier alternation is required because
+        // `migrateOnlyForTesting()` is followed by
+        // `private func migrateSelfDescribingTitlesV15IfNeeded()` —
+        // without matching `private func`, the slice would otherwise
+        // wrap that helper's body and pollute the column set with
+        // columns it adds (e.g. `title`).
+        let bodyStart = signatureRange.upperBound
+        let boundaryPattern = #"\n    (?:private |internal |public |fileprivate |open )?func "#
+        let boundaryRegex = try NSRegularExpression(pattern: boundaryPattern)
+        let scanRange = NSRange(bodyStart..<sourceText.endIndex, in: sourceText)
+        let firstBoundary = boundaryRegex.firstMatch(in: sourceText, range: scanRange)
+        let bodyEnd: String.Index
+        if let firstBoundary,
+           let boundaryRange = Range(firstBoundary.range, in: sourceText) {
+            bodyEnd = boundaryRange.lowerBound
+        } else {
+            bodyEnd = sourceText.endIndex
+        }
+        let body = String(sourceText[bodyStart..<bodyEnd])
+
+        // Strip comments only — strings must remain intact so the regex
+        // can match `"podcast_profiles"` and `"<NAME>"`.
+        let bodyNoComments = SwiftSourceInspector.strippingComments(body)
+
+        let pattern = #"addColumnIfNeeded\(\s*table:\s*"podcast_profiles"\s*,\s*column:\s*"([^"]+)""#
+        let regex = try NSRegularExpression(pattern: pattern)
+        let bodyNS = NSRange(bodyNoComments.startIndex..., in: bodyNoComments)
+        var columns: Set<String> = []
+        regex.enumerateMatches(in: bodyNoComments, range: bodyNS) { match, _, _ in
+            guard let match,
+                  let nameRange = Range(match.range(at: 1), in: bodyNoComments) else {
+                return
+            }
+            columns.insert(String(bodyNoComments[nameRange]))
+        }
+        return columns
     }
 
     // MARK: - PodcastProfile.adDurationStatsJSON column round-trip

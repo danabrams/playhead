@@ -129,6 +129,62 @@ struct NetworkPriorsBuilderTests {
         #expect(result.typicalAdDuration.upperBound < 200)
     }
 
+    // MARK: - Aggregator-level weight favoritism (cycle-2 L-6)
+
+    /// playhead-spxs cycle-2 L-6: pin the weighted-average favoritism
+    /// path inside `NetworkPriorAggregator.aggregate(_:)`.
+    ///
+    /// The cycle-2 reviewer asked for "very different sampleCount
+    /// weights (5 vs 50_000) confirming weighted average favors
+    /// heavier — pins the `weight: max(1.0, Float(stats.sampleCount))`
+    /// favoritism." Through the *builder's* homogeneous snapshots
+    /// (`sponsors: [:]`, `slotPositions: []`, `musicBracketRate: 0.5`,
+    /// `metadataTrust: 0.5` for every show — see `NetworkPriorsBuilder.swift`
+    /// line ~115), weight is unobservable today: the only varying field
+    /// is `averageAdDuration`, and `aggregateDuration` uses min/max
+    /// (not weighted average) on those values. So a builder-level
+    /// favoritism test would be vacuous against the current snapshot
+    /// shape.
+    ///
+    /// This test instead targets the aggregator directly, with two
+    /// snapshots whose weights differ by 4 orders of magnitude AND
+    /// whose `musicBracketRate` values differ. The weighted-average
+    /// path inside `aggregateMusicBracketPrevalence` (and the
+    /// `metadataTrustAverage` sibling) MUST favor the heavier-weighted
+    /// snapshot's value. If the producer is ever changed to surface
+    /// real (non-uniform) `musicBracketRate` snapshots through the
+    /// builder, this favoritism becomes load-bearing on a production
+    /// knob — pinning it now keeps the contract honest in advance of
+    /// that producer.
+    @Test("aggregator weighted-average favors heavier-weighted snapshot")
+    func aggregatorWeightedAverageFavorsHeavier() {
+        let lightweight = ShowPriorSnapshot(
+            sponsors: [:],
+            slotPositions: [],
+            averageAdDuration: 30,
+            musicBracketRate: 0.0,
+            metadataTrust: 0.0,
+            weight: 5
+        )
+        let heavyweight = ShowPriorSnapshot(
+            sponsors: [:],
+            slotPositions: [],
+            averageAdDuration: 30,
+            musicBracketRate: 1.0,
+            metadataTrust: 1.0,
+            weight: 50_000
+        )
+        let priors = try! #require(
+            NetworkPriorAggregator.aggregate([lightweight, heavyweight])
+        )
+        // Expected weighted average: (0.0 * 5 + 1.0 * 50_000) / 50_005
+        // ≈ 0.9999. Anything above 0.99 demonstrates the heavier
+        // snapshot dominates; anything below 0.5 would mean the
+        // weighted-average path has gone unweighted.
+        #expect(priors.musicBracketPrevalence > 0.99)
+        #expect(priors.metadataTrustAverage > 0.99)
+    }
+
     @Test("network aggregate is measurably narrower than global default")
     func builderNarrowsRangeBelowGlobal() {
         // A network whose shows all average around 10s should yield a

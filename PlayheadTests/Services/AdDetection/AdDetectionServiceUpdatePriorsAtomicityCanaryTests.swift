@@ -931,6 +931,436 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         )
     }
 
+    /// playhead-spxs cycle-2 M-2: per-method canary for the TrustScoring
+    /// networkId carry-forward. Replaces the implicit "floor of 5" of
+    /// `testEveryProfileConstructingProfileInClosureInTrustScoringCarriesNetworkId`
+    /// with an explicit, named assertion per mutation entry point.
+    ///
+    /// The cycle-2 reviewer flagged the floor as fragile in three ways:
+    ///   1. A whole-file scan that just counts matches can pass with 5
+    ///      `<ident>.networkId` references *even if 4 of them are in the
+    ///      same method and a fifth method has none*. The floor confirms
+    ///      "5 closures match", not "every method matches".
+    ///   2. The closure-token finder (`range(of: "profile in")`) is
+    ///      sensitive to the literal parameter name `profile`; a future
+    ///      rename to `existing`, `current`, or any other token would
+    ///      silently drop a closure out of the scan.
+    ///   3. A multi-line shape (`{ profile\n  in`) wouldn't be found
+    ///      either.
+    ///
+    /// This per-method canary slices the source into one chunk per
+    /// known mutation method (bounded by `func <name>(` … next `func`
+    /// or EOF) and asserts the `networkIdCarryForwardPattern` matches
+    /// inside each chunk — independent of closure-parameter naming or
+    /// formatting. If any one of the 5 methods drops the carry-forward,
+    /// the test fails *attributing* the failure to that method.
+    ///
+    /// Allow-list: the 5 mutation entry points were enumerated by hand
+    /// from the `playhead-084j` and `playhead-spxs` plumbing; renaming
+    /// or adding a method here is a deliberate edit. If a future bead
+    /// adds a 6th mutation entry point, append it to `mutationMethods`
+    /// in the same change that introduces the new method, so the
+    /// canary follows the production surface.
+    func testEachTrustScoringMutationMethodCarriesNetworkIdForward() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/TrustScoring/TrustScoringService.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        let mutationMethods = [
+            "recordSuccessfulObservation",
+            "recordFalseSkipSignal",
+            "setUserOverride",
+            "recordFalseNegativeSignal",
+            "decayFalseSignals",
+        ]
+
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+        let nextFuncRegex = try NSRegularExpression(pattern: #"\bfunc\s+\w+\s*\("#)
+        let nsAll = NSRange(stripped.startIndex..., in: stripped)
+
+        for methodName in mutationMethods {
+            let funcDeclPattern = #"\bfunc\s+\#(methodName)\s*\("#
+            let funcDeclRegex: NSRegularExpression
+            do {
+                funcDeclRegex = try NSRegularExpression(pattern: funcDeclPattern)
+            } catch {
+                XCTFail(
+                    "playhead-spxs cycle-2 M-2: failed to compile " +
+                    "func-declaration regex for `\(methodName)`: \(error)"
+                )
+                continue
+            }
+
+            guard let funcMatch = funcDeclRegex.firstMatch(in: stripped, range: nsAll),
+                  let funcRange = Range(funcMatch.range, in: stripped)
+            else {
+                XCTFail(
+                    """
+                    playhead-spxs cycle-2 M-2: could not locate \
+                    `func \(methodName)(` in TrustScoringService.swift. \
+                    Either the method has been renamed (update the \
+                    `mutationMethods` list above with the new name) or \
+                    the mutation entry point has been removed (remove \
+                    its name from `mutationMethods`). Do NOT silently \
+                    skip it — the per-method canary is the load-bearing \
+                    defense for this column.
+                    """
+                )
+                continue
+            }
+
+            let afterFunc = funcRange.upperBound
+            let restNSRange = NSRange(afterFunc..<stripped.endIndex, in: stripped)
+            let methodEnd: String.Index
+            if let nextMatch = nextFuncRegex.firstMatch(in: stripped, range: restNSRange),
+               let nfr = Range(nextMatch.range, in: stripped) {
+                methodEnd = nfr.lowerBound
+            } else {
+                methodEnd = stripped.endIndex
+            }
+
+            let methodSlice = String(stripped[funcRange.lowerBound..<methodEnd])
+            let sliceRange = NSRange(methodSlice.startIndex..., in: methodSlice)
+
+            XCTAssertNotNil(
+                networkCarryRegex.firstMatch(in: methodSlice, range: sliceRange),
+                """
+                playhead-spxs cycle-2 M-2: TrustScoringService.\(methodName) \
+                does NOT carry `<ident>.networkId` forward into its \
+                `PodcastProfile(...)` constructor. Each of the 5 \
+                mutation methods reconstructs the full profile from its \
+                closure parameter; missing the carry-forward in any one \
+                of them silently nils the column the next time the \
+                COALESCE protection in `upsertProfile` is refactored \
+                away — same regression shape as the cycle-15 M-2 \
+                trait-profile clobber. Restore the carry-forward (the \
+                pattern is `networkId: <ident>.networkId` for any \
+                closure-parameter name) or, if the omission is \
+                deliberate, document the rationale here and in \
+                `mutationMethods`.
+
+                Method slice (first 200 chars, comment-stripped):
+                \(methodSlice.prefix(200))…
+                """
+            )
+        }
+    }
+
+    /// playhead-spxs cycle-2 M-2 negative control: confirm the
+    /// per-method canary actually fires when a known method's slice
+    /// would lack the carry-forward. Synthetic source omits
+    /// `networkId:` from its `PodcastProfile(...)` call; the per-method
+    /// regex must return no match.
+    func testEachTrustScoringMutationMethodCarriesNetworkIdForward_negativeControl() throws {
+        let regressionFixture = """
+        actor TrustScoringService {
+            func recordSuccessfulObservation() async throws {
+                try await store.mutateProfile(podcastId: id) {
+                    fresh()
+                } update: { profile in
+                    PodcastProfile(
+                        podcastId: profile.podcastId,
+                        skipTrustScore: profile.skipTrustScore
+                    )
+                }
+            }
+            func anotherMethod() {}
+        }
+        """
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(regressionFixture)
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+        let funcDeclRegex = try NSRegularExpression(
+            pattern: #"\bfunc\s+recordSuccessfulObservation\s*\("#
+        )
+        let nextFuncRegex = try NSRegularExpression(pattern: #"\bfunc\s+\w+\s*\("#)
+
+        let nsAll = NSRange(stripped.startIndex..., in: stripped)
+        guard let funcMatch = funcDeclRegex.firstMatch(in: stripped, range: nsAll),
+              let funcRange = Range(funcMatch.range, in: stripped) else {
+            XCTFail("Fixture missing `func recordSuccessfulObservation(`")
+            return
+        }
+        let afterFunc = funcRange.upperBound
+        let restNSRange = NSRange(afterFunc..<stripped.endIndex, in: stripped)
+        let methodEnd: String.Index
+        if let nextMatch = nextFuncRegex.firstMatch(in: stripped, range: restNSRange),
+           let nfr = Range(nextMatch.range, in: stripped) {
+            methodEnd = nfr.lowerBound
+        } else {
+            methodEnd = stripped.endIndex
+        }
+        let methodSlice = String(stripped[funcRange.lowerBound..<methodEnd])
+        let sliceRange = NSRange(methodSlice.startIndex..., in: methodSlice)
+
+        XCTAssertNil(
+            networkCarryRegex.firstMatch(in: methodSlice, range: sliceRange),
+            """
+            playhead-spxs cycle-2 M-2 negative-control failure: the \
+            per-method canary's regex `\(networkCarryRegex.pattern)` \
+            MATCHED a fixture whose method body deliberately omits the \
+            carry-forward. The canary has gone blind because the regex \
+            over-accepts; tighten it (and update both the per-method \
+            and whole-file controls together).
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-2 M-2 positive control: confirm the
+    /// per-method canary correctly accepts a method body that DOES
+    /// carry the column forward, AND that it is robust to alternate
+    /// closure-parameter names (`existing`, `current`) plus a
+    /// multi-line `{ existing\n  in` shape — exactly the cases the
+    /// cycle-2 reviewer flagged as fragile in the floor-of-5 design.
+    func testEachTrustScoringMutationMethodCarriesNetworkIdForward_positiveControl() throws {
+        let happyPathFixture = """
+        actor TrustScoringService {
+            func recordSuccessfulObservation() async throws {
+                try await store.mutateProfile(podcastId: id) {
+                    fresh()
+                } update: { existing
+                    in
+                    PodcastProfile(
+                        podcastId: existing.podcastId,
+                        networkId: existing.networkId
+                    )
+                }
+            }
+            func anotherMethod() {}
+        }
+        """
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(happyPathFixture)
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+        let funcDeclRegex = try NSRegularExpression(
+            pattern: #"\bfunc\s+recordSuccessfulObservation\s*\("#
+        )
+        let nextFuncRegex = try NSRegularExpression(pattern: #"\bfunc\s+\w+\s*\("#)
+        let nsAll = NSRange(stripped.startIndex..., in: stripped)
+        guard let funcMatch = funcDeclRegex.firstMatch(in: stripped, range: nsAll),
+              let funcRange = Range(funcMatch.range, in: stripped) else {
+            XCTFail("Fixture missing `func recordSuccessfulObservation(`")
+            return
+        }
+        let afterFunc = funcRange.upperBound
+        let restNSRange = NSRange(afterFunc..<stripped.endIndex, in: stripped)
+        let methodEnd: String.Index
+        if let nextMatch = nextFuncRegex.firstMatch(in: stripped, range: restNSRange),
+           let nfr = Range(nextMatch.range, in: stripped) {
+            methodEnd = nfr.lowerBound
+        } else {
+            methodEnd = stripped.endIndex
+        }
+        let methodSlice = String(stripped[funcRange.lowerBound..<methodEnd])
+        let sliceRange = NSRange(methodSlice.startIndex..., in: methodSlice)
+
+        XCTAssertNotNil(
+            networkCarryRegex.firstMatch(in: methodSlice, range: sliceRange),
+            """
+            playhead-spxs cycle-2 M-2 positive-control failure: the \
+            per-method canary's regex `\(networkCarryRegex.pattern)` \
+            did NOT match a fixture that uses `existing` (not `profile`) \
+            as the closure parameter AND splits `existing\\n  in` across \
+            two lines. The pattern has over-restricted; loosen it OR \
+            confirm the slice-based approach is independent of closure- \
+            parameter naming.
+            """
+        )
+    }
+
+    /// playhead-spxs cycle-2 L-5: pin the documented "create path
+    /// doesn't carry forward `networkId`" semantics for the two
+    /// `mutateProfile`-based methods that have a lazy-create branch:
+    /// `recordSuccessfulObservation` and `setUserOverride`.
+    ///
+    /// The lazy-create closures in these two methods construct a brand-
+    /// new `PodcastProfile` row for a podcast that has no prior history.
+    /// Passing `networkId` on that fresh row would be wrong: there is no
+    /// "existing networkId to carry forward" — the column is correctly
+    /// nil-by-default until the next `AdDetectionService.updatePriors`
+    /// pass writes a real identity. Without this canary, a future
+    /// reviewer might "fix" the M-2 carry-forward by adding `networkId:`
+    /// to the create-closure too, which would synthesize a junk identity
+    /// (defaulting to nil literal) and lose the symmetric "no prior
+    /// history yet" semantic the create branch encodes.
+    ///
+    /// Strategy: locate `func <name>(`, slice from there to the
+    /// `update:` keyword (the boundary between the create and update
+    /// closures), then assert the slice — which now contains the create
+    /// closure body but not the update body — does NOT match the
+    /// `networkIdCarryForwardPattern`. Mirrors the M-2 slice approach so
+    /// it stays independent of closure-parameter naming and formatting.
+    func testTrustScoringCreatePathsDoNotCarryNetworkIdForward() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/TrustScoring/TrustScoringService.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        // Both methods that use `mutateProfile` with a lazy `create:`
+        // closure. `recordFalseSkipSignal`, `recordFalseNegativeSignal`,
+        // and `decayFalseSignals` use `updateProfileIfExists*` (no
+        // create branch) so they're correctly excluded.
+        let methodsWithCreatePath = [
+            "recordSuccessfulObservation",
+            "setUserOverride",
+        ]
+
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+        let updateLabelRegex = try NSRegularExpression(pattern: #"\bupdate\s*:"#)
+        let nsAll = NSRange(stripped.startIndex..., in: stripped)
+
+        for methodName in methodsWithCreatePath {
+            let funcDeclPattern = #"\bfunc\s+\#(methodName)\s*\("#
+            let funcDeclRegex: NSRegularExpression
+            do {
+                funcDeclRegex = try NSRegularExpression(pattern: funcDeclPattern)
+            } catch {
+                XCTFail(
+                    "playhead-spxs cycle-2 L-5: failed to compile " +
+                    "func-declaration regex for `\(methodName)`: \(error)"
+                )
+                continue
+            }
+
+            guard let funcMatch = funcDeclRegex.firstMatch(in: stripped, range: nsAll),
+                  let funcRange = Range(funcMatch.range, in: stripped)
+            else {
+                XCTFail(
+                    """
+                    playhead-spxs cycle-2 L-5: could not locate \
+                    `func \(methodName)(` in TrustScoringService.swift. \
+                    Either the method has been renamed (update the \
+                    `methodsWithCreatePath` list above with the new name) \
+                    or the lazy-create branch has been removed (drop \
+                    the name from `methodsWithCreatePath`). Do NOT \
+                    silently skip — this canary pins create-path \
+                    semantics that have no other defense.
+                    """
+                )
+                continue
+            }
+
+            // Slice from the start of the func body to the next
+            // `update:` label. That slice contains the lazy `create:`
+            // closure body and not the update body, so a `networkId:`
+            // hit inside it would be a real regression of the create-
+            // path semantic.
+            let afterFunc = funcRange.upperBound
+            let restNSRange = NSRange(afterFunc..<stripped.endIndex, in: stripped)
+            guard let updateMatch = updateLabelRegex.firstMatch(in: stripped, range: restNSRange),
+                  let updateRange = Range(updateMatch.range, in: stripped)
+            else {
+                XCTFail(
+                    """
+                    playhead-spxs cycle-2 L-5: could not locate the \
+                    `update:` label after `func \(methodName)(`. The \
+                    canary needs to bound the create-closure slice and \
+                    cannot proceed without the boundary. Either the \
+                    method shape has changed (named-arg call replaced \
+                    with positional or different label) or the lazy- \
+                    create entry point is no longer mutateProfile.
+                    """
+                )
+                continue
+            }
+
+            let createSlice = String(stripped[afterFunc..<updateRange.lowerBound])
+            let sliceRange = NSRange(createSlice.startIndex..., in: createSlice)
+
+            XCTAssertNil(
+                networkCarryRegex.firstMatch(in: createSlice, range: sliceRange),
+                """
+                playhead-spxs cycle-2 L-5: TrustScoringService.\(methodName) \
+                lazy-create closure now carries `networkId` forward. \
+                The create branch handles a brand-new podcast with no \
+                prior history; passing `networkId` from any closure \
+                parameter is non-sequitur (there is no parameter — \
+                `mutateProfile`'s create closure takes no args), and \
+                synthesizing a non-nil `networkId` from any other \
+                source on a brand-new row would generate a junk \
+                identity. Either remove the carry-forward from the \
+                create branch OR document the policy change here and \
+                in `methodsWithCreatePath`.
+
+                Create-closure slice (first 300 chars, comment-stripped):
+                \(createSlice.prefix(300))…
+                """
+            )
+        }
+    }
+
+    /// playhead-spxs cycle-2 L-5 positive control: confirm the canary
+    /// fires when a method's create-closure slice DOES contain a
+    /// `networkId` carry-forward. Without this control, a future
+    /// regex/pattern weakening would let the production canary pass
+    /// silently against a regressed source.
+    func testTrustScoringCreatePathsDoNotCarryNetworkIdForward_positiveControl() throws {
+        // Synthetic source where the create branch wrongly carries
+        // forward `networkId`. Note: no closure parameter exists in
+        // the create branch — the synthesized value would have to come
+        // from a captured local. The fixture uses a captured local to
+        // mirror the most plausible regression shape.
+        let regressionFixture = """
+        actor TrustScoringService {
+            func recordSuccessfulObservation() async throws {
+                let stale = somePriorProfile
+                try await store.mutateProfile(podcastId: id, create: {
+                    PodcastProfile(
+                        podcastId: id,
+                        networkId: stale.networkId
+                    )
+                }, update: { profile in
+                    PodcastProfile(podcastId: profile.podcastId)
+                })
+            }
+            func anotherMethod() {}
+        }
+        """
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(regressionFixture)
+        let networkCarryRegex = try NSRegularExpression(
+            pattern: Self.networkIdCarryForwardPattern
+        )
+        let funcDeclRegex = try NSRegularExpression(
+            pattern: #"\bfunc\s+recordSuccessfulObservation\s*\("#
+        )
+        let updateLabelRegex = try NSRegularExpression(pattern: #"\bupdate\s*:"#)
+
+        let nsAll = NSRange(stripped.startIndex..., in: stripped)
+        guard let funcMatch = funcDeclRegex.firstMatch(in: stripped, range: nsAll),
+              let funcRange = Range(funcMatch.range, in: stripped) else {
+            XCTFail("Fixture missing `func recordSuccessfulObservation(`")
+            return
+        }
+        let afterFunc = funcRange.upperBound
+        let restNSRange = NSRange(afterFunc..<stripped.endIndex, in: stripped)
+        guard let updateMatch = updateLabelRegex.firstMatch(in: stripped, range: restNSRange),
+              let updateRange = Range(updateMatch.range, in: stripped) else {
+            XCTFail("Fixture missing `update:` label boundary")
+            return
+        }
+        let createSlice = String(stripped[afterFunc..<updateRange.lowerBound])
+        let sliceRange = NSRange(createSlice.startIndex..., in: createSlice)
+
+        XCTAssertNotNil(
+            networkCarryRegex.firstMatch(in: createSlice, range: sliceRange),
+            """
+            playhead-spxs cycle-2 L-5 positive-control failure: the \
+            networkId carry-forward regex `\(networkCarryRegex.pattern)` \
+            FAILED to match a fixture that deliberately puts a \
+            carry-forward in the create branch. The canary has gone \
+            blind to this regression shape; tighten the regex OR \
+            confirm the fixture really does represent a carry-forward.
+            """
+        )
+    }
+
     /// playhead-spxs cycle-1 H-1 positive control: confirm the new
     /// TrustScoring canary's `profile in` walk-back AND
     /// `networkIdCarryForwardPattern` correctly catch a profile-
