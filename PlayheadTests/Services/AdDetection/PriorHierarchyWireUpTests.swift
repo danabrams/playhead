@@ -841,6 +841,53 @@ struct PriorHierarchyWireUpTests {
                 "empty-string networkId must short-circuit before the SQL bind")
     }
 
+    /// playhead-spxs cycle-5 missing-test: pin that the current show's
+    /// own profile IS included in the network aggregate.
+    ///
+    /// The resolver flow is: read `currentPodcastProfile.networkId`, then
+    /// `fetchProfiles(forNetworkId:)`. The fetch's `WHERE networkId = ?`
+    /// has no SQL-side exclusion of the current `podcastId`, so the
+    /// builder ALWAYS sees the current show's own row alongside its
+    /// siblings. This is the intended behavior — the network priors
+    /// represent "what this network looks like at observation time,
+    /// including this show," not "siblings only" — but it has no test
+    /// pinning it. A future refactor that excludes the current show
+    /// (e.g. `WHERE networkId = ? AND podcastId != ?`) would
+    /// silently shrink the aggregate by one show; for a 2-show network
+    /// with one observed show, that drops the network tier from
+    /// `showCount = 2` to `showCount = 1` (the cycle-2 minShows-1
+    /// fallback would still produce something, but with weaker
+    /// signal). This test pins the inclusion contract.
+    @Test("fetchProfiles(forNetworkId:) includes the queried show's own profile")
+    func fetchProfilesIncludesSelfRow() async throws {
+        let store = try await makeTestStore()
+        let networkId = "self-incl-network"
+
+        // Seed the "current show" plus one sibling — the network has
+        // exactly two profiles. If the fetch ever excludes the row
+        // matching some implicit "current podcastId", the count would
+        // drop below 2.
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-current",
+            adDurationStatsJSON: nil,
+            observationCount: 5,
+            networkId: networkId
+        ))
+        try await store.upsertProfile(makeProfile(
+            podcastId: "p-sibling",
+            adDurationStatsJSON: nil,
+            observationCount: 7,
+            networkId: networkId
+        ))
+
+        let profiles = try await store.fetchProfiles(forNetworkId: networkId)
+        #expect(profiles.count == 2,
+                "network fetch must include the current show; got \(profiles.count) rows")
+        let podcastIds = Set(profiles.map(\.podcastId))
+        #expect(podcastIds == ["p-current", "p-sibling"],
+                "expected both rows; got \(podcastIds)")
+    }
+
     /// playhead-spxs cycle-2 L-1: source canary that pins the
     /// documented drift between `AnalysisStore.migrate()` and
     /// `AnalysisStore.migrateOnlyForTesting()` for `podcast_profiles`
@@ -1229,24 +1276,32 @@ struct PriorHierarchyWireUpTests {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/Persistence/AnalysisStore/AnalysisStore.swift"
         )
-        // Allow flexibility on quoting, whitespace, and the partial-WHERE
-        // clause — the load-bearing claim is "an index named
-        // `idx_podcast_profiles_networkId` is created on the column".
-        let pattern = #"CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId\s+ON podcast_profiles\(networkId\)"#
+        // cycle-5 L-1: require the partial WHERE clause. Most rows in
+        // `podcast_profiles` have NULL `networkId` (the column was added
+        // late and most shows have no recorded network); a partial index
+        // keyed on `WHERE networkId IS NOT NULL` skips those NULL rows
+        // entirely, halving index size in the typical library. A
+        // regression that drops the partial clause would leave the index
+        // bloated with NULL entries the planner cannot use anyway, so
+        // this canary anchors on the full DDL shape.
+        let pattern = #"CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId\s+ON podcast_profiles\(networkId\)\s+WHERE networkId IS NOT NULL"#
         let regex = try NSRegularExpression(pattern: pattern)
         let nsRange = NSRange(source.startIndex..., in: source)
         let matches = regex.numberOfMatches(in: source, range: nsRange)
         #expect(
             matches == 1,
             """
-            playhead-spxs cycle-3 M-1: expected exactly one \
+            playhead-spxs cycle-3 M-1 / cycle-5 L-1: expected exactly one \
             `CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId \
-            ON podcast_profiles(networkId)` in AnalysisStore.swift; \
-            found \(matches). Without the index, every \
-            `resolveEpisodePriors()` does a full scan of \
-            `podcast_profiles`, becoming O(n) in library size. If the \
-            index name has been renamed, update this canary AND verify \
-            the new index actually covers the (networkId) lookup.
+            ON podcast_profiles(networkId) WHERE networkId IS NOT NULL` \
+            in AnalysisStore.swift; found \(matches). Without the index, \
+            every `resolveEpisodePriors()` does a full scan of \
+            `podcast_profiles`, becoming O(n) in library size. The \
+            partial WHERE is required so the index isn't bloated with \
+            NULL entries the planner can't use anyway. If the index \
+            name has been renamed, update this canary AND verify the \
+            new index actually covers the (networkId) lookup with the \
+            same partial-WHERE shape.
             """
         )
     }

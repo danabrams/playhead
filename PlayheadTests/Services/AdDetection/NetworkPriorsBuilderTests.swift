@@ -185,6 +185,54 @@ struct NetworkPriorsBuilderTests {
         #expect(priors.metadataTrustAverage > 0.99)
     }
 
+    /// playhead-spxs cycle-5 missing-test: regression alarm pinning the
+    /// neutral-default fields.
+    ///
+    /// The current `NetworkPriorsBuilder` is single-signal: it derives
+    /// only `typicalAdDuration` from real data, and feeds the aggregator
+    /// homogeneous neutral defaults for the rest (`sponsors: [:]`,
+    /// `slotPositions: []`, `musicBracketRate: 0.5`, `metadataTrust: 0.5`).
+    /// This test pins that today's network tier is non-load-bearing on
+    /// those four fields — when the producer is later extended to surface
+    /// a real signal for any of them, this test will fail and force the
+    /// author to update the contract intentionally rather than silently
+    /// shifting downstream behavior. Pair with cycle-2 L-6 in
+    /// `NetworkPriorsBuilderTests.aggregatorWeightedAverageFavorsHeavier`,
+    /// which pins the aggregator math the producer is currently bypassing.
+    @Test("builder-fed priors land on neutral defaults for non-duration fields (cycle-5 missing-test)")
+    func builderNeutralDefaultsForNonDurationFields() {
+        let s1 = AdDurationStats(meanDuration: 30, sampleCount: 10)
+        let s2 = AdDurationStats(meanDuration: 60, sampleCount: 20)
+        let s3 = AdDurationStats(meanDuration: 45, sampleCount: 50_000)
+        let profiles = [
+            makeProfile(podcastId: "p1", adDurationStatsJSON: s1.encodeForTesting(), observationCount: 10),
+            makeProfile(podcastId: "p2", adDurationStatsJSON: s2.encodeForTesting(), observationCount: 20),
+            makeProfile(podcastId: "p3", adDurationStatsJSON: s3.encodeForTesting(), observationCount: 50_000)
+        ]
+        let result = try! #require(NetworkPriorsBuilder.build(from: profiles))
+
+        // Sponsors empty: builder feeds `sponsors: [:]` for every
+        // snapshot. A regression that surfaces real sponsor data without
+        // updating the docstring would fail this expectation.
+        #expect(result.commonSponsors.isEmpty,
+                "expected no common sponsors today; builder feeds empty maps")
+
+        // Slot positions empty: builder feeds `slotPositions: []`.
+        #expect(result.typicalSlotPositions.isEmpty,
+                "expected no slot positions today; builder feeds empty arrays")
+
+        // musicBracketPrevalence collapses to exactly 0.5 — every
+        // snapshot's value is the same constant, so the weighted average
+        // is the constant regardless of weight. Even with the 50k-sample
+        // outlier weight, the result is 0.5.
+        #expect(result.musicBracketPrevalence == 0.5,
+                "expected musicBracketPrevalence = 0.5; got \(result.musicBracketPrevalence)")
+
+        // Same for metadataTrust.
+        #expect(result.metadataTrustAverage == 0.5,
+                "expected metadataTrustAverage = 0.5; got \(result.metadataTrustAverage)")
+    }
+
     @Test("network aggregate is measurably narrower than global default")
     func builderNarrowsRangeBelowGlobal() {
         // A network whose shows all average around 10s should yield a

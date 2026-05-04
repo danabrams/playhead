@@ -4645,15 +4645,27 @@ actor AdDetectionService {
         // resolver treats as "tier inactive". Errors in the SQL fetch are
         // also treated as "tier inactive" (logged then dropped) so a
         // transient persistence failure can't block ad detection.
+        //
+        // cycle-5 L-2: snapshot `networkId` AND `observationCount` from
+        // `currentPodcastProfile` BEFORE the `fetchProfiles` await.
+        // The await is a real reentrancy point on this actor, so an
+        // interleaving `updatePriors` / `recordSuccessfulObservation`
+        // turn could rewrite `currentPodcastProfile` between the two
+        // reads. Snapshotting both fields up front keeps the network
+        // tier's decay weight consistent with the networkId it was
+        // computed from — the snapshot-consistency contract that the
+        // resolver header documents.
         var networkPriors: NetworkPriors? = nil
         var networkDecay: Float = 0
-        if let networkId = currentPodcastProfile?.networkId, !networkId.isEmpty {
+        if let snapshotProfile = currentPodcastProfile,
+           let networkId = snapshotProfile.networkId,
+           !networkId.isEmpty {
+            let observedAtSnapshot = snapshotProfile.observationCount
             do {
                 let siblings = try await store.fetchProfiles(forNetworkId: networkId)
                 if let priors = NetworkPriorsBuilder.build(from: siblings) {
                     networkPriors = priors
-                    let observed = currentPodcastProfile?.observationCount ?? 0
-                    networkDecay = NetworkPriors.decayedWeight(episodesObserved: observed)
+                    networkDecay = NetworkPriors.decayedWeight(episodesObserved: observedAtSnapshot)
                 }
             } catch {
                 logger.warning("Failed to fetch network siblings for networkId=\(networkId): \(error.localizedDescription)")
