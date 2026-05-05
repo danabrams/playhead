@@ -263,7 +263,7 @@ struct FMSuppressionApplicator: Sendable {
             return false
         case .fingerprint:
             return true
-        case .classifier, .lexical, .acoustic, .musicBed, .catalog, .fusedScore, .metadata:
+        case .classifier, .lexical, .acoustic, .musicBed, .breakAlignment, .catalog, .fusedScore, .metadata:
             // playhead-z3ch: metadata is a coarse pre-seed prior, not strong
             // evidence. It must yield to FM noAds suppression like the other
             // soft signals. musicBed is the 2026-04-23 acoustic peer — same

@@ -51,11 +51,15 @@ struct FusionBudgetClamp: Sendable {
         // Test-only observer hook for verifying audit emissions without
         // scraping OSLog. Always nil in production; set/reset by Swift Testing.
         Self.testClampObserver?(rawWeight, cappedWeight)
+        // playhead-fqc8 cycle-1 review: preserve `subSource` per the
+        // uniform invariant — every cap re-stamp must carry forward
+        // every diagnostic field the input entry had.
         return EvidenceLedgerEntry(
             source: entry.source,
             weight: cappedWeight,
             detail: entry.detail,
-            classificationTrust: entry.classificationTrust
+            classificationTrust: entry.classificationTrust,
+            subSource: entry.subSource
         )
     }
 

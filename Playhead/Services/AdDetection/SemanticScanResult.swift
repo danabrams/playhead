@@ -200,6 +200,21 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// same underlying modality, different trigger geometry.
     /// Persistence note: additive case; no migration required.
     case musicBed
+    /// playhead-fqc8: Acoustic-break alignment with a `.classifierSeed`-anchored
+    /// span boundary. Treated as a DISTINCT evidence kind from `.acoustic`
+    /// (RMS-drop) so the family budget is honest: each kind caps independently
+    /// against its own per-source cap (`acousticCap` for RMS-drop,
+    /// `breakAlignmentCap` for break-alignment). Without a separate kind, a
+    /// classifier-seeded span could emit two `.acoustic` entries summing to
+    /// 2 × `acousticCap` = 0.40, silently doubling the documented family
+    /// budget. See `BackfillEvidenceFusion.buildLedger()` for the dedicated
+    /// branch.
+    /// Persistence note: additive case; no migration required. Forward-compatible
+    /// only — a TestFlight downgrade to a build that lacks `.breakAlignment` would
+    /// fail-loud at decode time (`AnalysisStore.readEvidenceEvent` throws
+    /// `queryFailed("Unknown evidence source type 'breakAlignment'")`); acceptable
+    /// for an additive enum and matches existing behavior for `.musicBed` etc.
+    case breakAlignment
 }
 
 struct EvidenceEvent: Sendable, Equatable {

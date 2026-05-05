@@ -182,6 +182,7 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
         case .fingerprint: return config.fingerprintCap
         case .metadata: return config.metadataCap  // playhead-z3ch
         case .musicBed: return config.acousticCap  // Shares the acoustic family's weight budget.
+        case .breakAlignment: return config.breakAlignmentCap  // playhead-fqc8: independent budget from the RMS-drop family.
         case .fusedScore: return 1.0  // Fused score is post-aggregation; no per-source cap applies.
         }
     }
