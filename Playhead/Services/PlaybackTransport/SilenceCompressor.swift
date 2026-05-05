@@ -460,8 +460,8 @@ final class SilenceCompressor {
             // the test the bead calls out as the most important
             // correctness invariant.
             if window.pauseProbability > config.pauseProbabilityFloor,
-               let prev = previousNonPauseSpeaker(in: sorted, before: index),
-               let next = nextNonPauseSpeaker(in: sorted, after: index),
+               let prev = previousSpeakerClustered(in: sorted, before: index),
+               let next = nextSpeakerClustered(in: sorted, after: index),
                prev == next
             {
                 buckets[index] = .dramaticPause
@@ -581,7 +581,11 @@ final class SilenceCompressor {
 
     // MARK: - Helpers
 
-    private static func previousNonPauseSpeaker(
+    // Walks for the nearest window with a non-nil speakerClusterId — i.e. the
+    // surrounding speech speaker. Windows without a cluster identity (pauses,
+    // music, unclustered) are skipped. The "Clustered" suffix names the actual
+    // predicate (has a speaker cluster), not pause-vs-non-pause semantics.
+    private static func previousSpeakerClustered(
         in windows: [FeatureWindow], before index: Int
     ) -> Int? {
         guard index > 0 else { return nil }
@@ -593,7 +597,7 @@ final class SilenceCompressor {
         return nil
     }
 
-    private static func nextNonPauseSpeaker(
+    private static func nextSpeakerClustered(
         in windows: [FeatureWindow], after index: Int
     ) -> Int? {
         var i = index + 1

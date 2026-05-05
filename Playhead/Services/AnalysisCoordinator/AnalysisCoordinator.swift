@@ -1970,6 +1970,26 @@ actor AnalysisCoordinator {
         let persistedDuration = asset?.episodeDurationSec ?? 0
         let resolvedEpisodeDuration = max(liveDuration, persistedDuration)
 
+        // L4 follow-up (review/v0.5-head-polish): the asymmetric
+        // `max(...)` silently inflates the denominator when a feed
+        // legitimately re-encodes shorter (rare, but observed). Log
+        // the divergence so the rare legitimate-shrink case is
+        // discoverable rather than silently extending forever.
+        if Self.episodeDurationsDiverge(
+            live: liveDuration,
+            persisted: persistedDuration
+        ) {
+            logger.warning(
+                """
+                resolvedEpisodeDuration divergence: \
+                live=\(liveDuration, format: .fixed(precision: 2))s \
+                persisted=\(persistedDuration, format: .fixed(precision: 2))s \
+                resolved=\(resolvedEpisodeDuration, format: .fixed(precision: 2))s \
+                assetId=\(assetId, privacy: .public)
+                """
+            )
+        }
+
         if let podcastId = activePodcastId, !allChunks.isEmpty {
             // Cycle 4 H5: thread the sessionId through so the shadow FM
             // phase can stamp `needsShadowRetry` on this exact session if
@@ -2787,6 +2807,28 @@ actor AnalysisCoordinator {
         try await finalizeBackfill(sessionId: sessionId, assetId: assetId)
     }
     #endif
+
+    // MARK: - Episode-duration divergence helper (review/v0.5-head-polish C2 MT-1)
+
+    /// Relative-difference threshold above which `finalizeBackfill`
+    /// emits a divergence warning. Pinned as a named constant so a
+    /// future tweak shows up in `git blame` and so the test suite can
+    /// reference it directly.
+    static let episodeDurationDivergenceWarnRatio: Double = 0.05
+
+    /// Pure predicate behind the `resolvedEpisodeDuration` divergence
+    /// warning. Returns `true` when both inputs are positive AND
+    /// differ relatively by more than `episodeDurationDivergenceWarnRatio`.
+    /// Extracted to a static, nonisolated helper so unit tests can
+    /// exercise it without standing up an `AnalysisCoordinator` actor.
+    nonisolated static func episodeDurationsDiverge(
+        live: TimeInterval,
+        persisted: TimeInterval
+    ) -> Bool {
+        guard live > 0, persisted > 0 else { return false }
+        let denom = max(live, persisted)
+        return abs(live - persisted) / denom > episodeDurationDivergenceWarnRatio
+    }
 }
 
 // MARK: - EpisodeDurationBackfillSummary (playhead-gyvb.2)
