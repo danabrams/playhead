@@ -11,11 +11,19 @@
 // in `correction_events` — confirming the clobber.
 //
 // The fix splits responsibility:
-//   - updatePriors owns lexical/slot priors and `observationCount`.
-//   - TrustScoringService is the SOLE writer of `skipTrustScore` (via
+//   - updatePriors owns lexical/slot priors and `observationCount`. It does
+//     NOT write `skipTrustScore`; it carries forward
+//     `existingProfile?.skipTrustScore ?? 0.5`.
+//   - `TrustScoringService` and `AdDetectionService.recordListenRewind` are
+//     the only two writers of `skipTrustScore` under the documented policy
+//     (C26 H-1, playhead-od4j; see the `recordListenRewind` docstring in
+//     AdDetectionService.swift for the full magnitude/state-machine
+//     divergence). TrustScoringService writes via
 //     `recordSuccessfulObservation`, `recordFalseSkipSignal`,
-//     `recordFalseNegativeSignal`).
-//   - updatePriors carries forward `existingProfile?.skipTrustScore ?? 0.5`.
+//     `recordFalseNegativeSignal`; recordListenRewind decrements by 0.05
+//     (weaker signal, no demotion-evaluation).
+//   - This contract pins carry-forward only — it does not assert which
+//     paths may decrement.
 //
 // These tests pin that contract so a future refactor can't reintroduce the
 // clobber.

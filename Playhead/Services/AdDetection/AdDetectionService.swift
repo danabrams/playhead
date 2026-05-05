@@ -3142,6 +3142,27 @@ actor AdDetectionService {
     /// Record that the user rewound back into a skipped ad window,
     /// signaling a potential false positive. Updates the podcast profile.
     ///
+    /// **Trust-score writer policy** (C26 H-1, playhead-od4j): this method
+    /// is the ONLY writer of `skipTrustScore` outside `TrustScoringService`.
+    /// The two paths intentionally diverge:
+    ///
+    ///   * `recordListenRewind` (here): -0.05, increments
+    ///     `recentFalseSkipSignals`, does NOT run demotion evaluation.
+    ///   * `TrustScoringService.recordFalseSkipSignal` (called from
+    ///     `SkipOrchestrator` listen/manualVeto paths): -0.10
+    ///     (`config.falseSignalPenalty`), increments
+    ///     `recentFalseSkipSignals`, runs `evaluateDemotion` and may
+    ///     transition `mode`.
+    ///
+    /// Why divergent: a listen-rewind is a noisier FP signal than an
+    /// explicit "Not an ad" revert (the user might've been distracted, or
+    /// not minded the ad). The 0.05 magnitude reflects that weaker
+    /// confidence; the state-machine bypass reflects "single rewinds
+    /// shouldn't trip mode demotion on their own". Whether N consecutive
+    /// rewinds *should* contribute to demotion is an open eval question
+    /// tracked in `playhead-q45f` — do not change this magnitude or wire
+    /// it through `TrustScoringService` without NarlEvalHarness evidence.
+    ///
     /// skeptical-review-cycle-17 M-1: routed through the atomic
     /// `store.updateProfileIfExists` helper (was a non-atomic
     /// `fetchProfile` → mutate → `upsertProfile` pair). The same two
@@ -4945,8 +4966,14 @@ actor AdDetectionService {
     ///     `TrustScoringService.recordFalseSkipSignal` (which is itself
     ///     atomic via `updateProfileIfExistsCapturing`) landing between
     ///     those hops would be silently overwritten by the carry-forward
-    ///     upsert below — defeating the Bug 4a fix that made
-    ///     TrustScoringService the sole writer of `skipTrustScore`.
+    ///     upsert below — defeating the Bug 4a contract that scopes
+    ///     `skipTrustScore` writes to TrustScoringService and
+    ///     `recordListenRewind` (the two paths defined by the writer
+    ///     policy in `recordListenRewind`'s docstring; C26 H-1,
+    ///     playhead-od4j). `updatePriors` itself does not write
+    ///     `skipTrustScore` — it only carries the existing value
+    ///     through, so any concurrent decrement from either writer must
+    ///     remain visible after this update commits.
     ///
     ///   • M-2 (traitProfileJSON clobber): the previous
     ///     `PodcastProfile(...)` constructor here omitted
@@ -5183,8 +5210,13 @@ actor AdDetectionService {
                     #endif
 
                     // Bug 4a (trust carry-forward): updatePriors does not
-                    // touch `skipTrustScore`. TrustScoringService is the
-                    // sole writer; we copy the existing value through.
+                    // touch `skipTrustScore`. The two writers under the
+                    // current policy (C26 H-1, playhead-od4j; see
+                    // `recordListenRewind` docstring for the full
+                    // contract) are `TrustScoringService` and
+                    // `recordListenRewind`; we copy the existing value
+                    // through so neither writer's decrement is silently
+                    // overwritten by this priors update.
                     return PodcastProfile(
                         podcastId: existing.podcastId,
                         sponsorLexicon: mergedSponsorLexicon,
