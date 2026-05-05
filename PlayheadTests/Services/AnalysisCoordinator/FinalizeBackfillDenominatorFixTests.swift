@@ -427,4 +427,62 @@ struct FinalizeBackfillDenominatorFixTests {
         // and the docstring on `finalizeBackfill`.
         #expect(AnalysisCoordinator.episodeDurationDivergenceWarnRatio == 0.05)
     }
+
+    // MARK: - Source canary: episodeDurationsDiverge actually wired
+    //         into finalizeBackfill (review/v0.5-head-polish C3 L-3)
+
+    /// Source canary that pins the production *call site* of
+    /// `episodeDurationsDiverge`. The cycle-2 unit tests pin the
+    /// predicate's behavior, but a future refactor that deletes the
+    /// `if Self.episodeDurationsDiverge(...)` block from
+    /// `finalizeBackfill` would silently disable the divergence
+    /// warning — the helper would still be present, the unit tests
+    /// would still pass, and no diagnostic would ever fire again.
+    ///
+    /// Why a source canary instead of a behavioral integration test:
+    /// the warning is a `Logger.warning(...)` emission with no
+    /// observable downstream effect on production state. Wiring a
+    /// logger probe into `AnalysisCoordinator` would be a much larger
+    /// surface change than the value gained. A regex check pinned to
+    /// the call site is sufficient defense in depth.
+    @Test("finalizeBackfill calls episodeDurationsDiverge(live:persisted:)")
+    func finalizeBackfillInvokesDivergencePredicate() throws {
+        guard let root = SwiftSourceInspector.repositoryRoot(from: #filePath) else {
+            Issue.record("could not locate repo root")
+            return
+        }
+        let coordinatorURL = root
+            .appendingPathComponent("Playhead", isDirectory: true)
+            .appendingPathComponent("Services", isDirectory: true)
+            .appendingPathComponent("AnalysisCoordinator", isDirectory: true)
+            .appendingPathComponent("AnalysisCoordinator.swift", isDirectory: false)
+        let raw = try String(contentsOf: coordinatorURL, encoding: .utf8)
+        let stripped = SwiftSourceInspector.strippingComments(raw)
+
+        // The match: `Self.episodeDurationsDiverge(` followed somewhere
+        // by `live:` AND `persisted:` argument labels (allowing
+        // whitespace/newlines between since Swift call sites often
+        // wrap). The strip runs over comments first so docstring
+        // mentions don't pin a false positive.
+        let pattern = #"Self\.episodeDurationsDiverge\([^)]*\blive:[^)]*\bpersisted:[^)]*\)"#
+        let regex = try NSRegularExpression(
+            pattern: pattern,
+            options: [.dotMatchesLineSeparators]
+        )
+        let range = NSRange(stripped.startIndex..., in: stripped)
+        let count = regex.numberOfMatches(in: stripped, range: range)
+
+        #expect(
+            count == 1,
+            """
+            Expected exactly 1 production call to \
+            `Self.episodeDurationsDiverge(live:persisted:)` in \
+            AnalysisCoordinator.swift; found \(count). \
+            If you added a second call site, update this canary's \
+            expected count. If you deleted the existing call site in \
+            `finalizeBackfill`, the divergence warning has been silently \
+            disabled — restore the call or update this test deliberately.
+            """
+        )
+    }
 }
