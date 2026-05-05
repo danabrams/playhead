@@ -45,6 +45,18 @@ struct AdDetectionConfig: Sendable {
     /// ef2.6.3: raised from 0.75 to 0.80 per product-approved band spec.
     let autoSkipConfidenceThreshold: Double
 
+    /// playhead-fqc8: Looser auto-skip threshold for spans on the
+    /// `PromotionTrack.classifierSeedQualified` track — i.e. classifier-only
+    /// candidates that picked up an `.acoustic`/`breakAlignment` corroborator
+    /// AND whose stored classifier score is `>= 0.70`. The `0.30` structural
+    /// ceiling on a classifier-only ledger sum makes the standard `0.80`
+    /// threshold unreachable for these spans no matter how strong the
+    /// classifier signal is. The qualified track gives them a separate
+    /// eligibility floor (default `0.50`) that respects the same gate /
+    /// policy guards as the standard path. Setting this `>=
+    /// autoSkipConfidenceThreshold` makes the qualified track no-op.
+    let classifierSeedQualifiedThreshold: Double
+
     /// playhead-gtt9.11: Segment-level UI-candidate threshold. A segment-
     /// aggregated score at or above this value qualifies as a "possible ad"
     /// marker in the UI; below it the segment is telemetry-only. Distinct
@@ -133,6 +145,7 @@ struct AdDetectionConfig: Sendable {
         fmConsensusThreshold: Int = 2,
         markOnlyThreshold: Double = 0.60,
         autoSkipConfidenceThreshold: Double = 0.80,
+        classifierSeedQualifiedThreshold: Double = 0.50,
         segmentUICandidateThreshold: Double = 0.40,
         segmentAutoSkipThreshold: Double = 0.55,
         bracketRefinementEnabled: Bool = true,
@@ -151,6 +164,7 @@ struct AdDetectionConfig: Sendable {
         self.fmConsensusThreshold = fmConsensusThreshold
         self.markOnlyThreshold = markOnlyThreshold
         self.autoSkipConfidenceThreshold = autoSkipConfidenceThreshold
+        self.classifierSeedQualifiedThreshold = classifierSeedQualifiedThreshold
         self.segmentUICandidateThreshold = segmentUICandidateThreshold
         self.segmentAutoSkipThreshold = segmentAutoSkipThreshold
         self.bracketRefinementEnabled = bracketRefinementEnabled
@@ -171,6 +185,7 @@ struct AdDetectionConfig: Sendable {
         fmConsensusThreshold: 2,
         markOnlyThreshold: 0.60,
         autoSkipConfidenceThreshold: 0.80,
+        classifierSeedQualifiedThreshold: 0.50,
         segmentUICandidateThreshold: 0.40,
         segmentAutoSkipThreshold: 0.55,
         bracketRefinementEnabled: true,
@@ -179,6 +194,19 @@ struct AdDetectionConfig: Sendable {
         bracketRefinementMinFineConfidence: 0.20,
         transcriptBoundaryCueEnabled: true
     )
+
+    /// playhead-fqc8: Pure helper that returns the active auto-skip
+    /// threshold for a given `PromotionTrack`. Centralizing the switch
+    /// here (rather than inlining at the call site in the service) keeps
+    /// the threshold lookup unit-testable without spinning up the actor.
+    func effectiveAutoSkipThreshold(for track: PromotionTrack) -> Double {
+        switch track {
+        case .standard:
+            return autoSkipConfidenceThreshold
+        case .classifierSeedQualified:
+            return classifierSeedQualifiedThreshold
+        }
+    }
 }
 
 // MARK: - Bracket Refinement Telemetry
@@ -1045,6 +1073,17 @@ actor AdDetectionService {
         for result in classifierResults {
             let timestamp = Date().timeIntervalSince1970
             let passed = result.adProbability >= config.candidateThreshold
+            // playhead-fqc8 cycle-1 review HIGH-2: the hot path uses the
+            // standard `autoSkipConfidenceThreshold` (0.80) here because the
+            // qualified-track signal — the acoustic-break alignment that
+            // gates `PromotionTrack.classifierSeedQualified` — only becomes
+            // available AFTER fusion runs in `runBackfill`. A classifier-
+            // seeded span the hot path passes on at 0.55 may still be
+            // promoted to `autoSkipEligible` later, once the alignment
+            // evidence joins the ledger and `DecisionMapper.computePromotionTrack`
+            // selects the looser `classifierSeedQualifiedThreshold`. This
+            // hot-path / backfill bifurcation is intentional and is the
+            // central design decision of bead playhead-fqc8.
             let promotesToAutoSkip = result.adProbability >= config.autoSkipConfidenceThreshold
             let action: String
             let thresholdCrossed: Double
@@ -1715,6 +1754,15 @@ actor AdDetectionService {
         let resolvedEpisodePriors = await resolveEpisodePriors()
         let episodeDurationPrior = DurationPrior(resolvedPriors: resolvedEpisodePriors)
 
+        // playhead-fqc8: detect acoustic breaks once for the whole asset
+        // so the per-span `buildEvidenceLedger` can emit a `.breakAlignment`
+        // ledger entry for `.classifierSeed`-anchored spans whose edges
+        // line up with a strong break. Pure computation over the same
+        // `featureWindows` array; safe to hoist out of the loop.
+        let assetAcousticBreaks: [AcousticBreak] = featureWindows.isEmpty
+            ? []
+            : AcousticBreakDetector.detectBreaks(in: featureWindows)
+
         for span in decodedSpans {
             try Task.checkCancellation()
 
@@ -1842,6 +1890,7 @@ actor AdDetectionService {
                 semanticScanResults: semanticScanResults,
                 metadataEntries: metadataEntries,
                 acousticPipelineFusion: acousticPipelineResult.fusion,
+                acousticBreaks: assetAcousticBreaks,
                 catalogMatchSimilarity: spanTopCatalogSimilarity,
                 fusionConfig: fusionConfig
             )
@@ -1872,12 +1921,16 @@ actor AdDetectionService {
             let rawDecision = mapper.map()
 
             // If FM suppression capped to markOnly, override the gate.
+            // playhead-fqc8: preserve `promotionTrack` from the raw mapper
+            // output; the FM-suppression cap only changes the eligibility
+            // gate, not the threshold-selection track.
             let decision: DecisionResult
             if suppressionResult.cappedToMarkOnly {
                 decision = DecisionResult(
                     proposalConfidence: rawDecision.proposalConfidence,
                     skipConfidence: rawDecision.skipConfidence,
-                    eligibilityGate: .cappedByFMSuppression
+                    eligibilityGate: .cappedByFMSuppression,
+                    promotionTrack: rawDecision.promotionTrack
                 )
             } else {
                 decision = rawDecision
@@ -1892,7 +1945,14 @@ actor AdDetectionService {
             // Eligible spans with skipConfidence >= threshold are promoted from
             // detectOnly/logOnly → autoSkipEligible. .suppress is never overridden.
             // Gate-blocked spans are excluded by the eligibilityGate check.
-            let autoSkipThreshold = config.autoSkipConfidenceThreshold
+            //
+            // playhead-fqc8: read the threshold from the decision's
+            // `promotionTrack`. `.standard` keeps `autoSkipConfidenceThreshold`
+            // (0.80 default); `.classifierSeedQualified` switches to the
+            // looser `classifierSeedQualifiedThreshold` (0.50 default) so a
+            // classifier-only span backed by `breakAlignment` corroboration
+            // can clear the gate despite the structural ledger ceiling.
+            let autoSkipThreshold = config.effectiveAutoSkipThreshold(for: decision.promotionTrack)
             let policyAction: SkipPolicyAction
             if (rawPolicyAction == .detectOnly || rawPolicyAction == .logOnly),
                decision.eligibilityGate == .eligible,
@@ -2215,6 +2275,7 @@ actor AdDetectionService {
         semanticScanResults: [SemanticScanResult],
         metadataEntries: [EvidenceLedgerEntry] = [],
         acousticPipelineFusion: [AcousticFeatureFusion.WindowFusion] = [],
+        acousticBreaks: [AcousticBreak] = [],
         catalogMatchSimilarity: Float = 0,
         fusionConfig: FusionWeightConfig
     ) -> [EvidenceLedgerEntry] {
@@ -2240,11 +2301,23 @@ actor AdDetectionService {
         )
 
         // Acoustic entries: from FeatureWindows in the span range.
-        let acousticEntries = buildAcousticLedgerEntries(
+        // playhead-fqc8: pass `acousticBreaks` so a `.classifierSeed`-anchored
+        // span with an aligned break also gets a `.breakAlignment` entry,
+        // which is the gate for `PromotionTrack.classifierSeedQualified`.
+        let acousticAndAlignmentEntries = buildAcousticLedgerEntries(
             span: span,
             featureWindows: featureWindows,
-            fusionConfig: fusionConfig
+            fusionConfig: fusionConfig,
+            acousticBreaks: acousticBreaks
         )
+        // playhead-fqc8 cycle-1 review HIGH-1: the helper returns RMS-drop
+        // `.acoustic` and the alignment corroborator (`.breakAlignment`)
+        // mixed in one list. Split them by source kind here so each family
+        // flows into its own dedicated parameter on
+        // `BackfillEvidenceFusion`, giving each family its own honest
+        // weight cap.
+        let acousticEntries = acousticAndAlignmentEntries.filter { $0.source != .breakAlignment }
+        let breakAlignmentEntries = acousticAndAlignmentEntries.filter { $0.source == .breakAlignment }
 
         // 2026-04-23 Finding 4: music-bed coverage produces its own
         // `.musicBed` ledger entry (distinct EvidenceSourceType) so
@@ -2312,6 +2385,7 @@ actor AdDetectionService {
             acousticEntries: combinedAcousticEntries,
             catalogEntries: catalogLedgerEntries,
             metadataEntries: metadataEntries,
+            breakAlignmentEntries: breakAlignmentEntries,
             mode: config.fmBackfillMode,
             config: fusionConfig
         )
@@ -2480,25 +2554,121 @@ actor AdDetectionService {
     /// evidence into the quorum gate's `distinctKinds.count`. The fused
     /// path was reverted; `.acoustic` once again fires only when
     /// `breakStrength > 0`.
+    ///
+    /// playhead-fqc8: Optionally also emits a `source: .breakAlignment`
+    /// entry when (a) the span has a `.classifierSeed` anchor in its
+    /// provenance AND (b) at least one `AcousticBreak` lies within
+    /// `breakAlignmentTolerance` (±2.0s) of either span boundary AND
+    /// (c) that break's `breakStrength` is `>= breakAlignmentMinStrength`
+    /// (0.5). The alignment entry is what gates
+    /// `PromotionTrack.classifierSeedQualified` in
+    /// `DecisionMapper.computePromotionTrack`. Pass `acousticBreaks: []`
+    /// (the default) to preserve pre-fqc8 behavior at every existing
+    /// call site.
+    ///
+    /// playhead-fqc8 cycle-1 review: the alignment entry now uses the
+    /// dedicated `EvidenceSourceType.breakAlignment` kind (not
+    /// `.acoustic` + `.subSource = .breakAlignment`) so the alignment
+    /// evidence is capped against `FusionWeightConfig.breakAlignmentCap`
+    /// — its own honest budget — instead of stealing from the acoustic
+    /// family budget. Callers that want the entries split by family
+    /// must filter on `source` (see `buildEvidenceLedger`).
     func buildAcousticLedgerEntries(
         span: DecodedSpan,
         featureWindows: [FeatureWindow],
-        fusionConfig: FusionWeightConfig
+        fusionConfig: FusionWeightConfig,
+        acousticBreaks: [AcousticBreak] = []
     ) -> [EvidenceLedgerEntry] {
         let spanWindows = featureWindows.filter { fw in
             fw.startTime < span.endTime && fw.endTime > span.startTime
         }
-        guard !spanWindows.isEmpty else { return [] }
 
-        let breakStrength = RegionScoring.computeRmsDropScore(windows: spanWindows)
-        guard breakStrength > 0 else { return [] }
+        var entries: [EvidenceLedgerEntry] = []
+        if !spanWindows.isEmpty {
+            let breakStrength = RegionScoring.computeRmsDropScore(windows: spanWindows)
+            if breakStrength > 0 {
+                let weight = min(breakStrength * fusionConfig.acousticCap, fusionConfig.acousticCap)
+                entries.append(EvidenceLedgerEntry(
+                    source: .acoustic,
+                    weight: weight,
+                    detail: .acoustic(breakStrength: breakStrength)
+                ))
+            }
+        }
 
-        let weight = min(breakStrength * fusionConfig.acousticCap, fusionConfig.acousticCap)
-        return [EvidenceLedgerEntry(
-            source: .acoustic,
+        // playhead-fqc8: classifier-seed break-alignment corroborator.
+        if let alignment = breakAlignmentEntry(
+            for: span,
+            acousticBreaks: acousticBreaks,
+            fusionConfig: fusionConfig
+        ) {
+            entries.append(alignment)
+        }
+
+        return entries
+    }
+
+    /// playhead-fqc8: Tolerance window (seconds) for matching an
+    /// `AcousticBreak` to either edge of a `.classifierSeed`-anchored
+    /// span. Symmetric (±2.0s on each side).
+    static let breakAlignmentTolerance: Double = 2.0
+
+    /// playhead-fqc8: Minimum `AcousticBreak.breakStrength` required for
+    /// the matched break to count as a corroborator. The 0.5 floor is
+    /// the same threshold the boundary refiner uses to discriminate a
+    /// useful cue from background noise.
+    static let breakAlignmentMinStrength: Double = 0.5
+
+    /// playhead-fqc8: Returns a `.breakAlignment` ledger entry when the
+    /// span carries `.classifierSeed` provenance AND at least one
+    /// `AcousticBreak` aligns to either edge with sufficient strength.
+    ///
+    /// playhead-fqc8 cycle-1 review M-4: the weight now scales with the
+    /// matched break's `breakStrength` so a barely-passing 0.5 strength
+    /// produces a 0.10 contribution while a clean 1.0 strength reaches
+    /// the full `breakAlignmentCap` (default 0.20). The minimum-strength
+    /// gate (0.5) is enforced before this method, so the dynamic-range
+    /// floor is `0.5 × breakAlignmentCap`. Returns `nil` when any
+    /// precondition fails.
+    private func breakAlignmentEntry(
+        for span: DecodedSpan,
+        acousticBreaks: [AcousticBreak],
+        fusionConfig: FusionWeightConfig
+    ) -> EvidenceLedgerEntry? {
+        guard !acousticBreaks.isEmpty else { return nil }
+        let hasClassifierSeed = span.anchorProvenance.contains {
+            if case .classifierSeed = $0 { return true }
+            return false
+        }
+        guard hasClassifierSeed else { return nil }
+
+        let tolerance = Self.breakAlignmentTolerance
+        let minStrength = Self.breakAlignmentMinStrength
+
+        let aligned = acousticBreaks
+            .filter { brk in
+                let nearStart = abs(brk.time - span.startTime) <= tolerance
+                let nearEnd = abs(brk.time - span.endTime) <= tolerance
+                return (nearStart || nearEnd) && brk.breakStrength >= minStrength
+            }
+            .max(by: { $0.breakStrength < $1.breakStrength })
+
+        guard let matched = aligned else { return nil }
+
+        // M-4 strength scaling: 0.5 → 0.10, 1.0 → 0.20 with the default
+        // `breakAlignmentCap = 0.20`. Clamp the strength to [0, 1] so
+        // an out-of-band detector value can't inflate the contribution
+        // past the cap.
+        let normalizedStrength = max(0.0, min(1.0, matched.breakStrength))
+        let weight = min(
+            normalizedStrength * fusionConfig.breakAlignmentCap,
+            fusionConfig.breakAlignmentCap
+        )
+        return EvidenceLedgerEntry(
+            source: .breakAlignment,
             weight: weight,
-            detail: .acoustic(breakStrength: breakStrength)
-        )]
+            detail: .breakAlignment(breakStrength: matched.breakStrength)
+        )
     }
 
     /// playhead-gtt9.16: build a single aggregated `.acoustic` ledger entry
@@ -4261,6 +4431,17 @@ actor AdDetectionService {
             // 71F0C2AE-7260-4D1E-B41A-BCFD5103A641 @ [7006..7008],
             // classifier 0.8154, surfaced as "hotPathCandidate" → invisible
             // to the harness → GT=3, Pred=0, Sec-F1=0.
+            //
+            // playhead-fqc8 cycle-1 review HIGH-2: the hot path keeps the
+            // standard 0.80 threshold here because the qualified-track
+            // signal (the acoustic-break alignment that gates
+            // `PromotionTrack.classifierSeedQualified`) only joins the
+            // ledger after fusion runs in `runBackfill`. A classifier-
+            // seeded span we passed on at, say, 0.55 may still be promoted
+            // to `autoSkipEligible` later via the looser
+            // `classifierSeedQualifiedThreshold` once the alignment
+            // evidence is available. This bifurcation is intentional —
+            // see the header docstring on `PromotionTrack`.
             let promotesToAutoSkip = result.adProbability >= config.autoSkipConfidenceThreshold
             let action: String
             let thresholdCrossed: Double

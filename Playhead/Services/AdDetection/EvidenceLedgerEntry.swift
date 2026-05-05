@@ -55,6 +55,13 @@ enum EvidenceLedgerDetail: Sendable {
     case lexical(matchedCategories: [String])
     /// Acoustic break detection strength.
     case acoustic(breakStrength: Double)
+    /// playhead-fqc8: Acoustic-break alignment with a `.classifierSeed`-anchored
+    /// span boundary. Mirrors `.acoustic`'s shape (single `breakStrength`
+    /// payload) but rides on a distinct `EvidenceSourceType.breakAlignment`
+    /// kind so it can be capped against its own dedicated weight budget
+    /// (`FusionWeightConfig.breakAlignmentCap`) instead of stealing from the
+    /// acoustic family budget.
+    case breakAlignment(breakStrength: Double)
     /// Catalog entries matched for this span.
     case catalog(entryCount: Int)
     /// Ad copy fingerprint matches for this span.
@@ -79,10 +86,11 @@ enum EvidenceLedgerDetail: Sendable {
 
 // MARK: - EvidenceSubSource
 
-/// playhead-epfk: Disambiguates the producer of a `.catalog`-sourced
-/// `EvidenceLedgerEntry`. Two distinct subsystems both emit `source =
-/// .catalog`, and a single unified label hides which one fired:
+/// Disambiguates the producer of an `EvidenceLedgerEntry` whose
+/// `source` is shared by multiple subsystems. Today only one source type
+/// uses sub-source labels:
 ///
+/// **Catalog (`source == .catalog`) — playhead-epfk:**
 ///   - `.transcriptCatalog` — `EvidenceCatalogBuilder` extracts sponsor
 ///     tokens / URLs / promo codes / disclosures deterministically from
 ///     transcript atoms in the *current* episode. Per-backfill, never
@@ -91,6 +99,13 @@ enum EvidenceLedgerDetail: Sendable {
 ///     fingerprint against the cross-episode SQLite store accumulated
 ///     from prior auto-skips and user corrections. Per-span similarity
 ///     in `[0, 1]`.
+///
+/// playhead-fqc8 history: an earlier draft used `subSource ==
+/// .breakAlignment` on an `.acoustic` entry to mark the
+/// `AcousticBreakDetector`-alignment corroborator. That shape was
+/// upgraded to a top-level `EvidenceSourceType.breakAlignment` so the
+/// alignment evidence has its own honest per-source budget instead of
+/// sharing the acoustic family cap.
 ///
 /// `nil` (the default for back-compat constructors) means "source label
 /// is the only producer marker," matching pre-epfk fixtures and call

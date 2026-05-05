@@ -69,6 +69,16 @@ struct FusionWeightConfig: Sendable {
     let lexicalCap: Double
     /// Maximum weight contribution from a single acoustic entry.
     let acousticCap: Double
+    /// playhead-fqc8: Maximum weight contribution from a single
+    /// `.breakAlignment` entry. Distinct from `acousticCap` because
+    /// break-alignment is independent evidence from the RMS-drop family;
+    /// honest scoring requires its own budget. Without this separation,
+    /// a classifier-seeded span could emit an RMS-drop `.acoustic` entry
+    /// AND a `.breakAlignment` entry that each cap independently against
+    /// `acousticCap = 0.20`, silently doubling the documented acoustic
+    /// family budget to 0.40. See `BackfillEvidenceFusion.buildLedger()`
+    /// for the dedicated branch.
+    let breakAlignmentCap: Double
     /// Maximum weight contribution from a single catalog entry.
     let catalogCap: Double
     /// Maximum weight contribution from fingerprint evidence.
@@ -83,6 +93,7 @@ struct FusionWeightConfig: Sendable {
         classifierCap: Double = 0.3,
         lexicalCap: Double = 0.2,
         acousticCap: Double = 0.2,
+        breakAlignmentCap: Double = 0.2,
         catalogCap: Double = 0.2,
         fingerprintCap: Double = 0.25,
         metadataCap: Double = 0.15
@@ -91,6 +102,7 @@ struct FusionWeightConfig: Sendable {
         self.classifierCap = classifierCap
         self.lexicalCap = lexicalCap
         self.acousticCap = acousticCap
+        self.breakAlignmentCap = breakAlignmentCap
         self.catalogCap = catalogCap
         self.fingerprintCap = fingerprintCap
         self.metadataCap = metadataCap
@@ -122,6 +134,14 @@ struct BackfillEvidenceFusion: Sendable {
     let lexicalEntries: [EvidenceLedgerEntry]
     /// Pre-constructed acoustic ledger entries.
     let acousticEntries: [EvidenceLedgerEntry]
+    /// playhead-fqc8: Pre-constructed `.breakAlignment` ledger entries.
+    /// Capped against `config.breakAlignmentCap` (independent from
+    /// `acousticCap`) so the alignment corroborator owns its own family
+    /// budget. Defaults to empty for back-compat. Producer-side, the
+    /// `AdDetectionService.buildAcousticLedgerEntries(...)` helper
+    /// segregates `.breakAlignment` entries from RMS-drop `.acoustic`
+    /// entries; the call site that wires fusion threads them in here.
+    let breakAlignmentEntries: [EvidenceLedgerEntry]
     /// Pre-constructed catalog ledger entries.
     let catalogEntries: [EvidenceLedgerEntry]
     /// Pre-constructed fingerprint ledger entries (Phase 9).
@@ -143,6 +163,7 @@ struct BackfillEvidenceFusion: Sendable {
         catalogEntries: [EvidenceLedgerEntry],
         fingerprintEntries: [EvidenceLedgerEntry] = [],
         metadataEntries: [EvidenceLedgerEntry] = [],
+        breakAlignmentEntries: [EvidenceLedgerEntry] = [],
         mode: FMBackfillMode,
         config: FusionWeightConfig
     ) {
@@ -154,6 +175,7 @@ struct BackfillEvidenceFusion: Sendable {
         self.catalogEntries = catalogEntries
         self.fingerprintEntries = fingerprintEntries
         self.metadataEntries = metadataEntries
+        self.breakAlignmentEntries = breakAlignmentEntries
         self.mode = mode
         self.config = config
     }
@@ -196,23 +218,30 @@ struct BackfillEvidenceFusion: Sendable {
                 // ef2.4.5: modulate FM weight by classificationTrust before capping.
                 // Trust is derived from (CommercialIntent × Ownership) at entry creation
                 // time and stored on the entry. Default of 1.0 preserves pre-ef2.4.5 behavior.
+                // playhead-fqc8 cycle-1 review: preserve subSource uniformly across all
+                // re-stamp loops; today no FM producer sets subSource, but the defensive
+                // pass-through keeps the invariant uniform with the catalog/acoustic loops.
                 let trustModulatedWeight = entry.weight * entry.classificationTrust
                 let capped = EvidenceLedgerEntry(
                     source: .fm,
                     weight: min(trustModulatedWeight, config.fmCap),
                     detail: entry.detail,
-                    classificationTrust: entry.classificationTrust
+                    classificationTrust: entry.classificationTrust,
+                    subSource: entry.subSource
                 )
                 ledger.append(capped)
             }
         }
 
-        // Lexical entries: always included
+        // Lexical entries: always included.
+        // playhead-fqc8 cycle-1 review: preserve subSource uniformly per
+        // the family-cap invariant; no current lexical producer sets it.
         for entry in lexicalEntries {
             let capped = EvidenceLedgerEntry(
                 source: .lexical,
                 weight: min(entry.weight, config.lexicalCap),
-                detail: entry.detail
+                detail: entry.detail,
+                subSource: entry.subSource
             )
             ledger.append(capped)
         }
@@ -225,11 +254,36 @@ struct BackfillEvidenceFusion: Sendable {
         // lets the quorum gate's `distinctKinds.count` increment.
         // Both `.acoustic` and `.musicBed` share the acoustic family
         // weight budget (`config.acousticCap`), so the cap is the same.
+        // playhead-fqc8 cycle-1 review: continue to preserve
+        // `entry.subSource` per the uniform-invariant (no producer in
+        // this loop currently sets it now that breakAlignment moved to
+        // its own source kind, but the pass-through stays defensive).
         for entry in acousticEntries {
             let capped = EvidenceLedgerEntry(
                 source: entry.source,
                 weight: min(entry.weight, config.acousticCap),
-                detail: entry.detail
+                detail: entry.detail,
+                subSource: entry.subSource
+            )
+            ledger.append(capped)
+        }
+
+        // playhead-fqc8: BreakAlignment entries — independent evidence
+        // family from the RMS-drop `.acoustic` entries above. Capped
+        // against `config.breakAlignmentCap` so the alignment evidence
+        // owns its own honest budget (default 0.20). The previous design
+        // emitted `.acoustic` + `subSource: .breakAlignment` and capped
+        // the alignment entry against `acousticCap`, silently letting
+        // the acoustic family contribute up to 2 × `acousticCap` = 0.40
+        // for classifier-seeded spans. The cycle-1 skeptical review
+        // flagged this as a family-budget violation — moving the entry
+        // to its own kind + cap fixes it.
+        for entry in breakAlignmentEntries {
+            let capped = EvidenceLedgerEntry(
+                source: .breakAlignment,
+                weight: min(entry.weight, config.breakAlignmentCap),
+                detail: entry.detail,
+                subSource: entry.subSource
             )
             ledger.append(capped)
         }
@@ -249,12 +303,15 @@ struct BackfillEvidenceFusion: Sendable {
             ledger.append(capped)
         }
 
-        // Fingerprint entries: always included (Phase 9)
+        // Fingerprint entries: always included (Phase 9).
+        // playhead-fqc8 cycle-1 review: preserve subSource uniformly per
+        // the family-cap invariant; no current fingerprint producer sets it.
         for entry in fingerprintEntries {
             let capped = EvidenceLedgerEntry(
                 source: .fingerprint,
                 weight: min(entry.weight, config.fingerprintCap),
-                detail: entry.detail
+                detail: entry.detail,
+                subSource: entry.subSource
             )
             ledger.append(capped)
         }
@@ -265,6 +322,9 @@ struct BackfillEvidenceFusion: Sendable {
         // fusion but cannot trigger a skip on its own — the corroboration gate in
         // `DecisionMapper.computeGate()` enforces that requirement separately.
         // Excess weight is clamped (NOT redistributed) and audited via the clamp.
+        // playhead-fqc8 cycle-1 review: `FusionBudgetClamp.clamp` already
+        // preserves the input entry's subSource (it re-stamps weight only),
+        // so the uniform-invariant holds for metadata entries as well.
         let metadataClamp = FusionBudgetClamp(sourceWeightCap: config.metadataCap)
         for entry in metadataEntries {
             let clamped = metadataClamp.clamp(entry, logger: Self.logger)
@@ -273,6 +333,38 @@ struct BackfillEvidenceFusion: Sendable {
 
         return ledger
     }
+}
+
+// MARK: - PromotionTrack (playhead-fqc8)
+
+/// Selects which auto-skip threshold applies to a `DecisionResult`.
+///
+/// Path-2 of playhead-fqc8: a classifier-only span hits a structural
+/// ceiling at `classifierCap × 1.0 = 0.30` even when the classifier is
+/// fully confident. The `0.80` standard auto-skip threshold is therefore
+/// unreachable for those spans no matter how strong the classifier
+/// signal is. `.classifierSeedQualified` opts a span into a separate
+/// (lower) eligibility threshold IFF a quorum of independent corroborators
+/// has fired:
+///
+///   1. Span anchor provenance contains `.classifierSeed`.
+///   2. The ledger contains a `.classifier(score:)` entry whose stored
+///      score is `>= 0.70`.
+///   3. The ledger contains an entry with `source == .breakAlignment`.
+///
+/// The track is consumed by the AdDetectionService auto-skip gate;
+/// `proposalConfidence` and `skipConfidence` are NEVER modified by
+/// this decision (scores stay honest — the consumer chooses the
+/// threshold).
+/// playhead-fqc8 cycle-1 review LOW-1: dropped `Codable` conformance — the
+/// track is not persisted in any artifact today, and adding a conformance
+/// "just in case" creates a maintenance liability if persistence is ever
+/// added with a different shape. Restore it (with a migration plan) when
+/// a persisted artifact actually needs the field. `Hashable` is kept so
+/// the track works with set membership / dictionary keys cheaply.
+enum PromotionTrack: String, Sendable, Equatable, Hashable {
+    case standard
+    case classifierSeedQualified
 }
 
 // MARK: - DecisionResult
@@ -288,6 +380,22 @@ struct DecisionResult: Sendable, Equatable {
     let skipConfidence: Double
     /// Whether this span is actionable. A blocked gate does not reduce the score.
     let eligibilityGate: SkipEligibilityGate
+    /// playhead-fqc8: Which auto-skip threshold applies to this decision. Default
+    /// `.standard`; promoted to `.classifierSeedQualified` only when the quorum
+    /// described on `PromotionTrack` is satisfied. Score fields are unaffected.
+    let promotionTrack: PromotionTrack
+
+    init(
+        proposalConfidence: Double,
+        skipConfidence: Double,
+        eligibilityGate: SkipEligibilityGate,
+        promotionTrack: PromotionTrack = .standard
+    ) {
+        self.proposalConfidence = proposalConfidence
+        self.skipConfidence = skipConfidence
+        self.eligibilityGate = eligibilityGate
+        self.promotionTrack = promotionTrack
+    }
 }
 
 // MARK: - DecisionMapper
@@ -384,10 +492,18 @@ struct DecisionMapper: Sendable {
         }
         let skipConfidence = effectiveConfidence
 
+        // playhead-fqc8: Promotion-track selection. Computed AFTER the
+        // gate so the score-mapping pipeline above is unchanged. The
+        // track is read by the AdDetectionService auto-skip gate to
+        // pick a threshold; it never modifies `proposalConfidence` or
+        // `skipConfidence`.
+        let promotionTrack = computePromotionTrack()
+
         return DecisionResult(
             proposalConfidence: proposalConfidence,
             skipConfidence: skipConfidence,
-            eligibilityGate: gate
+            eligibilityGate: gate,
+            promotionTrack: promotionTrack
         )
     }
 
@@ -408,6 +524,64 @@ struct DecisionMapper: Sendable {
         // future non-identity profiles from conflating the two distributions.
         let clamped = max(0.0, min(1.0, raw))
         return calibrationProfile.calibrator(for: .fusedScore).calibrate(clamped)
+    }
+
+    /// playhead-fqc8: Compute the promotion track for this span.
+    ///
+    /// Returns `.classifierSeedQualified` IFF all four of:
+    ///   1. `span.anchorProvenance` contains a `.classifierSeed` case.
+    ///   2. `span.anchorProvenance` contains NO FM-class anchor
+    ///      (`.fmConsensus` or `.fmAcousticCorroborated`). The qualified
+    ///      track is for classifier-only candidates; FM-corroborated spans
+    ///      have a separate path to clear the standard 0.80 gate on their
+    ///      own merits, and conflating the two would broaden the track
+    ///      beyond the bead's framing. Cycle-1 skeptical review M-2.
+    ///   3. The ledger contains a `.classifier(score:)` entry whose
+    ///      stored score is `>= 0.70`.
+    ///   4. The ledger contains an entry with `source == .breakAlignment`
+    ///      (the dedicated alignment evidence kind introduced in cycle-1
+    ///      to honor the acoustic family budget).
+    ///
+    /// Otherwise returns `.standard`.
+    ///
+    /// This decision NEVER modifies `proposalConfidence` or `skipConfidence`.
+    /// It is a pure threshold-selector consumed by the AdDetectionService
+    /// auto-skip gate.
+    private func computePromotionTrack() -> PromotionTrack {
+        let hasClassifierSeed = span.anchorProvenance.contains {
+            if case .classifierSeed = $0 { return true }
+            return false
+        }
+        guard hasClassifierSeed else { return .standard }
+
+        // playhead-fqc8 cycle-1 M-2: the qualified track is exclusively
+        // for classifier-only candidates. A span carrying an FM-class
+        // anchor has independent FM evidence and must clear the 0.80
+        // standard gate via the standard track.
+        let hasFMAnchor = span.anchorProvenance.contains { ref in
+            switch ref {
+            case .fmConsensus, .fmAcousticCorroborated:
+                return true
+            default:
+                return false
+            }
+        }
+        guard !hasFMAnchor else { return .standard }
+
+        let hasStrongClassifier = ledger.contains { entry in
+            if case .classifier(let score) = entry.detail, score >= 0.70 {
+                return true
+            }
+            return false
+        }
+        guard hasStrongClassifier else { return .standard }
+
+        let hasBreakAlignment = ledger.contains { entry in
+            entry.source == .breakAlignment
+        }
+        guard hasBreakAlignment else { return .standard }
+
+        return .classifierSeedQualified
     }
 
     /// Determine the eligibility gate by reading `anchorProvenance` directly.
@@ -459,8 +633,14 @@ struct DecisionMapper: Sendable {
         // non-corroborating (it carries no in-audio signal when its
         // adProbability is zero). Any other in-audio source — or a
         // classifier entry with a non-zero weight — counts as corroboration.
+        // playhead-fqc8 cycle-2 review HIGH-2: include `.breakAlignment` —
+        // boundary-alignment is real in-audio signal corroborating the
+        // metadata cue. Same root cause as HIGH-1: the cycle-1 family-budget
+        // fix promoted alignment to its own kind, and any gate that
+        // previously accepted the alignment corroborator under `.acoustic`
+        // must explicitly accept `.breakAlignment` now.
         let inAudioCorroboratingSources: Set<EvidenceSourceType> = [
-            .lexical, .acoustic, .musicBed, .catalog, .fingerprint, .fm
+            .lexical, .acoustic, .musicBed, .catalog, .fingerprint, .fm, .breakAlignment
         ]
         let hasInAudioCorroboration = ledger.contains { entry in
             if inAudioCorroboratingSources.contains(entry.source) {
@@ -511,7 +691,15 @@ struct DecisionMapper: Sendable {
     /// gate cannot be satisfied by a vacuous classifier=0 record alone. Sister gates
     /// `metadataCorroborationGate` and `quorumGateForFMConsensus` apply the same filter — keep in sync.
     private func quorumGateForFMAcoustic() -> SkipEligibilityGate {
-        let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .catalog, .acoustic, .musicBed, .fingerprint]
+        // playhead-fqc8 cycle-2 review HIGH-1: include `.breakAlignment` in the
+        // corroboration set. Pre-fqc8 the alignment corroborator was emitted as
+        // `source: .acoustic + subSource: .breakAlignment` and so satisfied this
+        // gate via `.acoustic`. The cycle-1 family-budget fix promoted alignment
+        // to its own top-level kind (`.breakAlignment`); without adding it here,
+        // a span anchored by `.fmAcousticCorroborated` whose only non-FM evidence
+        // is the boundary-alignment entry would silently regress to
+        // `.blockedByEvidenceQuorum` where it previously cleared.
+        let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .catalog, .acoustic, .musicBed, .fingerprint, .breakAlignment]
         let hasExternalCorroboration = ledger.contains { entry in
             if nonClassifierExternal.contains(entry.source) {
                 return true

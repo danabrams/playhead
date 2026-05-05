@@ -92,12 +92,16 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
         switch source {
         case .lexical, .classifier:
             return .textual
-        case .acoustic, .musicBed:
+        case .acoustic, .musicBed, .breakAlignment:
             // musicBed is a peer of acoustic: same modality (audio
             // features), different trigger geometry (interior coverage
             // vs. boundary RMS drop). Same family keeps the orthogonal-
             // corroboration rule honest — two acoustic-family signals
             // still count as one for trust updates.
+            // playhead-fqc8: breakAlignment is also an audio-derived
+            // signal, so it shares the acoustic family for trust-update
+            // orthogonality even though it has a distinct per-source
+            // weight cap (`breakAlignmentCap`).
             return .acoustic
         case .fm:
             return .model
@@ -237,6 +241,12 @@ struct SourceTrustProfile: Sendable, Equatable {
         // Mirror the MusicBracket prior (Beta(5,5) → 0.50) until we have
         // replay-corpus evidence to update it.
         .musicBed:    BetaPosterior(alpha: 5, beta: 5),   // 0.50 — music-bed coverage
+        // playhead-fqc8 cycle-2 review LOW-1: break-alignment is an
+        // acoustic-family peer of `.acoustic` (different trigger
+        // geometry: boundary-RMS-alignment vs. interior RMS-drop).
+        // Mirror its acoustic-family peer prior (Beta(5,5) → 0.50)
+        // until replay-corpus evidence is available to update it.
+        .breakAlignment: BetaPosterior(alpha: 5, beta: 5), // 0.50 — boundary alignment
     ]
 
     // MARK: - Query

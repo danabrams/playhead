@@ -293,6 +293,12 @@ struct SpanFinalizer: Sendable {
         var result = spans
         // Sort by ascending confidence — demote lowest confidence first.
         // Secondary sort by index for determinism when confidences are equal.
+        // playhead-fqc8 cycle-1 review M-1: qualified-track spans live at
+        // ~0.50–0.60 skipConfidence and thus get demoted before standard-track
+        // spans (≥0.80) when the action-cap fires. Intentional today —
+        // dense-ad episodes should prefer high-confidence skips over
+        // speculative ones — but track via playhead-fqc8-actioncap if real
+        // harness data shows damage.
         let sorted = autoSkipSpans.sorted { a, b in
             if a.confidence < b.confidence { return true }
             if a.confidence > b.confidence { return false }

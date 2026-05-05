@@ -1008,6 +1008,527 @@ struct BackfillEvidenceFusionTests {
         #expect(lexEntries.count == 1)
         #expect(abs(lexEntries[0].weight - 0.18) < 0.001, "Lexical weight should not be modulated by trust")
     }
+
+    // MARK: - playhead-fqc8 — PromotionTrack quorum (classifier-seeded)
+
+    /// Helper: build a fusion ledger from a span + entries, then run DecisionMapper.
+    /// `classifierScore` controls the always-on classifier ledger entry that
+    /// `buildLedger()` synthesizes; explicit `extraClassifierEntries` lets a
+    /// test inject additional `.classifier(score:)` records that the
+    /// promotion gate inspects.
+    private func mapDecision(
+        span: DecodedSpan,
+        classifierScore: Double,
+        acousticEntries: [EvidenceLedgerEntry] = [],
+        lexicalEntries: [EvidenceLedgerEntry] = [],
+        catalogEntries: [EvidenceLedgerEntry] = [],
+        fmEntries: [EvidenceLedgerEntry] = [],
+        metadataEntries: [EvidenceLedgerEntry] = [],
+        breakAlignmentEntries: [EvidenceLedgerEntry] = [],
+        transcriptQuality: TranscriptQuality = .good
+    ) -> DecisionResult {
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: classifierScore,
+            fmEntries: fmEntries,
+            lexicalEntries: lexicalEntries,
+            acousticEntries: acousticEntries,
+            catalogEntries: catalogEntries,
+            metadataEntries: metadataEntries,
+            breakAlignmentEntries: breakAlignmentEntries,
+            mode: .full,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: ledger,
+            config: defaultConfig(),
+            transcriptQuality: transcriptQuality
+        )
+        return mapper.map()
+    }
+
+    @Test("Classifier-only span with no break alignment sits on standard promotion track")
+    func classifierOnlyStandardTrack() {
+        // Classifier-seeded span, classifierScore=0.90, NO breakAlignment
+        // entry → quorum NOT met → standard track. Score is bounded by
+        // the 0.30 classifier ceiling.
+        let span = makeSpan(anchorProvenance: [
+            .classifierSeed(regionId: "x", score: 0.90)
+        ])
+        let result = mapDecision(span: span, classifierScore: 0.90)
+        #expect(result.promotionTrack == .standard,
+                "No breakAlignment entry → must remain on standard track")
+        #expect(result.skipConfidence < 0.80,
+                "Classifier-only span ceiling is 0.30; standard 0.80 gate is unreachable")
+    }
+
+    @Test("Classifier-seeded span with break-alignment entry promotes to qualified track")
+    func classifierSeededQualifiedPromotion() {
+        // classifierScore=0.82 (>= 0.70), classifierSeed provenance,
+        // .breakAlignment entry → quorum met → qualified track.
+        // Score must stay honest (no clamp to either threshold).
+        let span = makeSpan(anchorProvenance: [
+            .classifierSeed(regionId: "r1", score: 0.82)
+        ])
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.18,
+            detail: .breakAlignment(breakStrength: 0.7)
+        )
+        let result = mapDecision(
+            span: span,
+            classifierScore: 0.82,
+            breakAlignmentEntries: [breakAlignment]
+        )
+        #expect(result.promotionTrack == .classifierSeedQualified,
+                "classifierSeed + classifier>=0.70 + breakAlignment must promote to qualified track")
+        #expect(result.skipConfidence >= 0.40 && result.skipConfidence < 0.80,
+                "Score stays honest: classifier (0.246) + breakAlignment (0.18) ≈ 0.43, far below 0.80 standard gate")
+    }
+
+    @Test("Low classifier score does not qualify for the loose track")
+    func lowClassifierScoreStaysStandard() {
+        // classifierScore=0.65 fails the >= 0.70 component of the quorum.
+        let span = makeSpan(anchorProvenance: [
+            .classifierSeed(regionId: "r1", score: 0.65)
+        ])
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.18,
+            detail: .breakAlignment(breakStrength: 0.7)
+        )
+        let result = mapDecision(
+            span: span,
+            classifierScore: 0.65,
+            breakAlignmentEntries: [breakAlignment]
+        )
+        #expect(result.promotionTrack == .standard,
+                "classifier score 0.65 < 0.70 → must NOT qualify even with breakAlignment")
+    }
+
+    @Test("Lexical-only span with break-alignment entry stays on standard track")
+    func lexicalOnlyWithBreakAlignmentStaysStandard() {
+        // anchorProvenance is empty (no classifierSeed) → never qualified.
+        let span = makeSpan(anchorProvenance: [])
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.18,
+            detail: .breakAlignment(breakStrength: 0.7)
+        )
+        let result = mapDecision(
+            span: span,
+            classifierScore: 0.82,
+            lexicalEntries: [
+                .init(source: .lexical, weight: 0.18, detail: .lexical(matchedCategories: ["url"]))
+            ],
+            breakAlignmentEntries: [breakAlignment]
+        )
+        #expect(result.promotionTrack == .standard,
+                "No classifierSeed provenance → must remain on standard track")
+    }
+
+    @Test("Break alignment without classifierSeed provenance stays on standard track")
+    func fmConsensusWithBreakAlignmentStaysStandard() {
+        // fmConsensus provenance — classifierSeed gate is mandatory.
+        let span = makeSpan(anchorProvenance: [
+            .fmConsensus(regionId: "r1", consensusStrength: 0.9)
+        ])
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.18,
+            detail: .breakAlignment(breakStrength: 0.7)
+        )
+        let result = mapDecision(
+            span: span,
+            classifierScore: 0.82,
+            breakAlignmentEntries: [breakAlignment]
+        )
+        #expect(result.promotionTrack == .standard,
+                "fmConsensus provenance must NOT qualify — classifierSeed gate is mandatory")
+    }
+
+    @Test("Plain acoustic entry without breakAlignment kind does not qualify")
+    func plainAcousticEntryDoesNotQualify() {
+        // classifierSeed + classifier >= 0.70 + plain `.acoustic` entry
+        // (the standard RMS-drop path, no `.breakAlignment` corroborator)
+        // → quorum NOT met.
+        let span = makeSpan(anchorProvenance: [
+            .classifierSeed(regionId: "r1", score: 0.82)
+        ])
+        let plainAcoustic = EvidenceLedgerEntry(
+            source: .acoustic,
+            weight: 0.18,
+            detail: .acoustic(breakStrength: 0.7)
+        )
+        let result = mapDecision(
+            span: span,
+            classifierScore: 0.82,
+            acousticEntries: [plainAcoustic]
+        )
+        #expect(result.promotionTrack == .standard,
+                "Plain `.acoustic` entry is not a breakAlignment corroborator")
+    }
+
+    /// playhead-fqc8 cycle-1 review M-2: the qualified track is for
+    /// classifier-only candidates. A span carrying both a classifierSeed
+    /// AND an FM-class anchor (e.g. `.fmConsensus`) must NOT qualify even
+    /// if the rest of the quorum is met — it has independent FM evidence
+    /// and should clear the standard 0.80 gate via the standard track.
+    @Test("classifierSeed + fmConsensus + breakAlignment stays on standard track (M-2 fix)")
+    func classifierSeedPlusFMConsensusStaysStandard() {
+        let span = makeSpan(anchorProvenance: [
+            .classifierSeed(regionId: "r1", score: 0.85),
+            .fmConsensus(regionId: "r1", consensusStrength: 0.9)
+        ])
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.18,
+            detail: .breakAlignment(breakStrength: 0.7)
+        )
+        let result = mapDecision(
+            span: span,
+            classifierScore: 0.82,
+            breakAlignmentEntries: [breakAlignment]
+        )
+        #expect(result.promotionTrack == .standard,
+                "FM-class anchor coexisting with classifierSeed must keep the span on the standard track")
+    }
+
+    @Test("PromotionTrack default for legacy 3-arg DecisionResult is .standard")
+    func promotionTrackDefaultIsStandard() {
+        let decision = DecisionResult(
+            proposalConfidence: 0.5,
+            skipConfidence: 0.5,
+            eligibilityGate: .eligible
+        )
+        #expect(decision.promotionTrack == .standard,
+                "Back-compat: 3-arg init must default promotionTrack to .standard")
+    }
+
+    /// playhead-fqc8 cycle-1 review HIGH-1: the acoustic family budget
+    /// (`acousticCap`) and the breakAlignment family budget
+    /// (`breakAlignmentCap`) must be ENFORCED INDEPENDENTLY. The previous
+    /// design emitted `.acoustic` + `subSource: .breakAlignment` and capped
+    /// each entry against `acousticCap`, letting the acoustic family
+    /// contribute up to 2 × `acousticCap` = 0.40. Pin the fix here: an
+    /// over-cap RMS-drop AND an over-cap breakAlignment must each be
+    /// capped against their OWN budget independently, AND the
+    /// proposalConfidence must reflect both budgets summed honestly.
+    @Test("Acoustic family budget is independent from breakAlignment budget (HIGH-1)")
+    func acousticAndBreakAlignmentBudgetsAreIndependent() {
+        let span = makeSpan(anchorProvenance: [
+            .classifierSeed(regionId: "r1", score: 0.82)
+        ])
+        // BOTH entries arrive over-cap; the fusion code must cap each
+        // against its own per-source budget independently.
+        let rmsDrop = EvidenceLedgerEntry(
+            source: .acoustic,
+            weight: 0.50,  // way above acousticCap
+            detail: .acoustic(breakStrength: 1.0)
+        )
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.50,  // way above breakAlignmentCap
+            detail: .breakAlignment(breakStrength: 1.0)
+        )
+        let cfg = defaultConfig()
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.0,
+            fmEntries: [],
+            lexicalEntries: [],
+            acousticEntries: [rmsDrop],
+            catalogEntries: [],
+            breakAlignmentEntries: [breakAlignment],
+            mode: .full,
+            config: cfg
+        )
+        let ledger = fusion.buildLedger()
+
+        // Find the post-cap acoustic and breakAlignment entries.
+        let acousticEntries = ledger.filter { $0.source == .acoustic }
+        let breakAlignmentEntries = ledger.filter { $0.source == .breakAlignment }
+        try? #require(acousticEntries.count == 1)
+        try? #require(breakAlignmentEntries.count == 1)
+
+        // Each family is independently capped against its own budget.
+        #expect(acousticEntries[0].weight <= cfg.acousticCap + 1e-9,
+                "Acoustic family must be capped at acousticCap independently")
+        #expect(breakAlignmentEntries[0].weight <= cfg.breakAlignmentCap + 1e-9,
+                "BreakAlignment family must be capped at breakAlignmentCap independently")
+
+        // The mapper sums each family's contribution honestly: if both
+        // caps fire at 0.20 each, the ledger contributes ~0.40 from the
+        // two acoustic-modality kinds combined — the documented design.
+        let mapper = DecisionMapper(span: span, ledger: ledger, config: cfg)
+        let result = mapper.map()
+        #expect(result.proposalConfidence >= cfg.acousticCap + cfg.breakAlignmentCap - 1e-9,
+                "proposalConfidence must reflect BOTH budgets summed honestly (≥ 0.40)")
+    }
+
+    // MARK: - playhead-fqc8 cycle-2 review — gate boundary tests
+
+    /// playhead-fqc8 cycle-2 review HIGH-1: a span anchored by
+    /// `.fmAcousticCorroborated` whose ONLY non-FM evidence is a
+    /// `.breakAlignment` ledger entry must clear `quorumGateForFMAcoustic`.
+    /// Pre-fqc8 the alignment corroborator was emitted as
+    /// `source: .acoustic + subSource: .breakAlignment` and satisfied the gate
+    /// via `.acoustic`. The cycle-1 family-budget fix promoted alignment to
+    /// its own top-level kind; without adding `.breakAlignment` to the
+    /// corroboration set, this case silently regresses to
+    /// `.blockedByEvidenceQuorum`. Pin the fix here so the regression
+    /// boundary is guarded.
+    @Test("fmAcousticCorroborated + breakAlignment-only corroboration is eligible (HIGH-1)")
+    func fmAcousticCorroboratedWithBreakAlignmentIsEligible() {
+        let span = makeSpan(anchorProvenance: [
+            .fmAcousticCorroborated(regionId: "r2", breakStrength: 0.7)
+        ])
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.18,
+            detail: .breakAlignment(breakStrength: 0.7)
+        )
+        let result = mapDecision(
+            span: span,
+            classifierScore: 0.0,  // no classifier corroboration
+            breakAlignmentEntries: [breakAlignment]
+        )
+        #expect(result.eligibilityGate == .eligible,
+                "breakAlignment must satisfy the FM-acoustic corroboration set")
+    }
+
+    /// playhead-fqc8 cycle-2 review HIGH-2: a span with only metadata + a
+    /// `.breakAlignment` ledger entry must resolve to `.eligible` — the
+    /// boundary-alignment kind is real in-audio signal corroborating the
+    /// metadata cue. Same root cause as HIGH-1: the cycle-1 family-budget
+    /// fix promoted alignment to its own kind, and any gate that
+    /// previously accepted the alignment corroborator under `.acoustic`
+    /// must explicitly accept `.breakAlignment` now.
+    @Test("metadata + breakAlignment-only corroboration is eligible (HIGH-2)")
+    func metadataWithBreakAlignmentIsEligible() {
+        let span = makeSpan(anchorProvenance: [])  // no FM provenance
+        let metadata = EvidenceLedgerEntry(
+            source: .metadata,
+            weight: 0.10,
+            detail: .metadata(
+                cueCount: 1,
+                sourceField: .description,
+                dominantCueType: .disclosure
+            )
+        )
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.18,
+            detail: .breakAlignment(breakStrength: 0.7)
+        )
+        let result = mapDecision(
+            span: span,
+            classifierScore: 0.0,
+            metadataEntries: [metadata],
+            breakAlignmentEntries: [breakAlignment]
+        )
+        #expect(result.eligibilityGate == .eligible,
+                "breakAlignment must satisfy the metadata corroboration gate")
+    }
+
+    /// playhead-fqc8 cycle-2 review M-4: the FM-anchor exclusion guard in
+    /// `computePromotionTrack` must fire for `.fmAcousticCorroborated` too,
+    /// not just `.fmConsensus`. The existing FM-coexistence test only
+    /// covered `.fmConsensus`. Pin the guard's coverage of the second
+    /// FM-class anchor case here so a future refactor can't silently
+    /// loosen the exclusion.
+    @Test("classifierSeed + fmAcousticCorroborated + breakAlignment stays on standard track (M-4)")
+    func classifierSeedPlusFMAcousticStaysStandard() {
+        let span = makeSpan(anchorProvenance: [
+            .classifierSeed(regionId: "r1", score: 0.85),
+            .fmAcousticCorroborated(regionId: "r1", breakStrength: 0.7)
+        ])
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.18,
+            detail: .breakAlignment(breakStrength: 0.7)
+        )
+        let result = mapDecision(
+            span: span,
+            classifierScore: 0.82,
+            breakAlignmentEntries: [breakAlignment]
+        )
+        #expect(result.promotionTrack == .standard,
+                ".fmAcousticCorroborated coexisting with classifierSeed must keep the span on the standard track")
+    }
+
+    /// playhead-fqc8 cycle-2 review: `.userCorrection` is NOT an FM-class
+    /// anchor — only `.fmConsensus` and `.fmAcousticCorroborated` are.
+    /// A span anchored by `.classifierSeed` + `.userCorrection` with the
+    /// rest of the quorum met (classifier ≥ 0.70 + breakAlignment) MUST
+    /// promote to `.classifierSeedQualified`. Pin this so a future
+    /// refactor cannot accidentally treat `.userCorrection` as FM-class.
+    @Test("classifierSeed + userCorrection still qualifies for the loose track")
+    func classifierSeedPlusUserCorrectionQualifies() {
+        let span = makeSpan(anchorProvenance: [
+            .classifierSeed(regionId: "r1", score: 0.85),
+            .userCorrection(correctionId: "x", reportedTime: 100.0)
+        ])
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.18,
+            detail: .breakAlignment(breakStrength: 0.7)
+        )
+        let result = mapDecision(
+            span: span,
+            classifierScore: 0.82,
+            breakAlignmentEntries: [breakAlignment]
+        )
+        #expect(result.promotionTrack == .classifierSeedQualified,
+                "userCorrection is not FM-class — quorum still satisfied → qualified track")
+    }
+
+    /// Cycle-3 review (score-honesty contract): two `DecisionMapper`
+    /// invocations with byte-identical ledgers but spans whose anchor
+    /// provenance differs (one routes to `.standard`, the other to
+    /// `.classifierSeedQualified`) must emit equal `proposalConfidence`
+    /// and `skipConfidence`. The track is a pure threshold-selector
+    /// consumed downstream — never a score modulator.
+    @Test("Score-honesty contract: identical ledgers produce identical scores across promotion tracks")
+    func promotionTrackDoesNotMutateScore() {
+        // Same ledger entries for both mappers. Distinguish only by
+        // anchor provenance and (for the qualified track) the addition
+        // of the .breakAlignment entry that gates the track. We then
+        // re-run the standard-track mapper with the SAME ledger so the
+        // ledger itself is byte-identical between the two map() calls.
+        let breakAlignment = EvidenceLedgerEntry(
+            source: .breakAlignment,
+            weight: 0.18,
+            detail: .breakAlignment(breakStrength: 0.7)
+        )
+        let classifier = EvidenceLedgerEntry(
+            source: .classifier,
+            weight: 0.30,
+            detail: .classifier(score: 0.85)
+        )
+        let sharedLedger = [classifier, breakAlignment]
+
+        // Standard-track span: no .classifierSeed → standard.
+        let standardSpan = makeSpan(anchorProvenance: [
+            .fmConsensus(regionId: "r1", consensusStrength: 0.9)
+        ])
+        let standardMapper = DecisionMapper(
+            span: standardSpan,
+            ledger: sharedLedger,
+            config: defaultConfig(),
+            transcriptQuality: .good
+        )
+        let standardResult = standardMapper.map()
+
+        // Qualified-track span: classifierSeed + no FM-class anchor +
+        // classifier score >= 0.70 + .breakAlignment entry → qualified.
+        let qualifiedSpan = makeSpan(anchorProvenance: [
+            .classifierSeed(regionId: "r1", score: 0.85)
+        ])
+        let qualifiedMapper = DecisionMapper(
+            span: qualifiedSpan,
+            ledger: sharedLedger,
+            config: defaultConfig(),
+            transcriptQuality: .good
+        )
+        let qualifiedResult = qualifiedMapper.map()
+
+        // Track selection differs by design.
+        #expect(standardResult.promotionTrack == .standard)
+        #expect(qualifiedResult.promotionTrack == .classifierSeedQualified)
+
+        // But scores are byte-identical: ledger is the only score input.
+        #expect(standardResult.proposalConfidence == qualifiedResult.proposalConfidence,
+                "promotionTrack must NOT mutate proposalConfidence — score is a function of ledger only")
+        #expect(standardResult.skipConfidence == qualifiedResult.skipConfidence,
+                "promotionTrack must NOT mutate skipConfidence — score is a function of ledger only")
+    }
+
+    /// playhead-fqc8 cycle-2 review LOW-2: every cap re-stamp loop in
+    /// `BackfillEvidenceFusion.buildLedger()` must preserve the input
+    /// entry's `subSource`. Today no producer in any family except
+    /// `.catalog` populates `subSource`, but the uniform invariant lets
+    /// future producers add a sub-source label without a hidden silent
+    /// drop. Exercise every family by feeding a hand-constructed entry
+    /// with a non-nil `subSource` and asserting it survives the cap
+    /// re-stamp into the output ledger.
+    @Test("subSource passthrough is preserved across every family's cap re-stamp")
+    func subSourcePassthroughIsPreservedAcrossFamilies() {
+        let span = makeSpan(anchorProvenance: [.fmConsensus(regionId: "r1", consensusStrength: 0.9)])
+        // The `EvidenceSubSource` enum is currently catalog-specific
+        // (`.transcriptCatalog` / `.fingerprintStore`), but the
+        // pass-through invariant is family-agnostic — pick an arbitrary
+        // case and assert it survives every loop.
+        let probe: EvidenceSubSource = .transcriptCatalog
+        let lexEntry = EvidenceLedgerEntry(
+            source: .lexical, weight: 0.10,
+            detail: .lexical(matchedCategories: ["url"]),
+            subSource: probe
+        )
+        let fmEntry = EvidenceLedgerEntry(
+            source: .fm, weight: 0.20,
+            detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1"),
+            subSource: probe
+        )
+        let fingerprintEntry = EvidenceLedgerEntry(
+            source: .fingerprint, weight: 0.10,
+            detail: .fingerprint(matchCount: 1, averageSimilarity: 0.8),
+            subSource: probe
+        )
+        let metadataEntry = EvidenceLedgerEntry(
+            source: .metadata, weight: 0.10,
+            detail: .metadata(cueCount: 1, sourceField: .description, dominantCueType: .disclosure),
+            subSource: probe
+        )
+        let acousticEntry = EvidenceLedgerEntry(
+            source: .acoustic, weight: 0.10,
+            detail: .acoustic(breakStrength: 0.7),
+            subSource: probe
+        )
+        let catalogEntry = EvidenceLedgerEntry(
+            source: .catalog, weight: 0.10,
+            detail: .catalog(entryCount: 2),
+            subSource: probe
+        )
+        let breakAlignmentEntry = EvidenceLedgerEntry(
+            source: .breakAlignment, weight: 0.10,
+            detail: .breakAlignment(breakStrength: 0.7),
+            subSource: probe
+        )
+
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.0,
+            fmEntries: [fmEntry],
+            lexicalEntries: [lexEntry],
+            acousticEntries: [acousticEntry],
+            catalogEntries: [catalogEntry],
+            fingerprintEntries: [fingerprintEntry],
+            metadataEntries: [metadataEntry],
+            breakAlignmentEntries: [breakAlignmentEntry],
+            mode: .full,
+            config: defaultConfig()
+        )
+        let ledger = fusion.buildLedger()
+
+        // Every output entry from a family that received a probed input
+        // must surface `probe` on its `subSource`. The `.classifier` entry
+        // synthesized internally by `buildLedger()` has no producer-side
+        // `subSource`, so exclude it.
+        let producedFamilies: Set<EvidenceSourceType> = [
+            .lexical, .fm, .fingerprint, .metadata,
+            .acoustic, .catalog, .breakAlignment
+        ]
+        for source in producedFamilies {
+            let entries = ledger.filter { $0.source == source }
+            #expect(entries.count == 1,
+                    "expected exactly one \(source) entry in the ledger")
+            #expect(entries.first?.subSource == probe,
+                    "subSource must survive the \(source) cap re-stamp")
+        }
+    }
 }
 
 // MARK: - ClassificationTrustMatrix integration with fusion pipeline (ef2.4.5)

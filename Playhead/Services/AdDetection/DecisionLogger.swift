@@ -275,6 +275,21 @@ extension DecisionLogEntry.LedgerEntry.Detail {
                 matchCount: nil, averageSimilarity: nil,
                 cueCount: nil, sourceField: nil, dominantCueType: nil
             )
+        case .breakAlignment(let breakStrength):
+            // playhead-fqc8: `.breakAlignment` mirrors `.acoustic`'s
+            // single-strength shape but rides on a distinct `kind` string
+            // so NARL replay can distinguish the alignment corroborator
+            // from the RMS-drop entry without inspecting subSource.
+            self.init(
+                kind: "breakAlignment",
+                score: nil,
+                disposition: nil, band: nil, cohortPromptLabel: nil,
+                matchedCategories: nil,
+                breakStrength: breakStrength,
+                entryCount: nil,
+                matchCount: nil, averageSimilarity: nil,
+                cueCount: nil, sourceField: nil, dominantCueType: nil
+            )
         case .catalog(let entryCount):
             self.init(
                 kind: "catalog",
