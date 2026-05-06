@@ -239,12 +239,12 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // Current schema is v21 after the playhead-43ed (B3) migration
-        // that introduced `repeated_ad_cache` + `repeated_ad_cache_outcomes`.
-        // Prior v20 baseline came from the cycle-1 M3 no-op bump that
-        // accompanied the work-journal/H1 reaper additions; v19 dropped
-        // the vestigial `skip_cues` table.
-        #expect(version == 21)
+        // Current schema is v22 after playhead-q45f.1's `ad_listen_rewinds`
+        // table addition. v21 came from playhead-43ed (B3, repeated-ad
+        // cache); v20 was the cycle-1 M3 no-op bump alongside the work-
+        // journal/H1 reaper additions; v19 dropped the vestigial
+        // `skip_cues` table.
+        #expect(version == 22)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")

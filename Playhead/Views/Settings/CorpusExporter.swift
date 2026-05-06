@@ -46,6 +46,9 @@ struct CorpusExportResult: Sendable, Equatable {
     /// playhead-epfk: Number of `ad_window` rows emitted (one JSONL line
     /// per persisted `AdWindow`, carrying `catalogStoreMatchSimilarity`).
     let adWindowCount: Int
+    /// playhead-q45f.1: Number of `listen_rewind` rows emitted (one
+    /// JSONL line per persisted user listen-rewind tap).
+    let listenRewindCount: Int
     /// Absolute path of the sibling `decision-log.jsonl` written by narL,
     /// if it exists in the same Documents directory — exposed so the
     /// caller can build a combined bundle.
@@ -96,6 +99,12 @@ protocol CorpusExportSource: ShadowDecisionsExportSource {
     /// (cold-start before trust-scoring has materialized one). Mocks can
     /// return `nil` to exercise the missing-title JSONL path.
     func fetchPodcastProfile(podcastId: String) async throws -> PodcastProfile?
+    /// playhead-q45f.1: pull the persisted listen-rewind events scoped to
+    /// the asset's ad_windows so the exporter can emit one
+    /// `listen_rewind` JSONL line per recorded user tap. The q45f
+    /// counterfactual gate consumes these via the FrozenTrace
+    /// `listenRewindEvents` field.
+    func fetchListenRewinds(forAssetId assetId: String) async throws -> [AdListenRewindRow]
 }
 
 extension AnalysisStore: CorpusExportSource {
@@ -323,6 +332,24 @@ enum CorpusExporter {
         return try jsonLineData(from: obj)
     }
 
+    /// playhead-q45f.1: serialize an `AdListenRewindRow` as a single
+    /// JSONL line body. The exporter caller threads the source asset's
+    /// id through `analysisAssetId` so the NarlEvalCorpusBuilder can
+    /// scope these events to the FrozenTrace fixture they belong to
+    /// without having to re-resolve the JOIN.
+    static func listenRewindLine(_ row: AdListenRewindRow, analysisAssetId: String) throws -> Data {
+        let obj: [String: Any] = [
+            "type": "listen_rewind",
+            "schemaVersion": schemaVersion,
+            "analysisAssetId": analysisAssetId,
+            "windowId": row.windowId,
+            "podcastId": row.podcastId,
+            "time": row.time,
+            "createdAt": row.createdAt.timeIntervalSince1970,
+        ]
+        return try jsonLineData(from: obj)
+    }
+
     /// Serialize a `CorrectionEvent` as a single JSONL line body. Returns nil if
     /// the row has an unparseable `scope` string, signalling the caller to skip it.
     static func correctionLine(_ event: CorrectionEvent) throws -> Data? {
@@ -418,6 +445,7 @@ enum CorpusExporter {
         var correctionCount = 0
         var skippedCorrectionCount = 0
         var adWindowCount = 0
+        var listenRewindCount = 0
 
         let assets = try await store.fetchAllAssets()
         // playhead-i9dj: cache resolved podcast titles by podcastId so
@@ -508,6 +536,26 @@ enum CorpusExporter {
                 let windowData = try adWindowLine(window)
                 try write(line: windowData, to: handle, hasher: &hasher)
                 adWindowCount += 1
+            }
+
+            // playhead-q45f.1: listen_rewind records for this asset.
+            // The fetch JOINs through `ad_windows.analysisAssetId` so the
+            // result is already scoped. Lookup failure is non-fatal —
+            // matches the per-asset tolerance pattern above. Empty array
+            // simply emits zero `listen_rewind` lines for the asset.
+            let listenRewinds: [AdListenRewindRow]
+            do {
+                listenRewinds = try await store.fetchListenRewinds(forAssetId: asset.id)
+            } catch {
+                logger.warning(
+                    "export: fetchListenRewinds failed for asset=\(asset.id, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting 0 listen_rewind rows for this asset"
+                )
+                listenRewinds = []
+            }
+            for row in listenRewinds {
+                let rowData = try listenRewindLine(row, analysisAssetId: asset.id)
+                try write(line: rowData, to: handle, hasher: &hasher)
+                listenRewindCount += 1
             }
 
             // correction records for this asset
@@ -609,6 +657,7 @@ enum CorpusExporter {
             correctionCount: correctionCount,
             skippedCorrectionCount: skippedCorrectionCount,
             adWindowCount: adWindowCount,
+            listenRewindCount: listenRewindCount,
             decisionLogManifestURL: decisionLogManifestURL,
             shadowManifestURL: shadowManifestURL,
             shadowRowCount: shadowRowCount

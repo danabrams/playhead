@@ -51,10 +51,19 @@ func makeTempDir(prefix: String = "PlayheadTests") throws -> URL {
 /// Creates an AnalysisStore backed by a temporary directory for isolated testing.
 /// The directory is automatically cleaned up when the test process ends.
 func makeTestStore() async throws -> AnalysisStore {
+    let (store, _) = try await makeTestStoreWithDirectory()
+    return store
+}
+
+/// Variant of `makeTestStore` that also returns the backing directory so
+/// callers can probe the underlying SQLite file directly (e.g. with
+/// `probeRowCount`). Used by tests that need to verify orphan-row
+/// contracts that the public store accessors hide behind JOINs.
+func makeTestStoreWithDirectory() async throws -> (AnalysisStore, URL) {
     let dir = try makeTempDir(prefix: "PlayheadTests")
     let store = try AnalysisStore(directory: dir)
     try await store.migrate()
-    return store
+    return (store, dir)
 }
 
 // MARK: - ScanCohort test helpers
@@ -296,6 +305,37 @@ func probeTableExists(in directory: URL, table: String) throws -> Bool {
     defer { sqlite3_finalize(stmt) }
     sqlite3_bind_text(stmt, 1, table, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
     return sqlite3_step(stmt) == SQLITE_ROW
+}
+
+/// q45f.1: count rows in a table directly, bypassing any JOINs the
+/// public store accessor performs. Used to verify orphan-row contracts
+/// (e.g. that a missing-window listen-rewind does NOT insert into
+/// `ad_listen_rewinds`, regardless of whether the JOIN would surface it).
+/// Table name must be a literal in the test (not user input) — caller
+/// is expected to pass a known schema identifier.
+func probeRowCount(in directory: URL, table: String) throws -> Int {
+    let dbURL = directory.appendingPathComponent("analysis.sqlite")
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        throw NSError(domain: "ProbeRowCount", code: 1)
+    }
+    defer { sqlite3_close_v2(db) }
+
+    let sql = "SELECT COUNT(*) FROM \(table)"
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+        let msg = sqlite3_errmsg(db).map { String(cString: $0) } ?? "unknown"
+        throw NSError(
+            domain: "ProbeRowCount",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: msg]
+        )
+    }
+    defer { sqlite3_finalize(stmt) }
+    guard sqlite3_step(stmt) == SQLITE_ROW else {
+        return 0
+    }
+    return Int(sqlite3_column_int64(stmt, 0))
 }
 
 // MARK: - Correction Test Helpers

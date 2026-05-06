@@ -736,11 +736,31 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
     }
 }
 
+/// playhead-q45f.1: one persisted listen-rewind event. Each row records a
+/// single user tap on the "Listen" button of an auto-skipped ad window.
+/// `time` is the episode-time the user was returned to (the snapped start
+/// of the skipped span, mirroring `seek(to: item.adStartTime)` in
+/// `NowPlayingViewModel.handleListenRewind`); `createdAt` is wall-clock
+/// UNIX seconds for ordering and stale-row pruning.
+struct AdListenRewindRow: Sendable, Hashable {
+    let windowId: String
+    let podcastId: String
+    let time: Double
+    let createdAt: Date
+
+    init(windowId: String, podcastId: String, time: Double, createdAt: Date) {
+        self.windowId = windowId
+        self.podcastId = podcastId
+        self.time = time
+        self.createdAt = createdAt
+    }
+}
+
 // MARK: - AnalysisStore actor
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 21
+    nonisolated private static let currentSchemaVersion = 22
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1356,6 +1376,9 @@ actor AnalysisStore {
             // playhead-43ed (B3): RepeatedAdCache table for memoising
             // high-confidence ad-span fingerprints. Bumps schema_version to 21.
             try migrateRepeatedAdCacheV21IfNeeded()
+            // playhead-q45f.1: ad_listen_rewinds event log for the
+            // counterfactual gate replay. Bumps schema_version to 22.
+            try migrateAdListenRewindsV22IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1601,6 +1624,9 @@ actor AnalysisStore {
         // ladder seam. Helper is fully idempotent so it is safe to call
         // here even on fresh fixtures that have no prior `repeated_ad_cache`.
         try migrateRepeatedAdCacheV21IfNeeded()
+        // playhead-q45f.1 (v22): mirror ad_listen_rewinds migration into
+        // the ladder seam. Helper is fully idempotent.
+        try migrateAdListenRewindsV22IfNeeded()
     }
     #endif
 
@@ -2976,6 +3002,37 @@ actor AnalysisStore {
         try setSchemaVersion(21)
     }
 
+    /// playhead-q45f.1: V22 migration — adds `ad_listen_rewinds`, the
+    /// append-only event log of user listen-rewind taps. The q45f
+    /// counterfactual gate replays this log against frozen traces; before
+    /// this table the gate was structurally unsatisfiable.
+    ///
+    /// Schema:
+    ///
+    ///   `ad_listen_rewinds`
+    ///     windowId  TEXT NOT NULL          — ad_windows.id (joined, no FK)
+    ///     podcastId TEXT NOT NULL          — denormalized for fast filters
+    ///     time      REAL NOT NULL          — episode-time of the rewind tap
+    ///     createdAt REAL NOT NULL          — UNIX seconds wall-clock
+    ///
+    /// Idempotent: `CREATE TABLE IF NOT EXISTS` is a no-op on existing
+    /// DBs. Index covers the `(windowId)` JOIN target and the
+    /// `(podcastId, time)` filter used by per-podcast replay paths.
+    private func migrateAdListenRewindsV22IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 22 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS ad_listen_rewinds (
+                windowId  TEXT NOT NULL,
+                podcastId TEXT NOT NULL,
+                time      REAL NOT NULL,
+                createdAt REAL NOT NULL
+            );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_ad_listen_rewinds_window ON ad_listen_rewinds(windowId);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_ad_listen_rewinds_podcast_time ON ad_listen_rewinds(podcastId, time);")
+        try setSchemaVersion(22)
+    }
+
     // MARK: - Repeated-ad cache (playhead-43ed, schema v21)
     //
     // These methods are the persistence-layer surface used by the
@@ -3169,6 +3226,75 @@ actor AnalysisStore {
 
     func repeatedAdCacheClearOutcomes() throws {
         try exec("DELETE FROM repeated_ad_cache_outcomes")
+    }
+
+    // MARK: - Listen-rewind events (playhead-q45f.1, schema v22)
+    //
+    // The q45f counterfactual gate replays user listen-rewind taps against
+    // captured FrozenTraces; before this table, the only durable signal of
+    // a rewind was the indirect mutation of `AdWindowDecision.reverted` +
+    // `PodcastProfile.recentFalseSkipSignals` in `recordListenRewind`.
+    // Replay needs the *event*, not the latest state, so this is a pure
+    // append-only log keyed on (windowId, podcastId, time, createdAt).
+    //
+    // Why no FK on windowId: the table is exporter-fed and may briefly
+    // outlive a window row in the rare race where an asset is deleted
+    // mid-export. The corpus exporter joins via `ad_windows.id` so the
+    // join is the authoritative scope filter — orphan rows are silently
+    // discarded by the JOIN. Time is stored as `REAL` UNIX-seconds, the
+    // same representation as every other timestamp in this schema.
+
+    /// playhead-q45f.1: append a listen-rewind event. Idempotent only by
+    /// row identity — repeated taps on the same window persist as
+    /// distinct rows because the gate's likelihood scoring depends on
+    /// rewind *frequency*, not just "ever rewound".
+    func insertListenRewind(
+        windowId: String,
+        podcastId: String,
+        time: Double,
+        createdAt: Date
+    ) throws {
+        let stmt = try prepare("""
+            INSERT INTO ad_listen_rewinds (windowId, podcastId, time, createdAt)
+            VALUES (?, ?, ?, ?)
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, windowId)
+        bind(stmt, 2, podcastId)
+        bind(stmt, 3, time)
+        bind(stmt, 4, createdAt.timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-q45f.1: fetch every listen-rewind event whose `windowId`
+    /// belongs to an ad_window on the given asset. Returned in
+    /// time-ascending order so consumers (the FrozenTrace export and the
+    /// q45f gate replay) see events in episode-time sequence.
+    func fetchListenRewinds(forAssetId assetId: String) throws -> [AdListenRewindRow] {
+        let sql = """
+            SELECT lr.windowId, lr.podcastId, lr.time, lr.createdAt
+            FROM ad_listen_rewinds lr
+            JOIN ad_windows w ON w.id = lr.windowId
+            WHERE w.analysisAssetId = ?
+            ORDER BY lr.time ASC, lr.createdAt ASC
+        """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        var rows: [AdListenRewindRow] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let win = try requireText(stmt, 0)
+            let pod = try requireText(stmt, 1)
+            let t = sqlite3_column_double(stmt, 2)
+            let created = sqlite3_column_double(stmt, 3)
+            rows.append(AdListenRewindRow(
+                windowId: win,
+                podcastId: pod,
+                time: t,
+                createdAt: Date(timeIntervalSince1970: created)
+            ))
+        }
+        return rows
     }
 
     /// Reads the current schema version from `_meta`. Returns `nil` if the row
@@ -4918,6 +5044,43 @@ actor AnalysisStore {
         bind(stmt, 20, ad.eligibilityGate)
         bind(stmt, 21, ad.catalogStoreMatchSimilarity)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-q45f.1: fetch a single ad_window by primary key. Used by
+    /// `AdDetectionService.recordListenRewind` to read the snapped
+    /// startTime of the window the user is rewinding to (the value that
+    /// is persisted as the `time` of the ad_listen_rewinds event row).
+    /// Returns `nil` when no such row exists — callers must decide
+    /// whether the rewind tap still warrants a placeholder log entry.
+    func fetchAdWindow(id: String) throws -> AdWindow? {
+        let sql = "SELECT * FROM ad_windows WHERE id = ? LIMIT 1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return AdWindow(
+            id: text(stmt, 0),
+            analysisAssetId: text(stmt, 1),
+            startTime: sqlite3_column_double(stmt, 2),
+            endTime: sqlite3_column_double(stmt, 3),
+            confidence: sqlite3_column_double(stmt, 4),
+            boundaryState: text(stmt, 5),
+            decisionState: text(stmt, 6),
+            detectorVersion: text(stmt, 7),
+            advertiser: optionalText(stmt, 8),
+            product: optionalText(stmt, 9),
+            adDescription: optionalText(stmt, 10),
+            evidenceText: optionalText(stmt, 11),
+            evidenceStartTime: optionalDouble(stmt, 12),
+            metadataSource: text(stmt, 13),
+            metadataConfidence: optionalDouble(stmt, 14),
+            metadataPromptVersion: optionalText(stmt, 15),
+            wasSkipped: sqlite3_column_int(stmt, 16) != 0,
+            userDismissedBanner: sqlite3_column_int(stmt, 17) != 0,
+            evidenceSources: optionalText(stmt, 18),
+            eligibilityGate: optionalText(stmt, 19),
+            catalogStoreMatchSimilarity: optionalDouble(stmt, 20)
+        )
     }
 
     func fetchAdWindows(assetId: String) throws -> [AdWindow] {

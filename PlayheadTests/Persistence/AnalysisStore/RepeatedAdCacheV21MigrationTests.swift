@@ -2,10 +2,18 @@
 // playhead-43ed: pin the V21 migration that introduces the
 // `repeated_ad_cache` and `repeated_ad_cache_outcomes` tables.
 //
+// Note (q45f.1): the head schema is now v22 (ad_listen_rewinds was added
+// after the v21 repeated_ad_cache work). These tests exercise the V21
+// migration boundary specifically, but the post-migrate schemaVersion
+// they assert against is the *current head* (v22), since migrate() always
+// climbs the full ladder. The V21-specific structural checks (tables,
+// indexes) are what pin this file's invariants.
+//
 // Coverage targets:
-//   1. Fresh-DB migrate() leaves the schema at v21 with both tables and
-//      both expected indexes present.
-//   2. A v20-shaped DB climbs to v21 — pins the ladder boundary.
+//   1. Fresh-DB migrate() reaches the head schema with both v21 tables
+//      and both expected indexes present.
+//   2. A v20-shaped DB climbs through v21 to head — pins the ladder
+//      boundary.
 //   3. The migration is idempotent: running twice does not duplicate
 //      indexes or fail.
 //   4. Round-trip CRUD via the AnalysisStore-backed adapter writes,
@@ -25,7 +33,7 @@ struct RepeatedAdCacheV21MigrationTests {
         try makeTempDir(prefix: "RepeatedAdCacheV21")
     }
 
-    @Test("fresh DB migrate() lands repeated_ad_cache + outcomes tables and indexes at v21")
+    @Test("fresh DB migrate() lands repeated_ad_cache + outcomes tables and indexes (V21 contribution)")
     func freshDbHasV21Tables() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -34,7 +42,7 @@ struct RepeatedAdCacheV21MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 21)
+        #expect(try await store.schemaVersion() == 22)
         #expect(try probeTableExists(in: dir, table: "repeated_ad_cache"))
         #expect(try probeTableExists(in: dir, table: "repeated_ad_cache_outcomes"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_repeated_ad_cache_lastseen"))
@@ -42,16 +50,16 @@ struct RepeatedAdCacheV21MigrationTests {
         #expect(try probeIndexExists(in: dir, indexName: "idx_repeated_ad_cache_outcomes_ts"))
     }
 
-    @Test("v20-seeded DB picks up repeated_ad_cache at v21")
+    @Test("v20-seeded DB picks up repeated_ad_cache via the v20→v21 step")
     func seededV20ChainsToV21() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        // First, real migrate to build full v21 shape.
+        // First, real migrate to build the full head shape (post-V21 + V22).
         AnalysisStore.resetMigratedPathsForTesting()
         let bootstrap = try AnalysisStore(directory: dir)
         try await bootstrap.migrate()
-        #expect(try await bootstrap.schemaVersion() == 21)
+        #expect(try await bootstrap.schemaVersion() == 22)
 
         // Rewind: drop the v21 tables/indexes and reset _meta to '20' so
         // the v20 → v21 block runs on the next open.
@@ -78,7 +86,7 @@ struct RepeatedAdCacheV21MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 21)
+        #expect(try await store.schemaVersion() == 22)
         #expect(try probeTableExists(in: dir, table: "repeated_ad_cache"))
         #expect(try probeTableExists(in: dir, table: "repeated_ad_cache_outcomes"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_repeated_ad_cache_lastseen"))
@@ -100,8 +108,8 @@ struct RepeatedAdCacheV21MigrationTests {
         try await store.migrate()
         let v2 = try await store.schemaVersion()
 
-        #expect(v1 == 21)
-        #expect(v2 == 21)
+        #expect(v1 == 22)
+        #expect(v2 == 22)
     }
 
     // MARK: - Adapter round-trip
