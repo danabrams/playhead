@@ -164,9 +164,18 @@ struct SettingsL274CopyTests {
         #expect(SettingsL274Copy.sendDiagnosticsButtonLabel == "Send diagnostics")
     }
 
+    @Test func exportDogfoodLogsButtonLabel() {
+        #expect(SettingsL274Copy.exportDogfoodLogsButtonLabel == "Export dogfood logs")
+    }
+
+    @Test func shareDogfoodLogsButtonLabel() {
+        #expect(SettingsL274Copy.shareDogfoodLogsButtonLabel == "Save or share dogfood logs")
+    }
+
     @Test func sendDiagnosticsFooterPromisesNoAutoUpload() {
         // Acceptance: copy must state the bundle is never auto-uploaded.
         #expect(SettingsL274Copy.sendDiagnosticsFooter.contains("Never auto-uploads"))
+        #expect(SettingsL274Copy.sendDiagnosticsFooter.contains("surface-status JSONL"))
     }
 }
 
@@ -461,6 +470,15 @@ struct SettingsL274SourceCanaryTests {
         let l274Src = try read("Playhead/Views/Settings/SettingsL274.swift")
         #expect(!l274Src.lowercased().contains("manual model update"))
         #expect(!l274Src.lowercased().contains("force model update"))
+    }
+
+    @Test func dogfoodExportIsFileFirstAndShareSheetBacked() throws {
+        let viewSrc = try read("Playhead/Views/Settings/SettingsView.swift")
+        let serviceSrc = try read("Playhead/Support/Diagnostics/DiagnosticsExportService.swift")
+        #expect(viewSrc.contains("DogfoodDiagnosticsExporter.export()"))
+        #expect(viewSrc.contains("ShareLink("))
+        #expect(serviceSrc.contains("DogfoodDiagnostics"))
+        #expect(!serviceSrc.contains("install_id_salt"))
     }
 
     @Test func downloadNextViewTodoRemoved() throws {

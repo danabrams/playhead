@@ -81,6 +81,12 @@ struct SettingsView: View {
     /// playhead-l274: scheduler-event tail (up to 50 entries) for the
     /// Diagnostics group. Loaded lazily on section appearance.
     @State private var schedulerEvents: [WorkJournalEntry] = []
+    /// Focused Phase 1.5 dogfood export. Unlike Xcode's full-container
+    /// download, this emits one small support-safe JSON archive containing
+    /// only surface-status JSONL logs.
+    @State private var dogfoodDiagnosticsExportInProgress = false
+    @State private var dogfoodDiagnosticsExportResult: DogfoodDiagnosticsExportResult?
+    @State private var dogfoodDiagnosticsExportError: String?
 
     /// playhead-btoa.4: persisted toggle that drives the per-row
     /// `PipelineProgressStripView` on the Activity screen. Default is
@@ -1547,12 +1553,74 @@ private extension SettingsView {
             }
             .buttonStyle(.plain)
             .listRowBackground(AppColors.surface)
+
+            Button {
+                Task { await exportDogfoodDiagnostics() }
+            } label: {
+                HStack {
+                    Label(SettingsL274Copy.exportDogfoodLogsButtonLabel, systemImage: "doc.zipper")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.accent)
+                    Spacer()
+                    if dogfoodDiagnosticsExportInProgress {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(dogfoodDiagnosticsExportInProgress)
+            .listRowBackground(AppColors.surface)
+
+            if let result = dogfoodDiagnosticsExportResult {
+                ShareLink(
+                    item: result.fileURL,
+                    preview: SharePreview(
+                        SettingsL274Copy.shareDogfoodLogsButtonLabel,
+                        image: Image(systemName: "doc.text")
+                    )
+                ) {
+                    Label(SettingsL274Copy.shareDogfoodLogsButtonLabel, systemImage: "square.and.arrow.up")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.accent)
+                }
+                .listRowBackground(AppColors.surface)
+
+                Text("\(result.fileURL.lastPathComponent) · \(result.logFileCount) logs · \(SettingsViewModel.formattedSize(Int64(result.totalBytes)))")
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.textTertiary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .listRowBackground(AppColors.surface)
+            }
+
+            if let error = dogfoodDiagnosticsExportError {
+                Text(error)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(.red)
+                    .listRowBackground(AppColors.surface)
+            }
         } header: {
             sectionHeader(SettingsL274Copy.diagnosticsHeader)
         } footer: {
             Text(SettingsL274Copy.sendDiagnosticsFooter)
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.textTertiary)
+        }
+    }
+
+    @MainActor
+    func exportDogfoodDiagnostics() async {
+        dogfoodDiagnosticsExportInProgress = true
+        dogfoodDiagnosticsExportError = nil
+        defer { dogfoodDiagnosticsExportInProgress = false }
+
+        do {
+            dogfoodDiagnosticsExportResult = try await Task.detached(priority: .utility) {
+                try DogfoodDiagnosticsExporter.export()
+            }.value
+        } catch {
+            dogfoodDiagnosticsExportResult = nil
+            dogfoodDiagnosticsExportError = "Export failed: \(error.localizedDescription)"
         }
     }
 

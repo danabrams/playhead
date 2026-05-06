@@ -61,6 +61,20 @@ The downloader is a stub until a real `fixtures-v1` GitHub Release is
 published; once it exists, swap the `echo "would curl ..."` line for an
 actual `curl -L -f` invocation.
 
+## `false_ready_rate.swift`
+
+Summarizes `surface-status-*.jsonl` dogfood logs and the single-file JSON
+archive produced by Settings > Diagnostics > Export dogfood logs.
+
+```sh
+swift scripts/false_ready_rate.swift scripts/fixtures/false_ready_rate_sample.jsonl
+swift scripts/false_ready_rate.swift path/to/playhead-dogfood-diagnostics-2026-05-06T22-24-59Z.json
+```
+
+The strict rollup preserves the original false-ready metric. The trigger
+rollup separates `analysis_completed` from `cold_start` so initial observed
+ready states do not contaminate the dogfood gate candidate.
+
 ## `rotate-fixtures.swift`
 
 Picks the 4 rotating fixtures for the current release from the candidate

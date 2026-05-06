@@ -62,8 +62,10 @@ enum SettingsL274Copy {
     static let perShowCapabilityProfileLabel: String = "Per-show capability profile"
     static let featureFlagsLabel: String = "Feature flags (rollback)"
     static let sendDiagnosticsButtonLabel: String = "Send diagnostics"
+    static let exportDogfoodLogsButtonLabel: String = "Export dogfood logs"
+    static let shareDogfoodLogsButtonLabel: String = "Save or share dogfood logs"
     /// Footer reassuring the user diagnostics are NEVER auto-uploaded.
-    static let sendDiagnosticsFooter: String = "Opens Mail with a support-safe bundle attached. Never auto-uploads."
+    static let sendDiagnosticsFooter: String = "Opens Mail with a support-safe bundle attached. Dogfood log export includes only surface-status JSONL logs. Never auto-uploads."
 }
 
 // MARK: - AutoDownloadOnSubscribe

@@ -206,3 +206,179 @@ enum DiagnosticsExportError: Error, Equatable {
     /// the coordinator layer; UI should surface a retry prompt.
     case missingHostViewController
 }
+
+// MARK: - Dogfood Diagnostics Export
+
+/// Single-file archive for the Phase 1.5 dogfood audit logs.
+///
+/// This deliberately carries only the support-safe surface-status JSONL logs
+/// from `Caches/Diagnostics/`: no audio cache, no transcripts, no raw episode
+/// IDs, and no install-ID salt. The archive is JSON so it can travel through
+/// ShareLink/Mail as one small file and still be unpacked by local scripts
+/// without an iOS zip dependency.
+struct DogfoodDiagnosticsArchive: Codable, Sendable, Equatable {
+    let schemaVersion: Int
+    let generatedAt: Date
+    let files: [DogfoodDiagnosticsArchiveFile]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case generatedAt = "generated_at"
+        case files
+    }
+}
+
+struct DogfoodDiagnosticsArchiveFile: Codable, Sendable, Equatable {
+    let filename: String
+    let role: String
+    let byteCount: Int
+    let content: String
+
+    enum CodingKeys: String, CodingKey {
+        case filename
+        case role
+        case byteCount = "byte_count"
+        case content
+    }
+}
+
+struct DogfoodDiagnosticsExportResult: Sendable, Equatable {
+    let fileURL: URL
+    let logFileCount: Int
+    let totalBytes: Int
+}
+
+enum DogfoodDiagnosticsExportError: Error, Equatable, LocalizedError {
+    case missingDiagnosticsDirectory
+    case noSurfaceStatusLogs
+    case nonUTF8File(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingDiagnosticsDirectory:
+            "No diagnostics directory exists yet."
+        case .noSurfaceStatusLogs:
+            "No surface-status dogfood logs were found."
+        case .nonUTF8File(let filename):
+            "Dogfood diagnostics file is not UTF-8: \(filename)"
+        }
+    }
+}
+
+enum DogfoodDiagnosticsExporter {
+    static let schemaVersion = 1
+    static let filenamePrefix = "playhead-dogfood-diagnostics"
+
+    static func export(
+        sourceDirectory: URL? = nil,
+        outputDirectory: URL? = nil,
+        now: Date = Date(),
+        fileManager: FileManager = .default
+    ) throws -> DogfoodDiagnosticsExportResult {
+        let source: URL
+        if let sourceDirectory {
+            source = sourceDirectory
+        } else {
+            source = try defaultDiagnosticsDirectory(fileManager: fileManager)
+        }
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: source.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw DogfoodDiagnosticsExportError.missingDiagnosticsDirectory
+        }
+
+        let entries = try fileManager.contentsOfDirectory(
+            at: source,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsSubdirectoryDescendants]
+        )
+
+        let eligible = entries
+            .filter { isExportableDogfoodDiagnosticsFile($0.lastPathComponent) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let logFiles = eligible.filter { isSurfaceStatusLog($0.lastPathComponent) }
+        guard !logFiles.isEmpty else {
+            throw DogfoodDiagnosticsExportError.noSurfaceStatusLogs
+        }
+
+        var totalBytes = 0
+        let archiveFiles = try eligible.map { url -> DogfoodDiagnosticsArchiveFile in
+            let data = try Data(contentsOf: url)
+            totalBytes += data.count
+            guard let content = String(data: data, encoding: .utf8) else {
+                throw DogfoodDiagnosticsExportError.nonUTF8File(url.lastPathComponent)
+            }
+            return DogfoodDiagnosticsArchiveFile(
+                filename: url.lastPathComponent,
+                role: "surface_status_jsonl",
+                byteCount: data.count,
+                content: content
+            )
+        }
+
+        let archive = DogfoodDiagnosticsArchive(
+            schemaVersion: schemaVersion,
+            generatedAt: now,
+            files: archiveFiles
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(archive)
+
+        let output: URL
+        if let outputDirectory {
+            output = outputDirectory
+        } else {
+            output = try defaultOutputDirectory(fileManager: fileManager)
+        }
+        try fileManager.createDirectory(at: output, withIntermediateDirectories: true)
+        let fileURL = output.appendingPathComponent(filename(for: now), isDirectory: false)
+        try data.write(to: fileURL, options: [.atomic])
+
+        return DogfoodDiagnosticsExportResult(
+            fileURL: fileURL,
+            logFileCount: logFiles.count,
+            totalBytes: totalBytes
+        )
+    }
+
+    static func filename(for date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let stamp = formatter.string(from: date).replacingOccurrences(of: ":", with: "-")
+        return "\(filenamePrefix)-\(stamp).json"
+    }
+
+    static func isExportableDogfoodDiagnosticsFile(_ filename: String) -> Bool {
+        isSurfaceStatusLog(filename)
+    }
+
+    private static func isSurfaceStatusLog(_ filename: String) -> Bool {
+        filename.hasPrefix(SurfaceStatusInvariantLogger.sessionFilenamePrefix)
+            && filename.hasSuffix(".\(SurfaceStatusInvariantLogger.sessionFilenameExtension)")
+    }
+
+    private static func defaultDiagnosticsDirectory(fileManager: FileManager) throws -> URL {
+        let caches = try fileManager.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        )
+        return caches.appendingPathComponent(
+            SurfaceStatusInvariantLogger.diagnosticsDirectoryName,
+            isDirectory: true
+        )
+    }
+
+    private static func defaultOutputDirectory(fileManager: FileManager) throws -> URL {
+        let documents = try fileManager.url(
+            for: .documentDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        return documents.appendingPathComponent("DogfoodDiagnostics", isDirectory: true)
+    }
+}
