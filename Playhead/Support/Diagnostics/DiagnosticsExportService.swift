@@ -220,11 +220,25 @@ struct DogfoodDiagnosticsArchive: Codable, Sendable, Equatable {
     let schemaVersion: Int
     let generatedAt: Date
     let files: [DogfoodDiagnosticsArchiveFile]
+    let activitySnapshot: DogfoodDiagnosticsActivitySnapshot?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case generatedAt = "generated_at"
         case files
+        case activitySnapshot = "activity_snapshot"
+    }
+
+    init(
+        schemaVersion: Int,
+        generatedAt: Date,
+        files: [DogfoodDiagnosticsArchiveFile],
+        activitySnapshot: DogfoodDiagnosticsActivitySnapshot? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.generatedAt = generatedAt
+        self.files = files
+        self.activitySnapshot = activitySnapshot
     }
 }
 
@@ -239,6 +253,208 @@ struct DogfoodDiagnosticsArchiveFile: Codable, Sendable, Equatable {
         case role
         case byteCount = "byte_count"
         case content
+    }
+}
+
+struct DogfoodDiagnosticsActivitySnapshot: Codable, Sendable, Equatable {
+    let generatedAt: Date
+    let rows: [DogfoodDiagnosticsActivityRow]
+    let captureError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case generatedAt = "generated_at"
+        case rows
+        case captureError = "capture_error"
+    }
+
+    init(
+        generatedAt: Date,
+        rows: [DogfoodDiagnosticsActivityRow],
+        captureError: String? = nil
+    ) {
+        self.generatedAt = generatedAt
+        self.rows = rows
+        self.captureError = captureError
+    }
+}
+
+struct DogfoodDiagnosticsActivityRow: Codable, Sendable, Equatable {
+    let episodeIdHash: String
+    let section: String
+    let status: DogfoodDiagnosticsStatusSnapshot
+    let isRunning: Bool
+    let queuePosition: Int?
+    let cachedAudioPresent: Bool
+    let liveDownloadFraction: Double?
+    let pipeline: DogfoodDiagnosticsPipelineSnapshot
+    let analysisAsset: DogfoodDiagnosticsAnalysisAssetSnapshot
+    let latestSession: DogfoodDiagnosticsAnalysisSessionSnapshot?
+    let latestJob: DogfoodDiagnosticsAnalysisJobSnapshot?
+    let latestTerminalWorkJournal: DogfoodDiagnosticsWorkJournalSnapshot?
+
+    enum CodingKeys: String, CodingKey {
+        case episodeIdHash = "episode_id_hash"
+        case section
+        case status
+        case isRunning = "is_running"
+        case queuePosition = "queue_position"
+        case cachedAudioPresent = "cached_audio_present"
+        case liveDownloadFraction = "live_download_fraction"
+        case pipeline
+        case analysisAsset = "analysis_asset"
+        case latestSession = "latest_session"
+        case latestJob = "latest_job"
+        case latestTerminalWorkJournal = "latest_terminal_work_journal"
+    }
+}
+
+struct DogfoodDiagnosticsStatusSnapshot: Codable, Sendable, Equatable {
+    let disposition: String
+    let reason: String
+    let hint: String
+    let analysisUnavailableReason: String?
+    let playbackReadiness: String
+    let readinessAnchor: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case disposition
+        case reason
+        case hint
+        case analysisUnavailableReason = "analysis_unavailable_reason"
+        case playbackReadiness = "playback_readiness"
+        case readinessAnchor = "readiness_anchor"
+    }
+}
+
+struct DogfoodDiagnosticsPipelineSnapshot: Codable, Sendable, Equatable {
+    let downloadFraction: Double?
+    let downloadPercent: String
+    let downloadSource: String
+    let transcriptFraction: Double?
+    let transcriptPercent: String
+    let transcriptSource: String
+    let analysisFraction: Double?
+    let analysisPercent: String
+    let analysisSource: String
+    let episodeDurationSec: Double?
+    let transcriptCoveredSec: Double?
+    let transcriptWatermarkSec: Double?
+    let fastTranscriptWatermarkSec: Double?
+    let analysisWatermarkSec: Double?
+    let featureCoverageEndSec: Double?
+    let confirmedAdCoverageEndSec: Double?
+    let finalPassCoverageEndSec: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case downloadFraction = "download_fraction"
+        case downloadPercent = "download_percent"
+        case downloadSource = "download_source"
+        case transcriptFraction = "transcript_fraction"
+        case transcriptPercent = "transcript_percent"
+        case transcriptSource = "transcript_source"
+        case analysisFraction = "analysis_fraction"
+        case analysisPercent = "analysis_percent"
+        case analysisSource = "analysis_source"
+        case episodeDurationSec = "episode_duration_sec"
+        case transcriptCoveredSec = "transcript_covered_sec"
+        case transcriptWatermarkSec = "transcript_watermark_sec"
+        case fastTranscriptWatermarkSec = "fast_transcript_watermark_sec"
+        case analysisWatermarkSec = "analysis_watermark_sec"
+        case featureCoverageEndSec = "feature_coverage_end_sec"
+        case confirmedAdCoverageEndSec = "confirmed_ad_coverage_end_sec"
+        case finalPassCoverageEndSec = "final_pass_coverage_end_sec"
+    }
+}
+
+struct DogfoodDiagnosticsAnalysisAssetSnapshot: Codable, Sendable, Equatable {
+    let analysisState: String
+    let analysisVersion: Int
+    let artifactClass: String
+    let terminalReason: String?
+    let capabilitySnapshotPresent: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case analysisState = "analysis_state"
+        case analysisVersion = "analysis_version"
+        case artifactClass = "artifact_class"
+        case terminalReason = "terminal_reason"
+        case capabilitySnapshotPresent = "capability_snapshot_present"
+    }
+}
+
+struct DogfoodDiagnosticsAnalysisSessionSnapshot: Codable, Sendable, Equatable {
+    let state: String
+    let startedAt: Double
+    let updatedAt: Double
+    let failureReason: String?
+    let needsShadowRetry: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case startedAt = "started_at"
+        case updatedAt = "updated_at"
+        case failureReason = "failure_reason"
+        case needsShadowRetry = "needs_shadow_retry"
+    }
+}
+
+struct DogfoodDiagnosticsAnalysisJobSnapshot: Codable, Sendable, Equatable {
+    let jobType: String
+    let state: String
+    let priority: Int
+    let desiredCoverageSec: Double
+    let featureCoverageSec: Double
+    let transcriptCoverageSec: Double
+    let cueCoverageSec: Double
+    let attemptCount: Int
+    let nextEligibleAt: Double?
+    let leasePresent: Bool
+    let leaseExpiresAt: Double?
+    let lastErrorCode: String?
+    let createdAt: Double
+    let updatedAt: Double
+    let generationID: String
+    let schedulerEpoch: Int
+    let artifactClass: String
+    let estimatedWriteBytes: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case jobType = "job_type"
+        case state
+        case priority
+        case desiredCoverageSec = "desired_coverage_sec"
+        case featureCoverageSec = "feature_coverage_sec"
+        case transcriptCoverageSec = "transcript_coverage_sec"
+        case cueCoverageSec = "cue_coverage_sec"
+        case attemptCount = "attempt_count"
+        case nextEligibleAt = "next_eligible_at"
+        case leasePresent = "lease_present"
+        case leaseExpiresAt = "lease_expires_at"
+        case lastErrorCode = "last_error_code"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case generationID = "generation_id"
+        case schedulerEpoch = "scheduler_epoch"
+        case artifactClass = "artifact_class"
+        case estimatedWriteBytes = "estimated_write_bytes"
+    }
+}
+
+struct DogfoodDiagnosticsWorkJournalSnapshot: Codable, Sendable, Equatable {
+    let eventType: String
+    let cause: String?
+    let timestamp: Double
+    let generationID: String
+    let schedulerEpoch: Int
+    let artifactClass: String
+
+    enum CodingKeys: String, CodingKey {
+        case eventType = "event_type"
+        case cause
+        case timestamp
+        case generationID = "generation_id"
+        case schedulerEpoch = "scheduler_epoch"
+        case artifactClass = "artifact_class"
     }
 }
 
@@ -273,7 +489,8 @@ enum DogfoodDiagnosticsExporter {
         sourceDirectory: URL? = nil,
         outputDirectory: URL? = nil,
         now: Date = Date(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        activitySnapshot: DogfoodDiagnosticsActivitySnapshot? = nil
     ) throws -> DogfoodDiagnosticsExportResult {
         let source: URL
         if let sourceDirectory {
@@ -319,7 +536,8 @@ enum DogfoodDiagnosticsExporter {
         let archive = DogfoodDiagnosticsArchive(
             schemaVersion: schemaVersion,
             generatedAt: now,
-            files: archiveFiles
+            files: archiveFiles,
+            activitySnapshot: activitySnapshot
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601

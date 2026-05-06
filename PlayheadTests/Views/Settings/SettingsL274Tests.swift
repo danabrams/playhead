@@ -475,9 +475,11 @@ struct SettingsL274SourceCanaryTests {
     @Test func dogfoodExportIsFileFirstAndShareSheetBacked() throws {
         let viewSrc = try read("Playhead/Views/Settings/SettingsView.swift")
         let serviceSrc = try read("Playhead/Support/Diagnostics/DiagnosticsExportService.swift")
-        #expect(viewSrc.contains("DogfoodDiagnosticsExporter.export()"))
+        #expect(viewSrc.contains("DogfoodDiagnosticsExporter.export("))
+        #expect(viewSrc.contains("loadDogfoodDiagnosticsSnapshot"))
         #expect(viewSrc.contains("ShareLink("))
         #expect(serviceSrc.contains("DogfoodDiagnostics"))
+        #expect(serviceSrc.contains("activity_snapshot"))
         #expect(!serviceSrc.contains("install_id_salt"))
     }
 

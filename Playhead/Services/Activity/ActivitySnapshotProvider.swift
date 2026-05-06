@@ -346,6 +346,151 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         return inputs
     }
 
+    func loadDogfoodDiagnosticsSnapshot(
+        generatedAt: Date = Date(),
+        episodeHashProvider: @escaping @Sendable (String) -> String
+    ) async -> DogfoodDiagnosticsActivitySnapshot {
+        let snapshot = await capabilitySnapshotProvider()
+        let eligibility = EpisodeSurfaceStatusObserver.eligibility(from: snapshot)
+        let runningEpisodeId = await runningEpisodeIdProvider()
+
+        let storeIsOpen = await store.isOpen
+        guard storeIsOpen else {
+            return DogfoodDiagnosticsActivitySnapshot(
+                generatedAt: generatedAt,
+                rows: [],
+                captureError: "analysis_store_unopened"
+            )
+        }
+
+        let allAssets: [String: AnalysisAsset]
+        do {
+            allAssets = try await store.fetchLatestAssetByEpisodeIdMap()
+        } catch {
+            return DogfoodDiagnosticsActivitySnapshot(
+                generatedAt: generatedAt,
+                rows: [],
+                captureError: "fetch_assets_failed: \(error)"
+            )
+        }
+        if allAssets.isEmpty {
+            return DogfoodDiagnosticsActivitySnapshot(generatedAt: generatedAt, rows: [])
+        }
+        let eligibleEpisodeIds = Array(allAssets.keys)
+
+        let downloadFractions = await downloadProgressProvider()
+        let downloadedEpisodeIds = await downloadedEpisodeIdsProvider(Set(eligibleEpisodeIds))
+
+        let transcriptCoveredSecondsByAssetId: [String: Double]
+        do {
+            transcriptCoveredSecondsByAssetId = try await store.fetchFastTranscriptCoveredSecondsByAssetIds(
+                Set(allAssets.values.map(\.id))
+            )
+        } catch {
+            transcriptCoveredSecondsByAssetId = [:]
+        }
+
+        let context = ModelContext(modelContainer)
+        var descriptor = FetchDescriptor<Episode>(
+            predicate: #Predicate { eligibleEpisodeIds.contains($0.canonicalEpisodeKey) }
+        )
+        descriptor.relationshipKeyPathsForPrefetching = [\Episode.podcast]
+        let episodes: [Episode]
+        do {
+            episodes = try context.fetch(descriptor)
+        } catch {
+            return DogfoodDiagnosticsActivitySnapshot(
+                generatedAt: generatedAt,
+                rows: [],
+                captureError: "fetch_episodes_failed: \(error)"
+            )
+        }
+
+        var rows: [DogfoodDiagnosticsActivityRow] = []
+        rows.reserveCapacity(episodes.count)
+
+        for episode in episodes {
+            let episodeId = episode.canonicalEpisodeKey
+            guard let asset = allAssets[episodeId] else { continue }
+
+            let analysisState = EpisodeSurfaceStatusObserver.analysisState(from: asset)
+            let status = episodeSurfaceStatus(
+                state: analysisState,
+                cause: nil,
+                eligibility: eligibility,
+                coverage: episode.coverageSummary,
+                readinessAnchor: episode.playbackAnchor
+            )
+
+            let isRunning = (episodeId == runningEpisodeId)
+            let durationSec = asset.episodeDurationSec ?? 0
+            let transcriptCoveredSec = transcriptCoveredSecondsByAssetId[asset.id]
+            let transcriptWatermark = transcriptCoveredSec ?? asset.fastTranscriptCoverageEndTime
+            let transcriptFraction = fraction(transcriptWatermark, durationSec: durationSec)
+            let analysisWatermark = maxKnown(
+                asset.featureCoverageEndTime,
+                asset.confirmedAdCoverageEndTime
+            )
+            let analysisFraction = fraction(analysisWatermark, durationSec: durationSec)
+            let liveDownloadFraction = downloadFractions[episodeId].map(clampFraction)
+            let cachedAudioPresent = downloadedEpisodeIds.contains(episodeId)
+            let downloadFraction = liveDownloadFraction ?? (cachedAudioPresent ? 1.0 : nil)
+            let downloadSource = dogfoodDownloadSource(
+                liveDownloadFraction: liveDownloadFraction,
+                cachedAudioPresent: cachedAudioPresent
+            )
+
+            let session = try? await store.fetchLatestSessionForAsset(assetId: asset.id)
+            let job = try? await store.fetchLatestJobForEpisode(episodeId)
+            let terminalWorkJournal = try? await store.fetchLatestTerminalWorkJournalEntry(
+                episodeId: episodeId
+            )
+
+            rows.append(
+                DogfoodDiagnosticsActivityRow(
+                    episodeIdHash: episodeHashProvider(episodeId),
+                    section: dogfoodActivitySection(status: status, isRunning: isRunning),
+                    status: statusSnapshot(status),
+                    isRunning: isRunning,
+                    queuePosition: episode.queuePosition,
+                    cachedAudioPresent: cachedAudioPresent,
+                    liveDownloadFraction: liveDownloadFraction,
+                    pipeline: DogfoodDiagnosticsPipelineSnapshot(
+                        downloadFraction: downloadFraction,
+                        downloadPercent: formatPercent(downloadFraction),
+                        downloadSource: downloadSource,
+                        transcriptFraction: transcriptFraction,
+                        transcriptPercent: formatPercent(transcriptFraction),
+                        transcriptSource: dogfoodTranscriptSource(
+                            transcriptCoveredSec: transcriptCoveredSec,
+                            fastTranscriptWatermarkSec: asset.fastTranscriptCoverageEndTime
+                        ),
+                        analysisFraction: analysisFraction,
+                        analysisPercent: formatPercent(analysisFraction),
+                        analysisSource: dogfoodAnalysisSource(
+                            featureCoverageEndSec: asset.featureCoverageEndTime,
+                            confirmedAdCoverageEndSec: asset.confirmedAdCoverageEndTime
+                        ),
+                        episodeDurationSec: asset.episodeDurationSec,
+                        transcriptCoveredSec: transcriptCoveredSec,
+                        transcriptWatermarkSec: transcriptWatermark,
+                        fastTranscriptWatermarkSec: asset.fastTranscriptCoverageEndTime,
+                        analysisWatermarkSec: analysisWatermark,
+                        featureCoverageEndSec: asset.featureCoverageEndTime,
+                        confirmedAdCoverageEndSec: asset.confirmedAdCoverageEndTime,
+                        finalPassCoverageEndSec: asset.finalPassCoverageEndTime
+                    ),
+                    analysisAsset: analysisAssetSnapshot(asset),
+                    latestSession: session.map(analysisSessionSnapshot),
+                    latestJob: job.map(analysisJobSnapshot),
+                    latestTerminalWorkJournal: terminalWorkJournal.map(workJournalSnapshot)
+                )
+            )
+        }
+
+        return DogfoodDiagnosticsActivitySnapshot(generatedAt: generatedAt, rows: rows)
+    }
+
     private func isTerminal(status: EpisodeSurfaceStatus) -> Bool {
         switch status.disposition {
         case .failed, .cancelled, .unavailable:
@@ -355,5 +500,167 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         case .paused:
             return false
         }
+    }
+
+    private func dogfoodActivitySection(
+        status: EpisodeSurfaceStatus,
+        isRunning: Bool
+    ) -> String {
+        if isTerminal(status: status) {
+            return "recently_finished"
+        }
+        switch status.disposition {
+        case .paused:
+            return "paused"
+        case .queued:
+            return isRunning ? "now" : "up_next"
+        case .failed, .cancelled, .unavailable:
+            return "hidden_terminal"
+        }
+    }
+
+    private func fraction(_ watermark: Double?, durationSec: Double) -> Double? {
+        guard let watermark, durationSec > 0 else { return nil }
+        return clampFraction(watermark / durationSec)
+    }
+
+    private func clampFraction(_ fraction: Double) -> Double {
+        min(1.0, max(0.0, fraction))
+    }
+
+    private func maxKnown(_ lhs: Double?, _ rhs: Double?) -> Double? {
+        switch (lhs, rhs) {
+        case let (lhs?, rhs?):
+            return max(lhs, rhs)
+        case let (lhs?, nil):
+            return lhs
+        case let (nil, rhs?):
+            return rhs
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    private func formatPercent(_ fraction: Double?) -> String {
+        guard let fraction else { return "--%" }
+        let clamped = clampFraction(fraction)
+        return "\(Int((clamped * 100).rounded()))%"
+    }
+
+    private func dogfoodDownloadSource(
+        liveDownloadFraction: Double?,
+        cachedAudioPresent: Bool
+    ) -> String {
+        if liveDownloadFraction != nil {
+            return "live_progress"
+        }
+        if cachedAudioPresent {
+            return "cached_audio"
+        }
+        return "unknown"
+    }
+
+    private func dogfoodTranscriptSource(
+        transcriptCoveredSec: Double?,
+        fastTranscriptWatermarkSec: Double?
+    ) -> String {
+        if transcriptCoveredSec != nil {
+            return "fast_transcript_chunks"
+        }
+        if fastTranscriptWatermarkSec != nil {
+            return "asset_fast_watermark"
+        }
+        return "unknown"
+    }
+
+    private func dogfoodAnalysisSource(
+        featureCoverageEndSec: Double?,
+        confirmedAdCoverageEndSec: Double?
+    ) -> String {
+        switch (featureCoverageEndSec, confirmedAdCoverageEndSec) {
+        case let (feature?, confirmed?):
+            return confirmed >= feature ? "confirmed_ad_coverage" : "feature_coverage"
+        case (_?, nil):
+            return "feature_coverage"
+        case (nil, _?):
+            return "confirmed_ad_coverage"
+        case (nil, nil):
+            return "unknown"
+        }
+    }
+
+    private func statusSnapshot(
+        _ status: EpisodeSurfaceStatus
+    ) -> DogfoodDiagnosticsStatusSnapshot {
+        DogfoodDiagnosticsStatusSnapshot(
+            disposition: status.disposition.rawValue,
+            reason: status.reason.rawValue,
+            hint: status.hint.rawValue,
+            analysisUnavailableReason: status.analysisUnavailableReason?.rawValue,
+            playbackReadiness: status.playbackReadiness.rawValue,
+            readinessAnchor: status.readinessAnchor
+        )
+    }
+
+    private func analysisAssetSnapshot(
+        _ asset: AnalysisAsset
+    ) -> DogfoodDiagnosticsAnalysisAssetSnapshot {
+        DogfoodDiagnosticsAnalysisAssetSnapshot(
+            analysisState: asset.analysisState,
+            analysisVersion: asset.analysisVersion,
+            artifactClass: asset.artifactClass.rawValue,
+            terminalReason: asset.terminalReason,
+            capabilitySnapshotPresent: asset.capabilitySnapshot != nil
+        )
+    }
+
+    private func analysisSessionSnapshot(
+        _ session: AnalysisSession
+    ) -> DogfoodDiagnosticsAnalysisSessionSnapshot {
+        DogfoodDiagnosticsAnalysisSessionSnapshot(
+            state: session.state,
+            startedAt: session.startedAt,
+            updatedAt: session.updatedAt,
+            failureReason: session.failureReason,
+            needsShadowRetry: session.needsShadowRetry
+        )
+    }
+
+    private func analysisJobSnapshot(
+        _ job: AnalysisJob
+    ) -> DogfoodDiagnosticsAnalysisJobSnapshot {
+        DogfoodDiagnosticsAnalysisJobSnapshot(
+            jobType: job.jobType,
+            state: job.state,
+            priority: job.priority,
+            desiredCoverageSec: job.desiredCoverageSec,
+            featureCoverageSec: job.featureCoverageSec,
+            transcriptCoverageSec: job.transcriptCoverageSec,
+            cueCoverageSec: job.cueCoverageSec,
+            attemptCount: job.attemptCount,
+            nextEligibleAt: job.nextEligibleAt,
+            leasePresent: job.leaseOwner != nil,
+            leaseExpiresAt: job.leaseExpiresAt,
+            lastErrorCode: job.lastErrorCode,
+            createdAt: job.createdAt,
+            updatedAt: job.updatedAt,
+            generationID: job.generationID,
+            schedulerEpoch: job.schedulerEpoch,
+            artifactClass: job.artifactClass.rawValue,
+            estimatedWriteBytes: job.estimatedWriteBytes
+        )
+    }
+
+    private func workJournalSnapshot(
+        _ entry: WorkJournalEntry
+    ) -> DogfoodDiagnosticsWorkJournalSnapshot {
+        DogfoodDiagnosticsWorkJournalSnapshot(
+            eventType: entry.eventType.rawValue,
+            cause: entry.cause?.rawValue,
+            timestamp: entry.timestamp,
+            generationID: entry.generationID.uuidString,
+            schedulerEpoch: entry.schedulerEpoch,
+            artifactClass: entry.artifactClass.rawValue
+        )
     }
 }

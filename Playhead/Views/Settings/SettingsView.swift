@@ -1615,8 +1615,21 @@ private extension SettingsView {
         defer { dogfoodDiagnosticsExportInProgress = false }
 
         do {
+            let now = Date()
+            let activityProvider = runtime.makeActivitySnapshotProvider(
+                modelContainer: modelContext.container
+            )
+            let activitySnapshot = await activityProvider.loadDogfoodDiagnosticsSnapshot(
+                generatedAt: now,
+                episodeHashProvider: { [logger = runtime.surfaceStatusLogger] episodeId in
+                    logger.hashEpisodeId(episodeId)
+                }
+            )
             dogfoodDiagnosticsExportResult = try await Task.detached(priority: .utility) {
-                try DogfoodDiagnosticsExporter.export()
+                try DogfoodDiagnosticsExporter.export(
+                    now: now,
+                    activitySnapshot: activitySnapshot
+                )
             }.value
         } catch {
             dogfoodDiagnosticsExportResult = nil

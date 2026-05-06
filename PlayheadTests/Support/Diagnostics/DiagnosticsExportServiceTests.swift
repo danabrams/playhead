@@ -129,12 +129,100 @@ struct DiagnosticsExportServiceTests {
         let archive = try decoder.decode(DogfoodDiagnosticsArchive.self, from: data)
 
         #expect(archive.schemaVersion == DogfoodDiagnosticsExporter.schemaVersion)
+        #expect(archive.activitySnapshot == nil)
         #expect(archive.files.map(\.filename).sorted() == [
             logName
         ])
         #expect(archive.files.contains { $0.role == "surface_status_jsonl" && $0.content == logBody })
         #expect(!archive.files.contains { $0.filename == ".surface-status-install-id" })
         #expect(!archive.files.contains { $0.filename == "transcript-shadow-gate.jsonl" })
+    }
+
+    @Test("dogfood export can embed support-safe Activity row diagnostics")
+    func dogfoodExportEmbedsActivitySnapshot() throws {
+        let source = try makeTempDir(prefix: "DogfoodDiagnosticsSource")
+        let output = try makeTempDir(prefix: "DogfoodDiagnosticsOutput")
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
+
+        let logName = "surface-status-20260506T231611Z-AB96209D-BC9E-498D-A346-1DE302031315.jsonl"
+        try """
+        {"timestamp":"2026-05-06T23:16:11Z","session_id":"AB96209D-BC9E-498D-A346-1DE302031315","event_type":"ready_entered"}
+
+        """.write(
+            to: source.appendingPathComponent(logName),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [
+                DogfoodDiagnosticsActivityRow(
+                    episodeIdHash: "hash-only",
+                    section: "up_next",
+                    status: DogfoodDiagnosticsStatusSnapshot(
+                        disposition: "queued",
+                        reason: "waiting_for_time",
+                        hint: "wait",
+                        analysisUnavailableReason: nil,
+                        playbackReadiness: "none",
+                        readinessAnchor: nil
+                    ),
+                    isRunning: false,
+                    queuePosition: 7,
+                    cachedAudioPresent: true,
+                    liveDownloadFraction: nil,
+                    pipeline: DogfoodDiagnosticsPipelineSnapshot(
+                        downloadFraction: 1.0,
+                        downloadPercent: "100%",
+                        downloadSource: "cached_audio",
+                        transcriptFraction: nil,
+                        transcriptPercent: "--%",
+                        transcriptSource: "unknown",
+                        analysisFraction: 0.25,
+                        analysisPercent: "25%",
+                        analysisSource: "feature_coverage",
+                        episodeDurationSec: 400,
+                        transcriptCoveredSec: nil,
+                        transcriptWatermarkSec: nil,
+                        fastTranscriptWatermarkSec: nil,
+                        analysisWatermarkSec: 100,
+                        featureCoverageEndSec: 100,
+                        confirmedAdCoverageEndSec: nil,
+                        finalPassCoverageEndSec: nil
+                    ),
+                    analysisAsset: DogfoodDiagnosticsAnalysisAssetSnapshot(
+                        analysisState: "queued",
+                        analysisVersion: 1,
+                        artifactClass: "media",
+                        terminalReason: nil,
+                        capabilitySnapshotPresent: false
+                    ),
+                    latestSession: nil,
+                    latestJob: nil,
+                    latestTerminalWorkJournal: nil
+                )
+            ]
+        )
+
+        let result = try DogfoodDiagnosticsExporter.export(
+            sourceDirectory: source,
+            outputDirectory: output,
+            now: Date(timeIntervalSince1970: 1_700_000_000),
+            activitySnapshot: snapshot
+        )
+
+        let data = try Data(contentsOf: result.fileURL)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let archive = try decoder.decode(DogfoodDiagnosticsArchive.self, from: data)
+        let decodedSnapshot = try #require(archive.activitySnapshot)
+        #expect(decodedSnapshot.rows.map(\.episodeIdHash) == ["hash-only"])
+        #expect(decodedSnapshot.rows.first?.pipeline.downloadPercent == "100%")
+        #expect(decodedSnapshot.rows.first?.pipeline.transcriptPercent == "--%")
     }
 
     @Test("dogfood export fails clearly when no surface-status logs exist")

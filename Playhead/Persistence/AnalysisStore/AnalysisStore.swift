@@ -7091,6 +7091,27 @@ actor AnalysisStore {
         return try readWorkJournalEntry(stmt)
     }
 
+    /// Fetches the most-recent terminal WorkJournal entry for an
+    /// episode, across all generations. Used by dogfood diagnostics to
+    /// explain Activity rows that are stuck in a terminal or paused
+    /// looking state without exporting the raw episode id.
+    func fetchLatestTerminalWorkJournalEntry(episodeId: String) throws -> WorkJournalEntry? {
+        let sql = """
+            SELECT id, episode_id, generation_id, scheduler_epoch,
+                   timestamp, event_type, cause, metadata, artifact_class
+            FROM work_journal
+            WHERE episode_id = ?
+              AND event_type IN ('finalized', 'failed', 'preempted')
+            ORDER BY timestamp DESC, rowid DESC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return try readWorkJournalEntry(stmt)
+    }
+
     /// Fetches every WorkJournal row for a {episodeId, generationID}
     /// pair, ordered oldest-first. Primarily for testing / audit; the
     /// happy-path `fetchLastWorkJournalEntry` is what orphan recovery

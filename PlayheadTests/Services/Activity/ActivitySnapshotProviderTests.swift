@@ -569,4 +569,69 @@ struct LiveActivitySnapshotProviderFractionTests {
             #expect(input.downloadFraction == nil)
         }
     }
+
+    @Test("dogfood diagnostics snapshot includes displayed fractions and latest terminal cause")
+    func dogfoodDiagnosticsSnapshotCapturesActivityRowState() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                featureCoverageEndTime: 100,
+                fastTranscriptCoverageEndTime: 30,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 400
+            )
+        ])
+        try await fixture.store.insertTranscriptChunks([
+            transcriptChunk(assetId: fixture.assetIds[0], index: 0, start: 0, end: 200)
+        ])
+        let generationID = UUID()
+        try await fixture.store.appendWorkJournalEntry(
+            WorkJournalEntry(
+                id: "journal-failed",
+                episodeId: fixture.episodeIds[0],
+                generationID: generationID,
+                schedulerEpoch: 7,
+                timestamp: 20,
+                eventType: .failed,
+                cause: .asrFailed,
+                metadata: "{}",
+                artifactClass: .scratch
+            )
+        )
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [fixture.episodeIds[0]: 0.5] },
+            downloadedEpisodeIdsProvider: { eligible in
+                eligible.contains(fixture.episodeIds[0]) ? [fixture.episodeIds[0]] : []
+            },
+            modelContainer: fixture.container
+        )
+
+        let snapshot = await provider.loadDogfoodDiagnosticsSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            episodeHashProvider: { _ in "hashed-episode" }
+        )
+
+        #expect(snapshot.captureError == nil)
+        #expect(snapshot.rows.count == 1)
+        let row = try #require(snapshot.rows.first)
+        #expect(row.episodeIdHash == "hashed-episode")
+        #expect(row.section == "up_next")
+        #expect(row.cachedAudioPresent == true)
+        #expect(row.liveDownloadFraction == 0.5)
+        #expect(row.pipeline.downloadFraction == 0.5)
+        #expect(row.pipeline.downloadPercent == "50%")
+        #expect(row.pipeline.downloadSource == "live_progress")
+        #expect(row.pipeline.transcriptFraction == 0.5)
+        #expect(row.pipeline.transcriptPercent == "50%")
+        #expect(row.pipeline.transcriptSource == "fast_transcript_chunks")
+        #expect(row.pipeline.analysisFraction == 0.25)
+        #expect(row.pipeline.analysisPercent == "25%")
+        #expect(row.pipeline.analysisSource == "feature_coverage")
+        #expect(row.analysisAsset.analysisState == "queued")
+        #expect(row.latestTerminalWorkJournal?.eventType == "failed")
+        #expect(row.latestTerminalWorkJournal?.cause == "asr_failed")
+        #expect(row.latestTerminalWorkJournal?.generationID == generationID.uuidString)
+    }
 }
