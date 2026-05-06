@@ -631,9 +631,48 @@ struct NarlEvalHarnessTests {
             let gtResult = NarlGroundTruth.build(for: trace)
             let show = Self.showName(for: trace)
             let traceHasShadowCoverage = Self.hasShadowCoverage(trace: trace)
+            let lexicalOnly = MetadataActivationConfig(
+                lexicalInjectionEnabled: true,
+                lexicalInjectionMinTrust: 0.0,
+                lexicalInjectionDiscount: 0.75,
+                classifierPriorShiftEnabled: false,
+                classifierPriorShiftMinTrust: 0.08,
+                classifierShiftedMidpoint: 0.345,
+                classifierBaselineMidpoint: 0.37,
+                fmSchedulingEnabled: false,
+                fmSchedulingMinTrust: 0.0,
+                counterfactualGateOpen: true
+            )
+            let priorShiftOnly = MetadataActivationConfig(
+                lexicalInjectionEnabled: false,
+                lexicalInjectionMinTrust: 0.0,
+                lexicalInjectionDiscount: 0.75,
+                classifierPriorShiftEnabled: true,
+                classifierPriorShiftMinTrust: 0.08,
+                classifierShiftedMidpoint: 0.345,
+                classifierBaselineMidpoint: 0.37,
+                fmSchedulingEnabled: false,
+                fmSchedulingMinTrust: 0.0,
+                counterfactualGateOpen: true
+            )
+            let fmSchedulingOnly = MetadataActivationConfig(
+                lexicalInjectionEnabled: false,
+                lexicalInjectionMinTrust: 0.0,
+                lexicalInjectionDiscount: 0.75,
+                classifierPriorShiftEnabled: false,
+                classifierPriorShiftMinTrust: 0.08,
+                classifierShiftedMidpoint: 0.345,
+                classifierBaselineMidpoint: 0.37,
+                fmSchedulingEnabled: true,
+                fmSchedulingMinTrust: 0.0,
+                counterfactualGateOpen: true
+            )
             let configs: [(name: String, config: MetadataActivationConfig)] = [
                 ("default", .default),
                 ("allEnabled", .allEnabled),
+                ("lexicalOnly", lexicalOnly),
+                ("priorShiftOnly", priorShiftOnly),
+                ("fmSchedulingOnly", fmSchedulingOnly),
             ]
 
             for (configName, configValue) in configs {
