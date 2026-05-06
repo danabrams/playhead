@@ -46,6 +46,14 @@ struct TrustScoringConfig: Sendable {
     let correctObservationBonus: Double
     /// Exceptionally high first-episode confidence to skip shadow.
     let exceptionalFirstEpisodeConfidence: Double
+    /// playhead-q45f: weaker false-skip penalty for listen-rewinds. The
+    /// inline pre-q45f path in `AdDetectionService.recordListenRewind`
+    /// hard-coded a 0.05 decrement (half of `falseSignalPenalty`) but
+    /// bypassed the demotion state machine entirely. Routing rewinds
+    /// through `recordWeakFalseSkipSignal` keeps the weaker magnitude
+    /// while still running `evaluateDemotion` so two rewinds in a row
+    /// genuinely demote auto -> manual.
+    let weakFalseSignalPenalty: Double
 
     static let `default` = TrustScoringConfig(
         shadowToManualObservations: 3,
@@ -56,7 +64,8 @@ struct TrustScoringConfig: Sendable {
         manualToShadowFalseSignals: 4,
         falseSignalPenalty: 0.10,
         correctObservationBonus: 0.10,
-        exceptionalFirstEpisodeConfidence: 0.92
+        exceptionalFirstEpisodeConfidence: 0.92,
+        weakFalseSignalPenalty: 0.05
     )
 }
 
@@ -262,6 +271,91 @@ actor TrustScoringService {
             logger.info("Demoted \(podcastId): \(demoted.from.rawValue) -> \(demoted.to.rawValue) trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
         } else {
             logger.info("False signal for \(podcastId): trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
+        }
+    }
+
+    /// playhead-q45f: weaker false-skip variant for listen-rewinds.
+    ///
+    /// Mirrors `recordFalseSkipSignal` exactly except for the decrement
+    /// magnitude (`weakFalseSignalPenalty` instead of `falseSignalPenalty`).
+    /// Both pass through `evaluateDemotion`, so two rewinds in a row will
+    /// flip an `auto`-mode show to `manual` — the q45f defect was that
+    /// the pre-q45f path inside `AdDetectionService.recordListenRewind`
+    /// only mutated `recentFalseSkipSignals` and skipped the state
+    /// machine. The `Demotion`-capturing tuple shape is identical so
+    /// `nonisolated(unsafe)` is unnecessary here too.
+    func recordWeakFalseSkipSignal(podcastId: String) async {
+        let config = self.config
+        let outcome: (profile: PodcastProfile, captured: Demotion?)?
+        do {
+            outcome = try await store.updateProfileIfExistsCapturing(
+                podcastId: podcastId,
+                update: { profile in
+                    let newFalseSignals = profile.recentFalseSkipSignals + 1
+                    let newTrust = max(0, profile.skipTrustScore - config.weakFalseSignalPenalty)
+                    let currentMode = SkipMode(rawValue: profile.mode) ?? .shadow
+                    let newMode = Self.evaluateDemotion(
+                        config: config,
+                        currentMode: currentMode,
+                        trustScore: newTrust,
+                        recentFalseSignals: newFalseSignals
+                    )
+                    let demotion: Demotion? = (newMode != currentMode)
+                        ? Demotion(from: currentMode, to: newMode)
+                        : nil
+                    let merged = PodcastProfile(
+                        podcastId: profile.podcastId,
+                        sponsorLexicon: profile.sponsorLexicon,
+                        normalizedAdSlotPriors: profile.normalizedAdSlotPriors,
+                        repeatedCTAFragments: profile.repeatedCTAFragments,
+                        jingleFingerprints: profile.jingleFingerprints,
+                        implicitFalsePositiveCount: profile.implicitFalsePositiveCount + 1,
+                        skipTrustScore: newTrust,
+                        observationCount: profile.observationCount,
+                        mode: newMode.rawValue,
+                        recentFalseSkipSignals: newFalseSignals,
+                        traitProfileJSON: profile.traitProfileJSON,
+                        title: profile.title,
+                        // playhead-084j: see explanatory comment in
+                        // `recordSuccessfulObservation` above.
+                        adDurationStatsJSON: profile.adDurationStatsJSON,
+                        // playhead-spxs: see explanatory comment in
+                        // `recordSuccessfulObservation` above.
+                        networkId: profile.networkId
+                    )
+                    return (merged, demotion)
+                }
+            )
+        } catch {
+            logger.warning("Failed to mutate profile for \(podcastId) after weak false-skip signal: \(error.localizedDescription)")
+            return
+        }
+
+        guard let outcome else {
+            // playhead-q45f cycle-1 M-2 / cycle-2 M-3 / cycle-3 L-B:
+            // preserve the missing-profile telemetry that the pre-q45f
+            // inline AdDetectionService.recordListenRewind block emitted.
+            // Operationally this captures the "user tapped Listen on a
+            // window for a podcast with no profile row" branch.
+            // Severity is `warning` (matching the pre-q45f log) so the
+            // diagnostics bundle's warning-and-above filter still
+            // surfaces it. The phrase "No profile found for podcast"
+            // mirrors the pre-q45f message so any external grep
+            // (diagnostics dashboards, support-ticket triage) keeps
+            // working. The pre-q45f counter
+            // (`missingProfileListenRewindCount`) was an
+            // AdDetectionService instance variable; the post-q45f
+            // delegate has no equivalent state, so the count was
+            // dropped (event-log replay through `ad_listen_rewinds`
+            // gives a richer source of truth).
+            logger.warning("No profile found for podcast \(podcastId) during listen-rewind recording; trust mutation skipped")
+            return
+        }
+        let result = outcome.profile
+        if let demoted = outcome.captured {
+            logger.info("Weak-demoted \(podcastId): \(demoted.from.rawValue) -> \(demoted.to.rawValue) trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
+        } else {
+            logger.info("Weak false signal for \(podcastId): trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
         }
     }
 

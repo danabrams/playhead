@@ -975,7 +975,8 @@ struct TrustScoringTests {
             manualToShadowFalseSignals: 4,
             falseSignalPenalty: 0.10,
             correctObservationBonus: 0.10,
-            exceptionalFirstEpisodeConfidence: 0.92
+            exceptionalFirstEpisodeConfidence: 0.92,
+            weakFalseSignalPenalty: 0.05
         )
         let trust = TrustScoringService(store: store, config: config)
 

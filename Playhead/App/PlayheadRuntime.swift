@@ -1293,6 +1293,32 @@ final class PlayheadRuntime {
             await adDetectionService.setUserCorrectionStore(correctionStore)
         }
 
+        // playhead-q45f: install the TrustScoringService on
+        // AdDetectionService so `recordListenRewind` can route its
+        // weak-false-signal side-effect through the state machine
+        // (instead of an inline updateProfileIfExists block that
+        // bypassed `evaluateDemotion`). Setter pattern matches
+        // `setUserCorrectionStore` above. Until this Task completes,
+        // the optional `trustScoringService` is nil so listen-rewinds
+        // still flip the window decision + persist an event row.
+        //
+        // Race-window note (cycle-3 L-C): the trust mutation is
+        // optional-chained (`await trustScoringService?.recordWeak…`),
+        // so a listen-rewind that fires before this Task completes
+        // DROPS the trust decrement entirely — it is not deferred or
+        // queued. Acceptable because (a) the first user tap on a
+        // freshly-launched session lands many milliseconds after this
+        // Task fires, and (b) the missed decrement is recoverable:
+        // the tap still persists an `ad_listen_rewinds` event row so
+        // the q45f gate replay sees it on the next session, and the
+        // next non-startup tap on the same podcast will run the state
+        // machine. If this assumption ever stops holding (e.g. a UI
+        // change auto-fires recordListenRewind from a deep link), this
+        // becomes a deferred-mutation problem.
+        Task { [adDetectionService, trustService] in
+            await adDetectionService.setTrustScoringService(trustService)
+        }
+
         // playhead-4nt1: keep the eligibility cache fresh by following
         // capability updates. The first iteration seeds the cache from
         // `currentSnapshot`; subsequent iterations follow

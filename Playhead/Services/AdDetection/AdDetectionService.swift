@@ -441,6 +441,17 @@ actor AdDetectionService {
     /// spans gate to `.blockedByUserCorrection` without making the struct async.
     private(set) var correctionStore: (any UserCorrectionStore)?
 
+    /// playhead-q45f: the TrustScoringService that owns the per-show
+    /// trust state machine. Set post-init via `setTrustScoringService(_:)`
+    /// so the runtime can wire it without a circular init dependency
+    /// (mirrors `setUserCorrectionStore`). Optional because legacy test
+    /// factories that don't construct a TrustScoringService still need
+    /// `recordListenRewind` to succeed (decision flip + event log row);
+    /// in that case the trust mutation simply no-ops. Production wiring
+    /// in `PlayheadRuntime` always installs a real service before the
+    /// first user tap.
+    private(set) var trustScoringService: TrustScoringService?
+
     /// playhead-z3ch: Provider for feed-description metadata. `runBackfill`
     /// queries it once per asset and synthesizes `.metadata` ledger entries
     /// that are clamped at `metadataCap` (0.15) and gated by the corroboration
@@ -604,6 +615,15 @@ actor AdDetectionService {
     /// (actor property writes must be asynchronous from an init context).
     func setUserCorrectionStore(_ store: any UserCorrectionStore) {
         self.correctionStore = store
+    }
+
+    /// playhead-q45f: install the TrustScoringService post-init.
+    /// Mirrors `setUserCorrectionStore`. PlayheadRuntime calls this in
+    /// a Task after both actors exist; tests exercising the
+    /// listen-rewind reroute call it directly on the service they
+    /// constructed.
+    func setTrustScoringService(_ service: TrustScoringService) {
+        self.trustScoringService = service
     }
 
     #if DEBUG
@@ -3310,46 +3330,34 @@ actor AdDetectionService {
     // MARK: - User Behavior Feedback
 
     /// Record that the user rewound back into a skipped ad window,
-    /// signaling a potential false positive. Updates the podcast profile.
+    /// signaling a potential false positive.
     ///
-    /// **Trust-score writer policy** (C26 H-1, playhead-od4j): this method
-    /// is the ONLY writer of `skipTrustScore` outside `TrustScoringService`.
-    /// The two paths intentionally diverge:
+    /// **Trust-score writer policy** (post-q45f): all `skipTrustScore`
+    /// mutations now live in `TrustScoringService`. This method delegates
+    /// to `recordWeakFalseSkipSignal` (q45f), which uses the smaller
+    /// `weakFalseSignalPenalty` (default `0.05`) AND runs `evaluateDemotion`,
+    /// so two listen-rewinds in a row demote `auto -> manual` as expected.
+    /// Pre-q45f the trust mutation was an inline `updateProfileIfExists`
+    /// block here that bypassed the demotion state machine.
     ///
-    ///   * `recordListenRewind` (here): -0.05, increments
-    ///     `recentFalseSkipSignals`, does NOT run demotion evaluation.
-    ///   * `TrustScoringService.recordFalseSkipSignal` (called from
-    ///     `SkipOrchestrator` listen/manualVeto paths): -0.10
-    ///     (`config.falseSignalPenalty`), increments
-    ///     `recentFalseSkipSignals`, runs `evaluateDemotion` and may
-    ///     transition `mode`.
-    ///
-    /// Why divergent: a listen-rewind is a noisier FP signal than an
+    /// Magnitude rationale: a listen-rewind is a noisier FP signal than an
     /// explicit "Not an ad" revert (the user might've been distracted, or
-    /// not minded the ad). The 0.05 magnitude reflects that weaker
-    /// confidence; the state-machine bypass reflects "single rewinds
-    /// shouldn't trip mode demotion on their own". Whether N consecutive
-    /// rewinds *should* contribute to demotion is an open eval question
-    /// tracked in `playhead-q45f` — do not change this magnitude or wire
-    /// it through `TrustScoringService` without NarlEvalHarness evidence.
+    /// not minded the ad). `weakFalseSignalPenalty = 0.05` is half of
+    /// `falseSignalPenalty = 0.10` to reflect that weaker confidence, while
+    /// still letting repeated rewinds accumulate into a mode demotion.
     ///
-    /// skeptical-review-cycle-17 M-1: routed through the atomic
-    /// `store.updateProfileIfExists` helper (was a non-atomic
-    /// `fetchProfile` → mutate → `upsertProfile` pair). The same two
-    /// defects cycle-15 closed in `updatePriors` were live here:
+    /// Side effects on every call:
+    ///   1. Flip `AdWindowDecision` to `.reverted`.
+    ///   2. Append a row to `ad_listen_rewinds` (q45f.1 event log) keyed
+    ///      to `window.startTime`. Skipped if the window lookup fails.
+    ///   3. Delegate to `trustScoringService?.recordWeakFalseSkipSignal`
+    ///      for the atomic profile mutation + demotion evaluation. Optional
+    ///      chaining lets legacy test factories (no trust service injected)
+    ///      still get steps 1 & 2.
     ///
-    ///   • Lost-update race: the actor suspended between read and write,
-    ///     so a concurrent `TrustScoringService.recordSuccessfulObservation`
-    ///     / `.recordFalseSkipSignal` / `.decayFalseSignals` could land
-    ///     a merged write that this method then silently overwrote with
-    ///     a stale full-row upsert.
-    ///   • `traitProfileJSON` clobber: the previous `PodcastProfile(...)`
-    ///     constructor omitted `traitProfileJSON` and `title`, both
-    ///     defaulting to `nil`. `upsertProfile`'s SQL writes
-    ///     `traitProfileJSON = excluded.traitProfileJSON` (NOT COALESCE),
-    ///     so every "Listen" tap silently nilled that podcast's persisted
-    ///     trait profile. (`title` is COALESCE-protected, but is also
-    ///     carried forward here for symmetry with `updatePriors`.)
+    /// Do NOT re-introduce an inline profile mutation here — the
+    /// `testRecordListenRewindBodyRoutesThroughTrustScoringService`
+    /// canary blocks that regression at source-inspection time.
     func recordListenRewind(
         windowId: String,
         podcastId: String
@@ -3381,68 +3389,24 @@ actor AdDetectionService {
             logger.warning("recordListenRewind: no ad_window for id=\(windowId); skipping event log")
         }
 
-        // Increment false-positive signal on the profile via an atomic
-        // read-modify-write. `updateProfileIfExists` returns nil when no
-        // row exists (matches the prior `fetchProfile` early-return).
-        let merged = try await store.updateProfileIfExists(podcastId: podcastId) { existing in
-            PodcastProfile(
-                podcastId: existing.podcastId,
-                sponsorLexicon: existing.sponsorLexicon,
-                normalizedAdSlotPriors: existing.normalizedAdSlotPriors,
-                repeatedCTAFragments: existing.repeatedCTAFragments,
-                jingleFingerprints: existing.jingleFingerprints,
-                implicitFalsePositiveCount: existing.implicitFalsePositiveCount + 1,
-                skipTrustScore: max(0, existing.skipTrustScore - 0.05),
-                observationCount: existing.observationCount,
-                mode: existing.mode,
-                recentFalseSkipSignals: existing.recentFalseSkipSignals + 1,
-                traitProfileJSON: existing.traitProfileJSON,
-                title: existing.title,
-                // playhead-084j: carry-forward (mirror of `traitProfileJSON`).
-                // Belt-and-suspenders: `upsertProfile` already COALESCEs nil
-                // writes against the persisted column, but explicit symmetry
-                // with the other carry-forwards keeps every constructor in
-                // this file's pattern recognizable to future readers.
-                adDurationStatsJSON: existing.adDurationStatsJSON,
-                // playhead-spxs: carry-forward (mirror of
-                // `adDurationStatsJSON`). `networkId` is COALESCE-protected
-                // in `upsertProfile`, but explicit carry-forward keeps every
-                // constructor in this file consistent with the canary
-                // contract — see
-                // `AdDetectionServiceUpdatePriorsAtomicityCanaryTests`.
-                networkId: existing.networkId
-            )
-        }
-        if merged == nil {
-            missingProfileListenRewindCount += 1
-            logger.warning("No profile found for podcast \(podcastId) during listen-rewind recording (count=\(self.missingProfileListenRewindCount))")
-            return
-        }
+        // playhead-q45f: route the trust-score side-effect through
+        // `TrustScoringService.recordWeakFalseSkipSignal`. The pre-q45f
+        // inline `updateProfileIfExists` block decremented trust by
+        // 0.05 but bypassed the demotion state machine entirely — two
+        // listen-rewinds in a row never demoted an `auto` show to
+        // `manual`. Routing through the service keeps the weaker 0.05
+        // magnitude (matched to the pre-q45f hard-code) AND now passes
+        // through `evaluateDemotion`, closing the q45f defect.
+        //
+        // The optional chaining is deliberate: legacy test factories
+        // (and any future caller that constructs an `AdDetectionService`
+        // without injecting a trust service) still get the decision
+        // flip + event log row. Production wiring in `PlayheadRuntime`
+        // always installs a real service before the first user tap.
+        await trustScoringService?.recordWeakFalseSkipSignal(podcastId: podcastId)
 
         logger.info("Recorded listen-rewind for window \(windowId), podcast \(podcastId)")
     }
-
-    /// C26 L-2: monotonic counter incremented every time `recordListenRewind`
-    /// reaches the `updateProfileIfExists == nil` branch (the user tapped
-    /// "Listen" on a window whose podcast has no priors row yet). The
-    /// surrounding warn-log is sufficient for one-off diagnosis, but a
-    /// counter lets later phases observe the rate of this case across a
-    /// session without grepping logs. Read-only outside this actor.
-    ///
-    /// Status today: the counter is observed only by tests in
-    /// `AdDetectionServiceListenRewindTraitJSONTests` (cycle-3 added
-    /// monotonic-increment and branch-scoped interleaved-call tests on
-    /// top of the original missing-profile no-op test). Production
-    /// code does not yet surface it (no debug-log dump on session-end,
-    /// no diagnostics-bundle export). When such a surface is wired up,
-    /// drop this paragraph.
-    ///
-    /// Test contract: the counter has no exposed reset and is per-instance.
-    /// Tests that observe it must use a fresh `AdDetectionService` (the
-    /// `makeService(store:)` helper produces one per test); reusing a
-    /// service across test cases will drift the count and silently
-    /// invalidate the assertion.
-    private(set) var missingProfileListenRewindCount: Int = 0
 
     // MARK: - Classification Pipeline
 
@@ -5168,14 +5132,14 @@ actor AdDetectionService {
     ///     `TrustScoringService.recordFalseSkipSignal` (which is itself
     ///     atomic via `updateProfileIfExistsCapturing`) landing between
     ///     those hops would be silently overwritten by the carry-forward
-    ///     upsert below — defeating the Bug 4a contract that scopes
-    ///     `skipTrustScore` writes to TrustScoringService and
-    ///     `recordListenRewind` (the two paths defined by the writer
-    ///     policy in `recordListenRewind`'s docstring; C26 H-1,
-    ///     playhead-od4j). `updatePriors` itself does not write
+    ///     upsert below. Post-q45f the writer policy is single-source:
+    ///     TrustScoringService is the sole writer of `skipTrustScore`
+    ///     (via `recordSuccessfulObservation`, `recordFalseSkipSignal`,
+    ///     and the new `recordWeakFalseSkipSignal` that listen-rewind
+    ///     now delegates to). `updatePriors` itself does not write
     ///     `skipTrustScore` — it only carries the existing value
-    ///     through, so any concurrent decrement from either writer must
-    ///     remain visible after this update commits.
+    ///     through, so any concurrent decrement must remain visible
+    ///     after this update commits.
     ///
     ///   • M-2 (traitProfileJSON clobber): the previous
     ///     `PodcastProfile(...)` constructor here omitted

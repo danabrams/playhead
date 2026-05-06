@@ -14,14 +14,14 @@
 //   - updatePriors owns lexical/slot priors and `observationCount`. It does
 //     NOT write `skipTrustScore`; it carries forward
 //     `existingProfile?.skipTrustScore ?? 0.5`.
-//   - `TrustScoringService` and `AdDetectionService.recordListenRewind` are
-//     the only two writers of `skipTrustScore` under the documented policy
-//     (C26 H-1, playhead-od4j; see the `recordListenRewind` docstring in
-//     AdDetectionService.swift for the full magnitude/state-machine
-//     divergence). TrustScoringService writes via
-//     `recordSuccessfulObservation`, `recordFalseSkipSignal`,
-//     `recordFalseNegativeSignal`; recordListenRewind decrements by 0.05
-//     (weaker signal, no demotion-evaluation).
+//   - `TrustScoringService` is the sole writer of `skipTrustScore`
+//     (post-q45f). It exposes `recordSuccessfulObservation`,
+//     `recordFalseSkipSignal`, `recordFalseNegativeSignal`, and
+//     `recordWeakFalseSkipSignal` (the q45f reroute target for
+//     listen-rewinds). `AdDetectionService.recordListenRewind`
+//     delegates its trust-score side-effect through
+//     `recordWeakFalseSkipSignal`; it no longer writes the column
+//     directly.
 //   - This contract pins carry-forward only — it does not assert which
 //     paths may decrement.
 //

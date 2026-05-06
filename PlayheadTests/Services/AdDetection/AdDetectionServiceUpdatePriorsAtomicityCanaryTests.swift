@@ -191,19 +191,32 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         )
     }
 
-    /// Cycle-17 M-1: pin the sibling fix in `recordListenRewind`. The
-    /// production "Listen" tap path (NowPlayingViewModel → PlayheadRuntime
-    /// → AdDetectionService.recordListenRewind) had the same two cycle-15
-    /// defects (lost-update race + traitProfileJSON clobber) until cycle-17.
-    /// Pin both invariants here:
-    ///   1. Body MUST funnel through `store.updateProfileIfExists` (the
-    ///      no-lazy-create sibling of `mutateProfile` — this method
-    ///      early-returns when the row is missing, by design).
-    ///   2. Body MUST NOT contain the non-atomic `await store.fetchProfile`
-    ///      / `await store.upsertProfile` pair.
-    ///   3. The closure MUST carry `existing.traitProfileJSON` forward
-    ///      into the new `PodcastProfile(...)` constructor.
-    func testRecordListenRewindBodyUsesUpdateProfileIfExistsAndCarriesTraitJSON() throws {
+    /// playhead-q45f: pin the reroute of `recordListenRewind`'s
+    /// trust-score side-effect through `TrustScoringService.recordWeakFalseSkipSignal`.
+    /// Pre-q45f the body contained an inline `updateProfileIfExists`
+    /// block that decremented trust by 0.05 but BYPASSED
+    /// `evaluateDemotion`, so two listen-rewinds in a row never demoted
+    /// an `auto` show to `manual`. The q45f reroute keeps the weaker
+    /// 0.05 magnitude AND now passes through the state machine.
+    ///
+    /// Pin three invariants on the post-reroute body:
+    ///   1. Body MUST call `trustScoringService?.recordWeakFalseSkipSignal(`
+    ///      (or any optional-chained variant of the same call).
+    ///   2. Body MUST NOT call `store.updateProfileIfExists(` — the
+    ///      cycle-17 M-1 atomic pin is now hosted inside
+    ///      `TrustScoringService.recordWeakFalseSkipSignal` itself.
+    ///   3. Body MUST NOT contain the non-atomic
+    ///      `await store.fetchProfile(` / `await store.upsertProfile(`
+    ///      pair (the cycle-15 M-1 lost-update regression shape).
+    ///
+    /// The traitProfileJSON / networkId carry-forward contracts that
+    /// this canary used to host now live in
+    /// `TrustScoringServiceWeakSignalTests.carriesForwardOptionalFields`
+    /// (behavioral) and the per-method TrustScoring carry-forward canary
+    /// `testEachTrustScoringMutationMethodCarriesNetworkIdForward`
+    /// (whose `mutationMethods` allow-list now includes
+    /// `recordWeakFalseSkipSignal`).
+    func testRecordListenRewindBodyRoutesThroughTrustScoringService() throws {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/Services/AdDetection/AdDetectionService.swift"
         )
@@ -220,85 +233,81 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         let stripped = SwiftSourceInspector.strippingCommentsAndStrings(body)
         let strippedRange = NSRange(stripped.startIndex..., in: stripped)
 
-        // Positive: body MUST call `store.updateProfileIfExists`.
-        let updateIfExistsRegex = try NSRegularExpression(
-            pattern: #"store\s*\.\s*updateProfileIfExists\s*\("#
+        // Positive: body MUST call
+        // `trustScoringService?.recordWeakFalseSkipSignal(` (or any
+        // optional-chained variant — e.g. force-unwrap, alias, or
+        // explicit `await self.trustScoringService?.…`).
+        let weakSignalRegex = try NSRegularExpression(
+            pattern: #"trustScoringService\??\s*\.\s*recordWeakFalseSkipSignal\s*\("#
         )
         XCTAssertNotNil(
-            updateIfExistsRegex.firstMatch(in: stripped, range: strippedRange),
+            weakSignalRegex.firstMatch(in: stripped, range: strippedRange),
             """
-            `AdDetectionService.recordListenRewind(...)` no longer routes \
-            its podcast-profile read-modify-write through \
-            `store.updateProfileIfExists(podcastId:update:)`. Cycle-17 M-1: \
-            the prior `fetchProfile` → mutate → `upsertProfile` pair \
-            suspended the AnalysisStore actor between read and write, \
-            opening the same lost-update race against TrustScoringService \
-            that cycle-15 closed in `updatePriors`. Restore the atomic \
-            helper OR update this canary if the entry point intentionally \
-            moved.
+            `AdDetectionService.recordListenRewind(...)` no longer \
+            routes its weak-false-skip side-effect through \
+            `trustScoringService?.recordWeakFalseSkipSignal(...)`. \
+            playhead-q45f: the inline `updateProfileIfExists` block \
+            this canary used to pin bypassed `evaluateDemotion`, so \
+            two listen-rewinds never demoted auto -> manual. Restore \
+            the call OR update this canary if the reroute target \
+            intentionally moved (e.g. a thinner adapter on the \
+            TrustScoringService surface).
             """
         )
 
-        // Negative: body MUST NOT contain `await store.fetchProfile(` or
-        // `await store.upsertProfile(`.
+        // Negative: body MUST NOT call any `store.updateProfileIfExists*(`
+        // variant (the bare helper OR `updateProfileIfExistsCapturing`).
+        // The atomic pin for the trust mutation now lives inside
+        // `TrustScoringService.recordWeakFalseSkipSignal` (which
+        // itself calls `updateProfileIfExistsCapturing`); a copy of
+        // either call here would re-introduce the q45f defect by
+        // running the trust math twice and only one of them through
+        // the state machine. Cycle-1 H-1: the pre-cycle pattern
+        // `updateProfileIfExists\s*\(` accepted whitespace between the
+        // method name and `(`, so it would NOT have caught a new caller
+        // shaped `store.updateProfileIfExistsCapturing(...)`. The
+        // `\w*` after the base name closes that gap.
+        let updateIfExistsRegex = try NSRegularExpression(
+            pattern: #"store\s*\.\s*updateProfileIfExists\w*\s*\("#
+        )
+        XCTAssertNil(
+            updateIfExistsRegex.firstMatch(in: stripped, range: strippedRange),
+            """
+            `AdDetectionService.recordListenRewind(...)` re-introduced \
+            an inline `store.updateProfileIfExists(...)` call. \
+            playhead-q45f: the trust mutation must funnel solely \
+            through `TrustScoringService.recordWeakFalseSkipSignal`, \
+            which runs the demotion state machine. Two writers \
+            re-opens the q45f defect.
+            """
+        )
+
+        // Negative: body MUST NOT contain the non-atomic
+        // `fetchProfile` / `upsertProfile` pair (cycle-15 M-1 shape).
         let fetchProfileRegex = try NSRegularExpression(
             pattern: #"await\s+store\s*\.\s*fetchProfile\s*\("#
         )
         XCTAssertNil(
             fetchProfileRegex.firstMatch(in: stripped, range: strippedRange),
             """
-            `AdDetectionService.recordListenRewind(...)` re-introduced an \
-            `await store.fetchProfile(...)` call. Cycle-17 M-1: this is \
-            the read half of the non-atomic pair that races against \
-            TrustScoringService writers. Use \
-            `store.updateProfileIfExists(podcastId:update:)` instead.
+            `AdDetectionService.recordListenRewind(...)` re-introduced \
+            an `await store.fetchProfile(...)` call. Cycle-15 M-1: \
+            the fetch/upsert pair re-opens the lost-update race \
+            against TrustScoringService writers. Route through \
+            `TrustScoringService.recordWeakFalseSkipSignal` instead.
             """
         )
-
         let upsertProfileRegex = try NSRegularExpression(
             pattern: #"await\s+store\s*\.\s*upsertProfile\s*\("#
         )
         XCTAssertNil(
             upsertProfileRegex.firstMatch(in: stripped, range: strippedRange),
             """
-            `AdDetectionService.recordListenRewind(...)` re-introduced an \
-            `await store.upsertProfile(...)` call. Cycle-17 M-1: this is \
-            the write half of the non-atomic pair (and a bare upsert with \
-            a default-`nil` `traitProfileJSON` field would silently \
-            clobber the persisted trait profile because `upsertProfile` \
-            does NOT COALESCE that column). Use \
-            `store.updateProfileIfExists(podcastId:update:)` instead.
-            """
-        )
-
-        // Cycle-20 L-1: scope the carry-forward check to the closure
-        // body specifically (the trailing closure on
-        // `updateProfileIfExists`). See the rationale in
-        // `testUpdatePriorsCarriesExistingTraitProfileJSONForward`.
-        let updateClosureBody = try Self.closureBodyContainingExistingIn(in: body)
-        let updateClosureStripped = SwiftSourceInspector.strippingCommentsAndStrings(updateClosureBody)
-        let updateClosureRange = NSRange(updateClosureStripped.startIndex..., in: updateClosureStripped)
-
-        // Positive: closure MUST carry `existing.traitProfileJSON` forward.
-        let traitCarryRegex = try NSRegularExpression(
-            // Cycle-19 L-2: broadened past the literal `existing` LHS.
-            // The canonical closure-arg name is `existing`, but a future
-            // refactor that aliases (e.g.
-            // `let snapshot = existing; ... traitProfileJSON: snapshot.traitProfileJSON`)
-            // is still correct — the carry-forward is what matters, not
-            // the identifier name. Match `<ident>.traitProfileJSON` where
-            // `<ident>` is any single Swift identifier.
-            pattern: Self.traitProfileCarryForwardPattern
-        )
-        XCTAssertNotNil(
-            traitCarryRegex.firstMatch(in: updateClosureStripped, range: updateClosureRange),
-            """
-            `AdDetectionService.recordListenRewind(...)`'s `update` closure \
-            no longer carries `existing.traitProfileJSON` forward \
-            (whitespace-tolerant match, scoped to the closure body). \
-            Cycle-17 M-1: the same non-COALESCE `traitProfileJSON` \
-            clobber that cycle-15 M-2 closed in `updatePriors` lived here \
-            until cycle-17. Restore the carry-forward.
+            `AdDetectionService.recordListenRewind(...)` re-introduced \
+            an `await store.upsertProfile(...)` call. Cycle-15 M-1: \
+            the fetch/upsert pair re-opens the lost-update race \
+            against TrustScoringService writers. Route through \
+            `TrustScoringService.recordWeakFalseSkipSignal` instead.
             """
         )
     }
@@ -645,37 +654,36 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
             searchStart = tokenRange.upperBound
         }
 
-        // Sanity floor: today there are 4 `existing in` closures total
-        // in AdDetectionService.swift; 2 of them construct
-        // `PodcastProfile` (in `recordListenRewind` and `updatePriors`).
-        // Cycle-23 L-8: line numbers were removed from the doc — they
-        // rot the moment any unrelated edit shifts the file. Symbol
-        // names (`recordListenRewind`, `updatePriors`) anchor the
-        // intent durably. If a refactor drops the file to zero
-        // `existing in` tokens, this canary would silently pass with no
-        // work done — the floor below ensures the scan genuinely
-        // exercises its target every run.
+        // Sanity floor: post-q45f there is 1 `existing in` closure in
+        // AdDetectionService.swift that constructs `PodcastProfile`
+        // (`updatePriors`). The other entry point (`recordListenRewind`)
+        // no longer constructs a profile — it routes the trust mutation
+        // through `TrustScoringService.recordWeakFalseSkipSignal`
+        // instead. The TrustScoring carry-forward sits behind the
+        // sibling whole-file canary
+        // `testEveryProfileConstructingProfileInClosureInTrustScoringCarriesNetworkId`
+        // and the per-method canary
+        // `testEachTrustScoringMutationMethodCarriesNetworkIdForward`.
         XCTAssertGreaterThanOrEqual(
-            totalExistingInCount, 2,
+            totalExistingInCount, 1,
             """
-            Cycle-22 L-5 floor: expected at least 2 `existing in` \
-            closures in AdDetectionService.swift; found \
+            playhead-q45f floor: expected at least 1 `existing in` \
+            closure in AdDetectionService.swift; found \
             \(totalExistingInCount). If the file genuinely no longer has \
-            any `existing in` closures (e.g. all profile mutations moved \
-            elsewhere), delete this canary; otherwise the whole-file \
-            scan has gone blind.
+            any `existing in` closures (e.g. updatePriors's profile \
+            mutation moved elsewhere), delete this canary; otherwise the \
+            whole-file scan has gone blind.
             """
         )
         XCTAssertGreaterThanOrEqual(
-            profileConstructingClosureCount, 2,
+            profileConstructingClosureCount, 1,
             """
-            Cycle-22 L-5 floor: expected at least 2 `existing in` \
-            closures that construct `PodcastProfile(...)` — one in \
-            `recordListenRewind` and one in `updatePriors`. Found \
-            \(profileConstructingClosureCount). The whole-file scan has \
-            gone blind to its target; either restore the constructors \
-            OR move this floor down with an explanation of where the \
-            profile-mutation entry points have moved.
+            playhead-q45f floor: expected at least 1 `existing in` \
+            closure that constructs `PodcastProfile(...)` (`updatePriors`). \
+            Found \(profileConstructingClosureCount). The whole-file \
+            scan has gone blind to its target; either restore the \
+            constructor OR move this floor down with an explanation of \
+            where the profile-mutation entry point has moved.
             """
         )
     }
@@ -777,25 +785,27 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         }
 
         XCTAssertGreaterThanOrEqual(
-            totalExistingInCount, 2,
+            totalExistingInCount, 1,
             """
-            playhead-spxs floor: expected at least 2 `existing in` \
-            closures in AdDetectionService.swift; found \
-            \(totalExistingInCount). If the file genuinely no longer has \
-            any `existing in` closures, delete this canary; otherwise \
-            the whole-file scan has gone blind.
+            playhead-q45f floor (post-reroute): expected at least 1 \
+            `existing in` closure in AdDetectionService.swift; found \
+            \(totalExistingInCount). `recordListenRewind` no longer \
+            constructs a profile here — it routes through \
+            `TrustScoringService.recordWeakFalseSkipSignal`. If \
+            `updatePriors` also moves its mutation elsewhere, delete \
+            this canary; otherwise the whole-file scan has gone blind.
             """
         )
         XCTAssertGreaterThanOrEqual(
-            profileConstructingClosureCount, 2,
+            profileConstructingClosureCount, 1,
             """
-            playhead-spxs floor: expected at least 2 `existing in` \
-            closures that construct `PodcastProfile(...)` — one in \
-            `recordListenRewind` and one in `updatePriors`. Found \
-            \(profileConstructingClosureCount). The whole-file networkId \
-            scan has gone blind to its target; either restore the \
-            constructors OR move this floor down with an explanation \
-            of where the profile-mutation entry points have moved.
+            playhead-q45f floor (post-reroute): expected at least 1 \
+            `existing in` closure that constructs `PodcastProfile(...)` \
+            (`updatePriors`). Found \(profileConstructingClosureCount). \
+            The whole-file networkId scan has gone blind to its target; \
+            either restore the constructor OR move this floor down \
+            with an explanation of where the profile-mutation entry \
+            point has moved.
             """
         )
     }
@@ -905,28 +915,29 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         }
 
         XCTAssertGreaterThanOrEqual(
-            totalProfileInCount, 5,
+            totalProfileInCount, 6,
             """
-            playhead-spxs cycle-1 H-1 floor: expected at least 5 \
-            `profile in` closures in TrustScoringService.swift (one per \
-            mutation entry point); found \(totalProfileInCount). If the \
-            file genuinely no longer has 5 `profile in` closures, either \
-            the closure-parameter convention has changed (verify and \
-            update this scan to the new token) OR the entry points have \
-            moved. Either way, do NOT lower this floor without \
-            confirming the underlying closures are still being scanned.
+            playhead-q45f floor: expected at least 6 `profile in` \
+            closures in TrustScoringService.swift (one per mutation \
+            entry point — q45f added `recordWeakFalseSkipSignal` to \
+            the original 5); found \(totalProfileInCount). If the file \
+            genuinely no longer has 6 `profile in` closures, either the \
+            closure-parameter convention has changed (verify and update \
+            this scan to the new token) OR the entry points have moved. \
+            Either way, do NOT lower this floor without confirming the \
+            underlying closures are still being scanned.
             """
         )
         XCTAssertGreaterThanOrEqual(
-            profileConstructingClosureCount, 5,
+            profileConstructingClosureCount, 6,
             """
-            playhead-spxs cycle-1 H-1 floor: expected at least 5 \
-            `profile in` closures that construct `PodcastProfile(...)`. \
-            Found \(profileConstructingClosureCount). The whole-file \
-            networkId scan has gone blind to its targets in \
-            TrustScoringService; either restore the constructors OR \
-            move this floor down with an explanation of where the \
-            mutation entry points have moved.
+            playhead-q45f floor: expected at least 6 `profile in` \
+            closures that construct `PodcastProfile(...)` (q45f added \
+            `recordWeakFalseSkipSignal`). Found \
+            \(profileConstructingClosureCount). The whole-file networkId \
+            scan has gone blind to its targets in TrustScoringService; \
+            either restore the constructors OR move this floor down with \
+            an explanation of where the mutation entry points have moved.
             """
         )
     }
@@ -986,6 +997,12 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         let mutationMethods = [
             "recordSuccessfulObservation",
             "recordFalseSkipSignal",
+            // playhead-q45f: q45f introduced a 6th profile-mutating
+            // entry point (`recordWeakFalseSkipSignal`) for listen-
+            // rewinds; it reuses the same `updateProfileIfExistsCapturing`
+            // shape as `recordFalseSkipSignal` and is now load-bearing
+            // for the demotion state machine on weak signals.
+            "recordWeakFalseSkipSignal",
             "setUserOverride",
             "recordFalseNegativeSignal",
             "decayFalseSignals",

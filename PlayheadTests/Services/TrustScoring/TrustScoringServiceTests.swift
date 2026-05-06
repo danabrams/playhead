@@ -565,7 +565,8 @@ struct TrustScoringServiceTests {
             manualToShadowFalseSignals: 1,
             falseSignalPenalty: 0.25,
             correctObservationBonus: 0.20,
-            exceptionalFirstEpisodeConfidence: 0.99
+            exceptionalFirstEpisodeConfidence: 0.99,
+            weakFalseSignalPenalty: 0.125
         )
         let seed = makeProfile(mode: "shadow", trustScore: 0.0, observations: 0)
         let (sut, store) = try await makeSUT(config: config, seedProfile: seed)
