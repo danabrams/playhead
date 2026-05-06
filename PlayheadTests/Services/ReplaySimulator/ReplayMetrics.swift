@@ -663,8 +663,19 @@ struct ReplaySpanDecision: Sendable, Codable, Equatable {
 ///     from "explicitly empty" (an explicitly empty SHA would be a bug
 ///     in the producer, not legitimate data). See
 ///     `FrozenTraceProvenanceTests` for the back-compat contract.
+///   - `frozen-trace-v3` (playhead-q45f.1, 2026-05-05): adds
+///     `listenRewindEvents: [FrozenListenRewindEvent]` so the q45f
+///     counterfactual gate can see when the user reverted an
+///     auto-skipped window via the "Listen" button. Pre-q45f.1 fixtures
+///     decode as `[]` (consistent with `windowScores`, `corrections`,
+///     etc.). The version-string bump is intentional even though the
+///     change is strictly additive: a v3-stamped fixture promises that
+///     the listen-rewind capture path was active at capture time, so
+///     consumers know that an empty array is meaningful (no rewinds)
+///     rather than "field not captured". See
+///     `FrozenTraceListenRewindTests` for the back-compat contract.
 struct FrozenTrace: Sendable, Codable {
-    static let currentTraceVersion = "frozen-trace-v2"
+    static let currentTraceVersion = "frozen-trace-v3"
 
     let episodeId: String
     let podcastId: String
@@ -740,6 +751,19 @@ struct FrozenTrace: Sendable, Codable {
     /// build phase couldn't resolve a SHA), never an empty string.
     let buildCommitSHA: String
 
+    // MARK: - Listen-rewind capture (q45f.1, frozen-trace-v3)
+
+    /// User listen-rewind events recorded during the capture session.
+    /// A listen-rewind is a tap on the "Listen" button on an ad-skip
+    /// banner — the user reverted a window the system auto-skipped,
+    /// implying a probable false positive. q45f's counterfactual gate
+    /// asks whether N consecutive listen-rewinds should contribute to
+    /// trust-mode demotion; that question can only be answered with
+    /// captured event evidence. Empty array = no listen-rewinds in this
+    /// capture (or pre-q45f.1 fixture). Strictly additive: older
+    /// fixtures decode as `[]`.
+    let listenRewindEvents: [FrozenListenRewindEvent]
+
     init(
         episodeId: String,
         podcastId: String,
@@ -761,7 +785,8 @@ struct FrozenTrace: Sendable, Codable {
         fastTranscriptCoverageEndTime: Double? = nil,
         featureCoverageEndTime: Double? = nil,
         detectorVersion: String = "",
-        buildCommitSHA: String = ""
+        buildCommitSHA: String = "",
+        listenRewindEvents: [FrozenListenRewindEvent] = []
     ) {
         self.episodeId = episodeId
         self.podcastId = podcastId
@@ -784,6 +809,7 @@ struct FrozenTrace: Sendable, Codable {
         self.featureCoverageEndTime = featureCoverageEndTime
         self.detectorVersion = detectorVersion
         self.buildCommitSHA = buildCommitSHA
+        self.listenRewindEvents = listenRewindEvents
     }
 
     // MARK: - Codable (manual to keep new fields optional)
@@ -811,6 +837,8 @@ struct FrozenTrace: Sendable, Codable {
         // gtt9.21: capture provenance.
         case detectorVersion
         case buildCommitSHA
+        // q45f.1: listen-rewind capture.
+        case listenRewindEvents
     }
 
     init(from decoder: Decoder) throws {
@@ -839,7 +867,9 @@ struct FrozenTrace: Sendable, Codable {
             // for back-compat. See the schema-history note above for
             // why we picked empty-string over Optional<String>.
             detectorVersion: try c.decodeIfPresent(String.self, forKey: .detectorVersion) ?? "",
-            buildCommitSHA: try c.decodeIfPresent(String.self, forKey: .buildCommitSHA) ?? ""
+            buildCommitSHA: try c.decodeIfPresent(String.self, forKey: .buildCommitSHA) ?? "",
+            // q45f.1: pre-q45f.1 fixtures lack the field; default to [].
+            listenRewindEvents: try c.decodeIfPresent([FrozenListenRewindEvent].self, forKey: .listenRewindEvents) ?? []
         )
     }
 
@@ -871,6 +901,9 @@ struct FrozenTrace: Sendable, Codable {
         // gtt9.21 capture.
         try c.encode(detectorVersion, forKey: .detectorVersion)
         try c.encode(buildCommitSHA, forKey: .buildCommitSHA)
+        // q45f.1: always emit (even when empty) for the same reason —
+        // a fresh v3 capture should be self-describing on the wire.
+        try c.encode(listenRewindEvents, forKey: .listenRewindEvents)
     }
 
     /// Return a copy with a different holdout designation.
@@ -897,7 +930,8 @@ struct FrozenTrace: Sendable, Codable {
             fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime,
             featureCoverageEndTime: featureCoverageEndTime,
             detectorVersion: detectorVersion,
-            buildCommitSHA: buildCommitSHA
+            buildCommitSHA: buildCommitSHA,
+            listenRewindEvents: listenRewindEvents
         )
     }
 
@@ -1058,6 +1092,26 @@ struct FrozenTrace: Sendable, Codable {
         /// Whether the capture's `.default` path marked this window as an ad
         /// (post-gate). Replayed `.default` predictions rely on this.
         let isAdUnderDefault: Bool
+    }
+
+    /// User listen-rewind event: a tap on the "Listen" button on an
+    /// ad-skip banner, which reverts a system-skipped window. Captured
+    /// from the `ad_listen_rewinds` production table (added in q45f.1)
+    /// so the q45f counterfactual gate can ask whether N consecutive
+    /// rewinds should contribute to trust-mode demotion.
+    /// (Introduced in `frozen-trace-v3` for playhead-q45f.1.)
+    struct FrozenListenRewindEvent: Sendable, Codable, Equatable {
+        /// Episode-relative time (seconds) the user was rewound to —
+        /// mirrors the source ad_window's `startTime`. Sourced from the
+        /// `time` column on the `ad_listen_rewinds` row (NOT from
+        /// `createdAt`, which is wall-clock and only used for ordering).
+        let time: Double
+        /// AdWindow ID the user reverted (matches `AdWindow.id`).
+        let windowId: String
+        /// PodcastId on the rewind row (mirrors the production
+        /// `recordListenRewind` argument; needed because counterfactual
+        /// replay aggregates rewinds per-show).
+        let podcastId: String
     }
 }
 

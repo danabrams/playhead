@@ -122,6 +122,51 @@ struct CorpusExporterTests {
         }
     }
 
+    @Test("listen_rewind record carries assetId, windowId, podcastId, time, createdAt — playhead-q45f.1")
+    func listenRewindRecordShape() throws {
+        let row = AdListenRewindRow(
+            windowId: "win-Z",
+            podcastId: "pod-Z",
+            time: 87.5,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let data = try CorpusExporter.listenRewindLine(row, analysisAssetId: "asset-Z")
+        let json = try decodeJSONObject(from: data)
+        #expect(json["type"] as? String == "listen_rewind")
+        #expect(json["schemaVersion"] as? Int == 1)
+        #expect(json["analysisAssetId"] as? String == "asset-Z")
+        #expect(json["windowId"] as? String == "win-Z")
+        #expect(json["podcastId"] as? String == "pod-Z")
+        #expect(json["time"] as? Double == 87.5)
+        #expect(json["createdAt"] as? Double == 1_700_000_000.0)
+    }
+
+    @Test("export emits one listen_rewind line per persisted row, with non-zero count — playhead-q45f.1")
+    func exportEmitsListenRewindLines() async throws {
+        let docs = try makeTempDir(prefix: "CorpusExport-listen-rewind")
+        let asset = makeTestAsset(id: "asset-q45f-1")
+        let source = ListenRewindSource(
+            assets: [asset],
+            listenRewinds: [
+                "asset-q45f-1": [
+                    AdListenRewindRow(windowId: "win-A", podcastId: "pod-1", time: 60, createdAt: Date(timeIntervalSince1970: 1_700_000_100)),
+                    AdListenRewindRow(windowId: "win-A", podcastId: "pod-1", time: 60, createdAt: Date(timeIntervalSince1970: 1_700_000_200)),
+                    AdListenRewindRow(windowId: "win-B", podcastId: "pod-1", time: 120, createdAt: Date(timeIntervalSince1970: 1_700_000_300)),
+                ]
+            ]
+        )
+
+        let result = try await CorpusExporter.export(store: source, documentsURL: docs)
+        #expect(result.listenRewindCount == 3)
+
+        let records = try parseJSONL(at: result.fileURL)
+        let rewinds = records.filter { ($0["type"] as? String) == "listen_rewind" }
+        #expect(rewinds.count == 3)
+        #expect(rewinds.allSatisfy { ($0["analysisAssetId"] as? String) == "asset-q45f-1" })
+        let windowIds = Set(rewinds.compactMap { $0["windowId"] as? String })
+        #expect(windowIds == ["win-A", "win-B"])
+    }
+
     @Test("asset record carries podcastId when threaded through from the store (HIGH-3)")
     func assetRecordPodcastIdPassthrough() throws {
         let asset = makeTestAsset(id: "asset-H3")
@@ -985,6 +1030,36 @@ private struct FailingSource: CorpusExportSource {
     /// so the corpus-export path exercises end-to-end.
     func allShadowFMResponses() async throws -> [ShadowFMResponse] {
         return []
+    }
+
+    /// playhead-q45f.1: no listen-rewind rows in the failing-source
+    /// fixtures. Returns empty so the exporter exercises the
+    /// "no listen_rewind events for this asset" branch without any
+    /// SQL setup.
+    func fetchListenRewinds(forAssetId assetId: String) async throws -> [AdListenRewindRow] {
+        return []
+    }
+}
+
+// MARK: - ListenRewindSource (q45f.1 test seam)
+
+/// In-memory `CorpusExportSource` that returns a configured map of
+/// `[assetId: [AdListenRewindRow]]` for `fetchListenRewinds(forAssetId:)`.
+/// All other methods return empty/nil so the exporter exercises only the
+/// listen-rewind emission path.
+private struct ListenRewindSource: CorpusExportSource {
+    let assets: [AnalysisAsset]
+    let listenRewinds: [String: [AdListenRewindRow]]
+
+    func fetchAllAssets() async throws -> [AnalysisAsset] { assets }
+    func fetchDecodedSpans(assetId: String) async throws -> [DecodedSpan] { [] }
+    func fetchAdWindows(assetId: String) async throws -> [AdWindow] { [] }
+    func loadCorrectionEvents(analysisAssetId: String) async throws -> [CorrectionEvent] { [] }
+    func fetchPodcastId(forEpisodeId episodeId: String) async throws -> String? { nil }
+    func fetchPodcastProfile(podcastId: String) async throws -> PodcastProfile? { nil }
+    func allShadowFMResponses() async throws -> [ShadowFMResponse] { [] }
+    func fetchListenRewinds(forAssetId assetId: String) async throws -> [AdListenRewindRow] {
+        listenRewinds[assetId] ?? []
     }
 }
 

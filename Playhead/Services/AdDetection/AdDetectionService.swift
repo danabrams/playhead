@@ -3360,6 +3360,27 @@ actor AdDetectionService {
             decisionState: AdDecisionState.reverted.rawValue
         )
 
+        // playhead-q45f.1: append an event row to `ad_listen_rewinds`
+        // so the q45f counterfactual gate's frozen-trace replay can see
+        // *that* the user rewound, in addition to the indirect signal
+        // already encoded in `AdWindowDecision.reverted`. The row's
+        // `time` is the source window's `startTime` — the position the
+        // banner's "Listen" tap rewinds the player to, mirroring
+        // `seek(to: item.adStartTime)` in `NowPlayingViewModel`. Done
+        // before the profile mutation so a missing-profile early
+        // return still leaves the event in the log (q45f's gate cares
+        // about the *event*, not the trust-score side-effect).
+        if let window = try await store.fetchAdWindow(id: windowId) {
+            try await store.insertListenRewind(
+                windowId: windowId,
+                podcastId: podcastId,
+                time: window.startTime,
+                createdAt: Date()
+            )
+        } else {
+            logger.warning("recordListenRewind: no ad_window for id=\(windowId); skipping event log")
+        }
+
         // Increment false-positive signal on the profile via an atomic
         // read-modify-write. `updateProfileIfExists` returns nil when no
         // row exists (matches the prior `fetchProfile` early-return).

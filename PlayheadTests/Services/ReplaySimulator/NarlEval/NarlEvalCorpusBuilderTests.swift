@@ -54,11 +54,15 @@ struct NarlEvalCorpusBuilderTests {
 
         let documentsDir = try Self.resolveDocumentsDir(in: bundleURL)
 
-        // Parse corpus-export.jsonl (asset + decision + correction rows).
+        // Parse corpus-export.jsonl (asset + decision + correction + listen_rewind rows).
         let corpusExportURLs = try Self.locateCorpusExports(in: documentsDir)
         let assets = try Self.parseAssets(from: corpusExportURLs)
         let decisionsByAsset = try Self.parseDecisionSpans(from: corpusExportURLs)
         let correctionsByAsset = try Self.parseCorrections(from: corpusExportURLs)
+        // playhead-q45f.1: empty dictionary on pre-q45f.1 corpus exports
+        // (no rows of type `listen_rewind`). FrozenTrace.listenRewindEvents
+        // resolves to [] for affected assets.
+        let listenRewindsByAsset = try Self.parseListenRewinds(from: corpusExportURLs)
 
         // decision-log.jsonl (per-window decisions, optional).
         let decisionLogURL = documentsDir.appendingPathComponent("decision-log.jsonl")
@@ -92,13 +96,15 @@ struct NarlEvalCorpusBuilderTests {
             let shadow = shadowEntries[asset.id] ?? []
             let lifecycle = lifecycleSummaries[asset.id]
 
+            let listenRewinds = listenRewindsByAsset[asset.id] ?? []
             let trace = Self.assembleTrace(
                 asset: asset,
                 decisions: decisions,
                 corrections: corrections,
                 decisionLog: decisionLog,
                 shadow: shadow,
-                lifecycle: lifecycle
+                lifecycle: lifecycle,
+                listenRewinds: listenRewinds
             )
 
             let encoder = JSONEncoder()
@@ -184,6 +190,22 @@ struct NarlEvalCorpusBuilderTests {
         let createdAt: Double
     }
 
+    /// playhead-q45f.1: parsed `listen_rewind` JSONL row. Each row is a
+    /// single user-tap event recorded against an ad_window the auto-skip
+    /// path skipped. The q45f counterfactual gate replays these to ask
+    /// whether the gate would have suppressed the skip if N-of-M consecutive
+    /// rewinds had been visible at decision time.
+    struct BuilderListenRewind {
+        let assetId: String
+        let windowId: String
+        let podcastId: String
+        /// Episode-relative second the user was rewound to (mirrors the
+        /// source ad_window's `startTime`). The exporter writes this into
+        /// the `time` JSONL key; the harness consumes it as
+        /// `FrozenListenRewindEvent.time`.
+        let time: Double
+    }
+
     static func locateCorpusExports(in dir: URL) throws -> [URL] {
         let fm = FileManager.default
         let contents = try fm.contentsOfDirectory(
@@ -240,6 +262,33 @@ struct NarlEvalCorpusBuilderTests {
                 byAsset[asset, default: []].append(BuilderDecision(
                     assetId: asset, firstAtomOrdinal: firstOrd, lastAtomOrdinal: lastOrd,
                     startTime: start, endTime: end
+                ))
+            }
+        }
+        return byAsset
+    }
+
+    /// playhead-q45f.1: pull every `listen_rewind` JSONL row out of the
+    /// corpus-export files and group by `analysisAssetId`. Rows missing
+    /// any required field (assetId / windowId / podcastId / time) are
+    /// silently skipped — the exporter always emits all four, so any
+    /// missing field signals a corrupt or pre-q45f.1 row.
+    static func parseListenRewinds(from urls: [URL]) throws -> [String: [BuilderListenRewind]] {
+        var byAsset: [String: [BuilderListenRewind]] = [:]
+        for url in urls {
+            try Self.forEachJSONL(url: url) { obj in
+                guard let t = obj["type"] as? String, t == "listen_rewind" else { return }
+                guard let asset = obj["analysisAssetId"] as? String,
+                      let windowId = obj["windowId"] as? String,
+                      let podcastId = obj["podcastId"] as? String,
+                      let time = (obj["time"] as? Double)
+                                   ?? ((obj["time"] as? NSNumber).map(\.doubleValue))
+                else { return }
+                byAsset[asset, default: []].append(BuilderListenRewind(
+                    assetId: asset,
+                    windowId: windowId,
+                    podcastId: podcastId,
+                    time: time
                 ))
             }
         }
@@ -484,7 +533,8 @@ struct NarlEvalCorpusBuilderTests {
         corrections: [BuilderCorrection],
         decisionLog: [BuilderDecisionLogEntry],
         shadow: [BuilderShadowEntry],
-        lifecycle: BuilderLifecycleSummary? = nil
+        lifecycle: BuilderLifecycleSummary? = nil,
+        listenRewinds: [BuilderListenRewind] = []
     ) -> FrozenTrace {
         // Baseline span confidence is sourced from the decision-log row that
         // most-overlaps the span (HIGH-4). Promoted spans are always `isAd=true`
@@ -639,7 +689,17 @@ struct NarlEvalCorpusBuilderTests {
             // strings here — FrozenTrace's encoder still emits the
             // keys explicitly so the wire shape is unambiguous.
             detectorVersion: asset.detectorVersion,
-            buildCommitSHA: asset.buildCommitSHA
+            buildCommitSHA: asset.buildCommitSHA,
+            // playhead-q45f.1: each parsed listen-rewind row is one
+            // FrozenListenRewindEvent. Empty array on pre-q45f.1
+            // captures (no rows of `type: "listen_rewind"` in the JSONL).
+            listenRewindEvents: listenRewinds.map {
+                FrozenTrace.FrozenListenRewindEvent(
+                    time: $0.time,
+                    windowId: $0.windowId,
+                    podcastId: $0.podcastId
+                )
+            }
         )
     }
 
@@ -1102,5 +1162,145 @@ struct NarlEvalCorpusBuilderShadowFoldTests {
         )
         #expect(w1 == 1.0)
         #expect(w0 == 0.0)
+    }
+}
+
+// MARK: - Listen-rewind fold (playhead-q45f.1)
+
+@Suite("NarlEvalCorpusBuilder listen-rewind fold (q45f.1)")
+struct NarlEvalCorpusBuilderListenRewindFoldTests {
+
+    /// Write a JSONL corpus to a temp file and return its URL. Each line is
+    /// the result of `JSONSerialization.data(withJSONObject:)` — same shape
+    /// the production exporter writes.
+    private func writeJSONL(_ rows: [[String: Any]]) throws -> URL {
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("listen-rewind-fold-\(UUID().uuidString).jsonl")
+        var data = Data()
+        for row in rows {
+            let line = try JSONSerialization.data(withJSONObject: row, options: [])
+            data.append(line)
+            data.append(0x0A)  // newline
+        }
+        try data.write(to: tmp)
+        return tmp
+    }
+
+    @Test("parseListenRewinds: extracts only `type: \"listen_rewind\"` rows and ignores siblings")
+    func parseListenRewindsExtractsOnlyMatchingRows() throws {
+        let url = try writeJSONL([
+            ["type": "asset", "analysisAssetId": "asset-1", "episodeId": "ep-1", "schemaVersion": 1],
+            ["type": "listen_rewind", "schemaVersion": 1, "analysisAssetId": "asset-1",
+             "windowId": "win-A", "podcastId": "pod-1", "time": 60.0, "createdAt": 1_700_000_100.0],
+            ["type": "decision", "analysisAssetId": "asset-1", "startTime": 0.0, "endTime": 30.0],
+            ["type": "listen_rewind", "schemaVersion": 1, "analysisAssetId": "asset-2",
+             "windowId": "win-B", "podcastId": "pod-2", "time": 120.0, "createdAt": 1_700_000_200.0],
+        ])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let parsed = try NarlEvalCorpusBuilderTests.parseListenRewinds(from: [url])
+        #expect(parsed.count == 2)
+        #expect(parsed["asset-1"]?.count == 1)
+        #expect(parsed["asset-2"]?.count == 1)
+        #expect(parsed["asset-1"]?.first?.windowId == "win-A")
+        #expect(parsed["asset-1"]?.first?.podcastId == "pod-1")
+        #expect(parsed["asset-1"]?.first?.time == 60.0)
+        #expect(parsed["asset-2"]?.first?.windowId == "win-B")
+    }
+
+    @Test("parseListenRewinds: groups multiple events for same asset, preserving order")
+    func parseListenRewindsGroupsByAsset() throws {
+        let url = try writeJSONL([
+            ["type": "listen_rewind", "schemaVersion": 1, "analysisAssetId": "asset-1",
+             "windowId": "win-A", "podcastId": "pod-1", "time": 60.0],
+            ["type": "listen_rewind", "schemaVersion": 1, "analysisAssetId": "asset-1",
+             "windowId": "win-A", "podcastId": "pod-1", "time": 60.0],
+            ["type": "listen_rewind", "schemaVersion": 1, "analysisAssetId": "asset-1",
+             "windowId": "win-B", "podcastId": "pod-1", "time": 120.0],
+        ])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let parsed = try NarlEvalCorpusBuilderTests.parseListenRewinds(from: [url])
+        #expect(parsed["asset-1"]?.count == 3)
+        let windowIds = parsed["asset-1"]?.map(\.windowId) ?? []
+        #expect(windowIds == ["win-A", "win-A", "win-B"])
+    }
+
+    @Test("parseListenRewinds: skips rows missing required fields (windowId/podcastId/time)")
+    func parseListenRewindsSkipsCorruptRows() throws {
+        let url = try writeJSONL([
+            // Good row.
+            ["type": "listen_rewind", "schemaVersion": 1, "analysisAssetId": "asset-1",
+             "windowId": "win-A", "podcastId": "pod-1", "time": 60.0],
+            // Missing windowId.
+            ["type": "listen_rewind", "schemaVersion": 1, "analysisAssetId": "asset-1",
+             "podcastId": "pod-1", "time": 60.0],
+            // Missing podcastId.
+            ["type": "listen_rewind", "schemaVersion": 1, "analysisAssetId": "asset-1",
+             "windowId": "win-B", "time": 60.0],
+            // Missing time.
+            ["type": "listen_rewind", "schemaVersion": 1, "analysisAssetId": "asset-1",
+             "windowId": "win-C", "podcastId": "pod-1"],
+            // Missing analysisAssetId.
+            ["type": "listen_rewind", "schemaVersion": 1,
+             "windowId": "win-D", "podcastId": "pod-1", "time": 60.0],
+        ])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let parsed = try NarlEvalCorpusBuilderTests.parseListenRewinds(from: [url])
+        #expect(parsed["asset-1"]?.count == 1,
+                "only the well-formed row should survive; corrupt rows must be silently dropped")
+        #expect(parsed["asset-1"]?.first?.windowId == "win-A")
+    }
+
+    @Test("assembleTrace: populates FrozenTrace.listenRewindEvents from parsed rows")
+    func assembleTracePopulatesListenRewindEvents() {
+        let asset = NarlEvalCorpusBuilderTests.BuilderAsset(
+            id: "asset-1",
+            episodeId: "ep-1",
+            podcastId: "pod-1",
+            detectorVersion: "",
+            buildCommitSHA: ""
+        )
+        let rewinds: [NarlEvalCorpusBuilderTests.BuilderListenRewind] = [
+            .init(assetId: "asset-1", windowId: "win-A", podcastId: "pod-1", time: 60.0),
+            .init(assetId: "asset-1", windowId: "win-A", podcastId: "pod-1", time: 60.0),
+            .init(assetId: "asset-1", windowId: "win-B", podcastId: "pod-1", time: 120.0),
+        ]
+        let trace = NarlEvalCorpusBuilderTests.assembleTrace(
+            asset: asset,
+            decisions: [],
+            corrections: [],
+            decisionLog: [],
+            shadow: [],
+            lifecycle: nil,
+            listenRewinds: rewinds
+        )
+        #expect(trace.listenRewindEvents.count == 3)
+        #expect(trace.listenRewindEvents.map(\.windowId) == ["win-A", "win-A", "win-B"])
+        #expect(trace.listenRewindEvents.map(\.time) == [60.0, 60.0, 120.0])
+        #expect(trace.listenRewindEvents.allSatisfy { $0.podcastId == "pod-1" })
+    }
+
+    @Test("assembleTrace: empty listenRewinds → empty FrozenTrace.listenRewindEvents (back-compat default)")
+    func assembleTraceEmptyListenRewindsDefault() {
+        let asset = NarlEvalCorpusBuilderTests.BuilderAsset(
+            id: "asset-1",
+            episodeId: "ep-1",
+            podcastId: "pod-1",
+            detectorVersion: "",
+            buildCommitSHA: ""
+        )
+        // Caller omits the `listenRewinds:` argument — defaults to [].
+        let trace = NarlEvalCorpusBuilderTests.assembleTrace(
+            asset: asset,
+            decisions: [],
+            corrections: [],
+            decisionLog: [],
+            shadow: [],
+            lifecycle: nil
+        )
+        #expect(trace.listenRewindEvents.isEmpty,
+                "pre-q45f.1 capture path leaves listenRewindEvents empty by default")
     }
 }
