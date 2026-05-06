@@ -76,11 +76,10 @@ struct ActivityEpisodeInput: Sendable, Hashable {
     /// refresh; `nil` when no in-flight download is recorded.
     let downloadFraction: Double?
     /// Fraction in `[0, 1]` of episode duration covered by fast
-    /// transcript watermark; `nil` when watermark or duration is
-    /// unknown.
+    /// transcript chunks; `nil` when coverage or duration is unknown.
     let transcriptFraction: Double?
-    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
-    /// watermark; `nil` when watermark or duration is unknown.
+    /// Fraction in `[0, 1]` of episode duration covered by analysis
+    /// coverage; `nil` when coverage or duration is unknown.
     let analysisFraction: Double?
 
     init(

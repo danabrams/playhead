@@ -164,10 +164,11 @@ private final class ManagedCounter {
 /// Bead .1 plumbed `downloadFraction` / `transcriptFraction` /
 /// `analysisFraction` through the row payloads; bead .2 added
 /// `DownloadManager.progressSnapshot()`. This bead (.3) is the
-/// provider-side wiring: divide watermark by duration for the two
-/// analysis fractions, look up the download fraction from the injected
-/// snapshot closure, and clamp to `[0, 1]` so the row contract is
-/// "already in range if non-nil".
+/// provider-side wiring: divide coverage by duration for transcript and
+/// analysis fractions, prefer actual fast transcript chunk coverage when
+/// present, look up the download fraction from the injected snapshot
+/// closure, and clamp to `[0, 1]` so the row contract is "already in range
+/// if non-nil".
 @Suite("LiveActivitySnapshotProvider — pipeline fractions")
 struct LiveActivitySnapshotProviderFractionTests {
 
@@ -178,19 +179,33 @@ struct LiveActivitySnapshotProviderFractionTests {
     /// test can drive `loadInputs()` and assert on the resulting
     /// `ActivityEpisodeInput` fields.
     ///
-    /// `assetSeeds` carries the per-asset coverage watermarks +
-    /// duration; the provider divides watermark by duration to produce
-    /// the fractions under test.
+    /// `assetSeeds` carries the per-asset coverage watermarks + duration;
+    /// the provider divides coverage by duration to produce the fractions
+    /// under test.
     private struct AssetSeed {
+        let featureCoverageEndTime: Double?
         let fastTranscriptCoverageEndTime: Double?
         let confirmedAdCoverageEndTime: Double?
         let episodeDurationSec: Double?
+
+        init(
+            featureCoverageEndTime: Double? = nil,
+            fastTranscriptCoverageEndTime: Double?,
+            confirmedAdCoverageEndTime: Double?,
+            episodeDurationSec: Double?
+        ) {
+            self.featureCoverageEndTime = featureCoverageEndTime
+            self.fastTranscriptCoverageEndTime = fastTranscriptCoverageEndTime
+            self.confirmedAdCoverageEndTime = confirmedAdCoverageEndTime
+            self.episodeDurationSec = episodeDurationSec
+        }
     }
 
     private struct Fixture {
         let store: AnalysisStore
         let container: ModelContainer
         let episodeIds: [String]
+        let assetIds: [String]
     }
 
     // Returns a Fixture seeded with one Episode + AnalysisAsset per AssetSeed.
@@ -213,7 +228,9 @@ struct LiveActivitySnapshotProviderFractionTests {
 
         let store = try await makeTestStore()
         var episodeIds: [String] = []
+        var assetIds: [String] = []
         episodeIds.reserveCapacity(assetSeeds.count)
+        assetIds.reserveCapacity(assetSeeds.count)
         for (i, seed) in assetSeeds.enumerated() {
             let episode = Episode(
                 feedItemGUID: "guid-\(i)",
@@ -231,7 +248,7 @@ struct LiveActivitySnapshotProviderFractionTests {
                 assetFingerprint: "fp-\(i)",
                 weakFingerprint: nil,
                 sourceURL: "https://example.com/a\(i).mp3",
-                featureCoverageEndTime: nil,
+                featureCoverageEndTime: seed.featureCoverageEndTime,
                 fastTranscriptCoverageEndTime: seed.fastTranscriptCoverageEndTime,
                 confirmedAdCoverageEndTime: seed.confirmedAdCoverageEndTime,
                 analysisState: "queued",
@@ -240,10 +257,34 @@ struct LiveActivitySnapshotProviderFractionTests {
                 episodeDurationSec: seed.episodeDurationSec
             )
             try await store.insertAsset(asset)
+            assetIds.append(asset.id)
         }
         try context.save()
 
-        return Fixture(store: store, container: container, episodeIds: episodeIds)
+        return Fixture(store: store, container: container, episodeIds: episodeIds, assetIds: assetIds)
+    }
+
+    private func transcriptChunk(
+        assetId: String,
+        index: Int,
+        start: Double,
+        end: Double,
+        pass: String = "fast"
+    ) -> TranscriptChunk {
+        TranscriptChunk(
+            id: "\(assetId)-chunk-\(index)-\(pass)",
+            analysisAssetId: assetId,
+            segmentFingerprint: "\(assetId)-fp-\(index)-\(pass)",
+            chunkIndex: index,
+            startTime: start,
+            endTime: end,
+            text: "segment \(index)",
+            normalizedText: "segment \(index)",
+            pass: pass,
+            modelVersion: "test-asr",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
     }
 
     /// Watermark / duration → simple ratio in `[0, 1]` (no overflow).
@@ -269,6 +310,40 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(inputs.count == 1)
         let input = try #require(inputs.first)
         #expect(input.transcriptFraction == 0.2)
+    }
+
+    /// Dogfood regression: rows can have actual fast transcript chunks that
+    /// cover much more audio than the cached
+    /// `fastTranscriptCoverageEndTime`. The Activity strip should follow the
+    /// persisted text coverage instead of making a fully-transcribed-looking
+    /// episode appear barely started.
+    @Test("fast transcript chunks override stale transcript watermark")
+    func transcriptFractionUsesFastChunkCoverageWhenWatermarkIsStale() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                fastTranscriptCoverageEndTime: 30,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 300
+            )
+        ])
+        try await fixture.store.insertTranscriptChunks([
+            transcriptChunk(assetId: fixture.assetIds[0], index: 0, start: 0, end: 100),
+            transcriptChunk(assetId: fixture.assetIds[0], index: 1, start: 100, end: 200),
+            transcriptChunk(assetId: fixture.assetIds[0], index: 2, start: 200, end: 250)
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+
+        #expect(inputs.count == 1)
+        let input = try #require(inputs.first)
+        #expect(input.transcriptFraction == 250.0 / 300.0)
     }
 
     /// Overflow watermark (e.g. confirmed-ad watermark briefly past the
@@ -297,6 +372,35 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(inputs.count == 1)
         let input = try #require(inputs.first)
         #expect(input.analysisFraction == 1.0)
+    }
+
+    /// Analysis progress should not render as unknown just because no
+    /// non-suppressed ad window was found. Feature coverage is the broad
+    /// analysis-progress watermark available for no-ad and feature-only
+    /// episodes.
+    @Test("feature coverage populates analysis fraction when confirmed-ad coverage is nil")
+    func analysisFractionUsesFeatureCoverageWithoutConfirmedAds() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                featureCoverageEndTime: 150,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 300
+            )
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+
+        #expect(inputs.count == 1)
+        let input = try #require(inputs.first)
+        #expect(input.analysisFraction == 0.5)
     }
 
     /// Missing or non-positive duration must produce `nil` for both

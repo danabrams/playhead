@@ -15,8 +15,7 @@
 //
 // Post-hkn1 the provider is non-isolated: `loadInputs()` constructs
 // its own `ModelContext` from the injected `ModelContainer`, runs
-// the fetch off-main, and uses a single bulk `AnalysisStore` query
-// (`fetchAssetsByEpisodeIds`) plus
+// the fetch off-main, and uses bulk `AnalysisStore` queries plus
 // `relationshipKeyPathsForPrefetching` to eliminate the N+1.
 //
 // Boundary discipline:
@@ -174,6 +173,23 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         // from this map land with `downloadFraction == nil`.
         let downloadFractions = await downloadProgressProvider()
 
+        // playhead-3bv.2: the persisted fast-transcript watermark is a
+        // scheduler high-water mark, not a reliable display summary of
+        // actual transcript rows. Dogfood databases can have stale
+        // `fastTranscriptCoverageEndTime` values even though
+        // `transcript_chunks` covers nearly the whole episode. Aggregate
+        // real fast-pass chunk seconds once and prefer that value when
+        // present; fall back to the asset watermark for legacy rows or
+        // rows whose chunks have not landed yet.
+        let transcriptCoveredSecondsByAssetId: [String: Double]
+        do {
+            transcriptCoveredSecondsByAssetId = try await store.fetchFastTranscriptCoveredSecondsByAssetIds(
+                Set(allAssets.values.map(\.id))
+            )
+        } catch {
+            transcriptCoveredSecondsByAssetId = [:]
+        }
+
         // playhead-hkn1: SwiftData fetch on a freshly-constructed
         // `ModelContext` so this work runs off the main actor. The
         // `relationshipKeyPathsForPrefetching = [\.podcast]` directive
@@ -207,6 +223,19 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         func fraction(_ watermark: Double?, durationSec: Double) -> Double? {
             guard let watermark, durationSec > 0 else { return nil }
             return min(1.0, max(0.0, watermark / durationSec))
+        }
+
+        func maxKnown(_ lhs: Double?, _ rhs: Double?) -> Double? {
+            switch (lhs, rhs) {
+            case let (lhs?, rhs?):
+                return max(lhs, rhs)
+            case let (lhs?, nil):
+                return lhs
+            case let (nil, rhs?):
+                return rhs
+            case (nil, nil):
+                return nil
+            }
         }
 
         for episode in episodes {
@@ -252,15 +281,24 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // "already in `[0, 1]` if non-nil" — the strip view never
             // has to defend against overflow.
             //
-            // Transcript / analysis fractions are watermark / duration
-            // ratios derived from the persisted `AnalysisAsset`. A
-            // missing or non-positive `episodeDurationSec` (legacy
-            // rows, placeholder rows pre-decode) collapses both to
-            // `nil` rather than synthesising a fake 0% bar from a
+            // Transcript / analysis fractions are coverage-seconds /
+            // duration ratios. Transcript prefers actual fast-pass
+            // chunk seconds, then falls back to the asset watermark;
+            // analysis uses the broad feature/ad coverage watermark
+            // rather than detected-ad existence alone. A missing or
+            // non-positive `episodeDurationSec` (legacy rows,
+            // placeholder rows pre-decode) collapses both to `nil`
+            // rather than synthesising a fake 0% bar from a
             // divide-by-zero.
             let durationSec = asset.episodeDurationSec ?? 0
-            let transcriptFraction = fraction(asset.fastTranscriptCoverageEndTime, durationSec: durationSec)
-            let analysisFraction = fraction(asset.confirmedAdCoverageEndTime, durationSec: durationSec)
+            let transcriptWatermark = transcriptCoveredSecondsByAssetId[asset.id]
+                ?? asset.fastTranscriptCoverageEndTime
+            let transcriptFraction = fraction(transcriptWatermark, durationSec: durationSec)
+            let analysisWatermark = maxKnown(
+                asset.featureCoverageEndTime,
+                asset.confirmedAdCoverageEndTime
+            )
+            let analysisFraction = fraction(analysisWatermark, durationSec: durationSec)
             // Download fraction comes from the (already-snapshotted)
             // `DownloadManager` map. Clamp to `[0, 1]` defensively —
             // the manager's own arithmetic is bounded by `bytesWritten
@@ -306,4 +344,3 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         }
     }
 }
-

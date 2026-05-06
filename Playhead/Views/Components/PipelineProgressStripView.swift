@@ -39,12 +39,12 @@ struct PipelineProgressStripView: View {
     /// download is recorded for this episode this refresh.
     let downloadFraction: Double?
 
-    /// Fast-transcript watermark / duration fraction `[0, 1]`; `nil`
-    /// when watermark or duration is unknown.
+    /// Fast-transcript chunk coverage / duration fraction `[0, 1]`;
+    /// `nil` when coverage or duration is unknown.
     let transcriptFraction: Double?
 
-    /// Confirmed-ad watermark / duration fraction `[0, 1]`; `nil` when
-    /// watermark or duration is unknown.
+    /// Analysis coverage / duration fraction `[0, 1]`; `nil` when
+    /// coverage or duration is unknown.
     let analysisFraction: Double?
 
     /// Section identifier used to disambiguate the accessibility ID

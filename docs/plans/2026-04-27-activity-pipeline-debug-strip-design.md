@@ -65,10 +65,14 @@ Add three optional `Double?` fields to `ActivityEpisodeInput`:
   is recorded for this episode this refresh (caller distinguishes
   never-downloaded vs. complete via the row's existing `isDownloaded` flag).
 - `transcriptFraction: Double?` —
-  `fastTranscriptCoverageEndTime / episodeDurationSec`, clamped to `0.0...1.0`.
-  `nil` if either watermark or duration is unknown or duration is `<= 0`.
+  actual fast-pass transcript chunk coverage seconds divided by
+  `episodeDurationSec`, clamped to `0.0...1.0`. Falls back to
+  `fastTranscriptCoverageEndTime` when no chunks are present. `nil` if
+  either coverage or duration is unknown or duration is `<= 0`.
 - `analysisFraction: Double?` —
-  `confirmedAdCoverageEndTime / episodeDurationSec`, clamped. Same nil rules.
+  broad analysis coverage divided by `episodeDurationSec`, clamped. Uses the
+  larger of `featureCoverageEndTime` and `confirmedAdCoverageEndTime`; same nil
+  rules.
 
 The same three optionals propagate into `ActivityNowRow`, `ActivityUpNextRow`,
 and `ActivityPausedRow`. `ActivityRecentlyFinishedRow` does not carry them.
@@ -77,10 +81,11 @@ and `ActivityPausedRow`. `ActivityRecentlyFinishedRow` does not carry them.
 
 `ActivitySnapshotProvider` is the single source of these fractions per refresh.
 
-- **AnalysisStore tap (already wired):** read `fastTranscriptCoverageEndTime`,
-  `confirmedAdCoverageEndTime`, and `episodeDurationSec` from the
-  `AnalysisAsset` row the provider already loads. Compute fractions at
-  construction; no new query, no new round trip.
+- **AnalysisStore tap (already wired):** read coverage watermarks and
+  `episodeDurationSec` from the `AnalysisAsset` row the provider already loads,
+  plus one bulk aggregate over `transcript_chunks` so the TX display follows
+  actual persisted fast-pass chunks when the asset watermark is stale. Compute
+  fractions at construction.
 - **Download tap (new, narrow):** add
   `func progressSnapshot() async -> [String: Double]` to `DownloadManager`,
   returning `episodeId → fractionCompleted` for currently-active downloads

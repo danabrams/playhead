@@ -4952,6 +4952,53 @@ actor AnalysisStore {
         return results
     }
 
+    /// Bulk coverage aggregate for Activity's debug pipeline strip.
+    ///
+    /// `fastTranscriptCoverageEndTime` is a scheduler high-water mark and can
+    /// lag (or lead) the rows that actually landed in `transcript_chunks`.
+    /// For display, the useful question is "how much fast transcript text is
+    /// present?" not "what was the last cursor write?". Return approximate
+    /// covered seconds by summing persisted fast-pass chunk durations per
+    /// asset. Callers clamp against episode duration.
+    func fetchFastTranscriptCoveredSecondsByAssetIds(_ assetIds: Set<String>) throws -> [String: Double] {
+        guard !assetIds.isEmpty else { return [:] }
+        let chunkSize = 500
+        var results: [String: Double] = [:]
+        results.reserveCapacity(assetIds.count)
+
+        let allIds = assetIds.sorted()
+        var index = 0
+        while index < allIds.count {
+            let end = min(index + chunkSize, allIds.count)
+            let slice = Array(allIds[index..<end])
+            let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
+            let sql = """
+                SELECT analysisAssetId,
+                       SUM(CASE
+                           WHEN endTime > startTime THEN endTime - startTime
+                           ELSE 0
+                       END) AS coveredSeconds
+                FROM transcript_chunks
+                WHERE pass = 'fast'
+                  AND analysisAssetId IN (\(placeholders))
+                GROUP BY analysisAssetId
+                """
+            let stmt = try prepare(sql)
+            for (i, id) in slice.enumerated() {
+                bind(stmt, Int32(i + 1), id)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let assetId = text(stmt, 0)
+                guard sqlite3_column_type(stmt, 1) != SQLITE_NULL else { continue }
+                results[assetId] = sqlite3_column_double(stmt, 1)
+            }
+            sqlite3_finalize(stmt)
+            index = end
+        }
+
+        return results
+    }
+
     func searchTranscripts(query: String) throws -> [TranscriptChunk] {
         // Sanitize the query for FTS5: strip double quotes, then wrap each
         // whitespace-separated token in double quotes so special characters
