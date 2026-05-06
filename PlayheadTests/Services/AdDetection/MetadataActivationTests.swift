@@ -35,7 +35,7 @@ struct MetadataActivationConfigTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: true,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.33,
+            classifierShiftedMidpoint: MetadataActivationConfig.default.classifierShiftedMidpoint,
             classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: true,
             fmSchedulingMinTrust: 0.0,
@@ -54,7 +54,7 @@ struct MetadataActivationConfigTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: false,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.33,
+            classifierShiftedMidpoint: MetadataActivationConfig.default.classifierShiftedMidpoint,
             classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: false,
             fmSchedulingMinTrust: 0.0,
@@ -77,10 +77,10 @@ struct MetadataActivationConfigTests {
         #expect(config.classifierPriorShiftMinTrust == 0.08)
     }
 
-    @Test("Default shifted midpoint is 0.33 (playhead-gtt9.3 retune)")
+    @Test("Default shifted midpoint is 0.345 (playhead-gtt9.3 option a retune)")
     func shiftedMidpoint() {
         let config = MetadataActivationConfig.default
-        #expect(config.classifierShiftedMidpoint == 0.33)
+        #expect(config.classifierShiftedMidpoint == 0.345)
     }
 
     @Test("Default baseline midpoint is 0.37 (playhead-gtt9.3 retune)")
@@ -329,7 +329,7 @@ struct MetadataLexiconInjectorTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: false,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.33,
+            classifierShiftedMidpoint: MetadataActivationConfig.default.classifierShiftedMidpoint,
             classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: false,
             fmSchedulingMinTrust: 0.0,
@@ -472,14 +472,14 @@ struct MetadataPriorShiftTests {
     func trustMeetsThreshold() {
         let shift = MetadataPriorShift(config: .allEnabled)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.08)
-        #expect(mid == 0.33, "Trust 0.08 >= 0.08 threshold should return shifted midpoint")
+        #expect(mid == 0.345, "Trust 0.08 >= 0.08 threshold should return shifted midpoint")
     }
 
     @Test("Shifted midpoint returned when trust exceeds threshold")
     func trustExceedsThreshold() {
         let shift = MetadataPriorShift(config: .allEnabled)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.5)
-        #expect(mid == 0.33)
+        #expect(mid == 0.345)
     }
 
     @Test("isShiftActive returns false when gate is closed")
@@ -522,7 +522,7 @@ struct MetadataPriorShiftTests {
             lexicalInjectionDiscount: 0.75,
             classifierPriorShiftEnabled: false,
             classifierPriorShiftMinTrust: 0.08,
-            classifierShiftedMidpoint: 0.33,
+            classifierShiftedMidpoint: MetadataActivationConfig.default.classifierShiftedMidpoint,
             classifierBaselineMidpoint: 0.37,
             fmSchedulingEnabled: true,
             fmSchedulingMinTrust: 0.0,
@@ -539,8 +539,11 @@ struct MetadataPriorShiftTests {
 /// playhead-gtt9.3: the default midpoint band must overlap the real-data
 /// confidence distribution measured on 2026-04-23. Histogram mode was
 /// [0.30, 0.40) (53% of 147 scored windows); the old 0.22 / 0.25 band
-/// contained zero windows, making PriorShift inert. The new default
-/// band `(0.33, 0.37]` sits mid-mode and captures ~30 real windows.
+/// contained zero windows, making PriorShift inert. The first retune
+/// landed `(0.33, 0.37]` at mid-mode (~30 real windows). Per-add diagnostic
+/// logging then showed the lower edge concentrated FP-driving adds at
+/// ~0.343, so option (a) narrowed to `(0.345, 0.37]` — the current band,
+/// covering ~12 real windows on the eval corpus.
 ///
 /// These tests lock in that behavior at the defaults level so a future
 /// rebase does not silently revert the retune.
@@ -595,6 +598,20 @@ struct MetadataPriorShiftRealDataBandTests {
                 "Shifted midpoint must stay at or above suppressionThreshold — flipped windows would be suppressed.")
         #expect(config.classifierBaselineMidpoint < detection.confirmationThreshold,
                 "Baseline midpoint must sit well below confirmationThreshold.")
+    }
+
+    @Test("Option-a guard: observed FP-driving cluster at ~0.343 sits at or below the shifted midpoint (excluded from band)")
+    func optionAExcludesObserved343Cluster() {
+        // Per-add diagnostic logging on the eval corpus (2026-05-06) showed
+        // priorShift fires concentrated in (0.34, 0.36], with two ~0.343 adds
+        // driving DoaC strict-τ regressions. Option (a) raised the lower band
+        // edge from 0.33 to 0.345 to exclude that cluster. If a future retune
+        // drops the shifted midpoint below 0.343, the cluster re-enters the
+        // band and the regressions return — this guard fails first so the
+        // author has to delete it deliberately.
+        let cfg = MetadataActivationConfig.default
+        #expect(0.343 <= cfg.classifierShiftedMidpoint,
+                "Observed FP-driving cluster at ~0.343 must NOT exceed the shifted midpoint, else option-a regresses.")
     }
 }
 
