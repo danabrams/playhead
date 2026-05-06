@@ -88,9 +88,13 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     /// `DownloadManager.progressSnapshot()` (an actor hop returning
     /// `episodeId → fractionCompleted` for in-flight foreground
     /// transfers); tests inject a stub returning whatever map they need.
-    /// Episodes absent from the map have no in-flight download and the
-    /// provider emits `downloadFraction == nil` for them.
+    /// Episodes absent from the map may still render as 100% if the cached
+    /// download provider reports completed media.
     private let downloadProgressProvider: @Sendable () async -> [String: Double]
+    /// Fully-cached episode IDs for this refresh. Production wires a
+    /// DownloadManager directory scan over the eligible episode IDs; tests
+    /// inject a small set.
+    private let downloadedEpisodeIdsProvider: @Sendable (Set<String>) async -> Set<String>
     private let modelContainer: ModelContainer
 
     init(
@@ -98,12 +102,14 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot?,
         runningEpisodeIdProvider: @escaping @Sendable () async -> String?,
         downloadProgressProvider: @escaping @Sendable () async -> [String: Double],
+        downloadedEpisodeIdsProvider: @escaping @Sendable (Set<String>) async -> Set<String> = { _ in [] },
         modelContainer: ModelContainer
     ) {
         self.store = store
         self.capabilitySnapshotProvider = capabilitySnapshotProvider
         self.runningEpisodeIdProvider = runningEpisodeIdProvider
         self.downloadProgressProvider = downloadProgressProvider
+        self.downloadedEpisodeIdsProvider = downloadedEpisodeIdsProvider
         self.modelContainer = modelContainer
     }
 
@@ -169,9 +175,10 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         // injected so tests can drive the provider with arbitrary
         // states; production wires `DownloadManager.progressSnapshot()`
         // which only contains episodes with an in-flight foreground
-        // transfer (size-known, non-zero `totalBytes`). Episodes absent
-        // from this map land with `downloadFraction == nil`.
+        // transfer (size-known, non-zero `totalBytes`). Completed
+        // downloads come from the cached-id provider below.
         let downloadFractions = await downloadProgressProvider()
+        let downloadedEpisodeIds = await downloadedEpisodeIdsProvider(Set(eligibleEpisodeIds))
 
         // playhead-3bv.2: the persisted fast-transcript watermark is a
         // scheduler high-water mark, not a reliable display summary of
@@ -300,13 +307,19 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             )
             let analysisFraction = fraction(analysisWatermark, durationSec: durationSec)
             // Download fraction comes from the (already-snapshotted)
-            // `DownloadManager` map. Clamp to `[0, 1]` defensively —
-            // the manager's own arithmetic is bounded by `bytesWritten
-            // / totalBytes` but a brief race where `totalBytes` falls
+            // `DownloadManager` live-progress map. Completed cached
+            // audio renders as 100%; without that fallback the transfer
+            // disappearing from the in-flight progress map made done
+            // downloads look unknown (`DL --%`).
+            //
+            // Clamp live progress to `[0, 1]` defensively — the
+            // manager's own arithmetic is bounded by `bytesWritten /
+            // totalBytes` but a brief race where `totalBytes` falls
             // back to a smaller value than `bytesWritten` could in
             // principle yield > 1 mid-tick.
             let downloadFraction = downloadFractions[episodeId]
                 .map { min(1.0, max(0.0, $0)) }
+                ?? (downloadedEpisodeIds.contains(episodeId) ? 1.0 : nil)
 
             inputs.append(
                 ActivityEpisodeInput(

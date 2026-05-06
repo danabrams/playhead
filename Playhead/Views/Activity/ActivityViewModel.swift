@@ -73,7 +73,8 @@ struct ActivityEpisodeInput: Sendable, Hashable {
     /// this slot only carries.
     ///
     /// Fraction in `[0, 1]` of bytes downloaded for this episode this
-    /// refresh; `nil` when no in-flight download is recorded.
+    /// refresh; completed cached audio is `1.0`, `nil` when no cached
+    /// file or in-flight download is recorded.
     let downloadFraction: Double?
     /// Fraction in `[0, 1]` of episode duration covered by fast
     /// transcript chunks; `nil` when coverage or duration is unknown.
@@ -138,14 +139,14 @@ struct ActivityNowRow: Sendable, Hashable, Identifiable {
     /// requires plumbing the lookahead window into the row builder.
     let progressPhrase: String
     /// Fraction in `[0, 1]` of bytes downloaded for this episode this
-    /// refresh; `nil` when no in-flight download is recorded.
+    /// refresh; completed cached audio is `1.0`, `nil` when no cached
+    /// file or in-flight download is recorded.
     let downloadFraction: Double?
     /// Fraction in `[0, 1]` of episode duration covered by fast
-    /// transcript watermark; `nil` when watermark or duration is
-    /// unknown.
+    /// transcript chunks; `nil` when coverage or duration is unknown.
     let transcriptFraction: Double?
-    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
-    /// watermark; `nil` when watermark or duration is unknown.
+    /// Fraction in `[0, 1]` of episode duration covered by analysis
+    /// coverage; `nil` when coverage or duration is unknown.
     let analysisFraction: Double?
     var id: String { episodeId }
 }
@@ -157,14 +158,14 @@ struct ActivityUpNextRow: Sendable, Hashable, Identifiable {
     let title: String
     let podcastTitle: String?
     /// Fraction in `[0, 1]` of bytes downloaded for this episode this
-    /// refresh; `nil` when no in-flight download is recorded.
+    /// refresh; completed cached audio is `1.0`, `nil` when no cached
+    /// file or in-flight download is recorded.
     let downloadFraction: Double?
     /// Fraction in `[0, 1]` of episode duration covered by fast
-    /// transcript watermark; `nil` when watermark or duration is
-    /// unknown.
+    /// transcript chunks; `nil` when coverage or duration is unknown.
     let transcriptFraction: Double?
-    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
-    /// watermark; `nil` when watermark or duration is unknown.
+    /// Fraction in `[0, 1]` of episode duration covered by analysis
+    /// coverage; `nil` when coverage or duration is unknown.
     let analysisFraction: Double?
     var id: String { episodeId }
 }
@@ -181,14 +182,14 @@ struct ActivityPausedRow: Sendable, Hashable, Identifiable {
     let reason: SurfaceReason
     let hint: ResolutionHint
     /// Fraction in `[0, 1]` of bytes downloaded for this episode this
-    /// refresh; `nil` when no in-flight download is recorded.
+    /// refresh; completed cached audio is `1.0`, `nil` when no cached
+    /// file or in-flight download is recorded.
     let downloadFraction: Double?
     /// Fraction in `[0, 1]` of episode duration covered by fast
-    /// transcript watermark; `nil` when watermark or duration is
-    /// unknown.
+    /// transcript chunks; `nil` when coverage or duration is unknown.
     let transcriptFraction: Double?
-    /// Fraction in `[0, 1]` of episode duration covered by confirmed-ad
-    /// watermark; `nil` when watermark or duration is unknown.
+    /// Fraction in `[0, 1]` of episode duration covered by analysis
+    /// coverage; `nil` when coverage or duration is unknown.
     let analysisFraction: Double?
     var id: String { episodeId }
 }

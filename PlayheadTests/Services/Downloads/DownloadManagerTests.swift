@@ -95,6 +95,28 @@ struct DownloadManagerCacheTests {
         #expect(result == nil)
     }
 
+    @Test("cachedEpisodeIds matching detects manually placed complete files")
+    func cachedEpisodeIdsMatchingDetectsCompleteFiles() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let cachedURL = await manager.completeFileURL(for: "ep-cached")
+        try Data("fake audio".utf8).write(to: cachedURL)
+        let strayURL = await manager.completeFileURL(for: "ep-stray")
+        try Data("not audio".utf8).write(to: strayURL.deletingPathExtension().appendingPathExtension("txt"))
+
+        let cached = await manager.cachedEpisodeIds(matching: [
+            "ep-cached",
+            "ep-stray",
+            "ep-missing"
+        ])
+
+        #expect(cached == ["ep-cached"])
+    }
+
     @Test("removeCache deletes both partial and complete files")
     func removeCache() async throws {
         let dir = try makeTempDir()

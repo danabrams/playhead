@@ -96,7 +96,8 @@ struct LiveActivitySnapshotProviderPerfTests {
             // fractions — empty stub keeps every input's
             // `downloadFraction == nil` and exercises the no-overhead
             // dictionary lookup branch the production loop runs when
-            // there are zero in-flight foreground downloads.
+            // there are zero in-flight foreground downloads and zero
+            // cached completions.
             downloadProgressProvider: { [:] },
             modelContainer: container
         )
@@ -166,9 +167,8 @@ private final class ManagedCounter {
 /// `DownloadManager.progressSnapshot()`. This bead (.3) is the
 /// provider-side wiring: divide coverage by duration for transcript and
 /// analysis fractions, prefer actual fast transcript chunk coverage when
-/// present, look up the download fraction from the injected snapshot
-/// closure, and clamp to `[0, 1]` so the row contract is "already in range
-/// if non-nil".
+/// present, merge live + cached download state, and clamp to `[0, 1]` so
+/// the row contract is "already in range if non-nil".
 @Suite("LiveActivitySnapshotProvider — pipeline fractions")
 struct LiveActivitySnapshotProviderFractionTests {
 
@@ -478,8 +478,68 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(other.downloadFraction == nil)
     }
 
-    /// Empty download snapshot (the dominant production case once
-    /// transfers settle) leaves every input's `downloadFraction == nil`.
+    /// Once a transfer completes it disappears from the foreground progress
+    /// map. The Activity strip should still report the cached episode as
+    /// fully downloaded instead of falling back to "unknown".
+    @Test("cached episode with no live progress → downloadFraction 1.0")
+    func cachedDownloadProducesFullDownloadFraction() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 300
+            )
+        ])
+        let cachedId = fixture.episodeIds[0]
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            downloadedEpisodeIdsProvider: { eligible in
+                eligible.contains(cachedId) ? [cachedId] : []
+            },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+
+        #expect(inputs.count == 1)
+        let input = try #require(inputs.first)
+        #expect(input.downloadFraction == 1.0)
+    }
+
+    /// If a live foreground progress sample exists, it is the freshest
+    /// signal. Keep that fraction even if the cached set also contains the
+    /// episode, so a stale cache probe cannot hide an in-flight transfer.
+    @Test("live download progress wins over cached 100% fallback")
+    func liveDownloadProgressWinsOverCachedFallback() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 300
+            )
+        ])
+        let episodeId = fixture.episodeIds[0]
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [episodeId: 0.42] },
+            downloadedEpisodeIdsProvider: { _ in [episodeId] },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+
+        #expect(inputs.count == 1)
+        let input = try #require(inputs.first)
+        #expect(input.downloadFraction == 0.42)
+    }
+
+    /// Empty download snapshot + empty cached set leaves every input's
+    /// `downloadFraction == nil`.
     @Test("empty download snapshot → every input has downloadFraction == nil")
     func emptyDownloadSnapshotProducesNilEverywhere() async throws {
         let fixture = try await makeFixture(assetSeeds: [

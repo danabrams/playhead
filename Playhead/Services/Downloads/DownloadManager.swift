@@ -1390,6 +1390,28 @@ actor DownloadManager {
         Set(accessLog.keys.filter { isCached(episodeId: $0) })
     }
 
+    /// Returns the subset of the supplied episode IDs whose complete audio
+    /// file is present on disk.
+    ///
+    /// Unlike `allCachedEpisodeIds()`, this does not depend on the LRU access
+    /// log being keyed by episode ID; Activity already knows the relevant
+    /// episode IDs, so we can match their safe filenames against the complete
+    /// directory in one pass.
+    func cachedEpisodeIds(matching episodeIds: Set<String>) -> Set<String> {
+        guard !episodeIds.isEmpty else { return [] }
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: completeDirectory.path) else {
+            return []
+        }
+        let completeBasenames = Set(files.compactMap { file -> String? in
+            let filename = file as NSString
+            let ext = filename.pathExtension.lowercased()
+            guard Self.knownAudioExtensions.contains(ext) else { return nil }
+            return filename.deletingPathExtension
+        })
+        return Set(episodeIds.filter { completeBasenames.contains(Self.safeFilename(for: $0)) })
+    }
+
     // MARK: - Fingerprinting
 
     /// Returns the current fingerprint for an episode, if available.

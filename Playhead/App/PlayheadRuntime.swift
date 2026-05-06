@@ -2734,6 +2734,13 @@ final class PlayheadRuntime {
             downloadProgressProvider: { [downloadManager] in
                 await downloadManager.progressSnapshot()
             },
+            // playhead-3bv.3: the foreground progress map intentionally
+            // drops an episode as soon as the transfer completes. Feed a
+            // second, bounded cache probe so the debug strip can render
+            // completed media as `DL 100%` instead of unknown.
+            downloadedEpisodeIdsProvider: { [downloadManager] episodeIds in
+                await downloadManager.cachedEpisodeIds(matching: episodeIds)
+            },
             modelContainer: modelContainer
         )
     }

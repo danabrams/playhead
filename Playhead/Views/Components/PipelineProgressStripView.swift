@@ -8,8 +8,8 @@
 // in normal use.
 //
 // Scope: playhead-btoa.4 (last bead in the btoa epic). Beads .1–.3 plumbed
-// the three optional `Double` fields end-to-end (`AnalysisStore` watermarks
-// for transcript/analysis, `DownloadManager.progressSnapshot()` for
+// the three optional `Double` fields end-to-end (`AnalysisStore` coverage
+// for transcript/analysis, `DownloadManager` live + cached state for
 // download); this view is the visible piece.
 //
 // Design intent (docs/plans/2026-04-27-activity-pipeline-debug-strip-design.md):
@@ -35,8 +35,8 @@ import SwiftUI
 /// the row struct.
 struct PipelineProgressStripView: View {
 
-    /// Bytes-downloaded fraction `[0, 1]`; `nil` when no in-flight
-    /// download is recorded for this episode this refresh.
+    /// Bytes-downloaded fraction `[0, 1]`; completed cached audio is `1.0`,
+    /// `nil` when no cached file or in-flight download is recorded.
     let downloadFraction: Double?
 
     /// Fast-transcript chunk coverage / duration fraction `[0, 1]`;

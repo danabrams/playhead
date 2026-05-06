@@ -61,9 +61,9 @@ Runtime, on any build, off by default.
 
 Add three optional `Double?` fields to `ActivityEpisodeInput`:
 
-- `downloadFraction: Double?` — `0.0...1.0`, byte-level. `nil` if no download
-  is recorded for this episode this refresh (caller distinguishes
-  never-downloaded vs. complete via the row's existing `isDownloaded` flag).
+- `downloadFraction: Double?` — `0.0...1.0`, byte-level for active downloads
+  and `1.0` for fully cached audio. `nil` only when no cached file or
+  in-flight download is recorded for this episode this refresh.
 - `transcriptFraction: Double?` —
   actual fast-pass transcript chunk coverage seconds divided by
   `episodeDurationSec`, clamped to `0.0...1.0`. Falls back to
@@ -90,8 +90,9 @@ and `ActivityPausedRow`. `ActivityRecentlyFinishedRow` does not carry them.
   `func progressSnapshot() async -> [String: Double]` to `DownloadManager`,
   returning `episodeId → fractionCompleted` for currently-active downloads
   (drained from the same `ForegroundAssistProgress` map that already drives
-  `progressUpdates()`). Provider awaits it once per refresh and looks up by
-  episode ID.
+  `progressUpdates()`). Provider also asks DownloadManager for the subset of
+  eligible episode IDs whose complete audio file is cached, and renders those
+  as `1.0` when no live progress entry exists.
 
 This matches the existing snapshot-per-refresh shape of Activity: the screen
 re-aggregates on `ActivityRefreshNotification`, not via continuous streams.
