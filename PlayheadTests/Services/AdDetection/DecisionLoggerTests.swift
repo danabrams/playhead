@@ -59,7 +59,7 @@ struct DecisionLogEntryCodableTests {
         #expect(snap.fmSchedulingEnabled == true)
         #expect(snap.counterfactualGateOpen == true)
         #expect(snap.lexicalInjectionDiscount == 0.75)
-        #expect(snap.classifierShiftedMidpoint == 0.33)
+        #expect(snap.classifierShiftedMidpoint == 0.345)
         #expect(snap.classifierBaselineMidpoint == 0.37)
         #expect(snap.classifierPriorShiftMinTrust == 0.08)
 

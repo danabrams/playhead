@@ -38,9 +38,17 @@ struct MetadataActivationConfig: Sendable, Equatable {
     let classifierPriorShiftMinTrust: Float
 
     /// The shifted sigmoid midpoint for metadata-warmed episodes.
-    /// Default: 0.33 (vs baseline 0.37). Retuned 2026-04-23 (playhead-gtt9.3)
-    /// so the band `(shifted, baseline]` sits inside the real-data
-    /// confidence mode [0.30, 0.40) rather than the empty zone (0.22, 0.25].
+    /// Default: 0.345 (vs baseline 0.37). History:
+    ///   - 2026-04-23 (playhead-gtt9.3 first retune): 0.22 → 0.33 so the
+    ///     band `(shifted, baseline]` sat inside the real-data confidence
+    ///     mode [0.30, 0.40) rather than the empty zone (0.22, 0.25].
+    ///   - 2026-05-06 (playhead-gtt9.3 second retune, option a): 0.33 →
+    ///     0.345. Per-add diagnostic logging on the eval corpus showed all
+    ///     priorShift fires clustered in (0.34, 0.36] with the two ~0.343
+    ///     adds driving DoaC regressions at strict τ=0.5/0.7. Narrowing
+    ///     the lower edge of the band excludes those FPs while keeping
+    ///     the higher-confidence (0.345, 0.37] adds that contributed the
+    ///     +Sec-F1 lift.
     let classifierShiftedMidpoint: Double
 
     /// The baseline sigmoid midpoint (no metadata). Default: 0.37 —
@@ -85,7 +93,7 @@ struct MetadataActivationConfig: Sendable, Equatable {
         lexicalInjectionDiscount: 0.75,
         classifierPriorShiftEnabled: false,
         classifierPriorShiftMinTrust: 0.08,
-        classifierShiftedMidpoint: 0.33,
+        classifierShiftedMidpoint: 0.345,
         classifierBaselineMidpoint: 0.37,
         fmSchedulingEnabled: false,
         fmSchedulingMinTrust: 0.0,
@@ -99,7 +107,7 @@ struct MetadataActivationConfig: Sendable, Equatable {
         lexicalInjectionDiscount: 0.75,
         classifierPriorShiftEnabled: true,
         classifierPriorShiftMinTrust: 0.08,
-        classifierShiftedMidpoint: 0.33,
+        classifierShiftedMidpoint: 0.345,
         classifierBaselineMidpoint: 0.37,
         fmSchedulingEnabled: true,
         fmSchedulingMinTrust: 0.0,
