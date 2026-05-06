@@ -549,6 +549,46 @@ struct NarlEvalHarnessTests {
         #expect(decoded.layerBCount == 0)
     }
 
+    @Test("playhead-q45f.3: harness threads q45fCounterfactual onto every report entry")
+    func harnessThreadsQ45fCounterfactualOntoEntries() throws {
+        let (report, _) = try Self.runHarnessCollectingReport()
+        // Guard: CI clones without fixtures produce zero entries; the
+        // wiring still ran but there's nothing to assert against. The
+        // codable/.empty round-trip is covered in
+        // NarlQ45fCounterfactualTests.
+        guard !report.episodes.isEmpty else { return }
+
+        // Every entry — excluded or not — must carry the field. The pre-
+        // q45f.3 corpus has no rewind events on its fixtures, so the
+        // expected per-entry value is `.empty`. The point of this test
+        // is to lock in the wiring: a future refactor that drops the
+        // field from one of the two construction sites would silently
+        // omit it for that path; this test catches that.
+        for entry in report.episodes {
+            #expect(entry.q45fCounterfactual == .empty,
+                    "Pre-q45f.3 fixtures have no rewinds; per-entry counterfactual must be .empty")
+        }
+    }
+
+    @Test("playhead-q45f.3: harness threads q45fCarryforward onto rollups; ALL is .empty")
+    func harnessThreadsQ45fCarryforwardOntoRollups() throws {
+        let (report, _) = try Self.runHarnessCollectingReport()
+        guard !report.rollups.isEmpty else { return }
+        for rollup in report.rollups {
+            if rollup.show == "ALL" {
+                #expect(rollup.q45fCarryforward == .empty,
+                        "ALL pseudo-show must carry .empty carryforward (cross-show state has no production analogue)")
+            } else {
+                // Per-show rollup: episodeCount on the carryforward must
+                // be ≥ 1 (every show in the report has at least one
+                // trace by construction). Other fields are .empty for
+                // pre-q45f.3 corpora.
+                #expect(rollup.q45fCarryforward.episodeCount >= 1,
+                        "Per-show carryforward must reflect every trace in the show")
+            }
+        }
+    }
+
     @Test("harness emits pipeline coverage failure trend rows")
     func harnessEmitsPipelineCoverageFailureTrendRows() throws {
         let (report, _) = try Self.runHarnessCollectingReport()
@@ -606,6 +646,23 @@ struct NarlEvalHarnessTests {
                 + "Run with PLAYHEAD_BUILD_NARL_FIXTURES=1 against a .xcappdata bundle to populate.")
         }
 
+        // playhead-q45f.3: per-show carryforward of the q45f counterfactual
+        // gate. Group every trace by the harness's show classifier and
+        // replay each show's full rewind history in chronological order
+        // (sorted internally by `compute`). Looked up by show name when
+        // building each (show, config) rollup row below; the same value
+        // is populated on every config of the same show because the
+        // counterfactual is config-independent (only TrustScoringConfig
+        // matters, not MetadataActivationConfig). The "ALL" aggregate
+        // rollup gets `.empty` because cross-show state has no production
+        // analogue.
+        let tracesByShow: [String: [FrozenTrace]] = Dictionary(grouping: traces) {
+            Self.showName(for: $0)
+        }
+        let carryforwardByShow: [String: NarlQ45fCarryforwardRollup] = tracesByShow.mapValues {
+            NarlQ45fCarryforwardRollup.compute(showEpisodes: $0)
+        }
+
         for (fixtureIndex, trace) in traces.enumerated() {
             // gtt9.7: run the correction normalizer first so span-level
             // precision/recall is driven by actual span-level corrections
@@ -631,6 +688,14 @@ struct NarlEvalHarnessTests {
             let gtResult = NarlGroundTruth.build(for: trace)
             let show = Self.showName(for: trace)
             let traceHasShadowCoverage = Self.hasShadowCoverage(trace: trace)
+            // playhead-q45f.3: per-episode q45f counterfactual. Computed
+            // once per trace because the gate is config-independent (only
+            // TrustScoringConfig.default matters); the resulting value is
+            // stamped onto every (config) entry for this trace below so a
+            // downstream `jq` reader can ask "which episodes' rewinds
+            // would have demoted on their own?" without re-running the
+            // gate.
+            let q45fCounterfactual = NarlQ45fCounterfactual.compute(trace: trace)
             let lexicalOnly = MetadataActivationConfig(
                 lexicalInjectionEnabled: true,
                 lexicalInjectionMinTrust: 0.0,
@@ -722,7 +787,12 @@ struct NarlEvalHarnessTests {
                         // mean a pre-gtt9.21 fixture (back-compat).
                         detectorVersion: trace.detectorVersion,
                         buildCommitSHA: trace.buildCommitSHA,
-                        pipelineCoverageBucket: pipelineBucket
+                        pipelineCoverageBucket: pipelineBucket,
+                        // playhead-q45f.3: even excluded entries carry the
+                        // counterfactual — a whole-asset veto on this
+                        // episode doesn't cancel its rewinds' implication
+                        // for trust state.
+                        q45fCounterfactual: q45fCounterfactual
                     )
                     episodeEntries.append(entry)
                     // Tally excluded episodes per-rollup so the report shows
@@ -783,7 +853,9 @@ struct NarlEvalHarnessTests {
                     // pre-gtt9.21 fixture (back-compat).
                     detectorVersion: trace.detectorVersion,
                     buildCommitSHA: trace.buildCommitSHA,
-                    pipelineCoverageBucket: pipelineBucket
+                    pipelineCoverageBucket: pipelineBucket,
+                    // playhead-q45f.3: per-episode counterfactual replay.
+                    q45fCounterfactual: q45fCounterfactual
                 )
                 episodeEntries.append(entry)
 
@@ -845,6 +917,18 @@ struct NarlEvalHarnessTests {
                 let shadowCount = bundles.filter { $0.entry.hasShadowCoverage }.count
                 let coverageAgg = Self.aggregateCoverage(bundles.map(\.entry.coverageMetrics))
                 let failureAssetCount = bundles.filter { $0.entry.coverageMetrics.pipelineCoverageFailureAsset }.count
+                // playhead-q45f.3: per-show carryforward stamped on every
+                // (show, config) rollup. The "ALL" pseudo-show carries
+                // `.empty` because cross-show replay state has no
+                // production analogue (false signals never aggregate
+                // across podcasts in production). All other shows look
+                // up their precomputed value from the show-keyed map.
+                let q45fCarryforward: NarlQ45fCarryforwardRollup
+                if show == "ALL" {
+                    q45fCarryforward = .empty
+                } else {
+                    q45fCarryforward = carryforwardByShow[show] ?? .empty
+                }
                 return NarlReportRollup(
                     show: show,
                     config: config,
@@ -856,7 +940,8 @@ struct NarlEvalHarnessTests {
                     totalPriorShiftAdds: prAdds,
                     totalEpisodesWithShadowCoverage: shadowCount,
                     coverageMetrics: coverageAgg,
-                    pipelineCoverageFailureAssetCount: failureAssetCount
+                    pipelineCoverageFailureAssetCount: failureAssetCount,
+                    q45fCarryforward: q45fCarryforward
                 )
             }
 
@@ -871,6 +956,11 @@ struct NarlEvalHarnessTests {
             let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
             let show = parts[0]
             let config = parts.count > 1 ? parts[1] : ""
+            // playhead-q45f.3: even an excluded-only show can have rewinds
+            // whose carryforward state is meaningful. ALL is the only key
+            // we deliberately stamp `.empty` on.
+            let q45fCarryforward: NarlQ45fCarryforwardRollup =
+                show == "ALL" ? .empty : (carryforwardByShow[show] ?? .empty)
             return NarlReportRollup(
                 show: show,
                 config: config,
@@ -885,7 +975,8 @@ struct NarlEvalHarnessTests {
                 totalPriorShiftAdds: 0,
                 totalEpisodesWithShadowCoverage: 0,
                 coverageMetrics: .zero,
-                pipelineCoverageFailureAssetCount: 0
+                pipelineCoverageFailureAssetCount: 0,
+                q45fCarryforward: q45fCarryforward
             )
         }
         let allRollups = (rollups + excludedOnlyRollups).sorted { a, b in
