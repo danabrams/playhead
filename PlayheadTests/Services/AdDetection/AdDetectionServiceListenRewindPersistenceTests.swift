@@ -138,13 +138,14 @@ struct AdDetectionServiceListenRewindPersistenceTests {
         #expect(rows.count == 3, "each tap is a distinct event; expected 3 rows, got \(rows.count)")
     }
 
-    @Test("rewind on a missing-window id persists no event row (warning logged, profile still updates)")
+    @Test("rewind on a missing-window id persists no event row (warning logged, profile still updates via TrustScoringService)")
     func missingWindowDoesNotPersistEvent() async throws {
         // Defensive contract: if the supplied windowId has no corresponding
         // ad_window row (e.g. raced with a coverage rebuild that dropped
         // the row, or a stale UI state), recordListenRewind must NOT insert
-        // an event with a fabricated time. The warning is logged but
-        // execution continues so the profile-side trust signal still fires.
+        // an event with a fabricated time. Execution continues so the
+        // profile-side trust signal still fires through the rerouted
+        // TrustScoringService path (playhead-q45f).
         let (store, dir) = try await makeTestStoreWithDirectory()
         let assetId = "asset-rewind-noWindow"
         let podcastId = "pod-rewind-noWindow"
@@ -167,7 +168,13 @@ struct AdDetectionServiceListenRewindPersistenceTests {
             title: nil
         ))
 
+        // playhead-q45f: inject a TrustScoringService so the profile-
+        // side trust signal still fires through the reroute path. The
+        // pre-q45f assertion (`recentFalseSkipSignals > 0` from the
+        // inline closure) now becomes a contract on the rerouted call.
+        let trust = TrustScoringService(store: store)
         let service = makeService(store: store)
+        await service.setTrustScoringService(trust)
         try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
 
         // The asset-scoped accessor JOINs through `ad_windows`, so a
@@ -182,7 +189,7 @@ struct AdDetectionServiceListenRewindPersistenceTests {
         let rows = try await store.fetchListenRewinds(forAssetId: assetId)
         #expect(rows.isEmpty)
 
-        // Profile mutation still ran (recentFalseSkipSignals advanced).
+        // Profile mutation still ran via TrustScoringService.recordWeakFalseSkipSignal.
         let profile = try await store.fetchProfile(podcastId: podcastId)
         #expect(profile?.recentFalseSkipSignals ?? 0 > 0,
                 "profile-side trust signal must still update even when window lookup fails")
@@ -190,11 +197,12 @@ struct AdDetectionServiceListenRewindPersistenceTests {
 
     @Test("rewind on a missing-profile podcast still persists an event row")
     func missingProfileStillPersistsEvent() async throws {
-        // recordListenRewind early-returns when no PodcastProfile row
-        // exists (it doesn't lazy-create one — see the
-        // `missingProfileListenRewindCount` contract). The persistence
-        // log MUST still capture the tap, because q45f's gate cares
-        // about the *event*, not the profile-mutation side effect.
+        // recordListenRewind's trust-side delegate
+        // (TrustScoringService.recordWeakFalseSkipSignal) early-returns
+        // when no PodcastProfile row exists (it doesn't lazy-create
+        // one). The persistence log MUST still capture the tap, because
+        // q45f's gate cares about the *event*, not the profile-mutation
+        // side effect.
         let store = try await makeTestStore()
         let assetId = "asset-rewind-noprofile"
         let podcastId = "pod-no-profile-yet"

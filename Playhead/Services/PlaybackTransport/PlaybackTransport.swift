@@ -132,6 +132,20 @@ final class PlaybackService: NSObject, Sendable {
     private var rateObservation: NSKeyValueObservation?
     private var itemStatusObservation: NSKeyValueObservation?
 
+    /// Token for the block-based `AVPlayerItem.didPlayToEndTimeNotification`
+    /// observer that re-broadcasts as `.playbackDidFinishEpisode`. Block-
+    /// based registration is synchronous (the observer is live by the
+    /// time `addObserver` returns), unlike the prior async-sequence path
+    /// whose `for await` registration could lag tens of milliseconds
+    /// behind init under parallel test load — the source of the
+    /// `PlaybackFinishNotificationTests` flake. Removed in `tearDown`.
+    ///
+    /// `nonisolated(unsafe)` matches the precedent of `commandHandler`
+    /// above: mutation is confined to init (single-threaded construction)
+    /// and `tearDown` (actor-isolated by class isolation), and the
+    /// observer block itself never reads this property.
+    private nonisolated(unsafe) var finishObserverToken: (any NSObjectProtocol)?
+
     /// Separate NSObject that receives remote command callbacks without actor
     /// isolation, then hops to PlaybackServiceActor via Tasks. Stored strongly
     /// here because MPRemoteCommand only holds an unretained reference to targets.
@@ -165,6 +179,26 @@ final class PlaybackService: NSObject, Sendable {
 
         super.init()
 
+        // Register the player-item-finish re-broadcast SYNCHRONOUSLY
+        // (before the actor-isolated init Task spawns). Block-based
+        // `addObserver` returns only after the observer is live on the
+        // center, eliminating the for-await-startup race that previously
+        // dropped notifications posted in the first ~50ms after init.
+        // The block captures the center weakly; weak-self gates the
+        // re-post so tearDown's `removeObserver` is sufficient cleanup
+        // even if the block is briefly retained in flight.
+        self.finishObserverToken = notificationCenter.addObserver(
+            forName: AVPlayerItem.didPlayToEndTimeNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self, weak notificationCenter] _ in
+            guard self != nil else { return }
+            notificationCenter?.post(
+                name: .playbackDidFinishEpisode,
+                object: nil
+            )
+        }
+
         Task { @PlaybackServiceActor [self] in
             self.configureAudioSession()
             self.configureRemoteCommands()
@@ -177,7 +211,10 @@ final class PlaybackService: NSObject, Sendable {
             // assertions when accessing actor-isolated self.
             self.observeInterruptionsAsync()
             self.observeRouteChangesAsync()
-            self.observePlayerItemFinishAsync()
+            // Player-item-finish observer is installed synchronously
+            // above (block-based) — no async hop needed because the
+            // re-broadcast is a pure NotificationCenter.post and does
+            // not touch actor-isolated state.
         }
     }
 
@@ -186,6 +223,10 @@ final class PlaybackService: NSObject, Sendable {
         if let token = timeObserverToken {
             player.removeTimeObserver(token)
             timeObserverToken = nil
+        }
+        if let token = finishObserverToken {
+            notificationCenter.removeObserver(token)
+            finishObserverToken = nil
         }
         rateObservation?.invalidate()
         itemStatusObservation?.invalidate()
@@ -618,44 +659,6 @@ final class PlaybackService: NSObject, Sendable {
                 default:
                     break
                 }
-            }
-        }
-    }
-
-    // MARK: - Episode Finish (Async)
-
-    /// Re-broadcast `AVPlayerItem.didPlayToEndTimeNotification` as
-    /// `Notification.Name.playbackDidFinishEpisode` on the injected
-    /// notification center. The playback queue's auto-advancer
-    /// subscribes to the re-broadcast (playhead-05i) — re-broadcasting
-    /// here keeps the queue layer ignorant of AVFoundation's specific
-    /// notification name, and ensures tests that inject a private
-    /// `NotificationCenter` see the finish event without having to
-    /// fight `.default`.
-    ///
-    /// Why a re-broadcast rather than letting the queue subscribe
-    /// directly to `AVPlayerItem.didPlayToEndTimeNotification`: AVFoundation
-    /// posts on `.default`, and the runtime / tests use a per-instance
-    /// notification center for isolation. The PlaybackService is the only
-    /// type that owns the player item and therefore the right place to
-    /// fan out the event onto the configured center.
-    private func observePlayerItemFinishAsync() {
-        let center = notificationCenter
-        Task { @PlaybackServiceActor [weak self] in
-            // Subscribe on the injected center. AVFoundation posts on
-            // `.default` in production; that is exactly the center
-            // PlayheadRuntime injects, so the observer fires for real
-            // playback. Tests post a synthetic notification on their
-            // private center to drive the same path.
-            let notifications = center.notifications(
-                named: AVPlayerItem.didPlayToEndTimeNotification
-            )
-            for await _ in notifications {
-                guard self != nil else { break }
-                center.post(
-                    name: .playbackDidFinishEpisode,
-                    object: nil
-                )
             }
         }
     }

@@ -3,11 +3,12 @@
 //
 // Adds optional `listenRewindEvents: [FrozenListenRewindEvent]` to FrozenTrace
 // so the q45f counterfactual gate can replay how often a user tapped
-// "Listen" on an auto-skipped window. Today there is no event log of
-// listen-rewinds (recordListenRewind only mutates AdWindowDecision +
-// PodcastProfile), so q45f's gate is structurally unsatisfiable. This bead
-// extends the schema; the persistence layer that feeds it lands in a
-// follow-up commit in this same bead.
+// "Listen" on an auto-skipped window. Pre-q45f.1 there was no event log of
+// listen-rewinds (the original recordListenRewind only mutated
+// AdWindowDecision + PodcastProfile), so q45f's gate was structurally
+// unsatisfiable. q45f.1 lands the persistence layer (`ad_listen_rewinds`
+// table + recordListenRewind insertion); this bead extends the
+// FrozenTrace schema that consumes those rows.
 //
 // Acceptance contract proven by these tests:
 //   1. Field encodes and decodes round-trip with non-empty events.
