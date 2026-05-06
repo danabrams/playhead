@@ -549,8 +549,17 @@ actor TrustScoringService {
     }
 
     /// Evaluate whether the current mode should be demoted. Static for
-    /// the same reason as `evaluatePromotion`.
-    fileprivate static func evaluateDemotion(
+    /// the same reason as `evaluatePromotion`. Internal (not fileprivate)
+    /// is a deliberate test-seam: the replay-side q45f counterfactual gate
+    /// (`Q45fReplayGate.replay` in the test target, reachable via
+    /// `@testable import Playhead`) calls this directly so production
+    /// retunes propagate to NARL eval without duplicating the switch.
+    /// `recordFalseSkipSignal` and `recordWeakFalseSkipSignal` are the only
+    /// production callers — **no new production sites**. Funnel any new
+    /// demotion-triggering paths through one of those two recorders so the
+    /// actor's serialized mutation, persistence, and logging stay coupled
+    /// to the state-machine evaluation.
+    internal static func evaluateDemotion(
         config: TrustScoringConfig,
         currentMode: SkipMode,
         trustScore: Double,
