@@ -21,20 +21,13 @@ struct PlaybackFinishNotificationTests {
             notificationCenter: center
         )
 
-        // Force a hop through PlaybackServiceActor BEFORE posting. The
-        // service's init enqueues a `Task { @PlaybackServiceActor in
-        // observePlayerItemFinishAsync() }` which itself spawns a
-        // child task that performs the `for await` subscription.
-        // `observeStates()` re-enters the same actor and serializes
-        // after the init-time work — by the time it returns, the
-        // observer task chain has been scheduled. Mirrors the pattern
-        // that keeps `InterruptionHandlingTests` deterministic under
-        // PlayheadFastTests parallel load.
-        _ = await service.observeStates()
-
-        // Subscribe via the synchronous addObserver API. By the time
-        // addObserver returns, the observer is registered — no race
-        // against the consumer task starting iteration.
+        // PlaybackService.init now installs the player-item-finish
+        // observer SYNCHRONOUSLY (block-based `addObserver`) before
+        // returning, so by the time the `await PlaybackService(...)`
+        // call lands the observer is live on `center`. The previous
+        // `for await` async-sequence path needed a poll-with-deadline
+        // workaround because its subscription registered on a child
+        // Task — that race is gone, so a single post suffices.
         let receivedFlag = NotificationFlag()
         nonisolated(unsafe) let token = center.addObserver(
             forName: .playbackDidFinishEpisode,
@@ -45,20 +38,15 @@ struct PlaybackFinishNotificationTests {
         }
         defer { center.removeObserver(token) }
 
-        // The service's observer still uses the async-sequence path,
-        // so its `for await` may take a beat to start consuming.
-        // Repeat the trigger post on a short cadence; re-broadcast is
-        // idempotent so any retries after the first reception are
-        // harmless.
-        let deadline = Date().addingTimeInterval(3.0)
-        while Date() < deadline {
-            if receivedFlag.didFire() { break }
-            center.post(
-                name: AVPlayerItem.didPlayToEndTimeNotification,
-                object: nil
-            )
-            try await Task.sleep(for: .milliseconds(50))
-        }
+        // `addObserver(forName:object:queue:nil ...)` delivers blocks
+        // synchronously on the posting thread, so this single post
+        // walks: center.post → production observer block → secondary
+        // post → test observer block → receivedFlag.markFired()
+        // before the call returns.
+        center.post(
+            name: AVPlayerItem.didPlayToEndTimeNotification,
+            object: nil
+        )
 
         #expect(receivedFlag.didFire(),
                 "Expected PlaybackDidFinishEpisode notification to be posted")
