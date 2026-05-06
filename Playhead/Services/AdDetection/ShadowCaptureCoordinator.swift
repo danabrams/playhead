@@ -221,6 +221,10 @@ actor ShadowCaptureCoordinator {
     /// Current in-flight count for Lane B.
     private var laneBInFlight: Int = 0
 
+    /// Wall-clock time before which an empty-backlog Lane-B tick should
+    /// return without re-running the expensive incomplete-coverage query.
+    private var laneBNoCandidateUntil: TimeInterval?
+
     // MARK: - Init
 
     init(
@@ -353,6 +357,10 @@ actor ShadowCaptureCoordinator {
         // `.rateLimited` and waits for the next idle tick (at which
         // point the oldest token has likely fallen outside the window).
         let nowForLaneB = clock()
+        if let laneBNoCandidateUntil, nowForLaneB < laneBNoCandidateUntil {
+            return .noCandidates
+        }
+
         let windowOpensB = nowForLaneB - 60.0
         laneBRecentDispatchTimes.removeAll(where: { $0 < windowOpensB })
         guard laneBRecentDispatchTimes.count < config.laneBMaxCallsPerMinute else {
@@ -366,7 +374,11 @@ actor ShadowCaptureCoordinator {
             logger.warning("laneB: incomplete-coverage lookup failed: \(String(describing: error), privacy: .public)")
             return .dispatchFailed
         }
-        guard let assetId = assetIds.first else { return .noCandidates }
+        guard let assetId = assetIds.first else {
+            armLaneBNoCandidateCooldown(config: config, now: nowForLaneB)
+            return .noCandidates
+        }
+        laneBNoCandidateUntil = nil
 
         let alreadyCaptured: Set<ShadowWindowKey>
         do {
@@ -388,7 +400,10 @@ actor ShadowCaptureCoordinator {
             logger.warning("laneB: candidate lookup failed: \(String(describing: error), privacy: .public)")
             return .dispatchFailed
         }
-        guard !candidates.isEmpty else { return .noCandidates }
+        guard !candidates.isEmpty else {
+            armLaneBNoCandidateCooldown(config: config, now: nowForLaneB)
+            return .noCandidates
+        }
 
         laneBInFlight += 1
         defer { laneBInFlight -= 1 }
@@ -416,6 +431,14 @@ actor ShadowCaptureCoordinator {
             if lastOutcome == .dispatchFailed { break }
         }
         return lastOutcome
+    }
+
+    private func armLaneBNoCandidateCooldown(config: ShadowCaptureConfig, now: TimeInterval) {
+        guard config.laneBNoCandidateCooldownSeconds > 0 else {
+            laneBNoCandidateUntil = nil
+            return
+        }
+        laneBNoCandidateUntil = now + config.laneBNoCandidateCooldownSeconds
     }
 
     // MARK: - Shared dispatch + persist

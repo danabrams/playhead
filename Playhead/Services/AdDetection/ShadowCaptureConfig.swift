@@ -79,6 +79,12 @@ struct ShadowCaptureConfig: Sendable, Equatable {
     /// Maximum number of shadow FM calls in flight at any instant for Lane B.
     let laneBMaxInFlight: Int
 
+    /// Cooldown after Lane B finds no incomplete shadow coverage. The
+    /// scheduler may tick frequently while the app is idle, but a completed
+    /// library should not pay the full SQLite coverage scan on every idle
+    /// wake.
+    let laneBNoCandidateCooldownSeconds: TimeInterval
+
     // MARK: - Defaults
 
     /// Production/Dan-build default: dual-run capture ON, conservative budget
@@ -96,7 +102,8 @@ struct ShadowCaptureConfig: Sendable, Equatable {
         laneAMaxInFlight: 1,
         laneBCallsPerTick: 2,
         laneBMaxCallsPerMinute: 8,
-        laneBMaxInFlight: 1
+        laneBMaxInFlight: 1,
+        laneBNoCandidateCooldownSeconds: 60
     )
 
     /// Disabled preset — both lanes no-op on entry. Used by unit tests to
@@ -109,7 +116,8 @@ struct ShadowCaptureConfig: Sendable, Equatable {
         laneAMaxInFlight: 0,
         laneBCallsPerTick: 0,
         laneBMaxCallsPerMinute: 0,
-        laneBMaxInFlight: 0
+        laneBMaxInFlight: 0,
+        laneBNoCandidateCooldownSeconds: 0
     )
 }
 

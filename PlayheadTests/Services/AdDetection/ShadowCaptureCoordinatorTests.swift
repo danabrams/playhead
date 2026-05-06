@@ -152,7 +152,8 @@ struct ShadowCaptureCoordinatorTests {
             laneAMaxInFlight: 1,
             laneBCallsPerTick: 1,
             laneBMaxCallsPerMinute: 8,
-            laneBMaxInFlight: 1
+            laneBMaxInFlight: 1,
+            laneBNoCandidateCooldownSeconds: 60
         )
         let coord = ShadowCaptureCoordinator(
             store: store,
@@ -315,7 +316,8 @@ struct ShadowCaptureCoordinatorTests {
             laneAMaxInFlight: 1,
             laneBCallsPerTick: 2,
             laneBMaxCallsPerMinute: 8,
-            laneBMaxInFlight: 1
+            laneBMaxInFlight: 1,
+            laneBNoCandidateCooldownSeconds: 60
         )
         let coord = ShadowCaptureCoordinator(
             store: store, dispatcher: dispatcher, windowSource: windows,
@@ -332,6 +334,51 @@ struct ShadowCaptureCoordinatorTests {
         for row in rows {
             #expect(row.capturedBy == .laneB)
         }
+    }
+
+    @Test("Lane B backs off empty backlog before re-querying incomplete coverage")
+    func laneBNoCandidateBackoffSkipsRepeatedLookup() async throws {
+        let store = try await makeTestStore()
+        let dispatcher = RecordingDispatcher()
+        let playback = StubPlaybackSignal(isPlaying: false, asset: nil)
+        let environment = StubEnvironmentSignal(idle: true)
+        let clock = MutableClock(initial: 1_700_000_000)
+        let windows = StubWindowSource(
+            laneA: [],
+            laneB: [:],
+            assetsWithGaps: []
+        )
+        let config = ShadowCaptureConfig(
+            dualFMCaptureEnabled: true,
+            laneALookaheadSeconds: 60,
+            laneAMaxCallsPerMinute: 4,
+            laneAMaxInFlight: 1,
+            laneBCallsPerTick: 2,
+            laneBMaxCallsPerMinute: 8,
+            laneBMaxInFlight: 1,
+            laneBNoCandidateCooldownSeconds: 60
+        )
+        let coord = ShadowCaptureCoordinator(
+            store: store,
+            dispatcher: dispatcher,
+            windowSource: windows,
+            playbackSignal: playback,
+            environmentSignal: environment,
+            clock: { clock.now },
+            readConfig: { config }
+        )
+
+        #expect(await coord.tickLaneB() == .noCandidates)
+        #expect(await windows.incompleteCoverageLookupCount() == 1)
+
+        clock.now += 10
+        #expect(await coord.tickLaneB() == .noCandidates)
+        #expect(await windows.incompleteCoverageLookupCount() == 1)
+
+        clock.now += 60
+        #expect(await coord.tickLaneB() == .noCandidates)
+        #expect(await windows.incompleteCoverageLookupCount() == 2)
+        #expect(await dispatcher.callCount == 0)
     }
 
     // MARK: - Dispatcher failure paths (LOW)
@@ -364,7 +411,8 @@ struct ShadowCaptureCoordinatorTests {
             laneAMaxInFlight: 1,
             laneBCallsPerTick: 1,
             laneBMaxCallsPerMinute: 8,
-            laneBMaxInFlight: 1
+            laneBMaxInFlight: 1,
+            laneBNoCandidateCooldownSeconds: 60
         )
         let coord = ShadowCaptureCoordinator(
             store: store, dispatcher: dispatcher, windowSource: windows,
@@ -406,7 +454,8 @@ struct ShadowCaptureCoordinatorTests {
             laneAMaxInFlight: 1,
             laneBCallsPerTick: 3,
             laneBMaxCallsPerMinute: 8,
-            laneBMaxInFlight: 1
+            laneBMaxInFlight: 1,
+            laneBNoCandidateCooldownSeconds: 60
         )
         let coord = ShadowCaptureCoordinator(
             store: store, dispatcher: dispatcher, windowSource: windows,
@@ -534,6 +583,7 @@ private actor StubWindowSource: ShadowWindowSource {
     let laneB: [String: [ShadowWindow]]         // assetId -> windows
     let assetsWithGaps: [String]
     private(set) var lastLaneAAlreadyCaptured: Set<ShadowWindowKey>?
+    private var incompleteCoverageLookupCountValue = 0
 
     init(laneA: [ShadowWindow]?,
          laneB: [String: [ShadowWindow]],
@@ -561,7 +611,12 @@ private actor StubWindowSource: ShadowWindowSource {
     }
 
     func assetsWithIncompleteCoverage() async throws -> [String] {
+        incompleteCoverageLookupCountValue += 1
         return assetsWithGaps
+    }
+
+    func incompleteCoverageLookupCount() -> Int {
+        incompleteCoverageLookupCountValue
     }
 }
 

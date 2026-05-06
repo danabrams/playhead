@@ -28,9 +28,8 @@ protocol LanePreemptionHandler: Sendable {
 /// capture Lane B piggyback on the existing background drain cadence. The
 /// handler is installed by `PlayheadRuntime` and forwards to
 /// `ShadowCaptureCoordinator.tickLaneB()`. The scheduler treats the call as
-/// best-effort — any error or long await is the handler's own concern, and
-/// the scheduler's sleep-until-wake cadence is unchanged regardless of the
-/// handler's return.
+/// best-effort and keeps it out of the main dispatch path; the handler must
+/// own its own backoff for empty shadow backlogs.
 ///
 /// Why idle-tick vs. injecting an `AnalysisJob`: shadow capture is not a
 /// unit of user-visible work — it has no `episodeId`, no coverage target,
@@ -580,6 +579,13 @@ actor AnalysisWorkScheduler {
     private var wakeContinuation: AsyncStream<Void>.Continuation?
     private var wakeStream: AsyncStream<Void>
 
+    /// True while an idle-tick shadow Lane B task is still draining. The
+    /// scheduler fires Lane B as an unstructured task so user-visible jobs can
+    /// start without waiting for shadow FM work, but it must not enqueue an
+    /// unbounded pile of identical Lane B probes while the previous probe is
+    /// still in SQLite or FoundationModels.
+    private var shadowLaneTickInFlight = false
+
     /// Tracks OSSignposter queue-wait intervals keyed by jobId.
     private var queueWaitStates: [String: OSSignpostIntervalState] = [:]
 
@@ -640,7 +646,7 @@ actor AnalysisWorkScheduler {
         self.catchupPolicy = catchupPolicy
         self.acousticPromotionPolicy = acousticPromotionPolicy
         var continuation: AsyncStream<Void>.Continuation?
-        self.wakeStream = AsyncStream<Void> { continuation = $0 }
+        self.wakeStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { continuation = $0 }
         self.wakeContinuation = continuation
     }
 
@@ -1938,12 +1944,8 @@ actor AnalysisWorkScheduler {
                 // issue up to 2 sequential FM calls (~6s). Awaiting would
                 // delay the T0 job start when the user hits play
                 // mid-Lane-B tick. Capture the handler by value so the
-                // detached task does not close over the scheduler actor.
-                if let shadowLaneTickHandler {
-                    Task { [shadowLaneTickHandler] in
-                        await shadowLaneTickHandler.shadowLaneBTick()
-                    }
-                }
+                // unstructured task does not close over the scheduler actor.
+                startShadowLaneTickIfIdle()
                 await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
             }
@@ -2509,6 +2511,19 @@ actor AnalysisWorkScheduler {
 
     private func wakeSchedulerLoop() {
         wakeContinuation?.yield()
+    }
+
+    private func startShadowLaneTickIfIdle() {
+        guard let shadowLaneTickHandler, !shadowLaneTickInFlight else { return }
+        shadowLaneTickInFlight = true
+        Task { [weak self, shadowLaneTickHandler] in
+            await shadowLaneTickHandler.shadowLaneBTick()
+            await self?.shadowLaneTickDidFinish()
+        }
+    }
+
+    private func shadowLaneTickDidFinish() {
+        shadowLaneTickInFlight = false
     }
 
     // MARK: - Job Processing
