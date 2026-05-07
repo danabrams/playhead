@@ -871,8 +871,42 @@ extension DogfoodDiagnosticsAnalysisHealth {
             )
         }
 
+        // R6: healthy terminal completion — the row reached a
+        // satisfactory terminal state and `terminalCompletionContradiction`
+        // already confirmed canonical coverage agrees. The user has
+        // nothing to do, regardless of any non-terminal hazards
+        // (evicted audio, stale lease, stale watermark) the row may
+        // also exhibit; those hazards are persistence artifacts on a
+        // row that is already done.
+        //
+        // R5 placed this gate AFTER the stale-watermark check; R6
+        // moves it AHEAD of the no-cached-audio + stale-lease
+        // branches as well. Otherwise a `completeFull` row whose
+        // audio was evicted post-completion (the normal
+        // storage-budget path) is misrouted to `.openApp` even
+        // though there is no analysis work left to resume; or a
+        // `completeFull` row with a residual leased durable-job
+        // row is misrouted to `.clearStaleLease` even though the
+        // lease will be reaped on the next BG-task tick with no
+        // user action required.
+        //
+        // The corresponding staleness flags
+        // (`staleFastTranscriptWatermark`, `staleJobLease`) still
+        // surface in the `staleness_flags` list for support
+        // visibility — the change is only to the per-asset
+        // RECOMMENDATION the user-facing summary card surfaces.
+        if isTerminalCompletionState(asset.analysisState) {
+            return Recommendation(
+                action: .wait,
+                note: "healthy_terminal_completion"
+            )
+        }
+
         // No cached audio + no live progress → user has to open the
-        // app so the foreground manager resumes.
+        // app so the foreground manager resumes. Reaches here only
+        // for non-terminal-completion, non-failure rows (failures
+        // are handled at the top of the function; completions just
+        // above).
         if !row.cachedAudioPresent,
            row.liveDownloadFraction == nil,
            row.pipeline.downloadPercent == "--%" {
@@ -883,6 +917,8 @@ extension DogfoodDiagnosticsAnalysisHealth {
         }
 
         // Stale lease hint — surfaced for visibility, not blocking.
+        // Only fires on non-terminal rows; a leased durable-job row
+        // pinned past completion is benign and gets `.wait` above.
         if let job = row.latestJob,
            job.leasePresent,
            let expires = job.leaseExpiresAt,
@@ -891,33 +927,6 @@ extension DogfoodDiagnosticsAnalysisHealth {
             return Recommendation(
                 action: .clearStaleLease,
                 note: "lease_expires_at=\(expires) session_updated_at=\(updated)"
-            )
-        }
-
-        // R5: healthy terminal completion — the row reached a
-        // satisfactory terminal state and `terminalCompletionContradiction`
-        // already confirmed canonical coverage agrees. The user has
-        // nothing to do; recommend `.wait` BEFORE the stale-watermark
-        // and queued+cached fallbacks. R4 placed this gate after the
-        // stale-watermark check, which left a hole: the May 6
-        // `asset_004` shape — `completeFull` with chunk coverage at
-        // 3960 s but persisted `fast_transcript_watermark` stuck at
-        // 90 s — would fall through to `.plugInOrWait` and tell the
-        // user to plug in for an asset that is already terminally
-        // complete. The watermark drift is a benign persistence
-        // hazard (playhead-3bv.2) on terminal rows, not a thermal
-        // block; the staleness flag still surfaces it for support
-        // visibility.
-        //
-        // Without this gate a `completeFeatureOnly` row whose
-        // intentionally-low transcript leaves transcriptPercent at
-        // "--%" would be misclassified as thermal-blocked, and a
-        // `completeFull` with stale watermark would be incorrectly
-        // routed to "plug in".
-        if isTerminalCompletionState(asset.analysisState) {
-            return Recommendation(
-                action: .wait,
-                note: "healthy_terminal_completion"
             )
         }
 

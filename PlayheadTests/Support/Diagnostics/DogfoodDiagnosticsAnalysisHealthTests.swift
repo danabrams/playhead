@@ -901,6 +901,307 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         #expect(!health.stalenessFlags.contains { $0.kind == .terminalStateContradictsCoverage })
     }
 
+    @Test("terminal-completion rows with evicted audio recommend wait, not open_app")
+    func terminalCompletionWithEvictedAudioRecommendsWait() {
+        // R6 fix: a `completeFull` (or any terminal-completion) row
+        // whose cached audio was evicted post-completion — the normal
+        // storage-budget path — must NOT be misrouted to `.openApp`.
+        // The asset is already terminally complete; there is no
+        // analysis work the foreground manager could resume by
+        // having the user reopen the app. Audio eviction is a
+        // playback-tier concern handled at play time, not an
+        // analysis hazard.
+        //
+        // Without R6's reorder, the no-cached-audio + no-live +
+        // downloadPercent="--%" branch fires before the healthy-
+        // terminal-completion gate and incorrectly tells the user
+        // to open the app. Pin every healthy completion state so a
+        // future regression cannot reintroduce the misclassification.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [
+                makeActivityRow(
+                    hash: "h-cf-evicted",
+                    analysisState: "completeFull",
+                    cachedAudioPresent: false,
+                    liveDownloadFraction: nil,
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "98%",
+                        analysisPercent: "100%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 3960,
+                        fastTranscriptWatermarkSec: 3960,
+                        featureCoverageEndSec: 4000
+                    )
+                ),
+                makeActivityRow(
+                    hash: "h-cfo-evicted",
+                    analysisState: "completeFeatureOnly",
+                    cachedAudioPresent: false,
+                    liveDownloadFraction: nil,
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "--%",
+                        analysisPercent: "100%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 40,
+                        fastTranscriptWatermarkSec: 40,
+                        featureCoverageEndSec: 3960
+                    )
+                ),
+                makeActivityRow(
+                    hash: "h-ctp-evicted",
+                    analysisState: "completeTranscriptPartial",
+                    cachedAudioPresent: false,
+                    liveDownloadFraction: nil,
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "60%",
+                        analysisPercent: "100%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 2400,
+                        fastTranscriptWatermarkSec: 2400,
+                        featureCoverageEndSec: 4000
+                    )
+                ),
+                makeActivityRow(
+                    hash: "h-legacy-evicted",
+                    analysisState: "complete",
+                    cachedAudioPresent: false,
+                    liveDownloadFraction: nil,
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "98%",
+                        analysisPercent: "100%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 3960,
+                        fastTranscriptWatermarkSec: 3960,
+                        featureCoverageEndSec: 4000
+                    )
+                )
+            ]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let actions = health.assets.map(\.recommendedAction)
+        #expect(actions == [.wait, .wait, .wait, .wait])
+        let notes = health.assets.map(\.recommendedActionNote)
+        #expect(notes == [
+            "healthy_terminal_completion",
+            "healthy_terminal_completion",
+            "healthy_terminal_completion",
+            "healthy_terminal_completion"
+        ])
+        // Independent confirmation: the openApp branch is genuinely
+        // unreachable for these rows. A non-terminal row with the
+        // same cached/download shape still routes to .openApp (the
+        // existing recommendsOpenAppForNoCacheNoLive test pins this
+        // half).
+        #expect(!actions.contains(.openApp))
+    }
+
+    @Test("terminal-completion rows with stale lease recommend wait, not clear_stale_lease")
+    func terminalCompletionWithStaleLeaseRecommendsWait() {
+        // R6 fix companion: a terminal-completion row that also has
+        // a leased durable-job row whose lease has outlived the
+        // latest session is benign — the lease will be reaped on
+        // the next BG-task tick with no user action required, and
+        // the asset is already terminally complete. Without the R6
+        // reorder, the stale-lease branch would fire ahead of the
+        // healthy-terminal-completion gate.
+        //
+        // The `staleJobLease` flag still fires in the
+        // `staleness_flags` list for support visibility — that's
+        // pinned independently below so a future fix that
+        // suppresses the flag (instead of just changing the
+        // recommendation) is caught here.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-completed-stale-lease",
+                analysisState: "completeFull",
+                cachedAudioPresent: true,
+                pipeline: makePipeline(
+                    transcriptPercent: "99%",
+                    episodeDurationSec: 4000,
+                    transcriptCoveredSec: 3960,
+                    fastTranscriptWatermarkSec: 3960,
+                    featureCoverageEndSec: 4000
+                ),
+                latestSession: makeSession(updatedAt: 200.0),
+                latestJob: makeJob(
+                    leasePresent: true,
+                    leaseExpiresAt: 100.0
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let asset = try! #require(health.assets.first)
+        #expect(asset.recommendedAction == .wait)
+        #expect(asset.recommendedActionNote == "healthy_terminal_completion")
+        // Flag still fires for support visibility.
+        #expect(health.stalenessFlags.contains { $0.kind == .staleJobLease })
+    }
+
+    @Test("recommendation note strings are stable for every deterministic branch")
+    func recommendationNoteStringsAreStable() {
+        // R6: every deterministic (non-parameterized) note string
+        // must be pinned so support tooling can route on the value
+        // without the rug pulled out from under it. Parameterized
+        // notes (stale_watermark_delta=…, lease_expires_at=…) are
+        // pinned by prefix in the per-branch tests already; this
+        // test pins the constant-string branches end-to-end.
+        struct Case {
+            let name: String
+            let row: DogfoodDiagnosticsActivityRow
+            let expectedAction: DogfoodDiagnosticsAnalysisHealth.RecommendedAction
+            let expectedNote: String
+        }
+        let cases: [Case] = [
+            Case(
+                name: "healthy_terminal_completion",
+                row: makeActivityRow(
+                    hash: "h-htc",
+                    analysisState: "completeFull",
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 3960,
+                        fastTranscriptWatermarkSec: 3960,
+                        featureCoverageEndSec: 4000
+                    )
+                ),
+                expectedAction: .wait,
+                expectedNote: "healthy_terminal_completion"
+            ),
+            Case(
+                name: "no_cached_audio_and_no_live_download",
+                row: makeActivityRow(
+                    hash: "h-nca",
+                    cachedAudioPresent: false,
+                    liveDownloadFraction: nil,
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "--%",
+                        analysisPercent: "--%"
+                    )
+                ),
+                expectedAction: .openApp,
+                expectedNote: "no_cached_audio_and_no_live_download"
+            ),
+            Case(
+                name: "currently_running",
+                row: makeActivityRow(
+                    hash: "h-running",
+                    analysisState: "backfill",
+                    isRunning: true
+                ),
+                expectedAction: .wait,
+                expectedNote: "currently_running"
+            ),
+            Case(
+                name: "queued_with_cached_audio_no_transcript",
+                row: makeActivityRow(
+                    hash: "h-qcant",
+                    analysisState: "queued",
+                    cachedAudioPresent: true,
+                    pipeline: makePipeline(
+                        downloadPercent: "100%",
+                        transcriptPercent: "--%",
+                        analysisPercent: "--%"
+                    )
+                ),
+                expectedAction: .plugInOrWait,
+                expectedNote: "queued_with_cached_audio_no_transcript"
+            ),
+            Case(
+                name: "queued_with_progress",
+                row: makeActivityRow(
+                    hash: "h-qwp",
+                    analysisState: "queued",
+                    cachedAudioPresent: true,
+                    pipeline: makePipeline(
+                        downloadPercent: "100%",
+                        transcriptPercent: "30%",
+                        analysisPercent: "20%"
+                    )
+                ),
+                expectedAction: .wait,
+                expectedNote: "queued_with_progress"
+            )
+        ]
+        for testCase in cases {
+            let snapshot = DogfoodDiagnosticsActivitySnapshot(
+                generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                rows: [testCase.row]
+            )
+            let health = DogfoodDiagnosticsAnalysisHealth.build(
+                from: snapshot,
+                generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+            )
+            let asset = try! #require(health.assets.first, "missing asset for \(testCase.name)")
+            #expect(asset.recommendedAction == testCase.expectedAction, "wrong action for \(testCase.name)")
+            #expect(asset.recommendedActionNote == testCase.expectedNote, "wrong note for \(testCase.name)")
+        }
+    }
+
+    @Test("parameterized recommendation notes carry stable prefixes")
+    func parameterizedRecommendationNotePrefixesAreStable() {
+        // R6: pin the prefix for the two parameterized note strings
+        // (stale_watermark_delta=… and lease_expires_at=…). Support
+        // tooling can branch on the prefix without parsing the
+        // numeric tail; if the prefix drifts, this test catches it.
+
+        // stale_watermark_delta=…
+        let staleWatermarkSnapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-swm",
+                analysisState: "backfill",
+                cachedAudioPresent: true,
+                pipeline: makePipeline(
+                    episodeDurationSec: 4000,
+                    transcriptCoveredSec: 1500,
+                    fastTranscriptWatermarkSec: 90
+                )
+            )]
+        )
+        let staleWatermarkHealth = DogfoodDiagnosticsAnalysisHealth.build(
+            from: staleWatermarkSnapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let staleWatermarkAsset = try! #require(staleWatermarkHealth.assets.first)
+        #expect(staleWatermarkAsset.recommendedAction == .plugInOrWait)
+        let staleWatermarkNote = try! #require(staleWatermarkAsset.recommendedActionNote)
+        #expect(staleWatermarkNote.hasPrefix("stale_watermark_delta="))
+
+        // lease_expires_at=… session_updated_at=…
+        let staleLeaseSnapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-sl",
+                analysisState: "backfill",
+                cachedAudioPresent: true,
+                latestSession: makeSession(updatedAt: 200.0),
+                latestJob: makeJob(leasePresent: true, leaseExpiresAt: 100.0)
+            )]
+        )
+        let staleLeaseHealth = DogfoodDiagnosticsAnalysisHealth.build(
+            from: staleLeaseSnapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let staleLeaseAsset = try! #require(staleLeaseHealth.assets.first)
+        #expect(staleLeaseAsset.recommendedAction == .clearStaleLease)
+        let staleLeaseNote = try! #require(staleLeaseAsset.recommendedActionNote)
+        #expect(staleLeaseNote.hasPrefix("lease_expires_at="))
+        #expect(staleLeaseNote.contains("session_updated_at="))
+    }
+
     @Test("flags stale_job_lease and recommends clear_stale_lease when the lease outlived the latest session")
     func flagsAndRecommendsForStaleLease() {
         // Lease expires at t=100 but the latest session updatedAt is
