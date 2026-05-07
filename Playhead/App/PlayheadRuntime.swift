@@ -60,6 +60,14 @@ final class PlayheadRuntime {
     /// crashed prior process to `failed/orphan_at_launch` so dogfood
     /// diagnostics can distinguish stale rows from live ones.
     let backgroundTaskRunLedger: any BackgroundTaskRunLedger
+    /// playhead-hygc.1.4 (R2 fix): process-start timestamp captured
+    /// in `init` BEFORE `registerBackgroundTasks()` runs. Used as the
+    /// `startedBefore` filter for `reapOrphansAtLaunch` so a BG handler
+    /// that fires between `registerBackgroundTasks()` and the deferred
+    /// migrate Task body cannot have its fresh `running` row
+    /// mistakenly reaped — the handler's row will have
+    /// `startedAt > processLaunchTimestamp` by construction.
+    let processLaunchTimestamp: Double
     let downloadManager: DownloadManager
     let analysisJobRunner: AnalysisJobRunner
     let analysisWorkScheduler: AnalysisWorkScheduler
@@ -527,6 +535,16 @@ final class PlayheadRuntime {
         defer { initSignposter.endInterval("PlayheadRuntime.init", initSignpostState) }
 
         self.isPreviewRuntime = isPreviewRuntime
+        // playhead-hygc.1.4 (R2 fix): capture the process-launch
+        // timestamp BEFORE any BG-task handler can be registered. This
+        // is the `startedBefore` cutoff passed to `reapOrphansAtLaunch`
+        // in the deferred migrate Task. Capturing here (rather than at
+        // the reaper's call site) means a handler that fires between
+        // `registerBackgroundTasks()` and the deferred Task body
+        // running cannot have its fresh `running` row reaped — the
+        // handler's `recordRunStart` will stamp `startedAt` strictly
+        // greater than this timestamp.
+        self.processLaunchTimestamp = Date().timeIntervalSince1970
         let createdPlaybackService = PlaybackService()
         self.playbackService = createdPlaybackService
         self.capabilitiesService = CapabilitiesService()
@@ -1414,7 +1432,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox] in
+        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp] in
             // skeptical-review-cycle-9 L-4: pin the implicit MainActor
             // isolation that cycle-8 M1 relies on. PlayheadRuntime is
             // declared `@MainActor` (file:line 19), and an unannotated
@@ -1492,7 +1510,9 @@ final class PlayheadRuntime {
             // see `AnalysisStore.reapOrphanBackgroundTaskRuns` for
             // rationale. Best-effort: failure here just leaves diagnostics
             // less precise for one launch, the reaper retries on the next.
-            await backgroundTaskRunLedger.reapOrphansAtLaunch()
+            await backgroundTaskRunLedger.reapOrphansAtLaunch(
+                startedBefore: processLaunchTimestamp
+            )
 
             // Wake any UI that hit AnalysisStore before isOpen flipped true.
             AnalysisWorkScheduler.postActivityRefreshNotification()

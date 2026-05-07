@@ -479,6 +479,45 @@ struct BackgroundTaskRunLedgerTests {
         #expect(count == 0)
     }
 
+    @Test("reapOrphansAtLaunch(startedBefore:) skips rows newer than cutoff (R2 fix)")
+    func reapOrphansAtLaunchTemporalFilter() async throws {
+        // playhead-hygc.1.4 (R2 fix): rows whose `startedAt` is greater
+        // than or equal to the `startedBefore` cutoff must be left
+        // alone. This pins the race-safety contract: a BG handler that
+        // fires between `registerBackgroundTasks()` and the deferred
+        // migrate Task body must not have its fresh `running` row
+        // reaped, because the handler's row will have
+        // `startedAt > processLaunchTimestamp` by construction.
+        let store = try await makeTestStore()
+        let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+
+        // Capture cutoff THEN start a row — the row's startedAt is
+        // strictly after the cutoff, so it must be skipped.
+        let cutoff = Date().timeIntervalSince1970
+        // Tiny sleep to guarantee Date() inside startRun reads a value
+        // strictly greater than `cutoff` even on coarse clocks.
+        try await Task.sleep(for: .milliseconds(20))
+        let freshRunId = await ledger.startRun(
+            entryPoint: .backfill,
+            taskIdentifier: BackgroundTaskID.backfillProcessing,
+            taskInstanceID: "fresh-running",
+            scenePhase: "background"
+        )
+
+        // Reap with the captured cutoff.
+        let reaped = await ledger.reapOrphansAtLaunch(startedBefore: cutoff)
+        #expect(reaped == 0,
+                "Rows newer than the cutoff must NOT be reaped")
+
+        // Verify the fresh row is still .running.
+        let fresh = await ledger.fetchRecentRuns(limit: 10)
+            .first { $0.runId == freshRunId }
+        #expect(fresh?.outcome == .running,
+                "Fresh row must remain at .running — reaper must not have touched it")
+        #expect(fresh?.lastErrorCode == nil,
+                "Fresh row must not carry orphan_at_launch")
+    }
+
     // MARK: - Diagnostic queries
 
     @Test("fetchRecentRuns orders by startedAt DESC and respects the limit")

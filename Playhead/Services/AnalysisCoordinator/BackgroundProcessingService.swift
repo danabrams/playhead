@@ -881,16 +881,39 @@ actor BackgroundProcessingService {
         // playhead-hygc.1.4: open a durable run-outcome row at handler
         // entry so dogfood snapshots taken mid-run are still classifiable
         // (the row stays at outcome='running' until a terminal write
-        // finalizes it). The runId is captured per task instance so the
-        // expiration handler and the work task both finalize the same row.
-        let scenePhase = await BGTaskTelemetryScenePhase.current()
+        // finalizes it). The runId is minted SYNCHRONOUSLY here so the
+        // expiration handler and the work task both finalize the same
+        // row, but the SQLite insert + scenePhase MainActor hop are
+        // deferred to a structured-concurrency Task so the handler can
+        // install its `expirationHandler` before the OS reclaim window
+        // opens. Under heavy concurrent test load (or a thrashed
+        // scheduler on device) `await store.insert(...)` could otherwise
+        // delay the expirationHandler install past the test's polling
+        // deadline and past the OS's first reclaim chance — see the
+        // R2 review for the failure mode
+        // (`backfillEmitsExpireOnExpiration`).
+        //
+        // The Task handle is captured (`startRunTask`) and awaited from
+        // every `finishRun` call site so the UPDATE never races the
+        // INSERT — the chained await guarantees the row exists before
+        // the UPDATE's `WHERE runId=? AND outcome='running'` clause
+        // evaluates. Without that chain a fast handler (e.g. the
+        // QualityProfile-defer path) could hit `finishRun` before the
+        // detached Task lands the row, leaving a stale `running` row
+        // until the next launch's reaper.
+        let runId = UUID().uuidString
         let instanceID = bgTaskInstanceID(for: task as AnyObject)
-        let runId = await runLedger.startRun(
-            entryPoint: .backfill,
-            taskIdentifier: BackgroundTaskID.backfillProcessing,
-            taskInstanceID: instanceID,
-            scenePhase: scenePhase
-        )
+        let runLedgerForStart = self.runLedger
+        let startRunTask = Task {
+            let scenePhase = await BGTaskTelemetryScenePhase.current()
+            await runLedgerForStart.recordRunStart(
+                runId: runId,
+                entryPoint: .backfill,
+                taskIdentifier: BackgroundTaskID.backfillProcessing,
+                taskInstanceID: instanceID,
+                scenePhase: scenePhase
+            )
+        }
 
         // Schedule the next occurrence.
         scheduleBackfillIfNeeded()
@@ -922,6 +945,10 @@ actor BackgroundProcessingService {
                 // (LPM-stacked-on-fair) pause path.
                 let outcome: BackgroundTaskRunOutcome =
                     policy.pauseAllWork ? .deferredThermal : .deferredCapability
+                // Wait for the row insert to land before the UPDATE so
+                // `finishRun`'s `WHERE outcome='running'` finds the row
+                // — see startRunTask comment above.
+                await startRunTask.value
                 await runLedger.finishRun(
                     runId: runId,
                     update: BackgroundTaskRunOutcomeUpdate(
@@ -992,6 +1019,8 @@ actor BackgroundProcessingService {
             // outcome is `.admittedWork`.
             let outcome: BackgroundTaskRunOutcome =
                 baselinePending > 0 ? .admittedWork : .noEligibleWork
+            // Wait for the row insert to land before the UPDATE.
+            await startRunTask.value
             await runLedger.finishRun(
                 runId: runId,
                 update: BackgroundTaskRunOutcomeUpdate(
@@ -1024,7 +1053,12 @@ actor BackgroundProcessingService {
                 // audit trail. `finishRun` is idempotent against an
                 // already-terminal row, so a future call from the
                 // work task's normal-return path is a safe no-op.
+                //
+                // Wait for the row insert to land before the UPDATE —
+                // a fast expiration could otherwise race the detached
+                // INSERT and leave a stale `running` row.
                 if let self {
+                    await startRunTask.value
                     await self.runLedger.finishRun(
                         runId: runId,
                         update: BackgroundTaskRunOutcomeUpdate(
@@ -1352,14 +1386,33 @@ actor BackgroundProcessingService {
         // entry. Same shape as the backfill handler's ledger wiring:
         // the row captures startedAt + scenePhase up front and is
         // resolved to a terminal outcome at exit.
-        let scenePhase = await BGTaskTelemetryScenePhase.current()
+        //
+        // The runId is minted synchronously and the SQLite insert +
+        // scenePhase MainActor hop are deferred via a captured Task
+        // handle so the handler can reach its critical suspend point
+        // (`awaitPreAnalysisServicesInjected`) before the cold-launch
+        // race window closes — without this, tests that wait for the
+        // parked-waiter count via `pendingInjectionWaiterCountForTesting`
+        // can time out waiting for the actor hop. See R2 review for
+        // the failure mode (`triggeredTimeoutResumesEveryWaiter`,
+        // `recoveryWithoutReconciler`).
+        //
+        // `startRunTask` is awaited from every `finishRun` call site
+        // so the UPDATE never races the INSERT — see the matching
+        // comment in `handleBackfillTask`.
+        let runId = UUID().uuidString
         let instanceID = bgTaskInstanceID(for: task as AnyObject)
-        let runId = await runLedger.startRun(
-            entryPoint: .preAnalysisRecovery,
-            taskIdentifier: BackgroundTaskID.preAnalysisRecovery,
-            taskInstanceID: instanceID,
-            scenePhase: scenePhase
-        )
+        let runLedgerForStart = self.runLedger
+        let startRunTask = Task {
+            let scenePhase = await BGTaskTelemetryScenePhase.current()
+            await runLedgerForStart.recordRunStart(
+                runId: runId,
+                entryPoint: .preAnalysisRecovery,
+                taskIdentifier: BackgroundTaskID.preAnalysisRecovery,
+                taskInstanceID: instanceID,
+                scenePhase: scenePhase
+            )
+        }
 
         // Schedule the next occurrence.
         schedulePreAnalysisRecovery()
@@ -1377,6 +1430,9 @@ actor BackgroundProcessingService {
             // as `.failed` (we entered but could not even start the
             // recovery body) with a free-form error code so dogfood
             // diagnostics can pin the cause without grepping logs.
+            // Wait for the row insert to land before the UPDATE so
+            // `finishRun`'s `WHERE outcome='running'` finds the row.
+            await startRunTask.value
             await runLedger.finishRun(
                 runId: runId,
                 update: BackgroundTaskRunOutcomeUpdate(
@@ -1397,6 +1453,21 @@ actor BackgroundProcessingService {
             // with the localizedDescription as the error code.
             do {
                 let report = try await reconciler.reconcile()
+                // playhead-hygc.1.4 (R2 fix): mirror the backfill
+                // handler's cancellation guard. If the task was
+                // cancelled (expiration fired) the expirationHandler
+                // is the canonical source of the terminal outcome
+                // (.expired); writing .failed here would race the
+                // expiration write and the cause attribution would
+                // become order-dependent. Guard AFTER reconcile() so
+                // a cancellation that arrives mid-reconcile (which
+                // throws CancellationError, caught below) still gets
+                // routed to "do not finalize" instead of "finalize as
+                // .failed/CancellationError".
+                guard !Task.isCancelled else {
+                    self.logger.info("Pre-analysis recovery work task cancelled before completion")
+                    return
+                }
                 let recovered = report.expiredLeasesRecovered
                     + report.recoveredStrandedSessionJobs
                     + report.missingFilesUnblocked
@@ -1407,6 +1478,8 @@ actor BackgroundProcessingService {
                     + report.strandedFinalPassJobsReset
                 let outcome: BackgroundTaskRunOutcome =
                     recovered > 0 ? .recoveredWork : .noOp
+                // Wait for the row insert to land before the UPDATE.
+                await startRunTask.value
                 await runLedger.finishRun(
                     runId: runId,
                     update: BackgroundTaskRunOutcomeUpdate(
@@ -1415,6 +1488,17 @@ actor BackgroundProcessingService {
                     )
                 )
             } catch {
+                // playhead-hygc.1.4 (R2 fix): cancellation rolls in
+                // here as `CancellationError` from a throwing
+                // suspension point inside `reconcile()`. Defer to the
+                // expirationHandler in that case rather than writing
+                // `.failed/CancellationError` and racing the
+                // expiration's `.expired/task_expired` write.
+                if Task.isCancelled {
+                    self.logger.info("Pre-analysis recovery work task threw on cancellation; deferring to expiration handler")
+                    return
+                }
+                await startRunTask.value
                 await runLedger.finishRun(
                     runId: runId,
                     update: BackgroundTaskRunOutcomeUpdate(
@@ -1442,7 +1526,10 @@ actor BackgroundProcessingService {
                 // still leaves a durable audit trail. Idempotent
                 // against the work task's normal-return finish via
                 // the `running → terminal` guard.
+                //
+                // Wait for the row insert to land before the UPDATE.
                 if let self {
+                    await startRunTask.value
                     await self.runLedger.finishRun(
                         runId: runId,
                         update: BackgroundTaskRunOutcomeUpdate(

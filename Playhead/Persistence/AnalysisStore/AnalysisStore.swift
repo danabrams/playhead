@@ -3750,17 +3750,33 @@ actor AnalysisStore {
     /// we genuinely do not know whether the prior process exited via
     /// expiration callback or hard kill.
     @discardableResult
-    func reapOrphanBackgroundTaskRuns() throws -> Int {
+    func reapOrphanBackgroundTaskRuns(
+        olderThan startedBefore: Double = Date().timeIntervalSince1970
+    ) throws -> Int {
+        // playhead-hygc.1.4 (R2 fix): only reap rows that were inserted
+        // STRICTLY BEFORE `startedBefore` (typically captured at
+        // PlayheadRuntime init, before any BG task handler can register).
+        // Without this filter the reaper races a BG handler that fired
+        // between `PlayheadRuntime.init` returning and the deferred
+        // migrate Task body running — the OS can wake the app cold for
+        // a `BGProcessingTask`, the handler's `recordRunStart` lands a
+        // `running` row, and then the deferred Task's reaper would
+        // mistakenly nuke that fresh row as "orphan_at_launch".
+        // Filtering on `startedAt < ?` makes the reaper monotone w.r.t.
+        // process boundary: only rows from a strictly prior process
+        // are eligible.
         let sql = """
             UPDATE background_task_runs
             SET outcome = 'failed',
                 finishedAt = ?,
                 lastErrorCode = 'orphan_at_launch'
             WHERE outcome = 'running'
+              AND startedAt < ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, Date().timeIntervalSince1970)
+        bind(stmt, 2, startedBefore)
         try step(stmt, expecting: SQLITE_DONE)
         return Int(sqlite3_changes(db))
     }

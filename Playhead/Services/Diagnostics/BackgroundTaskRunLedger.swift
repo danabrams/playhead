@@ -311,6 +311,29 @@ protocol BackgroundTaskRunLedger: Sendable {
         scenePhase: String?
     ) async -> String
 
+    /// Caller-supplied-`runId` variant of `startRun`. Used by BG-task
+    /// handlers that need to mint the runId synchronously up front so
+    /// they can install the iOS `expirationHandler` (or hit a critical
+    /// suspend point such as `awaitPreAnalysisServicesInjected`) BEFORE
+    /// the SQLite insert completes — under heavy concurrent load the
+    /// AnalysisStore actor hop can be delayed long enough that
+    /// installing the expirationHandler after `await store.insert(...)`
+    /// would race the OS reclaim window. Tests still use the runId-less
+    /// `startRun` overload above; production handlers fire this variant
+    /// from a detached Task so the row insert is best-effort relative
+    /// to the handler's critical path.
+    ///
+    /// Idempotent on `runId` collision: a second insert with the same
+    /// runId is silently dropped (the row already exists). The default
+    /// implementation just delegates to the existing insert path.
+    func recordRunStart(
+        runId: String,
+        entryPoint: BackgroundTaskRunEntryPoint,
+        taskIdentifier: String,
+        taskInstanceID: String?,
+        scenePhase: String?
+    ) async
+
     /// Resolve a run to its terminal outcome. Idempotent: if the row
     /// is already at a terminal outcome, the call is a no-op and
     /// returns `false`. Returns `true` when the call advanced the
@@ -349,8 +372,32 @@ protocol BackgroundTaskRunLedger: Sendable {
     /// crash-recovery reapers — without this, dogfood diagnostics
     /// cannot distinguish "this row was alive when we shut down" from
     /// "this row is alive RIGHT NOW".
+    ///
+    /// `startedBefore` is the upper bound on `startedAt` for a row to
+    /// be considered an orphan. Callers should capture this timestamp
+    /// at process boundary (e.g. `PlayheadRuntime.init`) BEFORE
+    /// registering any BG-task handlers so a handler that fires
+    /// between init and the reaper running cannot have its fresh
+    /// `running` row mistakenly reaped — the handler's
+    /// `recordRunStart` will stamp `startedAt` strictly later than the
+    /// captured cutoff. Defaults to "now" for callers that don't need
+    /// the temporal-race protection (e.g. tests).
     @discardableResult
-    func reapOrphansAtLaunch() async -> Int
+    func reapOrphansAtLaunch(startedBefore: Double) async -> Int
+}
+
+extension BackgroundTaskRunLedger {
+    /// Convenience overload that captures the temporal cutoff at the
+    /// call site. Production callers (PlayheadRuntime) should prefer
+    /// the explicit-cutoff variant so the cutoff is captured BEFORE
+    /// `registerBackgroundTasks()` runs; this overload is for tests
+    /// and one-off diagnostic call sites.
+    @discardableResult
+    func reapOrphansAtLaunch() async -> Int {
+        await reapOrphansAtLaunch(
+            startedBefore: Date().timeIntervalSince1970
+        )
+    }
 }
 
 // MARK: - NoOpBackgroundTaskRunLedger
@@ -368,6 +415,14 @@ struct NoOpBackgroundTaskRunLedger: BackgroundTaskRunLedger {
         UUID().uuidString
     }
 
+    func recordRunStart(
+        runId: String,
+        entryPoint: BackgroundTaskRunEntryPoint,
+        taskIdentifier: String,
+        taskInstanceID: String?,
+        scenePhase: String?
+    ) async {}
+
     func finishRun(
         runId: String,
         update: BackgroundTaskRunOutcomeUpdate
@@ -382,7 +437,7 @@ struct NoOpBackgroundTaskRunLedger: BackgroundTaskRunLedger {
     func fetchLatestRun(forAssetId assetId: String) async -> BackgroundTaskRunRecord? { nil }
 
     @discardableResult
-    func reapOrphansAtLaunch() async -> Int { 0 }
+    func reapOrphansAtLaunch(startedBefore: Double) async -> Int { 0 }
 }
 
 // MARK: - AnalysisStoreBackgroundTaskRunLedger
@@ -416,6 +471,23 @@ struct AnalysisStoreBackgroundTaskRunLedger: BackgroundTaskRunLedger {
         scenePhase: String?
     ) async -> String {
         let runId = UUID().uuidString
+        await recordRunStart(
+            runId: runId,
+            entryPoint: entryPoint,
+            taskIdentifier: taskIdentifier,
+            taskInstanceID: taskInstanceID,
+            scenePhase: scenePhase
+        )
+        return runId
+    }
+
+    func recordRunStart(
+        runId: String,
+        entryPoint: BackgroundTaskRunEntryPoint,
+        taskIdentifier: String,
+        taskInstanceID: String?,
+        scenePhase: String?
+    ) async {
         let record = BackgroundTaskRunRecord(
             runId: runId,
             entryPoint: entryPoint,
@@ -430,10 +502,9 @@ struct AnalysisStoreBackgroundTaskRunLedger: BackgroundTaskRunLedger {
             try await store.insertBackgroundTaskRun(record)
         } catch {
             logger.warning(
-                "startRun failed: \(error.localizedDescription, privacy: .public)"
+                "recordRunStart failed: \(error.localizedDescription, privacy: .public)"
             )
         }
-        return runId
     }
 
     @discardableResult
@@ -491,9 +562,11 @@ struct AnalysisStoreBackgroundTaskRunLedger: BackgroundTaskRunLedger {
     }
 
     @discardableResult
-    func reapOrphansAtLaunch() async -> Int {
+    func reapOrphansAtLaunch(startedBefore: Double) async -> Int {
         do {
-            let count = try await store.reapOrphanBackgroundTaskRuns()
+            let count = try await store.reapOrphanBackgroundTaskRuns(
+                olderThan: startedBefore
+            )
             if count > 0 {
                 logger.info(
                     "Reaped \(count, privacy: .public) orphan running ledger row(s) at launch"
