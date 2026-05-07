@@ -153,6 +153,7 @@
 		288E1334DCF544CC781B1052 /* fixture-02-60min-music-bed.wav in Resources */ = {isa = PBXBuildFile; fileRef = 412744D4413D7761A3D32E4A /* fixture-02-60min-music-bed.wav */; };
 		288F5E6AC029881F78F1FED1 /* QueueAutoAdvanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DC83425467796AD5DC9A870 /* QueueAutoAdvanceTests.swift */; };
 		2891499C236A9B77B4B4AEE7 /* NarlQ45fCounterfactual.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAA1B4F6582A6F91720F2AF5 /* NarlQ45fCounterfactual.swift */; };
+		289D590EA6CA1606CE2A932C /* DogfoodDiagnosticsAnalysisHealthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1000D998852D2E358168D3D7 /* DogfoodDiagnosticsAnalysisHealthTests.swift */; };
 		28BEB8071172BFF2C2447FE3 /* SurfaceStatusInvariantsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17B526A04C8AADE9453BB145 /* SurfaceStatusInvariantsTests.swift */; };
 		2934CB0BDEFD261C285BD3AC /* WithTestRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D67C09F0363077895699D073 /* WithTestRuntime.swift */; };
 		29786647F005F38FF92188E1 /* TransportButtonHapticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BCF9000BF2F687523E430FF /* TransportButtonHapticTests.swift */; };
@@ -442,6 +443,7 @@
 		7ED912B97F7DE42511D5CB67 /* SpanFinalizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 532B4F2F15333FE90E8171FB /* SpanFinalizerTests.swift */; };
 		7F1144B8E4C5812F24C1C28C /* ChapterEvidenceParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B83A12F90F7FC0449CFE7742 /* ChapterEvidenceParser.swift */; };
 		7F5D2C35500BE7897E723D0A /* DecisionLoggerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0431ECEF60C4276EAF613EE6 /* DecisionLoggerTests.swift */; };
+		7F90A22B413E0850A3AC27CC /* DogfoodDiagnosticsAnalysisHealth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EA403C2C2098E82B02FB8D0 /* DogfoodDiagnosticsAnalysisHealth.swift */; };
 		7FC8A732C0B4997376335EC2 /* TrainingExampleCodableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 778B688B852911A4904407E7 /* TrainingExampleCodableTests.swift */; };
 		7FDB31900582CA875D2E38E2 /* FoundationModelExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF38243D35CA07BE595A877C /* FoundationModelExtractor.swift */; };
 		8054CD08AC2FF1B18460C37C /* DebugEpisodeExportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3D7ABC1EC0D754DAF2264C3 /* DebugEpisodeExportService.swift */; };
@@ -934,6 +936,7 @@
 		0F54E30E8F048B3EFC58755E /* OPMLService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OPMLService.swift; sourceTree = "<group>"; };
 		0F5CD7C4FCD046403493D617 /* AnalysisStoreWorkJournalRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisStoreWorkJournalRecorder.swift; sourceTree = "<group>"; };
 		0FFE1D6297B023C8B12CC94E /* TranscriptQualityEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptQualityEstimator.swift; sourceTree = "<group>"; };
+		1000D998852D2E358168D3D7 /* DogfoodDiagnosticsAnalysisHealthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DogfoodDiagnosticsAnalysisHealthTests.swift; sourceTree = "<group>"; };
 		1001B465F0F690FAE20F6532 /* LiveTransportStatusProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTransportStatusProviderTests.swift; sourceTree = "<group>"; };
 		104A431669814AE2F9BD67A2 /* CorpusLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorpusLoaderTests.swift; sourceTree = "<group>"; };
 		1096E6489087CF870E4BC9C9 /* DiagnosticsBundleShapeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsBundleShapeTests.swift; sourceTree = "<group>"; };
@@ -1381,6 +1384,7 @@
 		8D88AFE1E7856E852263579E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		8D913CBA6023333C7E52B693 /* FileProtectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProtectionTests.swift; sourceTree = "<group>"; };
 		8E8F1A8875BB42662C070DBD /* StorageBudgetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageBudgetTests.swift; sourceTree = "<group>"; };
+		8EA403C2C2098E82B02FB8D0 /* DogfoodDiagnosticsAnalysisHealth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DogfoodDiagnosticsAnalysisHealth.swift; sourceTree = "<group>"; };
 		8EB8FB87DD0F737950A79060 /* DownloadBatchEvictorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadBatchEvictorTests.swift; sourceTree = "<group>"; };
 		8EE1AC387F7C50E582BB2805 /* SpanHypothesisEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpanHypothesisEngineTests.swift; sourceTree = "<group>"; };
 		8F5DBE4EA997E3D9779DF83D /* TrustScoringServiceWeakSignalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustScoringServiceWeakSignalTests.swift; sourceTree = "<group>"; };
@@ -1962,6 +1966,7 @@
 				C7B6D27258130F6E10B7121C /* DiagnosticsExportCoordinator.swift */,
 				E655E0998C7C7C28FF20E5D2 /* DiagnosticsExportService.swift */,
 				B80D862BD3E04C867A450845 /* DiagnosticsOptInResetPolicy.swift */,
+				8EA403C2C2098E82B02FB8D0 /* DogfoodDiagnosticsAnalysisHealth.swift */,
 				6AE11A07191B8ECD0A219164 /* EpisodeIdHasher.swift */,
 				969E47E27FE98F3A50D41A16 /* InstallIdentity.swift */,
 				3861DF6C84A84021DE788252 /* ReleaseDiagnosticsHatch.swift */,
@@ -2018,6 +2023,7 @@
 				E85B05A45ED2EC4D70244642 /* DiagnosticsExportServiceTests.swift */,
 				343C65A38BB0EB9001C584F4 /* DiagnosticsOptInResetPolicyTests.swift */,
 				40F52FC0162A0B1DB3ADC401 /* DiagnosticsTestSupport.swift */,
+				1000D998852D2E358168D3D7 /* DogfoodDiagnosticsAnalysisHealthTests.swift */,
 				12F744DF7126FF0E4D9B770B /* EpisodeDiagnosticsOptInTests.swift */,
 				C4B456CA008DC183ADAF65D6 /* EpisodeIdHasherTests.swift */,
 				03691312EE8A1AB9AC1F5748 /* InstallIdentityTests.swift */,
@@ -3808,6 +3814,7 @@
 				5BB1D214E227D14CD73C99D7 /* DiagnosticsExportCoordinator.swift in Sources */,
 				8D39FE1D5323533EE1D3866A /* DiagnosticsExportService.swift in Sources */,
 				F69744A5F61FF6C9464EF57F /* DiagnosticsOptInResetPolicy.swift in Sources */,
+				7F90A22B413E0850A3AC27CC /* DogfoodDiagnosticsAnalysisHealth.swift in Sources */,
 				7965FAD7144F6A27068DC265 /* DownloadBatch.swift in Sources */,
 				D10E006FE7368D95A9400BBB /* DownloadBatchEvictor.swift in Sources */,
 				3FEA8B2D3DE188957955981F /* DownloadManager.swift in Sources */,
@@ -4201,6 +4208,7 @@
 				FF5D6E825A52787AC7DD3218 /* DiagnosticsExportServiceTests.swift in Sources */,
 				65400347C4D02C7B06CC90EB /* DiagnosticsOptInResetPolicyTests.swift in Sources */,
 				69D60F371446C8A2A71BFD9D /* DiagnosticsTestSupport.swift in Sources */,
+				289D590EA6CA1606CE2A932C /* DogfoodDiagnosticsAnalysisHealthTests.swift in Sources */,
 				8B48C8705A7C1915D767DC4E /* DownloadBatchEvictorTests.swift in Sources */,
 				FA2277442EBED4BFB47810F1 /* DownloadBatchSchemaTests.swift in Sources */,
 				D802325D82C83EF76D60152A /* DownloadManagerPreAnalysisTests.swift in Sources */,

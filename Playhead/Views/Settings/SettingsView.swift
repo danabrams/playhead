@@ -1625,10 +1625,24 @@ private extension SettingsView {
                     logger.hashEpisodeId(episodeId)
                 }
             )
+            // playhead-hygc.1.9: build the actionable analysis_health
+            // summary from the same snapshot the v1 export already
+            // carries. Sibling-bead aggregates (correction-store
+            // dedupe, learning-pipeline ingestion) are not yet wired
+            // in this build — they'll plug into the `duplicates` /
+            // `learning` parameters once .1.5 / .1.6 / .1.7 land. The
+            // analysis_health is still useful without them because
+            // the top-line "why didn't this progress?" questions are
+            // answered from the snapshot alone.
+            let analysisHealth = DogfoodDiagnosticsAnalysisHealth.build(
+                from: activitySnapshot,
+                generatedAt: now
+            )
             dogfoodDiagnosticsExportResult = try await Task.detached(priority: .utility) {
                 try DogfoodDiagnosticsExporter.export(
                     now: now,
-                    activitySnapshot: activitySnapshot
+                    activitySnapshot: activitySnapshot,
+                    analysisHealth: analysisHealth
                 )
             }.value
         } catch {
