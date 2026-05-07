@@ -2838,9 +2838,13 @@ actor AnalysisCoordinator {
         // denominator at write-time. We treat that as untrustworthy
         // regardless of the actual coverage values, because we can't
         // assume the coverage values themselves are sane either.
-        let reasonClaimsImpossibleRatio = parseHighestRatioInTerminalReason(
-            asset.terminalReason
-        ) ?? 0 > terminalStateRepairRatioCeiling
+        //
+        // R7: bind the `?? 0` result to a named local before comparing.
+        // Swift's `NilCoalescingPrecedence > ComparisonPrecedence` does
+        // make the inline `(...) ?? 0 > ceiling` parse correctly, but
+        // a stand-alone local removes any reader-side ambiguity.
+        let parsedHighestRatio = parseHighestRatioInTerminalReason(asset.terminalReason) ?? 0
+        let reasonClaimsImpossibleRatio = parsedHighestRatio > terminalStateRepairRatioCeiling
 
         // For `.completeFull`: both transcript AND feature must clear
         // the threshold against the canonical denominator.
