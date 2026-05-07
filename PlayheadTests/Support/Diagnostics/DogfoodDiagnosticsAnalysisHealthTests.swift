@@ -1049,6 +1049,48 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         #expect(health.stalenessFlags.contains { $0.kind == .staleJobLease })
     }
 
+    @Test("running rows recommend wait, not plug_in_or_wait, even when watermark is stale")
+    func runningRowWithStaleWatermarkRecommendsWait() {
+        // R7 fix: a row currently executing (`isRunning == true`)
+        // should never be classified as "thermal-blocked, plug in"
+        // just because its persisted watermark drift exceeds the
+        // tolerance. The active runner IS in the middle of catching
+        // the watermark up; the user-facing answer is "we're working
+        // on it, stand by", not "plug in." This is the same adjacent-
+        // pair pattern R4/R5/R6 fixed at higher gates — a less-specific
+        // hazard masking a more-specific truth.
+        //
+        // Pin: action=.wait, note="currently_running", AND the
+        // staleFastTranscriptWatermark flag still fires for support
+        // visibility so a future fix that suppresses the FLAG (instead
+        // of just changing the recommendation) is caught here.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-running-stale-watermark",
+                analysisState: "backfill",
+                isRunning: true,
+                cachedAudioPresent: true,
+                pipeline: makePipeline(
+                    transcriptPercent: "30%",
+                    episodeDurationSec: 4000,
+                    transcriptCoveredSec: 1500,
+                    fastTranscriptWatermarkSec: 90 // 23.5-minute drift
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let asset = try! #require(health.assets.first)
+        #expect(asset.recommendedAction == .wait)
+        #expect(asset.recommendedActionNote == "currently_running")
+        // The flag still fires for support visibility.
+        #expect(health.stalenessFlags.contains { $0.kind == .staleFastTranscriptWatermark })
+        #expect(health.global.staleWatermarkCount == 1)
+    }
+
     @Test("recommendation note strings are stable for every deterministic branch")
     func recommendationNoteStringsAreStable() {
         // R6: every deterministic (non-parameterized) note string
@@ -1200,6 +1242,115 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         let staleLeaseNote = try! #require(staleLeaseAsset.recommendedActionNote)
         #expect(staleLeaseNote.hasPrefix("lease_expires_at="))
         #expect(staleLeaseNote.contains("session_updated_at="))
+
+        // R7: the failure-state retry note carries `session_state=…
+        // reason=…`. R6's drift coverage focused on the deterministic
+        // notes plus the watermark/lease prefixes, but the retry path's
+        // parameterized prefix slipped through. Pin it here so support
+        // tooling that branches on the value catches a future rename.
+        let failureSnapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-fail",
+                analysisState: "failedTranscript",
+                terminalReason: "speech_analyzer_unavailable"
+            )]
+        )
+        let failureHealth = DogfoodDiagnosticsAnalysisHealth.build(
+            from: failureSnapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let failureAsset = try! #require(failureHealth.assets.first)
+        #expect(failureAsset.recommendedAction == .retry)
+        let failureNote = try! #require(failureAsset.recommendedActionNote)
+        #expect(failureNote.hasPrefix("session_state="))
+        #expect(failureNote.contains("reason="))
+    }
+
+    @Test("staleness flag detail strings carry stable prefixes")
+    func stalenessFlagDetailPrefixesAreStable() {
+        // R7: the parallel pin to R6's recommendation-note prefix
+        // coverage. Each StalenessFlag.detail follows a deterministic
+        // shape (prefix-only for parameterized strings, full string
+        // for the missingFailureReason `state=…` form). Support tooling
+        // routes on these prefixes; a future rename should fail loudly
+        // here, not silently in production.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [
+                // terminalStateContradictsCoverage → "state=… duration=…"
+                makeActivityRow(
+                    hash: "h-tc",
+                    analysisState: "completeFull",
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 100,
+                        fastTranscriptWatermarkSec: 100,
+                        featureCoverageEndSec: 100
+                    )
+                ),
+                // staleFastTranscriptWatermark → "transcript_covered=… fast_watermark=… delta=…"
+                makeActivityRow(
+                    hash: "h-fw",
+                    analysisState: "backfill",
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 1500,
+                        fastTranscriptWatermarkSec: 90
+                    )
+                ),
+                // unknownProgressWithoutPause → "disposition=… reason=…"
+                makeActivityRow(
+                    hash: "h-up",
+                    cachedAudioPresent: false,
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "--%",
+                        analysisPercent: "--%"
+                    )
+                ),
+                // staleJobLease → "lease_expires_at=… session_updated_at=…"
+                makeActivityRow(
+                    hash: "h-sjl",
+                    cachedAudioPresent: true,
+                    latestSession: makeSession(updatedAt: 200.0),
+                    latestJob: makeJob(leasePresent: true, leaseExpiresAt: 100.0)
+                ),
+                // missingFailureReason → "state=…"
+                makeActivityRow(
+                    hash: "h-mfr",
+                    analysisState: "failedTranscript",
+                    terminalReason: nil
+                )
+            ]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        func detailFor(
+            _ kind: DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind,
+            hash: String
+        ) -> String {
+            health.stalenessFlags.first {
+                $0.kind == kind && $0.episodeIdHash == hash
+            }?.detail ?? ""
+        }
+        let terminalDetail = detailFor(.terminalStateContradictsCoverage, hash: "h-tc")
+        #expect(terminalDetail.hasPrefix("state="))
+        #expect(terminalDetail.contains("duration="))
+        let watermarkDetail = detailFor(.staleFastTranscriptWatermark, hash: "h-fw")
+        #expect(watermarkDetail.hasPrefix("transcript_covered="))
+        #expect(watermarkDetail.contains("fast_watermark="))
+        #expect(watermarkDetail.contains("delta="))
+        let unknownDetail = detailFor(.unknownProgressWithoutPause, hash: "h-up")
+        #expect(unknownDetail.hasPrefix("disposition="))
+        #expect(unknownDetail.contains("reason="))
+        let leaseDetail = detailFor(.staleJobLease, hash: "h-sjl")
+        #expect(leaseDetail.hasPrefix("lease_expires_at="))
+        #expect(leaseDetail.contains("session_updated_at="))
+        let missingDetail = detailFor(.missingFailureReason, hash: "h-mfr")
+        #expect(missingDetail.hasPrefix("state="))
     }
 
     @Test("flags stale_job_lease and recommends clear_stale_lease when the lease outlived the latest session")

@@ -930,20 +930,30 @@ extension DogfoodDiagnosticsAnalysisHealth {
             )
         }
 
+        // R7: a row that is GENUINELY running outranks a stale-
+        // watermark hint. The watermark drift is a persistence artifact
+        // (playhead-3bv.2) the active runner is in the middle of
+        // catching up; telling the user to plug in/wait when the device
+        // is already executing the work is the same R4/R5/R6 pattern —
+        // a less-specific hazard masking a more-specific truth. The
+        // staleFastTranscriptWatermark flag still surfaces in the
+        // staleness_flags list for support visibility; the change is
+        // only to the per-asset RECOMMENDATION the user-facing card
+        // surfaces.
+        if row.isRunning {
+            return Recommendation(action: .wait, note: "currently_running")
+        }
+
         // Stale watermark gap → wait for next backfill tick (the
-        // playhead-3bv.2 reconciler will catch up). For non-terminal
-        // rows this almost always co-occurs with a thermal-deferred
-        // backfill, so `.plugInOrWait` is the right user-facing hint.
+        // playhead-3bv.2 reconciler will catch up). For non-terminal,
+        // non-running rows this almost always co-occurs with a thermal-
+        // deferred backfill, so `.plugInOrWait` is the right user-facing
+        // hint.
         if let delta = watermarkDelta, delta > staleWatermarkToleranceSec {
             return Recommendation(
                 action: .plugInOrWait,
                 note: "stale_watermark_delta=\(formatSeconds(delta))"
             )
-        }
-
-        // Already-running rows just need to wait.
-        if row.isRunning {
-            return Recommendation(action: .wait, note: "currently_running")
         }
 
         // Cached + queued → wait for next backfill tick. If transcript
