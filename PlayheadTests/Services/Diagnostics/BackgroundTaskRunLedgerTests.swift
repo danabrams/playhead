@@ -312,6 +312,71 @@ struct BackgroundTaskRunLedgerTests {
         #expect(latest == nil)
     }
 
+    // MARK: - Idempotence under contention (R6 stress test)
+
+    @Test("N concurrent finishRun calls on the same runId produce exactly one terminal write",
+          .timeLimit(.minutes(1)))
+    func finishRunIdempotenceUnderConcurrency() async throws {
+        // R6 adversarial review: pin the SQL `WHERE outcome='running'`
+        // guard under contention. The production wiring has at most two
+        // racing finishRun callers per row (the work task and the
+        // expirationHandler), but the contract is that only the FIRST
+        // terminal write succeeds — every subsequent caller observes
+        // `outcome != 'running'` in the idempotence probe and returns
+        // false. This stress test fires N=10 concurrent finishRun calls
+        // against a single shared `running` row to exercise the actor's
+        // serial executor isolation under load.
+        let store = try await makeTestStore()
+        let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+
+        // Seed one shared `running` row.
+        let runId = await ledger.startRun(
+            entryPoint: .backfill,
+            taskIdentifier: BackgroundTaskID.backfillProcessing,
+            taskInstanceID: "shared",
+            scenePhase: nil
+        )
+
+        // Fire 10 concurrent finishRun calls. Each carries a distinct
+        // outcome so we can verify exactly one wins — and identify
+        // which one. The actor's serial executor guarantees the
+        // probe→update is atomic per call, so there must be exactly
+        // one `advanced=true`.
+        let outcomes: [BackgroundTaskRunOutcome] = [
+            .admittedWork, .noEligibleWork, .deferredThermal,
+            .deferredCapability, .expired, .cancelled, .failed,
+            .noOp, .recoveredWork, .rescheduled,
+        ]
+        let advancedFlags = await withTaskGroup(of: Bool.self) { group in
+            for outcome in outcomes {
+                group.addTask {
+                    await ledger.finishRun(
+                        runId: runId,
+                        update: BackgroundTaskRunOutcomeUpdate(outcome: outcome)
+                    )
+                }
+            }
+            var results: [Bool] = []
+            for await result in group {
+                results.append(result)
+            }
+            return results
+        }
+
+        // Exactly one caller wins.
+        let advancedCount = advancedFlags.filter { $0 }.count
+        #expect(advancedCount == 1,
+                "Exactly one of \(outcomes.count) concurrent finishRun calls must advance the row; saw \(advancedCount)")
+
+        // The row is at SOME terminal outcome (we don't care which —
+        // ordering is non-deterministic by design).
+        let latest = await ledger.fetchLatestRun(for: .backfill)
+        #expect(latest?.runId == runId)
+        #expect(latest?.outcome != .running,
+                "Row must have been advanced to a terminal outcome")
+        #expect(latest?.finishedAt != nil)
+    }
+
     // MARK: - Persistence across process restart
 
     @Test("ledger row survives a close/reopen of the AnalysisStore")
