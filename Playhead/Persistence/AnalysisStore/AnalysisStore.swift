@@ -489,8 +489,15 @@ enum AnalysisCoverageMath {
     static func unionedSeconds(_ intervals: [(start: Double, end: Double)]) -> Double {
         guard !intervals.isEmpty else { return 0 }
         // Filter out degenerate pairs up front so the merge loop only has
-        // to deal with valid intervals.
-        let valid = intervals.filter { $0.end > $0.start }
+        // to deal with valid intervals. `isFinite` excludes both `NaN`
+        // (so the total never becomes NaN) AND ±Infinity (so the total
+        // never becomes Infinity from a single poisoned endpoint).
+        // Production data is real audio timestamps so non-finite values
+        // shouldn't arrive here, but the helper is reachable
+        // independently of the SQL filter, so make the contract explicit.
+        let valid = intervals.filter {
+            $0.start.isFinite && $0.end.isFinite && $0.end > $0.start
+        }
         guard !valid.isEmpty else { return 0 }
         let sorted = valid.sorted { lhs, rhs in
             if lhs.start != rhs.start { return lhs.start < rhs.start }

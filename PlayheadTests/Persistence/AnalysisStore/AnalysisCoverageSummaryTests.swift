@@ -118,6 +118,34 @@ struct AnalysisCoverageMathTests {
         #expect(result.isFinite)
     }
 
+    /// Infinity endpoints must also be filtered. Unlike NaN, an Infinity
+    /// endpoint passes a naive `end > start` check (`Inf > 0 == true`,
+    /// `0 > -Inf == true`), so a single poisoned interval would have
+    /// produced an Infinity total before the helper grew an explicit
+    /// `isFinite` guard. R6 pin: an isolated +Inf / -Inf does NOT leak
+    /// into the running total, and the result stays finite even when
+    /// the poisoned intervals share the input list with healthy ones.
+    @Test("Infinity endpoints are filtered, total stays finite")
+    func infinityIntervalsAreFiltered() {
+        let result = AnalysisCoverageMath.unionedSeconds([
+            (start: 0, end: 10),
+            // +Inf as end → would overshoot the union without the guard.
+            (start: 0, end: .infinity),
+            // -Inf as start → would overshoot the union below zero.
+            (start: -.infinity, end: 0),
+            // Both +Inf — passes `end > start == false` regardless, but
+            // pin alongside its single-endpoint cousins so the table is
+            // exhaustive across the 2x2 of {finite, ±Inf} × {start, end}.
+            (start: .infinity, end: .infinity),
+            // Mixed sign infinities. `+Inf > -Inf == true`, so this
+            // one specifically catches drifts in the filter that drop
+            // the `isFinite` predicate but keep the strict `>`.
+            (start: -.infinity, end: .infinity)
+        ])
+        #expect(result == 10)
+        #expect(result.isFinite)
+    }
+
     /// Intervals presented in arbitrary order must produce the same
     /// answer as sorted input — sort stability is internal to the helper.
     @Test("unsorted input matches sorted result")
