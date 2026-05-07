@@ -56,13 +56,14 @@ struct DogfoodAnalysisHealthFixtureTests {
         }
     }
 
-    // MARK: - Chunk-vs-watermark contradiction (the asset_004 / 9C109975 case)
+    // MARK: - Chunk-vs-watermark contradiction (the asset_004 case)
 
     @Test("At least one asset has fast-transcript chunk coverage far beyond its watermark")
     func chunkCoverageExceedsWatermark() throws {
-        // The dogfood asset 9C109975-A4B9-4C87-AE62-7BAFF35CAE24 (anonymized
-        // here as the synthetic `asset_004`) shows chunk transcript coverage
-        // ≈3960 s (~66 min) while the asset's stored
+        // The synthetic `asset_004` (4th row when `analysis_assets` is sorted
+        // by `(createdAt, id)`; raw UUID intentionally not recorded — the
+        // synthetic id is the contract surface) shows chunk transcript
+        // coverage ≈3960 s (~66 min) while the asset's stored
         // `fastTranscriptCoverageEndTime` watermark is only 90 s (~1.5 min) —
         // a coverage / watermark inconsistency that downstream beads need to
         // exercise.
