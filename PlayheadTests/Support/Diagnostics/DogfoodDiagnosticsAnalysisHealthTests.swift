@@ -811,6 +811,28 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
 
     // MARK: - Caller-supplied aggregates
 
+    @Test("nil duplicate / learning blocks are omitted from the encoded JSON")
+    func nilDuplicateAndLearningOmittedFromWire() throws {
+        // Pin Optional Codable behavior: when the caller passes nil
+        // for duplicates / learning, the encoded JSON must NOT contain
+        // those keys (`encodeIfPresent` semantics). Catches a future
+        // change that swaps to manual encode and accidentally emits
+        // null literals — present-but-null and absent decode the same
+        // way today but mean different things to support tooling.
+        let snapshot = makeMinimalActivitySnapshot()
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        let data = try encoder.encode(health)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("\"duplicates\""))
+        #expect(!json.contains("\"learning\""))
+    }
+
     @Test("duplicate counts and learning counts round-trip when supplied")
     func duplicatesAndLearningRoundTrip() throws {
         let snapshot = makeMinimalActivitySnapshot()
