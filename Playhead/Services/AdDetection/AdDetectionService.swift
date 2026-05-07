@@ -515,8 +515,15 @@ actor AdDetectionService {
     /// allocation across actor `await`s could otherwise race and
     /// double-insert replay rows). On entry the assetId is inserted; on
     /// exit (`defer`) it is removed. A second in-flight call for the same
-    /// asset hits a `preconditionFailure` in DEBUG builds and emits a
-    /// telemetry warning in RELEASE builds. Different assets remain
+    /// asset hits an `assertionFailure` (DEBUG: trap; RELEASE: no-op) and
+    /// also emits a `logger.warning` so RELEASE has at least an
+    /// observable footprint. R8: choosing `assertionFailure` over
+    /// `preconditionFailure` is deliberate — a single concurrent invocation
+    /// in production should NOT crash the player; the legacy
+    /// belt-and-suspenders dedupe in `correctionReplayCandidates`
+    /// (overlap check against the in-flight `emitted` set + the persisted
+    /// `existing` set) keeps the same-call duplicate-row hazard tolerable
+    /// even when the assertion is compiled out. Different assets remain
     /// independent. The actor's serialized re-entrance via `await` is the
     /// only realistic source of contention given the production caller
     /// chain (`AnalysisCoordinator.handlePersistedTranscriptChunks` and
