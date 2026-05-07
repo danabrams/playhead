@@ -3027,6 +3027,15 @@ actor AnalysisCoordinator {
         /// missing — the duration-backfill sweep heals these on the next
         /// launch.
         var skippedUnknownDuration: Int = 0
+        /// Rows the sweep TRIED to repair but the persistence write
+        /// threw. The idempotence marker is still set at end-of-sweep, so
+        /// these rows will NOT be reattempted on the next launch under
+        /// the same `_meta` version — bumping
+        /// ``terminalStateReconcileV1MetaKey`` (or clearing the row out
+        /// of band) is the documented escape hatch. R1: surfaced as a
+        /// counter so callers/tests can observe write-failure pressure
+        /// instead of having to read the unified-log warnings.
+        var writeFailures: Int = 0
         /// `true` when the sweep had already run on this install and
         /// short-circuited.
         var alreadyDone: Bool = false
@@ -3157,6 +3166,7 @@ actor AnalysisCoordinator {
                             "Terminal-state reconcile: repaired asset \(asset.id, privacy: .public) \(asset.analysisState, privacy: .public) -> \(newState.rawValue, privacy: .public) (transcriptEnd=\(transcriptEnd), featureEnd=\(asset.featureCoverageEndTime ?? 0), duration=\(asset.episodeDurationSec ?? 0))"
                         )
                     } catch {
+                        summary.writeFailures += 1
                         logger.warning(
                             "Terminal-state reconcile: write failed for asset \(asset.id, privacy: .public): \(String(describing: error), privacy: .public)"
                         )
@@ -3180,9 +3190,9 @@ actor AnalysisCoordinator {
             )
         }
 
-        if summary.repairedCount > 0 || summary.skippedUnknownDuration > 0 {
+        if summary.repairedCount > 0 || summary.skippedUnknownDuration > 0 || summary.writeFailures > 0 {
             logger.info(
-                "Terminal-state reconcile: repaired \(summary.repairedCount), unchanged \(summary.unchanged), skipped (unknown duration) \(summary.skippedUnknownDuration)"
+                "Terminal-state reconcile: repaired \(summary.repairedCount), unchanged \(summary.unchanged), skipped (unknown duration) \(summary.skippedUnknownDuration), write failures \(summary.writeFailures)"
             )
         }
 
