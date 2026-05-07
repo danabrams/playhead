@@ -274,11 +274,26 @@ extension DogfoodDiagnosticsAnalysisHealth {
     /// can branch on these without parsing free text. New cases must
     /// stay in lockstep with summary_schema_version.
     enum RecommendedAction: String, Codable, Sendable, Equatable, CaseIterable {
-        /// Nothing to do — the asset has reached a satisfactory
-        /// terminal state and canonical coverage agrees.
+        /// Nothing for the user to do. Emitted in three deterministic
+        /// shapes (pinned by `recommendationNoteStringsAreStable`):
+        ///   * `note="healthy_terminal_completion"` — terminal state
+        ///     reached and canonical coverage agrees.
+        ///   * `note="currently_running"` — the runner is mid-flight;
+        ///     transient persistence-artifact hazards (lease residue,
+        ///     watermark drift, evicted cache) are being resolved by
+        ///     the runner and do not require user action.
+        ///   * `note="queued_with_progress"` — cached + queued + the
+        ///     transcript pipeline already advanced; the next backfill
+        ///     tick will continue the work.
         case wait
-        /// Asset is queued but device-thermal or download blocked it;
-        /// the user should plug in / wait for thermal recovery.
+        /// Asset is held back by a thermal / scheduling gate. Emitted
+        /// in two shapes:
+        ///   * `note="queued_with_cached_audio_no_transcript"` — cached
+        ///     + queued but no transcript progress yet (almost always
+        ///     thermal).
+        ///   * `note="stale_watermark_delta=…"` — non-terminal,
+        ///     non-running row whose persisted fast-transcript
+        ///     watermark lags chunk coverage beyond the tolerance.
         case plugInOrWait = "plug_in_or_wait"
         /// Asset has no cached audio and no live download — user
         /// needs to open the app so the foreground download manager
@@ -839,6 +854,20 @@ extension DogfoodDiagnosticsAnalysisHealth {
         let note: String?
     }
 
+    /// Branch order (load-bearing — pinned by
+    /// `recommendationBranchOrderingExhaustive`):
+    ///   1. terminal failure          → `.retry`
+    ///   2. terminal contradiction    → `.fileBug`
+    ///   3. healthy terminal completion → `.wait "healthy_terminal_completion"`
+    ///   4. running                   → `.wait "currently_running"`
+    ///   5. no cached audio + no live download → `.openApp`
+    ///   6. stale lease               → `.clearStaleLease`
+    ///   7. stale watermark           → `.plugInOrWait`
+    ///   8. cached + queued           → `.plugInOrWait` or `.wait`
+    ///   9. fall-through              → `.unknown`
+    /// Earlier branches dominate later ones whenever both predicates
+    /// fire on the same row; every adjacent pair has a dual-trigger
+    /// regression test.
     private static func recommendation(
         for row: DogfoodDiagnosticsActivityRow,
         watermarkDelta: Double?
