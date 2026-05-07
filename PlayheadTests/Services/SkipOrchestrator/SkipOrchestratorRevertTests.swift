@@ -639,4 +639,101 @@ struct SkipOrchestratorRevertTests {
         #expect(untouchedC?.decisionState == AdDecisionState.candidate.rawValue,
                 "non-overlapping entry C must remain .candidate; got \(untouchedC?.decisionState ?? "<missing>")")
     }
+
+    // R3 (hygc.1.8): the R2 hardening test exercises the snapshot pattern
+    // with only ONE matching entry — which can pass even when the
+    // dict-mutation-while-iterating pattern is intact, because removing
+    // a single key during a single-pass iteration rarely visibly fails
+    // (even though Swift documents it as undefined behavior). To pin
+    // R2's snapshot fix against actual regression we need a test where
+    // the veto matches MULTIPLE suggest entries: removing N>1 keys
+    // mid-iteration is the case where the bug actually manifests
+    // (skipping or duplicating entries depending on stdlib hash table
+    // state). This test feeds five suggest entries, vetoes a span that
+    // overlaps three of them, and asserts every overlapping entry is
+    // cleared and every non-overlapping entry survives.
+    @Test("revertByTimeRange clears ALL overlapping suggest-tier entries when multiple match")
+    func revertByTimeRangeClearsAllOverlappingSuggestEntries() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // Five markOnly entries. The veto span 200..500 will overlap
+        // entries B, C, D — three removals — so the snapshot pattern is
+        // the only correct way to drive the loop. A naive
+        // dict-mutation-while-iterating loop would skip an entry or
+        // visit one twice depending on stdlib hash placement.
+        let entries: [(id: String, range: (Double, Double))] = [
+            ("ad-suggest-A", (50, 100)),    // before veto, must survive
+            ("ad-suggest-B", (210, 250)),   // inside veto, must be reverted
+            ("ad-suggest-C", (300, 350)),   // inside veto, must be reverted
+            ("ad-suggest-D", (400, 450)),   // inside veto, must be reverted
+            ("ad-suggest-E", (600, 660))    // after veto, must survive
+        ]
+        var windows: [AdWindow] = []
+        for (id, range) in entries {
+            let window = AdWindow(
+                id: id,
+                analysisAssetId: "asset-1",
+                startTime: range.0,
+                endTime: range.1,
+                confidence: 0.55,
+                boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: "test-1",
+                advertiser: nil, product: nil, adDescription: nil,
+                evidenceText: nil, evidenceStartTime: range.0,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: nil,
+                eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+            )
+            try await store.insertAdWindow(window)
+            windows.append(window)
+        }
+        await orchestrator.receiveAdWindows(windows)
+
+        let beforeIds = await orchestrator.activeSuggestWindowIDs()
+        #expect(beforeIds.count == 5, "all five must enter the suggest dict; got \(beforeIds)")
+
+        // Veto a span overlapping B, C, and D.
+        await orchestrator.revertByTimeRange(start: 200, end: 500, podcastId: "podcast-1")
+
+        let afterIds = await orchestrator.activeSuggestWindowIDs()
+        #expect(afterIds == ["ad-suggest-A", "ad-suggest-E"],
+                "only outside entries A and E must survive; got \(afterIds)")
+
+        // Persistence: all three overlapping entries must be .reverted,
+        // both non-overlapping must remain .candidate.
+        let persisted = try await store.fetchAdWindows(assetId: "asset-1")
+        let revertedIds: Set<String> = ["ad-suggest-B", "ad-suggest-C", "ad-suggest-D"]
+        for id in revertedIds {
+            let row = persisted.first { $0.id == id }
+            #expect(row?.decisionState == AdDecisionState.reverted.rawValue,
+                    "\(id) must persist as .reverted; got \(row?.decisionState ?? "<missing>")")
+        }
+        for id in ["ad-suggest-A", "ad-suggest-E"] {
+            let row = persisted.first { $0.id == id }
+            #expect(row?.decisionState == AdDecisionState.candidate.rawValue,
+                    "\(id) must remain .candidate; got \(row?.decisionState ?? "<missing>")")
+        }
+    }
 }
