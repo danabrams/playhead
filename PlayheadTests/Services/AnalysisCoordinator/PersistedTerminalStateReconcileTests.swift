@@ -345,6 +345,109 @@ struct PersistedTerminalStateReconcileTests {
         #expect(verdict == .unchanged)
     }
 
+    // MARK: - Pure verdict — bad rows on .completeFeatureOnly / .completeTranscriptPartial
+
+    @Test("Bad completeFeatureOnly row (feature short of canonical denominator) repairs and preserves audit prefix")
+    func badRow_completeFeatureOnly_featureShort_repairs() {
+        // R5 coverage gap: prior tests only covered the healthy
+        // `.completeFeatureOnly` case. A regression that no-ops the
+        // `state == .completeFeatureOnly` branch would still pass every
+        // other test. Pin the repair contract on this state explicitly.
+        //
+        // Shape: row claims feature-only completion against a 3600s
+        // episode but feature coverage is only 1290s (ratio 0.358 <
+        // 0.95). Classifier maps to .failedFeature on repair.
+        let asset = makeTerminalAsset(
+            id: "fo-bad",
+            analysisState: .completeFeatureOnly,
+            terminalReason: "feature-only (feature 0.999, transcript 0)",
+            episodeDurationSec: 3600,
+            featureCoverageEndTime: 1290,
+            fastTranscriptCoverageEndTime: 0
+        )
+        let verdict = AnalysisCoordinator.reconcilePersistedTerminalAssetVerdict(
+            asset: asset,
+            transcriptCoverageEnd: 0,
+            featureCoverageEnd: 1290,
+            episodeDuration: 3600
+        )
+        guard case .repair(let state, let reason) = verdict else {
+            #expect(Bool(false), "expected .repair; got \(verdict)")
+            return
+        }
+        #expect(state == .failedFeature)
+        #expect(reason.hasPrefix(AnalysisCoordinator.terminalStateRepairedReasonPrefix))
+        #expect(reason.contains("feature-only (feature 0.999, transcript 0)"))
+    }
+
+    @Test("Bad completeFeatureOnly row with bug-shape ratio in reason repairs even if feature ratio looks fine")
+    func badRow_completeFeatureOnly_impossibleRatioInReason_repairs() {
+        // R5 coverage gap: pin the `reasonClaimsImpossibleRatio` branch
+        // for .completeFeatureOnly. Without this test a regression that
+        // only checked feature shortness on this state would silently
+        // skip rows whose poisoned terminalReason is the only remaining
+        // signal of denominator-bug history.
+        let asset = makeTerminalAsset(
+            id: "fo-impossible",
+            analysisState: .completeFeatureOnly,
+            terminalReason: "feature-only (feature 1.724, transcript 0)",
+            episodeDurationSec: 3600,
+            featureCoverageEndTime: 3590,
+            fastTranscriptCoverageEndTime: 0
+        )
+        let verdict = AnalysisCoordinator.reconcilePersistedTerminalAssetVerdict(
+            asset: asset,
+            transcriptCoverageEnd: 0,
+            featureCoverageEnd: 3590,
+            episodeDuration: 3600
+        )
+        guard case .repair(_, let reason) = verdict else {
+            #expect(Bool(false), "expected .repair (impossible ratio); got \(verdict)")
+            return
+        }
+        // Feature ratio against canonical duration is 0.997 (>= 0.95), so
+        // the classifier emits .completeFeatureOnly again — the repair's
+        // value is the audit trail, not a state change. Pin the audit
+        // shape so a regression that drops the prefix on same-state
+        // repair is caught.
+        #expect(reason.hasPrefix(AnalysisCoordinator.terminalStateRepairedReasonPrefix))
+        #expect(reason.contains("feature-only (feature 1.724, transcript 0)"))
+    }
+
+    @Test("Bad completeTranscriptPartial row (feature short of canonical denominator) repairs and preserves audit prefix")
+    func badRow_completeTranscriptPartial_featureShort_repairs() {
+        // R5 coverage gap: prior tests only covered the healthy
+        // `.completeTranscriptPartial` case. A regression that no-ops
+        // the `state == .completeTranscriptPartial` branch would still
+        // pass every other test. Pin the repair contract on this state.
+        //
+        // Shape: row claims transcript-partial completion (which
+        // requires feature pipeline to have cleared the floor) but
+        // feature coverage is only 600s on a 3600s episode (ratio 0.166
+        // < 0.95). Classifier maps to .failedFeature on repair.
+        let asset = makeTerminalAsset(
+            id: "tp-bad",
+            analysisState: .completeTranscriptPartial,
+            terminalReason: "partial transcript 1800.0/3600.0s (ratio 0.500 < 0.950)",
+            episodeDurationSec: 3600,
+            featureCoverageEndTime: 600,
+            fastTranscriptCoverageEndTime: 1800
+        )
+        let verdict = AnalysisCoordinator.reconcilePersistedTerminalAssetVerdict(
+            asset: asset,
+            transcriptCoverageEnd: 1800,
+            featureCoverageEnd: 600,
+            episodeDuration: 3600
+        )
+        guard case .repair(let state, let reason) = verdict else {
+            #expect(Bool(false), "expected .repair; got \(verdict)")
+            return
+        }
+        #expect(state == .failedFeature)
+        #expect(reason.hasPrefix(AnalysisCoordinator.terminalStateRepairedReasonPrefix))
+        #expect(reason.contains("partial transcript 1800.0/3600.0s (ratio 0.500 < 0.950)"))
+    }
+
     // MARK: - Pure verdict — fail-safes
 
     @Test("Unknown episode duration returns .skipUnknownDuration (not destructive)")
