@@ -4798,8 +4798,10 @@ actor AdDetectionService {
     /// short-circuits before re-emitting it.
     ///
     /// Suppression: a `.falseNegative` correction whose time range is
-    /// fully covered by any later `.falsePositive` correction is
-    /// suppressed. This protects the precision contract when the user
+    /// fully covered by any `.falsePositive` correction (regardless of
+    /// relative ordering — typically the FP is recorded after the FN, but
+    /// we don't depend on `createdAt` since clock skew can scramble it)
+    /// is suppressed. This protects the precision contract when the user
     /// has effectively retracted their false-negative report (e.g.
     /// reported the ad, then realised it was content and vetoed it).
     ///

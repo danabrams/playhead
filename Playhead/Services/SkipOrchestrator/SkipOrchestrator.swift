@@ -1393,10 +1393,10 @@ actor SkipOrchestrator {
         Set(windows.keys)
     }
 
-    /// playhead-hygc.1.8: test-only accessor to inspect the suggest-tier
-    /// (markOnly) dictionary. Used by revert-tier coverage tests to assert
-    /// that a user veto via `revertByTimeRange` actually clears suggest
-    /// entries — production callers must not couple to it.
+    /// playhead-hygc.1.8: snapshot of suggest-tier (markOnly) window IDs.
+    /// Mirrors `activeWindowIDs()` for the auto-skip dictionary and is
+    /// used by revert-tier coverage tests to assert that a user veto via
+    /// `revertByTimeRange` actually clears suggest entries.
     func activeSuggestWindowIDs() -> Set<String> {
         Set(suggestWindows.keys)
     }
