@@ -175,6 +175,63 @@ struct FinalPassRetranscriptionRunnerCanonicalDedupeTests {
                 "the 3 non-canonical contributing AdWindow ids must be recorded as aliases for audit visibility")
     }
 
+    @Test("canonical pick is lex-lowest id regardless of insertion / fetch order")
+    func canonicalPickIsLexLowestRegardlessOfInsertionOrder() async throws {
+        // Adversarial: insert windows in REVERSE lex order so a buggy
+        // implementation that picks "first encountered" / "first by
+        // insertion order" / "first by SQLite return order" would pick
+        // "z-window" instead of "a-window". The canonical-pick rule is
+        // "lex-lowest id" — the only impl that passes is one that
+        // sorts by id BEFORE picking. Run twice to also catch any
+        // residual order dependency.
+        for run in 0..<2 {
+            let store = try await makeTestStore()
+            let assetId = "asset-fp-run\(run)"
+            try await store.insertAsset(makeAsset(id: assetId))
+
+            // Reverse-lex insertion. fetchAdWindows ORDER BY startTime
+            // ties leave row order undefined, so we cannot assume any
+            // particular fetch order — the dedupe MUST sort.
+            let ids = ["z-window", "m-window", "a-window", "p-window"]
+            for id in ids {
+                try await store.insertAdWindow(
+                    makeAdWindow(
+                        id: id,
+                        analysisAssetId: assetId,
+                        startTime: 100.0,
+                        endTime: 130.0
+                    )
+                )
+            }
+
+            let audio = StubAnalysisAudioProvider()
+            audio.shardsToReturn = [
+                AnalysisShard(id: 0, episodeID: "ep-\(assetId)", startTime: 100.0, duration: 30.0, samples: [])
+            ]
+            let runner = makeRunner(store: store, audio: audio)
+            _ = try await runner.runFinalPassBackfill(
+                for: FinalPassRetranscriptionRunner.AssetInput(
+                    analysisAssetId: assetId,
+                    podcastId: "pod-1",
+                    audioURL: LocalAudioURL(URL(fileURLWithPath: "/tmp/\(assetId).m4a"))!,
+                    episodeId: "ep-\(assetId)"
+                )
+            )
+
+            let persisted = try await store.fetchFinalPassJobs(forAsset: assetId)
+            #expect(persisted.count == 1)
+            let canonical = try #require(persisted.first)
+            #expect(canonical.adWindowId == "a-window",
+                    "lex-lowest pick must select 'a-window' regardless of insertion order; got \(canonical.adWindowId)")
+            // jobId encodes the canonical adWindowId — verify the
+            // canonical bookkeeping is consistent.
+            #expect(canonical.jobId == "fpj-\(assetId)-a-window")
+            let aliases = try await store.fetchFinalPassJobAliases(jobId: canonical.jobId)
+            #expect(aliases.sorted() == ["m-window", "p-window", "z-window"],
+                    "the 3 non-canonical ids must be recorded as aliases")
+        }
+    }
+
     @Test("two distinct spans on the same asset produce two canonical jobs (no over-collapsing)")
     func distinctSpansAreNotCollapsed() async throws {
         let store = try await makeTestStore()
@@ -307,6 +364,69 @@ struct FinalPassRetranscriptionRunnerCanonicalDedupeTests {
         // Both fresh AdWindow ids are recorded as aliases.
         let aliases = try await store.fetchFinalPassJobAliases(jobId: "fpj-asset-fp-prior")
         #expect(aliases.sorted() == ["fresh-1", "fresh-2"])
+    }
+
+    @Test("cross-launch with COMPLETE prior canonical: no new work runs (short-circuit)")
+    func crossLaunchCompleteCanonicalShortCircuits() async throws {
+        // Acceptance criterion: "if every (start,end) bucket already
+        // has a complete job, no new work is enqueued." Specifically:
+        //   * the canonical row stays `.complete` (no flip to running)
+        //   * `reTranscribedWindowIds` is empty
+        //   * `admittedJobIds` is empty (the runner skips the loop body
+        //     for already-complete canonicals)
+        //   * BUT new contributing AdWindow ids are still recorded as
+        //     aliases for audit visibility (the only useful side-effect
+        //     of finding a pre-existing complete canonical row).
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // Land a prior canonical row, then force it complete.
+        let priorCanonical = FinalPassJob(
+            jobId: "fpj-asset-fp-prior",
+            analysisAssetId: "asset-fp",
+            podcastId: "pod-1",
+            adWindowId: "prior",
+            windowStartTime: 600.0,
+            windowEndTime: 630.0,
+            status: .queued,
+            retryCount: 0,
+            deferReason: nil,
+            createdAt: 1.0
+        )
+        try await store.insertOrIgnoreFinalPassJob(priorCanonical)
+        try await store.forceFinalPassJobStateForTesting(
+            jobId: priorCanonical.jobId,
+            status: .complete
+        )
+
+        // New AdWindow rows for the same span land in this process.
+        try await store.insertAdWindow(makeAdWindow(id: "fresh-c1", analysisAssetId: "asset-fp", startTime: 600, endTime: 630))
+        try await store.insertAdWindow(makeAdWindow(id: "fresh-c2", analysisAssetId: "asset-fp", startTime: 600, endTime: 630))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 600, duration: 30, samples: [])
+        ]
+        let runner = makeRunner(store: store, audio: audio)
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        // Short-circuit: NO ASR work ran, no admittance, no re-transcription.
+        #expect(result.admittedJobIds.isEmpty,
+                "complete canonical short-circuits the loop body — no admittance should occur; got \(result.admittedJobIds)")
+        #expect(result.reTranscribedWindowIds.isEmpty,
+                "no re-transcription should run when canonical is already complete; got \(result.reTranscribedWindowIds)")
+
+        // The complete row stays complete.
+        let persisted = try await store.fetchFinalPassJobs(forAsset: "asset-fp")
+        #expect(persisted.count == 1)
+        #expect(persisted.first?.status == .complete,
+                "complete canonical must NOT be flipped to running/queued by the runner")
+
+        // Aliases ARE still recorded (audit visibility for the new
+        // contributing windows).
+        let aliases = try await store.fetchFinalPassJobAliases(jobId: priorCanonical.jobId)
+        #expect(aliases.sorted() == ["fresh-c1", "fresh-c2"],
+                "new contributors must still be recorded as aliases even when canonical is complete")
     }
 
     // MARK: - Progress derivation post-drain
