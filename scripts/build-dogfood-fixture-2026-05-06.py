@@ -18,6 +18,13 @@ Source files (read-only, NOT committed):
 shadow FM response count is sourced from the `shadow_fm_responses` SQL table.)
 
 Run: python3 scripts/build-dogfood-fixture-2026-05-06.py [out_path]
+
+Exit codes:
+  0  fixture written successfully
+  2  required raw input missing (preflight failure — set PLAYHEAD_HYGC_DIAG /
+     PLAYHEAD_HYGC_XCAPPDATA env vars to point at the raw evidence)
+  3  scrub-audit gate refused to overwrite the destination because the
+     serialized fixture contains a forbidden token / UUID / SHA-256 shape
 """
 from __future__ import annotations
 
