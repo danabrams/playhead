@@ -1008,10 +1008,18 @@ final class PlayheadRuntime {
             bgTaskTelemetry = NoOpBGTaskTelemetryLogger()
         }
         self.bgTaskTelemetryLogger = bgTaskTelemetry
+        // playhead-hygc.1.4: wire the durable per-run outcome ledger
+        // backed by AnalysisStore. This complements the JSONL telemetry
+        // logger above with a queryable SQLite surface so dogfood
+        // overnight runs are classifiable (admitted / no-eligible /
+        // deferred / expired / failed / no-op) without raw JSONL grep.
+        let runLedger: any BackgroundTaskRunLedger =
+            AnalysisStoreBackgroundTaskRunLedger(store: analysisStore)
         self.backgroundProcessingService = BackgroundProcessingService(
             coordinator: analysisCoordinator,
             capabilitiesService: capabilitiesService,
-            bgTelemetry: bgTaskTelemetry
+            bgTelemetry: bgTaskTelemetry,
+            runLedger: runLedger
         )
 
         let lanePreemptionCoordinator = LanePreemptionCoordinator()

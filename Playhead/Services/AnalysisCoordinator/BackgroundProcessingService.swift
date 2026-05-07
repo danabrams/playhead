@@ -215,6 +215,17 @@ actor BackgroundProcessingService {
     /// supplies the live `BGTaskTelemetryLogger`.
     private let bgTelemetry: any BGTaskTelemetryLogging
 
+    /// playhead-hygc.1.4: durable per-run outcome ledger (queryable
+    /// SQLite accounting). Distinct from `bgTelemetry` (append-only
+    /// JSONL lifecycle log): the ledger tracks the OUTCOME of each
+    /// run — admitted work, no eligible work, deferred, expired,
+    /// cancelled, failed, no-op — so dogfood diagnostics can classify
+    /// overnight runs without grepping raw logs. Defaults to no-op
+    /// for tests that do not exercise the ledger surface; production
+    /// wiring in `PlayheadRuntime` supplies the
+    /// `AnalysisStoreBackgroundTaskRunLedger`.
+    private let runLedger: any BackgroundTaskRunLedger
+
     /// Pre-analysis services, injected after construction via
     /// ``setPreAnalysisServices(scheduler:reconciler:)``.
     private var analysisWorkScheduler: AnalysisWorkScheduler?
@@ -352,13 +363,15 @@ actor BackgroundProcessingService {
         capabilitiesService: CapabilitiesService,
         taskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared,
         batteryProvider: any BatteryStateProviding = UIDeviceBatteryProvider(),
-        bgTelemetry: any BGTaskTelemetryLogging = NoOpBGTaskTelemetryLogger()
+        bgTelemetry: any BGTaskTelemetryLogging = NoOpBGTaskTelemetryLogger(),
+        runLedger: any BackgroundTaskRunLedger = NoOpBackgroundTaskRunLedger()
     ) {
         self.coordinator = coordinator
         self.capabilitiesService = capabilitiesService
         self.taskScheduler = taskScheduler
         self.batteryProvider = batteryProvider
         self.bgTelemetry = bgTelemetry
+        self.runLedger = runLedger
     }
 
     /// Inject pre-analysis services after construction. Called once the
@@ -859,15 +872,30 @@ actor BackgroundProcessingService {
 
     /// Handle the backfill BGProcessingTask. Runs analysis on episodes that
     /// have incomplete transcription or ad detection.
-    func handleBackfillTask(_ task: any BackgroundProcessingTaskProtocol) {
+    func handleBackfillTask(_ task: any BackgroundProcessingTaskProtocol) async {
         logger.info("Backfill task started")
 
         let taskID = ObjectIdentifier(task as AnyObject)
         emitStart(identifier: BackgroundTaskID.backfillProcessing, taskRef: task as AnyObject)
 
+        // playhead-hygc.1.4: open a durable run-outcome row at handler
+        // entry so dogfood snapshots taken mid-run are still classifiable
+        // (the row stays at outcome='running' until a terminal write
+        // finalizes it). The runId is captured per task instance so the
+        // expiration handler and the work task both finalize the same row.
+        let scenePhase = await BGTaskTelemetryScenePhase.current()
+        let instanceID = bgTaskInstanceID(for: task as AnyObject)
+        let runId = await runLedger.startRun(
+            entryPoint: .backfill,
+            taskIdentifier: BackgroundTaskID.backfillProcessing,
+            taskInstanceID: instanceID,
+            scenePhase: scenePhase
+        )
+
         // Schedule the next occurrence.
         scheduleBackfillIfNeeded()
 
+        let runLedger = self.runLedger
         let workTask = Task {
             // Check constraints before starting.
             await self.updateBatteryState()
@@ -888,9 +916,33 @@ actor BackgroundProcessingService {
                 self.logger.info(
                     "Backfill skipped under QualityProfile \(profile.rawValue, privacy: .public)"
                 )
+                // playhead-hygc.1.4: persist the deferral outcome before
+                // returning. `pauseAllWork` is the thermal pause path;
+                // `!allowSoonLane && !pauseAllWork` is the capability
+                // (LPM-stacked-on-fair) pause path.
+                let outcome: BackgroundTaskRunOutcome =
+                    policy.pauseAllWork ? .deferredThermal : .deferredCapability
+                await runLedger.finishRun(
+                    runId: runId,
+                    update: BackgroundTaskRunOutcomeUpdate(
+                        outcome: outcome,
+                        deferReason: "profile=\(profile.rawValue)",
+                        jobsAdmitted: 0,
+                        jobsCompleted: 0
+                    )
+                )
                 await self.markComplete(task, success: true)
                 return
             }
+
+            // playhead-hygc.1.4: capture a baseline pending-job count so
+            // the terminal outcome can distinguish "queue was empty"
+            // (no_eligible_work) from "queue had work and we drained it"
+            // (admitted_work). Best-effort — if the scheduler is not
+            // injected (early-launch race), we treat baseline as 0 so
+            // the eventual outcome falls into no_eligible_work / no_op
+            // semantics rather than misclassifying as admitted work.
+            let baselinePending = await self.analysisWorkScheduler?.pendingJobCountForLedger() ?? 0
 
             // Drive the analysis pipeline to drain pending backfill jobs.
             //
@@ -924,8 +976,30 @@ actor BackgroundProcessingService {
             // cancellation would race the expiration handler in markComplete.
             guard !Task.isCancelled else {
                 self.logger.info("Backfill work task cancelled before completion")
+                // Note: do NOT finalize the ledger here — the expiration
+                // handler is responsible for the terminal outcome
+                // (.expired). Calling finishRun in both paths would be
+                // a no-op on the second call (idempotence guard) but
+                // the cause attribution would be order-dependent.
                 return
             }
+
+            // playhead-hygc.1.4: classify the run by what we observed.
+            // baselinePending=0 → the queue was empty when we arrived;
+            // record `.noEligibleWork`. Otherwise we pulled work from
+            // the queue (the polling loop only returns when pending
+            // count hits zero or the task is cancelled), so the
+            // outcome is `.admittedWork`.
+            let outcome: BackgroundTaskRunOutcome =
+                baselinePending > 0 ? .admittedWork : .noEligibleWork
+            await runLedger.finishRun(
+                runId: runId,
+                update: BackgroundTaskRunOutcomeUpdate(
+                    outcome: outcome,
+                    jobsSeen: baselinePending,
+                    jobsAdmitted: baselinePending
+                )
+            )
 
             // Let the coordinator run until the task expires or completes.
             await self.markComplete(task, success: true)
@@ -944,6 +1018,22 @@ actor BackgroundProcessingService {
                     taskRef: task as AnyObject,
                     detail: "backfill-task-expired"
                 )
+                // playhead-hygc.1.4: persist the expiration outcome
+                // BEFORE the rest of teardown so a subsequent crash
+                // (or OS-forced termination) still leaves a durable
+                // audit trail. `finishRun` is idempotent against an
+                // already-terminal row, so a future call from the
+                // work task's normal-return path is a safe no-op.
+                if let self {
+                    await self.runLedger.finishRun(
+                        runId: runId,
+                        update: BackgroundTaskRunOutcomeUpdate(
+                            outcome: .expired,
+                            cause: InternalMissCause.taskExpired.rawValue,
+                            expiration: true
+                        )
+                    )
+                }
                 await self?.handleExpiredProcessingTask(task)
             }
         }
@@ -1258,6 +1348,19 @@ actor BackgroundProcessingService {
         let taskID = ObjectIdentifier(task as AnyObject)
         emitStart(identifier: BackgroundTaskID.preAnalysisRecovery, taskRef: task as AnyObject)
 
+        // playhead-hygc.1.4: open a durable run-outcome row at handler
+        // entry. Same shape as the backfill handler's ledger wiring:
+        // the row captures startedAt + scenePhase up front and is
+        // resolved to a terminal outcome at exit.
+        let scenePhase = await BGTaskTelemetryScenePhase.current()
+        let instanceID = bgTaskInstanceID(for: task as AnyObject)
+        let runId = await runLedger.startRun(
+            entryPoint: .preAnalysisRecovery,
+            taskIdentifier: BackgroundTaskID.preAnalysisRecovery,
+            taskInstanceID: instanceID,
+            scenePhase: scenePhase
+        )
+
         // Schedule the next occurrence.
         schedulePreAnalysisRecovery()
 
@@ -1270,12 +1373,56 @@ actor BackgroundProcessingService {
         let injected = await awaitPreAnalysisServicesInjected()
         guard injected, let reconciler = analysisJobReconciler else {
             logger.warning("Pre-analysis recovery: no reconciler available (timeout=\(!injected, privacy: .public))")
+            // playhead-hygc.1.4: classify the reconciler-missing path
+            // as `.failed` (we entered but could not even start the
+            // recovery body) with a free-form error code so dogfood
+            // diagnostics can pin the cause without grepping logs.
+            await runLedger.finishRun(
+                runId: runId,
+                update: BackgroundTaskRunOutcomeUpdate(
+                    outcome: .failed,
+                    lastErrorCode: "reconciler_unavailable"
+                )
+            )
             markComplete(task, success: false)
             return
         }
 
+        let runLedger = self.runLedger
         let workTask = Task {
-            _ = try? await reconciler.reconcile()
+            // playhead-hygc.1.4: capture the reconciler report so the
+            // ledger row can attribute "what did recovery sweep" —
+            // expired leases recovered, stranded session jobs, etc.
+            // A throwing reconcile() rolls into the .failed outcome
+            // with the localizedDescription as the error code.
+            do {
+                let report = try await reconciler.reconcile()
+                let recovered = report.expiredLeasesRecovered
+                    + report.recoveredStrandedSessionJobs
+                    + report.missingFilesUnblocked
+                    + report.modelsUnblocked
+                    + report.staleVersionsReenqueued
+                    + report.unEnqueuedDownloadsCreated
+                    + report.strandedBackfillJobsReset
+                    + report.strandedFinalPassJobsReset
+                let outcome: BackgroundTaskRunOutcome =
+                    recovered > 0 ? .recoveredWork : .noOp
+                await runLedger.finishRun(
+                    runId: runId,
+                    update: BackgroundTaskRunOutcomeUpdate(
+                        outcome: outcome,
+                        jobsCompleted: recovered
+                    )
+                )
+            } catch {
+                await runLedger.finishRun(
+                    runId: runId,
+                    update: BackgroundTaskRunOutcomeUpdate(
+                        outcome: .failed,
+                        lastErrorCode: String(describing: error)
+                    )
+                )
+            }
             await self.markComplete(task, success: true)
             self.logger.info("Pre-analysis recovery task completed")
         }
@@ -1290,6 +1437,21 @@ actor BackgroundProcessingService {
                     taskRef: task as AnyObject,
                     detail: "preanalysis-recovery-expired"
                 )
+                // playhead-hygc.1.4: persist the expiration outcome
+                // BEFORE the rest of teardown so a subsequent crash
+                // still leaves a durable audit trail. Idempotent
+                // against the work task's normal-return finish via
+                // the `running → terminal` guard.
+                if let self {
+                    await self.runLedger.finishRun(
+                        runId: runId,
+                        update: BackgroundTaskRunOutcomeUpdate(
+                            outcome: .expired,
+                            cause: InternalMissCause.taskExpired.rawValue,
+                            expiration: true
+                        )
+                    )
+                }
                 // playhead-1nl6: surface the BGProcessingTask-reclaim
                 // signal through the scheduler's cancel path as the
                 // `.taskExpired` InternalMissCause so any live slice

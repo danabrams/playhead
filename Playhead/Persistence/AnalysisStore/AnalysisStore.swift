@@ -1500,6 +1500,11 @@ actor AnalysisStore {
             // semantic-identity UNIQUE INDEX so future writes upsert.
             // Bumps schema_version to 23.
             try migrateCorrectionEventsDedupeV23IfNeeded()
+            // playhead-hygc.1.4: background_task_runs table — durable
+            // per-run outcome ledger for BGProcessingTask executions so
+            // dogfood overnight runs are queryable without raw JSONL
+            // grep. Bumps schema_version to 24.
+            try migrateBackgroundTaskRunsV24IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1753,6 +1758,9 @@ actor AnalysisStore {
         // and gated by `tableExists("correction_events")` so seeded
         // fixtures without the table still pass.
         try migrateCorrectionEventsDedupeV23IfNeeded()
+        // playhead-hygc.1.4 (v24): mirror background_task_runs migration
+        // into the ladder seam. Helper is fully idempotent.
+        try migrateBackgroundTaskRunsV24IfNeeded()
     }
     #endif
 
@@ -3380,6 +3388,334 @@ actor AnalysisStore {
                 try step(del, expecting: SQLITE_DONE)
             }
         }
+    }
+
+    /// playhead-hygc.1.4 (v24): create the `background_task_runs` table
+    /// — a durable per-run outcome ledger for BGProcessingTask
+    /// executions. Each backfill / preanalysis-recovery / continued-
+    /// processing wake creates one row at handler entry and updates
+    /// it with a terminal outcome at exit (or expiration).
+    ///
+    /// Schema:
+    ///   `background_task_runs`
+    ///     runId            TEXT PRIMARY KEY  — UUID, stable for one BGTask invocation
+    ///     entryPoint       TEXT NOT NULL     — see `BackgroundTaskRunEntryPoint`
+    ///     taskIdentifier   TEXT NOT NULL     — BGTaskScheduler identifier
+    ///     taskInstanceID   TEXT              — pointer-derived id; matches BGTaskTelemetry
+    ///     startedAt        REAL NOT NULL     — UNIX seconds at handler entry
+    ///     finishedAt       REAL              — UNIX seconds at terminal write
+    ///     outcome          TEXT NOT NULL     — see `BackgroundTaskRunOutcome.rawValue`
+    ///     deferReason      TEXT              — annotation for `deferred*` outcomes
+    ///     cause            TEXT              — InternalMissCause.rawValue when applicable
+    ///     jobsSeen         INTEGER           — bookkeeping counters (nullable)
+    ///     jobsAdmitted     INTEGER
+    ///     jobsCompleted    INTEGER
+    ///     jobsDeferred     INTEGER
+    ///     coverageBefore   REAL              — aggregate coverage attribution
+    ///     coverageAfter    REAL
+    ///     assetId          TEXT              — per-asset surfacing key (nullable)
+    ///     expiration       INTEGER NOT NULL DEFAULT 0  — 0/1
+    ///     lastErrorCode    TEXT              — free-form for `failed`
+    ///     scenePhase       TEXT              — UIApplication phase at start
+    ///
+    /// Indexes:
+    ///   * `(entryPoint, startedAt DESC)` — drives `fetchLatestRun(for:)`.
+    ///   * `(startedAt DESC)` — drives `fetchRecentRuns(limit:)`.
+    ///   * `(assetId, startedAt DESC)` — drives the per-asset query.
+    ///
+    /// Idempotent: `CREATE TABLE IF NOT EXISTS` is a no-op on existing
+    /// DBs (this table only arrived in v24, but we still write the
+    /// guard for future ladder reorderings).
+    private func migrateBackgroundTaskRunsV24IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 24 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS background_task_runs (
+                runId           TEXT PRIMARY KEY,
+                entryPoint      TEXT NOT NULL,
+                taskIdentifier  TEXT NOT NULL,
+                taskInstanceID  TEXT,
+                startedAt       REAL NOT NULL,
+                finishedAt      REAL,
+                outcome         TEXT NOT NULL,
+                deferReason     TEXT,
+                cause           TEXT,
+                jobsSeen        INTEGER,
+                jobsAdmitted    INTEGER,
+                jobsCompleted   INTEGER,
+                jobsDeferred    INTEGER,
+                coverageBefore  REAL,
+                coverageAfter   REAL,
+                assetId         TEXT,
+                expiration      INTEGER NOT NULL DEFAULT 0,
+                lastErrorCode   TEXT,
+                scenePhase      TEXT
+            );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_background_task_runs_entry_started ON background_task_runs(entryPoint, startedAt DESC);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_background_task_runs_started ON background_task_runs(startedAt DESC);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_background_task_runs_asset_started ON background_task_runs(assetId, startedAt DESC);")
+        try setSchemaVersion(24)
+    }
+
+    // MARK: - Background task run ledger (playhead-hygc.1.4, schema v24)
+    //
+    // Persistence-layer surface used by `AnalysisStoreBackgroundTaskRunLedger`
+    // to durably account for every BGProcessingTask invocation. The ledger
+    // is a closed-vocabulary outcome record (admitted_work, no_eligible_work,
+    // deferred_thermal, deferred_capability, expired, cancelled, failed,
+    // no_op, recovered_work, rescheduled, running) with optional bookkeeping
+    // counters; see `BackgroundTaskRunRecord` for the in-memory mirror.
+
+    /// Insert a new run row in the `running` state. Caller-supplied
+    /// `runId` (UUID) so the ledger and the on-disk row share identity.
+    /// This is the sole writer for ledger rows — `updateBackgroundTaskRunOutcome`
+    /// only ever UPDATEs an existing row.
+    func insertBackgroundTaskRun(_ record: BackgroundTaskRunRecord) throws {
+        let sql = """
+            INSERT INTO background_task_runs
+            (runId, entryPoint, taskIdentifier, taskInstanceID, startedAt,
+             finishedAt, outcome, deferReason, cause, jobsSeen, jobsAdmitted,
+             jobsCompleted, jobsDeferred, coverageBefore, coverageAfter,
+             assetId, expiration, lastErrorCode, scenePhase)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, record.runId)
+        bind(stmt, 2, record.entryPoint.rawValue)
+        bind(stmt, 3, record.taskIdentifier)
+        bind(stmt, 4, record.taskInstanceID)
+        bind(stmt, 5, record.startedAt)
+        bind(stmt, 6, record.finishedAt)
+        bind(stmt, 7, record.outcome.rawValue)
+        bind(stmt, 8, record.deferReason)
+        bind(stmt, 9, record.cause)
+        bind(stmt, 10, record.jobsSeen)
+        bind(stmt, 11, record.jobsAdmitted)
+        bind(stmt, 12, record.jobsCompleted)
+        bind(stmt, 13, record.jobsDeferred)
+        bind(stmt, 14, record.coverageBefore)
+        bind(stmt, 15, record.coverageAfter)
+        bind(stmt, 16, record.assetId)
+        bind(stmt, 17, record.expiration ? 1 : 0)
+        bind(stmt, 18, record.lastErrorCode)
+        bind(stmt, 19, record.scenePhase)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Resolve a run row to a terminal outcome. Idempotent against
+    /// already-terminal rows: returns `false` and leaves the row alone
+    /// when the existing `outcome` is non-`running`. Returns `true`
+    /// when the call advanced the row.
+    ///
+    /// Each optional counter on the update payload is COALESCEd against
+    /// the existing column so a partial update (e.g. "I only know
+    /// jobsAdmitted, not coverage") does not stomp prior writes.
+    /// `outcome`, `finishedAt`, and `expiration` are unconditional —
+    /// a terminal write is always definitive on those axes.
+    func updateBackgroundTaskRunOutcome(
+        runId: String,
+        update: BackgroundTaskRunOutcomeUpdate,
+        finishedAt: Double
+    ) throws -> Bool {
+        // Idempotence probe: if the row is already terminal, skip.
+        let probeSql = "SELECT outcome FROM background_task_runs WHERE runId = ? LIMIT 1"
+        let probe = try prepare(probeSql)
+        defer { sqlite3_finalize(probe) }
+        bind(probe, 1, runId)
+        let rc = sqlite3_step(probe)
+        guard rc == SQLITE_ROW else {
+            // No row at all — nothing to update. Treat as "not advanced"
+            // so racing callers that posted a pre-startRun finish do
+            // not silently appear to have won.
+            return false
+        }
+        let existingOutcome = text(probe, 0)
+        if existingOutcome != BackgroundTaskRunOutcome.running.rawValue {
+            return false
+        }
+
+        let sql = """
+            UPDATE background_task_runs SET
+                outcome = ?,
+                finishedAt = ?,
+                deferReason = COALESCE(?, deferReason),
+                cause = COALESCE(?, cause),
+                jobsSeen = COALESCE(?, jobsSeen),
+                jobsAdmitted = COALESCE(?, jobsAdmitted),
+                jobsCompleted = COALESCE(?, jobsCompleted),
+                jobsDeferred = COALESCE(?, jobsDeferred),
+                coverageBefore = COALESCE(?, coverageBefore),
+                coverageAfter = COALESCE(?, coverageAfter),
+                assetId = COALESCE(?, assetId),
+                expiration = COALESCE(?, expiration),
+                lastErrorCode = COALESCE(?, lastErrorCode)
+            WHERE runId = ? AND outcome = 'running'
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, update.outcome.rawValue)
+        bind(stmt, 2, finishedAt)
+        bind(stmt, 3, update.deferReason)
+        bind(stmt, 4, update.cause)
+        bind(stmt, 5, update.jobsSeen)
+        bind(stmt, 6, update.jobsAdmitted)
+        bind(stmt, 7, update.jobsCompleted)
+        bind(stmt, 8, update.jobsDeferred)
+        bind(stmt, 9, update.coverageBefore)
+        bind(stmt, 10, update.coverageAfter)
+        bind(stmt, 11, update.assetId)
+        if let expiration = update.expiration {
+            bind(stmt, 12, expiration ? 1 : 0)
+        } else {
+            sqlite3_bind_null(stmt, 12)
+        }
+        bind(stmt, 13, update.lastErrorCode)
+        bind(stmt, 14, runId)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    /// Read the most recent `background_task_runs` row for a given
+    /// entry point, regardless of terminal/running outcome. Returns
+    /// nil when no row matches.
+    func fetchLatestBackgroundTaskRun(
+        entryPoint: BackgroundTaskRunEntryPoint
+    ) throws -> BackgroundTaskRunRecord? {
+        let sql = """
+            \(backgroundTaskRunSelectColumns)
+            FROM background_task_runs
+            WHERE entryPoint = ?
+            ORDER BY startedAt DESC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, entryPoint.rawValue)
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            return try readBackgroundTaskRunRow(stmt)
+        }
+        return nil
+    }
+
+    /// Read up to `limit` most-recent `background_task_runs` rows
+    /// across every entry point, ordered by startedAt descending.
+    func fetchRecentBackgroundTaskRuns(limit: Int) throws -> [BackgroundTaskRunRecord] {
+        let sql = """
+            \(backgroundTaskRunSelectColumns)
+            FROM background_task_runs
+            ORDER BY startedAt DESC
+            LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, max(0, limit))
+        var rows: [BackgroundTaskRunRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let record = try? readBackgroundTaskRunRow(stmt) {
+                rows.append(record)
+            }
+        }
+        return rows
+    }
+
+    /// Read the most recent `background_task_runs` row that recorded
+    /// the given `assetId`. Used by per-asset diagnostics.
+    func fetchLatestBackgroundTaskRun(
+        assetId: String
+    ) throws -> BackgroundTaskRunRecord? {
+        let sql = """
+            \(backgroundTaskRunSelectColumns)
+            FROM background_task_runs
+            WHERE assetId = ?
+            ORDER BY startedAt DESC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            return try readBackgroundTaskRunRow(stmt)
+        }
+        return nil
+    }
+
+    /// Stable column-list ordering shared by all `background_task_runs`
+    /// reads so `readBackgroundTaskRunRow` can rely on positional
+    /// indices.
+    private var backgroundTaskRunSelectColumns: String {
+        """
+        SELECT runId, entryPoint, taskIdentifier, taskInstanceID, startedAt,
+               finishedAt, outcome, deferReason, cause, jobsSeen, jobsAdmitted,
+               jobsCompleted, jobsDeferred, coverageBefore, coverageAfter,
+               assetId, expiration, lastErrorCode, scenePhase
+        """
+    }
+
+    /// Materialize a `background_task_runs` row into a
+    /// `BackgroundTaskRunRecord`. Throws when a NOT NULL column is
+    /// unexpectedly missing — the caller (`fetchRecent…`) catches
+    /// this to skip a malformed row rather than abort the whole query.
+    private func readBackgroundTaskRunRow(
+        _ stmt: OpaquePointer?
+    ) throws -> BackgroundTaskRunRecord {
+        let runId = try requireText(stmt, 0)
+        let entryRaw = try requireText(stmt, 1)
+        let entryPoint = BackgroundTaskRunEntryPoint(rawValue: entryRaw) ?? .backfill
+        let taskIdentifier = try requireText(stmt, 2)
+        let taskInstanceID = optionalText(stmt, 3)
+        let startedAt = sqlite3_column_double(stmt, 4)
+        let finishedAt: Double? =
+            sqlite3_column_type(stmt, 5) == SQLITE_NULL
+            ? nil : sqlite3_column_double(stmt, 5)
+        let outcomeRaw = try requireText(stmt, 6)
+        let outcome = BackgroundTaskRunOutcome(rawValue: outcomeRaw) ?? .running
+        let deferReason = optionalText(stmt, 7)
+        let cause = optionalText(stmt, 8)
+        let jobsSeen: Int? =
+            sqlite3_column_type(stmt, 9) == SQLITE_NULL
+            ? nil : Int(sqlite3_column_int(stmt, 9))
+        let jobsAdmitted: Int? =
+            sqlite3_column_type(stmt, 10) == SQLITE_NULL
+            ? nil : Int(sqlite3_column_int(stmt, 10))
+        let jobsCompleted: Int? =
+            sqlite3_column_type(stmt, 11) == SQLITE_NULL
+            ? nil : Int(sqlite3_column_int(stmt, 11))
+        let jobsDeferred: Int? =
+            sqlite3_column_type(stmt, 12) == SQLITE_NULL
+            ? nil : Int(sqlite3_column_int(stmt, 12))
+        let coverageBefore: Double? =
+            sqlite3_column_type(stmt, 13) == SQLITE_NULL
+            ? nil : sqlite3_column_double(stmt, 13)
+        let coverageAfter: Double? =
+            sqlite3_column_type(stmt, 14) == SQLITE_NULL
+            ? nil : sqlite3_column_double(stmt, 14)
+        let assetId = optionalText(stmt, 15)
+        let expiration = sqlite3_column_int(stmt, 16) != 0
+        let lastErrorCode = optionalText(stmt, 17)
+        let scenePhase = optionalText(stmt, 18)
+
+        return BackgroundTaskRunRecord(
+            runId: runId,
+            entryPoint: entryPoint,
+            taskIdentifier: taskIdentifier,
+            taskInstanceID: taskInstanceID,
+            startedAt: startedAt,
+            finishedAt: finishedAt,
+            outcome: outcome,
+            deferReason: deferReason,
+            cause: cause,
+            jobsSeen: jobsSeen,
+            jobsAdmitted: jobsAdmitted,
+            jobsCompleted: jobsCompleted,
+            jobsDeferred: jobsDeferred,
+            coverageBefore: coverageBefore,
+            coverageAfter: coverageAfter,
+            assetId: assetId,
+            expiration: expiration,
+            lastErrorCode: lastErrorCode,
+            scenePhase: scenePhase
+        )
     }
 
     // MARK: - Repeated-ad cache (playhead-43ed, schema v21)
