@@ -135,21 +135,33 @@ struct DogfoodAnalysisHealthFixtureTests {
         #expect(!completeFulls.isEmpty, "fixture must contain completeFull assets")
 
         // A completeFull row is contradictory if EITHER:
-        //   (a) its terminal_reason claims a transcript or feature ratio > 1.0
-        //       (i.e. coverage allegedly exceeds duration — only possible due
-        //        to a bookkeeping bug), OR
+        //   (a) its terminal_reason claims a transcript or feature ratio
+        //       strictly > 1.0 (i.e. coverage allegedly exceeds duration —
+        //       only possible due to a bookkeeping bug), OR
         //   (b) its fast_transcript_coverage_end_sec is < 50% of duration —
         //       i.e. the asset is "complete" but only ~1.5 min of fast
         //       transcript was ever recorded for an hours-long episode.
+        //
+        // The regex must EXCLUDE `1.000` (which is healthy full coverage):
+        //   - integer part must be in `[2-9]` (anything 2.x or above), OR
+        //   - integer part is `1` AND the fractional part contains a nonzero
+        //     digit (so `1.001`+ matches but `1.000` doesn't).
+        // We also accept higher integer widths (e.g. `12.345`) which the raw
+        // bookkeeping has historically produced.
+        let ratioOverOnePattern = #"(?:[2-9]\d*\.\d+|[1-9]\d+\.\d+|1\.\d*[1-9]\d*)"#
         let contradictory = completeFulls.filter { asset in
             let terminalText = asset.terminalReason ?? ""
             // (a) terminalReason claims a transcript or feature ratio > 1.0
             //     (e.g. "transcript 1.163, feature 1.724") — only possible
             //     due to a bookkeeping bug.
-            let claimsRatioOver1 = terminalText.range(of: #"transcript\s+[1-9]\.\d{3,}"#,
-                                                      options: .regularExpression) != nil
-                || terminalText.range(of: #"feature\s+[1-9]\.\d{3,}"#,
-                                      options: .regularExpression) != nil
+            let claimsRatioOver1 = terminalText.range(
+                of: #"transcript\s+"# + ratioOverOnePattern,
+                options: .regularExpression
+            ) != nil
+                || terminalText.range(
+                    of: #"feature\s+"# + ratioOverOnePattern,
+                    options: .regularExpression
+                ) != nil
             // (b) fast_transcript_coverage_end_sec is < 50% of duration —
             //     the asset is "complete" but only ~1.5 min of fast
             //     transcript was ever recorded for an hours-long episode.
@@ -278,6 +290,14 @@ struct DogfoodAnalysisHealthFixtureTests {
         // `sponsorOnShow:<podcastId>:Squarespace`) leaks through the
         // build-script's scope filter. The May 6 capture has zero such rows;
         // this test is a forward-looking gate for future regenerations.
+        //
+        // All checks are CASE-INSENSITIVE — sponsor / show text is normalized
+        // by some downstream code paths, and we don't want a `squarespace`
+        // (lowercased) to slip past a `Squarespace` (titlecase) substring
+        // check. Field-name and URL-prefix tokens are also matched
+        // case-insensitively; the cost is one or two false-equivalences
+        // (e.g. `Acast` vs `acast`) which is fine — none of those should
+        // appear at all.
         let forbidden: [(String, String)] = [
             ("9C109975", "raw analysisAssetId UUID prefix"),
             ("8A9DFC82", "raw analysisAssetId UUID prefix"),
@@ -288,13 +308,27 @@ struct DogfoodAnalysisHealthFixtureTests {
             ("libsyn", "raw feed URL component"),
             ("acast", "raw feed URL component"),
             ("https://", "raw URL"),
+            ("http://", "raw URL"),
+            ("feed://", "raw feed URL scheme"),
             ("/var/mobile/", "device-specific filesystem path"),
+            ("/private/", "device-specific filesystem path"),
+            ("/Users/", "developer-machine filesystem path"),
+            ("~/Library", "device-specific filesystem path"),
+            ("~/Containers", "device-specific filesystem path"),
+            ("ApplicationSupport", "device-specific filesystem path"),
             ("AudioCache", "device-specific filesystem path"),
             ("fmResponseBase64", "FM response payload field name"),
             ("episode_id_hash", "raw activity-row hash field name"),
             ("session_id", "raw session UUID field name"),
+            ("installation_id", "raw install identifier field name"),
             ("BuildProvenance", "build-stamp file referenced in raw bundle"),
+            ("<system>", "FM payload role marker"),
+            ("<user>", "FM payload role marker"),
+            ("<assistant>", "FM payload role marker"),
             ("Squarespace", "sponsor brand string"),
+            ("BetterHelp", "sponsor brand string"),
+            ("MeUndies", "sponsor brand string"),
+            ("Mint Mobile", "sponsor brand string"),
             ("Conan", "show title fragment"),
             ("Diary of a CEO", "show title fragment"),
             // Non-asset-bound CorrectionScope prefixes — see
@@ -309,7 +343,7 @@ struct DogfoodAnalysisHealthFixtureTests {
         ]
 
         for (token, why) in forbidden {
-            #expect(!raw.contains(token),
+            #expect(raw.range(of: token, options: .caseInsensitive) == nil,
                     "fixture must not contain \(token) (\(why))")
         }
 
@@ -319,8 +353,9 @@ struct DogfoodAnalysisHealthFixtureTests {
             Issue.record("fixture contains UUID-shaped string: \(raw[match])")
         }
 
-        // No 64-char hex strings (SHA-256 candidates).
-        let sha256Pattern = #"\b[0-9a-f]{64}\b"#
+        // No 64-char hex strings (SHA-256 candidates) — case-insensitive so a
+        // future capitalized hash variant doesn't slip past.
+        let sha256Pattern = #"\b[0-9A-Fa-f]{64}\b"#
         if let match = raw.range(of: sha256Pattern, options: .regularExpression) {
             Issue.record("fixture contains SHA-256-shaped hex: \(raw[match])")
         }
@@ -348,7 +383,10 @@ struct DogfoodAnalysisHealthFixtureTests {
         // Cross-collection integrity: every transcript_chunk_maxima /
         // ad_window_summaries / correction_rows asset reference must resolve
         // against analysis_assets. This is what makes the fixture "joinable"
-        // for downstream beads.
+        // for downstream beads — Activity/diagnostics consumers join via the
+        // pipeline numerics keyed by activity row, while NARL/correction
+        // consumers join via the synthetic asset_id present on chunk maxima,
+        // ad-window summaries, and correction scopes.
         let assetIds = Set(fixture.analysisAssets.map(\.id))
         for chunkMax in fixture.transcriptChunkMaxima {
             #expect(assetIds.contains(chunkMax.assetId),
@@ -357,6 +395,21 @@ struct DogfoodAnalysisHealthFixtureTests {
         for window in fixture.adWindowSummaries {
             #expect(assetIds.contains(window.assetId),
                     "ad_window_summaries references unknown asset id: \(window.assetId)")
+        }
+        // Correction-row scopes: every retained scope is asset-bound (the
+        // build script drops non-asset-bound ones at scrub time), so the
+        // second `:`-separated token must resolve against analysis_assets.
+        // This is what NARL / correction tests need in order to join
+        // correction rows back to their per-asset state without a live
+        // .xcappdata bundle.
+        for row in fixture.correctionRows {
+            let parts = row.scope.split(separator: ":").map(String.init)
+            #expect(parts.count >= 2,
+                    "correction scope is malformed: \(row.scope)")
+            if parts.count >= 2 {
+                #expect(assetIds.contains(parts[1]),
+                        "correction_rows references unknown asset id: \(row.scope)")
+            }
         }
     }
 }

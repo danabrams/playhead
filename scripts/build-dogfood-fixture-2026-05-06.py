@@ -351,35 +351,57 @@ FORBIDDEN_SUBSTRINGS: tuple[tuple[str, str], ...] = (
     ("libsyn", "raw feed URL component"),
     ("acast", "raw feed URL component"),
     ("https://", "raw URL"),
-    # Device-specific paths.
+    ("http://", "raw URL"),
+    ("feed://", "raw feed URL scheme"),
+    # Device-specific paths and developer-machine paths.
     ("/var/mobile/", "device-specific filesystem path"),
+    ("/private/", "device-specific filesystem path"),
+    ("/Users/", "developer-machine filesystem path"),
+    ("~/Library", "device-specific filesystem path"),
+    ("~/Containers", "device-specific filesystem path"),
+    ("ApplicationSupport", "device-specific filesystem path"),
     ("AudioCache", "device-specific filesystem path"),
     # Raw-bundle field names that should never appear in the sanitized output.
     ("fmResponseBase64", "FM response payload field name"),
     ("episode_id_hash", "raw activity-row hash field name"),
     ("session_id", "raw session UUID field name"),
+    ("installation_id", "raw install identifier field name"),
     ("BuildProvenance", "build-stamp file referenced in raw bundle"),
+    # FM payload role markers (in case any prompt / response text leaks).
+    ("<system>", "FM payload role marker"),
+    ("<user>", "FM payload role marker"),
+    ("<assistant>", "FM payload role marker"),
     # Show / sponsor brand keywords known to appear in sponsor/phrase
     # corrections from the dogfood capture. None of these are sanitized via
     # raw_to_syn — their presence in the fixture means a non-asset-bound
     # correction scope leaked through.
     ("Squarespace", "sponsor brand string"),
+    ("BetterHelp", "sponsor brand string"),
+    ("MeUndies", "sponsor brand string"),
+    ("Mint Mobile", "sponsor brand string"),
     ("Conan", "show title fragment"),
     ("Diary of a CEO", "show title fragment"),
 )
 
 UUID_PATTERN = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
-SHA256_PATTERN = re.compile(r"\b[0-9a-f]{64}\b")
+# Case-insensitive — a future capture might emit hex hashes in mixed case.
+SHA256_PATTERN = re.compile(r"\b[0-9A-Fa-f]{64}\b")
 
 
 def audit_scrubbed(fixture_text: str) -> list[str]:
     """Return a list of human-readable issues for any banned content.
 
-    An empty list means the fixture passes the scrub gate.
+    An empty list means the fixture passes the scrub gate. All substring
+    matches are case-INSENSITIVE so a sponsor name lowercased by some
+    downstream normalizer still triggers (e.g. ``squarespace`` vs
+    ``Squarespace``). This must stay in lock-step with the
+    ``fixtureIsScrubbed`` Swift test so a regen that passes the gate also
+    passes CI.
     """
     issues: list[str] = []
+    haystack_lower = fixture_text.lower()
     for token, why in FORBIDDEN_SUBSTRINGS:
-        if token in fixture_text:
+        if token.lower() in haystack_lower:
             issues.append(f"contains '{token}' ({why})")
     if (m := UUID_PATTERN.search(fixture_text)) is not None:
         issues.append(f"contains UUID-shaped string: '{m.group(0)}'")
