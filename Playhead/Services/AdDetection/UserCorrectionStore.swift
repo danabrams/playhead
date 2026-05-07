@@ -285,22 +285,33 @@ extension CorrectionEvent {
 }
 
 /// Read-side dedupe utility: collapse a list of `CorrectionEvent` rows
-/// into one row per semantic identity. Audit metadata is preserved on
-/// the surviving row:
-///   - `createdAt` is the OLDEST row's createdAt (first observed).
-///   - The dropped rows' createdAt values are NOT preserved beyond the
-///     count — callers that need full provenance should consume the
-///     raw rows directly.
+/// into one row per semantic identity.
+///
+/// Survivor selection: the surviving row is the chronologically
+/// earliest row in the input bucket (oldest `createdAt` wins; ties are
+/// broken by the row `id` to keep the output deterministic across
+/// runs). The survivor's stored fields — including its persisted
+/// `submissionCount` and `lastSeenAt` — are returned UNCHANGED. This
+/// utility does NOT mutate any field on the survivor; callers that
+/// want the post-collapse audit count for a bucket consult the
+/// returned `submissionCounts` side dictionary instead.
+///
+/// Dropped rows' `createdAt` values are NOT preserved beyond the
+/// returned count — callers that need full provenance should consume
+/// the raw rows directly.
 ///
 /// Used by Activity, learning ingestion, and corpus export so that a
 /// pre-migration database with duplicate rows still presents a
 /// deduplicated view to consumers. Post-migration databases have at
-/// most one row per identity already, in which case this is a no-op.
+/// most one row per identity already, in which case this is a no-op
+/// and `submissionCounts[survivor.id]` is 1.
 ///
-/// Returns `(distinct, audit)` where `audit[id]` is the submission
-/// count observed for the surviving row's identity. The surviving row
-/// is the chronologically earliest row in the input; ties are broken
-/// by the row `id` to keep the output deterministic across runs.
+/// Returns `(distinct, submissionCounts)` where
+/// `submissionCounts[survivorId]` is the COUNT OF ROWS in the input
+/// bucket (in-memory observation), not the survivor's persisted
+/// `submissionCount`. On a fully-migrated database these are equal;
+/// on a partially-migrated input they may differ — the side dict is
+/// the authoritative pre-collapse multiplicity.
 func distinctSemanticCorrections(
     _ events: [CorrectionEvent]
 ) -> (distinct: [CorrectionEvent], submissionCounts: [String: Int]) {

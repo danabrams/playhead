@@ -200,10 +200,10 @@ final class CorrectionDedupeTests: XCTestCase {
             "Each distinct identity gets its own audit history with count = 1")
     }
 
-    // MARK: - (c.1) Tolerance boundary probe (R2 hygc.1.6 review)
+    // MARK: - (c.1) Tolerance boundary probe
 
     /// Pin the bucket-quantization canonicalization at and around the
-    /// 0.1s threshold. The R0 implementation uses
+    /// 0.1s threshold. The current implementation uses
     /// `(time / 0.1).rounded() * 0.1` (Swift default
     /// `.toNearestOrEven`) — i.e. a quantization grid, not a true
     /// "tolerance window." Values in the same 0.1s bucket collapse;
@@ -212,8 +212,8 @@ final class CorrectionDedupeTests: XCTestCase {
     ///
     /// Tests (b) and (c) only proved "small collapses" and
     /// "large does not". They did not pin behavior at the boundary
-    /// itself. R2 review: add a boundary probe so a future change to
-    /// the canonicalization strategy is a deliberate, observed delta
+    /// itself. Add a boundary probe so a future change to the
+    /// canonicalization strategy is a deliberate, observed delta
     /// rather than a silent regression.
     func testToleranceBoundaryCanonicalization() {
         let tol = CorrectionScope.identityKeyTimeToleranceSeconds
@@ -491,8 +491,8 @@ final class CorrectionDedupeTests: XCTestCase {
         // Pin the canonical regression: the asset_012 falseNegative-x4
         // cluster called out in the brief MUST collapse to exactly 1
         // AND the surviving row's audit metadata must reflect the
-        // pre-collapse multiplicity. R2 hygc.1.6 review: prior version
-        // of this test only asserted the count, leaving an impl that
+        // pre-collapse multiplicity. Earlier versions of this test
+        // only asserted the count, leaving an implementation that
         // dropped audit metadata silent. Tighten by also asserting
         // (a) submissionCount for the bucket = 4, and (b) the survivor
         // is the chronologically-earliest row in the bucket — so
@@ -539,7 +539,7 @@ final class CorrectionDedupeTests: XCTestCase {
         )
     }
 
-    // MARK: - (h) V22 → V23 in-place SQL collapse migration (R3 audit Q1)
+    // MARK: - (h) V22 → V23 in-place SQL collapse migration
 
     /// Pin the SQL collapse code path executed by
     /// `migrateCorrectionEventsDedupeV23IfNeeded` when an existing v22

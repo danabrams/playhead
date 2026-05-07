@@ -371,7 +371,7 @@ struct LearningArtifactIngestorTests {
         #expect(!after.isEmpty)
     }
 
-    /// playhead-hygc.1.7 R1: privacy invariant — the durable learning
+    /// playhead-hygc.1.7: privacy invariant — the durable learning
     /// surface MUST NOT contain raw transcript text. The materializer
     /// produces a `textSnapshotHash` (deterministic SHA-derived id) but
     /// leaves `textSnapshot` nil so the learning corpus carries provenance
@@ -407,7 +407,7 @@ struct LearningArtifactIngestorTests {
         }
     }
 
-    /// playhead-hygc.1.7 R1: malformed scopes are rejected at the front
+    /// playhead-hygc.1.7: malformed scopes are rejected at the front
     /// door. They must NOT touch the materializer, sponsor store, or the
     /// `correction_events` table — they're counted in `skippedMalformed`
     /// for diagnostics only. This guards against a future bad upstream
@@ -451,7 +451,7 @@ struct LearningArtifactIngestorTests {
             "malformed scope must not materialize any training_examples row")
     }
 
-    /// playhead-hygc.1.7 R2: end-to-end NARL round-trip.
+    /// playhead-hygc.1.7: end-to-end NARL round-trip.
     ///
     /// Bead acceptance criterion: "A false positive listen revert and a
     /// false negative user-marked ad both persist to canonical
@@ -553,7 +553,7 @@ struct LearningArtifactIngestorTests {
     }
     #endif
 
-    /// playhead-hygc.1.7 R2: concurrent re-ingest stress.
+    /// playhead-hygc.1.7: concurrent re-ingest stress.
     ///
     /// Sequential re-ingest is already pinned by
     /// `reIngestingSameCorrectionIsIdempotent`, but actor reentrancy means
@@ -638,17 +638,17 @@ struct LearningArtifactIngestorTests {
             "diagnostics must report exactly one sponsor rollback; got \(diag.sponsorRollbacksApplied)")
     }
 
-    // MARK: - R3 audit hardening
+    // MARK: - Durable-persistence-guard hardening
 
-    /// playhead-hygc.1.7 R3 audit #5: simulate the across-process replay
-    /// path where the in-process `seenIdentities` reservation is empty
-    /// (e.g. app restart, or R2's rollback-on-throw erased it after a
+    /// playhead-hygc.1.7: simulate the across-process replay path where
+    /// the in-process `seenIdentities` reservation is empty (e.g. app
+    /// restart, or the rollback-on-throw branch erased it after a
     /// downstream `materialize` failure left the row on disk). The
     /// persistence layer is the durable source of truth: a row already
     /// on disk MUST NOT trigger a second sponsor side effect even when
     /// the in-process dedupe set says "never seen this".
     ///
-    /// Pre-R3 code in this hot path:
+    /// Pin the pre-guard failure mode so a regression is loud:
     ///   1. seenIdentities is empty (post-restart / post-rollback).
     ///   2. contains-check passes → reserve identity.
     ///   3. `appendCorrectionEvent` lands on the existing row, audit-
@@ -656,7 +656,7 @@ struct LearningArtifactIngestorTests {
     ///   4. `recordRollback` runs unconditionally → `rollbackCount`
     ///      jumps from 1 to 2 for one user gesture.
     ///
-    /// Post-R3:
+    /// Post-guard:
     ///   `appendCorrectionEvent` returns `false` (probe saw the row);
     ///   the ingestor gates sponsor side effects on the bool; the
     ///   second-process call reports `.deduped` and the rollback count
@@ -694,8 +694,9 @@ struct LearningArtifactIngestorTests {
             "first ingest must apply rollback exactly once; got \(afterFirst?.rollbackCount ?? -1)")
 
         // Second "process": fresh ingestor with empty in-process
-        // seenIdentities (mirrors app restart / R2 rollback-on-throw
-        // path). Replay the same correction. The persistence guard
+        // seenIdentities (mirrors app restart / rollback-on-throw
+        // erasing the in-process reservation after a downstream
+        // failure). Replay the same correction. The persistence guard
         // must report .deduped without firing recordRollback again.
         let ingestor2 = LearningArtifactIngestor(store: store, knowledgeStore: knowledge)
         let second = try await ingestor2.ingest(correction: correction)
@@ -719,9 +720,9 @@ struct LearningArtifactIngestorTests {
             "second ingestor must report exactly one .deduped outcome; got \(diag2.deduped)")
     }
 
-    /// playhead-hygc.1.7 R3 audit #5: pre-existing correction row + fresh
-    /// ingestor + sponsor FN scope. Symmetric to the FP rollback test above
-    /// but for the non-idempotent `recordCandidate` confirmation-count
+    /// playhead-hygc.1.7: pre-existing correction row + fresh ingestor +
+    /// sponsor FN scope. Symmetric to the FP rollback test above but
+    /// for the non-idempotent `recordCandidate` confirmation-count
     /// increment. A row already on disk must NOT bump the confirmation
     /// count a second time.
     @Test("Across-process replay does not double-apply sponsor confirmation (durable persistence guard)")
@@ -772,12 +773,12 @@ struct LearningArtifactIngestorTests {
             "across-process replay MUST NOT bump confirmation count again; expected 2, got \(afterSecond?.confirmationCount ?? -1)")
     }
 
-    /// playhead-hygc.1.7 R3 audit #2/#5: directly pin
-    /// `appendCorrectionEvent`'s return contract — the persistence
-    /// source of truth that the ingestor's R3 side-effect gate depends
-    /// on. A fresh row returns `true`; a re-submission of the same
-    /// identity returns `false` (the upsert audit-bump path).
-    @Test("appendCorrectionEvent returns true only on fresh insert (R3 durable guard)")
+    /// playhead-hygc.1.7: directly pin `appendCorrectionEvent`'s return
+    /// contract — the persistence source of truth that the ingestor's
+    /// durable side-effect gate depends on. A fresh row returns `true`;
+    /// a re-submission of the same identity returns `false` (the upsert
+    /// audit-bump path).
+    @Test("appendCorrectionEvent returns true only on fresh insert (durable guard)")
     func appendCorrectionEventReturnContract() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
@@ -834,27 +835,27 @@ struct LearningArtifactIngestorTests {
             "distinct identity must report `true` even when other rows exist for the same asset")
     }
 
-    /// playhead-hygc.1.7 R4 audit #5: pin the fourth branch of the
+    /// playhead-hygc.1.7: pin the fourth branch of the
     /// `appendCorrectionEvent` return contract.
     ///
     /// `INSERT OR IGNORE` plus a row-level PRIMARY KEY (`id`) means a
     /// caller that re-uses a row id but with a DIFFERENT semantic
     /// identity hits the OR-IGNORE arm — no new row is added, no audit
-    /// bump fires, the database state is unchanged. The pre-R4 logic
-    /// (`return !alreadyPresent`) collapsed this case into "fresh
-    /// insert" because the probe correctly reported "no row for this
+    /// bump fires, the database state is unchanged. A naive
+    /// `return !alreadyPresent` would collapse this case into "fresh
+    /// insert" because the probe correctly reports "no row for this
     /// new identity"; the bool would then drive a sponsor side effect
-    /// for a write that never landed. R4 fixes this by `AND`-ing the
-    /// probe result with `sqlite3_changes(db) > 0`, so the durable
+    /// for a write that never landed. The fix is to `AND` the probe
+    /// result with `sqlite3_changes(db) > 0`, so the durable
     /// "this call mutated the row set" signal must hold for the
     /// function to claim `true`.
     ///
     /// Real callers (UserCorrectionStore, LearningArtifactIngestor)
     /// always mint fresh UUIDs so this branch is astronomically rare,
-    /// but the contract is now correct in all four states. Pinned
-    /// directly because the higher-level ingest tests can't reach this
-    /// branch through their own factories.
-    @Test("appendCorrectionEvent reports `false` when INSERT OR IGNORE skips due to id-PK collision (R4 contract fix)")
+    /// but the contract is correct in all four states. Pinned directly
+    /// because the higher-level ingest tests can't reach this branch
+    /// through their own factories.
+    @Test("appendCorrectionEvent reports `false` when INSERT OR IGNORE skips due to id-PK collision")
     func appendCorrectionEventReturnsFalseOnIdCollisionWithDifferentIdentity() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
@@ -885,9 +886,9 @@ struct LearningArtifactIngestorTests {
         // identity probe will report "no row at this identity"; the
         // ON CONFLICT clause won't fire (no identity match); INSERT
         // OR IGNORE will skip due to the PK collision; no row added.
-        // Pre-R4 behavior: returned `true`, falsely claiming a fresh
-        // insert. Post-R4: returns `false` because `sqlite3_changes`
-        // reports zero changes.
+        // A naive `return !alreadyPresent` would report `true` here,
+        // falsely claiming a fresh insert. The current contract returns
+        // `false` because `sqlite3_changes` reports zero changes.
         let scopeB = CorrectionScope.exactTimeSpan(
             assetId: assetId,
             startTime: 500,
@@ -915,31 +916,31 @@ struct LearningArtifactIngestorTests {
             "the surviving row must carry identity A's scope (identity B was never inserted)")
     }
 
-    /// playhead-hygc.1.7 R5: pin the in-process / on-disk identity-key
+    /// playhead-hygc.1.7: pin the in-process / on-disk identity-key
     /// alignment.
     ///
-    /// Pre-R5 the ingestor maintained its OWN canonicalization (1ms time
-    /// bucket; lowercased sponsor names) which diverged from the
-    /// persistence layer's `normalizedIdentityKey` (100ms time bucket;
-    /// case-preserving). Two visible failure modes:
+    /// A divergent in-process canonicalization (e.g. 1ms time bucket;
+    /// lowercased sponsor names) would split from the persistence
+    /// layer's `normalizedIdentityKey` (100ms time bucket;
+    /// case-preserving) and produce two visible failure modes:
     ///
     ///   1. exactTimeSpan drift within a 100ms bucket:
     ///      `seenIdentities` would treat 10.05s and 10.10s as DISTINCT
-    ///      keys, so two concurrent ingest calls both passed the
-    ///      contains-check, both ran the persistence path, and the
-    ///      ON CONFLICT(identity) UPDATE bumped `submissionCount`
+    ///      keys, so two concurrent ingest calls would both pass the
+    ///      contains-check, both run the persistence path, and the
+    ///      ON CONFLICT(identity) UPDATE would bump `submissionCount`
     ///      to 2 for one user gesture (with the second call also
-    ///      retriggering materialization). Post-R5: both keys round
-    ///      to the same 100ms bucket so the second hits the in-process
-    ///      dedupe before reaching SQLite.
+    ///      retriggering materialization). With aligned keys: both
+    ///      times round to the same 100ms bucket so the second hits
+    ///      the in-process dedupe before reaching SQLite.
     ///
     ///   2. sponsor casing divergence:
-    ///      "Squarespace" then "squarespace" used to collapse on the
+    ///      "Squarespace" then "squarespace" would collapse on a
     ///      lowercased in-process key, silently dropping the second
     ///      gesture. The on-disk identity is case-preserving so the
-    ///      second SHOULD have been a fresh insert. Post-R5 the keys
-    ///      agree, so the in-process dedupe matches SQLite reality.
-    @Test("Identity key matches persistence-layer normalizedIdentityKey (R5 alignment)")
+    ///      second SHOULD be a fresh insert. With aligned keys the
+    ///      in-process dedupe matches SQLite reality.
+    @Test("Identity key matches persistence-layer normalizedIdentityKey (canonicalization alignment)")
     func identityKeyAlignsWithPersistenceCanonicalization() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
@@ -952,8 +953,8 @@ struct LearningArtifactIngestorTests {
         // Case 1: exactTimeSpan corrections within the same 100ms bucket.
         // The persistence layer rounds to 100ms before computing identity
         // (UserCorrectionStore.identityKeyTimeToleranceSeconds = 0.1).
-        // Pre-R5 the ingestor used 1ms bucketing — these two calls would
-        // both have passed the in-process dedupe check.
+        // A divergent finer in-process bucket would let both calls pass
+        // the in-process dedupe check.
         let firstSpan = fnSpanCorrection(startTime: 10.050, endTime: 20.050)
         let secondSpan = fnSpanCorrection(startTime: 10.099, endTime: 20.099)
         let firstResult = try await ingestor.ingest(correction: firstSpan)
@@ -964,9 +965,9 @@ struct LearningArtifactIngestorTests {
             "second exactTimeSpan call within the same 100ms bucket must report .deduped (in-process key now matches persistence-layer 100ms bucket); got \(secondResult.outcome)")
 
         // Case 2: sponsor case-divergence MUST yield two distinct
-        // identities (the persistence layer is case-preserving).
-        // Pre-R5 the ingestor lowercased sponsor names, collapsing
-        // these — the second would have been silently dropped.
+        // identities (the persistence layer is case-preserving). A
+        // lowercasing in-process canonicalization would collapse these
+        // and silently drop the second submission.
         let sponsorMixed = sponsorCorrection(sponsor: "RawSponsor", kind: .falsePositive)
         let sponsorLower = sponsorCorrection(sponsor: "rawsponsor", kind: .falsePositive)
         let mixedResult = try await ingestor.ingest(correction: sponsorMixed)

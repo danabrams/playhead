@@ -92,23 +92,29 @@ actor LearningArtifactIngestor {
     /// `AnalysisStore` (the v23 UNIQUE INDEX + `appendCorrectionEvent`'s
     /// `Bool` return).
     ///
-    /// Concurrency note (R3): R2's TOCTOU fix reserved the identity
-    /// BEFORE the first `await` and rolled the reservation back on
-    /// throw. R3 audit found a residual hole: if `materialize()` throws
-    /// AFTER `appendCorrectionEvent` AND the non-idempotent
-    /// `recordRollback` succeeded, the rollback erased the reservation,
-    /// and a retry would re-fire `recordRollback` against the existing
-    /// row — incrementing `rollbackCount` to 2 for one user gesture.
+    /// Concurrency contract: the identity is reserved BEFORE any `await`
+    /// inside `ingest`, so concurrent re-entries on the actor observe
+    /// the identity already taken and short-circuit to `.deduped`. The
+    /// reservation is rolled back on throw so a transient SQLite hiccup
+    /// doesn't permanently mask future retries.
     ///
-    /// Fix: gate sponsor side effects on the persistence layer's
-    /// `wasNewlyInserted` Bool, not on the in-process reservation. The
-    /// store probes existence BEFORE the upsert (atomically inside its
-    /// actor, no awaits between probe and write), so a row that's
-    /// already on disk reports `false` and we skip side effects on
-    /// every retry forever — even after `seenIdentities` is rolled
-    /// back. The reservation is now a perf-only fast-path: we still
-    /// short-circuit obvious in-process duplicates, but the durable
+    /// Durable guard: sponsor side effects gate on the persistence
+    /// layer's `wasNewlyInserted` Bool, not on the in-process
+    /// reservation. The store probes existence BEFORE the upsert
+    /// (atomically inside its actor, no awaits between probe and
+    /// write), so a row already on disk reports `false` and side
+    /// effects are skipped — even when an across-process replay or a
+    /// rolled-back reservation leaves the in-process set empty. The
+    /// reservation is therefore a perf-only fast-path; the durable
     /// guard is the persistence Bool.
+    ///
+    /// Lifecycle: the set grows monotonically over the actor's
+    /// lifetime. In practice corrections per process are O(10s–100s)
+    /// and each entry is a short identity key (~80 bytes), so the
+    /// memory cost is bounded by realistic usage. A long-running
+    /// process that wants to bound memory explicitly should construct
+    /// a fresh ingestor; the persistence-layer guard keeps that safe
+    /// from a correctness standpoint.
     private var seenIdentities: Set<String> = []
 
     private var counters = LearningIngestionDiagnostics()
@@ -132,13 +138,13 @@ actor LearningArtifactIngestor {
         counters.raw += 1
         guard let parsedScope = CorrectionScope.deserialize(correction.scope) else {
             counters.skippedMalformed += 1
-            // R5 privacy: log only the scope's leading prefix (the token
-            // before the first ':' — the *type* discriminator) and the
-            // overall length. The remainder may carry user-typed text
+            // Privacy contract: log only the scope's leading prefix (the
+            // token before the first ':' — the *type* discriminator) and
+            // the overall length. The remainder may carry user-typed text
             // (phrase scopes), podcast-identifying podcastIds, or sponsor
-            // names. We never want any of that surfacing in os_log even
-            // when the parse fails. Public prefix is bounded to 32 chars
-            // so a malformed payload that lacks a ':' can't dump arbitrary
+            // names. None of that may surface in os_log even when the
+            // parse fails. The public prefix is bounded to 32 chars so a
+            // malformed payload that lacks a ':' can't dump arbitrary
             // bytes into the system log.
             let scope = correction.scope
             let prefix = scope.split(separator: ":", maxSplits: 1).first.map(String.init) ?? scope
@@ -152,9 +158,15 @@ actor LearningArtifactIngestor {
             )
         }
 
+        // Use `effectiveCorrectionType` so the in-process identity key
+        // agrees with the persistence-layer's identity tuple by construction
+        // (`AnalysisStore.appendCorrectionEvent` keys the v23 UNIQUE INDEX
+        // off `event.effectiveCorrectionType` via the same extension). A
+        // divergent inline derivation here would split legacy nil-typed
+        // rows into a different in-process bucket than the on-disk one.
         let identityKey = Self.identityKey(
             analysisAssetId: correction.analysisAssetId,
-            type: correction.correctionType ?? correction.source?.kind.correctionType ?? .falsePositive,
+            type: correction.effectiveCorrectionType,
             scope: parsedScope
         )
         if seenIdentities.contains(identityKey) {
@@ -165,27 +177,28 @@ actor LearningArtifactIngestor {
             )
         }
 
-        // R2: reserve the identity BEFORE any `await` so concurrent
+        // Reserve the identity BEFORE any `await` so concurrent
         // re-entries on the actor see the identity already taken and
         // short-circuit to `.deduped`. This closes the TOCTOU window
-        // between the contains-check above and the persistence/side-
-        // effect calls below — without it, 5 concurrent ingests of the
-        // same correction all pass the contains-check, all call the
-        // non-idempotent `recordRollback`, and the rollbackCount jumps
-        // to 5 for one gesture.
+        // between the contains-check above and the persistence /
+        // side-effect calls below — without the reservation, N concurrent
+        // ingests of the same correction would all pass the contains
+        // check, all call the non-idempotent `recordRollback`, and
+        // `rollbackCount` would jump to N for a single user gesture.
         seenIdentities.insert(identityKey)
 
-        // R3: durable side-effect guard. `appendCorrectionEvent`
-        // returns `true` only when it inserted a NEW row (the probe
+        // Durable side-effect guard. `appendCorrectionEvent` returns
+        // `true` only when it inserted a NEW row (its pre-upsert probe
         // saw nothing for this identity). If the row was already on
-        // disk — including the rare case where R2's rollback path
-        // erased the in-process reservation after a successful first
-        // append + downstream throw — `wasNewlyInserted` is `false`
-        // and we MUST NOT re-fire the non-idempotent sponsor side
-        // effects. Captured here so a `materializer.materialize`
-        // throw downstream still triggers the catch but the caller's
-        // retry will see the persistence layer say "not new" and
-        // skip the sponsor side effects on every future attempt.
+        // disk — including the rare case where the throw-rollback
+        // branch below erased the in-process reservation after a
+        // successful first append + downstream throw —
+        // `wasNewlyInserted` is `false` and we MUST NOT re-fire the
+        // non-idempotent sponsor side effects. Captured here so that a
+        // `materializer.materialize` throw downstream still triggers
+        // the catch, but the caller's retry sees the persistence
+        // layer say "not new" and skips the sponsor side effects on
+        // every future attempt.
         let wasNewlyInserted: Bool
         do {
             // Persist via the store's append path. The v23 UNIQUE INDEX
@@ -201,12 +214,19 @@ actor LearningArtifactIngestor {
             if wasNewlyInserted {
                 switch parsedScope {
                 case .sponsorOnShow(let podcastId, let sponsor):
+                    // Source has higher fidelity than type for the
+                    // FN-vs-FP distinction (a sponsor confirmation flows
+                    // through `.userTap*` source kinds and is reduced
+                    // to `.falsePositive` by `kindFor` for boundary-shift
+                    // types). Prefer source when present; otherwise
+                    // map the canonical `effectiveCorrectionType` (which
+                    // already handles the legacy nil-typed-row case).
+                    let kind: CorrectionKind = correction.source?.kind
+                        ?? Self.kindFor(correction.effectiveCorrectionType)
                     try await applySponsorSideEffect(
                         podcastId: podcastId,
                         sponsor: sponsor,
-                        kind: correction.source?.kind
-                            ?? correction.correctionType.map(Self.kindFor)
-                            ?? .falsePositive
+                        kind: kind
                     )
                 default:
                     break
@@ -229,20 +249,20 @@ actor LearningArtifactIngestor {
             // Roll the reservation back on error so a transient SQLite
             // hiccup doesn't permanently mask future legitimate retries
             // of this identity. The caller sees the throw and decides
-            // whether to retry. R3: even after this rollback, a retry
-            // is still safe — the durable persistence Bool will report
-            // `false` if `appendCorrectionEvent` succeeded before the
-            // throw, and the sponsor side-effect gate will skip.
+            // whether to retry. Even after this rollback a retry is
+            // still safe: the durable persistence Bool reports `false`
+            // if `appendCorrectionEvent` succeeded before the throw,
+            // and the sponsor side-effect gate skips on that signal.
             seenIdentities.remove(identityKey)
             throw error
         }
 
-        // R3: a non-new persist (an across-process replay landing on an
+        // A non-new persist (an across-process replay landing on an
         // already-deduped row) reports `.deduped` to the caller — same
         // observable shape as the in-process fast-path above — instead
         // of `.ingested`. This keeps the diagnostics counters honest
         // when an app restart drops the in-process `seenIdentities`
-        // and the user replays a previously-recorded correction.
+        // set and the user replays a previously-recorded correction.
         if !wasNewlyInserted {
             counters.deduped += 1
             return LearningIngestionResult(
@@ -305,34 +325,32 @@ actor LearningArtifactIngestor {
         type: CorrectionType,
         scope: CorrectionScope
     ) -> String {
-        // R5: route through `CorrectionScope.normalizedIdentityKey` so the
+        // Route through `CorrectionScope.normalizedIdentityKey` so the
         // in-process `seenIdentities` set keys on EXACTLY the same
         // canonicalization as the on-disk v23 UNIQUE INDEX
-        // (`appendCorrectionEvent` derives its `normalizedScopeKey` from
-        // this same property). Previously the ingestor maintained its
-        // own divergent canonicalization (1ms time bucketing vs the
-        // persistence layer's 100ms bucket; lowercased sponsor names vs
-        // case-preserving on disk) — which left two failure modes:
+        // (`appendCorrectionEvent` derives its `normalizedScopeKey`
+        // from this same property). Sharing the canonical form
+        // closes two failure modes that a divergent in-process
+        // canonicalization could open:
         //
-        //   1. In-process drift: two `.exactTimeSpan` corrections at
-        //      times 10.05 and 10.10 (50ms apart) collapse on disk
-        //      (same 100ms bucket) but produce DIFFERENT in-process keys,
-        //      so concurrent re-entrants both pass the `contains` check
-        //      and both call `appendCorrectionEvent`. The persistence
-        //      layer would still gate sponsor side effects via the Bool
-        //      return, but `submissionCount` would inflate beyond 1 for
-        //      one user gesture — visible in NARL exports.
+        //   1. Time-bucket drift: two `.exactTimeSpan` corrections
+        //      at times 10.05 and 10.10 (50ms apart) collapse on
+        //      disk (same 100ms bucket) but would produce DIFFERENT
+        //      in-process keys under finer bucketing. Concurrent
+        //      re-entrants would then both pass the `contains` check
+        //      and both call `appendCorrectionEvent`; the persistence
+        //      layer still gates sponsor side effects via the Bool
+        //      return, but `submissionCount` would inflate beyond 1
+        //      for one user gesture — visible in NARL exports.
         //
         //   2. Casing divergence: a sponsor reported as "Squarespace"
-        //      then "squarespace" hashes to ONE in-process key
-        //      (lowercased) but TWO on-disk identities (case-preserving
-        //      `serialized` form). The second call would short-circuit
-        //      to `.deduped` in-process and never reach the persistence
-        //      layer, silently dropping a correction that would have
-        //      legitimately written a second row.
-        //
-        // Both are now closed by sharing the canonical key with the
-        // persistence layer.
+        //      and then "squarespace" would hash to ONE in-process
+        //      key under lowercasing but TWO on-disk identities
+        //      under case-preserving `serialized` form. The second
+        //      call would short-circuit to `.deduped` in-process and
+        //      never reach the persistence layer, silently dropping
+        //      a correction that would have legitimately written a
+        //      second row.
         return "\(analysisAssetId)|\(type.rawValue)|\(scope.normalizedIdentityKey)"
     }
 

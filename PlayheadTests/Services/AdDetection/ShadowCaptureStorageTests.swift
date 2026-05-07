@@ -540,7 +540,7 @@ struct ShadowCaptureStorageTests {
         #expect(byId["legacy-organic"]?.shadowConfidence == 0.0)
     }
 
-    /// playhead-hygc.1.7 R1: explicit acceptance check — running the v24
+    /// playhead-hygc.1.7: explicit acceptance check — running the v24
     /// backfill migration twice MUST yield identical state. After the first
     /// `migrate()` brings the DB to v24 and stamps the summary columns, a
     /// second `migrate()` (e.g. process restart, `resetMigratedPathsForTesting`

@@ -10851,7 +10851,7 @@ actor AnalysisStore {
     /// time-tolerance bucket; identical re-submissions and submissions
     /// within the bucket collapse on conflict.
     ///
-    /// playhead-hygc.1.7 R3: returns `true` when the call inserted a NEW
+    /// playhead-hygc.1.7: returns `true` when the call inserted a NEW
     /// row, `false` when it landed on an existing identity (the
     /// `ON CONFLICT … DO UPDATE` audit-bump path). Callers that fire
     /// non-idempotent side effects per persisted correction
@@ -10862,18 +10862,18 @@ actor AnalysisStore {
     /// though the row is already on disk. Existing callers that don't
     /// care can ignore the result via `@discardableResult`.
     ///
-    /// playhead-hygc.1.7 R4: the `Bool` is now derived from the durable
-    /// SQLite `sqlite3_changes` counter combined with the pre-upsert
-    /// identity probe. Three on-disk outcomes are distinguished:
+    /// The `Bool` is derived from the durable SQLite `sqlite3_changes`
+    /// counter combined with the pre-upsert identity probe. Three
+    /// on-disk outcomes are distinguished:
     ///   • probe-absent + changes>0  → fresh INSERT       → `true`
     ///   • probe-present + changes>0 → ON CONFLICT UPDATE → `false`
     ///   • probe-absent + changes==0 → INSERT OR IGNORE skipped due to
     ///     `id` (PRIMARY KEY) collision with a row of a DIFFERENT
     ///     identity → no row was added → `false`. This last case is
-    ///     astronomically rare in practice (real callers use UUIDs)
-    ///     but the previous `return !alreadyPresent` would have wrongly
-    ///     reported `true` here, firing a sponsor side effect for a
-    ///     persistence write that never actually landed.
+    ///     astronomically rare in practice (real callers use UUIDs),
+    ///     but a naive `return !alreadyPresent` would wrongly report
+    ///     `true` here, firing a sponsor side effect for a persistence
+    ///     write that never actually landed.
     @discardableResult
     func appendCorrectionEvent(_ event: CorrectionEvent) throws -> Bool {
         // Compute identity-key columns once, in Swift, so the on-disk
@@ -10883,12 +10883,13 @@ actor AnalysisStore {
             CorrectionScope.deserialize(event.scope)?.normalizedIdentityKey ?? event.scope
         let effectiveType: CorrectionType = event.effectiveCorrectionType
 
-        // playhead-hygc.1.7 R3: probe presence BEFORE the upsert so we can
-        // tell a fresh insert from a deduped audit-bump. The probe and the
-        // write run inside the same actor-serialized `try` body — no `await`
-        // between them — so a concurrent caller cannot interleave between
-        // probe and write. This is the durable source of truth that
-        // `LearningArtifactIngestor` gates side effects on.
+        // playhead-hygc.1.7: probe presence BEFORE the upsert so we can
+        // tell a fresh insert from a deduped audit-bump. The probe and
+        // the write run inside the same actor-serialized `try` body —
+        // no `await` between them — so a concurrent caller cannot
+        // interleave between probe and write. This is the durable
+        // source of truth that `LearningArtifactIngestor` gates side
+        // effects on.
         let probeSQL = """
             SELECT 1 FROM correction_events
             WHERE analysisAssetId = ?
@@ -10954,19 +10955,20 @@ actor AnalysisStore {
         bind(stmt, 12, normalizedScopeKey)
         bind(stmt, 13, effectiveType.rawValue)
         try step(stmt, expecting: SQLITE_DONE)
-        // R4: `sqlite3_changes` is the durable signal that a row was
+        // `sqlite3_changes` is the durable signal that a row was
         // actually inserted or updated. Combined with the pre-upsert
         // probe, this disambiguates the three on-disk outcomes:
         //   • probe-absent + changes>0  → fresh INSERT       → newly inserted
         //   • probe-present + changes>0 → DO UPDATE          → not newly inserted
         //   • probe-absent + changes==0 → IGNORE (id-PK collision with a row
         //                                  of different identity) → no row added
-        // The previous `return !alreadyPresent` collapsed the third case into
-        // the first, falsely claiming "newly inserted" when the persistence
-        // layer had skipped the write. Real callers always use UUIDs so the
-        // third case is astronomically rare, but the contract is now correct
-        // for both R3's durable-side-effect gate and any future audit query
-        // that wants "did this call mutate the on-disk row set?".
+        // A naive `return !alreadyPresent` would collapse the third
+        // case into the first, falsely claiming "newly inserted" when
+        // the persistence layer skipped the write. Real callers always
+        // use UUIDs so the third case is astronomically rare, but the
+        // contract here is correct for both the durable-side-effect
+        // gate above and any future audit query asking "did this call
+        // mutate the on-disk row set?".
         let didMutate = sqlite3_changes(db) > 0
         return !alreadyPresent && didMutate
     }
