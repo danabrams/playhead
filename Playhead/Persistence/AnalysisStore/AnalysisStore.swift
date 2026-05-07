@@ -3426,6 +3426,17 @@ actor AnalysisStore {
     /// Idempotent: `CREATE TABLE IF NOT EXISTS` is a no-op on existing
     /// DBs (this table only arrived in v24, but we still write the
     /// guard for future ladder reorderings).
+    ///
+    /// playhead-hygc.1.4 (R4 integration note): bead bd-hygc.1.6 also
+    /// originally claimed schema v23 (correction-events dedupe). At
+    /// integration time .1.6 landed first and kept v23, so this
+    /// migration was renumbered to v24. The migration body is
+    /// self-contained — `CREATE TABLE IF NOT EXISTS` +
+    /// `CREATE INDEX IF NOT EXISTS` + a final `setSchemaVersion(N)`.
+    /// `reapOrphanBackgroundTaskRuns` already tolerates the table
+    /// being absent via a `tableExists` guard so an out-of-order
+    /// merge cannot cause a runtime regression on dogfood devices —
+    /// see that method for the corresponding R3/R4 commentary.
     private func migrateBackgroundTaskRunsV24IfNeeded() throws {
         guard (try schemaVersion() ?? 1) < 24 else { return }
         try exec("""
@@ -3770,7 +3781,20 @@ actor AnalysisStore {
         // quiet. Real SQL errors (e.g. disk-full, malformed db) still
         // bubble up via `prepare`/`step` because `tableExists` succeeds
         // before the UPDATE runs.
+        //
+        // playhead-hygc.1.4 (R4): emit a single info-level log when this
+        // guard fires so a regressed-migration condition stays visible
+        // in dogfood diagnostics instead of becoming silent. A correct
+        // production build NEVER trips this guard (the v23 migration
+        // runs inside `migrate()`'s BEGIN IMMEDIATE..COMMIT envelope
+        // before `reapOrphansAtLaunch` is ever called from
+        // `PlayheadRuntime`). If it does fire post-integration, that's
+        // an integration regression worth investigating, not noise to
+        // suppress further.
         guard try tableExists("background_task_runs") else {
+            logger.info(
+                "reapOrphanBackgroundTaskRuns: background_task_runs table missing — skipping reap (likely cross-worktree schema drift; see migrateBackgroundTaskRunsV23IfNeeded)"
+            )
             return 0
         }
         // playhead-hygc.1.4 (R2 fix): only reap rows that were inserted
