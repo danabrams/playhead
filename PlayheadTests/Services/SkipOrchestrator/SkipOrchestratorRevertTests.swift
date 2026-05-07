@@ -736,4 +736,102 @@ struct SkipOrchestratorRevertTests {
                     "\(id) must remain .candidate; got \(row?.decisionState ?? "<missing>")")
         }
     }
+
+    // R7 (hygc.1.8): the markOnly-only revert path went through R5/R6
+    // without pinning the trust-signal magnitude. R6's docstring noted
+    // that `recordFalseSkipSignal` (full magnitude, default 0.10) fires
+    // even when ONLY the suggest-tier loop matched, deferring weak/strong
+    // routing to a future calibration round. Without a magnitude pin a
+    // future diff could quietly flip the routing to
+    // `recordWeakFalseSkipSignal` (0.05) — silently rebalancing trust
+    // pressure across the dogfood corpus. This test pins the current
+    // contract: a suggest-tier-only revert decrements `skipTrustScore`
+    // by exactly `falseSignalPenalty` (the SAME magnitude as a
+    // managed-window revert). If a follow-up bead intentionally splits
+    // strong/weak routing, the new behavior should land in this test
+    // first so the change is explicit.
+    @Test("revertByTimeRange against ONLY a markOnly window decrements trust by full falseSignalPenalty")
+    func revertByTimeRangeMarkOnlyDecrementsTrustByFullPenalty() async throws {
+        // Inline trust-service construction so we can read skipTrustScore
+        // back from the SAME store the service mutates. The default
+        // `makeSkipTestTrustService` helper allocates an internal store
+        // we can't observe.
+        let trustStore = try await makeTestStore()
+        let initialTrust: Double = 0.90
+        try await trustStore.upsertProfile(
+            PodcastProfile(
+                podcastId: "podcast-1",
+                sponsorLexicon: nil,
+                normalizedAdSlotPriors: nil,
+                repeatedCTAFragments: nil,
+                jingleFingerprints: nil,
+                implicitFalsePositiveCount: 0,
+                skipTrustScore: initialTrust,
+                observationCount: 10,
+                mode: "auto",
+                recentFalseSkipSignals: 0
+            )
+        )
+        let trustConfig = TrustScoringConfig.default
+        let trustService = TrustScoringService(store: trustStore, config: trustConfig)
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let markOnly = AdWindow(
+            id: "ad-suggest-magnitude",
+            analysisAssetId: "asset-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.55,
+            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "test-1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: 60,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+        )
+        try await store.insertAdWindow(markOnly)
+        await orchestrator.receiveAdWindows([markOnly])
+
+        // Sanity: only the suggest tier carries the entry; auto-skip
+        // dict is empty.
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-magnitude"))
+        #expect(!(await orchestrator.activeWindowIDs().contains("ad-suggest-magnitude")))
+
+        // Veto.
+        await orchestrator.revertByTimeRange(start: 70, end: 110, podcastId: "podcast-1")
+
+        // The trust hit fires inside an unstructured Task — poll until
+        // the signal is observed.
+        var profile: PodcastProfile?
+        for _ in 0..<20 {
+            profile = try await trustStore.fetchProfile(podcastId: "podcast-1")
+            if let p = profile, p.recentFalseSkipSignals == 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        let expectedTrust = initialTrust - trustConfig.falseSignalPenalty
+        #expect(abs((profile?.skipTrustScore ?? -1) - expectedTrust) < 1e-6,
+                "suggest-tier-only revert must decrement trust by falseSignalPenalty (\(trustConfig.falseSignalPenalty)); got skipTrustScore=\(profile?.skipTrustScore ?? -1) expected=\(expectedTrust)")
+        #expect(profile?.recentFalseSkipSignals == 1,
+                "exactly one false-skip signal must be recorded for one veto gesture")
+    }
 }

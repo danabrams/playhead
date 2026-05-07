@@ -592,6 +592,151 @@ struct CorrectionReplayCandidateTests {
         #expect(replayAfterRun3.count == 1,
                 "run 3 must keep population bounded at one replay row; got \(replayAfterRun3.count)")
     }
+
+    // MARK: - 8. R7: overlapping FN ranges in a single run dedupe to ONE row
+
+    /// playhead-hygc.1.8 R7: the existing exact-match `seen` key
+    /// (`%.3f-%.3f`) inside `correctionReplayCandidates` only suppresses
+    /// truly-identical FN spans. Real-world dogfood corrections include
+    /// near-duplicates the user reported with slightly-different ranges
+    /// (e.g. one tap captured 600..680, a second tap 605..690 for the
+    /// same ad). Without an overlap-aware in-flight dedupe, BOTH would
+    /// land — leaving two suggest banners and two persisted rows where
+    /// the user reported one ad. R7 adds an overlap check against the
+    /// in-flight `emitted` set so only the first range survives; the
+    /// second is silently dropped because it overlaps an already-queued
+    /// row.
+    @Test("overlapping falseNegative ranges dedupe to a single replay row in one run")
+    func overlappingFalseNegativeRangesDedupeToOneRow() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-overlap-dedupe"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        // Three near-duplicate FN reports for the same physical ad.
+        try await appendFalseNegativeCorrection(
+            store: store, assetId: assetId, startTime: 600, endTime: 680
+        )
+        try await appendFalseNegativeCorrection(
+            store: store, assetId: assetId, startTime: 605, endTime: 690
+        )
+        try await appendFalseNegativeCorrection(
+            store: store, assetId: assetId, startTime: 610, endTime: 700
+        )
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        let replayRows = persisted.filter { $0.boundaryState == "correctionReplay" }
+        #expect(replayRows.count == 1,
+                "three overlapping FN ranges must dedupe to one replay row; got \(replayRows.count)")
+    }
+
+    // MARK: - 9. R7: dual-emission audit — replay + algorithmic rows can co-exist for the same span
+
+    /// playhead-hygc.1.8 R7 audit: when a replay row exists at span S
+    /// and a SUBSEQUENT run produces an algorithmic AdWindow for the
+    /// same span, what happens?
+    ///
+    /// Expected (current contract):
+    ///   * `correctionReplayCandidates` short-circuits on subsequent
+    ///     runs because the replay row IS in `existing`. So only ONE
+    ///     replay row exists.
+    ///   * The algorithmic detector can emit a row at the same span on
+    ///     a later run if Tier 1 / aggregator / candidates fire — that
+    ///     row carries a distinct `boundaryState` (segmentAggregated /
+    ///     acousticRefined). `matchingHotPathWindows` filters on
+    ///     `existing.boundaryState == incoming.boundaryState` so the
+    ///     two rows do NOT reconcile/merge — they remain as two
+    ///     persisted candidate rows for overlapping spans.
+    ///
+    /// This test pins that contract: the replay row stays markOnly, the
+    /// algorithmic row stays whatever boundary state it carried. R6
+    /// flagged this as a residual risk; this test locks the behavior so
+    /// any future change (e.g. unifying boundary states or deduping by
+    /// span) is detected.
+    @Test("replay row co-existing with algorithmic row at overlapping span: both persist with distinct boundary states")
+    func replayRowCoexistsWithOverlappingAlgorithmicRow() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-coexist-algorithmic"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        // FN at 600..680 with no algorithmic match yet → emits a replay row.
+        try await appendFalseNegativeCorrection(
+            store: store, assetId: assetId, startTime: 600, endTime: 680
+        )
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let afterReplay = try await store.fetchAdWindows(assetId: assetId)
+        #expect(afterReplay.filter { $0.boundaryState == "correctionReplay" }.count == 1,
+                "replay row must be present after run 1")
+
+        // Now a separate algorithmic boundary-singleton style row gets
+        // inserted directly (simulating a later run where Tier 1 fires
+        // on the same span). This bypasses the hot-path overlap check
+        // — which is by design: replay rows with distinct boundary
+        // states do not block algorithmic rows.
+        let algorithmic = AdWindow(
+            id: "algorithmic-coexist-1",
+            analysisAssetId: assetId,
+            startTime: 605,
+            endTime: 670,
+            confidence: 0.55,
+            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "hygc-1.8-test",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: 605,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+        )
+        try await store.insertAdWindow(algorithmic)
+
+        // A second hot-path run: replay short-circuits (existing
+        // replay row covers the FN span). The algorithmic row remains
+        // persisted as-is — neither retired by the replay path nor
+        // reconciled with the replay row.
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let final = try await store.fetchAdWindows(assetId: assetId)
+        let replayRows = final.filter { $0.boundaryState == "correctionReplay" }
+        let algorithmicRows = final.filter {
+            $0.boundaryState == AdBoundaryState.segmentAggregated.rawValue
+        }
+        #expect(replayRows.count == 1,
+                "replay row must remain after run 2; got \(replayRows.count)")
+        #expect(algorithmicRows.count == 1,
+                "algorithmic row must remain after run 2; got \(algorithmicRows.count)")
+        #expect(replayRows.first?.eligibilityGate == "markOnly",
+                "replay row must remain markOnly")
+        #expect(algorithmicRows.first?.id == "algorithmic-coexist-1",
+                "algorithmic row identity must be unchanged")
+    }
 }
 
 // MARK: - Test doubles
