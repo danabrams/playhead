@@ -4848,13 +4848,21 @@ actor AdDetectionService {
     /// the caller's subsequent `upsertHotPathAdWindows`). Actor
     /// reentrancy could in principle let two concurrent
     /// `runHotPathResult` calls each compute fresh UUIDs from the same
-    /// FN range and double-insert. The production caller chain
-    /// (`AnalysisCoordinator.handlePersistedTranscriptChunks`) is itself
-    /// an actor-isolated single-shot per asset, so two concurrent
-    /// `runHotPathResult` calls on the same asset are not produced. This
-    /// invariant is documented at the call site (R5) rather than enforced
-    /// here because the only callers in tree are the two
-    /// `runHotPathResult` entry points above.
+    /// FN range and double-insert. The production caller chain holds the
+    /// no-concurrent-runHotPath-per-asset invariant:
+    ///   - `AnalysisCoordinator.handlePersistedTranscriptChunks` is
+    ///     dispatched from a single `for await` loop (single-shot per
+    ///     `chunksPersisted` event, serialized).
+    ///   - `AnalysisJobRunner.run` invokes `runHotPath` once per asset
+    ///     job and the runner is itself a serial executor.
+    /// We document the invariant here (rather than enforce via
+    /// `precondition()`) because the only call sites in tree are the two
+    /// `runHotPathResult` entry points above; defending against an
+    /// invariant that only future callers could break would require
+    /// per-asset bookkeeping inside the actor that no caller actually
+    /// exercises. R6: the prior wording claimed the invariant was
+    /// "documented at the call site"; that was inaccurate (no such
+    /// comment existed) — the invariant is in this docstring only.
     private func correctionReplayCandidates(
         analysisAssetId: String
     ) async throws -> [AdWindow] {

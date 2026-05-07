@@ -1023,8 +1023,10 @@ actor SkipOrchestrator {
         var revertedAny = false
         // playhead-zskc: one user gesture produces one correction event — not
         // N events per overlapping window. Capture the analysisAssetId of any
-        // reverted window so we can write a single CorrectionEvent after the
-        // loop. (All managed windows on the orchestrator share the current
+        // reverted window (across BOTH the managed-window loop and the
+        // playhead-hygc.1.8 suggest-tier loop below) so we can write a single
+        // CorrectionEvent after both loops complete. (All managed and
+        // suggest-tier windows on the orchestrator share the current
         // episode's assetId; if they ever diverge mid-transition, attributing
         // to the first-matched window is still more correct than writing N
         // duplicates.)
@@ -1128,6 +1130,21 @@ actor SkipOrchestrator {
             }
 
             // Signal trust engine once per user correction, not per window.
+            //
+            // playhead-hygc.1.8 (R6 documentation): this fires whenever
+            // `revertedAny == true`, which now includes the case where
+            // ONLY the suggest-tier (markOnly) loop matched (no managed
+            // window was ever auto-skipped). We deliberately use the full
+            // `recordFalseSkipSignal` magnitude here, not
+            // `recordWeakFalseSkipSignal`: the algorithm thought the span
+            // was ad-like enough to surface a banner, and the user
+            // explicitly disagreed — that's a strong negative signal for
+            // the show's trust profile, regardless of whether the
+            // playback surface was a skip cue or a suggest banner. If
+            // calibration evidence later shows this over-penalizes
+            // markOnly-only reverts, the correct fix is to track which
+            // loop produced the signal and route to weak/strong
+            // separately — not to suppress the signal entirely.
             if let podcastId, let trustService {
                 await trustService.recordFalseSkipSignal(podcastId: podcastId)
             }
