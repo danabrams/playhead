@@ -5430,9 +5430,12 @@ actor AnalysisStore {
         }
 
         // ---- Pass 2: fetch fast-pass chunk intervals so we can compute the
-        //              interval union AND the high-water max in Swift. We
-        //              ORDER BY startTime so the union sweep below is a
-        //              single linear merge.
+        //              interval union AND the high-water max in Swift.
+        //              `AnalysisCoverageMath.unionedSeconds` does its own
+        //              sort over the collected intervals, so the SQL
+        //              `ORDER BY` is purely for deterministic output order
+        //              (helps debugging / explain plans), not for the merge
+        //              algorithm's correctness.
         var fastIntervals: [String: [(start: Double, end: Double)]] = [:]
         var fastMaxEnd: [String: Double] = [:]
         // ---- Pass 3 (fold into one query): final-pass chunk MAX(endTime).
