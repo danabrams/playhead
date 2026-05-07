@@ -490,13 +490,18 @@ final class CorrectionDedupeTests: XCTestCase {
 
         // Pin the canonical regression: the asset_012 falseNegative-x4
         // cluster called out in the brief MUST collapse to exactly 1
-        // AND the surviving row's audit metadata must reflect the
-        // pre-collapse multiplicity. Earlier versions of this test
-        // only asserted the count, leaving an implementation that
-        // dropped audit metadata silent. Tighten by also asserting
-        // (a) submissionCount for the bucket = 4, and (b) the survivor
-        // is the chronologically-earliest row in the bucket — so
+        // AND the dedupe result's `submissionCounts` side dict must
+        // record the pre-collapse multiplicity for the survivor's
+        // `id`. Earlier versions of this test only asserted the count,
+        // leaving an implementation that dropped audit metadata
+        // silent. Tighten by also asserting (a) the side dict reports
+        // 4 for this bucket, and (b) the survivor is the
+        // chronologically-earliest row in the bucket — so
         // first-observation provenance is preserved across dedupe.
+        // (The survivor's persisted `submissionCount` field is
+        // intentionally returned UNCHANGED by `distinctSemanticCorrections`;
+        // the side dict is the authoritative pre-collapse multiplicity
+        // source for in-memory inputs.)
         let asset012FN = collapsed.filter {
             $0.analysisAssetId == "asset_012"
                 && $0.correctionType == .falseNegative
