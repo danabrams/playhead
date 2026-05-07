@@ -247,7 +247,7 @@ struct BackfillJobStoreTests {
         // playhead-43ed (B3, repeated-ad cache); v20 was the cycle-1 M3
         // no-op bump alongside the work-journal/H1 reaper additions;
         // v19 dropped the vestigial `skip_cues` table.
-        #expect(version == 25)
+        #expect(version == 26)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")

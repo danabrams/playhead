@@ -875,7 +875,7 @@ struct AdListenRewindRow: Sendable, Hashable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 25
+    nonisolated private static let currentSchemaVersion = 26
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1514,6 +1514,13 @@ actor AnalysisStore {
             // from v23 at integration time — bd-hygc.1.6 took v23 and
             // bd-hygc.1.4 took v24).
             try migrateFinalPassCanonicalSpanV25IfNeeded()
+            // playhead-hygc.1.7: persist queryable shadow FM summary
+            // columns alongside the opaque BLOB so diagnostics and
+            // learning paths can read isAd/confidence without decoding
+            // base64. Backfills existing rows. Bumps schema_version to 26
+            // (renumbered from v24 at integration time — bd-hygc.1.4 took
+            // v24 and bd-hygc.1.5 took v25).
+            try migrateShadowFMResponsesSummaryV26IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1773,6 +1780,10 @@ actor AnalysisStore {
         // playhead-hygc.1.5 (v25): mirror final-pass canonical span
         // migration into the ladder seam. Helper is fully idempotent.
         try migrateFinalPassCanonicalSpanV25IfNeeded()
+        // playhead-hygc.1.7 (v26): mirror shadow FM summary column
+        // migration into the ladder seam. Helper is fully idempotent
+        // and gated by `tableExists("shadow_fm_responses")`.
+        try migrateShadowFMResponsesSummaryV26IfNeeded()
     }
     #endif
 
@@ -3974,6 +3985,104 @@ actor AnalysisStore {
             ON final_pass_job_aliases(adWindowId)
             """)
         try setSchemaVersion(25)
+    }
+
+    // MARK: - V26: Shadow FM summary columns (playhead-hygc.1.7)
+    //
+    // Add `isAdSummary INTEGER` and `shadowConfidenceSummary REAL` to
+    // `shadow_fm_responses` so diagnostics, learning paths, and per-asset
+    // queries can read the shadow classifier's decision signal without
+    // base64-decoding the opaque BLOB at every read site.
+    //
+    // The summary is the same surface the JSONL exporter already produces
+    // via `ShadowDecisionsExporter.decodeShadowSummary` — same convention
+    // (paid/owned/affiliate intents are ad signals; organic and unknown
+    // are not) and same band → confidence mapping (weak=0.33, moderate=0.66,
+    // strong=1.00). Persisting alongside the row at write time means a
+    // future schema audit can still reconstruct the summary from the BLOB
+    // (the BLOB is retained verbatim) but a "what did we decide for this
+    // window?" query becomes a plain SELECT instead of a per-row decode
+    // pass.
+    //
+    // For pre-v26 rows already in the store, the migration backfills the
+    // summary columns by decoding each row's BLOB once. Rows whose BLOBs
+    // can't be decoded (legacy / corrupt) get `(0, 0.0)` — the same fallback
+    // the live decoder uses, so a malformed row produces an honest
+    // "no signal" rather than a synthetic ad detection.
+    private func migrateShadowFMResponsesSummaryV26IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 26 else { return }
+        // Tolerate fixtures that didn't reach the v13 step (some test
+        // ladder seams seed pre-shadow shapes).
+        guard try tableExists("shadow_fm_responses") else {
+            try setSchemaVersion(26)
+            return
+        }
+        try addColumnIfNeeded(
+            table: "shadow_fm_responses",
+            column: "isAdSummary",
+            definition: "INTEGER"
+        )
+        try addColumnIfNeeded(
+            table: "shadow_fm_responses",
+            column: "shadowConfidenceSummary",
+            definition: "REAL"
+        )
+        try backfillShadowFMSummaryColumnsForV26()
+        try setSchemaVersion(26)
+    }
+
+    /// Backfill summary columns on every existing `shadow_fm_responses`
+    /// row by decoding its `fmResponse` BLOB through the same path the
+    /// exporter uses. Rows with unreadable payloads keep `(0, 0.0)`.
+    ///
+    /// Performed in Swift (not raw SQL) because the decoder lives in
+    /// `ShadowDecisionsExporter` and re-implementing it in SQL would be
+    /// brittle. The walk is bounded by the row count (May 6 dogfood:
+    /// 1,321 rows), well below any practical threshold.
+    private func backfillShadowFMSummaryColumnsForV26() throws {
+        let selectSQL = """
+            SELECT rowid, fmResponse FROM shadow_fm_responses
+            """
+        let stmt = try prepare(selectSQL)
+        defer { sqlite3_finalize(stmt) }
+
+        struct Pending {
+            let rowid: Int64
+            let isAd: Bool
+            let confidence: Double
+        }
+        var pending: [Pending] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let rowid = sqlite3_column_int64(stmt, 0)
+            let blobSize = Int(sqlite3_column_bytes(stmt, 1))
+            let blob: Data
+            if blobSize > 0, let ptr = sqlite3_column_blob(stmt, 1) {
+                blob = Data(bytes: ptr, count: blobSize)
+            } else {
+                blob = Data()
+            }
+            let summary = ShadowDecisionsExporter.decodeShadowSummary(blob)
+            pending.append(Pending(
+                rowid: rowid,
+                isAd: summary.isAd,
+                confidence: summary.confidence
+            ))
+        }
+
+        guard !pending.isEmpty else { return }
+        let updateSQL = """
+            UPDATE shadow_fm_responses
+               SET isAdSummary = ?, shadowConfidenceSummary = ?
+             WHERE rowid = ?
+            """
+        for p in pending {
+            let upd = try prepare(updateSQL)
+            defer { sqlite3_finalize(upd) }
+            sqlite3_bind_int(upd, 1, p.isAd ? 1 : 0)
+            sqlite3_bind_double(upd, 2, p.confidence)
+            sqlite3_bind_int64(upd, 3, p.rowid)
+            try step(upd, expecting: SQLITE_DONE)
+        }
     }
 
     // MARK: - Repeated-ad cache (playhead-43ed, schema v21)
@@ -12171,11 +12280,18 @@ actor AnalysisStore {
         // loss is zero in practice.
         let canonicalStart = ShadowFMResponse.canonicalize(seconds: row.windowStart)
         let canonicalEnd = ShadowFMResponse.canonicalize(seconds: row.windowEnd)
+        // playhead-hygc.1.7: decode the BLOB once at write time so the
+        // summary columns are populated alongside the opaque payload. The
+        // decoder soft-fails to (false, 0.0) on malformed payloads, which
+        // matches the live exporter's convention — a malformed row produces
+        // an honest "no signal" rather than a synthetic ad detection.
+        let summary = ShadowDecisionsExporter.decodeShadowSummary(row.fmResponse)
         let sql = """
             INSERT OR REPLACE INTO shadow_fm_responses
             (assetId, windowStart, windowEnd, configVariant,
-             fmResponse, capturedAt, capturedBy, fmModelVersion)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             fmResponse, capturedAt, capturedBy, fmModelVersion,
+             isAdSummary, shadowConfidenceSummary)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -12197,6 +12313,8 @@ actor AnalysisStore {
         bind(stmt, 6, row.capturedAt)
         bind(stmt, 7, row.capturedBy.rawValue)
         bind(stmt, 8, row.fmModelVersion)
+        sqlite3_bind_int(stmt, 9, summary.isAd ? 1 : 0)
+        sqlite3_bind_double(stmt, 10, summary.confidence)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -12343,6 +12461,69 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    /// playhead-hygc.1.7: queryable shadow FM summary surface. Returns one
+    /// row per persisted shadow capture with the pre-decoded `(isAd,
+    /// shadowConfidence)` summary stamped at write time by
+    /// `upsertShadowFMResponse`. No BLOB decoding happens at query time —
+    /// the columns are SELECTed directly. Use this for diagnostics and
+    /// learning paths that care about the classifier's decision but not
+    /// the underlying prompt/response text.
+    ///
+    /// Pre-v24 rows (or rows whose payloads were unparseable at write
+    /// time) report `(false, 0.0)` — the same fallback the live decoder
+    /// uses, so a malformed row produces an honest "no signal" rather
+    /// than a synthetic ad detection.
+    ///
+    /// Ordered by `(assetId, windowStart)` for stable diagnostics output.
+    /// Optional `assetId` filter narrows to a single asset for per-episode
+    /// queries.
+    func loadShadowSummaryRows(assetId: String? = nil) throws -> [ShadowSummaryRow] {
+        let sql: String
+        if assetId != nil {
+            sql = """
+                SELECT assetId, windowStart, windowEnd, configVariant,
+                       capturedAt, capturedBy, fmModelVersion,
+                       COALESCE(isAdSummary, 0),
+                       COALESCE(shadowConfidenceSummary, 0.0)
+                FROM shadow_fm_responses
+                WHERE assetId = ?
+                ORDER BY assetId ASC, windowStart ASC
+                """
+        } else {
+            sql = """
+                SELECT assetId, windowStart, windowEnd, configVariant,
+                       capturedAt, capturedBy, fmModelVersion,
+                       COALESCE(isAdSummary, 0),
+                       COALESCE(shadowConfidenceSummary, 0.0)
+                FROM shadow_fm_responses
+                ORDER BY assetId ASC, windowStart ASC
+                """
+        }
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        if let assetId {
+            bind(stmt, 1, assetId)
+        }
+        var results: [ShadowSummaryRow] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let variant = ShadowConfigVariant(rawValue: text(stmt, 3)),
+                  let capturedBy = ShadowCapturedBy(rawValue: text(stmt, 5))
+            else { continue }
+            results.append(ShadowSummaryRow(
+                assetId: text(stmt, 0),
+                windowStart: sqlite3_column_double(stmt, 1),
+                windowEnd: sqlite3_column_double(stmt, 2),
+                configVariant: variant,
+                capturedAt: sqlite3_column_double(stmt, 4),
+                capturedBy: capturedBy,
+                fmModelVersion: optionalText(stmt, 6),
+                isAd: sqlite3_column_int(stmt, 7) != 0,
+                shadowConfidence: sqlite3_column_double(stmt, 8)
+            ))
+        }
+        return results
     }
 
     /// Delete every shadow FM response whose `fmModelVersion` is NOT the

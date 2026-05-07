@@ -163,3 +163,36 @@ struct ShadowWindowKey: Sendable, Hashable {
 /// corpus builder decodes `fmResponseBase64` → `Data` before passing it back
 /// through the FM response deserializer.
 let shadowSchemaVersion: Int = 1
+
+// MARK: - ShadowSummaryRow (playhead-hygc.1.7)
+
+/// Queryable summary projection of a `shadow_fm_responses` row.
+///
+/// Phase-1 shadow rows store an opaque `fmResponse: Data` BLOB so the wire
+/// format can evolve without schema churn. That makes downstream telemetry
+/// (e.g. "how many shadow ads did variant X catch yesterday?") expensive —
+/// each query has to base64-decode the BLOB and run the FM response
+/// deserializer to recover the boolean verdict and confidence.
+///
+/// `playhead-hygc.1.7` adds two persisted summary columns to the table
+/// (`isAdSummary INTEGER`, `shadowConfidenceSummary REAL`) that are computed
+/// at write time via ``ShadowDecisionsExporter/decodeShadowSummary(_:)``.
+/// `ShadowSummaryRow` is the read-side projection of those columns plus the
+/// composite key — it lets dashboards, NARL exporters, and the bead's
+/// diagnostics counters answer "ad? confidence?" without ever touching the
+/// raw BLOB.
+///
+/// The BLOB stays canonical: if the summary disagrees with a fresh decode
+/// the BLOB is the source of truth and a re-migration can rebuild the
+/// summary columns.
+struct ShadowSummaryRow: Sendable, Equatable {
+    let assetId: String
+    let windowStart: TimeInterval
+    let windowEnd: TimeInterval
+    let configVariant: ShadowConfigVariant
+    let capturedAt: TimeInterval
+    let capturedBy: ShadowCapturedBy
+    let fmModelVersion: String?
+    let isAd: Bool
+    let shadowConfidence: Double
+}

@@ -485,8 +485,26 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     private let store: AnalysisStore
     private let logger = Logger(subsystem: "com.playhead", category: "UserCorrectionStore")
 
+    /// playhead-hygc.1.7: optional durable-learning ingestor. When set,
+    /// every `record(_:)` call routes through it so the same gesture
+    /// that produces a `correction_events` row also triggers training-
+    /// example materialization and sponsor-knowledge side effects. The
+    /// ingestor lives outside the actor's init contract so the runtime
+    /// can wire it post-init (mirrors the SwiftData/episodeMetadataProvider
+    /// pattern used elsewhere). When nil, the existing behavior is
+    /// preserved exactly — important for legacy tests and offline
+    /// replay paths that don't want side effects.
+    private var learningIngestor: LearningArtifactIngestor?
+
     init(store: AnalysisStore) {
         self.store = store
+    }
+
+    /// Install (or replace) the learning-artifact ingestor. Idempotent —
+    /// calling with the same ingestor is a no-op; calling with a new
+    /// ingestor replaces the previous one. Pass `nil` to detach.
+    func setLearningArtifactIngestor(_ ingestor: LearningArtifactIngestor?) {
+        self.learningIngestor = ingestor
     }
 
     // MARK: - UserCorrectionStore
@@ -632,7 +650,18 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     }
 
     /// Persist a fully-formed correction event.
+    ///
+    /// playhead-hygc.1.7: when a `LearningArtifactIngestor` is wired,
+    /// the event is routed through it instead of going directly to
+    /// `appendCorrectionEvent`. The ingestor handles persistence,
+    /// dedupe, materialization, and sponsor side effects in a single
+    /// idempotent step. Without an ingestor, behavior is unchanged
+    /// from pre-1.7 — direct append, no side effects.
     func record(_ event: CorrectionEvent) async throws {
+        if let learningIngestor {
+            _ = try await learningIngestor.ingest(correction: event)
+            return
+        }
         try await store.appendCorrectionEvent(event)
     }
 
