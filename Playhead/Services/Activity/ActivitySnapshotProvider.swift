@@ -738,22 +738,21 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     }
 
     /// playhead-hygc.1.2: derive the dogfood `analysis_source` wire
-    /// string. The historical wire enum was
-    /// `feature_coverage | confirmed_ad_coverage | unknown`; we now also
-    /// surface `final_pass_chunks` when the final-pass watermark exceeds
-    /// both feature and confirmed-ad coverage (a real dogfood signal —
-    /// final-pass re-transcribes ad-window ranges and can land coverage
-    /// the feature window never reached).
+    /// string. The wire enum stays
+    /// `feature_coverage | confirmed_ad_coverage | unknown` — exactly the
+    /// pre-hygc.1.2 surface — because `analysisFraction` is computed from
+    /// `max(featureCoverageEndSec, confirmedAdCoverageEndSec)` only.
+    /// Reporting `final_pass_chunks` here would create a wire-level
+    /// contradiction: `analysis_source` would name a coverage source whose
+    /// seconds were not actually used to compute `analysis_fraction`. The
+    /// final-pass provenance signal is still exposed independently via
+    /// the dedicated `final_pass_coverage_end_source` field, so dogfood
+    /// inspectors can still tell when final-pass chunks have advanced
+    /// beyond feature/ad watermarks.
     private func dogfoodAnalysisSource(summary: AnalysisCoverageSummary?) -> String {
         guard let summary else { return "unknown" }
         let feature = summary.featureCoverageEndSec
         let confirmed = summary.confirmedAdCoverageEndSec
-        let finalPass = summary.finalPassCoverageEndSec
-        if let finalPass,
-           summary.finalPassCoverageEndSource == .finalPassChunks,
-           finalPass > max(feature ?? 0, confirmed ?? 0) {
-            return "final_pass_chunks"
-        }
         switch (feature, confirmed) {
         case let (feature?, confirmed?):
             return confirmed >= feature ? "confirmed_ad_coverage" : "feature_coverage"

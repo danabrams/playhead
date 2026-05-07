@@ -5337,10 +5337,15 @@ actor AnalysisStore {
     /// Activity rows and the dogfood diagnostics snapshot.
     ///
     /// Reconciles per-asset coverage from the most trustworthy persisted
-    /// artifact at read time. Returns ``AnalysisCoverageSummary`` per
-    /// requested assetId — assets with zero rows in `analysis_assets` and
-    /// zero rows in `transcript_chunks` are simply absent from the
-    /// dictionary (callers treat absence as "no data yet").
+    /// artifact at read time. Returns ``AnalysisCoverageSummary`` for
+    /// every requested assetId, including ids with no `analysis_assets`
+    /// row and no `transcript_chunks` rows. Those "missing" entries are
+    /// surfaced with all coverage fields `nil` and provenance
+    /// ``CoverageProvenance/unknown`` so callers don't need to
+    /// distinguish "asset row not present" from "asset present but no
+    /// coverage" — both render the same `--%` placeholder. Use
+    /// ``fetchAssetByEpisodeId`` / ``fetchLatestAssetByEpisodeIdMap`` for
+    /// existence checks.
     ///
     /// Coverage rules:
     ///   - `fastTranscriptCoveredSec` is the **interval-unioned seconds** of
