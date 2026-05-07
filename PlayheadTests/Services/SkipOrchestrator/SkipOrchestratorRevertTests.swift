@@ -551,4 +551,92 @@ struct SkipOrchestratorRevertTests {
         #expect(pushedCues.isEmpty,
                 "veto of markOnly window must not promote to auto-skip; got \(pushedCues.count) cues")
     }
+
+    // R2 (hygc.1.8): hardening test. With multiple suggest-tier entries
+    // present, a localized revert must clear ONLY the overlapping entry
+    // and leave the others intact. This pins the iteration loop against
+    // two failure modes:
+    //   * dict-mutation-while-iterating skipping or duplicating entries
+    //   * an over-zealous "clear all suggest entries on any revert" bug
+    @Test("revertByTimeRange clears only the overlapping suggest-tier entry; non-overlapping entries survive")
+    func revertByTimeRangeOnlyClearsOverlappingSuggestEntries() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // Three markOnly entries at distinct, non-overlapping ranges.
+        let markOnlyIds = ["ad-suggest-A", "ad-suggest-B", "ad-suggest-C"]
+        let ranges: [(Double, Double)] = [(60, 120), (300, 360), (900, 960)]
+        var markOnlyWindows: [AdWindow] = []
+        for (id, range) in zip(markOnlyIds, ranges) {
+            let window = AdWindow(
+                id: id,
+                analysisAssetId: "asset-1",
+                startTime: range.0,
+                endTime: range.1,
+                confidence: 0.55,
+                boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: "test-1",
+                advertiser: nil, product: nil, adDescription: nil,
+                evidenceText: nil, evidenceStartTime: range.0,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: nil,
+                eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+            )
+            try await store.insertAdWindow(window)
+            markOnlyWindows.append(window)
+        }
+        await orchestrator.receiveAdWindows(markOnlyWindows)
+
+        let beforeIds = await orchestrator.activeSuggestWindowIDs()
+        for id in markOnlyIds {
+            #expect(beforeIds.contains(id),
+                    "all three markOnly windows must enter the suggest dict; missing \(id)")
+        }
+
+        // Veto a span that overlaps ONLY the middle entry (300..360).
+        await orchestrator.revertByTimeRange(start: 320, end: 340, podcastId: "podcast-1")
+
+        let afterIds = await orchestrator.activeSuggestWindowIDs()
+        #expect(!afterIds.contains("ad-suggest-B"),
+                "middle entry must be cleared; afterIds=\(afterIds)")
+        #expect(afterIds.contains("ad-suggest-A"),
+                "first non-overlapping entry must survive; afterIds=\(afterIds)")
+        #expect(afterIds.contains("ad-suggest-C"),
+                "third non-overlapping entry must survive; afterIds=\(afterIds)")
+        #expect(afterIds.count == 2,
+                "exactly one entry must be removed; afterIds=\(afterIds)")
+
+        // Persistence reflects the same partition.
+        let persisted = try await store.fetchAdWindows(assetId: "asset-1")
+        let revertedRow = persisted.first { $0.id == "ad-suggest-B" }
+        #expect(revertedRow?.decisionState == AdDecisionState.reverted.rawValue,
+                "only middle entry must be persisted as .reverted; got \(revertedRow?.decisionState ?? "<missing>")")
+        let untouchedA = persisted.first { $0.id == "ad-suggest-A" }
+        let untouchedC = persisted.first { $0.id == "ad-suggest-C" }
+        #expect(untouchedA?.decisionState == AdDecisionState.candidate.rawValue,
+                "non-overlapping entry A must remain .candidate; got \(untouchedA?.decisionState ?? "<missing>")")
+        #expect(untouchedC?.decisionState == AdDecisionState.candidate.rawValue,
+                "non-overlapping entry C must remain .candidate; got \(untouchedC?.decisionState ?? "<missing>")")
+    }
 }

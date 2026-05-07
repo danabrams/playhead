@@ -1074,10 +1074,19 @@ actor SkipOrchestrator {
         // disappear and never re-emit. The persisted AdWindow row gets
         // `decisionState = .reverted` so a re-launch / replay does not
         // resurface the entry.
-        for (id, suggested) in suggestWindows {
-            // Same overlap predicate as the windows loop.
-            guard suggested.startTime < end, suggested.endTime > start else { continue }
+        //
+        // R2 (hygc.1.8): snapshot the matching entries BEFORE mutating
+        // `suggestWindows`. Mutating a Swift Dictionary mid-iteration is
+        // documented as undefined behavior — even though COW happens to
+        // make the current loop survive in practice, depending on that is
+        // a maintenance hazard. Build the work list first, then mutate.
+        let suggestRevertTargets: [(id: String, window: AdWindow)] =
+            suggestWindows.compactMap { (id, suggested) in
+                guard suggested.startTime < end, suggested.endTime > start else { return nil }
+                return (id, suggested)
+            }
 
+        for (id, suggested) in suggestRevertTargets {
             suggestWindows.removeValue(forKey: id)
             // Also clear from the bannered set so a future ingest with the
             // same id doesn't immediately re-emit the suggest banner.
