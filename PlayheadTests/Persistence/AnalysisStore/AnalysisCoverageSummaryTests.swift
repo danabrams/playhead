@@ -98,6 +98,26 @@ struct AnalysisCoverageMathTests {
         #expect(result == 7)
     }
 
+    /// NaN endpoints must be filtered (NOT poison the running total).
+    /// Subtle: any comparison against `NaN` returns `false`, so the
+    /// helper's `end > start` filter naturally excludes `NaN`-valued
+    /// intervals — but only because the predicate is `>` (strict). If a
+    /// future refactor weakens that to `>=` AND admits NaN-equal cases,
+    /// the math would silently start producing NaN totals; this test
+    /// pins the current behaviour so that regression is caught.
+    @Test("NaN endpoints are filtered, total stays finite")
+    func nanIntervalsAreFiltered() {
+        let result = AnalysisCoverageMath.unionedSeconds([
+            (start: 0, end: 10),
+            (start: .nan, end: 50),
+            (start: 0, end: .nan),
+            (start: .nan, end: .nan)
+        ])
+        // Only [0, 10] survives — total is 10s and is finite.
+        #expect(result == 10)
+        #expect(result.isFinite)
+    }
+
     /// Intervals presented in arbitrary order must produce the same
     /// answer as sorted input — sort stability is internal to the helper.
     @Test("unsorted input matches sorted result")
