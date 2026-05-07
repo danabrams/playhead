@@ -903,6 +903,23 @@ extension DogfoodDiagnosticsAnalysisHealth {
             )
         }
 
+        // R4: healthy terminal completion — the row reached a
+        // satisfactory terminal state, the contradiction predicate
+        // already confirmed canonical coverage agrees, no failure
+        // outweighs it, no stale lease/watermark hazard. The user has
+        // nothing to do; recommend `.wait` rather than letting the row
+        // fall through to the queued+cached branch below, which would
+        // tell the user to "plug in" for an asset that is already
+        // done. Without this gate a `completeFeatureOnly` row whose
+        // intentionally-low transcript leaves transcriptPercent at
+        // "--%" would be misclassified as thermal-blocked.
+        if isTerminalCompletionState(asset.analysisState) {
+            return Recommendation(
+                action: .wait,
+                note: "healthy_terminal_completion"
+            )
+        }
+
         // Already-running rows just need to wait.
         if row.isRunning {
             return Recommendation(action: .wait, note: "currently_running")

@@ -767,6 +767,83 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         #expect(health.assets.first?.recommendedAction == .wait)
     }
 
+    @Test("recommends wait for healthy terminal-completion rows even when transcriptPercent is --%")
+    func recommendsWaitForHealthyTerminalCompletion() {
+        // R4 fix: a healthy terminal-completion row (no failure, no
+        // contradiction, no stale lease/watermark hazard) must
+        // recommend `.wait`, not fall through to the queued+cached
+        // branch. The interesting case is `completeFeatureOnly` whose
+        // intentionally-low transcript leaves transcriptPercent at
+        // "--%" — under the previous logic that would route to
+        // `.plugInOrWait` and tell the user to plug in for an asset
+        // that is already terminally complete. Pin every healthy
+        // completion state so a future regression cannot misclassify
+        // the row as thermal-blocked.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [
+                // completeFeatureOnly with intentionally-low transcript.
+                makeActivityRow(
+                    hash: "h-cfo-healthy",
+                    analysisState: "completeFeatureOnly",
+                    pipeline: makePipeline(
+                        transcriptPercent: "--%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 40,
+                        fastTranscriptWatermarkSec: 40,
+                        featureCoverageEndSec: 3960
+                    )
+                ),
+                // completeTranscriptPartial with healthy partial coverage.
+                makeActivityRow(
+                    hash: "h-ctp-healthy",
+                    analysisState: "completeTranscriptPartial",
+                    pipeline: makePipeline(
+                        transcriptPercent: "60%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 2400,
+                        fastTranscriptWatermarkSec: 2400,
+                        featureCoverageEndSec: 4000
+                    )
+                ),
+                // completeFull, fully healthy.
+                makeActivityRow(
+                    hash: "h-cf-healthy",
+                    analysisState: "completeFull",
+                    pipeline: makePipeline(
+                        transcriptPercent: "98%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 3960,
+                        fastTranscriptWatermarkSec: 3960,
+                        featureCoverageEndSec: 4000
+                    )
+                ),
+                // legacy `complete`, fully healthy.
+                makeActivityRow(
+                    hash: "h-legacy-healthy",
+                    analysisState: "complete",
+                    pipeline: makePipeline(
+                        transcriptPercent: "98%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 3960,
+                        fastTranscriptWatermarkSec: 3960,
+                        featureCoverageEndSec: 4000
+                    )
+                )
+            ]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let actions = health.assets.map(\.recommendedAction)
+        #expect(actions == [.wait, .wait, .wait, .wait])
+        // None of the healthy completions may be flagged for
+        // contradiction (independent confirmation that the new branch
+        // is gated correctly).
+        #expect(!health.stalenessFlags.contains { $0.kind == .terminalStateContradictsCoverage })
+    }
+
     @Test("flags stale_job_lease and recommends clear_stale_lease when the lease outlived the latest session")
     func flagsAndRecommendsForStaleLease() {
         // Lease expires at t=100 but the latest session updatedAt is
