@@ -4841,6 +4841,20 @@ actor AdDetectionService {
     /// All emitted rows are stamped with `eligibilityGate = "markOnly"`
     /// so the suggest-tier banner — and explicitly NOT auto-skip — is
     /// the surface. This is the precision-safe recall lever.
+    ///
+    /// Concurrency precondition: this function runs to completion under
+    /// the `AdDetectionService` actor's serialization, BUT it spans
+    /// multiple `await`s (`loadCorrectionEvents`, `fetchAdWindows`, and
+    /// the caller's subsequent `upsertHotPathAdWindows`). Actor
+    /// reentrancy could in principle let two concurrent
+    /// `runHotPathResult` calls each compute fresh UUIDs from the same
+    /// FN range and double-insert. The production caller chain
+    /// (`AnalysisCoordinator.handlePersistedTranscriptChunks`) is itself
+    /// an actor-isolated single-shot per asset, so two concurrent
+    /// `runHotPathResult` calls on the same asset are not produced. This
+    /// invariant is documented at the call site (R5) rather than enforced
+    /// here because the only callers in tree are the two
+    /// `runHotPathResult` entry points above.
     private func correctionReplayCandidates(
         analysisAssetId: String
     ) async throws -> [AdWindow] {

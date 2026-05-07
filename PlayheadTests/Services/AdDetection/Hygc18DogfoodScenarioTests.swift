@@ -258,6 +258,131 @@ struct Hygc18DogfoodScenarioTests {
         #expect(untouched.allSatisfy { $0.decisionState != AdDecisionState.reverted.rawValue },
                 "unrelated windows must not be reverted by a localized veto")
     }
+
+    // playhead-hygc.1.8 R5: integration coverage for the production
+    // retirement-enabled multi-run path. The original
+    // `dogfoodScenarioCoversAllThreeLevers` test calls `runHotPath`
+    // (defaulting to `retireUnmatchedReplayCandidates: false`) with empty
+    // chunks — a code path that takes the `chunks.isEmpty` early return
+    // and never even reaches the retirement logic. Production
+    // `AnalysisCoordinator.handlePersistedTranscriptChunks` calls
+    // `runHotPathResult` with `retireUnmatchedReplayCandidates: true` and
+    // non-empty chunks, which is exactly the path R3 / R4 had to harden.
+    //
+    // This test mirrors the production caller shape (chunks present,
+    // retirement enabled) over MULTIPLE runs and asserts:
+    //   * Run 1 emits the replay row, the row is NOT in
+    //     `retiredWindowIDs` (R3 fix).
+    //   * Run 2 keeps the previously-emitted replay row and the row's
+    //     id is NOT in `retiredWindowIDs` even though it would match
+    //     `(decisionState=.candidate, detectorVersion=current)` in
+    //     `hotPathCandidateIDs` (R4 fix).
+    //   * Run 3 keeps population bounded at one replay row.
+    //   * Through all runs, the row identity is stable (same UUID).
+    //
+    // Without this, the integration suite passes for the wrong reason:
+    // the empty-chunks branch short-circuits before retirement runs.
+    @Test("integration scenario survives the production multi-run retirement-enabled path")
+    func dogfoodScenarioSurvivesMultiRunRetirement() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-hygc-dogfood-multi-run"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        // No-op classifier: only the correction-replay path can produce
+        // an AdWindow. This isolates the multi-run retirement bug from
+        // any algorithmic noise.
+        let classifier = SlotScoringClassifier(
+            scoresByStartTime: [:],
+            defaultScore: 0.05
+        )
+        let service = makeService(store: store, classifier: classifier)
+
+        // FN at 1500..1560 — same shape as the dogfood scenario.
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: 1500, endTime: 1560
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        ))
+
+        // Chunks whose envelope (1400..1600) overlaps the FN range so the
+        // retirement path's `replayCandidateIDs` query would include the
+        // persisted replay row on every subsequent run. Lexically benign
+        // text → algorithmic detector emits nothing.
+        let chunks: [TranscriptChunk] = [
+            TranscriptChunk(
+                id: "chunk-1",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-1",
+                chunkIndex: 0,
+                startTime: 1400,
+                endTime: 1600,
+                text: "the speaker is talking about something benign",
+                normalizedText: "the speaker is talking about something benign",
+                pass: "final",
+                modelVersion: "speech-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil,
+                weakAnchorMetadata: nil
+            )
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        // Run 1: emit + retain.
+        let r1 = try await service.runHotPathResult(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            retireUnmatchedReplayCandidates: true
+        )
+        let after1 = try await store.fetchAdWindows(assetId: assetId)
+            .filter { $0.boundaryState == "correctionReplay" }
+        #expect(after1.count == 1,
+                "run 1: must emit exactly one replay row; got \(after1.count)")
+        let stableId = after1.first?.id ?? ""
+        #expect(!r1.retiredWindowIDs.contains(stableId),
+                "run 1: fresh replay row id must not be retired; got \(r1.retiredWindowIDs)")
+        #expect(r1.windows.contains { $0.id == stableId },
+                "run 1: HotPathRunResult.windows must include the replay row")
+
+        // Run 2: replay short-circuits, persisted row must survive
+        // retirement (R4 critical fix).
+        let r2 = try await service.runHotPathResult(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            retireUnmatchedReplayCandidates: true
+        )
+        let after2 = try await store.fetchAdWindows(assetId: assetId)
+            .filter { $0.boundaryState == "correctionReplay" }
+        #expect(after2.count == 1,
+                "run 2: replay row must survive retirement; got \(after2.count)")
+        #expect(after2.first?.id == stableId,
+                "run 2: replay row id must be stable; got \(after2.first?.id ?? "<missing>")")
+        #expect(!r2.retiredWindowIDs.contains(stableId),
+                "run 2: retiredWindowIDs must not contain replay row; got \(r2.retiredWindowIDs)")
+
+        // Run 3: bounded.
+        let r3 = try await service.runHotPathResult(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            retireUnmatchedReplayCandidates: true
+        )
+        let after3 = try await store.fetchAdWindows(assetId: assetId)
+            .filter { $0.boundaryState == "correctionReplay" }
+        #expect(after3.count == 1,
+                "run 3: population must remain bounded at one replay row; got \(after3.count)")
+        #expect(!r3.retiredWindowIDs.contains(stableId),
+                "run 3: retiredWindowIDs must not contain replay row; got \(r3.retiredWindowIDs)")
+    }
 }
 
 // MARK: - Test doubles
