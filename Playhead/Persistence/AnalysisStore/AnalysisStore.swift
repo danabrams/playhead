@@ -3540,7 +3540,26 @@ actor AnalysisStore {
         update: BackgroundTaskRunOutcomeUpdate,
         finishedAt: Double
     ) throws -> Bool {
-        // Idempotence probe: if the row is already terminal, skip.
+        // Idempotence probe.
+        //
+        // R12 audit note: this probe is BEHAVIORALLY redundant with the
+        // UPDATE's `WHERE runId=? AND outcome='running'` clause and the
+        // `sqlite3_changes(db) > 0` return check below — the bare UPDATE
+        // alone produces identical observable behavior on all three
+        // possible row states (no row, terminal row, running row), so a
+        // strictly-correctness-only refactor could remove the probe and
+        // pass every test in the suite (including the N=10 contention
+        // stress test in `BackgroundTaskRunLedgerTests`). The probe is
+        // retained as defense-in-depth: if a future SQL refactor drops
+        // the `outcome='running'` filter from the UPDATE's WHERE clause
+        // (e.g. someone adding a new column and rewriting the statement
+        // without re-reading the idempotence contract), the probe still
+        // catches the regression and prevents stomping a terminal write.
+        // Any maintainer tempted to delete the probe MUST first migrate
+        // the contract elsewhere (e.g. a UNIQUE INDEX or trigger) — the
+        // probe is the only commented enforcement point for the
+        // "first-writer-wins" invariant that the BPS expirationHandler
+        // race depends on.
         let probeSql = "SELECT outcome FROM background_task_runs WHERE runId = ? LIMIT 1"
         let probe = try prepare(probeSql)
         defer { sqlite3_finalize(probe) }
