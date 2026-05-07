@@ -401,6 +401,154 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         #expect(health.global.staleTerminalCount == 0)
     }
 
+    @Test("threshold is strict <: exactly 95.0% does not flag, just below does")
+    func thresholdBoundaryAtNinetyFivePercent() {
+        // Pin the exact comparison semantics around the 95% threshold.
+        // duration=1000, threshold=950. Coverage=950 is healthy
+        // (strict <), coverage=949.999... is a contradiction. Without
+        // this pin, a future >= 0.95 swap would silently widen the
+        // window (or a < 1.0 hardcode would silently narrow it).
+        let healthySnapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-at-threshold",
+                analysisState: "completeFull",
+                pipeline: makePipeline(
+                    episodeDurationSec: 1000,
+                    transcriptCoveredSec: 950,
+                    fastTranscriptWatermarkSec: 950,
+                    featureCoverageEndSec: 950
+                )
+            )]
+        )
+        let healthy = DogfoodDiagnosticsAnalysisHealth.build(
+            from: healthySnapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        #expect(!healthy.stalenessFlags.contains { $0.kind == .terminalStateContradictsCoverage })
+        #expect(healthy.assets.first?.recommendedAction != .fileBug)
+
+        // 949.999 just below threshold → flag fires.
+        let belowSnapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-just-below",
+                analysisState: "completeFull",
+                pipeline: makePipeline(
+                    episodeDurationSec: 1000,
+                    transcriptCoveredSec: 949.999,
+                    fastTranscriptWatermarkSec: 949.999,
+                    featureCoverageEndSec: 949.999
+                )
+            )]
+        )
+        let below = DogfoodDiagnosticsAnalysisHealth.build(
+            from: belowSnapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        #expect(below.stalenessFlags.contains { $0.kind == .terminalStateContradictsCoverage })
+        #expect(below.assets.first?.recommendedAction == .fileBug)
+    }
+
+    @Test("flag list and recommendation list always agree on terminal contradictions")
+    func flagAndRecommendationAgreeOnContradictions() {
+        // R2 invariant: stalenessFlags(for:) and recommendation(for:)
+        // both call the SAME terminalCompletionContradiction predicate.
+        // Walk a matrix of state × axis combinations and assert the
+        // bidirectional agreement: a row flagged for terminal
+        // contradiction MUST be recommended fileBug, and a row
+        // recommended fileBug MUST be flagged for terminal contradiction.
+        // Failure modes one would-be R3 reviewer asks about: a future
+        // refactor that moves the predicate inline in one site but not
+        // the other, or introduces a state-specific note that diverges.
+        let cases: [(String, String, Double, Double, Double, Double)] = [
+            // (hash, state, duration, transcriptCovered, fastWatermark, featureCoverage)
+            ("h-cf-both-short",     "completeFull",            4000, 100, 100, 100),
+            ("h-cf-feature-short",  "completeFull",            4000, 3960, 3960, 100),
+            ("h-cf-transcript-short","completeFull",           4000, 100, 100, 3960),
+            ("h-cf-healthy",        "completeFull",            4000, 3900, 3900, 4000),
+            ("h-legacy-short",      "complete",                4000, 100, 100, 100),
+            ("h-legacy-healthy",    "complete",                4000, 3900, 3900, 3900),
+            ("h-cfo-short",         "completeFeatureOnly",     4000, 40, 40, 100),
+            ("h-cfo-healthy",       "completeFeatureOnly",     4000, 40, 40, 3900),
+            ("h-ctp-empty",         "completeTranscriptPartial", 4000, 0, 0, 4000),
+            ("h-ctp-partial",       "completeTranscriptPartial", 4000, 2000, 2000, 4000),
+            // States outside the completion vocabulary should NEVER
+            // flag for terminal contradiction, regardless of coverage.
+            ("h-running",           "backfill",                4000, 0, 0, 0),
+            ("h-queued",            "queued",                  4000, 0, 0, 0)
+        ]
+        let rows = cases.map { hashValue, state, dur, tc, fwm, fc in
+            makeActivityRow(
+                hash: hashValue,
+                analysisState: state,
+                pipeline: makePipeline(
+                    episodeDurationSec: dur,
+                    transcriptCoveredSec: tc,
+                    fastTranscriptWatermarkSec: fwm,
+                    featureCoverageEndSec: fc
+                )
+            )
+        }
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: rows
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let flaggedHashes: Set<String> = Set(
+            health.stalenessFlags
+                .filter { $0.kind == .terminalStateContradictsCoverage }
+                .map(\.episodeIdHash)
+        )
+        let fileBugHashes: Set<String> = Set(
+            health.assets
+                .filter { $0.recommendedAction == .fileBug }
+                .map(\.episodeIdHash)
+        )
+        // Bidirectional agreement.
+        #expect(flaggedHashes == fileBugHashes)
+        // And the absolute set is what we expect — if this changes,
+        // the predicate (or a state contract) shifted and we want to
+        // notice.
+        #expect(flaggedHashes == [
+            "h-cf-both-short",
+            "h-cf-feature-short",
+            "h-cf-transcript-short",
+            "h-legacy-short",
+            "h-cfo-short",
+            "h-ctp-empty"
+        ])
+    }
+
+    @Test("nil episode_duration_sec on a completeFull row never flags or recommends fileBug")
+    func nilDurationSuppressesContradiction() {
+        // Without a duration, we cannot compute a threshold. The
+        // contract is "no flag" rather than "always flag" — pin both
+        // halves of that.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-no-duration",
+                analysisState: "completeFull",
+                pipeline: makePipeline(
+                    episodeDurationSec: nil,
+                    transcriptCoveredSec: 0,
+                    fastTranscriptWatermarkSec: 0,
+                    featureCoverageEndSec: 0
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        #expect(!health.stalenessFlags.contains { $0.kind == .terminalStateContradictsCoverage })
+        #expect(health.assets.first?.recommendedAction != .fileBug)
+    }
+
     @Test("does not flag completeFeatureOnly when transcript is intentionally low")
     func doesNotFlagCompleteFeatureOnlyForLowTranscript() {
         // Feature covered to 99% but transcript only 1% — by the
