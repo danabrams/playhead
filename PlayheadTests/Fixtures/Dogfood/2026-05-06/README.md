@@ -27,9 +27,10 @@ the structural-fact tests are at
 | `*.xcappdata/AppData/Documents/ExportedAnalysisStore/analysis.sqlite` | `analysis_assets`, `transcript_chunks` maxima, `ad_windows` counts, `correction_events` duplicates, learning-table counts, `shadow_fm_responses` count |
 | `*.xcappdata/AppData/Documents/bg-task-log.jsonl` | Background-task event counts overall and by category |
 
-The asset-lifecycle and shadow-decisions JSONL files are read for cross-check
-during sanity scans (asset state transitions; FM response payloads) but no
-fields from them appear in the fixture.
+The build script does NOT read `asset-lifecycle-log.jsonl` or
+`shadow-decisions.jsonl` — the shadow FM response count is sourced from the
+`shadow_fm_responses` SQL table, and lifecycle events are not part of the
+fixture's load-bearing surface.
 
 ## Fields retained
 

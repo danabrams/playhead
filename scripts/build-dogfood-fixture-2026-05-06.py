@@ -11,10 +11,11 @@ appears in the output. All identifiers are stable synthetic IDs.
 
 Source files (read-only, NOT committed):
   - playhead-dogfood-diagnostics-2026-05-06T23-46-51Z.json   (activity_snapshot)
-  - .xcappdata/.../analysis.sqlite                          (assets/chunks/ad_windows/corrections/learning tables)
+  - .xcappdata/.../analysis.sqlite                          (assets/chunks/ad_windows/corrections/learning tables; shadow_fm_responses count)
   - .xcappdata/.../bg-task-log.jsonl                         (background-task event counts)
-  - .xcappdata/.../shadow-decisions.jsonl                    (shadow FM response COUNT only)
-  - .xcappdata/.../asset-lifecycle-log.jsonl                 (lifecycle event counts; not strictly needed but cheap)
+
+(`shadow-decisions.jsonl` and `asset-lifecycle-log.jsonl` are NOT read — the
+shadow FM response count is sourced from the `shadow_fm_responses` SQL table.)
 
 Run: python3 scripts/build-dogfood-fixture-2026-05-06.py [out_path]
 """
@@ -56,10 +57,6 @@ def sqlite_path() -> str:
 
 def bg_task_log_path() -> str:
     return os.path.join(documents_dir(), "bg-task-log.jsonl")
-
-
-def shadow_log_path() -> str:
-    return os.path.join(documents_dir(), "shadow-decisions.jsonl")
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +378,16 @@ FORBIDDEN_SUBSTRINGS: tuple[tuple[str, str], ...] = (
     ("Mint Mobile", "sponsor brand string"),
     ("Conan", "show title fragment"),
     ("Diary of a CEO", "show title fragment"),
+    # Non-asset-bound CorrectionScope prefixes (see UserCorrectionStore.swift).
+    # These MUST be filtered upstream by `rewrite_scope` because their payload
+    # has no synthetic mapping; if any survive into the serialized fixture the
+    # audit gate must abort the write. This list mirrors the Swift
+    # `fixtureIsScrubbed` test's allowlist so the gate stays in lock-step.
+    ("sponsorOnShow", "non-asset-bound CorrectionScope prefix"),
+    ("phraseOnShow", "non-asset-bound CorrectionScope prefix"),
+    ("campaignOnShow", "non-asset-bound CorrectionScope prefix"),
+    ("domainOwnershipOnShow", "non-asset-bound CorrectionScope prefix"),
+    ("jingleOnShow", "non-asset-bound CorrectionScope prefix"),
 )
 
 UUID_PATTERN = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
