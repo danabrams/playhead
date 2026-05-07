@@ -894,29 +894,41 @@ extension DogfoodDiagnosticsAnalysisHealth {
             )
         }
 
-        // Stale watermark gap → wait (the next backfill tick will
-        // reconcile playhead-3bv.2).
-        if let delta = watermarkDelta, delta > staleWatermarkToleranceSec {
-            return Recommendation(
-                action: .plugInOrWait,
-                note: "stale_watermark_delta=\(formatSeconds(delta))"
-            )
-        }
-
-        // R4: healthy terminal completion — the row reached a
-        // satisfactory terminal state, the contradiction predicate
-        // already confirmed canonical coverage agrees, no failure
-        // outweighs it, no stale lease/watermark hazard. The user has
-        // nothing to do; recommend `.wait` rather than letting the row
-        // fall through to the queued+cached branch below, which would
-        // tell the user to "plug in" for an asset that is already
-        // done. Without this gate a `completeFeatureOnly` row whose
+        // R5: healthy terminal completion — the row reached a
+        // satisfactory terminal state and `terminalCompletionContradiction`
+        // already confirmed canonical coverage agrees. The user has
+        // nothing to do; recommend `.wait` BEFORE the stale-watermark
+        // and queued+cached fallbacks. R4 placed this gate after the
+        // stale-watermark check, which left a hole: the May 6
+        // `asset_004` shape — `completeFull` with chunk coverage at
+        // 3960 s but persisted `fast_transcript_watermark` stuck at
+        // 90 s — would fall through to `.plugInOrWait` and tell the
+        // user to plug in for an asset that is already terminally
+        // complete. The watermark drift is a benign persistence
+        // hazard (playhead-3bv.2) on terminal rows, not a thermal
+        // block; the staleness flag still surfaces it for support
+        // visibility.
+        //
+        // Without this gate a `completeFeatureOnly` row whose
         // intentionally-low transcript leaves transcriptPercent at
-        // "--%" would be misclassified as thermal-blocked.
+        // "--%" would be misclassified as thermal-blocked, and a
+        // `completeFull` with stale watermark would be incorrectly
+        // routed to "plug in".
         if isTerminalCompletionState(asset.analysisState) {
             return Recommendation(
                 action: .wait,
                 note: "healthy_terminal_completion"
+            )
+        }
+
+        // Stale watermark gap → wait for next backfill tick (the
+        // playhead-3bv.2 reconciler will catch up). For non-terminal
+        // rows this almost always co-occurs with a thermal-deferred
+        // backfill, so `.plugInOrWait` is the right user-facing hint.
+        if let delta = watermarkDelta, delta > staleWatermarkToleranceSec {
+            return Recommendation(
+                action: .plugInOrWait,
+                note: "stale_watermark_delta=\(formatSeconds(delta))"
             )
         }
 

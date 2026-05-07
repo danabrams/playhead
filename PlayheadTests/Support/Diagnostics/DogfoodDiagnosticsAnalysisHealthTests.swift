@@ -838,9 +838,66 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         )
         let actions = health.assets.map(\.recommendedAction)
         #expect(actions == [.wait, .wait, .wait, .wait])
+        // R5: pin the note string too, otherwise a future rename of
+        // the wire annotation would slip past the action-only check.
+        // Support tooling that branches on this string would silently
+        // miss the new value.
+        let notes = health.assets.map(\.recommendedActionNote)
+        #expect(notes == [
+            "healthy_terminal_completion",
+            "healthy_terminal_completion",
+            "healthy_terminal_completion",
+            "healthy_terminal_completion"
+        ])
         // None of the healthy completions may be flagged for
         // contradiction (independent confirmation that the new branch
         // is gated correctly).
+        #expect(!health.stalenessFlags.contains { $0.kind == .terminalStateContradictsCoverage })
+    }
+
+    @Test("terminal-completion rows with stale watermark drift recommend wait, not plug in")
+    func terminalCompletionWithStaleWatermarkRecommendsWait() {
+        // R5 fix: the May 6 `asset_004` shape — a `completeFull` row
+        // whose persisted `fast_transcript_watermark_sec` lags the
+        // real `transcript_covered_sec` by minutes — was incorrectly
+        // routed to `.plugInOrWait` "stale_watermark_delta=..." under
+        // R4's branch ordering. The asset is already terminally
+        // complete; the watermark drift is a benign persistence
+        // hazard (playhead-3bv.2), not a thermal block. The user has
+        // nothing to do; the staleness flag still surfaces the drift
+        // for support visibility.
+        //
+        // Pin: action=.wait, note="healthy_terminal_completion", AND
+        // the staleFastTranscriptWatermark flag is still raised so a
+        // future fix that suppresses the FLAG (instead of just
+        // changing the recommendation) is caught here.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-asset004",
+                analysisState: "completeFull",
+                cachedAudioPresent: true,
+                pipeline: makePipeline(
+                    transcriptPercent: "99%",
+                    episodeDurationSec: 4000,
+                    transcriptCoveredSec: 3960,
+                    fastTranscriptWatermarkSec: 90, // 65-minute drift
+                    featureCoverageEndSec: 4000
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let asset = try! #require(health.assets.first)
+        #expect(asset.recommendedAction == .wait)
+        #expect(asset.recommendedActionNote == "healthy_terminal_completion")
+        // The flag still fires for support visibility.
+        #expect(health.stalenessFlags.contains { $0.kind == .staleFastTranscriptWatermark })
+        #expect(health.global.staleWatermarkCount == 1)
+        // And the row is NOT a contradiction (transcript axis = 3960
+        // ≥ threshold 3800 via best-known fallback).
         #expect(!health.stalenessFlags.contains { $0.kind == .terminalStateContradictsCoverage })
     }
 
@@ -1284,6 +1341,16 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         // Terminal-state truth: at least one completeFull row in
         // the May 6 shape carries a watermark contradiction.
         #expect(health.global.staleWatermarkCount >= 1)
+        // R5: the `asset_004`-equivalent row (completeFull with
+        // chunks at 3960 s but watermark stuck at 90 s) is terminally
+        // complete; recommend `.wait`, not `.plugInOrWait`. Pin the
+        // recommendation alongside the watermark flag — the flag
+        // survives for support visibility while the user-facing
+        // hint stays correct.
+        let asset004 = health.assets.first { $0.episodeIdHash == "may6-completeFull-0" }
+        let pinned = try! #require(asset004)
+        #expect(pinned.recommendedAction == .wait)
+        #expect(pinned.recommendedActionNote == "healthy_terminal_completion")
     }
 }
 
