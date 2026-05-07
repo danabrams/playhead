@@ -392,6 +392,87 @@ struct CorrectionReplayCandidateTests {
         #expect(persisted.first(where: { $0.id == "reverted-row-1" })?.decisionState == AdDecisionState.reverted.rawValue,
                 "previously vetoed window must remain reverted")
     }
+
+    // MARK: - 6. R3: replay row not retired by the same hot-path run that emitted it
+
+    /// playhead-hygc.1.8 R3: regression for the retirement-bug found in R0.
+    /// Live `AnalysisCoordinator` calls `runHotPathResult` with
+    /// `retireUnmatchedReplayCandidates: true`. That path computes
+    /// `replayCandidateIDs` as every existing
+    /// `decisionState=.candidate, detectorVersion=config.detectorVersion`
+    /// AdWindow overlapping the chunks envelope — which, after R0,
+    /// includes the freshly-emitted correction-replay row that was
+    /// upserted moments earlier. With no incoming algorithmic AdWindow to
+    /// match it, the replay row would land in `retiredWindowIDs` and get
+    /// DELETED at the end of the same run that just inserted it. This
+    /// breaks the idempotency claim AND would yank the suggest-tier
+    /// banner via `retireAdWindows` in production.
+    @Test("retireUnmatchedReplayCandidates does not delete a freshly-emitted correction-replay row")
+    func retirementDoesNotEatFreshCorrectionReplayRow() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-retire-bug"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        // User reported a missed ad at 600..680 — the same range will be
+        // covered by the upcoming chunk envelope.
+        try await appendFalseNegativeCorrection(
+            store: store,
+            assetId: assetId,
+            startTime: 600,
+            endTime: 680
+        )
+
+        // Build chunks whose envelope (`chunks.startTime.min ...
+        // chunks.endTime.max`) includes 600..680. The text contains no
+        // lexical ad triggers so the algorithmic detector emits nothing
+        // and the only AdWindow on the asset must be the
+        // correction-replay row — which would be retired by the
+        // unmatched-replay-candidate logic if R3's exclusion isn't in
+        // place.
+        let chunks: [TranscriptChunk] = [
+            TranscriptChunk(
+                id: "chunk-1",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-1",
+                chunkIndex: 0,
+                startTime: 500,
+                endTime: 700,
+                text: "the speaker is talking about something benign",
+                normalizedText: "the speaker is talking about something benign",
+                pass: "final",
+                modelVersion: "speech-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil,
+                weakAnchorMetadata: nil
+            )
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+
+        let result = try await service.runHotPathResult(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            retireUnmatchedReplayCandidates: true
+        )
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        let replayRows = persisted.filter { $0.boundaryState == "correctionReplay" }
+        #expect(replayRows.count == 1,
+                "fresh correction-replay row must survive the same-run retirement pass; got \(replayRows.count)")
+
+        // The row id must NOT be in the retiredWindowIDs set returned
+        // to AnalysisCoordinator (which would push retireAdWindows to
+        // SkipOrchestrator and yank the suggest-tier banner).
+        if let replayRow = replayRows.first {
+            #expect(!result.retiredWindowIDs.contains(replayRow.id),
+                    "fresh correction-replay row id must not be in retiredWindowIDs: \(result.retiredWindowIDs)")
+        }
+    }
 }
 
 // MARK: - Test doubles

@@ -1302,12 +1302,27 @@ actor AdDetectionService {
             )
         }
 
+        // playhead-hygc.1.8 (R3): exclude freshly-emitted correction-replay
+        // row IDs from `replayCandidateIDs`. The replay rows are persisted
+        // moments earlier in this same `runHotPathResult` call with
+        // `decisionState = .candidate` and `detectorVersion =
+        // config.detectorVersion`, so `hotPathCandidateIDs` (which filters
+        // by exactly that pair) would otherwise include them in the
+        // retirement set. When `retireUnmatchedReplayCandidates == true`
+        // (the live AnalysisCoordinator caller) AND the chunks envelope
+        // overlaps a freshly-emitted replay row, the row would be retired
+        // (DELETED) at the end of the same run that just inserted it —
+        // breaking idempotency, and triggering a `retireAdWindows` push to
+        // the orchestrator that would yank the suggest-tier banner. We
+        // intentionally insert these rows above any retirement window.
+        let correctionReplayWindowIDs: Set<String> =
+            Set(correctionReplayWindows.map(\.id))
         let replayCandidateIDs: Set<String>
         if retireUnmatchedReplayCandidates {
             replayCandidateIDs = try await hotPathCandidateIDs(
                 analysisAssetId: analysisAssetId,
                 overlapping: replayEnvelope(for: chunks)
-            )
+            ).subtracting(correctionReplayWindowIDs)
         } else {
             replayCandidateIDs = []
         }
