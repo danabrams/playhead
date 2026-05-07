@@ -458,7 +458,6 @@ extension DogfoodDiagnosticsAnalysisHealth {
         }
         let global = buildGlobalSummary(
             rows: rows,
-            assets: assets,
             stalenessFlags: allStalenessFlags
         )
         return DogfoodDiagnosticsAnalysisHealth(
@@ -585,72 +584,19 @@ extension DogfoodDiagnosticsAnalysisHealth {
         //                                 still cover up to the
         //                                 transcript ceiling
         //   * complete (legacy)     → both should be roughly covered
-        // We only flag contradictions for the cases where the
-        // expectation actually exists — flagging completeFeatureOnly's
-        // low transcript coverage would be noise, not signal.
-        if let duration = pipeline.episodeDurationSec, duration > 0 {
-            let threshold = duration * terminalCoverageRatioThreshold
-            let featureBest = bestKnown(
-                pipeline.featureCoverageEndSec,
-                pipeline.confirmedAdCoverageEndSec
-            )
-            // For completeFull/legacy-complete the contract is feature AND
-            // transcript at threshold — a shortfall on EITHER axis is a
-            // contradiction. We compute the two axes independently (taking
-            // the max-known value within each axis, so a non-nil watermark
-            // can stand in for a nil chunk-coverage) and flag if either
-            // axis fails. Folding the axes into a single max would mask
-            // the case where one is healthy and the other is empty.
-            let transcriptAxis = bestKnown(
-                pipeline.transcriptCoveredSec,
-                pipeline.fastTranscriptWatermarkSec
-            ) ?? 0
-            let featureAxis = featureBest ?? 0
-            switch asset.analysisState {
-            case "completeFull", "complete":
-                if transcriptAxis < threshold || featureAxis < threshold {
-                    flags.append(StalenessFlag(
-                        episodeIdHash: row.episodeIdHash,
-                        kind: .terminalStateContradictsCoverage,
-                        detail: redactedTruncated(
-                            "state=\(asset.analysisState) duration=\(formatSeconds(duration)) "
-                                + "transcript_axis=\(formatSeconds(transcriptAxis)) "
-                                + "feature_axis=\(formatSeconds(featureAxis)) "
-                                + "threshold=\(formatSeconds(threshold))"
-                        )
-                    ))
-                }
-            case "completeFeatureOnly":
-                let featureCoverage = featureBest ?? 0
-                if featureCoverage < threshold {
-                    flags.append(StalenessFlag(
-                        episodeIdHash: row.episodeIdHash,
-                        kind: .terminalStateContradictsCoverage,
-                        detail: redactedTruncated(
-                            "state=completeFeatureOnly duration=\(formatSeconds(duration)) "
-                                + "feature_coverage=\(formatSeconds(featureCoverage)) "
-                                + "threshold=\(formatSeconds(threshold))"
-                        )
-                    ))
-                }
-            case "completeTranscriptPartial":
-                // Transcript is intentionally partial; flag only if
-                // transcript coverage is genuinely zero (nothing
-                // advanced) — that's the contradiction worth
-                // surfacing.
-                let transcriptCoverage = pipeline.transcriptCoveredSec ?? 0
-                if transcriptCoverage < 1.0 {
-                    flags.append(StalenessFlag(
-                        episodeIdHash: row.episodeIdHash,
-                        kind: .terminalStateContradictsCoverage,
-                        detail: redactedTruncated(
-                            "state=completeTranscriptPartial transcript_coverage=\(formatSeconds(transcriptCoverage))"
-                        )
-                    ))
-                }
-            default:
-                break
-            }
+        //
+        // R2: routed through `terminalCompletionContradiction(for:)` so
+        // this function and `recommendation(for:)` share the SAME
+        // predicate. Previously the per-state branches were duplicated
+        // in both places, creating a drift hazard where R1's OR-axis
+        // fix had to be applied twice — the next maintainer could miss
+        // one site.
+        if let contradiction = terminalCompletionContradiction(for: row) {
+            flags.append(StalenessFlag(
+                episodeIdHash: row.episodeIdHash,
+                kind: .terminalStateContradictsCoverage,
+                detail: redactedTruncated(contradiction.detail)
+            ))
         }
 
         // Stale fast-transcript watermark — playhead-3bv.2 hazard.
@@ -723,9 +669,85 @@ extension DogfoodDiagnosticsAnalysisHealth {
         return flags
     }
 
+    /// Detected terminal-completion vs. canonical-coverage contradiction
+    /// for a single row. Returns `nil` when the row is consistent (or
+    /// when `episode_duration_sec` is missing/zero, in which case we
+    /// can't compute a threshold).
+    ///
+    /// Single source of truth shared by `stalenessFlags(for:)` and
+    /// `recommendation(for:)` — keeping them in lockstep prevents the
+    /// flag list and the `.fileBug` recommendation from disagreeing.
+    private struct TerminalCompletionContradiction {
+        let detail: String
+    }
+
+    private static func terminalCompletionContradiction(
+        for row: DogfoodDiagnosticsActivityRow
+    ) -> TerminalCompletionContradiction? {
+        let pipeline = row.pipeline
+        let asset = row.analysisAsset
+
+        guard let duration = pipeline.episodeDurationSec,
+              duration > 0,
+              duration.isFinite
+        else {
+            return nil
+        }
+        let threshold = duration * terminalCoverageRatioThreshold
+
+        // Per-axis "best known" coverage. Take the max of the chunk-
+        // accurate and watermark fallbacks within each axis so a
+        // healthy watermark can stand in for a nil chunk count, but
+        // do NOT collapse axes — a missing transcript with a healthy
+        // feature is still a contradiction on `completeFull`.
+        let transcriptAxis = bestKnown(
+            pipeline.transcriptCoveredSec,
+            pipeline.fastTranscriptWatermarkSec
+        ) ?? 0
+        let featureAxis = bestKnown(
+            pipeline.featureCoverageEndSec,
+            pipeline.confirmedAdCoverageEndSec
+        ) ?? 0
+
+        switch asset.analysisState {
+        case "completeFull", "complete":
+            // OR-axis contract: a shortfall on EITHER axis is a
+            // contradiction. (R1 fix; R2 centralizes here.)
+            if transcriptAxis < threshold || featureAxis < threshold {
+                return TerminalCompletionContradiction(
+                    detail: "state=\(asset.analysisState) duration=\(formatSeconds(duration)) "
+                        + "transcript_axis=\(formatSeconds(transcriptAxis)) "
+                        + "feature_axis=\(formatSeconds(featureAxis)) "
+                        + "threshold=\(formatSeconds(threshold))"
+                )
+            }
+        case "completeFeatureOnly":
+            // Feature axis only — transcript is intentionally low.
+            if featureAxis < threshold {
+                return TerminalCompletionContradiction(
+                    detail: "state=completeFeatureOnly duration=\(formatSeconds(duration)) "
+                        + "feature_coverage=\(formatSeconds(featureAxis)) "
+                        + "threshold=\(formatSeconds(threshold))"
+                )
+            }
+        case "completeTranscriptPartial":
+            // Transcript is intentionally short; flag only when
+            // transcript_covered_sec is essentially zero (nothing
+            // advanced).
+            let transcriptCoverage = pipeline.transcriptCoveredSec ?? 0
+            if transcriptCoverage < 1.0 {
+                return TerminalCompletionContradiction(
+                    detail: "state=completeTranscriptPartial transcript_coverage=\(formatSeconds(transcriptCoverage))"
+                )
+            }
+        default:
+            break
+        }
+        return nil
+    }
+
     private static func buildGlobalSummary(
         rows: [DogfoodDiagnosticsActivityRow],
-        assets: [AssetSummary],
         stalenessFlags: [StalenessFlag]
     ) -> GlobalSummary {
         var running = 0
@@ -831,51 +853,19 @@ extension DogfoodDiagnosticsAnalysisHealth {
             )
         }
 
-        // Terminal-completion contradiction → file a bug. Mirror the
-        // per-state coverage contracts the staleness builder uses so
-        // the recommendation never disagrees with the flag list.
-        if let duration = row.pipeline.episodeDurationSec,
-           duration > 0 {
-            let threshold = duration * terminalCoverageRatioThreshold
-            let featureBest = bestKnown(
-                row.pipeline.featureCoverageEndSec,
-                row.pipeline.confirmedAdCoverageEndSec
+        // Terminal-completion contradiction → file a bug. R2: routed
+        // through the shared `terminalCompletionContradiction(for:)`
+        // helper so this branch and the matching staleness flag
+        // CANNOT disagree. Note still goes through `redactedTruncated`
+        // because it carries pipeline numbers + the analysisState
+        // string — both are closed-vocab/numeric today, but defense-
+        // in-depth keeps the surface tight if a future caller widens
+        // the input.
+        if let contradiction = terminalCompletionContradiction(for: row) {
+            return Recommendation(
+                action: .fileBug,
+                note: redactedTruncated(contradiction.detail)
             )
-            // Same axis-independent OR semantics as `stalenessFlags(for:)`.
-            let transcriptAxis = bestKnown(
-                row.pipeline.transcriptCoveredSec,
-                row.pipeline.fastTranscriptWatermarkSec
-            ) ?? 0
-            let featureAxis = featureBest ?? 0
-            switch asset.analysisState {
-            case "completeFull", "complete":
-                if transcriptAxis < threshold || featureAxis < threshold {
-                    return Recommendation(
-                        action: .fileBug,
-                        note: "terminal state but transcript=\(formatSeconds(transcriptAxis)) "
-                            + "feature=\(formatSeconds(featureAxis)) "
-                            + "threshold=\(formatSeconds(threshold))"
-                    )
-                }
-            case "completeFeatureOnly":
-                let featureCoverage = featureBest ?? 0
-                if featureCoverage < threshold {
-                    return Recommendation(
-                        action: .fileBug,
-                        note: "completeFeatureOnly but feature coverage \(formatSeconds(featureCoverage))/\(formatSeconds(duration))"
-                    )
-                }
-            case "completeTranscriptPartial":
-                let transcriptCoverage = row.pipeline.transcriptCoveredSec ?? 0
-                if transcriptCoverage < 1.0 {
-                    return Recommendation(
-                        action: .fileBug,
-                        note: "completeTranscriptPartial with transcript_coverage=\(formatSeconds(transcriptCoverage))"
-                    )
-                }
-            default:
-                break
-            }
         }
 
         // No cached audio + no live progress → user has to open the
