@@ -637,4 +637,200 @@ struct LearningArtifactIngestorTests {
         #expect(diag.sponsorRollbacksApplied == 1,
             "diagnostics must report exactly one sponsor rollback; got \(diag.sponsorRollbacksApplied)")
     }
+
+    // MARK: - R3 audit hardening
+
+    /// playhead-hygc.1.7 R3 audit #5: simulate the across-process replay
+    /// path where the in-process `seenIdentities` reservation is empty
+    /// (e.g. app restart, or R2's rollback-on-throw erased it after a
+    /// downstream `materialize` failure left the row on disk). The
+    /// persistence layer is the durable source of truth: a row already
+    /// on disk MUST NOT trigger a second sponsor side effect even when
+    /// the in-process dedupe set says "never seen this".
+    ///
+    /// Pre-R3 code in this hot path:
+    ///   1. seenIdentities is empty (post-restart / post-rollback).
+    ///   2. contains-check passes → reserve identity.
+    ///   3. `appendCorrectionEvent` lands on the existing row, audit-
+    ///      bumps `submissionCount`, returns void.
+    ///   4. `recordRollback` runs unconditionally → `rollbackCount`
+    ///      jumps from 1 to 2 for one user gesture.
+    ///
+    /// Post-R3:
+    ///   `appendCorrectionEvent` returns `false` (probe saw the row);
+    ///   the ingestor gates sponsor side effects on the bool; the
+    ///   second-process call reports `.deduped` and the rollback count
+    ///   stays at 1.
+    @Test("Across-process replay does not double-apply sponsor rollback (durable persistence guard)")
+    func acrossProcessReplayDoesNotDoubleApplySponsorRollback() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let knowledge = SponsorKnowledgeStore(store: store)
+        // Build sponsor up to active so a rollback has something to demote.
+        for i in 1...3 {
+            try await knowledge.recordCandidate(
+                podcastId: podcastId,
+                entityType: .sponsor,
+                entityValue: "ReplaySponsor",
+                analysisAssetId: "asset-pre-\(i)",
+                sourceAtomOrdinals: [i * 10],
+                transcriptVersion: transcriptVersion,
+                confidence: 0.8
+            )
+        }
+
+        // First "process": ingest, sponsor rollback applies once.
+        let ingestor1 = LearningArtifactIngestor(store: store, knowledgeStore: knowledge)
+        let correction = sponsorCorrection(sponsor: "ReplaySponsor", kind: .falsePositive)
+        let first = try await ingestor1.ingest(correction: correction)
+        #expect(first.outcome == .ingested)
+
+        let afterFirst = try await knowledge.entry(
+            podcastId: podcastId,
+            entityType: .sponsor,
+            normalizedValue: "replaysponsor"
+        )
+        #expect(afterFirst?.rollbackCount == 1,
+            "first ingest must apply rollback exactly once; got \(afterFirst?.rollbackCount ?? -1)")
+
+        // Second "process": fresh ingestor with empty in-process
+        // seenIdentities (mirrors app restart / R2 rollback-on-throw
+        // path). Replay the same correction. The persistence guard
+        // must report .deduped without firing recordRollback again.
+        let ingestor2 = LearningArtifactIngestor(store: store, knowledgeStore: knowledge)
+        let second = try await ingestor2.ingest(correction: correction)
+        #expect(second.outcome == .deduped,
+            "across-process replay of an already-persisted correction must report .deduped; got \(second.outcome)")
+
+        let afterSecond = try await knowledge.entry(
+            podcastId: podcastId,
+            entityType: .sponsor,
+            normalizedValue: "replaysponsor"
+        )
+        #expect(afterSecond?.rollbackCount == 1,
+            "across-process replay MUST NOT double-apply rollback; expected 1, got \(afterSecond?.rollbackCount ?? -1)")
+
+        // Diagnostics on the second ingestor see the deduped path,
+        // not the sponsor-rollback path.
+        let diag2 = await ingestor2.diagnostics()
+        #expect(diag2.sponsorRollbacksApplied == 0,
+            "second ingestor must NOT report a sponsor rollback; got \(diag2.sponsorRollbacksApplied)")
+        #expect(diag2.deduped == 1,
+            "second ingestor must report exactly one .deduped outcome; got \(diag2.deduped)")
+    }
+
+    /// playhead-hygc.1.7 R3 audit #5: pre-existing correction row + fresh
+    /// ingestor + sponsor FN scope. Symmetric to the FP rollback test above
+    /// but for the non-idempotent `recordCandidate` confirmation-count
+    /// increment. A row already on disk must NOT bump the confirmation
+    /// count a second time.
+    @Test("Across-process replay does not double-apply sponsor confirmation (durable persistence guard)")
+    func acrossProcessReplayDoesNotDoubleApplySponsorConfirmation() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let knowledge = SponsorKnowledgeStore(store: store)
+        // Pre-existing candidate so confirmation is observable.
+        try await knowledge.recordCandidate(
+            podcastId: podcastId,
+            entityType: .sponsor,
+            entityValue: "ReplayFNSponsor",
+            analysisAssetId: assetId,
+            sourceAtomOrdinals: [10],
+            transcriptVersion: transcriptVersion,
+            confidence: 0.8
+        )
+        let baseline = try await knowledge.entry(
+            podcastId: podcastId,
+            entityType: .sponsor,
+            normalizedValue: "replayfnsponsor"
+        )
+        #expect(baseline?.confirmationCount == 1)
+
+        let ingestor1 = LearningArtifactIngestor(store: store, knowledgeStore: knowledge)
+        let correction = sponsorCorrection(sponsor: "ReplayFNSponsor", kind: .falseNegative)
+        _ = try await ingestor1.ingest(correction: correction)
+
+        let afterFirst = try await knowledge.entry(
+            podcastId: podcastId,
+            entityType: .sponsor,
+            normalizedValue: "replayfnsponsor"
+        )
+        #expect(afterFirst?.confirmationCount == 2,
+            "first ingest must bump confirmation count by exactly one; got \(afterFirst?.confirmationCount ?? -1)")
+
+        // Second process replay.
+        let ingestor2 = LearningArtifactIngestor(store: store, knowledgeStore: knowledge)
+        let second = try await ingestor2.ingest(correction: correction)
+        #expect(second.outcome == .deduped)
+
+        let afterSecond = try await knowledge.entry(
+            podcastId: podcastId,
+            entityType: .sponsor,
+            normalizedValue: "replayfnsponsor"
+        )
+        #expect(afterSecond?.confirmationCount == 2,
+            "across-process replay MUST NOT bump confirmation count again; expected 2, got \(afterSecond?.confirmationCount ?? -1)")
+    }
+
+    /// playhead-hygc.1.7 R3 audit #2/#5: directly pin
+    /// `appendCorrectionEvent`'s return contract — the persistence
+    /// source of truth that the ingestor's R3 side-effect gate depends
+    /// on. A fresh row returns `true`; a re-submission of the same
+    /// identity returns `false` (the upsert audit-bump path).
+    @Test("appendCorrectionEvent returns true only on fresh insert (R3 durable guard)")
+    func appendCorrectionEventReturnContract() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: assetId,
+            startTime: 100,
+            endTime: 110
+        )
+        let event = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: scope.serialized,
+            createdAt: 1_700_000_000,
+            source: .manualVeto,
+            podcastId: podcastId,
+            correctionType: .falsePositive
+        )
+
+        let firstInsert = try await store.appendCorrectionEvent(event)
+        #expect(firstInsert == true,
+            "first append of a fresh identity must report `true` (newly inserted)")
+
+        // Same identity, different row UUID — upserts the audit-bump
+        // path, must report `false`.
+        let replay = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: scope.serialized,
+            createdAt: 1_700_000_500,
+            source: .manualVeto,
+            podcastId: podcastId,
+            correctionType: .falsePositive
+        )
+        let secondInsert = try await store.appendCorrectionEvent(replay)
+        #expect(secondInsert == false,
+            "re-append of the same identity must report `false` (upsert audit-bump)")
+
+        // Distinct identity (different time, outside the 100ms tolerance
+        // bucket) — must report `true` again.
+        let distinctScope = CorrectionScope.exactTimeSpan(
+            assetId: assetId,
+            startTime: 200,
+            endTime: 210
+        )
+        let distinct = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: distinctScope.serialized,
+            createdAt: 1_700_001_000,
+            source: .manualVeto,
+            podcastId: podcastId,
+            correctionType: .falsePositive
+        )
+        let thirdInsert = try await store.appendCorrectionEvent(distinct)
+        #expect(thirdInsert == true,
+            "distinct identity must report `true` even when other rows exist for the same asset")
+    }
 }

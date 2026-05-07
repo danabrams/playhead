@@ -86,24 +86,29 @@ actor LearningArtifactIngestor {
         category: "LearningArtifactIngestor"
     )
 
-    /// In-process semantic-identity set. The store's v23 UNIQUE INDEX
-    /// already collapses duplicates on the persistence side, but
-    /// remembering identities here lets the ingestor surface
-    /// `.deduped` outcomes to callers and avoid re-applying sponsor
-    /// rollbacks (which are *not* idempotent on `recordRollback`'s side
-    /// — every call increments `rollbackCount`).
+    /// In-process semantic-identity set. Used as a fast-path to surface
+    /// `.deduped` outcomes for repeat ingests within the same process —
+    /// the durable source of truth for "is this a new persist?" lives in
+    /// `AnalysisStore` (the v23 UNIQUE INDEX + `appendCorrectionEvent`'s
+    /// `Bool` return).
     ///
-    /// Concurrency note (R2): the identity is inserted BEFORE the first
-    /// `await` (the `appendCorrectionEvent` call) so a concurrent task
-    /// landing on the actor's executor between our enter and the
-    /// suspension point sees the identity already reserved and short-
-    /// circuits to `.deduped`. Without this reservation, actor
-    /// reentrancy lets N tasks all pass the contains-check, run the
-    /// non-idempotent `recordRollback` N times, and report N×
-    /// `sponsorRollbacksApplied` for what the user authored as one
-    /// gesture. If any of the post-reservation awaits THROWS, we erase
-    /// the reservation in a `do/catch` so a transient SQLite failure
-    /// doesn't permanently mask future legitimate retries.
+    /// Concurrency note (R3): R2's TOCTOU fix reserved the identity
+    /// BEFORE the first `await` and rolled the reservation back on
+    /// throw. R3 audit found a residual hole: if `materialize()` throws
+    /// AFTER `appendCorrectionEvent` AND the non-idempotent
+    /// `recordRollback` succeeded, the rollback erased the reservation,
+    /// and a retry would re-fire `recordRollback` against the existing
+    /// row — incrementing `rollbackCount` to 2 for one user gesture.
+    ///
+    /// Fix: gate sponsor side effects on the persistence layer's
+    /// `wasNewlyInserted` Bool, not on the in-process reservation. The
+    /// store probes existence BEFORE the upsert (atomically inside its
+    /// actor, no awaits between probe and write), so a row that's
+    /// already on disk reports `false` and we skip side effects on
+    /// every retry forever — even after `seenIdentities` is rolled
+    /// back. The reservation is now a perf-only fast-path: we still
+    /// short-circuit obvious in-process duplicates, but the durable
+    /// guard is the persistence Bool.
     private var seenIdentities: Set<String> = []
 
     private var counters = LearningIngestionDiagnostics()
@@ -158,33 +163,53 @@ actor LearningArtifactIngestor {
         // non-idempotent `recordRollback`, and the rollbackCount jumps
         // to 5 for one gesture.
         seenIdentities.insert(identityKey)
+
+        // R3: durable side-effect guard. `appendCorrectionEvent`
+        // returns `true` only when it inserted a NEW row (the probe
+        // saw nothing for this identity). If the row was already on
+        // disk — including the rare case where R2's rollback path
+        // erased the in-process reservation after a successful first
+        // append + downstream throw — `wasNewlyInserted` is `false`
+        // and we MUST NOT re-fire the non-idempotent sponsor side
+        // effects. Captured here so a `materializer.materialize`
+        // throw downstream still triggers the catch but the caller's
+        // retry will see the persistence layer say "not new" and
+        // skip the sponsor side effects on every future attempt.
+        let wasNewlyInserted: Bool
         do {
             // Persist via the store's append path. The v23 UNIQUE INDEX
             // upsert collapses any pre-existing duplicate row to one — so
             // appending the same identity twice across processes is safe.
-            try await store.appendCorrectionEvent(correction)
+            wasNewlyInserted = try await store.appendCorrectionEvent(correction)
 
             // Sponsor side effects fire only for `.sponsorOnShow` (the
-            // scope that names a sponsor). Other scopes contribute to
-            // training examples via the materializer but don't touch
+            // scope that names a sponsor) AND only when the persistence
+            // layer says this is a fresh insert. Other scopes contribute
+            // to training examples via the materializer but don't touch
             // sponsor knowledge.
-            switch parsedScope {
-            case .sponsorOnShow(let podcastId, let sponsor):
-                try await applySponsorSideEffect(
-                    podcastId: podcastId,
-                    sponsor: sponsor,
-                    kind: correction.source?.kind
-                        ?? correction.correctionType.map(Self.kindFor)
-                        ?? .falsePositive
-                )
-            default:
-                break
+            if wasNewlyInserted {
+                switch parsedScope {
+                case .sponsorOnShow(let podcastId, let sponsor):
+                    try await applySponsorSideEffect(
+                        podcastId: podcastId,
+                        sponsor: sponsor,
+                        kind: correction.source?.kind
+                            ?? correction.correctionType.map(Self.kindFor)
+                            ?? .falsePositive
+                    )
+                default:
+                    break
+                }
             }
 
             // Materialize after every new correction so downstream
             // consumers see fresh artifacts without waiting for the next
             // backfill pass. `replaceTrainingExamples` is id-keyed upsert,
-            // so a re-run is cheap and idempotent.
+            // so a re-run is cheap and idempotent. We materialize even
+            // on `wasNewlyInserted == false` (the across-process replay
+            // path) because the materializer's spine join is decoupled
+            // from this single correction — a different correction may
+            // have landed in the meantime that was never materialized.
             try await materializer.materialize(
                 forAsset: correction.analysisAssetId,
                 store: store
@@ -193,9 +218,26 @@ actor LearningArtifactIngestor {
             // Roll the reservation back on error so a transient SQLite
             // hiccup doesn't permanently mask future legitimate retries
             // of this identity. The caller sees the throw and decides
-            // whether to retry.
+            // whether to retry. R3: even after this rollback, a retry
+            // is still safe — the durable persistence Bool will report
+            // `false` if `appendCorrectionEvent` succeeded before the
+            // throw, and the sponsor side-effect gate will skip.
             seenIdentities.remove(identityKey)
             throw error
+        }
+
+        // R3: a non-new persist (an across-process replay landing on an
+        // already-deduped row) reports `.deduped` to the caller — same
+        // observable shape as the in-process fast-path above — instead
+        // of `.ingested`. This keeps the diagnostics counters honest
+        // when an app restart drops the in-process `seenIdentities`
+        // and the user replays a previously-recorded correction.
+        if !wasNewlyInserted {
+            counters.deduped += 1
+            return LearningIngestionResult(
+                outcome: .deduped,
+                analysisAssetId: correction.analysisAssetId
+            )
         }
 
         counters.ingested += 1

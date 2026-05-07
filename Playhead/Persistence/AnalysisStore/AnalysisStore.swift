@@ -10850,13 +10850,45 @@ actor AnalysisStore {
     /// row + audit history) when they fall outside the identity-key
     /// time-tolerance bucket; identical re-submissions and submissions
     /// within the bucket collapse on conflict.
-    func appendCorrectionEvent(_ event: CorrectionEvent) throws {
+    ///
+    /// playhead-hygc.1.7 R3: returns `true` when the call inserted a NEW
+    /// row, `false` when it landed on an existing identity (the
+    /// `ON CONFLICT … DO UPDATE` audit-bump path). Callers that fire
+    /// non-idempotent side effects per persisted correction
+    /// (e.g. `SponsorKnowledgeStore.recordRollback`, which increments
+    /// `rollbackCount` on every call) MUST gate those side effects on
+    /// the bool — otherwise a retry that follows a successful append +
+    /// failed downstream step double-applies the side effect even
+    /// though the row is already on disk. Existing callers that don't
+    /// care can ignore the result via `@discardableResult`.
+    @discardableResult
+    func appendCorrectionEvent(_ event: CorrectionEvent) throws -> Bool {
         // Compute identity-key columns once, in Swift, so the on-disk
         // values agree with the read-side `distinctSemanticCorrections`
         // utility by construction.
         let normalizedScopeKey: String =
             CorrectionScope.deserialize(event.scope)?.normalizedIdentityKey ?? event.scope
         let effectiveType: CorrectionType = event.effectiveCorrectionType
+
+        // playhead-hygc.1.7 R3: probe presence BEFORE the upsert so we can
+        // tell a fresh insert from a deduped audit-bump. The probe and the
+        // write run inside the same actor-serialized `try` body — no `await`
+        // between them — so a concurrent caller cannot interleave between
+        // probe and write. This is the durable source of truth that
+        // `LearningArtifactIngestor` gates side effects on.
+        let probeSQL = """
+            SELECT 1 FROM correction_events
+            WHERE analysisAssetId = ?
+              AND effectiveCorrectionType = ?
+              AND normalizedScopeKey = ?
+            LIMIT 1
+            """
+        let probeStmt = try prepare(probeSQL)
+        bind(probeStmt, 1, event.analysisAssetId)
+        bind(probeStmt, 2, effectiveType.rawValue)
+        bind(probeStmt, 3, normalizedScopeKey)
+        let alreadyPresent = sqlite3_step(probeStmt) == SQLITE_ROW
+        sqlite3_finalize(probeStmt)
 
         // `INSERT OR IGNORE` handles the PRIMARY KEY collision case
         // (caller re-submits an event with the same row `id` but a
@@ -10909,6 +10941,7 @@ actor AnalysisStore {
         bind(stmt, 12, normalizedScopeKey)
         bind(stmt, 13, effectiveType.rawValue)
         try step(stmt, expecting: SQLITE_DONE)
+        return !alreadyPresent
     }
 
     /// Load all correction events for an asset, ordered by createdAt ascending.
