@@ -1253,6 +1253,71 @@ struct CorrectionReplayCandidateTests {
                     "surviving row must be the FIRST FN range (outer 600..800); got \(row.startTime)..\(row.endTime)")
         }
     }
+
+    // MARK: - 14. R11: concurrency invariant cleanup post-condition
+
+    /// playhead-hygc.1.8 R11: pin the `defer { hotPathRunInFlightAssetIds
+    /// .remove(...) }` cleanup contract that runs at the end of every
+    /// `runHotPathResult` invocation. R7 added the
+    /// `hotPathRunInFlightAssetIds.insert(...)` + `assertionFailure` on
+    /// concurrent re-entry; R11 pins the release-side cleanup so a
+    /// future refactor that drops the `defer` (or moves the insert
+    /// inside a non-unwinding scope) fails this test rather than
+    /// silently leaking the asset id and triggering a spurious
+    /// `assertionFailure` on the NEXT legitimate single-shot call.
+    ///
+    /// Pre-condition: set is empty before any run.
+    /// Post-condition: set is empty after a successful run completes.
+    /// Symmetric on a second back-to-back run for the same asset.
+    ///
+    /// Tests cannot directly observe `assertionFailure` firing without
+    /// crashing in DEBUG, but the `defer` cleanup is observable as the
+    /// post-condition `set.isEmpty == true`. If the cleanup regressed
+    /// (e.g. someone removed the `defer` line), the second back-to-back
+    /// run would EITHER trip the assertion (DEBUG crash, this test
+    /// fails to complete) OR — in RELEASE — would silently leak and
+    /// `set.contains(assetId) == true` would be observable here.
+    @Test("runHotPathResult clears its in-flight assetId tracker via defer (R11 concurrency-invariant post-condition pin)")
+    func runHotPathResultClearsInFlightTrackerOnExit() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-inflight-cleanup"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+
+        // Pre-condition: a fresh service has no in-flight assets.
+        let before = await service.hotPathInFlightAssetIdsForTesting()
+        #expect(before.isEmpty,
+                "fresh service must start with no in-flight assets; got \(before)")
+
+        // Run 1: complete a full run. The `defer` must clear the entry
+        // before the function returns.
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+        let afterRun1 = await service.hotPathInFlightAssetIdsForTesting()
+        #expect(afterRun1.isEmpty,
+                "in-flight tracker must be empty after a successful run (defer contract); got \(afterRun1)")
+
+        // Run 2 (back-to-back, same asset): if the defer regressed, the
+        // entry from run 1 would still be present and run 2 would trip
+        // `assertionFailure` (DEBUG crash) before this assertion.
+        // Surviving the second await means the cleanup ran. We then
+        // verify the post-condition again to pin the symmetric contract.
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+        let afterRun2 = await service.hotPathInFlightAssetIdsForTesting()
+        #expect(afterRun2.isEmpty,
+                "in-flight tracker must be empty after a second back-to-back run; got \(afterRun2)")
+    }
 }
 
 // MARK: - Test doubles

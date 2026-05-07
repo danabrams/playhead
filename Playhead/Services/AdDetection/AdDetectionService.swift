@@ -713,6 +713,20 @@ actor AdDetectionService {
         lastBracketRefinementCounts
     }
 
+    /// playhead-hygc.1.8 (R11): test seam exposing the per-asset in-flight
+    /// tracker so the `defer { hotPathRunInFlightAssetIds.remove(...) }`
+    /// post-condition documented at `runHotPathResult`'s entry can be
+    /// verified directly. Without this seam the cleanup contract is
+    /// observable only by triggering the assertionFailure (which crashes
+    /// in DEBUG) — leaving the "the defer ran" half of the concurrency
+    /// invariant unpinned. R7 added the assertionFailure; R11 pins the
+    /// release-side cleanup so a future refactor that drops the `defer`
+    /// (e.g. moving the insert/remove inside a child task that aborts
+    /// without unwinding the actor frame) fails this single test.
+    func hotPathInFlightAssetIdsForTesting() -> Set<String> {
+        hotPathRunInFlightAssetIds
+    }
+
     /// Lazy accessor for `MusicBracketTrustStore`. Constructs the actor on
     /// the first request and caches it for the lifetime of the service.
     /// Both the actor itself and its `AnalysisStore` backing are safe to
