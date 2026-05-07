@@ -139,14 +139,38 @@ struct BackgroundProcessingServiceLedgerTests {
         // Capture the row BEFORE simulating a late expiration.
         let beforeLate = await ledger.fetchLatestRun(for: .backfill)
         #expect(beforeLate?.outcome == .noEligibleWork)
+        // Sanity: the happy-path work task must NOT call coordinator.stop()
+        // — only the expiration teardown does. This is what lets us use
+        // stopCallCount as a reliable "expiration handler chain ran"
+        // barrier below (R5 fix: replace the previous fixed-50ms sleep,
+        // which could let the test pass vacuously if the unstructured
+        // Task hadn't been scheduled yet on a loaded sim).
+        #expect(coordinator.stopCallCount == 0,
+                "Pre-expiration: stop() must not have been called")
 
         // Simulate iOS firing expiration AFTER the work task already
         // finished. The ledger's idempotence guard must reject the
         // racing terminal write.
         task.simulateExpiration()
-        // Yield so the unstructured Task spawned by the expiration
-        // handler can run.
-        try await Task.sleep(for: .milliseconds(50))
+
+        // Wait for the expiration handler's unstructured Task to actually
+        // run end-to-end. The chain is:
+        //     simulateExpiration() → expirationHandler closure →
+        //     workTask.cancel() (no-op, already finished) →
+        //     Task { ... emitExpire ... finishRun (rejected by
+        //     idempotence guard) ... handleExpiredProcessingTask →
+        //     coordinator.stop() (observable!) → markComplete }
+        // Polling for stopCallCount >= 1 is the only reliable signal
+        // that the expiration handler's Task actually ran finishRun
+        // and the idempotence guard had a chance to fire. A fixed sleep
+        // could let the test pass for the wrong reason (Task never
+        // scheduled → finishRun never attempted → guard never tested).
+        let deadline = ContinuousClock.now + .seconds(5)
+        while coordinator.stopCallCount == 0 && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(coordinator.stopCallCount >= 1,
+                "Expiration handler Task must have run end-to-end (stop() observable)")
 
         let afterLate = await ledger.fetchLatestRun(for: .backfill)
         // Outcome MUST still be the work task's terminal write — the

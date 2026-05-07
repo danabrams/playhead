@@ -3782,7 +3782,7 @@ actor AnalysisStore {
         // bubble up via `prepare`/`step` because `tableExists` succeeds
         // before the UPDATE runs.
         //
-        // playhead-hygc.1.4 (R4): emit a single info-level log when this
+        // playhead-hygc.1.4 (R4 + R5): emit a warning-level log when this
         // guard fires so a regressed-migration condition stays visible
         // in dogfood diagnostics instead of becoming silent. A correct
         // production build NEVER trips this guard (the v23 migration
@@ -3791,9 +3791,29 @@ actor AnalysisStore {
         // `PlayheadRuntime`). If it does fire post-integration, that's
         // an integration regression worth investigating, not noise to
         // suppress further.
+        //
+        // R5 raises the level from `.info` to `.warning` because Apple's
+        // unified logging hides `.info` from the default Console.app
+        // stream (only `.default`/`.warning`/`.error` surface without an
+        // explicit `--info` opt-in). At dogfood time we want this to be
+        // discoverable on first sight; if it ever becomes noisy, the
+        // correct fix is to land the v23 migration upstream of the
+        // sibling beads, not to suppress the signal here. R5 also
+        // includes the observed `schema_version` in the message so an
+        // integrator can immediately tell which sibling migration ran
+        // first (e.g., "v=24" → bd-hygc.1.6 won the rung). The probe is
+        // best-effort — a rethrown SQLite error during the probe falls
+        // back to "unknown" so the guard's primary purpose (skipping
+        // the reap UPDATE) still runs.
         guard try tableExists("background_task_runs") else {
-            logger.info(
-                "reapOrphanBackgroundTaskRuns: background_task_runs table missing — skipping reap (likely cross-worktree schema drift; see migrateBackgroundTaskRunsV23IfNeeded)"
+            let observedSchemaVersion: String
+            if let v = (try? schemaVersion()) ?? nil {
+                observedSchemaVersion = String(v)
+            } else {
+                observedSchemaVersion = "unknown"
+            }
+            logger.warning(
+                "reapOrphanBackgroundTaskRuns: background_task_runs table missing — skipping reap (likely cross-worktree schema drift; observed schema_version=\(observedSchemaVersion, privacy: .public); see migrateBackgroundTaskRunsV23IfNeeded)"
             )
             return 0
         }
