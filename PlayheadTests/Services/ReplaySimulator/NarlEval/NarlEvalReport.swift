@@ -33,6 +33,86 @@ struct NarlReportRollup: Sendable, Codable {
     /// gtt9.6: episodes in this rollup whose `pipelineCoverageFailureAsset`
     /// flag fired.
     let pipelineCoverageFailureAssetCount: Int
+    /// playhead-q45f.3: chronological carryforward replay of every episode
+    /// in this show's history, threading a single trust state across
+    /// episode boundaries. Config-independent (TrustScoringConfig.default
+    /// is the only production-tuned setting), so the same value is
+    /// populated on every (show, config) rollup of the same show.
+    ///
+    /// One entry **per `podcastId`** in this show — production trust state
+    /// is keyed on `podcastId`, and a heuristic show label can collapse
+    /// multiple `podcastId`s (e.g. DoaC has both `flightcast:01KM…` and
+    /// `https://rss2.flightcast.com/…` forms). Collapsing them into a
+    /// single carryforward would falsely thread one podcast's false-skip
+    /// signals into another's trust state. Sorted by `podcastId` for
+    /// stable rendering.
+    ///
+    /// The "ALL"-aggregate rollup carries `[]` because cross-show state
+    /// has no production analogue. Defaults to `[]` for pre-q45f.3
+    /// report artifacts and synthetic excluded-only rollup rows.
+    let q45fCarryforward: [NarlQ45fCarryforwardRollup]
+
+    init(
+        show: String,
+        config: String,
+        episodeCount: Int,
+        excludedEpisodeCount: Int,
+        windowMetrics: [NarlWindowMetricsAtThreshold],
+        secondLevel: NarlSecondLevelMetrics,
+        totalLexicalInjectionAdds: Int,
+        totalPriorShiftAdds: Int,
+        totalEpisodesWithShadowCoverage: Int,
+        coverageMetrics: NarlCoverageMetrics,
+        pipelineCoverageFailureAssetCount: Int,
+        q45fCarryforward: [NarlQ45fCarryforwardRollup] = []
+    ) {
+        self.show = show
+        self.config = config
+        self.episodeCount = episodeCount
+        self.excludedEpisodeCount = excludedEpisodeCount
+        self.windowMetrics = windowMetrics
+        self.secondLevel = secondLevel
+        self.totalLexicalInjectionAdds = totalLexicalInjectionAdds
+        self.totalPriorShiftAdds = totalPriorShiftAdds
+        self.totalEpisodesWithShadowCoverage = totalEpisodesWithShadowCoverage
+        self.coverageMetrics = coverageMetrics
+        self.pipelineCoverageFailureAssetCount = pipelineCoverageFailureAssetCount
+        self.q45fCarryforward = q45fCarryforward
+    }
+
+    /// Manual init(from:) so pre-q45f.3 `report.json` artifacts (which lack
+    /// `q45fCarryforward`) decode with `[]`. `decodeIfPresent` (rather than
+    /// `try?`) is deliberate — a malformed `q45fCarryforward` value (wrong
+    /// shape, broken JSON) raises the decode error instead of silently
+    /// degrading to an empty list. Encode is synthesized and always emits
+    /// the new field.
+    enum CodingKeys: String, CodingKey {
+        case show, config, episodeCount, excludedEpisodeCount
+        case windowMetrics, secondLevel
+        case totalLexicalInjectionAdds, totalPriorShiftAdds
+        case totalEpisodesWithShadowCoverage
+        case coverageMetrics
+        case pipelineCoverageFailureAssetCount
+        case q45fCarryforward
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            show: try c.decode(String.self, forKey: .show),
+            config: try c.decode(String.self, forKey: .config),
+            episodeCount: try c.decode(Int.self, forKey: .episodeCount),
+            excludedEpisodeCount: try c.decode(Int.self, forKey: .excludedEpisodeCount),
+            windowMetrics: try c.decode([NarlWindowMetricsAtThreshold].self, forKey: .windowMetrics),
+            secondLevel: try c.decode(NarlSecondLevelMetrics.self, forKey: .secondLevel),
+            totalLexicalInjectionAdds: try c.decode(Int.self, forKey: .totalLexicalInjectionAdds),
+            totalPriorShiftAdds: try c.decode(Int.self, forKey: .totalPriorShiftAdds),
+            totalEpisodesWithShadowCoverage: try c.decode(Int.self, forKey: .totalEpisodesWithShadowCoverage),
+            coverageMetrics: try c.decode(NarlCoverageMetrics.self, forKey: .coverageMetrics),
+            pipelineCoverageFailureAssetCount: try c.decode(Int.self, forKey: .pipelineCoverageFailureAssetCount),
+            q45fCarryforward: try c.decodeIfPresent([NarlQ45fCarryforwardRollup].self, forKey: .q45fCarryforward) ?? []
+        )
+    }
 }
 
 /// gtt9.7 C1: per-episode counts emitted by `CorrectionNormalizer`, persisted
@@ -179,6 +259,14 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
     /// filter out `pipeline-coverage-limited` episodes without re-
     /// classifying. Defaults to `.unknown` for pre-jif5 report artifacts.
     let pipelineCoverageBucket: NarlPipelineCoverageBucket
+    /// playhead-q45f.3: per-episode counterfactual replay of this trace's
+    /// `listenRewindEvents` against a fresh `(auto, 0.90, 0)` trust state.
+    /// Surfaces "would auto-mode have flipped on this episode alone?" and
+    /// is config-independent (TrustScoringConfig.default is the only
+    /// production-tuned setting). Defaults to `.empty` for pre-q45f.3
+    /// report artifacts AND for synthetic excluded-only rollup entries
+    /// where no trace was replayed.
+    let q45fCounterfactual: NarlQ45fCounterfactual
 
     init(
         episodeId: String,
@@ -199,7 +287,8 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         normalizerCounts: NarlNormalizerCounts = .zero,
         detectorVersion: String = "",
         buildCommitSHA: String = "",
-        pipelineCoverageBucket: NarlPipelineCoverageBucket = .unknown
+        pipelineCoverageBucket: NarlPipelineCoverageBucket = .unknown,
+        q45fCounterfactual: NarlQ45fCounterfactual = .empty
     ) {
         self.episodeId = episodeId
         self.podcastId = podcastId
@@ -220,11 +309,16 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         self.detectorVersion = detectorVersion
         self.buildCommitSHA = buildCommitSHA
         self.pipelineCoverageBucket = pipelineCoverageBucket
+        self.q45fCounterfactual = q45fCounterfactual
     }
 
     /// Codable default handling: older `report.json` artifacts written before
     /// gtt9.7 do not carry a `normalizerCounts` block. Decode gracefully by
     /// defaulting the field to `.zero`. Encode always emits the new field.
+    /// Same back-compat rule applies to `q45fCounterfactual` (pre-q45f.3).
+    /// `q45fCounterfactual` uses `decodeIfPresent` rather than `try?` so a
+    /// malformed value raises the decode error instead of silently
+    /// degrading to `.empty` — back-compat shouldn't mask data corruption.
     enum CodingKeys: String, CodingKey {
         case episodeId, podcastId, show, config, isExcluded, exclusionReason
         case groundTruthWindowCount, predictedWindowCount
@@ -234,6 +328,7 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         case normalizerCounts
         case detectorVersion, buildCommitSHA
         case pipelineCoverageBucket
+        case q45fCounterfactual
     }
 
     init(from decoder: Decoder) throws {
@@ -258,6 +353,8 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         self.buildCommitSHA = (try? c.decode(String.self, forKey: .buildCommitSHA)) ?? ""
         self.pipelineCoverageBucket = (try? c.decode(NarlPipelineCoverageBucket.self,
                                                      forKey: .pipelineCoverageBucket)) ?? .unknown
+        self.q45fCounterfactual = try c.decodeIfPresent(NarlQ45fCounterfactual.self,
+                                                        forKey: .q45fCounterfactual) ?? .empty
     }
 }
 
