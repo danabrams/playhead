@@ -866,6 +866,7 @@
 		FF7AE172A90350F9F28ECFC3 /* AdCatalogStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA38E3CD24228CDDC55D126B /* AdCatalogStoreTests.swift */; };
 		FFAF04927F83DB6DDE50F1F8 /* BoundarySnapDiagnosticLoggingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 949FDBAD9F21BD739D142E1B /* BoundarySnapDiagnosticLoggingTests.swift */; };
 		FFCE561B2115E48CA2895A4D /* PlaybackQueueFinishObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD745BB6950D33FBC35F30A1 /* PlaybackQueueFinishObserver.swift */; };
+		44C29F824CF6EDBA7E377F9B /* TrustScoringServiceFunnelDisciplineCanaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7168EB5DF57231EB4D75DB7B /* TrustScoringServiceFunnelDisciplineCanaryTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -1742,6 +1743,7 @@
 		FF87059092BDF6E5FF9B1DB4 /* DecisionLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionLogger.swift; sourceTree = "<group>"; };
 		FFAC0AF611301A8AF53A5A5F /* MetadataEvidenceFusionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataEvidenceFusionTests.swift; sourceTree = "<group>"; };
 		FFCBD9A239AF9AFF6B5BAA97 /* AnalysisWorkSchedulerBackfillRearmTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisWorkSchedulerBackfillRearmTests.swift; sourceTree = "<group>"; };
+		7168EB5DF57231EB4D75DB7B /* TrustScoringServiceFunnelDisciplineCanaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustScoringServiceFunnelDisciplineCanaryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -2834,6 +2836,7 @@
 				C088315362D4161754AFC069 /* TrustScoringServiceTests.swift */,
 				2CE03DD04DE16F8EE4D376EE /* TrustScoringServiceUpsertProfileCanaryTests.swift */,
 				8F5DBE4EA997E3D9779DF83D /* TrustScoringServiceWeakSignalTests.swift */,
+				7168EB5DF57231EB4D75DB7B /* TrustScoringServiceFunnelDisciplineCanaryTests.swift */,
 			);
 			path = TrustScoring;
 			sourceTree = "<group>";
@@ -4513,6 +4516,7 @@
 				2934CB0BDEFD261C285BD3AC /* WithTestRuntime.swift in Sources */,
 				E517D642282F2FF5DD23A010 /* WorkJournalReadCorruptionTests.swift in Sources */,
 				885C8E3A4D8E7A1BF24135C6 /* WorkJournalTailFetchTests.swift in Sources */,
+				44C29F824CF6EDBA7E377F9B /* TrustScoringServiceFunnelDisciplineCanaryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

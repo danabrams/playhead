@@ -4566,6 +4566,10 @@ actor AdDetectionService {
             episodeDuration: episodeDuration
         )
         let surfacedSegments = promotedSegments + boundarySingletonSegments
+        // playhead-9ro7: boundary-singleton mark-only enforcement now
+        // lives in `precisionGateLabel` (slot-only firedSignals → demote
+        // to "markOnly"), so both this aggregator path and the single-
+        // window path at the top of `runHotPath` honor the same rule.
         guard !surfacedSegments.isEmpty else { return [] }
 
         // Observability: emit one decision-log entry per promoted segment
@@ -4981,7 +4985,34 @@ actor AdDetectionService {
             return nil
         case .uiCandidate:
             return "markOnly"
-        case .autoSkipEligible:
+        case .autoSkipEligible(let firedSignals):
+            // playhead-9ro7 (cycle-2 follow-up): metadataSlotPrior fires by
+            // construction whenever the segment center is in the first/last
+            // `slotFraction` of the episode. The pure gate admits any
+            // non-empty signal set so it preserves its single-knob
+            // contract (see `AutoSkipPrecisionGateTests
+            // .autoSkipAdmittedBySlotPriorPreRoll`), but the service-layer
+            // policy is stricter: a slot-only autoSkip is just "score in
+            // the slot," with no independent corroboration. Demote those
+            // to mark-only at the helper so both the single-window path
+            // (line ~1345) and the aggregator path (line ~4683) inherit
+            // the rule without bespoke per-call-site overrides.
+            //
+            // Modeled as an explicit "no strong corroborator" check rather
+            // than `firedSignals == [.metadataSlotPrior]` set-equality.
+            // The set-equality form silently re-admits the moment a
+            // second weak signal is introduced; the inclusion-list form
+            // forces any future SafetySignal author to decide whether
+            // their case counts as independent corroboration.
+            let strongCorroborators: Set<SafetySignal> = [
+                .strongLexicalAdPhrase,
+                .sustainedAcousticAdSignature,
+                .userConfirmedLocalPattern,
+                .catalogMatch,
+            ]
+            if firedSignals.isDisjoint(with: strongCorroborators) {
+                return "markOnly"
+            }
             return "autoSkip"
         }
     }

@@ -737,7 +737,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             analysisState: asset.analysisState,
             analysisVersion: asset.analysisVersion,
             artifactClass: asset.artifactClass.rawValue,
-            terminalReason: asset.terminalReason,
+            terminalReason: Self.sanitizedDiagnosticString(asset.terminalReason),
             capabilitySnapshotPresent: asset.capabilitySnapshot != nil
         )
     }
@@ -749,7 +749,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             state: session.state,
             startedAt: session.startedAt,
             updatedAt: session.updatedAt,
-            failureReason: session.failureReason,
+            failureReason: Self.sanitizedDiagnosticString(session.failureReason),
             needsShadowRetry: session.needsShadowRetry
         )
     }
@@ -769,7 +769,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             nextEligibleAt: job.nextEligibleAt,
             leasePresent: job.leaseOwner != nil,
             leaseExpiresAt: job.leaseExpiresAt,
-            lastErrorCode: job.lastErrorCode,
+            lastErrorCode: Self.sanitizedDiagnosticString(job.lastErrorCode),
             createdAt: job.createdAt,
             updatedAt: job.updatedAt,
             generationID: job.generationID,
@@ -777,6 +777,42 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             artifactClass: job.artifactClass.rawValue,
             estimatedWriteBytes: job.estimatedWriteBytes
         )
+    }
+
+    /// playhead-9ro7 cycle-3: scrub PII shapes and bound length on
+    /// free-form diagnostic strings before they enter a dogfood
+    /// diagnostics export. Producers (`AnalysisCoordinator`,
+    /// `AnalysisWorkScheduler`) write `String(describing: error)` and
+    /// `error.localizedDescription` directly into `terminalReason`,
+    /// `failureReason`, and `lastErrorCode`; on iOS those strings can
+    /// embed user-home paths (`/Users/...`, `/var/mobile/...`),
+    /// container paths (`/private/var/mobile/Containers/...`), and
+    /// remote URLs from `NSURLError.userInfo` — all of which would
+    /// land in the JSON the user manually shares for support. The
+    /// underlying SQLite columns retain the original strings (those
+    /// stay on-device per the Playhead legal mandate); only the
+    /// export layer scrubs them.
+    private static func sanitizedDiagnosticString(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return raw }
+        let stripPatterns: [String] = [
+            #"file://[^\s]*"#,
+            #"https?://[^\s]*"#,
+            #"/Users/[^\s]*"#,
+            #"/var/mobile/[^\s]*"#,
+            #"/private/var/[^\s]*"#
+        ]
+        var s = raw
+        for pattern in stripPatterns {
+            s = s.replacingOccurrences(
+                of: pattern,
+                with: "[redacted]",
+                options: .regularExpression
+            )
+        }
+        if s.count > 200 {
+            s = String(s.prefix(200)) + "…"
+        }
+        return s
     }
 
     private func workJournalSnapshot(

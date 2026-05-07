@@ -177,39 +177,64 @@ struct AutoSkipPrecisionGateIntegrationTests {
 
     // MARK: - 2. segmentScore ≥ autoSkip, ONE safety signal → autoSkip
 
-    @Test("aggregator segment scoring ≥ autoSkipThreshold with ≥1 safety signal persists as eligibilityGate=autoSkip and SkipOrchestrator emits a skip cue")
+    @Test("hot path: ≥0.55 score in pre-roll WITH a non-slot signal (sponsor/promoCode/URL lexical) persists eligibilityGate=autoSkip")
     func highScoreSegmentWithSafetySignalAutoSkips() async throws {
-        // Same three-slot high-confidence pattern, but centered in the
-        // PRE-ROLL slot (first 10% of the episode → metadataSlotPrior
-        // fires). That's our ≥1 safety signal. Score ≥ 0.55, duration
-        // ≤ 90 s, signal fires → autoSkip.
+        // playhead-9ro7 cycle-2 follow-up: a slot prior on its own no
+        // longer admits autoSkip — the service-level helper
+        // `AdDetectionService.precisionGateLabel` demotes slot-only
+        // autoSkip to mark-only (the pure gate's existing contract is
+        // preserved via `AutoSkipPrecisionGateTests
+        // .autoSkipAdmittedBySlotPriorPreRoll`). To pin the real
+        // autoSkip path we co-fire `strongLexicalAdPhrase` alongside
+        // `metadataSlotPrior` by placing a sponsor/promoCode/URL chunk
+        // in the pre-roll slot — same lexical pattern as the single-
+        // window autoSkip test at §5, just shifted into the slot
+        // region. firedSignals = {metadataSlotPrior, strongLexicalAdPhrase}
+        // ≠ {.metadataSlotPrior}, so the helper stamps autoSkip.
         let store = try await makeTestStore()
-        let assetId = "asset-gtt9.11-autoskip-slot-signal"
+        let assetId = "asset-9ro7-cycle3-slot-plus-lexical"
         try await store.insertAsset(makeAsset(id: assetId))
         let duration: Double = 3600
         try await insertFeatureGrid(store: store, assetId: assetId, duration: duration)
 
-        // Three adjacent slots at 0..90 s — center 45 s < 360 s (10% of 3600).
-        var scores = [Double: Double]()
-        for t in stride(from: 0.0, to: duration, by: 30.0) { scores[t] = 0.10 }
-        scores[0.0] = 0.85
-        scores[30.0] = 0.85
-        scores[60.0] = 0.85
-
-        let classifier = SlotScoringClassifier(scoresByStartTime: scores, defaultScore: 0.10)
+        let classifier = SlotScoringClassifier(
+            scoresByStartTime: [:],
+            defaultScore: 0.10,
+            chunkScore: 0.85
+        )
         let service = makeService(store: store, classifier: classifier)
 
+        // Pre-roll chunk [60, 120]: center 90 s ÷ 3600 s = 2.5% < 10%
+        // slotFraction → metadataSlotPrior fires. The same sponsor /
+        // promoCode / urlCTA cluster used at §5 fires
+        // strongLexicalAdPhrase. Duration 60 ∈ [30, 90] (typical ad).
+        let normalized = "brought to you by squarespace use promo code playhead at squarespace.com"
+        let chunk = TranscriptChunk(
+            id: "chunk-9ro7-cycle3-slot-lexical",
+            analysisAssetId: assetId,
+            segmentFingerprint: "fp-slot-lexical",
+            chunkIndex: 0,
+            startTime: 60,
+            endTime: 120,
+            text: normalized,
+            normalizedText: normalized,
+            pass: "final",
+            modelVersion: "test-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+
         _ = try await service.runHotPath(
-            chunks: [],
+            chunks: [chunk],
             analysisAssetId: assetId,
             episodeDuration: duration
         )
 
         let persisted = try await store.fetchAdWindows(assetId: assetId)
         #expect(persisted.count == 1,
-                "one aggregator segment expected; got \(persisted.count)")
+                "one AdWindow expected; got \(persisted.count)")
         #expect(persisted.first?.eligibilityGate == "autoSkip",
-                "slot-prior safety signal fired → must stamp eligibilityGate=autoSkip; got \(String(describing: persisted.first?.eligibilityGate))")
+                "slot+lexical safety signals fired → must stamp eligibilityGate=autoSkip; got \(String(describing: persisted.first?.eligibilityGate))")
 
         try await assertSkipCueEmitted(store: store, windows: persisted, assetId: assetId)
     }
@@ -419,6 +444,131 @@ struct AutoSkipPrecisionGateIntegrationTests {
                 "exactly one AdWindow from the single-window path; got \(persisted.count)")
         #expect(persisted.first?.eligibilityGate == "markOnly",
                 "0.85 score but zero safety signals → must stamp eligibilityGate=markOnly (NEW precision gate); got \(String(describing: persisted.first?.eligibilityGate))")
+
+        try await assertNoSkipCueEmitted(store: store, windows: persisted, assetId: assetId)
+    }
+
+    // MARK: - 7. Single-window in slot with metadataSlotPrior alone → markOnly
+
+    @Test("single-window fast path: 0.85 window in pre-roll with ONLY metadataSlotPrior signal persists eligibilityGate=markOnly (no auto-skip)")
+    func singleHighConfidenceWindowInSlotWithOnlySlotSignalStaysMarkOnly() async throws {
+        // playhead-9ro7 cycle-2: pin the symmetric single-window leak.
+        // The pure gate (`AutoSkipPrecisionGate.classify`) admits any
+        // non-empty signal set — a slot-prior alone clears the bar (see
+        // `AutoSkipPrecisionGateTests.autoSkipAdmittedBySlotPriorPreRoll`).
+        // The service-level helper `precisionGateLabel` overlays a
+        // stricter policy: when `metadataSlotPrior` is the ONLY firing
+        // signal, demote to mark-only. This test drives that policy via
+        // the single-window path so future drift on EITHER call site
+        // (single-window line ~1345 OR aggregator line ~4674) is caught.
+        let store = try await makeTestStore()
+        let assetId = "asset-9ro7-single-window-slot-only"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 3600
+        try await insertFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        let classifier = SlotScoringClassifier(
+            scoresByStartTime: [:],
+            defaultScore: 0.10,
+            chunkScore: 0.85
+        )
+        let service = makeService(store: store, classifier: classifier)
+
+        // Pre-roll chunk [60, 120]: center 90 s ÷ 3600 s = 2.5% < 10%
+        // slotFraction → metadataSlotPrior fires by construction.
+        // transitionMarker-only lexical hits emit a LexicalCandidate
+        // (so the single-window path actually fires) but do NOT trip
+        // strongLexicalAdPhrase. No music grid → acoustic silent. No
+        // user correction → boost = 1.0. So firedSignals == {.metadataSlotPrior}.
+        let normalized = "anyway back to the show without further ado"
+        let chunk = TranscriptChunk(
+            id: "chunk-9ro7-slot-only",
+            analysisAssetId: assetId,
+            segmentFingerprint: "fp-slot-only",
+            chunkIndex: 0,
+            startTime: 60,
+            endTime: 120,
+            text: normalized,
+            normalizedText: normalized,
+            pass: "final",
+            modelVersion: "test-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+
+        _ = try await service.runHotPath(
+            chunks: [chunk],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        #expect(persisted.count == 1,
+                "exactly one AdWindow from the single-window path; got \(persisted.count)")
+        #expect(persisted.first?.eligibilityGate == "markOnly",
+                "0.85 score with metadataSlotPrior as the ONLY firing safety signal must demote to markOnly; got \(String(describing: persisted.first?.eligibilityGate))")
+
+        try await assertNoSkipCueEmitted(store: store, windows: persisted, assetId: assetId)
+    }
+
+    // MARK: - 8. Post-roll variant: single-window slot-only → markOnly
+
+    @Test("single-window fast path: 0.85 window in POST-roll with ONLY metadataSlotPrior signal persists eligibilityGate=markOnly")
+    func singleHighConfidenceWindowInPostRollSlotWithOnlySlotSignalStaysMarkOnly() async throws {
+        // playhead-9ro7 cycle-3: symmetric coverage of the helper's
+        // bound to `metadataSlotPrior`. The slot prior fires for both
+        // pre-roll AND post-roll segments (center within first OR last
+        // `slotFraction` of the episode), so the demotion rule must
+        // apply on both edges. Without this test, a future regression
+        // that forgets to demote on the post-roll path would slip
+        // through — the pre-roll-only test would still pass.
+        let store = try await makeTestStore()
+        let assetId = "asset-9ro7-single-window-postroll-slot-only"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 3600
+        try await insertFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        let classifier = SlotScoringClassifier(
+            scoresByStartTime: [:],
+            defaultScore: 0.10,
+            chunkScore: 0.85
+        )
+        let service = makeService(store: store, classifier: classifier)
+
+        // Post-roll chunk [3540, 3600]: center 3570 s ÷ 3600 s = 99.2%
+        // → within last 10% slotFraction → metadataSlotPrior fires by
+        // construction. transitionMarker-only lexical hits emit a
+        // LexicalCandidate (so the single-window path actually fires)
+        // but do NOT trip strongLexicalAdPhrase. No music grid →
+        // acoustic silent. No user correction → boost = 1.0. So
+        // firedSignals == {.metadataSlotPrior}.
+        let normalized = "anyway back to the show without further ado"
+        let chunk = TranscriptChunk(
+            id: "chunk-9ro7-postroll-slot-only",
+            analysisAssetId: assetId,
+            segmentFingerprint: "fp-postroll-slot-only",
+            chunkIndex: 0,
+            startTime: 3540,
+            endTime: 3600,
+            text: normalized,
+            normalizedText: normalized,
+            pass: "final",
+            modelVersion: "test-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+
+        _ = try await service.runHotPath(
+            chunks: [chunk],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        #expect(persisted.count == 1,
+                "exactly one AdWindow from the single-window path; got \(persisted.count)")
+        #expect(persisted.first?.eligibilityGate == "markOnly",
+                "0.85 score with metadataSlotPrior as the ONLY firing safety signal in POST-roll must demote to markOnly; got \(String(describing: persisted.first?.eligibilityGate))")
 
         try await assertNoSkipCueEmitted(store: store, windows: persisted, assetId: assetId)
     }

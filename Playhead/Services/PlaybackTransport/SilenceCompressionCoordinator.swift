@@ -240,9 +240,20 @@ final class SilenceCompressionCoordinator {
             inFlightWindowsRefresh = Task { [weak self, assetId, source, config] in
                 let from = max(0, time - 1.0)
                 let to = time + config.lookaheadHorizonSeconds
-                let windows = (try? await source.fetchWindows(
-                    assetId: assetId, from: from, to: to
-                )) ?? []
+                let windows: [FeatureWindow]
+                do {
+                    windows = try await source.fetchWindows(
+                        assetId: assetId, from: from, to: to
+                    )
+                } catch {
+                    // Cancellation race or fetch error — keep the
+                    // previously-published windows rather than wiping
+                    // them with []. Wiping on a transient SQLite or
+                    // CancellationError would disable compression
+                    // until the next cadence refresh.
+                    return
+                }
+                if Task.isCancelled { return }
                 guard let self else { return }
                 guard self.currentAssetId == assetId else { return }
                 self.compressor.replaceWindows(windows, assetId: assetId)
