@@ -196,6 +196,19 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         } catch {
             transcriptCoveredSecondsByAssetId = [:]
         }
+        let assetIds = Set(allAssets.values.map(\.id))
+        let episodeIdSet = Set(eligibleEpisodeIds)
+        let latestSessionsByAssetId = (
+            try? await store.fetchLatestSessionByAssetIdMap(assetIds: assetIds)
+        ) ?? [:]
+        let latestJobsByEpisodeId = (
+            try? await store.fetchLatestJobByEpisodeIdMap(episodeIds: episodeIdSet)
+        ) ?? [:]
+        let latestTerminalWorkJournalByEpisodeId = (
+            try? await store.fetchLatestTerminalWorkJournalEntryByEpisodeIdMap(
+                episodeIds: episodeIdSet
+            )
+        ) ?? [:]
 
         // playhead-hkn1: SwiftData fetch on a freshly-constructed
         // `ModelContext` so this work runs off the main actor. The
@@ -272,15 +285,6 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             )
 
             let isRunning = (episodeId == runningEpisodeId)
-            // v1 finishedAt: derive from the Episode model when the
-            // status is terminal. The Episode.feedMetadata table does
-            // not yet carry an analysis-finishedAt column; we fall
-            // back to the asset's `lastPlayedAnalysisAssetId` heuristic
-            // by treating any terminal disposition as "just finished"
-            // (Date()). This is intentionally coarse — Recently
-            // Finished is bounded by the 24h window, and a real
-            // finishedAt column is a follow-up bead.
-            let finishedAt: Date? = isTerminal(status: status) ? Date() : nil
 
             // playhead-btoa.3: compute the three pipeline-progress
             // fractions for the row payload. Clamping happens here (in
@@ -320,6 +324,25 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             let downloadFraction = downloadFractions[episodeId]
                 .map { min(1.0, max(0.0, $0)) }
                 ?? (downloadedEpisodeIds.contains(episodeId) ? 1.0 : nil)
+            let latestSession = latestSessionsByAssetId[asset.id]
+            let latestJob = latestJobsByEpisodeId[episodeId]
+            let latestTerminalWorkJournal = latestTerminalWorkJournalByEpisodeId[episodeId]
+            let finishedOutcome = activityFinishedOutcome(
+                asset: asset,
+                latestSession: latestSession,
+                latestJob: latestJob,
+                latestTerminalWorkJournal: latestTerminalWorkJournal
+            )
+            let finishedAt: Date?
+            if finishedOutcome != nil || isTerminal(status: status) {
+                finishedAt = activityFinishedAt(
+                    latestSession: latestSession,
+                    latestJob: latestJob,
+                    latestTerminalWorkJournal: latestTerminalWorkJournal
+                )
+            } else {
+                finishedAt = nil
+            }
 
             inputs.append(
                 ActivityEpisodeInput(
@@ -329,6 +352,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                     status: status,
                     isRunning: isRunning,
                     finishedAt: finishedAt,
+                    finishedOutcome: finishedOutcome,
                     // playhead-cjqq: forward the persisted user
                     // ordering so the aggregator's Up Next sort
                     // (queuePosition asc, nil-last, episodeId
@@ -389,6 +413,19 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         } catch {
             transcriptCoveredSecondsByAssetId = [:]
         }
+        let assetIds = Set(allAssets.values.map(\.id))
+        let episodeIdSet = Set(eligibleEpisodeIds)
+        let latestSessionsByAssetId = (
+            try? await store.fetchLatestSessionByAssetIdMap(assetIds: assetIds)
+        ) ?? [:]
+        let latestJobsByEpisodeId = (
+            try? await store.fetchLatestJobByEpisodeIdMap(episodeIds: episodeIdSet)
+        ) ?? [:]
+        let latestTerminalWorkJournalByEpisodeId = (
+            try? await store.fetchLatestTerminalWorkJournalEntryByEpisodeIdMap(
+                episodeIds: episodeIdSet
+            )
+        ) ?? [:]
 
         let context = ModelContext(modelContainer)
         var descriptor = FetchDescriptor<Episode>(
@@ -440,18 +477,27 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                 cachedAudioPresent: cachedAudioPresent
             )
 
-            let session = try? await store.fetchLatestSessionForAsset(assetId: asset.id)
-            let job = try? await store.fetchLatestJobForEpisode(episodeId)
-            let terminalWorkJournal = try? await store.fetchLatestTerminalWorkJournalEntry(
-                episodeId: episodeId
+            let session = latestSessionsByAssetId[asset.id]
+            let job = latestJobsByEpisodeId[episodeId]
+            let terminalWorkJournal = latestTerminalWorkJournalByEpisodeId[episodeId]
+            let finishedOutcome = activityFinishedOutcome(
+                asset: asset,
+                latestSession: session,
+                latestJob: job,
+                latestTerminalWorkJournal: terminalWorkJournal
             )
 
             rows.append(
                 DogfoodDiagnosticsActivityRow(
                     episodeIdHash: episodeHashProvider(episodeId),
-                    section: dogfoodActivitySection(status: status, isRunning: isRunning),
+                    section: dogfoodActivitySection(
+                        status: status,
+                        isRunning: isRunning,
+                        finishedOutcome: finishedOutcome
+                    ),
                     status: statusSnapshot(status),
                     isRunning: isRunning,
+                    finishedOutcome: finishedOutcome.map(dogfoodFinishedOutcomeName),
                     queuePosition: episode.queuePosition,
                     cachedAudioPresent: cachedAudioPresent,
                     liveDownloadFraction: liveDownloadFraction,
@@ -504,9 +550,10 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
 
     private func dogfoodActivitySection(
         status: EpisodeSurfaceStatus,
-        isRunning: Bool
+        isRunning: Bool,
+        finishedOutcome: ActivityFinishedOutcome?
     ) -> String {
-        if isTerminal(status: status) {
+        if finishedOutcome != nil || isTerminal(status: status) {
             return "recently_finished"
         }
         switch status.disposition {
@@ -516,6 +563,87 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             return isRunning ? "now" : "up_next"
         case .failed, .cancelled, .unavailable:
             return "hidden_terminal"
+        }
+    }
+
+    private func activityFinishedOutcome(
+        asset: AnalysisAsset,
+        latestSession: AnalysisSession?,
+        latestJob: AnalysisJob?,
+        latestTerminalWorkJournal: WorkJournalEntry?
+    ) -> ActivityFinishedOutcome? {
+        if let outcome = activityFinishedOutcome(sessionStateRaw: asset.analysisState) {
+            return outcome
+        }
+        if let session = latestSession,
+           let outcome = activityFinishedOutcome(sessionStateRaw: session.state) {
+            return outcome
+        }
+        if let latestJob,
+           latestJob.analysisAssetId == nil || latestJob.analysisAssetId == asset.id {
+            if latestJob.state == "complete" {
+                return .success
+            }
+            if latestJob.state == "superseded",
+               let latestTerminalWorkJournal {
+                switch latestTerminalWorkJournal.eventType {
+                case .finalized:
+                    return .success
+                case .failed, .preempted:
+                    return .couldntAnalyze
+                case .acquired, .checkpointed:
+                    return nil
+                }
+            }
+        }
+        return nil
+    }
+
+    private func activityFinishedOutcome(
+        sessionStateRaw: String
+    ) -> ActivityFinishedOutcome? {
+        guard let state = SessionState(rawValue: sessionStateRaw) else { return nil }
+        if state.isTerminalCompletion {
+            return .success
+        }
+        if state.isTerminalFailure {
+            return .couldntAnalyze
+        }
+        return nil
+    }
+
+    private func activityFinishedAt(
+        latestSession: AnalysisSession?,
+        latestJob: AnalysisJob?,
+        latestTerminalWorkJournal: WorkJournalEntry?
+    ) -> Date {
+        let timestamp = [
+            latestSession?.updatedAt,
+            latestJob?.updatedAt,
+            latestTerminalWorkJournal?.timestamp
+        ]
+        .compactMap { value -> Double? in
+            guard let value, value.isFinite, value > 0 else { return nil }
+            return value
+        }
+        .max()
+
+        if let timestamp {
+            return Date(timeIntervalSince1970: timestamp)
+        }
+        return Date()
+    }
+
+    private func dogfoodFinishedOutcomeName(
+        _ outcome: ActivityFinishedOutcome
+    ) -> String {
+        switch outcome {
+        case .success:
+            return "success"
+        case .couldntAnalyze:
+            return "couldnt_analyze"
+        case .analysisUnavailable(let reason):
+            return "analysis_unavailable:\(reason.rawValue)"
         }
     }
 

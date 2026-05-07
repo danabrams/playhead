@@ -69,7 +69,8 @@ struct ActivityViewModelTests {
         podcast: String? = "Some Show",
         status: EpisodeSurfaceStatus,
         isRunning: Bool = false,
-        finishedAt: Date? = nil
+        finishedAt: Date? = nil,
+        finishedOutcome: ActivityFinishedOutcome? = nil
     ) -> ActivityEpisodeInput {
         ActivityEpisodeInput(
             episodeId: id,
@@ -77,7 +78,8 @@ struct ActivityViewModelTests {
             podcastTitle: podcast,
             status: status,
             isRunning: isRunning,
-            finishedAt: finishedAt
+            finishedAt: finishedAt,
+            finishedOutcome: finishedOutcome
         )
     }
 
@@ -198,6 +200,29 @@ struct ActivityViewModelTests {
         let row = try! #require(snapshot.recentlyFinished.first)
         #expect(row.episodeId == "ep-5")
         #expect(row.outcome == .success)
+    }
+
+    @Test("explicit finishedOutcome beats stale queued readiness")
+    func finishedOutcomeOverridesQueuedReadiness() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let input = Self.makeInput(
+            id: "ep-complete-stale-coverage",
+            status: Self.makeStatus(
+                disposition: .queued,
+                reason: .waitingForTime,
+                hint: .wait,
+                readiness: .none
+            ),
+            finishedAt: now.addingTimeInterval(-60),
+            finishedOutcome: .success
+        )
+
+        let snapshot = ActivityViewModel.aggregate(inputs: [input], now: now)
+
+        #expect(snapshot.upNext.isEmpty)
+        #expect(snapshot.recentlyFinished.count == 1)
+        #expect(snapshot.recentlyFinished.first?.episodeId == "ep-complete-stale-coverage")
+        #expect(snapshot.recentlyFinished.first?.outcome == .success)
     }
 
     @Test("failed disposition → Recently Finished (couldntAnalyze)")

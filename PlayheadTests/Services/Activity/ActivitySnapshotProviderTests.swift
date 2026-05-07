@@ -187,17 +187,20 @@ struct LiveActivitySnapshotProviderFractionTests {
         let fastTranscriptCoverageEndTime: Double?
         let confirmedAdCoverageEndTime: Double?
         let episodeDurationSec: Double?
+        let analysisState: String
 
         init(
             featureCoverageEndTime: Double? = nil,
             fastTranscriptCoverageEndTime: Double?,
             confirmedAdCoverageEndTime: Double?,
-            episodeDurationSec: Double?
+            episodeDurationSec: Double?,
+            analysisState: String = "queued"
         ) {
             self.featureCoverageEndTime = featureCoverageEndTime
             self.fastTranscriptCoverageEndTime = fastTranscriptCoverageEndTime
             self.confirmedAdCoverageEndTime = confirmedAdCoverageEndTime
             self.episodeDurationSec = episodeDurationSec
+            self.analysisState = analysisState
         }
     }
 
@@ -251,7 +254,7 @@ struct LiveActivitySnapshotProviderFractionTests {
                 featureCoverageEndTime: seed.featureCoverageEndTime,
                 fastTranscriptCoverageEndTime: seed.fastTranscriptCoverageEndTime,
                 confirmedAdCoverageEndTime: seed.confirmedAdCoverageEndTime,
-                analysisState: "queued",
+                analysisState: seed.analysisState,
                 analysisVersion: 1,
                 capabilitySnapshot: nil,
                 episodeDurationSec: seed.episodeDurationSec
@@ -633,5 +636,65 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(row.latestTerminalWorkJournal?.eventType == "failed")
         #expect(row.latestTerminalWorkJournal?.cause == "asr_failed")
         #expect(row.latestTerminalWorkJournal?.generationID == generationID.uuidString)
+    }
+
+    @Test("terminal asset and job states do not remain Up Next when coverage summary is stale")
+    func terminalLifecycleStatesProduceFinishedOutcome() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                featureCoverageEndTime: 80,
+                fastTranscriptCoverageEndTime: 40,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 400,
+                analysisState: "completeFull"
+            ),
+            AssetSeed(
+                featureCoverageEndTime: 20,
+                fastTranscriptCoverageEndTime: 20,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 400,
+                analysisState: "queued"
+            )
+        ])
+        try await fixture.store.insertSession(
+            AnalysisSession(
+                id: "session-terminal",
+                analysisAssetId: fixture.assetIds[0],
+                state: "completeFull",
+                startedAt: now.addingTimeInterval(-600).timeIntervalSince1970,
+                updatedAt: now.addingTimeInterval(-120).timeIntervalSince1970,
+                failureReason: nil
+            )
+        )
+        try await fixture.store.insertJob(
+            makeAnalysisJob(
+                jobId: "job-terminal",
+                episodeId: fixture.episodeIds[1],
+                analysisAssetId: fixture.assetIds[1],
+                state: "complete",
+                updatedAt: now.addingTimeInterval(-60).timeIntervalSince1970
+            )
+        )
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+        let byId = Dictionary(uniqueKeysWithValues: inputs.map { ($0.episodeId, $0) })
+        let assetTerminal = try #require(byId[fixture.episodeIds[0]])
+        let jobTerminal = try #require(byId[fixture.episodeIds[1]])
+        #expect(assetTerminal.status.playbackReadiness == .none)
+        #expect(assetTerminal.finishedOutcome == .success)
+        #expect(jobTerminal.finishedOutcome == .success)
+
+        let snapshot = ActivityViewModel.aggregate(inputs: inputs, now: now)
+        #expect(snapshot.upNext.isEmpty)
+        #expect(snapshot.recentlyFinished.count == 2)
+        #expect(Set(snapshot.recentlyFinished.map(\.episodeId)) == Set(fixture.episodeIds))
     }
 }

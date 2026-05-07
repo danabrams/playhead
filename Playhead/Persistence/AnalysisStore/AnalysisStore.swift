@@ -4377,6 +4377,45 @@ actor AnalysisStore {
         return readSession(stmt)
     }
 
+    /// Bulk latest-session map keyed by `analysisAssetId`. Mirrors
+    /// `fetchLatestSessionForAsset(assetId:)` while avoiding one actor
+    /// hop and SQL query per Activity row.
+    func fetchLatestSessionByAssetIdMap(assetIds: Set<String>) throws -> [String: AnalysisSession] {
+        guard !assetIds.isEmpty else { return [:] }
+        let chunkSize = 500
+        var results: [String: AnalysisSession] = [:]
+        results.reserveCapacity(assetIds.count)
+
+        let allIds = Array(assetIds)
+        var index = 0
+        while index < allIds.count {
+            let end = min(index + chunkSize, allIds.count)
+            let slice = Array(allIds[index..<end])
+            let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
+            let sql = """
+                SELECT id, analysisAssetId, state, startedAt, updatedAt, failureReason,
+                       needsShadowRetry, shadowRetryPodcastId
+                FROM analysis_sessions
+                WHERE analysisAssetId IN (\(placeholders))
+                ORDER BY updatedAt DESC, rowid DESC
+                """
+            let stmt = try prepare(sql)
+            for (i, id) in slice.enumerated() {
+                bind(stmt, Int32(i + 1), id)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let session = readSession(stmt)
+                if results[session.analysisAssetId] == nil {
+                    results[session.analysisAssetId] = session
+                }
+            }
+            sqlite3_finalize(stmt)
+            index = end
+        }
+
+        return results
+    }
+
     private func readSession(_ stmt: OpaquePointer?) -> AnalysisSession {
         AnalysisSession(
             id: text(stmt, 0),
@@ -6008,6 +6047,43 @@ actor AnalysisStore {
         return readJob(stmt)
     }
 
+    /// Bulk latest-job map keyed by `episodeId`. Mirrors
+    /// `fetchLatestJobForEpisode(_:)` for hot Activity/diagnostics paths
+    /// that need terminal-job state for many visible episodes.
+    func fetchLatestJobByEpisodeIdMap(episodeIds: Set<String>) throws -> [String: AnalysisJob] {
+        guard !episodeIds.isEmpty else { return [:] }
+        let chunkSize = 500
+        var results: [String: AnalysisJob] = [:]
+        results.reserveCapacity(episodeIds.count)
+
+        let allIds = Array(episodeIds)
+        var index = 0
+        while index < allIds.count {
+            let end = min(index + chunkSize, allIds.count)
+            let slice = Array(allIds[index..<end])
+            let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
+            let sql = """
+                SELECT * FROM analysis_jobs
+                WHERE episodeId IN (\(placeholders))
+                ORDER BY updatedAt DESC, rowid DESC
+                """
+            let stmt = try prepare(sql)
+            for (i, id) in slice.enumerated() {
+                bind(stmt, Int32(i + 1), id)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let job = readJob(stmt)
+                if results[job.episodeId] == nil {
+                    results[job.episodeId] = job
+                }
+            }
+            sqlite3_finalize(stmt)
+            index = end
+        }
+
+        return results
+    }
+
     func fetchNextEligibleJob(
         deferredWorkAllowed: Bool,
         t0ThresholdSec: Double,
@@ -7110,6 +7186,48 @@ actor AnalysisStore {
         bind(stmt, 1, episodeId)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return try readWorkJournalEntry(stmt)
+    }
+
+    /// Bulk latest-terminal WorkJournal map keyed by raw `episodeId`.
+    /// Callers that export diagnostics must hash or omit the key before
+    /// serializing; this accessor intentionally stays persistence-level.
+    func fetchLatestTerminalWorkJournalEntryByEpisodeIdMap(
+        episodeIds: Set<String>
+    ) throws -> [String: WorkJournalEntry] {
+        guard !episodeIds.isEmpty else { return [:] }
+        let chunkSize = 500
+        var results: [String: WorkJournalEntry] = [:]
+        results.reserveCapacity(episodeIds.count)
+
+        let allIds = Array(episodeIds)
+        var index = 0
+        while index < allIds.count {
+            let end = min(index + chunkSize, allIds.count)
+            let slice = Array(allIds[index..<end])
+            let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
+            let sql = """
+                SELECT id, episode_id, generation_id, scheduler_epoch,
+                       timestamp, event_type, cause, metadata, artifact_class
+                FROM work_journal
+                WHERE episode_id IN (\(placeholders))
+                  AND event_type IN ('finalized', 'failed', 'preempted')
+                ORDER BY timestamp DESC, rowid DESC
+                """
+            let stmt = try prepare(sql)
+            for (i, id) in slice.enumerated() {
+                bind(stmt, Int32(i + 1), id)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let entry = try readWorkJournalEntry(stmt)
+                if results[entry.episodeId] == nil {
+                    results[entry.episodeId] = entry
+                }
+            }
+            sqlite3_finalize(stmt)
+            index = end
+        }
+
+        return results
     }
 
     /// Fetches every WorkJournal row for a {episodeId, generationID}

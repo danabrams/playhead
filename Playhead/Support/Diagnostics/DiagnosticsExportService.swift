@@ -283,6 +283,7 @@ struct DogfoodDiagnosticsActivityRow: Codable, Sendable, Equatable {
     let section: String
     let status: DogfoodDiagnosticsStatusSnapshot
     let isRunning: Bool
+    let finishedOutcome: String?
     let queuePosition: Int?
     let cachedAudioPresent: Bool
     let liveDownloadFraction: Double?
@@ -297,6 +298,7 @@ struct DogfoodDiagnosticsActivityRow: Codable, Sendable, Equatable {
         case section
         case status
         case isRunning = "is_running"
+        case finishedOutcome = "finished_outcome"
         case queuePosition = "queue_position"
         case cachedAudioPresent = "cached_audio_present"
         case liveDownloadFraction = "live_download_fraction"

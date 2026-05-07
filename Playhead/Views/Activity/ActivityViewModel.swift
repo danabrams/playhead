@@ -57,6 +57,11 @@ struct ActivityEpisodeInput: Sendable, Hashable {
     /// (done / failed / cancelled / unavailable). `nil` for in-flight
     /// jobs. Drives Recently-Finished membership and ordering.
     let finishedAt: Date?
+    /// Explicit terminal lifecycle outcome from the provider. Used when
+    /// persistence says the analysis asset/session/job is terminal even
+    /// though the surface reducer still reports a queued status because
+    /// the denormalized `Episode.coverageSummary` is stale or missing.
+    let finishedOutcome: ActivityFinishedOutcome?
     /// Persisted user ordering for the Up Next section
     /// (playhead-cjqq). `nil` means the user has never reordered this
     /// episode — it inherits the provider's natural ordering and sorts
@@ -90,6 +95,7 @@ struct ActivityEpisodeInput: Sendable, Hashable {
         status: EpisodeSurfaceStatus,
         isRunning: Bool,
         finishedAt: Date?,
+        finishedOutcome: ActivityFinishedOutcome? = nil,
         queuePosition: Int? = nil,
         downloadFraction: Double? = nil,
         transcriptFraction: Double? = nil,
@@ -101,6 +107,7 @@ struct ActivityEpisodeInput: Sendable, Hashable {
         self.status = status
         self.isRunning = isRunning
         self.finishedAt = finishedAt
+        self.finishedOutcome = finishedOutcome
         self.queuePosition = queuePosition
         self.downloadFraction = downloadFraction
         self.transcriptFraction = transcriptFraction
@@ -418,7 +425,7 @@ final class ActivityViewModel {
             // Terminal-state rows route to Recently Finished when a
             // finishedAt timestamp is present and inside the retention
             // window. The disposition determines the outcome label.
-            if let outcome = terminalOutcome(for: input.status) {
+            if let outcome = input.finishedOutcome ?? terminalOutcome(for: input.status) {
                 guard let finishedAt = input.finishedAt else { continue }
                 let age = now.timeIntervalSince(finishedAt)
                 if age < 0 || age > recentlyFinishedWindow { continue }

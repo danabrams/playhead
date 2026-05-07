@@ -172,6 +172,7 @@ struct DiagnosticsExportServiceTests {
                         readinessAnchor: nil
                     ),
                     isRunning: false,
+                    finishedOutcome: nil,
                     queuePosition: 7,
                     cachedAudioPresent: true,
                     liveDownloadFraction: nil,
