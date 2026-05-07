@@ -3753,6 +3753,26 @@ actor AnalysisStore {
     func reapOrphanBackgroundTaskRuns(
         olderThan startedBefore: Double = Date().timeIntervalSince1970
     ) throws -> Int {
+        // playhead-hygc.1.4 (R3 fix): tolerate a missing table.
+        //
+        // Cross-worktree dogfooding can leave the AnalysisStore at a
+        // schemaVersion ABOVE 23 (e.g. bd-hygc.1.6 bumps to v24) without
+        // having created `background_task_runs`, because that bead's
+        // ladder predates this one. Our v23 migration is gated on
+        // `schemaVersion < 23` and is therefore SKIPPED on those files,
+        // leaving the table missing despite a "later" schema version.
+        // Without this guard, the reaper raises `queryFailed("no such
+        // table")` on every launch under that condition — adding noise
+        // to dogfood logs without surfacing any actionable bug. The
+        // canonical fix lives in the bd-hygc.1.6 integration commit
+        // (rebase the v23 ladder rung in front of v24); locally, we
+        // simply degrade to "nothing to reap" so the launch path stays
+        // quiet. Real SQL errors (e.g. disk-full, malformed db) still
+        // bubble up via `prepare`/`step` because `tableExists` succeeds
+        // before the UPDATE runs.
+        guard try tableExists("background_task_runs") else {
+            return 0
+        }
         // playhead-hygc.1.4 (R2 fix): only reap rows that were inserted
         // STRICTLY BEFORE `startedBefore` (typically captured at
         // PlayheadRuntime init, before any BG task handler can register).
