@@ -14,12 +14,15 @@
 //      into a SINGLE persisted AdWindow via the aggregator path.
 //   2. Single high-confidence window (>= 0.60) is still a one-window promotion:
 //      exactly one AdWindow persisted. The aggregator must not double-emit.
-//   3. C22D6EC6 pattern: a single 0.597 window alone must NOT promote — not
-//      via single-window (below 0.60 highConfidence) and not via aggregator
-//      (N-nearby requires 2 candidate-strength windows).
+//   3. C22D6EC6 pattern: a single mid-episode 0.597 window alone must NOT
+//      promote — not via single-window (below 0.60 highConfidence) and not
+//      via aggregator (N-nearby requires 2 candidate-strength windows).
 //   4. Observability: aggregator-promoted segments carry a distinct
 //      finalDecision.action in the decision log so replay tooling can
 //      distinguish "single-window path" from "aggregator path".
+//   5. Boundary recall: a single candidate-strength Tier 1 pre/post-roll
+//      slot persists as a mark-only AdWindow so common dogfood false
+//      negatives surface without granting autoskip authority.
 
 import Foundation
 import Testing
@@ -271,7 +274,54 @@ struct SegmentAggregatorWiringTests {
                 "no AdWindow should be persisted for a lone 0.597 window; got \(persisted.count)")
     }
 
-    // MARK: - 4. Observability: decision log distinguishes the two paths
+    // MARK: - 4. Boundary singleton recall
+
+    @Test("Boundary recall: isolated pre/post-roll Tier 1 candidates persist as markOnly AdWindows")
+    func boundarySingletonTier1CandidatesPersistMarkOnly() async throws {
+        // Dogfood playhead-9ro7: a large share of manual false-negative
+        // corrections were isolated pre-roll/post-roll slots where Tier 1
+        // crossed the UI candidate threshold but did not have a second
+        // nearby candidate to satisfy the mid-episode N=2 guard. These
+        // should surface as mark-only detections, while autoskip remains
+        // gated by AutoSkipPrecisionGate.
+        let store = try await makeTestStore()
+        let assetId = "asset-boundary-singletons"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let duration: Double = 3600
+        try await insertUniformFeatureGrid(
+            store: store,
+            assetId: assetId,
+            duration: duration
+        )
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [
+            0.0: 0.52,
+            3540.0: 0.52
+        ], defaultScore: 0.10)
+        let service = makeService(store: store, classifier: classifier)
+
+        let windows = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+        #expect(windows.count == 2,
+                "pre/post-roll singleton candidates should surface as two mark-only windows; got \(windows.count)")
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        let sortedPersisted = persisted.sorted { $0.startTime < $1.startTime }
+        #expect(sortedPersisted.count == 2,
+                "expected two persisted boundary singleton AdWindows; got \(sortedPersisted.count)")
+        #expect(sortedPersisted.allSatisfy { $0.boundaryState == AdBoundaryState.segmentAggregated.rawValue })
+        #expect(sortedPersisted.allSatisfy { $0.decisionState == AdDecisionState.candidate.rawValue })
+        #expect(sortedPersisted.allSatisfy { $0.eligibilityGate == "markOnly" },
+                "boundary singleton recall must not auto-skip at 0.52; gates=\(sortedPersisted.map { String(describing: $0.eligibilityGate) })")
+        #expect(sortedPersisted.first?.startTime == 0)
+        #expect(sortedPersisted.last?.startTime == 3540)
+    }
+
+    // MARK: - 5. Observability: decision log distinguishes the two paths
 
     @Test("Decision log marks aggregator-promoted segments distinctly from single-window promotions")
     func decisionLogDistinguishesAggregatorFromSingleWindowPromotion() async throws {

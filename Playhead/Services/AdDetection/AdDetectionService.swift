@@ -355,6 +355,14 @@ actor AdDetectionService {
     }
 
     private static let hotPathCandidateIdentityTolerance: Double = 5
+    /// playhead-9ro7: Dogfood false negatives are concentrated in
+    /// pre-roll/post-roll slots where Tier 1 often sees exactly one
+    /// candidate-strength 30 s window. Keep this recall rule boundary-
+    /// scoped and mark-only-gated so mid-episode precision still relies
+    /// on SegmentAggregator's N-nearby corroboration.
+    private static let boundarySingletonStartWindowSeconds: Double = 120
+    private static let boundarySingletonEndWindowSeconds: Double = 180
+    private static let boundarySingletonMinimumWindowSeconds: Double = 20
 
     private let logger = Logger(subsystem: "com.playhead", category: "AdDetectionService")
 
@@ -4552,7 +4560,13 @@ actor AdDetectionService {
 
         let segments = SegmentAggregator.aggregate(windows: windowScores)
         let promotedSegments = segments.filter(\.promoted)
-        guard !promotedSegments.isEmpty else { return [] }
+        let boundarySingletonSegments = boundarySingletonPromotedSegments(
+            tier1Results: tier1Results,
+            existingSegments: promotedSegments,
+            episodeDuration: episodeDuration
+        )
+        let surfacedSegments = promotedSegments + boundarySingletonSegments
+        guard !surfacedSegments.isEmpty else { return [] }
 
         // Observability: emit one decision-log entry per promoted segment
         // with a distinguishing action string so replay tooling can
@@ -4563,7 +4577,7 @@ actor AdDetectionService {
         let activationSnapshot = DecisionLogEntry.ActivationConfigSnapshot(
             MetadataActivationConfig.resolved()
         )
-        for segment in promotedSegments {
+        for segment in surfacedSegments {
             let timestamp = Date().timeIntervalSince1970
             let clampedScore = max(0.0, min(1.0, segment.segmentScore))
             let cappedWeight = min(clampedScore * classifierCap, classifierCap)
@@ -4621,7 +4635,7 @@ actor AdDetectionService {
         let previouslyPersistedWindows = try await store
             .fetchAdWindows(assetId: analysisAssetId)
             .filter { $0.detectorVersion == config.detectorVersion }
-        let surviving = promotedSegments.filter { segment in
+        let surviving = surfacedSegments.filter { segment in
             let overlapsSingleWindow = singleWindowAdWindows.contains { window in
                 segment.endTime > window.startTime && segment.startTime < window.endTime
             }
@@ -4684,8 +4698,84 @@ actor AdDetectionService {
                 )
             )
         }
-        logger.info("Hot path: aggregator produced \(newWindows.count) windows (of \(promotedSegments.count) promoted segments, \(promotedSegments.count - surviving.count) deduped against single-window path)")
+        logger.info("Hot path: aggregator produced \(newWindows.count) windows (of \(surfacedSegments.count) surfaced segments, \(surfacedSegments.count - surviving.count) deduped against single-window path)")
         return newWindows
+    }
+
+    private func boundarySingletonPromotedSegments(
+        tier1Results: [ClassifierResult],
+        existingSegments: [AdSegmentCandidate],
+        episodeDuration: Double
+    ) -> [AdSegmentCandidate] {
+        guard episodeDuration > 0 else { return [] }
+
+        let slotFraction = AutoSkipPrecisionGateConfig.default.slotFraction
+        let startWindow = min(
+            Self.boundarySingletonStartWindowSeconds,
+            max(AdDetectionService.tier1DefaultWindowSeconds, episodeDuration * slotFraction)
+        )
+        let endWindow = min(
+            Self.boundarySingletonEndWindowSeconds,
+            max(AdDetectionService.tier1DefaultWindowSeconds, episodeDuration * slotFraction)
+        )
+        let scoreFloor = AutoSkipPrecisionGateConfig.default.uiCandidateThreshold
+        let gapTolerance = SegmentAggregatorConfig.default.maxInternalGapSeconds
+
+        let boundaryCandidates = tier1Results
+            .filter { result in
+                let duration = result.endTime - result.startTime
+                guard duration >= Self.boundarySingletonMinimumWindowSeconds,
+                      result.adProbability >= scoreFloor
+                else { return false }
+
+                let center = (result.startTime + result.endTime) / 2
+                let inStartSlot = center <= startWindow
+                let inEndSlot = center >= (episodeDuration - endWindow)
+                guard inStartSlot || inEndSlot else { return false }
+
+                return !existingSegments.contains { segment in
+                    result.endTime > segment.startTime && result.startTime < segment.endTime
+                }
+            }
+            .sorted {
+                if $0.startTime != $1.startTime { return $0.startTime < $1.startTime }
+                return $0.endTime < $1.endTime
+            }
+
+        guard !boundaryCandidates.isEmpty else { return [] }
+
+        var groups: [[ClassifierResult]] = []
+        for result in boundaryCandidates {
+            if let lastGroup = groups.last,
+               let last = lastGroup.last,
+               result.startTime <= last.endTime + gapTolerance {
+                groups[groups.count - 1].append(result)
+            } else {
+                groups.append([result])
+            }
+        }
+
+        return groups.compactMap { group in
+            guard let first = group.first, let last = group.last else { return nil }
+            let weighted = group.reduce(into: (sum: 0.0, duration: 0.0)) { acc, result in
+                let duration = max(0, result.endTime - result.startTime)
+                acc.sum += max(0, min(1, result.adProbability)) * duration
+                acc.duration += duration
+            }
+            guard weighted.duration >= GlobalPriorDefaults.standard.typicalAdDuration.lowerBound,
+                  weighted.duration > 0
+            else { return nil }
+
+            let score = weighted.sum / weighted.duration
+            guard score >= scoreFloor else { return nil }
+            return AdSegmentCandidate(
+                startTime: first.startTime,
+                endTime: last.endTime,
+                segmentScore: score,
+                windowCount: group.count,
+                promoted: true
+            )
+        }
     }
 
     /// Decision-log `finalDecision.action` string stamped on aggregator-
