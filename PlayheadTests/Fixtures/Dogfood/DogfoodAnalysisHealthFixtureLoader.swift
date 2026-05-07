@@ -252,22 +252,37 @@ enum DogfoodAnalysisHealthFixtureLoader {
     /// Capture date the fixture pertains to. Drives the on-disk subdir.
     static let captureDateStamp = "2026-05-06"
 
+    /// Source path of *this* loader file. Captured at compile time so callers
+    /// in arbitrary test directories resolve the fixture correctly.
+    ///
+    /// Why a stored property and not a `#filePath` default on each method:
+    /// Swift's `#filePath` magic literal evaluates at the CALL site when
+    /// used as a default argument value. Placing it on a default parameter
+    /// makes cross-directory test files (e.g., one under
+    /// `PlayheadTests/Persistence/AnalysisStore/`) resolve to their OWN
+    /// directory instead of `PlayheadTests/Fixtures/Dogfood/`. Capturing it
+    /// here (in the loader's own source file) pins the anchor to this file's
+    /// location regardless of caller site.
+    private static let loaderSourceFilePath: String = #filePath
+
     /// Resolve the fixture directory from the source file path of this loader.
     /// Convention matches `FixtureManifestIntegrityTests` / `CorpusLoader`.
-    static func fixtureDirectoryURL(filePath: String = #filePath) -> URL {
+    /// `filePath` retains an override hook for tests that want to point the
+    /// loader at a different source root (e.g., a stub fixture in CI).
+    static func fixtureDirectoryURL(filePath: String = loaderSourceFilePath) -> URL {
         URL(fileURLWithPath: filePath)
             .deletingLastPathComponent()                       // Fixtures/Dogfood/
             .appendingPathComponent(captureDateStamp, isDirectory: true)
     }
 
     /// Resolve the analysis-health.json URL.
-    static func fixtureURL(filePath: String = #filePath) -> URL {
+    static func fixtureURL(filePath: String = loaderSourceFilePath) -> URL {
         fixtureDirectoryURL(filePath: filePath)
             .appendingPathComponent("analysis-health.json")
     }
 
     /// Load and decode the sanitized analysis-health snapshot.
-    static func load(filePath: String = #filePath) throws -> DogfoodAnalysisHealthFixture {
+    static func load(filePath: String = loaderSourceFilePath) throws -> DogfoodAnalysisHealthFixture {
         let url = fixtureURL(filePath: filePath)
         let data: Data
         do {

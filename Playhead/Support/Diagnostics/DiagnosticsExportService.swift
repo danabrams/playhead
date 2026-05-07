@@ -356,6 +356,19 @@ struct DogfoodDiagnosticsPipelineSnapshot: Codable, Sendable, Equatable {
     let featureCoverageEndSec: Double?
     let confirmedAdCoverageEndSec: Double?
     let finalPassCoverageEndSec: Double?
+    /// playhead-hygc.1.2: provenance for `fastTranscriptWatermarkSec`
+    /// (`fast_transcript_chunks` when sourced from `MAX(endTime)` of fast
+    /// chunks, `asset_watermark` when sourced from
+    /// `analysis_assets.fastTranscriptCoverageEndTime`, `unknown` when
+    /// neither is recorded). Decouples the watermark wire from the stale-
+    /// vs-fresh narrative on stuck-device diagnostics.
+    let fastTranscriptCoverageEndSource: String
+    /// playhead-hygc.1.2: provenance for `finalPassCoverageEndSec`
+    /// (`final_pass_chunks`, `asset_watermark`, or `unknown`). Surfaces
+    /// whether final-pass coverage came from chunk MAX(endTime) or from
+    /// the asset watermark column — the bead's "final-pass coverage
+    /// appearing in dogfood provenance" acceptance criterion.
+    let finalPassCoverageEndSource: String
 
     enum CodingKeys: String, CodingKey {
         case downloadFraction = "download_fraction"
@@ -375,6 +388,54 @@ struct DogfoodDiagnosticsPipelineSnapshot: Codable, Sendable, Equatable {
         case featureCoverageEndSec = "feature_coverage_end_sec"
         case confirmedAdCoverageEndSec = "confirmed_ad_coverage_end_sec"
         case finalPassCoverageEndSec = "final_pass_coverage_end_sec"
+        case fastTranscriptCoverageEndSource = "fast_transcript_coverage_end_source"
+        case finalPassCoverageEndSource = "final_pass_coverage_end_source"
+    }
+
+    init(
+        downloadFraction: Double?,
+        downloadPercent: String,
+        downloadSource: String,
+        transcriptFraction: Double?,
+        transcriptPercent: String,
+        transcriptSource: String,
+        analysisFraction: Double?,
+        analysisPercent: String,
+        analysisSource: String,
+        episodeDurationSec: Double?,
+        transcriptCoveredSec: Double?,
+        transcriptWatermarkSec: Double?,
+        fastTranscriptWatermarkSec: Double?,
+        analysisWatermarkSec: Double?,
+        featureCoverageEndSec: Double?,
+        confirmedAdCoverageEndSec: Double?,
+        finalPassCoverageEndSec: Double?,
+        // playhead-hygc.1.2: defaulted to `unknown` so the existing
+        // call-sites in tests that constructed the snapshot positionally
+        // pre-hygc.1.2 keep compiling. Production wires the real
+        // provenance from `AnalysisCoverageSummary`.
+        fastTranscriptCoverageEndSource: String = "unknown",
+        finalPassCoverageEndSource: String = "unknown"
+    ) {
+        self.downloadFraction = downloadFraction
+        self.downloadPercent = downloadPercent
+        self.downloadSource = downloadSource
+        self.transcriptFraction = transcriptFraction
+        self.transcriptPercent = transcriptPercent
+        self.transcriptSource = transcriptSource
+        self.analysisFraction = analysisFraction
+        self.analysisPercent = analysisPercent
+        self.analysisSource = analysisSource
+        self.episodeDurationSec = episodeDurationSec
+        self.transcriptCoveredSec = transcriptCoveredSec
+        self.transcriptWatermarkSec = transcriptWatermarkSec
+        self.fastTranscriptWatermarkSec = fastTranscriptWatermarkSec
+        self.analysisWatermarkSec = analysisWatermarkSec
+        self.featureCoverageEndSec = featureCoverageEndSec
+        self.confirmedAdCoverageEndSec = confirmedAdCoverageEndSec
+        self.finalPassCoverageEndSec = finalPassCoverageEndSec
+        self.fastTranscriptCoverageEndSource = fastTranscriptCoverageEndSource
+        self.finalPassCoverageEndSource = finalPassCoverageEndSource
     }
 }
 
