@@ -914,4 +914,65 @@ struct LearningArtifactIngestorTests {
         #expect(rows.first?.scope == scopeA.serialized,
             "the surviving row must carry identity A's scope (identity B was never inserted)")
     }
+
+    /// playhead-hygc.1.7 R5: pin the in-process / on-disk identity-key
+    /// alignment.
+    ///
+    /// Pre-R5 the ingestor maintained its OWN canonicalization (1ms time
+    /// bucket; lowercased sponsor names) which diverged from the
+    /// persistence layer's `normalizedIdentityKey` (100ms time bucket;
+    /// case-preserving). Two visible failure modes:
+    ///
+    ///   1. exactTimeSpan drift within a 100ms bucket:
+    ///      `seenIdentities` would treat 10.05s and 10.10s as DISTINCT
+    ///      keys, so two concurrent ingest calls both passed the
+    ///      contains-check, both ran the persistence path, and the
+    ///      ON CONFLICT(identity) UPDATE bumped `submissionCount`
+    ///      to 2 for one user gesture (with the second call also
+    ///      retriggering materialization). Post-R5: both keys round
+    ///      to the same 100ms bucket so the second hits the in-process
+    ///      dedupe before reaching SQLite.
+    ///
+    ///   2. sponsor casing divergence:
+    ///      "Squarespace" then "squarespace" used to collapse on the
+    ///      lowercased in-process key, silently dropping the second
+    ///      gesture. The on-disk identity is case-preserving so the
+    ///      second SHOULD have been a fresh insert. Post-R5 the keys
+    ///      agree, so the in-process dedupe matches SQLite reality.
+    @Test("Identity key matches persistence-layer normalizedIdentityKey (R5 alignment)")
+    func identityKeyAlignsWithPersistenceCanonicalization() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let knowledge = SponsorKnowledgeStore(store: store)
+        let ingestor = LearningArtifactIngestor(
+            store: store,
+            knowledgeStore: knowledge
+        )
+
+        // Case 1: exactTimeSpan corrections within the same 100ms bucket.
+        // The persistence layer rounds to 100ms before computing identity
+        // (UserCorrectionStore.identityKeyTimeToleranceSeconds = 0.1).
+        // Pre-R5 the ingestor used 1ms bucketing — these two calls would
+        // both have passed the in-process dedupe check.
+        let firstSpan = fnSpanCorrection(startTime: 10.050, endTime: 20.050)
+        let secondSpan = fnSpanCorrection(startTime: 10.099, endTime: 20.099)
+        let firstResult = try await ingestor.ingest(correction: firstSpan)
+        let secondResult = try await ingestor.ingest(correction: secondSpan)
+        #expect(firstResult.outcome == .ingested,
+            "first exactTimeSpan call must report .ingested")
+        #expect(secondResult.outcome == .deduped,
+            "second exactTimeSpan call within the same 100ms bucket must report .deduped (in-process key now matches persistence-layer 100ms bucket); got \(secondResult.outcome)")
+
+        // Case 2: sponsor case-divergence MUST yield two distinct
+        // identities (the persistence layer is case-preserving).
+        // Pre-R5 the ingestor lowercased sponsor names, collapsing
+        // these — the second would have been silently dropped.
+        let sponsorMixed = sponsorCorrection(sponsor: "RawSponsor", kind: .falsePositive)
+        let sponsorLower = sponsorCorrection(sponsor: "rawsponsor", kind: .falsePositive)
+        let mixedResult = try await ingestor.ingest(correction: sponsorMixed)
+        let lowerResult = try await ingestor.ingest(correction: sponsorLower)
+        #expect(mixedResult.outcome == .ingested)
+        #expect(lowerResult.outcome == .ingested,
+            "differently-cased sponsor names are DIFFERENT identities on disk and must therefore be DIFFERENT in-process keys; got \(lowerResult.outcome)")
+    }
 }

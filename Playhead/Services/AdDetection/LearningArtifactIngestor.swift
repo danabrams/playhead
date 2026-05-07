@@ -132,8 +132,19 @@ actor LearningArtifactIngestor {
         counters.raw += 1
         guard let parsedScope = CorrectionScope.deserialize(correction.scope) else {
             counters.skippedMalformed += 1
+            // R5 privacy: log only the scope's leading prefix (the token
+            // before the first ':' — the *type* discriminator) and the
+            // overall length. The remainder may carry user-typed text
+            // (phrase scopes), podcast-identifying podcastIds, or sponsor
+            // names. We never want any of that surfacing in os_log even
+            // when the parse fails. Public prefix is bounded to 32 chars
+            // so a malformed payload that lacks a ':' can't dump arbitrary
+            // bytes into the system log.
+            let scope = correction.scope
+            let prefix = scope.split(separator: ":", maxSplits: 1).first.map(String.init) ?? scope
+            let safePrefix = String(prefix.prefix(32))
             logger.warning(
-                "ingest: rejecting correction with malformed scope: \(correction.scope, privacy: .public)"
+                "ingest: rejecting correction with malformed scope (typePrefix=\(safePrefix, privacy: .public), len=\(scope.count, privacy: .public))"
             )
             return LearningIngestionResult(
                 outcome: .skippedMalformed,
@@ -294,33 +305,35 @@ actor LearningArtifactIngestor {
         type: CorrectionType,
         scope: CorrectionScope
     ) -> String {
-        // Use the same normalization the store's v23 UNIQUE INDEX
-        // applies, but live in-process so we don't need a round-trip
-        // through SQLite to detect a duplicate.
-        let normalizedScope: String
-        switch scope {
-        case .exactSpan(let assetId, let range):
-            normalizedScope = "exactSpan:\(assetId):\(range.lowerBound):\(range.upperBound)"
-        case .exactTimeSpan(let assetId, let start, let end):
-            // Bucket to integer-millisecond precision to match v23's
-            // dedupe convention (the persistence layer rounds to ms
-            // before computing identity to absorb FP drift across
-            // rebinds of the same UI gesture).
-            let s = (start * 1000.0).rounded() / 1000.0
-            let e = (end * 1000.0).rounded() / 1000.0
-            normalizedScope = String(format: "exactTimeSpan:%@:%.3f:%.3f", assetId, s, e)
-        case .sponsorOnShow(let podcastId, let sponsor):
-            normalizedScope = "sponsorOnShow:\(podcastId):\(sponsor.lowercased())"
-        case .phraseOnShow(let podcastId, let phrase):
-            normalizedScope = "phraseOnShow:\(podcastId):\(phrase.lowercased())"
-        case .campaignOnShow(let podcastId, let campaign):
-            normalizedScope = "campaignOnShow:\(podcastId):\(campaign.lowercased())"
-        case .domainOwnershipOnShow(let podcastId, let domain):
-            normalizedScope = "domainOwnershipOnShow:\(podcastId):\(domain.lowercased())"
-        case .jingleOnShow(let podcastId, let jingleId):
-            normalizedScope = "jingleOnShow:\(podcastId):\(jingleId)"
-        }
-        return "\(analysisAssetId)|\(type.rawValue)|\(normalizedScope)"
+        // R5: route through `CorrectionScope.normalizedIdentityKey` so the
+        // in-process `seenIdentities` set keys on EXACTLY the same
+        // canonicalization as the on-disk v23 UNIQUE INDEX
+        // (`appendCorrectionEvent` derives its `normalizedScopeKey` from
+        // this same property). Previously the ingestor maintained its
+        // own divergent canonicalization (1ms time bucketing vs the
+        // persistence layer's 100ms bucket; lowercased sponsor names vs
+        // case-preserving on disk) — which left two failure modes:
+        //
+        //   1. In-process drift: two `.exactTimeSpan` corrections at
+        //      times 10.05 and 10.10 (50ms apart) collapse on disk
+        //      (same 100ms bucket) but produce DIFFERENT in-process keys,
+        //      so concurrent re-entrants both pass the `contains` check
+        //      and both call `appendCorrectionEvent`. The persistence
+        //      layer would still gate sponsor side effects via the Bool
+        //      return, but `submissionCount` would inflate beyond 1 for
+        //      one user gesture — visible in NARL exports.
+        //
+        //   2. Casing divergence: a sponsor reported as "Squarespace"
+        //      then "squarespace" hashes to ONE in-process key
+        //      (lowercased) but TWO on-disk identities (case-preserving
+        //      `serialized` form). The second call would short-circuit
+        //      to `.deduped` in-process and never reach the persistence
+        //      layer, silently dropping a correction that would have
+        //      legitimately written a second row.
+        //
+        // Both are now closed by sharing the canonical key with the
+        // persistence layer.
+        return "\(analysisAssetId)|\(type.rawValue)|\(scope.normalizedIdentityKey)"
     }
 
     private static func kindFor(_ type: CorrectionType) -> CorrectionKind {
