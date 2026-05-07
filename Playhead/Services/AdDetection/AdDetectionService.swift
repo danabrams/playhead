@@ -509,6 +509,20 @@ actor AdDetectionService {
     /// Episode duration for position-based scoring.
     private var episodeDuration: Double = 0
 
+    /// playhead-hygc.1.8 (R7): per-asset in-flight tracker for
+    /// `runHotPathResult`. Enforces the no-concurrent-runs-per-asset
+    /// invariant that `correctionReplayCandidates` documents (UUID
+    /// allocation across actor `await`s could otherwise race and
+    /// double-insert replay rows). On entry the assetId is inserted; on
+    /// exit (`defer`) it is removed. A second in-flight call for the same
+    /// asset hits a `preconditionFailure` in DEBUG builds and emits a
+    /// telemetry warning in RELEASE builds. Different assets remain
+    /// independent. The actor's serialized re-entrance via `await` is the
+    /// only realistic source of contention given the production caller
+    /// chain (`AnalysisCoordinator.handlePersistedTranscriptChunks` and
+    /// `AnalysisJobRunner.run` are both single-shot per asset).
+    private var hotPathRunInFlightAssetIds: Set<String> = []
+
     // playhead-gtt9.16: Last snapshot of the `AcousticFeaturePipeline` funnel.
     // Captured at the end of each `runBackfill` invocation so that tests (and
     // future telemetry surfaces) can inspect which features were computed /
@@ -1217,6 +1231,25 @@ actor AdDetectionService {
         episodeDuration: Double,
         retireUnmatchedReplayCandidates: Bool = false
     ) async throws -> HotPathRunResult {
+        // playhead-hygc.1.8 (R7): enforce the documented
+        // no-concurrent-runHotPath-per-asset invariant. Actor reentrancy
+        // across `await`s could otherwise let a second caller compute
+        // fresh UUIDs for the same FN range and double-insert replay
+        // rows. In DEBUG we crash fast; in RELEASE we log a warning and
+        // proceed (the legacy belt-and-suspenders dedupe in
+        // `correctionReplayCandidates` keeps the same-call path
+        // tolerable, but no consumer should rely on that).
+        if hotPathRunInFlightAssetIds.contains(analysisAssetId) {
+            assertionFailure(
+                "runHotPathResult called concurrently for asset \(analysisAssetId)"
+            )
+            logger.warning(
+                "runHotPathResult: concurrent invocation detected for asset \(analysisAssetId, privacy: .public) — production caller chain expects single-shot serialization"
+            )
+        }
+        hotPathRunInFlightAssetIds.insert(analysisAssetId)
+        defer { hotPathRunInFlightAssetIds.remove(analysisAssetId) }
+
         self.episodeDuration = episodeDuration
 
         // playhead-hygc.1.8: correction-replay recall step. A
@@ -4855,14 +4888,12 @@ actor AdDetectionService {
     ///     `chunksPersisted` event, serialized).
     ///   - `AnalysisJobRunner.run` invokes `runHotPath` once per asset
     ///     job and the runner is itself a serial executor.
-    /// We document the invariant here (rather than enforce via
-    /// `precondition()`) because the only call sites in tree are the two
-    /// `runHotPathResult` entry points above; defending against an
-    /// invariant that only future callers could break would require
-    /// per-asset bookkeeping inside the actor that no caller actually
-    /// exercises. R6: the prior wording claimed the invariant was
-    /// "documented at the call site"; that was inaccurate (no such
-    /// comment existed) — the invariant is in this docstring only.
+    /// R7: the invariant is now ENFORCED — `runHotPathResult` tracks
+    /// per-asset in-flight state in `hotPathRunInFlightAssetIds` and
+    /// fires `assertionFailure` (DEBUG crash, RELEASE warning log) on a
+    /// concurrent re-entry for the same asset. The earlier rounds (R0–R6)
+    /// only documented the invariant; R7 added the runtime check so a
+    /// future caller cannot quietly violate it.
     private func correctionReplayCandidates(
         analysisAssetId: String
     ) async throws -> [AdWindow] {
@@ -4925,10 +4956,23 @@ actor AdDetectionService {
         var emitted: [AdWindow] = []
         let detectorVersion = config.detectorVersion
         for (start, end) in falseNegativeRanges {
-            let overlaps = existing.contains { window in
+            let overlapsExisting = existing.contains { window in
                 window.startTime < end && window.endTime > start
             }
-            if overlaps { continue }
+            if overlapsExisting { continue }
+            // playhead-hygc.1.8 (R7): dedupe-by-overlap across the in-flight
+            // emit set. The exact-match `seen` key above (`%.3f-%.3f`)
+            // catches duplicate user reports with identical span numerics
+            // but not slightly-different overlapping spans (e.g. a single
+            // ad reported with ranges [600, 680] and [610, 690]). Without
+            // this guard both would persist, leaving two suggest banners
+            // — and an `acceptSuggestedSkip` on either would only veto its
+            // own row. Skip any FN range that already overlaps a row we
+            // just queued in this same call.
+            let overlapsEmitted = emitted.contains { window in
+                window.startTime < end && window.endTime > start
+            }
+            if overlapsEmitted { continue }
             let id = UUID().uuidString
             let row = AdWindow(
                 id: id,
