@@ -3,11 +3,12 @@
 // types attached to the report:
 //
 //   - `NarlQ45fCounterfactual` — per-episode answer to "would auto-mode have
-//     flipped this episode out of auto, given a fresh trust state of
-//     (auto, 0.90, 0)?". The initial state is synthesized rather than read
-//     from a profile snapshot because `FrozenTrace` does not carry the
-//     show's `PodcastProfile` row at capture time. Useful for spotting
-//     individual episodes that would unilaterally trigger demotion.
+//     flipped this episode out of auto, given a best-case fresh trust state
+//     of (auto, 0.90, 0)?". The initial state is synthesized rather than
+//     read from a profile snapshot because `FrozenTrace` does not carry
+//     the show's `PodcastProfile` row at capture time. Useful for spotting
+//     individual episodes whose rewinds would unilaterally trigger
+//     demotion *if* the user had reached fully-trusted auto mode first.
 //
 //   - `NarlQ45fCarryforwardRollup` — per-PODCAST chronological replay of
 //     every episode of a single podcast, threading `Q45fReplayGate.State`
@@ -20,11 +21,19 @@
 //     collapsed. The `NarlReportRollup` carries one rollup per
 //     podcastId-in-show as `[NarlQ45fCarryforwardRollup]`.
 //
-// Both `compute` methods sort their input events by `time` (the source
-// ad-window's `startTime`, episode-relative) to satisfy
-// `Q45fReplayGate.replay`'s "events must be in chronological order"
-// precondition (the corpus parser does not guarantee this — see
-// `NarlEvalCorpusBuilderTests.swift` listen-rewind ingest).
+// Both `compute` methods sort their input events by `(time, windowId)` to
+// satisfy `Q45fReplayGate.replay`'s "events must be in chronological
+// order" precondition (the corpus parser does not guarantee this — see
+// `NarlEvalCorpusBuilderTests.swift` listen-rewind ingest). The
+// secondary `windowId` key stabilizes ties so two rewinds with the same
+// `time` always replay in the same order across runs/toolchains.
+// Choice of secondary key: `FrozenListenRewindEvent` carries three
+// fields — `time`, `windowId`, `podcastId`. `time` is the primary key.
+// `podcastId` cannot be the secondary key because the cross-podcast
+// filter pre-narrows events to a single `podcastId`, so within the
+// sorted slice it is constant and provides no ordering signal.
+// `windowId` is the only remaining field and carries enough entropy
+// (one rewind tap per ad-window per user) to break ties deterministically.
 //
 // **Sort-key divergence from production.** Production records signals
 // in tap-order (wall-clock `createdAt` of the rewind tap).
@@ -37,20 +46,45 @@
 // approximation; the alternative is re-baking fixtures with `createdAt`
 // preserved.
 //
-// Both also filter cross-podcast events as defense-in-depth and log a
-// warning to `narl.q45f:` when the filter drops anything; the gate's
-// precondition would precondition-trap on mixed input but a corrupt
-// fixture should produce a visible warning, not a silent miss.
+// Both also filter cross-podcast events as defense-in-depth and surface
+// the dropped count both as a `crossPodcastDroppedCount` field on the
+// report (so a corrupt-fixture episode is distinguishable from a
+// genuinely empty one without scanning stdout) and as a `narl.q45f:`
+// warning row to the test log (mirroring the `narl.normalizer:`
+// channel). The gate's precondition would precondition-trap on mixed
+// input, but a corrupt fixture should produce a visible warning + a
+// queryable telemetry field, not a silent miss.
 
 import Foundation
 @testable import Playhead
 
 /// Shared default fresh trust state for q45f counterfactual replays.
-/// Mirrors what production assumes for a podcast with no prior
-/// `PodcastProfile` row: auto mode, fully-trusted (0.90), zero recent
-/// false signals. Hoisted onto the gate's `State` so both wrapper types
-/// (per-episode and per-podcast carryforward) share one source of truth —
-/// changing the fresh-state convention happens in one place.
+///
+/// **Best-case auto-mode steady state — counterfactual seed, NOT a
+/// "fresh production state".** Production never starts a `PodcastProfile`
+/// in `(auto, 0.90, 0)`:
+///
+///   - For a no-row podcast, `recordWeakFalseSkipSignal` early-returns
+///     (no row → no state to mutate). The "first signal" is a no-op,
+///     not a penalty toward the auto→manual threshold.
+///   - When `recordSuccessfulObservation` first creates a row, it
+///     initializes mode to `.shadow` (trust 0.2) or `.manual` (trust
+///     `shadowToManualTrustScore + 0.1`, ≈ 0.5) — never `.auto`.
+///   - Reaching `(auto, 0.90)` requires sustained `correctObservationBonus`
+///     promotions over multiple episodes.
+///
+/// The seed therefore answers a counterfactual: "*if* this podcast had
+/// already earned full-trust auto mode, would these rewinds have
+/// demoted it?". It is NOT "what production would have done starting
+/// from the user's actual state" — that question requires snapshotting
+/// each trace's `PodcastProfile` row, which the corpus does not capture.
+///
+/// Hoisted onto the gate's `State` so both wrapper types (per-episode
+/// and per-podcast carryforward) share one source of truth — changing
+/// the counterfactual seed convention happens in one place. Lives in
+/// this file (rather than next to `Q45fReplayGate.State`) because the
+/// "best-case auto" semantic is a NARL-eval concept; the gate itself
+/// is policy-free and accepts any caller-provided state.
 extension Q45fReplayGate.State {
     static let freshDefault = Q45fReplayGate.State(
         trustScore: 0.90,
@@ -65,27 +99,53 @@ extension Q45fReplayGate.State {
 /// existing `narl.normalizer:` channel (see `NarlEvalHarnessTests`,
 /// which uses `print("narl.normalizer: ...")` for the same purpose).
 /// `os.Logger` was tried briefly but it routes to OSLog, which doesn't
-/// surface in `xcodebuild test` stdout — defeating the point.
+/// surface in `xcodebuild test` stdout — defeating the point. Format
+/// matches `narl.normalizer:` (channel prefix + free-form message; no
+/// severity token like "WARN" in between, since the channel itself is
+/// warning-only).
 private func logQ45fWarning(_ message: String) {
-    print("narl.q45f: WARN \(message)")
+    print("narl.q45f: \(message)")
+}
+
+/// Strip cross-podcast events from a trace's listen-rewind set and
+/// surface the drop both as a returned count (for telemetry on the
+/// report value) and a stdout warning. Defense-in-depth: a corpus
+/// built correctly never contains foreign events for a given trace,
+/// but a bug in the capture path would otherwise be a silent miss.
+private func filterCrossPodcastEvents(
+    _ events: [FrozenTrace.FrozenListenRewindEvent],
+    expectedPodcastId: String,
+    contextLabel: @autoclosure () -> String
+) -> (kept: [FrozenTrace.FrozenListenRewindEvent], droppedCount: Int) {
+    let kept = events.filter { $0.podcastId == expectedPodcastId }
+    let droppedCount = events.count - kept.count
+    if droppedCount > 0 {
+        logQ45fWarning(
+            "\(contextLabel()) dropped \(droppedCount) cross-podcast "
+            + "listenRewindEvents (expected podcastId=\(expectedPodcastId)). "
+            + "This is a corpus bug — investigate the capture."
+        )
+    }
+    return (kept, droppedCount)
 }
 
 /// Per-episode counterfactual: replay this trace's listen-rewind events
-/// against a synthesized fresh trust state (`auto`, 0.90, 0 false signals)
+/// against a synthesized best-case `(auto, 0.90, 0)` initial trust state
 /// and surface whether the episode would have flipped out of auto on its
 /// own. Carries the first demotion's time so the report can answer "where
 /// in the episode did the flip happen?".
 ///
 /// **Caveat — divergence from production:** `compute(trace:)` always uses
-/// the fresh `(auto, 0.90, 0)` initial state because `FrozenTrace` does
-/// not carry a `PodcastProfile` snapshot at capture time. In production a
+/// `Q45fReplayGate.State.freshDefault` because `FrozenTrace` does not
+/// carry a `PodcastProfile` snapshot at capture time. In production a
 /// trace can be played from a podcast whose profile already has elevated
 /// `recentFalseSkipSignals` or a depressed `trustScore`; the counterfactual
-/// here ignores that history. This is "would auto-mode have flipped on
-/// this episode in isolation?" — not "what would production have done?".
-/// The per-podcast carryforward (`NarlQ45fCarryforwardRollup`) closes
-/// some of that gap by threading state across the podcast's episodes,
-/// but only for episodes captured in the corpus.
+/// here ignores that history. This is "would best-case auto-mode have
+/// flipped on this episode in isolation?" — not "what would production
+/// have done?". The per-podcast carryforward
+/// (`NarlQ45fCarryforwardRollup`) closes some of that gap by threading
+/// state across the podcast's episodes, but only for episodes captured
+/// in the corpus, and only starting from the same best-case seed.
 struct NarlQ45fCounterfactual: Sendable, Codable, Equatable {
     /// True when the gate produced at least one demotion transition.
     let wouldDemote: Bool
@@ -104,41 +164,124 @@ struct NarlQ45fCounterfactual: Sendable, Codable, Equatable {
     let demotionsCount: Int
     /// Number of rewind events actually replayed (post-cross-podcast filter).
     let rewindEventCount: Int
+    /// Number of rewind events dropped by the cross-podcast filter
+    /// (defense-in-depth). On a correctly-built corpus this is always 0;
+    /// a non-zero value flags a capture bug. Surfacing this on the report
+    /// — rather than only as a `narl.q45f:` stdout warning — lets a
+    /// downstream `jq` reader distinguish "episode had no rewinds" from
+    /// "episode's rewinds were all foreign and silently dropped". Both
+    /// produce `wouldDemote == false`, but the second is a corpus alarm.
+    /// Defaults to 0 for pre-q45f.3 fixtures (Codable back-compat).
+    let crossPodcastDroppedCount: Int
+
+    init(
+        wouldDemote: Bool,
+        demotionTime: Double?,
+        finalMode: String,
+        demotionsCount: Int,
+        rewindEventCount: Int,
+        crossPodcastDroppedCount: Int = 0
+    ) {
+        self.wouldDemote = wouldDemote
+        self.demotionTime = demotionTime
+        self.finalMode = finalMode
+        self.demotionsCount = demotionsCount
+        self.rewindEventCount = rewindEventCount
+        self.crossPodcastDroppedCount = crossPodcastDroppedCount
+    }
 
     /// Sentinel for "no rewinds in this trace" or pre-q45f.3 fixtures
-    /// where the field is absent. Equality with `.empty` is the canonical
-    /// "no signal" check.
+    /// where the field is absent.
+    ///
+    /// **Returned by `compute(trace:)` only when there is genuinely
+    /// nothing to surface.** Cycle-4 M-2 disambiguated this: the path
+    /// where every listen-rewind event was for a foreign `podcastId`
+    /// (corpus bug) deliberately does NOT collapse to `.empty` — it
+    /// returns a non-`.empty` value with `crossPodcastDroppedCount > 0`
+    /// and `rewindEventCount == 0` so the corpus alarm survives schema-
+    /// level inspection (a `jq` reader can distinguish "no rewinds"
+    /// from "rewinds were all foreign and got dropped"). Equality-with-
+    /// `.empty` is therefore a reliable "no rewinds at all, foreign or
+    /// otherwise" check on `compute(trace:)` output. Mirrors the same
+    /// disambiguation on `NarlQ45fCarryforwardRollup.empty`.
     static let empty = NarlQ45fCounterfactual(
         wouldDemote: false,
         demotionTime: nil,
         finalMode: SkipMode.auto.rawValue,
         demotionsCount: 0,
-        rewindEventCount: 0
+        rewindEventCount: 0,
+        crossPodcastDroppedCount: 0
     )
 
+    /// Codable: `crossPodcastDroppedCount` was added in q45f.3 cycle 4;
+    /// pre-cycle-4 fixtures decode to 0 via `decodeIfPresent`. Encode
+    /// always emits the field. (Distinct from the broader pre-q45f.3
+    /// back-compat handled at the parent type's decoder, which defaults
+    /// the entire `q45fCounterfactual` field to `.empty` when absent.)
+    enum CodingKeys: String, CodingKey {
+        case wouldDemote, demotionTime, finalMode
+        case demotionsCount, rewindEventCount
+        case crossPodcastDroppedCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            wouldDemote: try c.decode(Bool.self, forKey: .wouldDemote),
+            demotionTime: try c.decodeIfPresent(Double.self, forKey: .demotionTime),
+            finalMode: try c.decode(String.self, forKey: .finalMode),
+            demotionsCount: try c.decode(Int.self, forKey: .demotionsCount),
+            rewindEventCount: try c.decode(Int.self, forKey: .rewindEventCount),
+            crossPodcastDroppedCount: try c.decodeIfPresent(
+                Int.self, forKey: .crossPodcastDroppedCount
+            ) ?? 0
+        )
+    }
+
     /// Replay `trace.listenRewindEvents` (filtered to the trace's own
-    /// `podcastId`, sorted by `time`) through `Q45fReplayGate` starting
-    /// from `Q45fReplayGate.State.freshDefault`. Returns `.empty` when the
-    /// trace has no applicable events. Pinned to `TrustScoringConfig.default`
+    /// `podcastId`, sorted by `(time, windowId)`) through `Q45fReplayGate`
+    /// starting from `Q45fReplayGate.State.freshDefault`. Returns `.empty`
+    /// when the trace has no applicable events (post-filter); the
+    /// pre-filter dropped count is preserved on the return value's
+    /// `crossPodcastDroppedCount`. Pinned to `TrustScoringConfig.default`
     /// — sweep/what-if eval would need a config-parameterized variant.
     static func compute(trace: FrozenTrace) -> NarlQ45fCounterfactual {
-        let raw = trace.listenRewindEvents
-        let filtered = raw.filter { $0.podcastId == trace.podcastId }
-        if filtered.count != raw.count {
-            logQ45fWarning(
-                "compute(trace: \(trace.episodeId)) dropped \(raw.count - filtered.count) "
-                + "cross-podcast listenRewindEvents (trace.podcastId=\(trace.podcastId)). "
-                + "This is a corpus bug — investigate the capture."
+        let (filtered, droppedCount) = filterCrossPodcastEvents(
+            trace.listenRewindEvents,
+            expectedPodcastId: trace.podcastId,
+            contextLabel: "compute(trace: \(trace.episodeId))"
+        )
+        guard !filtered.isEmpty else {
+            // Even when there's nothing to replay, surface the dropped
+            // count if any so the operator can distinguish "no rewinds"
+            // from "all rewinds were foreign and got dropped".
+            if droppedCount == 0 {
+                return .empty
+            }
+            return NarlQ45fCounterfactual(
+                wouldDemote: false,
+                demotionTime: nil,
+                finalMode: SkipMode.auto.rawValue,
+                demotionsCount: 0,
+                rewindEventCount: 0,
+                crossPodcastDroppedCount: droppedCount
             )
         }
-        guard !filtered.isEmpty else { return .empty }
         // H2: Q45fReplayGate.replay requires chronological order. The
-        // corpus parser does not sort. Sort by event.time here. Ties on
-        // `time` (multiple rewinds against the same window) are
-        // order-independent under the gate's math: each contributes the
-        // same penalty + signal increment, so the demotion time stamped
-        // on a tie group is identical regardless of within-tie order.
-        let events = filtered.sorted { $0.time < $1.time }
+        // corpus parser does not sort. Sort by event.time here, with
+        // `windowId` as a stable tiebreaker — Swift's sort is unstable,
+        // so without a secondary key two events with the same `time`
+        // could swap places between runs/toolchains, flipping
+        // tie-bound fields like `demotionTime` for same-window double-
+        // taps. Ties on `time` (multiple rewinds against the same
+        // window) are order-independent under the gate's math: each
+        // contributes the same penalty + signal increment, so the
+        // demotion time stamped on a tie group is identical regardless
+        // of within-tie order — but the explicit secondary key makes
+        // that a property of the input ordering, not a happy accident.
+        let events = filtered.sorted {
+            ($0.time, $0.windowId) < ($1.time, $1.windowId)
+        }
         let result = Q45fReplayGate.replay(
             initialState: .freshDefault,
             events: events
@@ -148,7 +291,8 @@ struct NarlQ45fCounterfactual: Sendable, Codable, Equatable {
             demotionTime: result.demotions.first?.time,
             finalMode: result.finalState.mode.rawValue,
             demotionsCount: result.demotions.count,
-            rewindEventCount: events.count
+            rewindEventCount: events.count,
+            crossPodcastDroppedCount: droppedCount
         )
     }
 }
@@ -156,8 +300,8 @@ struct NarlQ45fCounterfactual: Sendable, Codable, Equatable {
 /// Per-PODCAST carryforward: replay every episode of one podcast in
 /// chronological order, threading `Q45fReplayGate.State` across episode
 /// boundaries. Diagnostic-grade approximation of "across this podcast's
-/// captured history, would the user have ended up in manual or shadow
-/// mode?".
+/// captured history, would best-case auto-mode have flipped to manual or
+/// shadow?".
 ///
 /// Production keys trust state on `podcastId` — false signals from one
 /// podcast never affect another. A "show" in the harness is a heuristic
@@ -173,19 +317,23 @@ struct NarlQ45fCounterfactual: Sendable, Codable, Equatable {
 /// drawing conclusions from this field should account for:
 ///
 ///   1. **Initial state.** Always synthesized as
-///      `(auto, 0.90, 0)`. Production starts from the persisted
-///      `PodcastProfile` row, which `FrozenTrace` does not snapshot.
+///      `(auto, 0.90, 0)` — the best-case auto-mode steady state.
+///      Production starts from the persisted `PodcastProfile` row,
+///      which `FrozenTrace` does not snapshot. Production never *creates*
+///      a row in `.auto` (see `Q45fReplayGate.State.freshDefault`'s
+///      docstring) — that mode is earned via repeated promotions.
 ///   2. **No-profile no-op.** Production's
 ///      `recordWeakFalseSkipSignal` early-returns on the first false
 ///      signal for a brand-new podcast (no row yet → no state to
 ///      mutate). The replay here counts that first signal toward the
 ///      demotion threshold.
-///   3. **Event ordering.** Sorted by `event.time` (episode-relative
-///      timeline position of the source ad-window). `FrozenTrace` does
-///      not preserve the source `createdAt` (wall-clock at user tap),
-///      so a user who rewinds backwards in the asset (taps Listen on
-///      an earlier window after a later one) replays in the wrong
-///      order vs. production. For linear listening these match.
+///   3. **Event ordering.** Sorted by `(event.time, event.windowId)`
+///      (episode-relative timeline position of the source ad-window,
+///      with windowId as a stable tiebreaker). `FrozenTrace` does not
+///      preserve the source `createdAt` (wall-clock at user tap), so
+///      a user who rewinds backwards in the asset (taps Listen on an
+///      earlier window after a later one) replays in the wrong order
+///      vs. production. For linear listening these match.
 ///   4. **Config pinned.** `TrustScoringConfig.default` only —
 ///      sweep/what-if eval would need a config-parameterized variant.
 ///
@@ -206,7 +354,7 @@ struct NarlQ45fCarryforwardRollup: Sendable, Codable, Equatable {
     let totalRewindEventCount: Int
     /// `episodeId` of the first episode whose replay produced a demotion.
     /// Nil when no demotion fired. The "first" is in chronological order
-    /// (by `trace.capturedAt`), not input order.
+    /// (by `(trace.capturedAt, trace.episodeId)`), not input order.
     let firstDemotionEpisodeId: String?
     /// Number of input traces (whether they had rewinds or not). NOT the
     /// same as `NarlReportRollup.episodeCount`, which counts only non-
@@ -219,25 +367,89 @@ struct NarlQ45fCarryforwardRollup: Sendable, Codable, Equatable {
     /// expect equality only under the per-(show, config) intersection
     /// of the same podcastId, not in general.
     let traceCount: Int
+    /// Total cross-podcast events dropped across all traces of this
+    /// podcast (sum of each trace's defense-in-depth filter result).
+    /// 0 on a correctly-built corpus; a non-zero value flags a capture
+    /// bug. Mirrors `NarlQ45fCounterfactual.crossPodcastDroppedCount`
+    /// at the per-podcast aggregation level. Defaults to 0 for pre-q45f.3
+    /// fixtures and pre-cycle-4 fixtures (Codable back-compat via
+    /// `decodeIfPresent`).
+    let totalCrossPodcastDroppedCount: Int
+
+    init(
+        podcastId: String,
+        finalMode: String,
+        totalDemotionsCount: Int,
+        totalRewindEventCount: Int,
+        firstDemotionEpisodeId: String?,
+        traceCount: Int,
+        totalCrossPodcastDroppedCount: Int = 0
+    ) {
+        self.podcastId = podcastId
+        self.finalMode = finalMode
+        self.totalDemotionsCount = totalDemotionsCount
+        self.totalRewindEventCount = totalRewindEventCount
+        self.firstDemotionEpisodeId = firstDemotionEpisodeId
+        self.traceCount = traceCount
+        self.totalCrossPodcastDroppedCount = totalCrossPodcastDroppedCount
+    }
 
     /// Empty sentinel for an unspecified-podcast slot. Used as a Codable
     /// fallback for pre-q45f.3 report artifacts that don't carry the
     /// field at all (the field decodes to `[]`, not `[.empty]`).
+    ///
+    /// **Returned by `compute(podcastEpisodes:)` only when input is
+    /// empty.** Mirrors the cycle-4 M-2 disambiguation on
+    /// `NarlQ45fCounterfactual.empty`: a podcast whose every trace
+    /// carries only foreign events (corpus-wide capture bug)
+    /// deliberately does NOT collapse to `.empty` — it returns a non-
+    /// `.empty` rollup with `totalCrossPodcastDroppedCount > 0`,
+    /// `totalRewindEventCount == 0`, and `traceCount > 0` so the
+    /// corpus alarm survives at the per-podcast aggregation level
+    /// (verified by `carryforwardAllForeignAcrossAllTracesSurfacesDropCount`).
     ///
     /// **Caution:** equality-with-`.empty` is NOT a reliable "no signal"
     /// check on real harness output. A fixture with a genuinely empty
     /// `podcastId` field (a corrupt or pre-frozen-trace-v3 capture)
     /// produces a real rollup whose `podcastId == ""` — indistinguishable
     /// from this sentinel by equality. Prefer `traceCount == 0` as the
-    /// "synthesized empty" check instead.
+    /// "synthesized empty" check; that works because the all-foreign-
+    /// across-all-traces case above produces `traceCount > 0`, so the
+    /// `.empty`-vs-`traceCount > 0` split is the right boundary.
     static let empty = NarlQ45fCarryforwardRollup(
         podcastId: "",
         finalMode: SkipMode.auto.rawValue,
         totalDemotionsCount: 0,
         totalRewindEventCount: 0,
         firstDemotionEpisodeId: nil,
-        traceCount: 0
+        traceCount: 0,
+        totalCrossPodcastDroppedCount: 0
     )
+
+    /// Codable: `totalCrossPodcastDroppedCount` was added in q45f.3
+    /// cycle 4; pre-cycle-4 fixtures decode to 0 via `decodeIfPresent`.
+    /// Encode always emits the field.
+    enum CodingKeys: String, CodingKey {
+        case podcastId, finalMode
+        case totalDemotionsCount, totalRewindEventCount
+        case firstDemotionEpisodeId, traceCount
+        case totalCrossPodcastDroppedCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            podcastId: try c.decode(String.self, forKey: .podcastId),
+            finalMode: try c.decode(String.self, forKey: .finalMode),
+            totalDemotionsCount: try c.decode(Int.self, forKey: .totalDemotionsCount),
+            totalRewindEventCount: try c.decode(Int.self, forKey: .totalRewindEventCount),
+            firstDemotionEpisodeId: try c.decodeIfPresent(String.self, forKey: .firstDemotionEpisodeId),
+            traceCount: try c.decode(Int.self, forKey: .traceCount),
+            totalCrossPodcastDroppedCount: try c.decodeIfPresent(
+                Int.self, forKey: .totalCrossPodcastDroppedCount
+            ) ?? 0
+        )
+    }
 
     /// Compute one carryforward for a single podcast's traces. All input
     /// traces must share the same `podcastId` (precondition); cross-
@@ -248,27 +460,37 @@ struct NarlQ45fCarryforwardRollup: Sendable, Codable, Equatable {
         }
         precondition(
             podcastEpisodes.allSatisfy { $0.podcastId == firstId },
-            "NarlQ45fCarryforwardRollup.compute(podcastEpisodes:) requires every trace to share the same podcastId; got mixed input."
+            "NarlQ45fCarryforwardRollup.compute(podcastEpisodes:) requires every trace to share the same podcastId; got mixed input. Counterfactual carryforward is per-podcastId because production keys trust state on podcastId, not on the heuristic show label."
         )
-        let sorted = podcastEpisodes.sorted { $0.capturedAt < $1.capturedAt }
+        // Stable sort by `(capturedAt, episodeId)` — Swift's stdlib sort
+        // is unstable, so two traces with the same `capturedAt` (real-
+        // world: batch-imported fixtures, simultaneous downloads,
+        // synthesized-timestamp test fixtures) could swap order across
+        // runs/toolchains and flip `firstDemotionEpisodeId`. Adding
+        // `episodeId` as a deterministic secondary key pins the order.
+        let sorted = podcastEpisodes.sorted {
+            ($0.capturedAt, $0.episodeId) < ($1.capturedAt, $1.episodeId)
+        }
         var state = Q45fReplayGate.State.freshDefault
         var totalDemotions = 0
         var totalEvents = 0
+        var totalDropped = 0
         var firstDemotionEpisodeId: String?
         for trace in sorted {
-            let raw = trace.listenRewindEvents
-            let filtered = raw.filter { $0.podcastId == trace.podcastId }
-            if filtered.count != raw.count {
-                logQ45fWarning(
-                    "carryforward(\(firstId), trace=\(trace.episodeId)) dropped "
-                    + "\(raw.count - filtered.count) cross-podcast events. "
-                    + "This is a corpus bug — investigate the capture."
-                )
-            }
+            let (filtered, droppedCount) = filterCrossPodcastEvents(
+                trace.listenRewindEvents,
+                expectedPodcastId: trace.podcastId,
+                contextLabel: "carryforward(\(firstId), trace=\(trace.episodeId))"
+            )
+            totalDropped += droppedCount
             guard !filtered.isEmpty else { continue }
-            // H2: gate precondition requires chronological order; sort
-            // by event.time. Ties are order-independent (see compute(trace:)).
-            let events = filtered.sorted { $0.time < $1.time }
+            // H2 + cycle-4 M-3: gate precondition requires chronological
+            // order; sort by (event.time, event.windowId). See
+            // NarlQ45fCounterfactual.compute(trace:) for the tiebreaker
+            // rationale.
+            let events = filtered.sorted {
+                ($0.time, $0.windowId) < ($1.time, $1.windowId)
+            }
             let result = Q45fReplayGate.replay(initialState: state, events: events)
             state = result.finalState
             totalEvents += events.count
@@ -283,7 +505,8 @@ struct NarlQ45fCarryforwardRollup: Sendable, Codable, Equatable {
             totalDemotionsCount: totalDemotions,
             totalRewindEventCount: totalEvents,
             firstDemotionEpisodeId: firstDemotionEpisodeId,
-            traceCount: sorted.count
+            traceCount: sorted.count,
+            totalCrossPodcastDroppedCount: totalDropped
         )
     }
 

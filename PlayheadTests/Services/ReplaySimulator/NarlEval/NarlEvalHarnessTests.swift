@@ -602,6 +602,42 @@ struct NarlEvalHarnessTests {
         }
     }
 
+    @Test("playhead-q45f.3: harness q45fCarryforward is identical across .default and .allEnabled configs")
+    func harnessQ45fCarryforwardIsConfigIndependent() throws {
+        // Cycle-4 invariant: q45fCarryforward depends only on a trace's
+        // `listenRewindEvents` and the fixed counterfactual seed
+        // (`Q45fReplayGate.State.freshDefault`). It does NOT depend on
+        // the eval config (which controls correction layers + scoring
+        // gates, none of which feed the gate). For any given `show`, the
+        // per-podcastId carryforward array under config "default" must
+        // equal the array under config "allEnabled" — anything else
+        // means a future refactor accidentally coupled the gate to
+        // config-driven state, the kind of silent regression that would
+        // skew a sweep eval.
+        let (report, _) = try Self.runHarnessCollectingReport()
+        guard !report.rollups.isEmpty else { return }
+
+        // Bucket by show; within each show, look up the two configs and
+        // assert their carryforward arrays are equal.
+        let byShow = Dictionary(grouping: report.rollups, by: \.show)
+        var asserted = 0
+        for (show, rollups) in byShow where show != "ALL" {
+            let defaultRollup = rollups.first { $0.config == "default" }
+            let allEnabledRollup = rollups.first { $0.config == "allEnabled" }
+            // Only the (show, default, allEnabled) triple is meaningful;
+            // shows with only one config get skipped (defensive — the
+            // harness always emits both, but this avoids a brittle assert).
+            guard let d = defaultRollup, let a = allEnabledRollup else { continue }
+            #expect(d.q45fCarryforward == a.q45fCarryforward,
+                    "q45fCarryforward must be config-independent for show=\(show); got \(d.q45fCarryforward.count) vs \(a.q45fCarryforward.count) (or differing per-podcastId rollups)")
+            asserted += 1
+        }
+        // Sanity: at least one show must have produced both configs;
+        // otherwise the test passed vacuously.
+        #expect(asserted >= 1,
+                "At least one show must have both default + allEnabled rollups for the invariant to mean anything")
+    }
+
     @Test("playhead-q45f.3: harness carryforward helper splits multi-podcastId shows")
     func carryforwardHelperSplitsMultiplePodcastIdsInOneShow() {
         // DoaC scenario: a heuristic show label collapses two podcastIds

@@ -142,6 +142,92 @@ struct NarlQ45fCounterfactualTests {
         #expect(cf.demotionsCount == 1)
         #expect(cf.rewindEventCount == 2,
                 "rewindEventCount should reflect events actually replayed (post-filter), not raw input")
+        #expect(cf.crossPodcastDroppedCount == 2,
+                "crossPodcastDroppedCount must surface the dropped pc-B events on the report (M-2)")
+    }
+
+    @Test("compute(trace:) surfaces all-foreign drops as a non-.empty result with crossPodcastDroppedCount > 0")
+    func computeTraceAllForeignSurfacesDropCount() {
+        // Cycle-4 M-2: `.empty` is ambiguous between "no rewinds at all"
+        // and "every rewind was foreign and got dropped". The fix surfaces
+        // the dropped count on a non-`.empty` return value so a downstream
+        // `jq` reader can distinguish the two.
+        let trace = Self.makeTrace(
+            episodeId: "ep-1",
+            podcastId: "pc-A",
+            capturedAt: Date(timeIntervalSince1970: 1000),
+            listenRewindEvents: [
+                Self.makeRewind(time: 5, windowId: "wX1", podcastId: "pc-X"),
+                Self.makeRewind(time: 6, windowId: "wX2", podcastId: "pc-X"),
+                Self.makeRewind(time: 7, windowId: "wX3", podcastId: "pc-X"),
+            ]
+        )
+        let cf = NarlQ45fCounterfactual.compute(trace: trace)
+        #expect(cf != .empty,
+                "an all-foreign trace must NOT collapse to .empty (it would be confused with a no-rewind trace)")
+        #expect(cf.wouldDemote == false)
+        #expect(cf.demotionTime == nil)
+        #expect(cf.finalMode == SkipMode.auto.rawValue)
+        #expect(cf.demotionsCount == 0)
+        #expect(cf.rewindEventCount == 0,
+                "no events were actually replayed — the rewindEventCount must be 0")
+        #expect(cf.crossPodcastDroppedCount == 3,
+                "all 3 foreign events must be reflected in the dropped count (M-2 corpus-bug telemetry)")
+    }
+
+    @Test("compute(trace:) returns truly-.empty for genuinely-empty traces")
+    func computeTraceGenuinelyEmptyReturnsEmpty() {
+        // Conjugate of computeTraceAllForeignSurfacesDropCount: a trace
+        // with no rewinds at all must still return exactly `.empty`. The
+        // ambiguity-fix from M-2 must NOT regress the no-rewind path.
+        let trace = Self.makeTrace(
+            episodeId: "ep-1",
+            podcastId: "pc-A",
+            capturedAt: Date(timeIntervalSince1970: 1000),
+            listenRewindEvents: []
+        )
+        let cf = NarlQ45fCounterfactual.compute(trace: trace)
+        #expect(cf == .empty)
+        #expect(cf.crossPodcastDroppedCount == 0)
+    }
+
+    @Test("compute(trace:) is deterministic across input shuffles when events tie on time")
+    func computeTraceTieBreakDeterministic() {
+        // Cycle-4 M-3: Swift's stdlib `sorted(by:)` is unstable. Without
+        // a secondary key on the event sort, two events with the same
+        // `time` could swap places between runs.
+        //
+        // **Caveat (cycle-5 L-A acknowledgement):** the value-type
+        // assertion `cf1 == cf2` here is necessarily TAUTOLOGICAL for
+        // pure same-`time` ties — the gate's math is order-independent
+        // within a `time` tie group (each tied event contributes the
+        // same penalty + signal increment, so demotion time stamped on
+        // the tie group is identical regardless of within-tie order),
+        // and `NarlQ45fCounterfactual` carries no `windowId` field that
+        // could leak the ordering. The point of this test is *belt-and-
+        // suspenders* coverage of the secondary sort key alongside the
+        // carryforward variant `carryforwardCapturedAtTieBreakDeterministic`,
+        // which IS observably non-tautological because
+        // `firstDemotionEpisodeId` flips with order. Together they pin
+        // the (time, windowId) sort against `sorted(by:)` instability;
+        // the per-event variant guards against a future change that
+        // adds a windowId-dependent field to the value type.
+        let evA = Self.makeRewind(time: 10, windowId: "windowA", podcastId: "pc-A")
+        let evB = Self.makeRewind(time: 10, windowId: "windowB", podcastId: "pc-A")
+        let trace1 = Self.makeTrace(
+            episodeId: "ep-1", podcastId: "pc-A",
+            capturedAt: Date(timeIntervalSince1970: 1000),
+            listenRewindEvents: [evA, evB]
+        )
+        let trace2 = Self.makeTrace(
+            episodeId: "ep-1", podcastId: "pc-A",
+            capturedAt: Date(timeIntervalSince1970: 1000),
+            listenRewindEvents: [evB, evA]
+        )
+        let cf1 = NarlQ45fCounterfactual.compute(trace: trace1)
+        let cf2 = NarlQ45fCounterfactual.compute(trace: trace2)
+        #expect(cf1 == cf2,
+                "Counterfactual must be invariant under input shuffle when events tie on time")
     }
 
     // MARK: - codable round-trip
@@ -153,11 +239,14 @@ struct NarlQ45fCounterfactualTests {
             demotionTime: 25.5,
             finalMode: SkipMode.manual.rawValue,
             demotionsCount: 1,
-            rewindEventCount: 3
+            rewindEventCount: 3,
+            crossPodcastDroppedCount: 2
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(NarlQ45fCounterfactual.self, from: data)
         #expect(decoded == original)
+        #expect(decoded.crossPodcastDroppedCount == 2,
+                "Cycle-4: crossPodcastDroppedCount must round-trip")
     }
 
     @Test("counterfactual decodes nil demotionTime when absent")
@@ -168,6 +257,37 @@ struct NarlQ45fCounterfactualTests {
         let data = Data(json.utf8)
         let decoded = try JSONDecoder().decode(NarlQ45fCounterfactual.self, from: data)
         #expect(decoded == NarlQ45fCounterfactual.empty)
+    }
+
+    @Test("counterfactual decodes pre-cycle-4 artifact (missing crossPodcastDroppedCount) as 0")
+    func counterfactualDecodesPreCycle4WithZeroDropCount() throws {
+        // Cycle-4 codable back-compat: the new `crossPodcastDroppedCount`
+        // field uses `decodeIfPresent ?? 0`. A pre-cycle-4 artifact will
+        // not carry the key; it must decode to 0, not throw.
+        let json = """
+        {"wouldDemote":true,"demotionTime":12.5,"finalMode":"manual","demotionsCount":1,"rewindEventCount":2}
+        """
+        let data = Data(json.utf8)
+        let decoded = try JSONDecoder().decode(NarlQ45fCounterfactual.self, from: data)
+        #expect(decoded.crossPodcastDroppedCount == 0,
+                "pre-cycle-4 artifacts (no crossPodcastDroppedCount key) must decode the field as 0")
+        #expect(decoded.wouldDemote == true)
+        #expect(decoded.demotionTime == 12.5)
+    }
+
+    @Test("counterfactual decode RAISES on malformed crossPodcastDroppedCount")
+    func counterfactualDecodeRaisesOnMalformedDropCount() throws {
+        // Cycle-4 back-compat invariant: the new field uses
+        // `decodeIfPresent` rather than `try?`, so a malformed payload
+        // (string instead of int) must surface a `DecodingError` rather
+        // than silently degrade to 0.
+        let json = """
+        {"wouldDemote":false,"demotionTime":null,"finalMode":"auto","demotionsCount":0,"rewindEventCount":0,"crossPodcastDroppedCount":"not-an-int"}
+        """
+        let data = Data(json.utf8)
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(NarlQ45fCounterfactual.self, from: data)
+        }
     }
 
     // MARK: - per-podcast carryforward compute(podcastEpisodes:)
@@ -321,6 +441,85 @@ struct NarlQ45fCounterfactualTests {
         #expect(cf.totalDemotionsCount == 1)
         #expect(cf.firstDemotionEpisodeId == "ep-B")
         #expect(cf.finalMode == SkipMode.manual.rawValue)
+        #expect(cf.totalCrossPodcastDroppedCount == 2,
+                "Cycle-4 M-2: cross-podcast drops must aggregate across the carryforward (1 per trace × 2 traces = 2)")
+    }
+
+    @Test("carryforward surfaces all-foreign-across-all-traces drops, NOT collapsing to .empty")
+    func carryforwardAllForeignAcrossAllTracesSurfacesDropCount() {
+        // Cycle-5 L-D: the multi-trace mirror of the per-episode
+        // `computeTraceAllForeignSurfacesDropCount`. If every trace in
+        // a podcast carries only foreign events (corpus-wide capture
+        // bug), `totalRewindEventCount` is 0 BUT
+        // `totalCrossPodcastDroppedCount` must reflect the dropped
+        // count and the rollup must NOT collapse to `.empty` — that
+        // would lose the corpus alarm. Guards against a future
+        // optimization that short-circuits when no events would be
+        // replayed.
+        let traceA = Self.makeTrace(
+            episodeId: "ep-A",
+            podcastId: "pc-A",
+            capturedAt: Date(timeIntervalSince1970: 100),
+            listenRewindEvents: [
+                Self.makeRewind(time: 5, windowId: "wA1", podcastId: "pc-X"),
+                Self.makeRewind(time: 6, windowId: "wA2", podcastId: "pc-X"),
+            ]
+        )
+        let traceB = Self.makeTrace(
+            episodeId: "ep-B",
+            podcastId: "pc-A",
+            capturedAt: Date(timeIntervalSince1970: 200),
+            listenRewindEvents: [
+                Self.makeRewind(time: 7, windowId: "wB1", podcastId: "pc-X"),
+            ]
+        )
+        let cf = NarlQ45fCarryforwardRollup.compute(podcastEpisodes: [traceA, traceB])
+        #expect(cf != .empty,
+                "all-foreign across all traces must NOT collapse to .empty (corpus alarm would be lost)")
+        #expect(cf.podcastId == "pc-A",
+                "rollup is stamped with the trace-level podcastId, not the foreign event podcastId")
+        #expect(cf.totalRewindEventCount == 0,
+                "no events were actually replayed (all foreign)")
+        #expect(cf.totalDemotionsCount == 0)
+        #expect(cf.firstDemotionEpisodeId == nil)
+        #expect(cf.totalCrossPodcastDroppedCount == 3,
+                "all 3 foreign events across both traces must be reflected in the aggregate dropped count")
+        #expect(cf.traceCount == 2,
+                "every input trace counts toward traceCount, even if its events all dropped")
+    }
+
+    @Test("carryforward is invariant under input shuffle when traces tie on capturedAt")
+    func carryforwardCapturedAtTieBreakDeterministic() {
+        // Cycle-4 M-3 (carryforward): swap order of two traces with the
+        // same `capturedAt` timestamp (a real fixture pattern: batch
+        // imports stamp identical times) and the rollup must come back
+        // identical. The fix sorts by `(capturedAt, episodeId)`.
+        let traceA = Self.makeTrace(
+            episodeId: "ep-A",
+            podcastId: "pc-A",
+            capturedAt: Date(timeIntervalSince1970: 100),
+            listenRewindEvents: [
+                Self.makeRewind(time: 10, windowId: "wA1", podcastId: "pc-A"),
+                Self.makeRewind(time: 20, windowId: "wA2", podcastId: "pc-A"),
+            ]
+        )
+        let traceB = Self.makeTrace(
+            episodeId: "ep-B",
+            podcastId: "pc-A",
+            capturedAt: Date(timeIntervalSince1970: 100), // tied
+            listenRewindEvents: [
+                Self.makeRewind(time: 5, windowId: "wB1", podcastId: "pc-A"),
+                Self.makeRewind(time: 8, windowId: "wB2", podcastId: "pc-A"),
+            ]
+        )
+        let cfAB = NarlQ45fCarryforwardRollup.compute(podcastEpisodes: [traceA, traceB])
+        let cfBA = NarlQ45fCarryforwardRollup.compute(podcastEpisodes: [traceB, traceA])
+        #expect(cfAB == cfBA,
+                "Carryforward must be invariant under input shuffle when traces tie on capturedAt")
+        // And the chronological tie-break must put ep-A first (alpha order),
+        // so demotion lands within ep-A.
+        #expect(cfAB.firstDemotionEpisodeId == "ep-A",
+                "On capturedAt ties, episodeId is the secondary key; ep-A < ep-B alpha")
     }
 
     // MARK: - per-podcast convenience computePerPodcast(showEpisodes:)
@@ -450,11 +649,93 @@ struct NarlQ45fCounterfactualTests {
             totalDemotionsCount: 2,
             totalRewindEventCount: 5,
             firstDemotionEpisodeId: "ep-A",
-            traceCount: 3
+            traceCount: 3,
+            totalCrossPodcastDroppedCount: 4
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(NarlQ45fCarryforwardRollup.self, from: data)
         #expect(decoded == original)
+        #expect(decoded.totalCrossPodcastDroppedCount == 4,
+                "Cycle-4: totalCrossPodcastDroppedCount must round-trip")
+    }
+
+    @Test("carryforward decodes pre-cycle-4 artifact (missing totalCrossPodcastDroppedCount) as 0")
+    func carryforwardDecodesPreCycle4WithZeroDropCount() throws {
+        let json = """
+        {"podcastId":"pc-A","finalMode":"manual","totalDemotionsCount":1,"totalRewindEventCount":2,"firstDemotionEpisodeId":"ep-A","traceCount":2}
+        """
+        let data = Data(json.utf8)
+        let decoded = try JSONDecoder().decode(NarlQ45fCarryforwardRollup.self, from: data)
+        #expect(decoded.totalCrossPodcastDroppedCount == 0,
+                "pre-cycle-4 artifacts (no totalCrossPodcastDroppedCount key) must decode the field as 0")
+        #expect(decoded.podcastId == "pc-A")
+        #expect(decoded.totalDemotionsCount == 1)
+    }
+
+    @Test("carryforward decode RAISES on malformed totalCrossPodcastDroppedCount")
+    func carryforwardDecodeRaisesOnMalformedDropCount() throws {
+        let json = """
+        {"podcastId":"pc-A","finalMode":"auto","totalDemotionsCount":0,"totalRewindEventCount":0,"firstDemotionEpisodeId":null,"traceCount":1,"totalCrossPodcastDroppedCount":"not-an-int"}
+        """
+        let data = Data(json.utf8)
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(NarlQ45fCarryforwardRollup.self, from: data)
+        }
+    }
+
+    // MARK: - encoder emits new keys (cycle-4 M-4)
+
+    @Test("NarlReportEpisodeEntry encoder emits q45fCounterfactual key")
+    func reportEntryEncoderEmitsQ45fCounterfactualKey() throws {
+        // Cycle-4 M-4: a custom Codable that omits a new field on the
+        // encode side breaks downstream readers as silently as a missing
+        // decode would. Verify the wire actually carries the key by
+        // round-tripping through `JSONSerialization` and inspecting the
+        // top-level dictionary.
+        let entry = Self.makeMinimalEntry()
+        let data = try JSONEncoder().encode(entry)
+        let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let cfDict = dict?["q45fCounterfactual"] as? [String: Any]
+        #expect(cfDict != nil,
+                "encoded entry must carry the q45fCounterfactual key on the wire")
+        // And the new cycle-4 field must be present inside the nested object.
+        #expect(cfDict?["crossPodcastDroppedCount"] is Int,
+                "encoded counterfactual must carry the crossPodcastDroppedCount key on the wire")
+    }
+
+    @Test("NarlReportRollup encoder emits q45fCarryforward key")
+    func reportRollupEncoderEmitsQ45fCarryforwardKey() throws {
+        let rollup = Self.makeMinimalRollup()
+        let data = try JSONEncoder().encode(rollup)
+        let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let arr = dict?["q45fCarryforward"] as? [Any]
+        #expect(arr != nil,
+                "encoded rollup must carry the q45fCarryforward key on the wire")
+        // Cycle-5 L-C: explicit non-empty guard so a future refactor of
+        // `makeMinimalRollup()` that drops the seed entry can't turn this
+        // assertion into a silent no-op (the M-4 acceptance criterion is
+        // "tests must assert top-level keys exist on the wire").
+        #expect(arr?.count == 1,
+                "minimal rollup fixture must carry exactly 1 carryforward entry to verify the nested wire key")
+        let first = try #require(arr?.first as? [String: Any])
+        #expect(first["totalCrossPodcastDroppedCount"] is Int,
+                "encoded carryforward must carry the totalCrossPodcastDroppedCount key on the wire")
+    }
+
+    // MARK: - sanity check on freshDefault seed (cycle-4 L-7)
+
+    @Test("Q45fReplayGate.State.freshDefault is at or above the manual→auto trust threshold")
+    func freshDefaultIsAtOrAboveManualToAutoThreshold() {
+        // Cycle-4 sanity: the "best-case auto-mode steady state" seed
+        // (auto, 0.90, 0) has to be at or above the trust score that
+        // production would need to grant auto. If the production threshold
+        // is ever raised above 0.90, this seed becomes a lie. Surface that
+        // drift via a build-time test rather than a silent semantic shift.
+        let threshold = TrustScoringConfig.default.manualToAutoTrustScore
+        #expect(Q45fReplayGate.State.freshDefault.trustScore >= threshold,
+                "freshDefault.trustScore (\(Q45fReplayGate.State.freshDefault.trustScore)) must be ≥ manualToAutoTrustScore (\(threshold)); raise the seed if production raised the bar")
+        #expect(Q45fReplayGate.State.freshDefault.mode == .auto)
+        #expect(Q45fReplayGate.State.freshDefault.recentFalseSkipSignals == 0)
     }
 
     // MARK: - helpers
