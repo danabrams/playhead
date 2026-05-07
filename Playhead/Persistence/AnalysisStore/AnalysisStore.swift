@@ -10851,6 +10851,21 @@ actor AnalysisStore {
     /// time-tolerance bucket; identical re-submissions and submissions
     /// within the bucket collapse on conflict.
     ///
+    /// Mirror-correction semantics (FN ↔ FP for the same scope):
+    /// the identity tuple includes `effectiveCorrectionType`, so a
+    /// `.falseNegative` correction and a `.falsePositive` correction
+    /// for the SAME asset + scope have DIFFERENT identities — they
+    /// coexist as two rows, neither superseding the other. Each fires
+    /// its own sponsor side effect (FN → `recordCandidate`, FP →
+    /// `recordRollback`) the first time it lands. There is no built-in
+    /// "user changed their mind, retract the prior side effect"
+    /// reconciliation — the model is append-only at the (scope, type)
+    /// granularity, and `SponsorKnowledgeStore`'s confirmation /
+    /// rollback counters net out the user's evolving intent over time.
+    /// If a future feature needs explicit retraction, it should add a
+    /// new `CorrectionType` (e.g. `.retracted`) rather than mutating
+    /// existing rows.
+    ///
     /// playhead-hygc.1.7: returns `true` when the call inserted a NEW
     /// row, `false` when it landed on an existing identity (the
     /// `ON CONFLICT … DO UPDATE` audit-bump path). Callers that fire

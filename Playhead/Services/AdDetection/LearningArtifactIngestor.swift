@@ -214,13 +214,24 @@ actor LearningArtifactIngestor {
             if wasNewlyInserted {
                 switch parsedScope {
                 case .sponsorOnShow(let podcastId, let sponsor):
-                    // Source has higher fidelity than type for the
-                    // FN-vs-FP distinction (a sponsor confirmation flows
-                    // through `.userTap*` source kinds and is reduced
-                    // to `.falsePositive` by `kindFor` for boundary-shift
-                    // types). Prefer source when present; otherwise
-                    // map the canonical `effectiveCorrectionType` (which
-                    // already handles the legacy nil-typed-row case).
+                    // `source` is the canonical FN-vs-FP discriminator —
+                    // `CorrectionSource` only has two shapes, falsePositive
+                    // (`.manualVeto` / `.listenRevert`) and falseNegative
+                    // (`.falseNegative`), and `source.kind` returns those
+                    // directly. Prefer it when present.
+                    //
+                    // Fallback for legacy rows where `source == nil`: derive
+                    // from `effectiveCorrectionType` via `kindFor`, which
+                    // handles boundary-shift types (`.startTooEarly`,
+                    // `.startTooLate`, `.endTooEarly`, `.endTooLate`) by
+                    // collapsing them to `.falsePositive` — they are
+                    // FP-shaped corrections (the user disagreed with the
+                    // edges of a flagged span).
+                    //
+                    // The legacy nil-source / nil-type case defaults to
+                    // `.falsePositive` via `effectiveCorrectionType`'s
+                    // own fallback, preserving the prior
+                    // `correctionPassthroughFactor` legacy assumption.
                     let kind: CorrectionKind = correction.source?.kind
                         ?? Self.kindFor(correction.effectiveCorrectionType)
                     try await applySponsorSideEffect(
