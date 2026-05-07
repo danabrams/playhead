@@ -3743,9 +3743,9 @@ actor AnalysisStore {
     /// playhead-hygc.1.4 (R1 fix): reap orphan `running` ledger rows left
     /// behind by a prior process that crashed or was OS-killed mid-run.
     /// Called once at app launch from `PlayheadRuntime` after `migrate()`
-    /// succeeds, BEFORE any new BG-task handlers run. Sibling reaper to
-    /// `resetStrandedBackfillJobs` / `resetStrandedFinalPassJobs` (see
-    /// those for the same crash-recovery rationale).
+    /// succeeds. Sibling reaper to `resetStrandedBackfillJobs` /
+    /// `resetStrandedFinalPassJobs` (see those for the same crash-
+    /// recovery rationale).
     ///
     /// Why this matters for dogfood diagnostics:
     ///   Without a reaper, a process killed by iOS mid-handler leaves a
@@ -3757,14 +3757,23 @@ actor AnalysisStore {
     ///   diagnostics distinguishes "this row was alive when we shut down"
     ///   from "this row is alive RIGHT NOW".
     ///
-    /// Safety invariant:
-    ///   This must run only at process boundaries, never concurrently
-    ///   with a live BG handler. It is safe to call exactly once on
-    ///   `PlayheadRuntime` startup because (a) the actor's serial
-    ///   executor isolates this update from any later `insertBackground…`
-    ///   call inside the same process, and (b) iOS guarantees the prior
-    ///   process is dead by the time the new one wakes — there is no
-    ///   cross-process writer to race.
+    /// Safety invariant (R10 doc fix):
+    ///   The reaper IS allowed to run concurrently with a live BG
+    ///   handler in the same process — the production wiring fires
+    ///   `registerBackgroundTasks()` synchronously during `PlayheadRuntime.init`
+    ///   and runs the reaper from a deferred Task body, so iOS could
+    ///   have already dispatched a fresh handler whose `recordRunStart`
+    ///   has landed a `running` row before the reaper executes. Three
+    ///   things together make this safe:
+    ///   (a) the actor's serial executor isolates the reap UPDATE from
+    ///       concurrent `insertBackgroundTaskRun` calls so we never see
+    ///       a partially-written row,
+    ///   (b) iOS guarantees the prior process is dead by the time the
+    ///       new one wakes — there is no cross-process writer to race,
+    ///   (c) the `startedAt < startedBefore` filter restricts the
+    ///       UPDATE to rows from a strictly prior process. Without
+    ///       (c), in-process concurrent handlers could see their fresh
+    ///       `.running` row reaped as "orphan_at_launch".
     ///
     /// `finishedAt` is set to "now" so the row participates in
     /// `fetchRecentRuns` ordering on a stable axis. The `expiration`

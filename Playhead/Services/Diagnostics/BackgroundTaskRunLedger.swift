@@ -371,12 +371,24 @@ protocol BackgroundTaskRunLedger: Sendable {
     /// flips orphan `.running` rows (left over from a prior process
     /// that crashed or was OS-killed) to `.failed` with
     /// `lastErrorCode = "orphan_at_launch"`. Returns the number of rows
-    /// reaped. Must be called once at app launch BEFORE any new BG-task
-    /// handlers run. Sibling to the existing
+    /// reaped. Sibling to the existing
     /// `resetStrandedBackfillJobs` / `resetStrandedFinalPassJobs`
     /// crash-recovery reapers — without this, dogfood diagnostics
     /// cannot distinguish "this row was alive when we shut down" from
     /// "this row is alive RIGHT NOW".
+    ///
+    /// Call-time ordering (R10 doc fix):
+    ///   The reaper does NOT need to run before BG-task handlers
+    ///   register. The production wiring in `PlayheadRuntime` calls
+    ///   `registerBackgroundTasks()` synchronously during `init` and
+    ///   then runs this reaper from a deferred `Task { ... }` body
+    ///   after `migrate()` succeeds — so a fresh handler can have
+    ///   already started a `.running` row by the time the reaper
+    ///   runs. The temporal filter (`startedBefore`) is what makes
+    ///   that race safe: any row inserted by a handler in THIS
+    ///   process has `startedAt > processLaunchTimestamp`, so passing
+    ///   the launch timestamp as the cutoff guarantees only prior-
+    ///   process rows are eligible.
     ///
     /// `startedBefore` is the upper bound on `startedAt` for a row to
     /// be considered an orphan. Callers should capture this timestamp
