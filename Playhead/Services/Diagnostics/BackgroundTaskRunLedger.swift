@@ -323,9 +323,14 @@ protocol BackgroundTaskRunLedger: Sendable {
     /// from a detached Task so the row insert is best-effort relative
     /// to the handler's critical path.
     ///
-    /// Idempotent on `runId` collision: a second insert with the same
-    /// runId is silently dropped (the row already exists). The default
-    /// implementation just delegates to the existing insert path.
+    /// Idempotent on `runId` collision in observable behavior: a second
+    /// `recordRunStart` with the same `runId` will hit the SQLite PRIMARY
+    /// KEY constraint and throw inside the AnalysisStore impl, but the
+    /// throw is caught and logged at `.warning` rather than propagating
+    /// — callers see no error. This protects against a duplicate
+    /// `recordRunStart` in production from leaving the handler half-
+    /// initialized; tests should not rely on it as an idempotence
+    /// primitive (the call is best-effort, not transactional).
     func recordRunStart(
         runId: String,
         entryPoint: BackgroundTaskRunEntryPoint,

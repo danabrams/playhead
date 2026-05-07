@@ -875,7 +875,7 @@ struct AdListenRewindRow: Sendable, Hashable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 23
+    nonisolated private static let currentSchemaVersion = 24
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -3427,12 +3427,19 @@ actor AnalysisStore {
     /// DBs (this table only arrived in v24, but we still write the
     /// guard for future ladder reorderings).
     ///
-    /// playhead-hygc.1.4 (R4 integration note): bead bd-hygc.1.6 also
-    /// originally claimed schema v23 (correction-events dedupe). At
-    /// integration time .1.6 landed first and kept v23, so this
-    /// migration was renumbered to v24. The migration body is
-    /// self-contained — `CREATE TABLE IF NOT EXISTS` +
-    /// `CREATE INDEX IF NOT EXISTS` + a final `setSchemaVersion(N)`.
+    /// playhead-hygc.1.4 (R4/R8 integration note): bead bd-hygc.1.6
+    /// also originally claimed schema v23 (correction-events dedupe).
+    /// At integration time .1.6 landed first and kept v23, so this
+    /// migration was renumbered to v24. Three sites moved together:
+    ///   1. `currentSchemaVersion = 24` (the static at the top of
+    ///      `actor AnalysisStore` — easy to miss because it lives
+    ///      far from this helper)
+    ///   2. `(schemaVersion() ?? 1) < 24` (the gate below)
+    ///   3. `setSchemaVersion(24)` (the rung commit at the end of
+    ///      this method)
+    /// The migration body is self-contained — `CREATE TABLE IF NOT
+    /// EXISTS` + `CREATE INDEX IF NOT EXISTS` + a final
+    /// `setSchemaVersion(N)`.
     /// `reapOrphanBackgroundTaskRuns` already tolerates the table
     /// being absent via a `tableExists` guard so an out-of-order
     /// merge cannot cause a runtime regression on dogfood devices —
@@ -3521,9 +3528,13 @@ actor AnalysisStore {
     ///
     /// Each optional counter on the update payload is COALESCEd against
     /// the existing column so a partial update (e.g. "I only know
-    /// jobsAdmitted, not coverage") does not stomp prior writes.
-    /// `outcome`, `finishedAt`, and `expiration` are unconditional —
-    /// a terminal write is always definitive on those axes.
+    /// jobsAdmitted, not coverage") does not stomp prior writes. The
+    /// `expiration` column is also COALESCEd — call sites that don't
+    /// know the expiration disposition pass nil and inherit the
+    /// inserted default (0); the expirationHandler call site passes
+    /// `expiration: true` to overwrite. `outcome` and `finishedAt` are
+    /// the only two columns written unconditionally — a terminal write
+    /// is always definitive on those axes.
     func updateBackgroundTaskRunOutcome(
         runId: String,
         update: BackgroundTaskRunOutcomeUpdate,
