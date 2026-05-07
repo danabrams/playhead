@@ -2948,7 +2948,21 @@ actor AnalysisCoordinator {
             transcriptFailed: false,
             featureFailed: false
         )
-        let originalReasonForAudit = unwrappedAuditOriginal(from: asset.terminalReason)
+        // R3: sanitize `]` out of the embedded original reason before
+        // wrapping. The audit prefix uses the FIRST `]` to delimit the
+        // wrapped original (see ``unwrappedAuditOriginal(from:)`` and
+        // the read-side `firstIndex(of: "]")` in
+        // ``parseHighestRatioInTerminalReason``). Today's
+        // `classifyBackfillTerminal` never emits `]` in any of its eight
+        // canonical reason shapes, but `transitionAndPersist` accepts
+        // arbitrary `terminalReason` strings — a future code path that
+        // wrote a reason containing `]` would silently truncate the
+        // audit-wrapped form (read side scans the wrong tail; rewrap
+        // peels too aggressively). Replacing with `}` keeps the
+        // original recognizable for support diagnosis while making the
+        // boundary unambiguous in both helpers.
+        let unwrappedOriginal = unwrappedAuditOriginal(from: asset.terminalReason)
+        let originalReasonForAudit = unwrappedOriginal.replacingOccurrences(of: "]", with: "}")
         let auditedReason = "\(terminalStateRepairedReasonPrefix)\(originalReasonForAudit)] \(verdict.reason)"
         return .repair(state: verdict.state, reason: auditedReason)
     }

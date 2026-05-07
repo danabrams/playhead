@@ -274,6 +274,16 @@ struct PersistedTerminalStateReconcileTests {
         // still pass.
         #expect(reason.hasPrefix(AnalysisCoordinator.terminalStateRepairedReasonPrefix))
         #expect(reason.contains("full coverage: transcript 6.891, feature 8.106"))
+        // R3: pin the EXACT canonical wrapper shape so a wrong impl
+        // that pads `[autoRepaired:` with whitespace, doubles the
+        // closing bracket, or omits the space before the new reason
+        // still fails. `hasPrefix` + `contains` alone are satisfied by
+        // any string that contains the prefix and original substring,
+        // even with arbitrary decoration in between.
+        #expect(
+            reason.hasPrefix("[autoRepaired:full coverage: transcript 6.891, feature 8.106] "),
+            "expected canonical `[autoRepaired:<original>] ` shape; got \(reason)"
+        )
     }
 
     // MARK: - Pure verdict — healthy rows
@@ -523,6 +533,68 @@ struct PersistedTerminalStateReconcileTests {
             "full coverage: transcript 1.163, feature 1.724"
         )
         #expect((r ?? 0) > AnalysisCoordinator.terminalStateRepairRatioCeiling)
+    }
+
+    // MARK: - Audit-prefix sanitization (R3: ] in original is neutralized)
+
+    @Test("Original reason containing `]` is sanitized so audit-prefix boundary stays unambiguous")
+    func auditPrefixSanitizesEmbeddedCloseBracket() {
+        // R3 fix: the audit-prefix encoding uses the first `]` after
+        // `[autoRepaired:` as the boundary. Today's
+        // `classifyBackfillTerminal` never emits `]`, but
+        // `transitionAndPersist` accepts arbitrary terminalReason
+        // strings (any future code path could plant a `]`). Without
+        // sanitization, the read-side parser truncates at the embedded
+        // `]` — `parseHighestRatioInTerminalReason` would scan a
+        // trailing tail that still contains the bug-shape ratio, and
+        // `unwrappedAuditOriginal(from:)` would peel a partial original
+        // on re-repair. The fix replaces `]` with `}` at write time so
+        // the wrapper is unambiguous regardless of original content.
+        let asset = makeTerminalAsset(
+            id: "embedded-bracket",
+            analysisState: .completeFull,
+            // Synthetic original carrying `]` — proxy for any future
+            // reason format that escapes the canonical 8 shapes.
+            terminalReason: "garbage] full coverage: transcript 6.891, feature 8.106",
+            episodeDurationSec: 1800,
+            featureCoverageEndTime: 1800,
+            fastTranscriptCoverageEndTime: 1800
+        )
+        let verdict = AnalysisCoordinator.reconcilePersistedTerminalAssetVerdict(
+            asset: asset,
+            transcriptCoverageEnd: 1800,
+            featureCoverageEnd: 1800,
+            episodeDuration: 1800
+        )
+        guard case .repair(_, let reason) = verdict else {
+            #expect(Bool(false), "expected .repair (impossible ratio); got \(verdict)")
+            return
+        }
+        // Exactly one `]` between `[autoRepaired:` and the new reason —
+        // the embedded `]` from the original must be sanitized to `}`.
+        let prefix = AnalysisCoordinator.terminalStateRepairedReasonPrefix
+        guard let prefixRange = reason.range(of: prefix) else {
+            #expect(Bool(false), "expected prefix in \(reason)")
+            return
+        }
+        let afterPrefix = reason[prefixRange.upperBound...]
+        guard let firstClose = afterPrefix.firstIndex(of: "]") else {
+            #expect(Bool(false), "expected `]` after prefix in \(reason)")
+            return
+        }
+        let wrappedOriginal = afterPrefix[..<firstClose]
+        // The full original must be present (length-equivalently) inside
+        // the wrapper — no truncation. The single `]` is replaced with
+        // `}`, so the wrapped form has the same number of characters.
+        #expect(
+            wrappedOriginal == "garbage} full coverage: transcript 6.891, feature 8.106",
+            "expected `]` -> `}` sanitization preserving full original length; got \(wrappedOriginal)"
+        )
+        // And the new reason follows the closing bracket immediately
+        // (no second `]` from the original survived to confuse parsing).
+        let tail = afterPrefix[afterPrefix.index(after: firstClose)...]
+        #expect(!tail.contains("]"),
+                "audit-wrapper tail must not contain `]`; got \(tail)")
     }
 
     // MARK: - Audit-prefix length bound (R2: prevent stacking)
