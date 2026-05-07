@@ -285,7 +285,11 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
 
     @Test("flags terminal-state contradiction when completeFull lacks coverage")
     func flagsTerminalContradictionForCompleteFull() {
-        // 50% transcript coverage on a `completeFull` row → contradiction.
+        // 50% transcript coverage AND 2.5% feature coverage on a
+        // `completeFull` row → contradiction on both axes. Pins the
+        // count to exactly one terminal-contradiction flag and that
+        // the only other flag attributable to the row is the watermark
+        // gap (transcript_covered=2000, fast_watermark=90 → delta>60).
         let snapshot = DogfoodDiagnosticsActivitySnapshot(
             generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
             rows: [makeActivityRow(
@@ -303,11 +307,98 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
             from: snapshot,
             generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
         )
-        let kinds: [DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind] = health.stalenessFlags.map(\.kind)
-        #expect(kinds.contains(.terminalStateContradictsCoverage))
+        let terminalFlags = health.stalenessFlags.filter {
+            $0.kind == .terminalStateContradictsCoverage
+        }
+        #expect(terminalFlags.count == 1)
+        #expect(terminalFlags.first?.episodeIdHash == "h-contradicting")
         #expect(health.global.staleTerminalCount == 1)
         // The recommendation should agree with the flag.
         #expect(health.assets.first?.recommendedAction == .fileBug)
+    }
+
+    @Test("flags completeFull when only the feature axis is short of threshold")
+    func flagsCompleteFullOnFeatureShortfallAlone() {
+        // Adversarial OR-axis test: transcript is healthy (99%) but
+        // feature coverage is empty (2.5%). Per the completeFull
+        // contract — feature AND transcript at threshold — a feature
+        // shortfall alone IS a contradiction. A logic that takes the
+        // max across axes would silently miss this.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-feature-shortfall",
+                analysisState: "completeFull",
+                pipeline: makePipeline(
+                    episodeDurationSec: 4000,
+                    transcriptCoveredSec: 3960,
+                    fastTranscriptWatermarkSec: 3960,
+                    featureCoverageEndSec: 100
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let flagKinds = health.stalenessFlags.map(\.kind)
+        #expect(flagKinds.contains(.terminalStateContradictsCoverage))
+        #expect(health.global.staleTerminalCount == 1)
+        #expect(health.assets.first?.recommendedAction == .fileBug)
+    }
+
+    @Test("flags completeFull when only the transcript axis is short of threshold")
+    func flagsCompleteFullOnTranscriptShortfallAlone() {
+        // Mirror of the feature-shortfall test: feature is healthy
+        // but transcript is empty. The contradiction is real.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-transcript-shortfall",
+                analysisState: "completeFull",
+                pipeline: makePipeline(
+                    episodeDurationSec: 4000,
+                    transcriptCoveredSec: 100,
+                    fastTranscriptWatermarkSec: 100,
+                    featureCoverageEndSec: 3960
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let flagKinds = health.stalenessFlags.map(\.kind)
+        #expect(flagKinds.contains(.terminalStateContradictsCoverage))
+        #expect(health.assets.first?.recommendedAction == .fileBug)
+    }
+
+    @Test("does not flag completeFull when both axes meet the threshold")
+    func doesNotFlagCompleteFullWhenHealthy() {
+        // Healthy completeFull row: transcript and feature both at
+        // threshold. Pins the no-flag side of the OR contract so a
+        // future regression can't quietly start flagging healthy
+        // rows.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-healthy",
+                analysisState: "completeFull",
+                pipeline: makePipeline(
+                    episodeDurationSec: 4000,
+                    transcriptCoveredSec: 3900,
+                    fastTranscriptWatermarkSec: 3900,
+                    featureCoverageEndSec: 4000
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let flagKinds = health.stalenessFlags.map(\.kind)
+        #expect(!flagKinds.contains(.terminalStateContradictsCoverage))
+        #expect(health.global.staleTerminalCount == 0)
     }
 
     @Test("does not flag completeFeatureOnly when transcript is intentionally low")
@@ -526,6 +617,196 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
             generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
         )
         #expect(health.assets.first?.recommendedAction == .wait)
+    }
+
+    @Test("flags stale_job_lease and recommends clear_stale_lease when the lease outlived the latest session")
+    func flagsAndRecommendsForStaleLease() {
+        // Lease expires at t=100 but the latest session updatedAt is
+        // t=200 — the runner already finished but the lease row is
+        // pinned. Expect the staleJobLease flag AND the
+        // clearStaleLease recommendation; both branches share the
+        // same condition and must agree.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-stale-lease",
+                cachedAudioPresent: true,
+                latestSession: makeSession(updatedAt: 200.0),
+                latestJob: makeJob(
+                    leasePresent: true,
+                    leaseExpiresAt: 100.0
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let leaseFlags = health.stalenessFlags.filter { $0.kind == .staleJobLease }
+        #expect(leaseFlags.count == 1)
+        #expect(leaseFlags.first?.episodeIdHash == "h-stale-lease")
+        #expect(health.assets.first?.recommendedAction == .clearStaleLease)
+    }
+
+    @Test("does not flag stale_job_lease when no lease is present")
+    func doesNotFlagStaleLeaseWithoutLease() {
+        // Same updatedAt-vs-leaseExpires shape but with leasePresent=false:
+        // there is no lease to be stale, so no flag should fire.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-no-lease",
+                cachedAudioPresent: true,
+                latestSession: makeSession(updatedAt: 200.0),
+                latestJob: makeJob(
+                    leasePresent: false,
+                    leaseExpiresAt: 100.0
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        #expect(!health.stalenessFlags.contains { $0.kind == .staleJobLease })
+        #expect(health.assets.first?.recommendedAction != .clearStaleLease)
+    }
+
+    @Test("does not flag unknown progress when row is paused or unavailable")
+    func doesNotFlagUnknownProgressWhenPausedOrUnavailable() {
+        // Both negative cases (paused and unavailable) need to be
+        // pinned, otherwise a regression that loosens the gate to
+        // "unknown_progress fires for paused too" would slip through.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [
+                makeActivityRow(
+                    hash: "h-paused",
+                    disposition: "paused",
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "--%",
+                        analysisPercent: "--%"
+                    )
+                ),
+                makeActivityRow(
+                    hash: "h-unavailable",
+                    disposition: "unavailable",
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "--%",
+                        analysisPercent: "--%"
+                    )
+                )
+            ]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let unknownFlagHashes = health.stalenessFlags
+            .filter { $0.kind == .unknownProgressWithoutPause }
+            .map(\.episodeIdHash)
+        #expect(unknownFlagHashes.isEmpty)
+    }
+
+    @Test("flags terminal-state contradiction for completeTranscriptPartial only when transcript is essentially zero")
+    func completeTranscriptPartialOnlyFlagsOnZero() {
+        // Spec: completeTranscriptPartial transcript is intentionally
+        // short of threshold, so a 50% transcript coverage is fine
+        // (no flag). Only a genuinely-zero transcript_coverage_sec
+        // counts as a contradiction.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [
+                // Healthy partial: 50% transcript coverage → no flag.
+                makeActivityRow(
+                    hash: "h-partial-healthy",
+                    analysisState: "completeTranscriptPartial",
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 2000,
+                        fastTranscriptWatermarkSec: 2000
+                    )
+                ),
+                // Genuine contradiction: 0 transcript coverage on a
+                // partial-complete row — nothing advanced.
+                makeActivityRow(
+                    hash: "h-partial-empty",
+                    analysisState: "completeTranscriptPartial",
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 0,
+                        fastTranscriptWatermarkSec: 0
+                    )
+                )
+            ]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let terminalContradictionHashes = health.stalenessFlags
+            .filter { $0.kind == .terminalStateContradictsCoverage }
+            .map(\.episodeIdHash)
+        #expect(terminalContradictionHashes == ["h-partial-empty"])
+    }
+
+    // MARK: - Closed-vocabulary string drift
+
+    @Test("RecommendedAction wire strings match the bead spec verbatim")
+    func recommendedActionStringsAreStable() {
+        // Pin every wire string. If a future rename flips wait→waiting
+        // or open_app→openApp, support tooling breaks silently —
+        // catch it here.
+        #expect(DogfoodDiagnosticsAnalysisHealth.RecommendedAction.wait.rawValue == "wait")
+        #expect(DogfoodDiagnosticsAnalysisHealth.RecommendedAction.plugInOrWait.rawValue == "plug_in_or_wait")
+        #expect(DogfoodDiagnosticsAnalysisHealth.RecommendedAction.openApp.rawValue == "open_app")
+        #expect(DogfoodDiagnosticsAnalysisHealth.RecommendedAction.retry.rawValue == "retry")
+        #expect(DogfoodDiagnosticsAnalysisHealth.RecommendedAction.clearStaleLease.rawValue == "clear_stale_lease")
+        #expect(DogfoodDiagnosticsAnalysisHealth.RecommendedAction.fileBug.rawValue == "file_bug")
+        #expect(DogfoodDiagnosticsAnalysisHealth.RecommendedAction.unknown.rawValue == "unknown")
+        // Belt-and-braces: assert the case-iterable count so a new
+        // case doesn't slip in without an updated wire-string pin.
+        #expect(DogfoodDiagnosticsAnalysisHealth.RecommendedAction.allCases.count == 7)
+    }
+
+    @Test("StalenessFlag.Kind wire strings match the bead spec verbatim")
+    func stalenessFlagKindStringsAreStable() {
+        #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.terminalStateContradictsCoverage.rawValue == "terminal_state_contradicts_coverage")
+        #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.staleFastTranscriptWatermark.rawValue == "stale_fast_transcript_watermark")
+        #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.unknownProgressWithoutPause.rawValue == "unknown_progress_without_pause")
+        #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.staleJobLease.rawValue == "stale_job_lease")
+        #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.missingFailureReason.rawValue == "missing_failure_reason")
+        #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.allCases.count == 5)
+    }
+
+    // MARK: - v1 wire-format byte identity
+
+    @Test("v1 archive (no analysis_health) does not emit analysis_health key")
+    func v1ArchiveOmitsAnalysisHealthKey() throws {
+        // Acceptance criterion: when analysis_health is omitted, the
+        // v1 wire format is byte-identical to the pre-bead shape. The
+        // strongest pin is to inspect the raw JSON and confirm the
+        // analysis_health key is not emitted (Optional Codable should
+        // call encodeIfPresent and skip nil keys).
+        let source = try makeTempDir(prefix: "AHV1WireSource")
+        let output = try makeTempDir(prefix: "AHV1WireOutput")
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
+        try writeMinimalSurfaceStatusLog(in: source)
+        let result = try DogfoodDiagnosticsExporter.export(
+            sourceDirectory: source,
+            outputDirectory: output,
+            now: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let raw = try String(contentsOf: result.fileURL, encoding: .utf8)
+        #expect(!raw.contains("\"analysis_health\""))
+        #expect(!raw.contains("\"activity_snapshot\""))
+        // schema_version must be 1, not 2.
+        #expect(raw.contains("\"schema_version\" : 1"))
     }
 
     // MARK: - Caller-supplied aggregates

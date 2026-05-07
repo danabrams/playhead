@@ -469,7 +469,9 @@ extension DogfoodDiagnosticsAnalysisHealth {
             stalenessFlags: allStalenessFlags,
             duplicates: duplicates,
             learning: learning,
-            captureNote: activitySnapshot.captureError.map { "activity_capture_error: \($0)" }
+            captureNote: activitySnapshot.captureError.map {
+                redactedTruncated("activity_capture_error: \($0)")
+            }
         )
     }
 
@@ -506,7 +508,7 @@ extension DogfoodDiagnosticsAnalysisHealth {
             stalenessFlags: [],
             duplicates: duplicates,
             learning: learning,
-            captureNote: "no_activity_snapshot: \(reason)"
+            captureNote: redactedTruncated("no_activity_snapshot: \(reason)")
         )
     }
 
@@ -592,20 +594,28 @@ extension DogfoodDiagnosticsAnalysisHealth {
                 pipeline.featureCoverageEndSec,
                 pipeline.confirmedAdCoverageEndSec
             )
+            // For completeFull/legacy-complete the contract is feature AND
+            // transcript at threshold — a shortfall on EITHER axis is a
+            // contradiction. We compute the two axes independently (taking
+            // the max-known value within each axis, so a non-nil watermark
+            // can stand in for a nil chunk-coverage) and flag if either
+            // axis fails. Folding the axes into a single max would mask
+            // the case where one is healthy and the other is empty.
+            let transcriptAxis = bestKnown(
+                pipeline.transcriptCoveredSec,
+                pipeline.fastTranscriptWatermarkSec
+            ) ?? 0
+            let featureAxis = featureBest ?? 0
             switch asset.analysisState {
             case "completeFull", "complete":
-                let bestCoverage = bestKnown(
-                    pipeline.transcriptCoveredSec,
-                    pipeline.fastTranscriptWatermarkSec,
-                    featureBest
-                ) ?? 0
-                if bestCoverage < threshold {
+                if transcriptAxis < threshold || featureAxis < threshold {
                     flags.append(StalenessFlag(
                         episodeIdHash: row.episodeIdHash,
                         kind: .terminalStateContradictsCoverage,
                         detail: redactedTruncated(
                             "state=\(asset.analysisState) duration=\(formatSeconds(duration)) "
-                                + "best_coverage=\(formatSeconds(bestCoverage)) "
+                                + "transcript_axis=\(formatSeconds(transcriptAxis)) "
+                                + "feature_axis=\(formatSeconds(featureAxis)) "
                                 + "threshold=\(formatSeconds(threshold))"
                         )
                     ))
@@ -831,17 +841,20 @@ extension DogfoodDiagnosticsAnalysisHealth {
                 row.pipeline.featureCoverageEndSec,
                 row.pipeline.confirmedAdCoverageEndSec
             )
+            // Same axis-independent OR semantics as `stalenessFlags(for:)`.
+            let transcriptAxis = bestKnown(
+                row.pipeline.transcriptCoveredSec,
+                row.pipeline.fastTranscriptWatermarkSec
+            ) ?? 0
+            let featureAxis = featureBest ?? 0
             switch asset.analysisState {
             case "completeFull", "complete":
-                let bestCoverage = bestKnown(
-                    row.pipeline.transcriptCoveredSec,
-                    row.pipeline.fastTranscriptWatermarkSec,
-                    featureBest
-                ) ?? 0
-                if bestCoverage < threshold {
+                if transcriptAxis < threshold || featureAxis < threshold {
                     return Recommendation(
                         action: .fileBug,
-                        note: "terminal state but coverage \(formatSeconds(bestCoverage))/\(formatSeconds(duration))"
+                        note: "terminal state but transcript=\(formatSeconds(transcriptAxis)) "
+                            + "feature=\(formatSeconds(featureAxis)) "
+                            + "threshold=\(formatSeconds(threshold))"
                     )
                 }
             case "completeFeatureOnly":
