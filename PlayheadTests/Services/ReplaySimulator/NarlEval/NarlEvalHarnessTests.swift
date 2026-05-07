@@ -570,23 +570,123 @@ struct NarlEvalHarnessTests {
         }
     }
 
-    @Test("playhead-q45f.3: harness threads q45fCarryforward onto rollups; ALL is .empty")
+    @Test("playhead-q45f.3: harness threads q45fCarryforward onto rollups; ALL is []")
     func harnessThreadsQ45fCarryforwardOntoRollups() throws {
         let (report, _) = try Self.runHarnessCollectingReport()
         guard !report.rollups.isEmpty else { return }
         for rollup in report.rollups {
             if rollup.show == "ALL" {
-                #expect(rollup.q45fCarryforward == .empty,
-                        "ALL pseudo-show must carry .empty carryforward (cross-show state has no production analogue)")
+                #expect(rollup.q45fCarryforward.isEmpty,
+                        "ALL pseudo-show must carry [] carryforward (cross-show state has no production analogue)")
             } else {
-                // Per-show rollup: episodeCount on the carryforward must
-                // be ≥ 1 (every show in the report has at least one
-                // trace by construction). Other fields are .empty for
-                // pre-q45f.3 corpora.
-                #expect(rollup.q45fCarryforward.episodeCount >= 1,
-                        "Per-show carryforward must reflect every trace in the show")
+                // Per-show rollup: at least one carryforward per show
+                // (one per podcastId in the show), and each carryforward
+                // must reflect every trace under its podcastId. Other
+                // fields are zero for pre-q45f.3 corpora because the
+                // fixtures have no listenRewindEvents.
+                #expect(!rollup.q45fCarryforward.isEmpty,
+                        "Per-show carryforward must contain at least one per-podcastId rollup")
+                // Sorted-by-podcastId invariant from
+                // NarlQ45fCarryforwardRollup.computePerPodcast. Empty-
+                // podcastId fixtures (a real corpus condition for
+                // pre-frozen-trace-v3 captures) sort first; that's
+                // expected, not an error.
+                let podcastIds = rollup.q45fCarryforward.map(\.podcastId)
+                #expect(podcastIds == podcastIds.sorted(),
+                        "Per-podcastId carryforwards must be sorted by podcastId for stable rendering")
+                for cf in rollup.q45fCarryforward {
+                    #expect(cf.traceCount >= 1,
+                            "Each per-podcastId carryforward must reflect ≥ 1 trace")
+                }
             }
         }
+    }
+
+    @Test("playhead-q45f.3: harness carryforward helper splits multi-podcastId shows")
+    func carryforwardHelperSplitsMultiplePodcastIdsInOneShow() {
+        // DoaC scenario: a heuristic show label collapses two podcastIds
+        // (legacy form `flightcast:01KM…` + URL form
+        // `https://rss2.flightcast.com/…`). Production keys trust state
+        // on `podcastId`, so the carryforward MUST emit one rollup per
+        // podcastId — never collapse them under the show label.
+        //
+        // This drives the same `buildCarryforwardByShow` that the live
+        // harness uses, with synthesized traces, so a refactor that
+        // accidentally swaps `podcastId`-grouping for `show`-grouping
+        // (the cycle-1 bug class) will fail this test even when the
+        // live fixture corpus has only one podcastId per show.
+        let pcLegacy1 = Self.makeMinimalTrace(
+            episodeId: "doac-ep-1",
+            podcastId: "flightcast:01KM",
+            capturedAt: Date(timeIntervalSince1970: 100),
+            listenRewindEvents: [
+                FrozenTrace.FrozenListenRewindEvent(
+                    time: 5, windowId: "w1", podcastId: "flightcast:01KM"
+                ),
+                FrozenTrace.FrozenListenRewindEvent(
+                    time: 10, windowId: "w2", podcastId: "flightcast:01KM"
+                ),
+            ]
+        )
+        let pcLegacy2 = Self.makeMinimalTrace(
+            episodeId: "doac-ep-2",
+            podcastId: "flightcast:01KM",
+            capturedAt: Date(timeIntervalSince1970: 200),
+            listenRewindEvents: []
+        )
+        let pcUrlForm = Self.makeMinimalTrace(
+            episodeId: "doac-ep-3",
+            podcastId: "https://rss2.flightcast.com/abcd",
+            capturedAt: Date(timeIntervalSince1970: 150),
+            listenRewindEvents: [
+                FrozenTrace.FrozenListenRewindEvent(
+                    time: 7, windowId: "wU", podcastId: "https://rss2.flightcast.com/abcd"
+                ),
+            ]
+        )
+        let unrelated = Self.makeMinimalTrace(
+            episodeId: "conan-ep-1",
+            podcastId: "simplecast:99",
+            capturedAt: Date(timeIntervalSince1970: 100),
+            listenRewindEvents: []
+        )
+        let result = Self.buildCarryforwardByShow(
+            traces: [pcLegacy1, pcLegacy2, pcUrlForm, unrelated],
+            showName: { trace in
+                // Mimic the harness's heuristic: both DoaC podcastIds
+                // collapse to a single show label.
+                if trace.podcastId.hasPrefix("flightcast:")
+                    || trace.podcastId.hasPrefix("https://rss2.flightcast.com")
+                {
+                    return "DoaC"
+                }
+                return "Conan"
+            }
+        )
+
+        let doac = result["DoaC"] ?? []
+        #expect(doac.count == 2,
+                "Two podcastIds in one show must produce two carryforward rollups, not one")
+        #expect(doac.map(\.podcastId).sorted() == [
+            "flightcast:01KM",
+            "https://rss2.flightcast.com/abcd",
+        ])
+        // The legacy podcastId received both DoaC rewinds and demoted;
+        // the URL-form received one rewind and stayed in auto. If the
+        // grouping accidentally collapsed to a single show-keyed rollup,
+        // the URL-form's single event would chain onto the legacy's two
+        // events and produce a different (incorrect) demotion footprint.
+        let legacy = doac.first { $0.podcastId == "flightcast:01KM" }!
+        #expect(legacy.totalDemotionsCount == 1)
+        #expect(legacy.firstDemotionEpisodeId == "doac-ep-1")
+        #expect(legacy.finalMode == SkipMode.manual.rawValue)
+        let urlForm = doac.first { $0.podcastId == "https://rss2.flightcast.com/abcd" }!
+        #expect(urlForm.totalDemotionsCount == 0)
+        #expect(urlForm.finalMode == SkipMode.auto.rawValue)
+
+        let conan = result["Conan"] ?? []
+        #expect(conan.count == 1)
+        #expect(conan.first?.podcastId == "simplecast:99")
     }
 
     @Test("harness emits pipeline coverage failure trend rows")
@@ -646,22 +746,26 @@ struct NarlEvalHarnessTests {
                 + "Run with PLAYHEAD_BUILD_NARL_FIXTURES=1 against a .xcappdata bundle to populate.")
         }
 
-        // playhead-q45f.3: per-show carryforward of the q45f counterfactual
-        // gate. Group every trace by the harness's show classifier and
-        // replay each show's full rewind history in chronological order
-        // (sorted internally by `compute`). Looked up by show name when
-        // building each (show, config) rollup row below; the same value
-        // is populated on every config of the same show because the
-        // counterfactual is config-independent (only TrustScoringConfig
-        // matters, not MetadataActivationConfig). The "ALL" aggregate
-        // rollup gets `.empty` because cross-show state has no production
-        // analogue.
-        let tracesByShow: [String: [FrozenTrace]] = Dictionary(grouping: traces) {
-            Self.showName(for: $0)
-        }
-        let carryforwardByShow: [String: NarlQ45fCarryforwardRollup] = tracesByShow.mapValues {
-            NarlQ45fCarryforwardRollup.compute(showEpisodes: $0)
-        }
+        // playhead-q45f.3: per-PODCAST carryforward of the q45f
+        // counterfactual gate. Group every trace by the harness's show
+        // classifier (the rendered axis) and within each show emit one
+        // carryforward rollup per `podcastId` — production keys trust
+        // state on `podcastId` (see `TrustScoringService.recordWeak…`)
+        // and a heuristic show label can collapse multiple `podcastId`s
+        // (e.g. DoaC has both `flightcast:01KM…` and the URL form).
+        // Collapsing them into one rollup would falsely thread one
+        // podcast's false-skip signals into another's trust state.
+        //
+        // Looked up by show name when building each (show, config)
+        // rollup row below; the same list is populated on every config
+        // of the same show because the counterfactual is config-
+        // independent (only TrustScoringConfig matters, not
+        // MetadataActivationConfig). The "ALL" aggregate rollup gets
+        // `[]` because cross-show state has no production analogue.
+        let carryforwardByShow = Self.buildCarryforwardByShow(
+            traces: traces,
+            showName: Self.showName(for:)
+        )
 
         for (fixtureIndex, trace) in traces.enumerated() {
             // gtt9.7: run the correction normalizer first so span-level
@@ -917,17 +1021,18 @@ struct NarlEvalHarnessTests {
                 let shadowCount = bundles.filter { $0.entry.hasShadowCoverage }.count
                 let coverageAgg = Self.aggregateCoverage(bundles.map(\.entry.coverageMetrics))
                 let failureAssetCount = bundles.filter { $0.entry.coverageMetrics.pipelineCoverageFailureAsset }.count
-                // playhead-q45f.3: per-show carryforward stamped on every
-                // (show, config) rollup. The "ALL" pseudo-show carries
-                // `.empty` because cross-show replay state has no
-                // production analogue (false signals never aggregate
-                // across podcasts in production). All other shows look
-                // up their precomputed value from the show-keyed map.
-                let q45fCarryforward: NarlQ45fCarryforwardRollup
+                // playhead-q45f.3: per-podcastId carryforwards stamped on
+                // every (show, config) rollup as a list. The "ALL"
+                // pseudo-show carries `[]` because cross-show replay
+                // state has no production analogue (false signals never
+                // aggregate across podcasts in production). All other
+                // shows look up their precomputed list of one-per-
+                // podcastId rollups from the show-keyed map.
+                let q45fCarryforward: [NarlQ45fCarryforwardRollup]
                 if show == "ALL" {
-                    q45fCarryforward = .empty
+                    q45fCarryforward = []
                 } else {
-                    q45fCarryforward = carryforwardByShow[show] ?? .empty
+                    q45fCarryforward = carryforwardByShow[show] ?? []
                 }
                 return NarlReportRollup(
                     show: show,
@@ -958,9 +1063,9 @@ struct NarlEvalHarnessTests {
             let config = parts.count > 1 ? parts[1] : ""
             // playhead-q45f.3: even an excluded-only show can have rewinds
             // whose carryforward state is meaningful. ALL is the only key
-            // we deliberately stamp `.empty` on.
-            let q45fCarryforward: NarlQ45fCarryforwardRollup =
-                show == "ALL" ? .empty : (carryforwardByShow[show] ?? .empty)
+            // we deliberately stamp `[]` on.
+            let q45fCarryforward: [NarlQ45fCarryforwardRollup] =
+                show == "ALL" ? [] : (carryforwardByShow[show] ?? [])
             return NarlReportRollup(
                 show: show,
                 config: config,
@@ -1287,6 +1392,52 @@ struct NarlEvalHarnessTests {
     /// `fmSchedulingEnabled` code path.
     static func hasShadowCoverage(trace: FrozenTrace) -> Bool {
         trace.evidenceCatalog.contains { $0.source.hasPrefix("shadow:") }
+    }
+
+    /// playhead-q45f.3: build the per-show → per-podcastId carryforward
+    /// map that the live harness uses. Pulled out so a unit-level test
+    /// can drive it with synthetic multi-`podcastId`-per-show fixtures
+    /// without standing up the full report pipeline. The `showName`
+    /// classifier is parameterised (production passes `Self.showName`)
+    /// so the same helper can drive both real and synthetic show labels.
+    static func buildCarryforwardByShow(
+        traces: [FrozenTrace],
+        showName: (FrozenTrace) -> String
+    ) -> [String: [NarlQ45fCarryforwardRollup]] {
+        let tracesByShow: [String: [FrozenTrace]] = Dictionary(
+            grouping: traces, by: showName
+        )
+        return tracesByShow.mapValues {
+            NarlQ45fCarryforwardRollup.computePerPodcast(showEpisodes: $0)
+        }
+    }
+
+    /// playhead-q45f.3: minimal frozen-trace-v3 factory that supports
+    /// `listenRewindEvents`. Distinct from `makeTrace(episodeId:podcastId:showLabel:)`
+    /// (the gtt9.5 v2 factory) — bumping that one to v3 would require
+    /// touching every show-heuristic test, none of which care about
+    /// rewinds.
+    static func makeMinimalTrace(
+        episodeId: String,
+        podcastId: String,
+        capturedAt: Date,
+        listenRewindEvents: [FrozenTrace.FrozenListenRewindEvent]
+    ) -> FrozenTrace {
+        FrozenTrace(
+            episodeId: episodeId,
+            podcastId: podcastId,
+            episodeDuration: 1800,
+            traceVersion: "frozen-trace-v3",
+            capturedAt: capturedAt,
+            featureWindows: [],
+            atoms: [],
+            evidenceCatalog: [],
+            corrections: [],
+            decisionEvents: [],
+            baselineReplaySpanDecisions: [],
+            holdoutDesignation: .training,
+            listenRewindEvents: listenRewindEvents
+        )
     }
 
     /// gtt9.6: aggregate per-episode `NarlCoverageMetrics` into a single

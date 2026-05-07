@@ -37,11 +37,20 @@ struct NarlReportRollup: Sendable, Codable {
     /// in this show's history, threading a single trust state across
     /// episode boundaries. Config-independent (TrustScoringConfig.default
     /// is the only production-tuned setting), so the same value is
-    /// populated on every (show, config) rollup of the same show. The
-    /// "ALL"-aggregate rollup carries `.empty` because cross-show state
-    /// has no production analogue. Defaults to `.empty` for pre-q45f.3
+    /// populated on every (show, config) rollup of the same show.
+    ///
+    /// One entry **per `podcastId`** in this show — production trust state
+    /// is keyed on `podcastId`, and a heuristic show label can collapse
+    /// multiple `podcastId`s (e.g. DoaC has both `flightcast:01KM…` and
+    /// `https://rss2.flightcast.com/…` forms). Collapsing them into a
+    /// single carryforward would falsely thread one podcast's false-skip
+    /// signals into another's trust state. Sorted by `podcastId` for
+    /// stable rendering.
+    ///
+    /// The "ALL"-aggregate rollup carries `[]` because cross-show state
+    /// has no production analogue. Defaults to `[]` for pre-q45f.3
     /// report artifacts and synthetic excluded-only rollup rows.
-    let q45fCarryforward: NarlQ45fCarryforwardRollup
+    let q45fCarryforward: [NarlQ45fCarryforwardRollup]
 
     init(
         show: String,
@@ -55,7 +64,7 @@ struct NarlReportRollup: Sendable, Codable {
         totalEpisodesWithShadowCoverage: Int,
         coverageMetrics: NarlCoverageMetrics,
         pipelineCoverageFailureAssetCount: Int,
-        q45fCarryforward: NarlQ45fCarryforwardRollup = .empty
+        q45fCarryforward: [NarlQ45fCarryforwardRollup] = []
     ) {
         self.show = show
         self.config = config
@@ -72,8 +81,11 @@ struct NarlReportRollup: Sendable, Codable {
     }
 
     /// Manual init(from:) so pre-q45f.3 `report.json` artifacts (which lack
-    /// `q45fCarryforward`) decode with `.empty`. Encode is synthesized and
-    /// always emits the new field.
+    /// `q45fCarryforward`) decode with `[]`. `decodeIfPresent` (rather than
+    /// `try?`) is deliberate — a malformed `q45fCarryforward` value (wrong
+    /// shape, broken JSON) raises the decode error instead of silently
+    /// degrading to an empty list. Encode is synthesized and always emits
+    /// the new field.
     enum CodingKeys: String, CodingKey {
         case show, config, episodeCount, excludedEpisodeCount
         case windowMetrics, secondLevel
@@ -98,7 +110,7 @@ struct NarlReportRollup: Sendable, Codable {
             totalEpisodesWithShadowCoverage: try c.decode(Int.self, forKey: .totalEpisodesWithShadowCoverage),
             coverageMetrics: try c.decode(NarlCoverageMetrics.self, forKey: .coverageMetrics),
             pipelineCoverageFailureAssetCount: try c.decode(Int.self, forKey: .pipelineCoverageFailureAssetCount),
-            q45fCarryforward: (try? c.decode(NarlQ45fCarryforwardRollup.self, forKey: .q45fCarryforward)) ?? .empty
+            q45fCarryforward: try c.decodeIfPresent([NarlQ45fCarryforwardRollup].self, forKey: .q45fCarryforward) ?? []
         )
     }
 }
@@ -304,6 +316,9 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
     /// gtt9.7 do not carry a `normalizerCounts` block. Decode gracefully by
     /// defaulting the field to `.zero`. Encode always emits the new field.
     /// Same back-compat rule applies to `q45fCounterfactual` (pre-q45f.3).
+    /// `q45fCounterfactual` uses `decodeIfPresent` rather than `try?` so a
+    /// malformed value raises the decode error instead of silently
+    /// degrading to `.empty` — back-compat shouldn't mask data corruption.
     enum CodingKeys: String, CodingKey {
         case episodeId, podcastId, show, config, isExcluded, exclusionReason
         case groundTruthWindowCount, predictedWindowCount
@@ -338,8 +353,8 @@ struct NarlReportEpisodeEntry: Sendable, Codable {
         self.buildCommitSHA = (try? c.decode(String.self, forKey: .buildCommitSHA)) ?? ""
         self.pipelineCoverageBucket = (try? c.decode(NarlPipelineCoverageBucket.self,
                                                      forKey: .pipelineCoverageBucket)) ?? .unknown
-        self.q45fCounterfactual = (try? c.decode(NarlQ45fCounterfactual.self,
-                                                 forKey: .q45fCounterfactual)) ?? .empty
+        self.q45fCounterfactual = try c.decodeIfPresent(NarlQ45fCounterfactual.self,
+                                                        forKey: .q45fCounterfactual) ?? .empty
     }
 }
 
