@@ -902,11 +902,33 @@ extension DogfoodDiagnosticsAnalysisHealth {
             )
         }
 
+        // R8: a row that is GENUINELY running outranks every
+        // less-specific persistence-artifact hint that follows
+        // (`noCachedAudio`, `staleLease`, `staleWatermark`). R7
+        // already moved this gate ahead of `staleWatermark`; R8
+        // promotes it ahead of the remaining "static" hazards so a
+        // single principle holds: while the runner is mid-flight, the
+        // user-facing answer is "we're working on it, stand by",
+        // never "open the app", "clear a lease", or "plug in." The
+        // transient combinations that bring a running row to those
+        // hazards (cache eviction mid-run, leased-row residue,
+        // watermark drift) are all things the runner itself is in
+        // the middle of resolving.
+        //
+        // The corresponding staleness flags
+        // (`staleJobLease`, `staleFastTranscriptWatermark`) still
+        // surface in the `staleness_flags` list for support
+        // visibility; the change is only to the per-asset
+        // RECOMMENDATION.
+        if row.isRunning {
+            return Recommendation(action: .wait, note: "currently_running")
+        }
+
         // No cached audio + no live progress → user has to open the
         // app so the foreground manager resumes. Reaches here only
-        // for non-terminal-completion, non-failure rows (failures
-        // are handled at the top of the function; completions just
-        // above).
+        // for non-terminal-completion, non-failure, non-running rows
+        // (failures are handled at the top of the function;
+        // completions and active runners just above).
         if !row.cachedAudioPresent,
            row.liveDownloadFraction == nil,
            row.pipeline.downloadPercent == "--%" {
@@ -917,8 +939,10 @@ extension DogfoodDiagnosticsAnalysisHealth {
         }
 
         // Stale lease hint — surfaced for visibility, not blocking.
-        // Only fires on non-terminal rows; a leased durable-job row
-        // pinned past completion is benign and gets `.wait` above.
+        // Only fires on non-terminal, non-running rows; a leased
+        // durable-job row pinned past completion is benign and gets
+        // `.wait` above, and a leased row whose runner is mid-flight
+        // gets `.wait "currently_running"` from the running gate.
         if let job = row.latestJob,
            job.leasePresent,
            let expires = job.leaseExpiresAt,
@@ -928,20 +952,6 @@ extension DogfoodDiagnosticsAnalysisHealth {
                 action: .clearStaleLease,
                 note: "lease_expires_at=\(expires) session_updated_at=\(updated)"
             )
-        }
-
-        // R7: a row that is GENUINELY running outranks a stale-
-        // watermark hint. The watermark drift is a persistence artifact
-        // (playhead-3bv.2) the active runner is in the middle of
-        // catching up; telling the user to plug in/wait when the device
-        // is already executing the work is the same R4/R5/R6 pattern —
-        // a less-specific hazard masking a more-specific truth. The
-        // staleFastTranscriptWatermark flag still surfaces in the
-        // staleness_flags list for support visibility; the change is
-        // only to the per-asset RECOMMENDATION the user-facing card
-        // surfaces.
-        if row.isRunning {
-            return Recommendation(action: .wait, note: "currently_running")
         }
 
         // Stale watermark gap → wait for next backfill tick (the

@@ -1091,6 +1091,422 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         #expect(health.global.staleWatermarkCount == 1)
     }
 
+    @Test("running rows recommend wait, not clear_stale_lease, even when the lease residue is present")
+    func runningRowWithStaleLeaseRecommendsWait() {
+        // R8 fix: a row currently executing (`isRunning == true`)
+        // should never be classified as "clear a stale lease" just
+        // because the lease's expiry slipped behind the latest
+        // session's `updatedAt`. The active runner is mid-flight; the
+        // durable-job lease residue will be reaped on the next
+        // BG-task tick or as the runner finalizes the chunk it's
+        // currently on. This is the same R7 ordering principle
+        // (running outranks every persistence-artifact hazard hint),
+        // applied to the staleLease vs running adjacent pair.
+        //
+        // Pin: action=.wait, note="currently_running", AND the
+        // staleJobLease flag still fires for support visibility so a
+        // future fix that suppresses the FLAG (instead of just
+        // changing the recommendation) is caught here.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-running-stale-lease",
+                analysisState: "backfill",
+                isRunning: true,
+                cachedAudioPresent: true,
+                latestSession: makeSession(updatedAt: 200.0),
+                latestJob: makeJob(
+                    leasePresent: true,
+                    leaseExpiresAt: 100.0
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let asset = try! #require(health.assets.first)
+        #expect(asset.recommendedAction == .wait)
+        #expect(asset.recommendedActionNote == "currently_running")
+        // The flag still fires for support visibility.
+        #expect(health.stalenessFlags.contains { $0.kind == .staleJobLease })
+    }
+
+    @Test("running rows recommend wait, not open_app, even when cached audio is missing")
+    func runningRowWithMissingCachedAudioRecommendsWait() {
+        // R8 fix companion: a row currently executing
+        // (`isRunning == true`) should never be classified as
+        // ".openApp" just because `cachedAudioPresent == false` and
+        // download_percent is "--%". The combination is itself a
+        // transient state — an active runner mid-flight cannot be
+        // running with no audio source — but if it ever surfaces,
+        // the user-facing answer is "we're working on it" not
+        // "open the app so the foreground manager resumes." Same
+        // R4/R5/R6/R7 principle applied to the noCachedAudio vs
+        // running pair.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-running-no-cache",
+                analysisState: "backfill",
+                isRunning: true,
+                cachedAudioPresent: false,
+                liveDownloadFraction: nil,
+                pipeline: makePipeline(
+                    downloadPercent: "--%",
+                    transcriptPercent: "--%",
+                    analysisPercent: "--%"
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let asset = try! #require(health.assets.first)
+        #expect(asset.recommendedAction == .wait)
+        #expect(asset.recommendedActionNote == "currently_running")
+    }
+
+    @Test("recommendation branch ordering is exhaustive across every adjacent pair")
+    func recommendationBranchOrderingExhaustive() {
+        // Adjacent-pair audit (R8): for each adjacent pair (A, B) in
+        // the branch order
+        //   failure → contradiction → healthyTerminalCompletion →
+        //   running → noCachedAudio → staleLease →
+        //   staleWatermark → cachedAndQueued → unknown
+        // assert that a row simultaneously triggering A's predicate
+        // AND B's predicate routes to A. Each case is a single row
+        // engineered to satisfy BOTH predicates; the assertion fails
+        // loudly if a future reorder swaps the gate.
+        struct Case {
+            let name: String
+            let row: DogfoodDiagnosticsActivityRow
+            let expected: DogfoodDiagnosticsAnalysisHealth.RecommendedAction
+        }
+        let cases: [Case] = [
+            // failure outranks contradiction (terminal failure +
+            // completion-state coverage shape — the failure state
+            // wins; isTerminalCompletionState and
+            // isTerminalFailureState are disjoint, but the ordering
+            // is still a load-bearing contract — pin it.)
+            Case(
+                name: "failure-vs-contradiction",
+                row: makeActivityRow(
+                    hash: "fc",
+                    analysisState: "failedTranscript",
+                    terminalReason: "decode_error",
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 100,
+                        fastTranscriptWatermarkSec: 100,
+                        featureCoverageEndSec: 100
+                    )
+                ),
+                expected: .retry
+            ),
+            // contradiction outranks healthyTerminalCompletion
+            // (a `completeFull` row with low coverage IS a
+            // contradiction; healthy terminal is unreachable.)
+            Case(
+                name: "contradiction-vs-healthyTerminal",
+                row: makeActivityRow(
+                    hash: "ch",
+                    analysisState: "completeFull",
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 100,
+                        fastTranscriptWatermarkSec: 100,
+                        featureCoverageEndSec: 100
+                    )
+                ),
+                expected: .fileBug
+            ),
+            // healthyTerminal outranks running (a row in a healthy
+            // terminal-completion state should never be told
+            // "currently running" even if isRunning leaks true).
+            Case(
+                name: "healthyTerminal-vs-running",
+                row: makeActivityRow(
+                    hash: "hr",
+                    analysisState: "completeFull",
+                    isRunning: true,
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 3960,
+                        fastTranscriptWatermarkSec: 3960,
+                        featureCoverageEndSec: 4000
+                    )
+                ),
+                expected: .wait
+            ),
+            // running outranks noCachedAudio.
+            Case(
+                name: "running-vs-noCachedAudio",
+                row: makeActivityRow(
+                    hash: "rn",
+                    analysisState: "backfill",
+                    isRunning: true,
+                    cachedAudioPresent: false,
+                    liveDownloadFraction: nil,
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "--%",
+                        analysisPercent: "--%"
+                    )
+                ),
+                expected: .wait
+            ),
+            // running outranks staleLease.
+            Case(
+                name: "running-vs-staleLease",
+                row: makeActivityRow(
+                    hash: "rl",
+                    analysisState: "backfill",
+                    isRunning: true,
+                    cachedAudioPresent: true,
+                    latestSession: makeSession(updatedAt: 200.0),
+                    latestJob: makeJob(leasePresent: true, leaseExpiresAt: 100.0)
+                ),
+                expected: .wait
+            ),
+            // running outranks staleWatermark (R7).
+            Case(
+                name: "running-vs-staleWatermark",
+                row: makeActivityRow(
+                    hash: "rw",
+                    analysisState: "backfill",
+                    isRunning: true,
+                    cachedAudioPresent: true,
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 1500,
+                        fastTranscriptWatermarkSec: 90
+                    )
+                ),
+                expected: .wait
+            ),
+            // noCachedAudio outranks staleLease.
+            Case(
+                name: "noCachedAudio-vs-staleLease",
+                row: makeActivityRow(
+                    hash: "nl",
+                    analysisState: "backfill",
+                    cachedAudioPresent: false,
+                    liveDownloadFraction: nil,
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "--%",
+                        analysisPercent: "--%"
+                    ),
+                    latestSession: makeSession(updatedAt: 200.0),
+                    latestJob: makeJob(leasePresent: true, leaseExpiresAt: 100.0)
+                ),
+                expected: .openApp
+            ),
+            // staleLease outranks staleWatermark.
+            Case(
+                name: "staleLease-vs-staleWatermark",
+                row: makeActivityRow(
+                    hash: "lw",
+                    analysisState: "backfill",
+                    cachedAudioPresent: true,
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 1500,
+                        fastTranscriptWatermarkSec: 90
+                    ),
+                    latestSession: makeSession(updatedAt: 200.0),
+                    latestJob: makeJob(leasePresent: true, leaseExpiresAt: 100.0)
+                ),
+                expected: .clearStaleLease
+            ),
+            // staleWatermark outranks cachedAndQueued. The cached+queued
+            // gate also runs on this shape; staleWatermark wins.
+            Case(
+                name: "staleWatermark-vs-cachedAndQueued",
+                row: makeActivityRow(
+                    hash: "wq",
+                    disposition: "queued",
+                    analysisState: "backfill",
+                    cachedAudioPresent: true,
+                    pipeline: makePipeline(
+                        downloadPercent: "100%",
+                        transcriptPercent: "30%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 1500,
+                        fastTranscriptWatermarkSec: 90
+                    )
+                ),
+                expected: .plugInOrWait
+            ),
+            // cachedAndQueued outranks unknown (a queued cached row
+            // with progress should not fall through to .unknown).
+            Case(
+                name: "cachedAndQueued-vs-unknown",
+                row: makeActivityRow(
+                    hash: "qu",
+                    disposition: "queued",
+                    analysisState: "queued",
+                    cachedAudioPresent: true,
+                    pipeline: makePipeline(
+                        downloadPercent: "100%",
+                        transcriptPercent: "30%",
+                        analysisPercent: "20%"
+                    )
+                ),
+                expected: .wait
+            )
+        ]
+        for testCase in cases {
+            let snapshot = DogfoodDiagnosticsActivitySnapshot(
+                generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                rows: [testCase.row]
+            )
+            let health = DogfoodDiagnosticsAnalysisHealth.build(
+                from: snapshot,
+                generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+            )
+            let asset = try! #require(
+                health.assets.first,
+                "missing asset for \(testCase.name)"
+            )
+            #expect(
+                asset.recommendedAction == testCase.expected,
+                "wrong action for \(testCase.name): got \(asset.recommendedAction.rawValue), expected \(testCase.expected.rawValue)"
+            )
+        }
+    }
+
+    @Test("global summary counts are stable across rows that hit each reordered branch")
+    func globalSummaryStableAcrossReorderedBranches() {
+        // Aggregation invariant (task #2): GlobalSummary counters
+        // (totals, dispositions, terminal-completed, stale flags,
+        // unknown-progress) are derived from input row state directly,
+        // NOT from recommended-action routing. Confirm that mixing
+        // rows that hit each of the R4..R8 reordered branches in a
+        // single snapshot still produces the expected counts.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [
+                // R4: healthy terminal completion (transcriptPercent="--%").
+                makeActivityRow(
+                    hash: "g-r4-htc",
+                    analysisState: "completeFeatureOnly",
+                    pipeline: makePipeline(
+                        transcriptPercent: "--%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 40,
+                        fastTranscriptWatermarkSec: 40,
+                        featureCoverageEndSec: 3960
+                    )
+                ),
+                // R5: terminal completion + stale watermark.
+                makeActivityRow(
+                    hash: "g-r5-stale-watermark-terminal",
+                    analysisState: "completeFull",
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 3960,
+                        fastTranscriptWatermarkSec: 90,
+                        featureCoverageEndSec: 4000
+                    )
+                ),
+                // R6: terminal completion + evicted audio.
+                makeActivityRow(
+                    hash: "g-r6-evicted-terminal",
+                    analysisState: "completeFull",
+                    cachedAudioPresent: false,
+                    liveDownloadFraction: nil,
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 3960,
+                        fastTranscriptWatermarkSec: 3960,
+                        featureCoverageEndSec: 4000
+                    )
+                ),
+                // R7: running + stale watermark.
+                makeActivityRow(
+                    hash: "g-r7-running-stale-watermark",
+                    analysisState: "backfill",
+                    isRunning: true,
+                    cachedAudioPresent: true,
+                    pipeline: makePipeline(
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 1500,
+                        fastTranscriptWatermarkSec: 90
+                    )
+                ),
+                // R8: running + stale lease.
+                makeActivityRow(
+                    hash: "g-r8-running-stale-lease",
+                    analysisState: "backfill",
+                    isRunning: true,
+                    cachedAudioPresent: true,
+                    latestSession: makeSession(updatedAt: 200.0),
+                    latestJob: makeJob(leasePresent: true, leaseExpiresAt: 100.0)
+                )
+            ]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        // Per-row routing (sanity) — each row hits the correct branch.
+        let actions = health.assets.map(\.recommendedAction)
+        #expect(actions == [.wait, .wait, .wait, .wait, .wait])
+        // Global aggregates are independent of recommendation routing.
+        #expect(health.global.totalAssets == 5)
+        #expect(health.global.runningCount == 2) // R7, R8
+        #expect(health.global.queuedCount == 5)  // disposition default = "queued"
+        #expect(health.global.terminalCompletedCount == 3) // R4, R5, R6
+        // Two rows have stale-watermark drift (R5: terminal +
+        // R7: running). Both still appear in staleness_flags
+        // regardless of recommendation routing.
+        #expect(health.global.staleWatermarkCount == 2)
+        // Stale lease appears on R8 (running) and is still flagged
+        // even though the recommendation says "currently_running".
+        let leaseCount = health.stalenessFlags.filter {
+            $0.kind == .staleJobLease
+        }.count
+        #expect(leaseCount == 1)
+        // No terminal contradictions — R4/R5/R6 are all healthy.
+        #expect(health.global.staleTerminalCount == 0)
+    }
+
+    @Test("captureNote prefixes are stable for both build paths")
+    func captureNotePrefixesAreStable() {
+        // R8: every emitted note-string prefix should be pinned.
+        // captureNote has two deterministic shapes:
+        //   * "activity_capture_error: …" — when build(from:) sees a
+        //     non-nil captureError on the input snapshot.
+        //   * "no_activity_snapshot: …" — when noSnapshot(reason:)
+        //     constructs an empty summary because the activity
+        //     snapshot itself was nil.
+        // Support tooling routes on these prefixes. Pin both.
+        let captureErrorSnapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [],
+            captureError: "io_open_failed"
+        )
+        let withErrorHealth = DogfoodDiagnosticsAnalysisHealth.build(
+            from: captureErrorSnapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let captureErrorNote = try! #require(withErrorHealth.captureNote)
+        #expect(captureErrorNote.hasPrefix("activity_capture_error:"))
+        #expect(captureErrorNote.contains("io_open_failed"))
+
+        let noSnapshotHealth = DogfoodDiagnosticsAnalysisHealth.noSnapshot(
+            reason: "analysis_store_unopened",
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let noSnapshotNote = try! #require(noSnapshotHealth.captureNote)
+        #expect(noSnapshotNote.hasPrefix("no_activity_snapshot:"))
+        #expect(noSnapshotNote.contains("analysis_store_unopened"))
+    }
+
     @Test("recommendation note strings are stable for every deterministic branch")
     func recommendationNoteStringsAreStable() {
         // R6: every deterministic (non-parameterized) note string
