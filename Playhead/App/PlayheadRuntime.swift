@@ -459,6 +459,8 @@ final class PlayheadRuntime {
     //   - lifecycleLogger.migrate() (added by playhead-jncn)
     //   - bgTaskTelemetry.migrate() (added by playhead-jncn)
     //   - analysisCoordinator.recoverCoverageGuardFailures()
+    //   - analysisCoordinator.runEpisodeDurationBackfillIfNeeded(...)
+    //   - analysisCoordinator.reconcilePersistedTerminalStatesIfNeeded() (playhead-hygc.1.3)
     //   - analysisStore.pruneOrphanedScansForCurrentCohort(...)
     //   - shadowRetryObserver.start()
     //   - downloadManager.setAnalysisWorkScheduler(...)
@@ -1574,6 +1576,21 @@ final class PlayheadRuntime {
                     await downloadManager.cachedFileURL(for: episodeId)
                 }
             )
+
+            // playhead-hygc.1.3: one-shot launch-time sweep that repairs
+            // persisted terminal-completion rows whose `analysisState`
+            // contradicts the canonical coverage proven by transcript
+            // chunks + `episodeDurationSec`. Heals the May 6 dogfood
+            // pattern (rows stamped `completeFull` with `terminalReason
+            // "transcript 1.163, feature 1.724"` while real coverage is
+            // a small fraction of the episode) so Activity / dogfood
+            // diagnostics no longer present those rows as fully
+            // analyzed. Idempotent via
+            // `_meta.did_terminal_state_reconcile_v1`; runs after the
+            // duration-backfill sweep so the canonical denominator is
+            // in place before the contradiction check fires. Errors
+            // inside are logged and swallowed.
+            _ = await analysisCoordinator.reconcilePersistedTerminalStatesIfNeeded()
 
             // bd-200: prune scan rows under stale cohort hashes (locale change,
             // app upgrade, prompt/schema/plan/normalization revs). Best-effort —

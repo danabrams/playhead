@@ -5584,6 +5584,58 @@ actor AnalysisStore {
         return summaries
     }
 
+    /// playhead-hygc.1.3: batch fetch of the maximum `endTime` across all
+    /// transcript chunks for each asset, regardless of pass. Returned as
+    /// covered-end (high-water mark), not summed coverage. Callers
+    /// compare this against the canonical `episodeDurationSec` to verify
+    /// terminal-state invariants on persisted-row repair.
+    ///
+    /// Why max(endTime) rather than the SUM-based covered-seconds in
+    /// ``fetchFastTranscriptCoveredSecondsByAssetIds(_:)``: the terminal
+    /// classifier (``AnalysisCoordinator/classifyBackfillTerminal``) and
+    /// the finalize coverage guard both reason about end-time coverage
+    /// (`coverageEnd / duration`), not interval-summed coverage. Reusing
+    /// the SUM helper here would give a different denominator than the
+    /// classifier itself uses, defeating the point of the repair.
+    ///
+    /// Includes both `fast` and `final` pass chunks because either pass
+    /// proves transcript coverage advanced past the recorded watermark.
+    /// Assets with no chunks are absent from the result (callers treat
+    /// missing entries as `coverageEnd == 0`).
+    func fetchMaxTranscriptEndTimeByAssetIds(_ assetIds: Set<String>) throws -> [String: Double] {
+        guard !assetIds.isEmpty else { return [:] }
+        let chunkSize = 500
+        var results: [String: Double] = [:]
+        results.reserveCapacity(assetIds.count)
+
+        let allIds = assetIds.sorted()
+        var index = 0
+        while index < allIds.count {
+            let end = min(index + chunkSize, allIds.count)
+            let slice = Array(allIds[index..<end])
+            let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
+            let sql = """
+                SELECT analysisAssetId, MAX(endTime) AS maxEnd
+                FROM transcript_chunks
+                WHERE analysisAssetId IN (\(placeholders))
+                GROUP BY analysisAssetId
+                """
+            let stmt = try prepare(sql)
+            for (i, id) in slice.enumerated() {
+                bind(stmt, Int32(i + 1), id)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let assetId = text(stmt, 0)
+                guard sqlite3_column_type(stmt, 1) != SQLITE_NULL else { continue }
+                results[assetId] = sqlite3_column_double(stmt, 1)
+            }
+            sqlite3_finalize(stmt)
+            index = end
+        }
+
+        return results
+    }
+
     func searchTranscripts(query: String) throws -> [TranscriptChunk] {
         // Sanitize the query for FTS5: strip double quotes, then wrap each
         // whitespace-separated token in double quotes so special characters

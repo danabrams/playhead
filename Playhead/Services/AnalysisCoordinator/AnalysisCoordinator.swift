@@ -2702,6 +2702,493 @@ actor AnalysisCoordinator {
         return summary
     }
 
+    // MARK: - Persisted terminal-state reconcile (playhead-hygc.1.3)
+
+    /// `_meta.key` flag controlling idempotence of
+    /// ``reconcilePersistedTerminalStatesIfNeeded()``. Once set, subsequent
+    /// invocations short-circuit. Bumping the suffix (`v1`, `v2`, ...)
+    /// re-runs the sweep against any rows persisted under newer logic
+    /// changes — see `coverageGuardFailureReasonPrefix` for the same
+    /// pattern applied to a different sweep.
+    static let terminalStateReconcileV1MetaKey = "did_terminal_state_reconcile_v1"
+
+    /// Prefix prepended to repaired `terminalReason` strings so support
+    /// can tell "this was reclassified at launch by the reconciler" from
+    /// "this is the original `classifyBackfillTerminal` verdict from the
+    /// pipeline run that produced the row."
+    ///
+    /// Format: `[autoRepaired:<original-reason>] <new-reason>`.
+    /// `<original-reason>` falls back to `nil` (literal string) when the
+    /// row never recorded one — pre-gtt9.8 legacy rows had `terminalReason
+    /// == nil` and we want the audit trail to make that visible.
+    static let terminalStateRepairedReasonPrefix = "[autoRepaired:"
+
+    /// Maximum coverage ratio considered plausible in a `terminalReason`
+    /// numeric field. Ratios above this floor indicate a stale-denominator
+    /// computation (the persisted asset was scored against a small initial
+    /// shard sum, not the eventual probed truth) and trigger a repair.
+    ///
+    /// 1.05 lets a few-second decoder tail through (matches the floor in
+    /// ``finalizeBackfillMinCoverageRatio``); anything above that range is
+    /// the libsyn/flightcast denominator-bug shape and reclassifies via
+    /// the canonical `episodeDurationSec`.
+    static let terminalStateRepairRatioCeiling: Double = 1.05
+
+    /// Verdict returned by ``reconcilePersistedTerminalAssetVerdict``.
+    /// Pure value type so tests can drive the decision without standing
+    /// up the actor or a store.
+    enum PersistedTerminalAssetVerdict: Equatable {
+        /// Row is consistent — leave it alone.
+        case unchanged
+        /// Row contradicts canonical coverage. Caller should write
+        /// `state` and `reason` via
+        /// ``AnalysisStore/updateAssetState(id:state:terminalReason:)``.
+        case repair(state: SessionState, reason: String)
+        /// Row was skipped because we cannot prove a contradiction
+        /// (typically: unknown duration). Distinct from `.unchanged` so
+        /// the sweep can count fail-safe skips for diagnostics.
+        case skipUnknownDuration
+    }
+
+    /// Pure helper that decides whether a persisted terminal-completion
+    /// row contradicts its real coverage. Reuses the same coverage math
+    /// as ``classifyBackfillTerminal`` so a repaired row gets the exact
+    /// terminal the live classifier would have picked given the same
+    /// inputs — the sweep does NOT introduce a parallel set of rules.
+    ///
+    /// Triggers a repair when the persisted state is one of the three
+    /// completion terminals (`completeFull`, `completeFeatureOnly`,
+    /// `completeTranscriptPartial`) AND any of the following hold:
+    ///
+    ///   * `analysisState == completeFull` but transcript coverage end
+    ///     (max chunk endTime) falls short of
+    ///     `finalizeBackfillMinCoverageRatio` against
+    ///     `episodeDurationSec`. The pre-fix denominator was almost
+    ///     certainly a stale shard-sum (the
+    ///     `FinalizeBackfillDenominatorFixTests` shape), and the row
+    ///     misrepresents the contract.
+    ///   * `analysisState == completeFull` but feature coverage falls
+    ///     short of the same ratio. (Same shape, feature side.)
+    ///   * `terminalReason` carries a numeric field above
+    ///     `terminalStateRepairRatioCeiling` (e.g. "transcript 6.891" or
+    ///     "feature 8.106"). That can only happen when the denominator
+    ///     used at write-time was wrong, so the row's classification is
+    ///     untrustworthy regardless of the field values.
+    ///
+    /// Non-completion terminals (`failedTranscript`, `failedFeature`,
+    /// `cancelledBudget`, legacy `failed`/`complete`) and non-terminal
+    /// states (`queued`, `spooling`, `featuresReady`, etc.) are left
+    /// alone — those rows are not making a "fully analyzed" promise the
+    /// surface contradicts.
+    ///
+    /// - Parameters:
+    ///   - asset: persisted `AnalysisAsset` row from the store.
+    ///   - transcriptCoverageEnd: highest `endTime` across all transcript
+    ///     chunks for the asset (any pass), or 0 when no chunks exist.
+    ///   - featureCoverageEnd: persisted feature coverage end seconds
+    ///     (typically `asset.featureCoverageEndTime`). Hoisted as a
+    ///     parameter so test seams can drive corner cases.
+    ///   - episodeDuration: the canonical duration to score against,
+    ///     normally `asset.episodeDurationSec`. Treated as "unknown"
+    ///     when nil or non-positive (returns `.skipUnknownDuration`).
+    nonisolated static func reconcilePersistedTerminalAssetVerdict(
+        asset: AnalysisAsset,
+        transcriptCoverageEnd: Double,
+        featureCoverageEnd: Double?,
+        episodeDuration: Double?
+    ) -> PersistedTerminalAssetVerdict {
+        guard let state = SessionState(rawValue: asset.analysisState) else {
+            return .unchanged
+        }
+        // Only the three new completion terminals make a "fully analyzed"
+        // promise that the canonical coverage can contradict. Legacy
+        // `.complete` is excluded because it carries no terminalReason
+        // and pre-dates the gtt9.8 contract; those rows are intentionally
+        // left for the next pipeline run to re-evaluate via the live
+        // classifier rather than auto-repaired here.
+        switch state {
+        case .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+            break
+        default:
+            return .unchanged
+        }
+
+        let duration = episodeDuration ?? 0
+        guard duration > 0 else {
+            // Fail-safe: without a denominator we cannot prove the row
+            // contradicts canonical coverage. The duration-backfill
+            // sweep that runs alongside this one rewrites missing
+            // durations from a probed audio file; the next pass will
+            // re-evaluate this row.
+            return .skipUnknownDuration
+        }
+
+        let featureSeconds = featureCoverageEnd ?? 0
+        let featureRatio = featureSeconds / duration
+        let transcriptRatio = transcriptCoverageEnd / duration
+
+        // Detect denominator-bug rows by parsing the persisted
+        // terminalReason. Any ratio above `terminalStateRepairRatioCeiling`
+        // is a sign the row was scored against a wrong (stale shard sum)
+        // denominator at write-time. We treat that as untrustworthy
+        // regardless of the actual coverage values, because we can't
+        // assume the coverage values themselves are sane either.
+        let reasonClaimsImpossibleRatio = parseHighestRatioInTerminalReason(
+            asset.terminalReason
+        ) ?? 0 > terminalStateRepairRatioCeiling
+
+        // For `.completeFull`: both transcript AND feature must clear
+        // the threshold against the canonical denominator.
+        if state == .completeFull {
+            let transcriptShort = transcriptRatio + 1e-9 < finalizeBackfillMinCoverageRatio
+            let featureShort = featureRatio + 1e-9 < finalizeBackfillMinCoverageRatio
+            if transcriptShort || featureShort || reasonClaimsImpossibleRatio {
+                return repairVerdict(
+                    asset: asset,
+                    transcriptCoverageEnd: transcriptCoverageEnd,
+                    featureSeconds: featureSeconds,
+                    duration: duration
+                )
+            }
+        }
+
+        // For `.completeFeatureOnly`: feature must clear the threshold;
+        // transcript is permitted to be ~0. A row that claims feature-only
+        // but actually has substantial transcript is also wrong, but
+        // that's the live classifier's job — here we only repair rows
+        // that overstate coverage. (Understated rows are healed by the
+        // coverage-guard recovery sweep on the failure side.)
+        if state == .completeFeatureOnly {
+            let featureShort = featureRatio + 1e-9 < finalizeBackfillMinCoverageRatio
+            if featureShort || reasonClaimsImpossibleRatio {
+                return repairVerdict(
+                    asset: asset,
+                    transcriptCoverageEnd: transcriptCoverageEnd,
+                    featureSeconds: featureSeconds,
+                    duration: duration
+                )
+            }
+        }
+
+        // For `.completeTranscriptPartial`: feature must clear the
+        // threshold (the classifier requires this before the partial
+        // bucket is even reachable). A row that claims transcript-partial
+        // but has feature short of the threshold was misclassified.
+        if state == .completeTranscriptPartial {
+            let featureShort = featureRatio + 1e-9 < finalizeBackfillMinCoverageRatio
+            if featureShort || reasonClaimsImpossibleRatio {
+                return repairVerdict(
+                    asset: asset,
+                    transcriptCoverageEnd: transcriptCoverageEnd,
+                    featureSeconds: featureSeconds,
+                    duration: duration
+                )
+            }
+        }
+
+        return .unchanged
+    }
+
+    /// Wrap the `classifyBackfillTerminal` call that produces the
+    /// repaired state, then prepend the audit-trail marker. Extracted so
+    /// the three call sites in
+    /// ``reconcilePersistedTerminalAssetVerdict`` share one definition of
+    /// "what does the live classifier say about this row's coverage now."
+    ///
+    /// The classifier inputs are deliberately simple here: the row
+    /// reached a completion terminal at write-time, so neither
+    /// `budgetCancelled`, `transcriptFailed`, nor `featureFailed` were
+    /// set — passing them as `false` reproduces the same priority-4/5
+    /// branch the original write-path took, just against the canonical
+    /// denominator. Any future divergence between sweep semantics and
+    /// classifier semantics shows up here, in one helper.
+    nonisolated private static func repairVerdict(
+        asset: AnalysisAsset,
+        transcriptCoverageEnd: Double,
+        featureSeconds: Double,
+        duration: Double
+    ) -> PersistedTerminalAssetVerdict {
+        // Build a minimal synthetic chunk list with a single "endTime"
+        // entry so we can reuse classifyBackfillTerminal verbatim — that
+        // helper only reads `chunks.map(\.endTime).max()`. Empty list when
+        // there is no transcript coverage at all.
+        let syntheticChunks: [TranscriptChunk]
+        if transcriptCoverageEnd > 0 {
+            syntheticChunks = [
+                TranscriptChunk(
+                    id: "reconcile-synthetic",
+                    analysisAssetId: asset.id,
+                    segmentFingerprint: "reconcile",
+                    chunkIndex: 0,
+                    startTime: 0,
+                    endTime: transcriptCoverageEnd,
+                    text: "",
+                    normalizedText: "",
+                    pass: TranscriptPassType.fast.rawValue,
+                    modelVersion: "reconcile",
+                    transcriptVersion: nil,
+                    atomOrdinal: nil,
+                    weakAnchorMetadata: nil,
+                    speakerId: nil
+                )
+            ]
+        } else {
+            syntheticChunks = []
+        }
+        let verdict = classifyBackfillTerminal(
+            chunks: syntheticChunks,
+            episodeDuration: duration,
+            featureCoverage: featureSeconds,
+            budgetCancelled: false,
+            transcriptFailed: false,
+            featureFailed: false
+        )
+        let originalReasonForAudit = asset.terminalReason ?? "nil"
+        let auditedReason = "\(terminalStateRepairedReasonPrefix)\(originalReasonForAudit)] \(verdict.reason)"
+        return .repair(state: verdict.state, reason: auditedReason)
+    }
+
+    /// Pull the largest numeric "ratio-shaped" value out of a persisted
+    /// `terminalReason` string. The classifier emits two formats today:
+    ///
+    ///   * Full coverage: `"full coverage: transcript 1.000, feature 0.999"`
+    ///   * Partial:       `"partial transcript 870.0/3600.0s (ratio 0.241 < 0.950)"`
+    ///   * Feature-only:  `"feature-only (feature 0.998, transcript 0)"`
+    ///   * Bug shape:     `"full coverage: transcript 6.891, feature 8.106"`
+    ///
+    /// We scan for tokens that start with `transcript`, `feature`, or
+    /// `ratio`, parse the next whitespace-delimited token as a Double,
+    /// and return the maximum. Returns `nil` when the input is `nil` or
+    /// no parseable ratios are found, which the caller treats as
+    /// "no impossible ratio claim recorded."
+    nonisolated static func parseHighestRatioInTerminalReason(
+        _ reason: String?
+    ) -> Double? {
+        guard let reason, !reason.isEmpty else { return nil }
+        // Strip an autoRepaired audit prefix so a previously-repaired
+        // reason that still carries the original bad ratio inside the
+        // brackets does NOT trigger a second repair on next launch. We
+        // only inspect the post-prefix tail.
+        let scanRange: Substring
+        if reason.hasPrefix(terminalStateRepairedReasonPrefix),
+           let closeBracket = reason.firstIndex(of: "]") {
+            scanRange = reason[reason.index(after: closeBracket)...]
+        } else {
+            scanRange = Substring(reason)
+        }
+        // Tokenize on whitespace AND comma so "transcript 1.000," yields
+        // a clean "1.000" token in the next slot.
+        let tokens = scanRange.split(whereSeparator: { $0.isWhitespace || $0 == "," })
+        var bestRatio: Double?
+        var i = 0
+        while i < tokens.count {
+            let token = tokens[i].lowercased()
+            let isLabel = token == "transcript" || token == "feature" || token == "ratio"
+            if isLabel, i + 1 < tokens.count {
+                // The next token may be a bare number ("1.000") or a
+                // fraction token like "870.0/3600.0s" — the partial-shape
+                // emission. The bare-number form is what we care about
+                // (ratios > 1 only appear in the bug shape); skip
+                // slash-bearing tokens because their numerator is in
+                // seconds, not in ratio units.
+                let next = tokens[i + 1]
+                if !next.contains("/") {
+                    // Trim any trailing ASCII non-digit punctuation
+                    // (e.g. ")") that snuck in.
+                    let trimmed = next.trimmingCharacters(
+                        in: CharacterSet(charactersIn: "()<>:;\"")
+                    )
+                    if let value = Double(trimmed) {
+                        if let cur = bestRatio {
+                            bestRatio = max(cur, value)
+                        } else {
+                            bestRatio = value
+                        }
+                    }
+                }
+            }
+            i += 1
+        }
+        return bestRatio
+    }
+
+    /// Summary returned by ``reconcilePersistedTerminalStatesIfNeeded()``.
+    /// `repairedAssetIds` carries the IDs of every row whose
+    /// `analysisState` and/or `terminalReason` were rewritten so a test
+    /// (or post-mortem reader) can assert exactly which rows the sweep
+    /// touched.
+    struct TerminalStateReconcileSummary: Sendable, Equatable {
+        /// Rows the sweep rewrote.
+        var repairedAssetIds: [String] = []
+        /// Rows the sweep inspected but left untouched (the contract
+        /// already held).
+        var unchanged: Int = 0
+        /// Rows the sweep skipped because `episodeDurationSec` was
+        /// missing — the duration-backfill sweep heals these on the next
+        /// launch.
+        var skippedUnknownDuration: Int = 0
+        /// `true` when the sweep had already run on this install and
+        /// short-circuited.
+        var alreadyDone: Bool = false
+
+        var repairedCount: Int { repairedAssetIds.count }
+    }
+
+    /// One-shot launch-time sweep that scans every terminal-completion
+    /// row for contradictions between the persisted `analysisState` and
+    /// the canonical coverage proven by transcript chunks +
+    /// `episodeDurationSec`. Rows that fail the invariant are
+    /// reclassified via the live ``classifyBackfillTerminal`` so the
+    /// repair path can never disagree with the live pipeline rules.
+    ///
+    /// Idempotent via ``terminalStateReconcileV1MetaKey``. Errors inside
+    /// the sweep are logged and swallowed per-row so one bad row cannot
+    /// sink the whole pass.
+    ///
+    /// Ordering note: callers (today: `PlayheadRuntime`) MUST run this
+    /// AFTER ``runEpisodeDurationBackfillIfNeeded`` so that any rows
+    /// poisoned by the libsyn/flightcast denominator bug have their
+    /// `episodeDurationSec` rewritten to the probed truth before this
+    /// sweep reads it. The two sweeps share a launch sequence; if their
+    /// order is ever inverted, this sweep would skip those exact rows
+    /// (`skipUnknownDuration` for nil rows; `unchanged` for stale-but-
+    /// nonzero rows) and the contradictory states would persist for
+    /// another launch cycle. Pinned by
+    /// `PersistedTerminalStateReconcileLaunchOrderTests` (test name kept
+    /// in case a runtime refactor flips the call order).
+    @discardableResult
+    func reconcilePersistedTerminalStatesIfNeeded() async -> TerminalStateReconcileSummary {
+        var summary = TerminalStateReconcileSummary()
+
+        // Idempotence gate.
+        do {
+            if let flag = try await store.fetchMetaValue(forKey: Self.terminalStateReconcileV1MetaKey),
+               flag == "1" {
+                summary.alreadyDone = true
+                return summary
+            }
+        } catch {
+            logger.warning(
+                "Terminal-state reconcile: meta read failed (\(String(describing: error), privacy: .public)); proceeding without idempotence guard"
+            )
+        }
+
+        // Paginate over `analysis_assets` using the same keyset cursor
+        // shape as the duration-backfill sweep. A page-then-batch fetch
+        // for transcript coverage keeps memory bounded and lets the
+        // sweep make forward progress even if a single page's chunk
+        // fetch fails.
+        let pageSize = 200
+        var lastSeenRowId: Int64 = 0
+        pageLoop: while true {
+            let page: [(rowId: Int64, asset: AnalysisAsset)]
+            do {
+                page = try await store.fetchAssetsKeysetByRowId(
+                    afterRowId: lastSeenRowId,
+                    limit: pageSize
+                )
+            } catch {
+                logger.warning(
+                    "Terminal-state reconcile: fetchAssetsKeysetByRowId(afterRowId:\(lastSeenRowId),limit:\(pageSize)) failed (\(String(describing: error), privacy: .public)); aborting sweep"
+                )
+                return summary
+            }
+            if page.isEmpty { break pageLoop }
+
+            // Filter the page down to terminal-completion candidates
+            // before fetching transcript coverage — most rows are
+            // non-terminal and we don't want their chunk counts.
+            var candidateAssets: [AnalysisAsset] = []
+            candidateAssets.reserveCapacity(page.count)
+            for (rowId, asset) in page {
+                lastSeenRowId = max(lastSeenRowId, rowId)
+                guard let state = SessionState(rawValue: asset.analysisState) else { continue }
+                switch state {
+                case .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+                    candidateAssets.append(asset)
+                default:
+                    continue
+                }
+            }
+            guard !candidateAssets.isEmpty else {
+                if page.count < pageSize { break pageLoop }
+                continue
+            }
+
+            let candidateAssetIds = Set(candidateAssets.map(\.id))
+            let transcriptEndsByAssetId: [String: Double]
+            do {
+                transcriptEndsByAssetId = try await store.fetchMaxTranscriptEndTimeByAssetIds(
+                    candidateAssetIds
+                )
+            } catch {
+                logger.warning(
+                    "Terminal-state reconcile: chunk maxima fetch failed for \(candidateAssetIds.count) assets: \(String(describing: error), privacy: .public); skipping page"
+                )
+                if page.count < pageSize { break pageLoop }
+                continue
+            }
+
+            for asset in candidateAssets {
+                let transcriptEnd = transcriptEndsByAssetId[asset.id] ?? 0
+                let verdict = Self.reconcilePersistedTerminalAssetVerdict(
+                    asset: asset,
+                    transcriptCoverageEnd: transcriptEnd,
+                    featureCoverageEnd: asset.featureCoverageEndTime,
+                    episodeDuration: asset.episodeDurationSec
+                )
+
+                switch verdict {
+                case .unchanged:
+                    summary.unchanged += 1
+
+                case .skipUnknownDuration:
+                    summary.skippedUnknownDuration += 1
+
+                case .repair(let newState, let newReason):
+                    do {
+                        try await store.updateAssetState(
+                            id: asset.id,
+                            state: newState.rawValue,
+                            terminalReason: newReason
+                        )
+                        summary.repairedAssetIds.append(asset.id)
+                        logger.info(
+                            "Terminal-state reconcile: repaired asset \(asset.id, privacy: .public) \(asset.analysisState, privacy: .public) -> \(newState.rawValue, privacy: .public) (transcriptEnd=\(transcriptEnd), featureEnd=\(asset.featureCoverageEndTime ?? 0), duration=\(asset.episodeDurationSec ?? 0))"
+                        )
+                    } catch {
+                        logger.warning(
+                            "Terminal-state reconcile: write failed for asset \(asset.id, privacy: .public): \(String(describing: error), privacy: .public)"
+                        )
+                    }
+                }
+            }
+
+            if page.count < pageSize { break pageLoop }
+        }
+
+        // Idempotence marker — set even if zero rows were repaired so a
+        // future identical call short-circuits.
+        do {
+            try await store.setMetaValue(
+                forKey: Self.terminalStateReconcileV1MetaKey,
+                value: "1"
+            )
+        } catch {
+            logger.warning(
+                "Terminal-state reconcile: failed to set idempotence marker: \(String(describing: error), privacy: .public)"
+            )
+        }
+
+        if summary.repairedCount > 0 || summary.skippedUnknownDuration > 0 {
+            logger.info(
+                "Terminal-state reconcile: repaired \(summary.repairedCount), unchanged \(summary.unchanged), skipped (unknown duration) \(summary.skippedUnknownDuration)"
+            )
+        }
+
+        return summary
+    }
+
     // MARK: - Test seams (playhead-gtt9.1.1)
 
     #if DEBUG
