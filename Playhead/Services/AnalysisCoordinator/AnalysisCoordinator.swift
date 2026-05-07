@@ -2721,6 +2721,11 @@ actor AnalysisCoordinator {
     /// `<original-reason>` falls back to `nil` (literal string) when the
     /// row never recorded one — pre-gtt9.8 legacy rows had `terminalReason
     /// == nil` and we want the audit trail to make that visible.
+    ///
+    /// Length is bounded by ``unwrappedAuditOriginal(from:)`` — re-repairs
+    /// (e.g. after bumping the meta key to `_v2`) flatten the prefix
+    /// chain to a single level rather than nesting
+    /// `[autoRepaired:[autoRepaired:...]]` for unbounded length growth.
     static let terminalStateRepairedReasonPrefix = "[autoRepaired:"
 
     /// Maximum coverage ratio considered plausible in a `terminalReason`
@@ -2943,9 +2948,40 @@ actor AnalysisCoordinator {
             transcriptFailed: false,
             featureFailed: false
         )
-        let originalReasonForAudit = asset.terminalReason ?? "nil"
+        let originalReasonForAudit = unwrappedAuditOriginal(from: asset.terminalReason)
         let auditedReason = "\(terminalStateRepairedReasonPrefix)\(originalReasonForAudit)] \(verdict.reason)"
         return .repair(state: verdict.state, reason: auditedReason)
+    }
+
+    /// Extract the innermost (oldest) original reason from a possibly
+    /// already-audit-wrapped `terminalReason` so a row that gets repaired
+    /// twice (e.g. after bumping `terminalStateReconcileV1MetaKey` to
+    /// `_v2`) does NOT accumulate nested `[autoRepaired:[autoRepaired:...]
+    /// ...]` prefixes. Length stays bounded; the original bad reason that
+    /// support cares about is preserved verbatim.
+    ///
+    /// Behavior:
+    ///   * `nil` / empty → `"nil"` (legacy pre-gtt9.8 sentinel).
+    ///   * Plain string → returned unchanged.
+    ///   * `[autoRepaired:<inner>] <tail>` → returns `<inner>`.
+    ///     `<inner>` may itself be a previously-stacked audit chain; we
+    ///     only need to peel one level because every repair routes
+    ///     through this helper, so the persisted form never contains
+    ///     more than one audit wrapper to begin with.
+    nonisolated private static func unwrappedAuditOriginal(
+        from reason: String?
+    ) -> String {
+        guard let reason, !reason.isEmpty else { return "nil" }
+        guard reason.hasPrefix(terminalStateRepairedReasonPrefix),
+              let closeBracket = reason.firstIndex(of: "]") else {
+            return reason
+        }
+        let prefixEnd = reason.index(
+            reason.startIndex,
+            offsetBy: terminalStateRepairedReasonPrefix.count
+        )
+        guard prefixEnd <= closeBracket else { return reason }
+        return String(reason[prefixEnd..<closeBracket])
     }
 
     /// Pull the largest numeric "ratio-shaped" value out of a persisted
@@ -2956,11 +2992,21 @@ actor AnalysisCoordinator {
     ///   * Feature-only:  `"feature-only (feature 0.998, transcript 0)"`
     ///   * Bug shape:     `"full coverage: transcript 6.891, feature 8.106"`
     ///
-    /// We scan for tokens that start with `transcript`, `feature`, or
-    /// `ratio`, parse the next whitespace-delimited token as a Double,
-    /// and return the maximum. Returns `nil` when the input is `nil` or
-    /// no parseable ratios are found, which the caller treats as
-    /// "no impossible ratio claim recorded."
+    /// We scan for tokens that match `transcript`, `feature`, or
+    /// `ratio` after trimming leading/trailing punctuation (so
+    /// `(feature` and `(ratio` from the parenthesized formats both
+    /// match), parse the next whitespace-delimited token as a Double
+    /// (also after trimming punctuation), and return the maximum.
+    /// Returns `nil` when the input is `nil` or no parseable ratios
+    /// are found, which the caller treats as "no impossible ratio
+    /// claim recorded."
+    ///
+    /// R2 fix: prior to the punctuation trim the parser missed the
+    /// feature ratio in `feature-only (feature X, transcript 0)` and
+    /// the explicit ratio in `partial transcript X/Ys (ratio Z < W)`.
+    /// That left a hole where a poisoned feature-only or partial row
+    /// could carry a bug-shape ratio in its parenthesized field and
+    /// not trigger the impossible-ratio gate.
     nonisolated static func parseHighestRatioInTerminalReason(
         _ reason: String?
     ) -> Double? {
@@ -2979,10 +3025,20 @@ actor AnalysisCoordinator {
         // Tokenize on whitespace AND comma so "transcript 1.000," yields
         // a clean "1.000" token in the next slot.
         let tokens = scanRange.split(whereSeparator: { $0.isWhitespace || $0 == "," })
+        // Punctuation set used to trim leading/trailing decoration on
+        // both labels and numeric tokens. The classifier emits parens
+        // around the feature-only and partial-shape labels (e.g.
+        // `(feature` and `(ratio`); without trimming these the labels
+        // would never match and the bug-shape ratio gate would silently
+        // miss those formats. Punctuation chosen to cover the canonical
+        // emissions in `classifyBackfillTerminal` without consuming the
+        // dot/digit characters that make up the numbers themselves.
+        let punctuation = CharacterSet(charactersIn: "()[]<>:;\"")
         var bestRatio: Double?
         var i = 0
         while i < tokens.count {
-            let token = tokens[i].lowercased()
+            let rawToken = tokens[i]
+            let token = rawToken.trimmingCharacters(in: punctuation).lowercased()
             let isLabel = token == "transcript" || token == "feature" || token == "ratio"
             if isLabel, i + 1 < tokens.count {
                 // The next token may be a bare number ("1.000") or a
@@ -2993,11 +3049,9 @@ actor AnalysisCoordinator {
                 // seconds, not in ratio units.
                 let next = tokens[i + 1]
                 if !next.contains("/") {
-                    // Trim any trailing ASCII non-digit punctuation
-                    // (e.g. ")") that snuck in.
-                    let trimmed = next.trimmingCharacters(
-                        in: CharacterSet(charactersIn: "()<>:;\"")
-                    )
+                    // Trim leading/trailing punctuation (e.g. ")") that
+                    // snuck in from the canonical emissions.
+                    let trimmed = next.trimmingCharacters(in: punctuation)
                     if let value = Double(trimmed) {
                         if let cur = bestRatio {
                             bestRatio = max(cur, value)
@@ -3062,9 +3116,9 @@ actor AnalysisCoordinator {
     /// order is ever inverted, this sweep would skip those exact rows
     /// (`skipUnknownDuration` for nil rows; `unchanged` for stale-but-
     /// nonzero rows) and the contradictory states would persist for
-    /// another launch cycle. Pinned by
-    /// `PersistedTerminalStateReconcileLaunchOrderTests` (test name kept
-    /// in case a runtime refactor flips the call order).
+    /// another launch cycle. Order is enforced by the call site in
+    /// ``PlayheadRuntime`` (deferred warmup) — the surrounding inline
+    /// comment names this dependency explicitly.
     @discardableResult
     func reconcilePersistedTerminalStatesIfNeeded() async -> TerminalStateReconcileSummary {
         var summary = TerminalStateReconcileSummary()

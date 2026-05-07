@@ -192,12 +192,20 @@ struct PersistedTerminalStateReconcileTests {
             featureCoverageEnd: 1290,
             episodeDuration: 5646
         )
-        guard case .repair(let state, _) = verdict else {
+        guard case .repair(let state, let reason) = verdict else {
             #expect(Bool(false), "expected .repair; got \(verdict)")
             return
         }
         // Feature 1290/5646 = 0.229 < 0.95 → .failedFeature.
         #expect(state == .failedFeature)
+        // Audit-prefix invariant: support diagnosis depends on the
+        // original (impossible-ratio) reason being preserved verbatim
+        // in the rewritten string. R2: was previously asserted only on
+        // the .completeTranscriptPartial shape; pin it here too so a
+        // regression that drops the audit on the .failedFeature branch
+        // gets caught.
+        #expect(reason.hasPrefix(AnalysisCoordinator.terminalStateRepairedReasonPrefix))
+        #expect(reason.contains("full coverage: transcript 1.163, feature 1.724"))
     }
 
     @Test("9C109975 shape: chunks prove more coverage than asset watermark — still must not be completeFull")
@@ -249,7 +257,7 @@ struct PersistedTerminalStateReconcileTests {
         )
         // Coverage values themselves are full — but the impossible ratio
         // in terminalReason forces a reclassify.
-        guard case .repair(let state, _) = verdict else {
+        guard case .repair(let state, let reason) = verdict else {
             #expect(Bool(false), "expected .repair (impossible ratio); got \(verdict)")
             return
         }
@@ -258,6 +266,14 @@ struct PersistedTerminalStateReconcileTests {
         // make clear this row was reclassified, with the original
         // impossible-ratio text preserved for support.
         #expect(state == .completeFull)
+        // R2: audit-trail invariant — the only signal that distinguishes
+        // a reconciled row from an organically-completeFull row is the
+        // prefix + preserved original reason. Without these assertions a
+        // regression that drops the prefix on the same-state branch
+        // would silently strip the audit history and the test would
+        // still pass.
+        #expect(reason.hasPrefix(AnalysisCoordinator.terminalStateRepairedReasonPrefix))
+        #expect(reason.contains("full coverage: transcript 6.891, feature 8.106"))
     }
 
     // MARK: - Pure verdict — healthy rows
@@ -438,17 +454,43 @@ struct PersistedTerminalStateReconcileTests {
         #expect(AnalysisCoordinator.parseHighestRatioInTerminalReason("") == nil)
     }
 
-    @Test("parseHighestRatioInTerminalReason ignores slash-bearing tokens (partial-shape)")
+    @Test("parseHighestRatioInTerminalReason ignores slash-bearing tokens but extracts the parenthesized ratio")
     func parseRatio_partialShape() {
         // partial-shape: "partial transcript 870.0/3600.0s (ratio 0.241 < 0.950)"
-        // The next-token-after-`transcript` is "870.0/3600.0s" which we
-        // skip. The next-token-after-`ratio` is "0.241". 0.241 is not > ceiling.
+        // The next-token-after-`transcript` is "870.0/3600.0s" — slash
+        // bearing, skipped. After R2's punctuation-trim fix, `(ratio` is
+        // recognized as the `ratio` label and we pick up `0.241`. Both
+        // contracts pinned: (a) 870 is NOT swept up by accident, (b)
+        // the parenthesized ratio IS extracted so a future format that
+        // emits `(ratio 1.5 < 0.950)` would trigger the impossible-ratio
+        // gate.
         let r = AnalysisCoordinator.parseHighestRatioInTerminalReason(
             "partial transcript 870.0/3600.0s (ratio 0.241 < 0.950)"
         )
-        // We may or may not pick up "0.241", but the key contract is
-        // that we DO NOT pick up 870 by accident.
-        #expect((r ?? 0) <= 1.0)
+        #expect(r != nil, "parser must recognize `(ratio` after punctuation trim")
+        #expect(abs((r ?? 0) - 0.241) < 1e-6)
+        #expect((r ?? 0) <= AnalysisCoordinator.terminalStateRepairRatioCeiling)
+    }
+
+    @Test("parseHighestRatioInTerminalReason extracts feature ratio from feature-only paren shape")
+    func parseRatio_featureOnlyParenShape() {
+        // R2 fix: `feature-only (feature 0.998, transcript 0)` — before
+        // the fix, the parser missed `(feature` because of the leading
+        // paren and only picked up `transcript 0)` → 0.0. That left a
+        // hole where a feature-only row with a bug-shape ratio of
+        // `(feature 1.724, transcript 0)` would NOT trigger the
+        // impossible-ratio gate. Pin the fix so the gap can't reopen.
+        let healthy = AnalysisCoordinator.parseHighestRatioInTerminalReason(
+            "feature-only (feature 0.998, transcript 0)"
+        )
+        #expect(healthy != nil)
+        #expect(abs((healthy ?? 0) - 0.998) < 1e-6)
+
+        let bug = AnalysisCoordinator.parseHighestRatioInTerminalReason(
+            "feature-only (feature 1.724, transcript 0)"
+        )
+        #expect(bug != nil)
+        #expect((bug ?? 0) > AnalysisCoordinator.terminalStateRepairRatioCeiling)
     }
 
     @Test("parseHighestRatioInTerminalReason ignores the tail of an already-repaired reason")
@@ -457,12 +499,18 @@ struct PersistedTerminalStateReconcileTests {
         // post-prefix tail should be the only thing that informs the
         // ratio decision — otherwise an already-repaired row would
         // re-trigger repair on next launch.
+        // R2: tighten the assertion. After the punctuation-trim fix,
+        // `(ratio 0.229 < 0.950)` parses to 0.229 — the test now pins
+        // the EXACT extracted value so a regression that returned `nil`
+        // (parser stopped working) or 8.106 (prefix not stripped) would
+        // both fail.
         let r = AnalysisCoordinator.parseHighestRatioInTerminalReason(
-            "[autoRepaired:full coverage: transcript 6.891, feature 8.106] feature coverage 1290.0/5646.0s (ratio 0.229 < 0.950)"
+            "[autoRepaired:full coverage: transcript 6.891, feature 8.106] partial transcript 1290.0/5646.0s (ratio 0.229 < 0.950)"
         )
-        // Inside the audit prefix the ratios are 6.891 / 8.106 — but
-        // we strip those. Outside, only "0.229" / "0.950" remain.
-        #expect((r ?? 0) <= 1.0)
+        #expect(r != nil, "post-prefix tail must yield a parseable ratio")
+        #expect(abs((r ?? 0) - 0.229) < 1e-6,
+                "expected 0.229 from `(ratio 0.229 < 0.950)`; got \(String(describing: r))")
+        #expect((r ?? 0) <= AnalysisCoordinator.terminalStateRepairRatioCeiling)
     }
 
     @Test("parseHighestRatioInTerminalReason picks ratio > ceiling when it is in the live tail")
@@ -475,6 +523,63 @@ struct PersistedTerminalStateReconcileTests {
             "full coverage: transcript 1.163, feature 1.724"
         )
         #expect((r ?? 0) > AnalysisCoordinator.terminalStateRepairRatioCeiling)
+    }
+
+    // MARK: - Audit-prefix length bound (R2: prevent stacking)
+
+    @Test("Re-repair flattens audit prefix; chain does not stack to unbounded length")
+    func reRepairFlattensAuditPrefix() async throws {
+        // Simulate the upgrade path where a row gets repaired under
+        // `_v1`, then a future bead bumps the meta key to `_v2` and the
+        // sweep re-evaluates the same row. Without the length-bound
+        // helper the persisted reason would accumulate
+        // `[autoRepaired:[autoRepaired:[autoRepaired:original]...]...]`
+        // and grow with every revision. After R2's
+        // `unwrappedAuditOriginal(from:)` the chain stays at one level.
+        let store = try await makeStore()
+        let coordinator = makeCoordinator(store: store)
+
+        // Seed an already-once-repaired row directly: state is
+        // .failedFeature and terminalReason carries the audit prefix
+        // wrapping the original bug-shape reason.
+        let originalReason = "full coverage: transcript 1.163, feature 1.724"
+        let firstRepairedReason =
+            "\(AnalysisCoordinator.terminalStateRepairedReasonPrefix)\(originalReason)] feature coverage 1290.0/5646.0s (ratio 0.229 < 0.950)"
+        let asset = makeTerminalAsset(
+            id: "stacked-audit",
+            analysisState: .completeFull, // pretend the bug came back
+            terminalReason: firstRepairedReason,
+            episodeDurationSec: 5646,
+            featureCoverageEndTime: 1290,
+            fastTranscriptCoverageEndTime: 90
+        )
+        try await seedAsset(store: store, asset)
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: asset.id, chunkIndex: 0, startTime: 0, endTime: 90)
+        ])
+
+        let summary = await coordinator.reconcilePersistedTerminalStatesIfNeeded()
+        #expect(summary.repairedAssetIds == [asset.id])
+
+        let after = try await store.fetchAsset(id: asset.id)
+        let rewrittenReason = after?.terminalReason ?? ""
+
+        // Exactly ONE `[autoRepaired:` prefix must remain in the
+        // persisted form. The original reason is preserved verbatim.
+        let prefix = AnalysisCoordinator.terminalStateRepairedReasonPrefix
+        let occurrences = rewrittenReason.components(separatedBy: prefix).count - 1
+        #expect(occurrences == 1, "expected exactly 1 audit prefix; got \(occurrences) in \(rewrittenReason)")
+        #expect(rewrittenReason.contains(originalReason))
+
+        // Length stays bounded by `prefix + originalReason + "] " +
+        // newReason` rather than the previously-repaired wrapping.
+        // Concretely: rewritten reason must be SHORTER than naïve
+        // stacking would produce.
+        let naiveStacked = "\(prefix)\(firstRepairedReason)] dummy"
+        #expect(
+            rewrittenReason.count < naiveStacked.count,
+            "audit prefix must flatten; got \(rewrittenReason.count) chars vs naive \(naiveStacked.count)"
+        )
     }
 
     // MARK: - Sweep integration
