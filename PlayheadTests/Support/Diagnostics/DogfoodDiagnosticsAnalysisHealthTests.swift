@@ -2427,7 +2427,13 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
             #expect(json.contains("\"\(key)\""), "missing top-level key \(key)")
         }
 
-        // GlobalSummary keys.
+        // GlobalSummary keys. R12: the latest_*_at / latest_*_outcome
+        // keys ARE populated in this fixture (the row carries
+        // latestSession/latestJob/latestTerminalWork plus pipeline
+        // watermarks), so they're pinned directly here rather than
+        // deferred to the populated round-trip's Equatable check —
+        // the round-trip catches field-level CodingKey drift but
+        // does not pin specific snake_case wire strings.
         let globalKeys = [
             "total_assets",
             "running_count",
@@ -2438,17 +2444,29 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
             "terminal_completed_count",
             "stale_terminal_count",
             "stale_watermark_count",
-            "unknown_progress_count"
-            // latest_*_at / latest_*_outcome are nil-when-empty;
-            // covered by the populated round-trip test.
+            "unknown_progress_count",
+            "latest_job_update_at",
+            "latest_terminal_work_at",
+            "latest_artifact_watermark_sec",
+            "latest_terminal_work_outcome"
         ]
         for key in globalKeys {
             #expect(json.contains("\"\(key)\""), "missing global key \(key)")
         }
 
-        // AssetSummary keys.
+        // AssetSummary keys. R12: `section` was missing from the
+        // earlier list — it's always populated (default "up_next" in
+        // the fixture) and shipped on every row, so add it. The
+        // remaining nil-when-default fields (queue_position,
+        // latest_session_failure_reason, latest_job_last_error_code,
+        // latest_job_next_eligible_at, latest_terminal_work_cause,
+        // finished_outcome) are intentionally nil in this fixture and
+        // therefore omitted by encodeIfPresent — those snake_case
+        // wire keys are pinned by the populated round-trip's
+        // Equatable check.
         let assetKeys = [
             "episode_id_hash",
+            "section",
             "analysis_state",
             "is_running",
             "cached_audio_present",
@@ -2478,6 +2496,21 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         let provenanceKeys = ["download_source", "transcript_source", "analysis_source"]
         for key in provenanceKeys {
             #expect(json.contains("\"\(key)\""), "missing provenance key \(key)")
+        }
+
+        // StalenessFlag keys. R12: the fixture's completeFull row
+        // with low coverage triggers a terminalStateContradictsCoverage
+        // flag, so `staleness_flags` is non-empty and its sub-keys are
+        // emitted. `episode_id_hash` is shared with AssetSummary (so
+        // its presence alone doesn't prove the flag's CodingKey is
+        // intact), but `kind` and `detail` are unique to the flag
+        // block. Pin all three so a future drop of
+        // `case episodeIdHash = "episode_id_hash"` from
+        // StalenessFlag.CodingKeys is caught here in addition to the
+        // existing camelCase prohibition (`episodeIdHash`) below.
+        let stalenessFlagKeys = ["episode_id_hash", "kind", "detail"]
+        for key in stalenessFlagKeys {
+            #expect(json.contains("\"\(key)\""), "missing staleness_flag key \(key)")
         }
 
         // DuplicateCounts keys.
