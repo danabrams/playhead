@@ -1061,6 +1061,84 @@ struct CorrectionReplayCandidateTests {
         #expect(row.confidence == 1.0,
                 "confidence stamp must be 1.0; got \(row.confidence)")
     }
+
+    // MARK: - 12. R10: defensive guard for malformed FN spans
+
+    /// playhead-hygc.1.8 R10: pin the defensive guard inside
+    /// `correctionReplayCandidates`:
+    ///
+    ///     guard s.isFinite, e.isFinite, e > s else { continue }
+    ///
+    /// Scope serialization round-trips through `String(format: "%.3f")`
+    /// + `Double(...)`, both of which preserve NaN/Inf and also accept
+    /// zero/negative durations. A FN scope with `s == e` (zero duration)
+    /// or `s > e` (negative duration) or non-finite endpoints would,
+    /// without the guard, persist a degenerate AdWindow whose
+    /// `startTime == endTime` (or NaN) — leaking through to the suggest
+    /// banner UI as a zero-pixel or invalid entry. The guard is cheap
+    /// and silently filters these. Without a test, a future refactor
+    /// could drop it without anyone noticing until a malformed event
+    /// reaches the store in production.
+    @Test("zero-duration / inverted / non-finite falseNegative spans do not produce replay rows")
+    func malformedFalseNegativeSpansAreSilentlyDropped() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-malformed"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        // Bypass the convenience helper so we can inject malformed values
+        // — `appendFalseNegativeCorrection` rounds via the public API,
+        // and we want to exercise the defensive filter directly.
+        // Zero-duration FN: start == end.
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: 600, endTime: 600
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        ))
+        // Negative-duration FN: start > end.
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: 800, endTime: 700
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970 + 1,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        ))
+        // NaN endpoint FN. `%.3f` formatter renders NaN as "nan", and
+        // `Double("nan")` parses it back as NaN — so this CAN reach the
+        // emit path without the guard.
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: Double.nan, endTime: 700
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970 + 2,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        ))
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        let replayRows = persisted.filter { $0.boundaryState == "correctionReplay" }
+        #expect(replayRows.isEmpty,
+                "malformed FN spans (zero-duration, negative-duration, NaN) must be silently dropped; got \(replayRows.count) rows: \(replayRows.map { ($0.startTime, $0.endTime) })")
+    }
 }
 
 // MARK: - Test doubles
