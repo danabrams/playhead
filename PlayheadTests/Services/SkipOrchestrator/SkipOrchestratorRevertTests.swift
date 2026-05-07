@@ -917,4 +917,113 @@ struct SkipOrchestratorRevertTests {
         #expect(profile?.recentFalseSkipSignals == 1,
                 "exactly one false-skip signal must be recorded for one veto gesture")
     }
+
+    // R10 (hygc.1.8): symmetric "no overlap → no trust decrement" pin.
+    // R7 pinned the suggest-tier full-magnitude decrement, R9 pinned the
+    // managed-window full-magnitude decrement. Both fire on `revertedAny`.
+    // Without this third pin, a future regression that lifts the
+    // `if revertedAny` guard (e.g. by accident moving `recordFalseSkip
+    // Signal` outside the conditional) would silently fire the trust
+    // signal even on a no-op revert gesture — quietly poisoning a
+    // podcast's trust score whenever the user taps "this isn't an ad"
+    // on a region where no window exists. The two existing
+    // full-magnitude pins do NOT catch this regression because they
+    // both have an overlap. Pin the zero-magnitude case so the symmetric
+    // pair is loud in both directions.
+    @Test("revertByTimeRange with no overlapping windows does NOT decrement trust")
+    func revertByTimeRangeNoOverlapDoesNotDecrementTrust() async throws {
+        let trustStore = try await makeTestStore()
+        let initialTrust: Double = 0.90
+        try await trustStore.upsertProfile(
+            PodcastProfile(
+                podcastId: "podcast-1",
+                sponsorLexicon: nil,
+                normalizedAdSlotPriors: nil,
+                repeatedCTAFragments: nil,
+                jingleFingerprints: nil,
+                implicitFalsePositiveCount: 0,
+                skipTrustScore: initialTrust,
+                observationCount: 10,
+                mode: "auto",
+                recentFalseSkipSignals: 0
+            )
+        )
+        let trustConfig = TrustScoringConfig.default
+        let trustService = TrustScoringService(store: trustStore, config: trustConfig)
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // Seed both surfaces with windows OUTSIDE the upcoming gesture range
+        // so we exercise both loops without producing a match.
+        let managed = makeSkipTestAdWindow(
+            id: "ad-managed-far",
+            assetId: "asset-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.85,
+            decisionState: AdDecisionState.candidate.rawValue
+        )
+        let markOnly = AdWindow(
+            id: "ad-suggest-far",
+            analysisAssetId: "asset-1",
+            startTime: 200,
+            endTime: 260,
+            confidence: 0.55,
+            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "test-1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: 200,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+        )
+        try await store.insertAdWindow(managed)
+        try await store.insertAdWindow(markOnly)
+        await orchestrator.receiveAdWindows([managed, markOnly])
+
+        // Veto a region that overlaps NEITHER surface.
+        await orchestrator.revertByTimeRange(start: 800, end: 900, podcastId: "podcast-1")
+
+        // Give any in-flight unstructured task a fair chance to write.
+        // (We expect no write, but we want to give the no-op enough time
+        // to let any erroneous trust write reach the store.)
+        for _ in 0..<5 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        let profile = try await trustStore.fetchProfile(podcastId: "podcast-1")
+        #expect(abs((profile?.skipTrustScore ?? -1) - initialTrust) < 1e-6,
+                "no-overlap revert must NOT decrement trust; got skipTrustScore=\(profile?.skipTrustScore ?? -1) expected=\(initialTrust)")
+        #expect(profile?.recentFalseSkipSignals == 0,
+                "no false-skip signal must be recorded when no windows overlap; got \(profile?.recentFalseSkipSignals ?? -1)")
+
+        // And neither persisted window must be in `.reverted` state — the
+        // managed window may legitimately advance to `.applied` via the
+        // auto-skip lifecycle, but neither should reach `.reverted`
+        // because the gesture overlapped neither.
+        let persisted = try await store.fetchAdWindows(assetId: "asset-1")
+        let managedRow = persisted.first { $0.id == "ad-managed-far" }
+        let suggestRow = persisted.first { $0.id == "ad-suggest-far" }
+        #expect(managedRow?.decisionState != AdDecisionState.reverted.rawValue,
+                "managed window outside the gesture must NOT be reverted; got \(managedRow?.decisionState ?? "<missing>")")
+        #expect(suggestRow?.decisionState != AdDecisionState.reverted.rawValue,
+                "markOnly window outside the gesture must NOT be reverted; got \(suggestRow?.decisionState ?? "<missing>")")
+    }
 }
