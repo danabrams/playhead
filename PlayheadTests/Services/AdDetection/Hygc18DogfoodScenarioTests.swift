@@ -282,6 +282,24 @@ struct Hygc18DogfoodScenarioTests {
     //
     // Without this, the integration suite passes for the wrong reason:
     // the empty-chunks branch short-circuits before retirement runs.
+    //
+    // R8 negative-control verification (per R7's mental trace, made
+    // physical): this test fails the run-2 / run-3 assertions if the
+    // R4 source-level filter at `AdDetectionService.swift`
+    // `hotPathCandidateIDs` is removed — specifically the line:
+    //
+    //     window.boundaryState != Self.correctionReplayBoundaryState
+    //
+    // (currently around `AdDetectionService.swift:3741`, inside
+    // `hotPathCandidateIDs(analysisAssetId:overlapping:)`). Removing
+    // that filter would let the persisted replay row land in
+    // `replayCandidateIDs` on run 2; with no incoming algorithmic match,
+    // the row would be retired and deleted at the end of run 2, and
+    // `after2.count == 1` would fail. Future maintainers can verify the
+    // fix is load-bearing by deleting that line and rerunning this test
+    // — it MUST fail. (R3's belt-and-suspenders local `subtracting`
+    // alone is insufficient for run 2 because `correctionReplayWindowIDs`
+    // is empty when run 2 short-circuits the fresh-emit path.)
     @Test("integration scenario survives the production multi-run retirement-enabled path")
     func dogfoodScenarioSurvivesMultiRunRetirement() async throws {
         let store = try await makeTestStore()
