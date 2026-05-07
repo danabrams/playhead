@@ -844,8 +844,8 @@ struct CorrectionReplayCandidateTests {
             retireUnmatchedReplayCandidates: true
         )
 
-        // CONTRACT: replay row id is NEVER in retiredWindowIDs (R4
-        // boundaryState filter is load-bearing here).
+        // CONTRACT (asymmetric, half 1 of 2): replay row id is NEVER in
+        // retiredWindowIDs (R4 boundaryState filter is load-bearing here).
         #expect(!r2.retiredWindowIDs.contains(replayId),
                 "replay row must be protected from retirement even when an algorithmic row co-exists; got \(r2.retiredWindowIDs)")
 
@@ -856,6 +856,30 @@ struct CorrectionReplayCandidateTests {
                 "replay row must survive retirement-enabled run 2; got \(replayAfter.count)")
         #expect(replayAfter.first?.id == replayId,
                 "replay row identity must be stable across runs; got \(replayAfter.first?.id ?? "<missing>") vs \(replayId)")
+
+        // CONTRACT (asymmetric, half 2 of 2 — playhead-hygc.1.8 R9):
+        // the algorithmic row IS subject to the normal stale-candidate
+        // retirement contract. It carries the current `detectorVersion`,
+        // its span (605..670) is fully inside the chunks envelope
+        // (580..700), and the run produces no incoming algorithmic match
+        // for it (the no-op classifier scores 0.05, well below the 0.40
+        // candidate threshold). Per `hotPathCandidateIDs`, every such
+        // candidate row whose boundaryState is NOT `correctionReplay`
+        // lands in `replayCandidateIDs` — and with no matching incoming
+        // window, the id is propagated to `retiredWindowIDs` and the
+        // row is deleted at end-of-run.
+        //
+        // Without this assertion R8's "algorithmic follows normal
+        // contract" promise is unobserved (the test name claimed it; only
+        // the "replay protected" half was actually pinned). Pinning both
+        // halves means a future regression that EITHER under-retires
+        // algorithmic rows (false negative on staleness) OR over-retires
+        // replay rows (re-introducing R4) fails this single test.
+        let algorithmicId = "algorithmic-retire-coexist-1"
+        #expect(r2.retiredWindowIDs.contains(algorithmicId),
+                "algorithmic row must be retired by the normal stale-candidate path on run 2; got retiredWindowIDs=\(r2.retiredWindowIDs)")
+        #expect(final.first { $0.id == algorithmicId } == nil,
+                "algorithmic row must be physically removed from the store after retirement; persisted ids=\(final.map(\.id))")
     }
 
     // MARK: - 10. R8: boundary semantics for overlap dedupe
@@ -904,6 +928,83 @@ struct CorrectionReplayCandidateTests {
                     "first row must span 600..680; got \(replayRows[0].startTime)..\(replayRows[0].endTime)")
             #expect(abs(replayRows[1].startTime - 680) < 0.01 && abs(replayRows[1].endTime - 760) < 0.01,
                     "second row must span 680..760; got \(replayRows[1].startTime)..\(replayRows[1].endTime)")
+        }
+    }
+
+    // MARK: - 10b. R9: sub-millisecond overlap is treated as overlap (dedupe), not as adjacency
+
+    /// playhead-hygc.1.8 R9: the strict-inequality overlap predicate
+    /// (`s1 < e2 && e1 > s2`) draws a HARD line at `==`. The
+    /// adjacent-touching test above pins that `[600, 680]` and
+    /// `[680, 760]` are DISJOINT (no dedupe). This test pins the
+    /// complementary edge: a sub-millisecond overlap of just 0.001 s
+    /// (`[600, 680.001]` and `[680, 760]`) IS overlap and DOES dedupe.
+    ///
+    /// Why this matters: scope serialization rounds to %.3f, so the
+    /// finest distinguishable spacing the system can represent for
+    /// overlap-vs-adjacency IS one millisecond. If a future "fix" widens
+    /// the overlap predicate to `<=`/`>=` it would silently merge the
+    /// adjacent case (caught by the test above). If a future "fix"
+    /// loosens it to "overlap by at least N ms" it would silently
+    /// un-dedupe the sub-millisecond case (caught by THIS test). The
+    /// pair pins both directions of the boundary so a single regression
+    /// on either side fails loudly.
+    @Test("sub-millisecond overlap (1 ms) is treated as overlap and dedupes to a single replay row")
+    func subMillisecondOverlapDedupesToOneRow() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-submillisecond-overlap"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        // [600, 680.001] and [680, 760]: the 1 ms overlap at the tail of
+        // the first range satisfies the strict-inequality predicate
+        // (680 < 680.001 && 760 > 600), so the second range overlaps
+        // the first in the in-flight `emitted` set and is dropped.
+        //
+        // Insertion ordering is load-bearing for "first wins" — use
+        // explicit, monotonically-increasing `createdAt` values so the
+        // test cannot flake on same-millisecond clock collisions.
+        let now = Date().timeIntervalSince1970
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: 600, endTime: 680.001
+            ).serialized,
+            createdAt: now,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        ))
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: 680, endTime: 760
+            ).serialized,
+            createdAt: now + 1.0,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        ))
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        let replayRows = persisted.filter { $0.boundaryState == "correctionReplay" }
+        #expect(replayRows.count == 1,
+                "1 ms overlap must dedupe to a single replay row; got \(replayRows.count)")
+        // The surviving row is the FIRST inserted (the one already in
+        // `emitted` when the second is evaluated). Pin which range wins
+        // so a future re-ordering of the FN iteration is loud.
+        if let row = replayRows.first {
+            #expect(abs(row.startTime - 600) < 0.0005 && abs(row.endTime - 680.001) < 0.0005,
+                    "surviving replay row must be the first FN range (600..680.001); got \(row.startTime)..\(row.endTime)")
         }
     }
 
