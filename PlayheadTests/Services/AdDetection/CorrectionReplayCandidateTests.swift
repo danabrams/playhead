@@ -1074,11 +1074,19 @@ struct CorrectionReplayCandidateTests {
     /// zero/negative durations. A FN scope with `s == e` (zero duration)
     /// or `s > e` (negative duration) or non-finite endpoints would,
     /// without the guard, persist a degenerate AdWindow whose
-    /// `startTime == endTime` (or NaN) — leaking through to the suggest
-    /// banner UI as a zero-pixel or invalid entry. The guard is cheap
-    /// and silently filters these. Without a test, a future refactor
+    /// `startTime == endTime` (or NaN/Inf) — leaking through to the
+    /// suggest banner UI as a zero-pixel or invalid entry. The guard is
+    /// cheap and silently filters these. Without a test, a future refactor
     /// could drop it without anyone noticing until a malformed event
     /// reaches the store in production.
+    ///
+    /// R11: infinity coverage was missing — the R10 test enumerated only
+    /// NaN. `String(format: "%.3f", Double.infinity)` renders "inf" and
+    /// `Double("inf")` parses it back as `Double.infinity`, which is NOT
+    /// finite, so the same guard branch (`s.isFinite, e.isFinite`) catches
+    /// it. Pinning Inf and -Inf alongside NaN means the `isFinite` half of
+    /// the predicate is exercised end-to-end through the round-trip, not
+    /// just the `e > s` half.
     @Test("zero-duration / inverted / non-finite falseNegative spans do not produce replay rows")
     func malformedFalseNegativeSpansAreSilentlyDropped() async throws {
         let store = try await makeTestStore()
@@ -1125,6 +1133,34 @@ struct CorrectionReplayCandidateTests {
             podcastId: nil,
             correctionType: .falseNegative
         ))
+        // R11: positive infinity endpoint. `%.3f` formatter renders +Inf
+        // as "inf", `Double("inf")` parses it back as `Double.infinity` —
+        // the deserialized scope reaches the guard with `e.isFinite ==
+        // false`, which the predicate rejects.
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: 1000, endTime: Double.infinity
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970 + 3,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        ))
+        // R11: negative infinity endpoint. Symmetric coverage so the
+        // `s.isFinite` half of the predicate is exercised end-to-end.
+        // `%.3f` renders -Inf as "-inf", `Double("-inf")` parses it
+        // back as `-Double.infinity`.
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: -Double.infinity, endTime: 1100
+            ).serialized,
+            createdAt: Date().timeIntervalSince1970 + 4,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        ))
 
         let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
         let service = makeService(store: store, classifier: classifier)
@@ -1137,7 +1173,7 @@ struct CorrectionReplayCandidateTests {
         let persisted = try await store.fetchAdWindows(assetId: assetId)
         let replayRows = persisted.filter { $0.boundaryState == "correctionReplay" }
         #expect(replayRows.isEmpty,
-                "malformed FN spans (zero-duration, negative-duration, NaN) must be silently dropped; got \(replayRows.count) rows: \(replayRows.map { ($0.startTime, $0.endTime) })")
+                "malformed FN spans (zero-duration, negative-duration, NaN, +Inf, -Inf) must be silently dropped; got \(replayRows.count) rows: \(replayRows.map { ($0.startTime, $0.endTime) })")
     }
 }
 
