@@ -88,10 +88,13 @@ assertions.
    running**, with cached audio present and download progress at 100%. The
    work-pump is wedged: there's nothing left to download but nothing's
    moving.
-2. **`asset_004`** (the dogfood UUID `9C109975-A4B9-4C87-AE62-7BAFF35CAE24`)
-   is in `completeFull` but has chunk transcript coverage ≈3960 s (~66 min)
-   while its stored `fastTranscriptCoverageEndTime` watermark is only 90 s
-   (~1.5 min). The chunks exist but the watermark was never advanced.
+2. **`asset_004`** is in `completeFull` but has chunk transcript coverage
+   ≈3960 s (~66 min) while its stored `fastTranscriptCoverageEndTime`
+   watermark is only 90 s (~1.5 min). The chunks exist but the watermark was
+   never advanced. (The original `analysisAssetId` UUID is intentionally not
+   recorded here — the synthetic id is the contract surface; if you need to
+   correlate back to the raw `.xcappdata` bundle, sort `analysis_assets` by
+   `createdAt, id` and the 4th row is `asset_004`.)
 3. **At least 6 `completeFull` assets carry contradictory state** — either
    their `terminal_reason` claims a coverage ratio > 1.0
    (e.g. `"transcript 1.163, feature 1.724"`) or their fast watermark is
