@@ -200,6 +200,70 @@ final class CorrectionDedupeTests: XCTestCase {
             "Each distinct identity gets its own audit history with count = 1")
     }
 
+    // MARK: - (c.1) Tolerance boundary probe (R2 hygc.1.6 review)
+
+    /// Pin the bucket-quantization canonicalization at and around the
+    /// 0.1s threshold. The R0 implementation uses
+    /// `(time / 0.1).rounded() * 0.1` (Swift default
+    /// `.toNearestOrEven`) — i.e. a quantization grid, not a true
+    /// "tolerance window." Values in the same 0.1s bucket collapse;
+    /// values straddling a bucket boundary do NOT, even if they are
+    /// less than the tolerance apart.
+    ///
+    /// Tests (b) and (c) only proved "small collapses" and
+    /// "large does not". They did not pin behavior at the boundary
+    /// itself. R2 review: add a boundary probe so a future change to
+    /// the canonicalization strategy is a deliberate, observed delta
+    /// rather than a silent regression.
+    func testToleranceBoundaryCanonicalization() {
+        let tol = CorrectionScope.identityKeyTimeToleranceSeconds
+        XCTAssertEqual(tol, 0.1, accuracy: 1e-9, "Pre-condition: tolerance is 100ms")
+
+        // Numeric canonicalization grid points, spanning a single
+        // bucket and its neighbours. Pinned to specific outputs so a
+        // future change to the rounding strategy (e.g. `.toNearestOrAwayFromZero`)
+        // is caught here.
+        let q800 = CorrectionScope.canonicalizeTimeForIdentityKey(80.000)
+        let q804 = CorrectionScope.canonicalizeTimeForIdentityKey(80.040)
+        let q806 = CorrectionScope.canonicalizeTimeForIdentityKey(80.060)
+        let q810 = CorrectionScope.canonicalizeTimeForIdentityKey(80.100)
+        let q814 = CorrectionScope.canonicalizeTimeForIdentityKey(80.140)
+        XCTAssertEqual(q800, 80.0, accuracy: 1e-9, "80.000 lands in 80.0 bucket")
+        XCTAssertEqual(q804, 80.0, accuracy: 1e-9, "80.040 quantizes down to 80.0 bucket")
+        XCTAssertEqual(q806, 80.1, accuracy: 1e-9, "80.060 quantizes up to 80.1 bucket")
+        XCTAssertEqual(q810, 80.1, accuracy: 1e-9, "80.100 lands exactly on the 80.1 bucket")
+        XCTAssertEqual(q814, 80.1, accuracy: 1e-9, "80.140 quantizes down to 80.1 bucket")
+
+        // Identity collapse vs split: build pairs that share a bucket
+        // (must collapse) vs pairs that straddle a bucket boundary
+        // (must split, even if they are arbitrarily close).
+        func keysFor(end1: Double, end2: Double) -> (String, String) {
+            let a = CorrectionScope.exactTimeSpan(
+                assetId: "asset-bdy", startTime: 50.000, endTime: end1)
+            let b = CorrectionScope.exactTimeSpan(
+                assetId: "asset-bdy", startTime: 50.000, endTime: end2)
+            return (a.normalizedIdentityKey, b.normalizedIdentityKey)
+        }
+
+        // Same bucket (80.0): two values both in [79.95, 80.05) rounding
+        // window must collapse. Pick endpoints near the ends of the bucket.
+        let (kSame1, kSame2) = keysFor(end1: 79.960, end2: 80.040)
+        XCTAssertEqual(kSame1, kSame2,
+            "Two times in the same 0.1s quantization bucket must produce the same identity key")
+
+        // Cross bucket boundary by ~80ms (well under tolerance) — they
+        // straddle the 80.05 midpoint so they fall in different buckets.
+        // This pins the documented quantization-not-window semantics.
+        let (kAcross1, kAcross2) = keysFor(end1: 80.040, end2: 80.120)
+        XCTAssertNotEqual(kAcross1, kAcross2,
+            "Two times that straddle a quantization bucket boundary produce distinct identities — quantization, not a true tolerance window")
+
+        // Clearly beyond tolerance (3x): must split.
+        let (kBeyond1, kBeyond2) = keysFor(end1: 80.000, end2: 80.300)
+        XCTAssertNotEqual(kBeyond1, kBeyond2,
+            "Times >3x the bucket apart must produce distinct identities")
+    }
+
     // MARK: - (d) FP and FN do not collapse on identical span
 
     func testFalsePositiveAndFalseNegativeDoNotCollapseOnSameSpan() async throws {
@@ -415,7 +479,9 @@ final class CorrectionDedupeTests: XCTestCase {
         }
 
         // Read-side dedupe collapses every cluster.
-        let collapsed = distinctSemanticCorrections(raw).distinct
+        let dedupeResult = distinctSemanticCorrections(raw)
+        let collapsed = dedupeResult.distinct
+        let submissionCounts = dedupeResult.submissionCounts
         XCTAssertEqual(
             collapsed.count,
             fixture.correctionRows.count,
@@ -423,7 +489,14 @@ final class CorrectionDedupeTests: XCTestCase {
         )
 
         // Pin the canonical regression: the asset_012 falseNegative-x4
-        // cluster called out in the brief MUST collapse to exactly 1.
+        // cluster called out in the brief MUST collapse to exactly 1
+        // AND the surviving row's audit metadata must reflect the
+        // pre-collapse multiplicity. R2 hygc.1.6 review: prior version
+        // of this test only asserted the count, leaving an impl that
+        // dropped audit metadata silent. Tighten by also asserting
+        // (a) submissionCount for the bucket = 4, and (b) the survivor
+        // is the chronologically-earliest row in the bucket — so
+        // first-observation provenance is preserved across dedupe.
         let asset012FN = collapsed.filter {
             $0.analysisAssetId == "asset_012"
                 && $0.correctionType == .falseNegative
@@ -431,6 +504,23 @@ final class CorrectionDedupeTests: XCTestCase {
         }
         XCTAssertEqual(asset012FN.count, 1,
             "asset_012 falseNegative scope 3386.000:3394.140 must collapse to exactly 1 row")
+        let asset012Survivor = try XCTUnwrap(asset012FN.first)
+        XCTAssertEqual(submissionCounts[asset012Survivor.id], 4,
+            "asset_012 falseNegative cluster: pre-collapse multiplicity (4) must survive on the dedupe-result audit map")
+        // Locate the original raw rows for this cluster to verify the
+        // survivor's createdAt is the OLDEST in the bucket — a regression
+        // here would mean later submissions could overwrite original
+        // observation provenance.
+        let asset012RawCluster = raw.filter {
+            $0.analysisAssetId == "asset_012"
+                && $0.correctionType == .falseNegative
+                && $0.scope == "exactTimeSpan:asset_012:3386.000:3394.140"
+        }
+        XCTAssertEqual(asset012RawCluster.count, 4,
+            "Pre-condition: 4 raw rows expected for asset_012 falseNegative cluster")
+        let oldestRawCreatedAt = try XCTUnwrap(asset012RawCluster.map(\.createdAt).min())
+        XCTAssertEqual(asset012Survivor.createdAt, oldestRawCreatedAt, accuracy: 0.0001,
+            "Survivor must pin the earliest createdAt in the cluster (first-observation provenance)")
 
         // The asset_013 480.000:690.000 row appears in BOTH the FN
         // (count: 3) and FP (count: 2) buckets in the fixture — they
