@@ -165,6 +165,168 @@ enum CorrectionScope: Sendable, Equatable {
             return nil
         }
     }
+
+    // MARK: - Normalized Identity Key (playhead-hygc.1.6)
+
+    /// Tolerance window (in seconds) used when canonicalizing `.exactTimeSpan`
+    /// boundaries for the semantic identity key. Two `.exactTimeSpan` scopes
+    /// with the same asset whose start AND end times round to the same
+    /// `0.1s` bucket collapse to the same identity row at write time.
+    ///
+    /// Why 100 ms: end-of-pipeline boundary times come from word-aligned
+    /// transcript timestamps which jitter by 50–200 ms across re-runs of
+    /// the same span (anchor density, decoder warmup). 1 ms (the existing
+    /// `%.3f` serialization precision) was too tight — replaying the May 6
+    /// dogfood corrections regenerated rows that round-tripped through
+    /// `BoundaryExpander` with sub-3-decimal drift, producing apparent
+    /// "different scopes" the user never authored. 1 s is too loose —
+    /// adjacent breaks on a tight ad pod (e.g. 3386–3394 vs 3394–3395)
+    /// would collide. 100 ms threads the needle: it absorbs decoder
+    /// jitter without conflating distinct ads.
+    ///
+    /// Edits beyond tolerance are treated as a NEW correction
+    /// (documented "distinct" rule) — they get their own row with their
+    /// own audit history. The user can still revert the original via
+    /// the existing UI path.
+    static let identityKeyTimeToleranceSeconds: Double = 0.1
+
+    /// Round a time value to the identity-key tolerance bucket.
+    ///
+    /// Internal so unit tests can pin the canonicalization exactly. Not
+    /// `private` because the persistence layer needs to call it from a
+    /// different actor (`AnalysisStore`) when computing keys at the
+    /// SQL boundary.
+    static func canonicalizeTimeForIdentityKey(_ time: Double) -> Double {
+        // Float-quantize to the tolerance bucket. The result is then
+        // re-serialized to 3-decimal text via the same `%.3f` formatter
+        // used by the wire format, so the on-disk key is stable across
+        // platforms/locales.
+        let bucket = identityKeyTimeToleranceSeconds
+        return (time / bucket).rounded() * bucket
+    }
+
+    /// The semantic identity key for this scope.
+    ///
+    /// Identity is the substring of the scope that participates in
+    /// dedupe. `.exactTimeSpan` boundaries are quantized to the
+    /// `identityKeyTimeToleranceSeconds` bucket; all other scopes use
+    /// the canonical `serialized` form because their fields are already
+    /// discrete (integer ordinals, sponsor strings, podcast IDs).
+    ///
+    /// Combined with `analysisAssetId` and `correctionType` this forms
+    /// the full `correction_events` UNIQUE key. See
+    /// `AnalysisStore.appendCorrectionEvent` for the on-disk semantics.
+    var normalizedIdentityKey: String {
+        switch self {
+        case .exactTimeSpan(let assetId, let startTime, let endTime):
+            let qStart = Self.canonicalizeTimeForIdentityKey(startTime)
+            let qEnd = Self.canonicalizeTimeForIdentityKey(endTime)
+            let startStr = String(format: "%.3f", qStart)
+            let endStr = String(format: "%.3f", qEnd)
+            return "exactTimeSpan:\(assetId):\(startStr):\(endStr)"
+        case .exactSpan, .sponsorOnShow, .phraseOnShow,
+             .campaignOnShow, .domainOwnershipOnShow, .jingleOnShow:
+            // Already-canonical: the serialized form is the identity key.
+            return serialized
+        }
+    }
+}
+
+// MARK: - CorrectionEvent Identity (playhead-hygc.1.6)
+
+/// Identity-key components for a `CorrectionEvent`.
+///
+/// The `correction_events` semantic identity is the tuple
+///   `(analysisAssetId, effectiveCorrectionType, normalizedScopeKey)`
+///
+/// where `effectiveCorrectionType` falls back to a derivation from
+/// `source` for legacy rows that pre-date the `correctionType` column
+/// (those rows have `correctionType == nil`; per the existing
+/// passthrough-factor convention they are all false-positive vetoes).
+///
+/// Stable across app launches: every component is derived from the
+/// scope/source value, never from a per-row UUID. Stable across
+/// exports: the `normalizedScopeKey` is computed from the persisted
+/// `scope` text, not from a Swift-internal hash.
+struct CorrectionEventIdentity: Hashable, Sendable {
+    let analysisAssetId: String
+    let effectiveCorrectionType: CorrectionType
+    let normalizedScopeKey: String
+}
+
+extension CorrectionEvent {
+    /// The effective correction type used for identity keying. Legacy
+    /// rows (pre-ef2.3.1) have `correctionType == nil`; we map their
+    /// `source` to a `CorrectionType` so they don't all collide on a
+    /// single nil bucket. If neither field is populated (extremely
+    /// old rows from a pre-source DB), default to `.falsePositive` —
+    /// the `correctionPassthroughFactor` path already treats nil-source
+    /// rows as FP, so this preserves prior semantics.
+    var effectiveCorrectionType: CorrectionType {
+        if let type = correctionType { return type }
+        if let kind = source?.kind { return kind.correctionType }
+        return .falsePositive
+    }
+
+    /// Identity tuple used by the dedupe contract. See
+    /// `CorrectionEventIdentity` doc and `AnalysisStore` migration v23.
+    var identity: CorrectionEventIdentity {
+        let normalized: String = CorrectionScope.deserialize(scope)?.normalizedIdentityKey
+            // Fallback: if the persisted scope is corrupt, key on the
+            // raw scope text so a bad row still dedupes against itself
+            // rather than multiplying without bound.
+            ?? scope
+        return CorrectionEventIdentity(
+            analysisAssetId: analysisAssetId,
+            effectiveCorrectionType: effectiveCorrectionType,
+            normalizedScopeKey: normalized
+        )
+    }
+}
+
+/// Read-side dedupe utility: collapse a list of `CorrectionEvent` rows
+/// into one row per semantic identity. Audit metadata is preserved on
+/// the surviving row:
+///   - `createdAt` is the OLDEST row's createdAt (first observed).
+///   - The dropped rows' createdAt values are NOT preserved beyond the
+///     count — callers that need full provenance should consume the
+///     raw rows directly.
+///
+/// Used by Activity, learning ingestion, and corpus export so that a
+/// pre-migration database with duplicate rows still presents a
+/// deduplicated view to consumers. Post-migration databases have at
+/// most one row per identity already, in which case this is a no-op.
+///
+/// Returns `(distinct, audit)` where `audit[id]` is the submission
+/// count observed for the surviving row's identity. The surviving row
+/// is the chronologically earliest row in the input; ties are broken
+/// by the row `id` to keep the output deterministic across runs.
+func distinctSemanticCorrections(
+    _ events: [CorrectionEvent]
+) -> (distinct: [CorrectionEvent], submissionCounts: [String: Int]) {
+    // Group by identity, deterministic insertion order via array of keys.
+    var groups: [CorrectionEventIdentity: [CorrectionEvent]] = [:]
+    var keyOrder: [CorrectionEventIdentity] = []
+    for event in events {
+        let key = event.identity
+        if groups[key] == nil { keyOrder.append(key) }
+        groups[key, default: []].append(event)
+    }
+
+    var distinct: [CorrectionEvent] = []
+    distinct.reserveCapacity(keyOrder.count)
+    var counts: [String: Int] = [:]
+    for key in keyOrder {
+        let bucket = groups[key]!
+        // Survivor: oldest createdAt; ties broken by row id (stable).
+        let survivor = bucket.min { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+            return lhs.id < rhs.id
+        }!
+        distinct.append(survivor)
+        counts[survivor.id] = bucket.count
+    }
+    return (distinct, counts)
 }
 
 // MARK: - Decay Weight
@@ -773,18 +935,36 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     // MARK: - Query
 
     /// Load all correction events for the given analysis asset, oldest first.
-    func activeCorrections(for analysisAssetId: String) async throws -> [CorrectionEvent] {
-        try await store.loadCorrectionEvents(analysisAssetId: analysisAssetId)
+    ///
+    /// playhead-hygc.1.6: Returns the SEMANTIC view by default — duplicate
+    /// rows that pre-date the v23 dedupe migration (e.g. the May 6 dogfood
+    /// `falseNegative-x4` clusters) collapse here so consumers see one row
+    /// per logical correction. Pass `includingDuplicates: true` to bypass
+    /// dedupe (debug/raw-export paths only).
+    func activeCorrections(
+        for analysisAssetId: String,
+        includingDuplicates: Bool = false
+    ) async throws -> [CorrectionEvent] {
+        let events = try await store.loadCorrectionEvents(analysisAssetId: analysisAssetId)
+        if includingDuplicates { return events }
+        return distinctSemanticCorrections(events).distinct
     }
 
     /// Load all correction events for the given asset with decay weights applied.
     ///
     /// Returns pairs of (event, weight) where weight = correctionDecayWeight(ageDays:).
+    ///
+    /// playhead-hygc.1.6: Read-side dedupe is applied before weighting so
+    /// the aggregation factors (passthrough, boost) see one vote per
+    /// semantic correction, not one vote per duplicated row. Without this,
+    /// a user who tapped "this is an ad" four times in a row on the same
+    /// span would get 4× the boost.
     func weightedCorrections(
         for analysisAssetId: String,
         at now: Date = Date()
     ) async throws -> [(CorrectionEvent, Double)] {
-        let events = try await store.loadCorrectionEvents(analysisAssetId: analysisAssetId)
+        let raw = try await store.loadCorrectionEvents(analysisAssetId: analysisAssetId)
+        let events = distinctSemanticCorrections(raw).distinct
         return events.map { event in
             let ageDays = (now.timeIntervalSince1970 - event.createdAt) / 86400.0
             let weight = correctionDecayWeight(ageDays: ageDays)

@@ -760,7 +760,7 @@ struct AdListenRewindRow: Sendable, Hashable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 22
+    nonisolated private static let currentSchemaVersion = 23
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1379,6 +1379,12 @@ actor AnalysisStore {
             // playhead-q45f.1: ad_listen_rewinds event log for the
             // counterfactual gate replay. Bumps schema_version to 22.
             try migrateAdListenRewindsV22IfNeeded()
+            // playhead-hygc.1.6: collapse duplicate correction_events rows
+            // (May 6 dogfood DB had 76 falseNegative rows but only 61
+            // distinct semantic scopes; FP had 12→7) and add the
+            // semantic-identity UNIQUE INDEX so future writes upsert.
+            // Bumps schema_version to 23.
+            try migrateCorrectionEventsDedupeV23IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1627,6 +1633,11 @@ actor AnalysisStore {
         // playhead-q45f.1 (v22): mirror ad_listen_rewinds migration into
         // the ladder seam. Helper is fully idempotent.
         try migrateAdListenRewindsV22IfNeeded()
+        // playhead-hygc.1.6 (v23): mirror correction_events dedupe
+        // migration into the ladder seam. Helper is fully idempotent
+        // and gated by `tableExists("correction_events")` so seeded
+        // fixtures without the table still pass.
+        try migrateCorrectionEventsDedupeV23IfNeeded()
     }
     #endif
 
@@ -3031,6 +3042,229 @@ actor AnalysisStore {
         try exec("CREATE INDEX IF NOT EXISTS idx_ad_listen_rewinds_window ON ad_listen_rewinds(windowId);")
         try exec("CREATE INDEX IF NOT EXISTS idx_ad_listen_rewinds_podcast_time ON ad_listen_rewinds(podcastId, time);")
         try setSchemaVersion(22)
+    }
+
+    // MARK: - V23: Correction-event dedupe (playhead-hygc.1.6)
+    //
+    // Identity contract for `correction_events`:
+    //
+    //   identity = (analysisAssetId, effective_correctionType,
+    //               normalizedScopeKey)
+    //
+    // where:
+    //
+    //   - `effective_correctionType` is `correctionType` when present,
+    //     otherwise derived from `source` (manualVeto/listenRevert →
+    //     'falsePositive', falseNegative → 'falseNegative'). Legacy
+    //     pre-source rows default to 'falsePositive', preserving the
+    //     `correctionPassthroughFactor` legacy assumption.
+    //
+    //   - `normalizedScopeKey` is the wire `scope` text canonicalized
+    //     by `CorrectionScope.normalizedIdentityKey`. For `.exactTimeSpan`
+    //     scopes the start/end times are quantized to the
+    //     `CorrectionScope.identityKeyTimeToleranceSeconds` (100 ms)
+    //     bucket. All other scopes are already discrete and pass
+    //     through unchanged.
+    //
+    // Pre-existing duplicates (the May 6 dogfood DB had 76 FN rows
+    // collapsing to 61 distinct identities, 12 FP rows collapsing to
+    // 7) are merged in-place during this migration via deterministic
+    // keep-oldest:
+    //
+    //   - Survivor row = the row with the smallest createdAt within an
+    //     identity bucket; ties broken by row `id` for determinism.
+    //   - Survivor's `firstSeenAt`  = its createdAt
+    //   - Survivor's `lastSeenAt`   = max(createdAt) across the bucket
+    //   - Survivor's `submissionCount` = bucket row count
+    //   - Survivor's `normalizedScopeKey` = computed identity key
+    //   - Other rows in the bucket are dropped.
+    //
+    // After collapse, a UNIQUE INDEX on
+    // `(analysisAssetId, effectiveCorrectionType, normalizedScopeKey)` is
+    // added so future writes can `INSERT ... ON CONFLICT DO UPDATE`.
+    //
+    // Why deterministic keep-oldest collapse (vs. preserve-and-read-side-
+    // dedupe-only)? The bead lists either approach as acceptable. We
+    // choose collapse because:
+    //   1. It eliminates the source of contamination at the storage
+    //      layer — Activity, learning, and corpus consumers no longer
+    //      depend on a wrapper applying dedupe correctly to be honest.
+    //   2. The UNIQUE INDEX makes future write-path idempotency a hard
+    //      DB-level guarantee rather than a soft application-level one.
+    //   3. Audit metadata (`submissionCount`, `lastSeenAt`) is preserved
+    //      so we don't lose the "user submitted this 4 times" signal.
+    //
+    // The read-side `distinctSemanticCorrections(_:)` utility is still
+    // exposed for callers that read pre-migration backup snapshots
+    // (rare) and as a defense-in-depth layer.
+    private func migrateCorrectionEventsDedupeV23IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 23 else { return }
+        // Some seeded fixtures (e.g. v1-shape DBs) reach the v23 step
+        // without ever creating `correction_events`. Skip the migration
+        // body but still bump the version so the ladder is monotonic.
+        guard try tableExists("correction_events") else {
+            try setSchemaVersion(23)
+            return
+        }
+
+        // 1. Add the new audit + identity columns. Nullable so we can
+        //    backfill without losing existing rows.
+        try addColumnIfNeeded(table: "correction_events", column: "firstSeenAt", definition: "REAL")
+        try addColumnIfNeeded(table: "correction_events", column: "lastSeenAt", definition: "REAL")
+        try addColumnIfNeeded(table: "correction_events", column: "submissionCount", definition: "INTEGER NOT NULL DEFAULT 1")
+        try addColumnIfNeeded(table: "correction_events", column: "normalizedScopeKey", definition: "TEXT")
+        try addColumnIfNeeded(table: "correction_events", column: "effectiveCorrectionType", definition: "TEXT")
+
+        // 2. Collapse duplicates. Done in Swift (not raw SQL) because
+        //    the canonical key requires `CorrectionScope.deserialize` +
+        //    `normalizedIdentityKey`, which encode the time-bucketing
+        //    rule. Doing this in SQL would either duplicate the rule
+        //    (drift hazard) or assume a brittle textual-prefix match.
+        try collapseCorrectionEventDuplicatesForV23()
+
+        // 3. Now that the table is duplicate-free, enforce the identity
+        //    via a UNIQUE INDEX. Future writes use `INSERT ... ON
+        //    CONFLICT(...) DO UPDATE` against this index.
+        try exec("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_correction_events_identity
+            ON correction_events(analysisAssetId, effectiveCorrectionType, normalizedScopeKey)
+            """)
+
+        try setSchemaVersion(23)
+    }
+
+    /// Collapse pre-v23 duplicate `correction_events` rows in place.
+    ///
+    /// Algorithm:
+    ///   1. SELECT every row.
+    ///   2. Group by `(analysisAssetId, effectiveCorrectionType, normalizedScopeKey)`
+    ///      where the type is derived from `correctionType ?? source.kind ?? .falsePositive`
+    ///      and the scope is canonicalized via the same `normalizedIdentityKey` rule
+    ///      used by the upsert path.
+    ///   3. For each bucket: keep the chronologically-earliest row (ties
+    ///      broken by `id` for determinism), set its audit fields, and
+    ///      delete the rest.
+    ///
+    /// Performance: O(n) Swift work + 1 UPDATE + 1 DELETE per bucket.
+    /// The May 6 dogfood DB has 88 total correction rows → 68 buckets,
+    /// well under any practical threshold.
+    private func collapseCorrectionEventDuplicatesForV23() throws {
+        // Read all rows with the columns we need to compute the identity
+        // and execute the collapse decisions.
+        let selectSQL = """
+            SELECT id, analysisAssetId, scope, createdAt,
+                   source, correctionType
+            FROM correction_events
+            """
+        let stmt = try prepare(selectSQL)
+        defer { sqlite3_finalize(stmt) }
+
+        struct Row {
+            let id: String
+            let analysisAssetId: String
+            let scope: String
+            let createdAt: Double
+            let source: CorrectionSource?
+            let correctionType: CorrectionType?
+        }
+
+        var rows: [Row] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = text(stmt, 0)
+            let assetId = text(stmt, 1)
+            let scope = text(stmt, 2)
+            let createdAt = sqlite3_column_double(stmt, 3)
+            let sourceRaw = optionalText(stmt, 4)
+            let typeRaw = optionalText(stmt, 5)
+            rows.append(Row(
+                id: id,
+                analysisAssetId: assetId,
+                scope: scope,
+                createdAt: createdAt,
+                source: sourceRaw.flatMap { CorrectionSource(rawValue: $0) },
+                correctionType: typeRaw.flatMap { CorrectionType(rawValue: $0) }
+            ))
+        }
+
+        guard !rows.isEmpty else { return }
+
+        // Reuse the canonicalization rules from the runtime model so the
+        // migration and the write path agree on identity by construction.
+        func effectiveType(_ row: Row) -> CorrectionType {
+            if let t = row.correctionType { return t }
+            if let kind = row.source?.kind { return kind.correctionType }
+            return .falsePositive
+        }
+        func normalizedKey(_ row: Row) -> String {
+            CorrectionScope.deserialize(row.scope)?.normalizedIdentityKey ?? row.scope
+        }
+
+        struct GroupKey: Hashable {
+            let assetId: String
+            let type: CorrectionType
+            let key: String
+        }
+
+        var groups: [GroupKey: [Row]] = [:]
+        for row in rows {
+            let key = GroupKey(
+                assetId: row.analysisAssetId,
+                type: effectiveType(row),
+                key: normalizedKey(row)
+            )
+            groups[key, default: []].append(row)
+        }
+
+        // Two-pass write: update each survivor with audit fields, then
+        // delete dropped rows. Done in deterministic key order so a
+        // failed migration mid-flight (theoretically impossible inside
+        // the surrounding `BEGIN/COMMIT`) would replay identically.
+        let updateSQL = """
+            UPDATE correction_events
+               SET firstSeenAt = ?,
+                   lastSeenAt = ?,
+                   submissionCount = ?,
+                   normalizedScopeKey = ?,
+                   effectiveCorrectionType = ?
+             WHERE id = ?
+            """
+        let deleteSQL = "DELETE FROM correction_events WHERE id = ?"
+
+        let sortedKeys = groups.keys.sorted { lhs, rhs in
+            if lhs.assetId != rhs.assetId { return lhs.assetId < rhs.assetId }
+            if lhs.type.rawValue != rhs.type.rawValue {
+                return lhs.type.rawValue < rhs.type.rawValue
+            }
+            return lhs.key < rhs.key
+        }
+
+        for groupKey in sortedKeys {
+            let bucket = groups[groupKey]!
+            // Survivor: smallest createdAt; ties broken by row id.
+            let survivor = bucket.min { lhs, rhs in
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+                return lhs.id < rhs.id
+            }!
+            let lastSeen = bucket.map(\.createdAt).max() ?? survivor.createdAt
+            let count = bucket.count
+
+            let upd = try prepare(updateSQL)
+            defer { sqlite3_finalize(upd) }
+            bind(upd, 1, survivor.createdAt)        // firstSeenAt
+            bind(upd, 2, lastSeen)                  // lastSeenAt
+            bind(upd, 3, count)                     // submissionCount
+            bind(upd, 4, groupKey.key)              // normalizedScopeKey
+            bind(upd, 5, groupKey.type.rawValue)    // effectiveCorrectionType
+            bind(upd, 6, survivor.id)
+            try step(upd, expecting: SQLITE_DONE)
+
+            for row in bucket where row.id != survivor.id {
+                let del = try prepare(deleteSQL)
+                defer { sqlite3_finalize(del) }
+                bind(del, 1, row.id)
+                try step(del, expecting: SQLITE_DONE)
+            }
+        }
     }
 
     // MARK: - Repeated-ad cache (playhead-43ed, schema v21)
@@ -9298,12 +9532,57 @@ actor AnalysisStore {
     // MARK: - CRUD: correction_events (Phase 7, playhead-4my.7.1)
 
     /// Persist a user correction event.
+    ///
+    /// playhead-hygc.1.6: idempotent. Two submissions of the same logical
+    /// correction (matching `(analysisAssetId, effectiveCorrectionType,
+    /// normalizedScopeKey)`) collapse into a single row. The audit
+    /// columns (`submissionCount`, `lastSeenAt`) reflect the cumulative
+    /// gesture history; `firstSeenAt`/`createdAt` preserve the original
+    /// observation timestamp.
+    ///
+    /// Identity contract: see the doc on
+    /// `migrateCorrectionEventsDedupeV23IfNeeded` and
+    /// `CorrectionScope.normalizedIdentityKey`. Two distinct user
+    /// edits are treated as distinct corrections (each gets its own
+    /// row + audit history) when they fall outside the identity-key
+    /// time-tolerance bucket; identical re-submissions and submissions
+    /// within the bucket collapse on conflict.
     func appendCorrectionEvent(_ event: CorrectionEvent) throws {
+        // Compute identity-key columns once, in Swift, so the on-disk
+        // values agree with the read-side `distinctSemanticCorrections`
+        // utility by construction.
+        let normalizedScopeKey: String =
+            CorrectionScope.deserialize(event.scope)?.normalizedIdentityKey ?? event.scope
+        let effectiveType: CorrectionType = event.effectiveCorrectionType
+
+        // `INSERT OR IGNORE` handles the PRIMARY KEY collision case
+        // (caller re-submits an event with the same row `id` but a
+        // different semantic identity — astronomically rare for real
+        // UUIDs, but `INSERT OR IGNORE` was the prior behavior so we
+        // preserve it). The named `ON CONFLICT(identity)` clause takes
+        // precedence for the dedupe path: same logical correction →
+        // bump the audit counters instead of failing or silently
+        // ignoring.
         let sql = """
             INSERT OR IGNORE INTO correction_events
             (id, analysisAssetId, scope, createdAt, source, podcastId,
-             correctionType, causalSource, targetRefsJSON)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             correctionType, causalSource, targetRefsJSON,
+             firstSeenAt, lastSeenAt, submissionCount,
+             normalizedScopeKey, effectiveCorrectionType)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(analysisAssetId, effectiveCorrectionType, normalizedScopeKey)
+            DO UPDATE SET
+                lastSeenAt = MAX(correction_events.lastSeenAt, excluded.lastSeenAt),
+                submissionCount = correction_events.submissionCount + 1,
+                -- Refresh causalSource/targetRefs from the new event so
+                -- the latest attribution wins. The original `id` /
+                -- `createdAt` / `firstSeenAt` are intentionally NOT
+                -- overwritten — they pin the first-observation provenance.
+                source = COALESCE(correction_events.source, excluded.source),
+                podcastId = COALESCE(correction_events.podcastId, excluded.podcastId),
+                correctionType = COALESCE(correction_events.correctionType, excluded.correctionType),
+                causalSource = COALESCE(excluded.causalSource, correction_events.causalSource),
+                targetRefsJSON = COALESCE(excluded.targetRefsJSON, correction_events.targetRefsJSON)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -9322,14 +9601,28 @@ actor AnalysisStore {
             return String(data: data, encoding: .utf8)
         }()
         bind(stmt, 9, targetRefsJSON)
+        bind(stmt, 10, event.createdAt)             // firstSeenAt
+        bind(stmt, 11, event.createdAt)             // lastSeenAt
+        bind(stmt, 12, normalizedScopeKey)
+        bind(stmt, 13, effectiveType.rawValue)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
     /// Load all correction events for an asset, ordered by createdAt ascending.
+    ///
+    /// playhead-hygc.1.6: Surfaces the audit columns
+    /// (`submissionCount`, `lastSeenAt`) populated by the v23
+    /// dedupe migration and the upsert write path. Legacy rows that
+    /// pre-date v23 will have NULL audit values; the
+    /// `migrateCorrectionEventsDedupeV23IfNeeded()` migration backfills
+    /// them at first launch on the new build, but we still read them
+    /// nullable here so a partially-migrated DB (e.g. backup snapshot
+    /// restored mid-flight) loads without throwing.
     func loadCorrectionEvents(analysisAssetId: String) throws -> [CorrectionEvent] {
         let sql = """
             SELECT id, analysisAssetId, scope, createdAt, source, podcastId,
-                   correctionType, causalSource, targetRefsJSON
+                   correctionType, causalSource, targetRefsJSON,
+                   submissionCount, lastSeenAt
             FROM correction_events
             WHERE analysisAssetId = ?
             ORDER BY createdAt ASC
@@ -9356,6 +9649,14 @@ actor AnalysisStore {
                 guard let data = json.data(using: .utf8) else { return nil }
                 return try? JSONDecoder().decode(CorrectionTargetRefs.self, from: data)
             }
+            // Audit columns. NULL for legacy rows; treat as nil so
+            // readers can apply their own defaults (1 / createdAt).
+            let submissionCount: Int? = sqlite3_column_type(stmt, 9) == SQLITE_NULL
+                ? nil
+                : Int(sqlite3_column_int64(stmt, 9))
+            let lastSeenAt: Double? = sqlite3_column_type(stmt, 10) == SQLITE_NULL
+                ? nil
+                : sqlite3_column_double(stmt, 10)
             results.append(CorrectionEvent(
                 id: id,
                 analysisAssetId: assetId,
@@ -9365,7 +9666,9 @@ actor AnalysisStore {
                 podcastId: podcastId,
                 correctionType: correctionType,
                 causalSource: causalSource,
-                targetRefs: targetRefs
+                targetRefs: targetRefs,
+                submissionCount: submissionCount,
+                lastSeenAt: lastSeenAt
             ))
         }
         return results

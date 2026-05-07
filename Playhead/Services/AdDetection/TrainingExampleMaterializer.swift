@@ -58,9 +58,15 @@ struct TrainingExampleMaterializer: Sendable {
         let decisionEvents = try await store.loadDecisionEvents(
             for: analysisAssetId
         )
-        let correctionEvents = try await store.loadCorrectionEvents(
+        // playhead-hygc.1.6: pre-v23 databases may carry duplicate
+        // correction rows (May 6 dogfood: 76 FN rows, 61 distinct
+        // identities). Collapse to one row per semantic identity
+        // BEFORE bucketing so a user-hammered "this is an ad" doesn't
+        // count as multiple training labels.
+        let rawCorrectionEvents = try await store.loadCorrectionEvents(
             analysisAssetId: analysisAssetId
         )
+        let correctionEvents = distinctSemanticCorrections(rawCorrectionEvents).distinct
         let adWindows = try await store.fetchAdWindows(
             assetId: analysisAssetId
         )
