@@ -1175,6 +1175,84 @@ struct CorrectionReplayCandidateTests {
         #expect(replayRows.isEmpty,
                 "malformed FN spans (zero-duration, negative-duration, NaN, +Inf, -Inf) must be silently dropped; got \(replayRows.count) rows: \(replayRows.map { ($0.startTime, $0.endTime) })")
     }
+
+    // MARK: - 13. R11: containment overlap dedupes (third leg of the overlap-boundary triplet)
+
+    /// playhead-hygc.1.8 R11: pin the third leg of the overlap-boundary
+    /// triplet. R8 pinned ADJACENCY (`[600, 680]` and `[680, 760]` →
+    /// disjoint, two rows). R9 pinned SUB-MILLISECOND OVERLAP
+    /// (`[600, 680.001]` and `[680, 760]` → 1 ms overlap, one row). This
+    /// pins CONTAINMENT (`[600, 800]` and `[650, 700]` — the second range
+    /// fully inside the first).
+    ///
+    /// Why: the strict-inequality overlap predicate
+    /// (`s1 < e2 && e1 > s2`) is symmetric — containment satisfies it
+    /// trivially (`600 < 700 && 800 > 650`). But containment is a
+    /// distinct geometric case from "shifted-but-partially-overlapping"
+    /// (R7's existing test) and from "boundary-touching" (R8 / R9). A
+    /// future "fix" that special-cased containment (e.g. "if one range
+    /// contains another, keep the LARGER") would dedupe to one row but
+    /// pick the wrong winner, silently swapping which span the user sees.
+    /// Pinning containment means that subtle re-ordering also fails
+    /// loudly: the FIRST inserted FN is the survivor (matching R9's
+    /// "first wins" pin).
+    @Test("containment (one falseNegative range fully inside another) dedupes to a single replay row; first inserted wins")
+    func containmentOverlapDedupesToOneRow() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-containment"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        // [600, 800] is the OUTER range; [650, 700] is the INNER. The
+        // outer is inserted first so it lands in `emitted` first; the
+        // inner is rejected by the `overlapsEmitted` check.
+        //
+        // Explicit, monotonically-increasing `createdAt` so the test
+        // cannot flake on same-millisecond clock collisions.
+        let now = Date().timeIntervalSince1970
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: 600, endTime: 800
+            ).serialized,
+            createdAt: now,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        ))
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: assetId, startTime: 650, endTime: 700
+            ).serialized,
+            createdAt: now + 1.0,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        ))
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        let replayRows = persisted.filter { $0.boundaryState == "correctionReplay" }
+        #expect(replayRows.count == 1,
+                "containment must dedupe to a single replay row; got \(replayRows.count)")
+        // The surviving row must be the OUTER range — the first inserted
+        // is the one already in `emitted` when the inner is evaluated.
+        // Pin which range wins so a future re-ordering (e.g. sorting FN
+        // ranges by duration before iteration) is loud.
+        if let row = replayRows.first {
+            #expect(abs(row.startTime - 600) < 0.01 && abs(row.endTime - 800) < 0.01,
+                    "surviving row must be the FIRST FN range (outer 600..800); got \(row.startTime)..\(row.endTime)")
+        }
+    }
 }
 
 // MARK: - Test doubles
