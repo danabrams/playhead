@@ -24,8 +24,9 @@
 //
 // Schema versioning:
 //   * `analysis_health` is a NEW optional field on
-//     `DogfoodDiagnosticsArchive`. v1 archives (no activity snapshot,
-//     no analysis health) continue to decode unchanged.
+//     `DogfoodDiagnosticsArchive`. v1 archives (no analysis_health,
+//     with or without an activity_snapshot) continue to decode
+//     unchanged.
 //   * When `analysis_health` is present the archive bumps
 //     `schema_version` to 2. Older tooling reading a v2 archive sees
 //     the extra key — JSONDecoder ignores unknown keys by default, so
@@ -439,10 +440,12 @@ extension DogfoodDiagnosticsAnalysisHealth {
     /// hand-rolled fixture and the production exporter can call it
     /// off-main without further serialization.
     ///
-    /// Returns `nil` for a missing snapshot; the caller is expected
-    /// to either skip the analysis_health field entirely (preserving
-    /// schema v1 shape) or attach an empty-but-noted summary via
-    /// `noSnapshot(...)`.
+    /// Always returns a populated summary. When the caller has no
+    /// snapshot at all (e.g. AnalysisStore failed to open before
+    /// export ran), use `noSnapshot(reason:generatedAt:)` instead;
+    /// when the caller wants to preserve the v1 wire format
+    /// byte-for-byte, pass `nil` for the exporter's
+    /// `analysisHealth` parameter and skip the summary entirely.
     static func build(
         from activitySnapshot: DogfoodDiagnosticsActivitySnapshot,
         duplicates: DuplicateCounts? = nil,
@@ -963,6 +966,16 @@ extension DogfoodDiagnosticsAnalysisHealth {
     /// strip here so a future caller passing in raw strings cannot
     /// accidentally widen the export's privacy surface. Length-bound
     /// to keep the JSON compact.
+    ///
+    /// R3: input is truncated *before* regex evaluation so a hostile
+    /// or buggy caller passing a multi-megabyte string can't force
+    /// the export to scan the full input five times. Truncating
+    /// first is also strictly safer for redaction — even if the cut
+    /// lands mid-path the surviving prefix still matches one of the
+    /// regex patterns (the patterns are anchored at well-known
+    /// scheme/root prefixes) and gets replaced. The post-redaction
+    /// length bound is kept as belt-and-braces in case a future
+    /// pattern set changes the output length.
     static func redactedTruncated(
         _ raw: String,
         limit: Int = 200
@@ -974,7 +987,10 @@ extension DogfoodDiagnosticsAnalysisHealth {
             #"/var/mobile/[^\s]*"#,
             #"/private/var/[^\s]*"#
         ]
-        var s = raw
+        // Pre-truncate so regex work is bounded by `limit`, not by
+        // the (potentially adversarial) input length.
+        var s = raw.count > limit ? String(raw.prefix(limit)) : raw
+        let truncated = s.count < raw.count
         for pattern in stripPatterns {
             s = s.replacingOccurrences(
                 of: pattern,
@@ -982,9 +998,12 @@ extension DogfoodDiagnosticsAnalysisHealth {
                 options: .regularExpression
             )
         }
+        // Post-redaction length bound: defensive cap in case a
+        // future pattern grows the string above `limit`.
         if s.count > limit {
-            s = String(s.prefix(limit)) + "…"
+            s = String(s.prefix(limit))
+            return s + "…"
         }
-        return s
+        return truncated ? s + "…" : s
     }
 }

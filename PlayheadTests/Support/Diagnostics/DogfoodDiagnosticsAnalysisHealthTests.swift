@@ -1048,6 +1048,26 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         #expect(scrubbed.hasSuffix("…"))
     }
 
+    @Test("redaction still fires on a path embedded in an oversized input (pre-truncate ordering)")
+    func redactsBeforeTruncationBoundsRegexWork() {
+        // R3 contract: the regex strip runs against a length-bounded
+        // copy of the input — a hostile/buggy caller passing a
+        // multi-megabyte string with a /Users/ path at the front
+        // should still get the path redacted AND get bounded work.
+        // Pin both halves: the path leaves the redactor as
+        // "[redacted]" (not as raw "/Users/...") AND the output is
+        // capped at the limit.
+        let path = "/Users/dan/Library/audio.m4a "
+        let trailing = String(repeating: "x", count: 5000)
+        let raw = path + trailing
+        let scrubbed = DogfoodDiagnosticsAnalysisHealth.redactedTruncated(raw, limit: 100)
+        #expect(!scrubbed.contains("/Users/"))
+        #expect(scrubbed.contains("[redacted]"))
+        // 100-char cap + single trailing ellipsis Character.
+        #expect(scrubbed.count <= 101)
+        #expect(scrubbed.hasSuffix("…"))
+    }
+
     @Test("encoded analysis_health does not leak raw transcript-text or audio paths")
     func encodedHealthHasNoLeaks() throws {
         // The encoded JSON should never contain raw transcript text
