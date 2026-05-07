@@ -1,7 +1,18 @@
 # Chapter Signal for Ad Detection — Design
 
-**Status**: Design approved 2026-05-06. Ready for implementation planning.
+**Status**: Design approved 2026-05-06. Reconciled with existing code 2026-05-06. Ready for implementation planning.
 **Author**: Dan + Claude (brainstorming session)
+
+## Reconciliation note (2026-05-06)
+
+After reading existing code in `Playhead/Services/AdDetection/`, the original design's new `Chapter` and `ChapterPlan` types are reframed to reuse existing types and integration points:
+
+- **No new evidence type.** Existing `ChapterEvidence` (with `ChapterSource ∈ {id3, pc20, rssInline}` and `ChapterDisposition ∈ {adBreak, content, ambiguous}`) is the canonical chapter record. Add a new variant: `ChapterSource.inferred`.
+- **No new fusion wiring.** `ChapterMetadataEvidenceBuilder` already projects `[ChapterEvidence]` → `metadataEntries` in `BackfillEvidenceFusion` (cap 0.15). Inferred chapters ride the same path automatically once they emit `ChapterEvidence` with `source = .inferred`.
+- **`ChapterPlan` is repurposed** as the *cache artifact* — a content-hash-keyed envelope holding `[ChapterEvidence]` with `ChapterSource.inferred`, plus phase metadata (boundary confidence, plan confidence, generation timestamp). Not a new evidence shape.
+- **Gate pattern**: mirror `FMBackfillMode` (`off / shadow / rescoreOnly / proposalOnly / full`), not `Q45fReplayGate`. Add `ChapterSignalMode` to `AdDetectionConfig`.
+- **Creator-chapter precedence (Dan, 2026-05-06)**: when an episode already has any `ChapterEvidence` with source ∈ {id3, pc20, rssInline}, `ChapterGenerationPhase` exits early without invoking FM. Creator chapters are near-ground-truth; inferred chapters are statistical inference. Don't pay FM cost when creator labels are available.
+- **Consumers**: `CoveragePlanner` (net-new chapter-awareness) and FM prompt builders (net-new context injection) read chapters from the unified path — `ChapterEvidence` array on the episode, regardless of source. They do NOT need to distinguish creator vs. inferred at consumption time, except where confidence weighting matters (creator chapters get full weight; inferred get the existing `metadataCap = 0.15` discount via fusion's existing weighting, plus per-chapter `qualityScore` for finer tuning).
 
 ## Problem
 
