@@ -5379,10 +5379,9 @@ actor AnalysisStore {
         let allIds = assetIds.sorted()
 
         // ---- Pass 1: per-asset duration + watermark columns from
-        //              `analysis_assets`. The latest row per assetId wins
-        //              (rowid DESC tie-break for legacy rows that share an
-        //              `id`; the column has UNIQUE INDEX in production but
-        //              the safer ordering keeps tests deterministic).
+        //              `analysis_assets`. `id` is UNIQUE so the WHERE
+        //              clause yields at most one row per requested id —
+        //              no tie-breaking needed.
         struct AssetRow {
             let id: String
             let episodeDurationSec: Double?

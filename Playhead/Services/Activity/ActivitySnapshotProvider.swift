@@ -713,19 +713,18 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     }
 
     /// playhead-hygc.1.2: derive the dogfood `transcript_source` wire
-    /// string from the canonical ``AnalysisCoverageSummary``. The wire
-    /// format keeps the historical `asset_fast_watermark` value (rather
-    /// than the bead's generic `asset_watermark`) so existing dogfood
-    /// JSON consumers don't break — the value still carries the same
-    /// semantic ("displayed transcript fraction came from the asset
-    /// watermark, not from chunks").
+    /// string from the canonical ``AnalysisCoverageSummary``. Wire token
+    /// vocabulary matches the bead's allowlist
+    /// (`fast_transcript_chunks`, `asset_watermark`, `unknown`) so the
+    /// `transcript_source` field and the `fast_transcript_coverage_end_source`
+    /// field never disagree on the name of the same provenance.
     private func dogfoodTranscriptSource(summary: AnalysisCoverageSummary?) -> String {
         guard let summary else { return "unknown" }
         switch summary.fastTranscriptCoveredSource {
         case .fastTranscriptChunks:
             return "fast_transcript_chunks"
         case .assetWatermark:
-            return "asset_fast_watermark"
+            return "asset_watermark"
         case .unknown:
             return "unknown"
         case .finalPassChunks, .adWindows, .cachedAudio:
