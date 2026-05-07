@@ -92,6 +92,18 @@ actor LearningArtifactIngestor {
     /// `.deduped` outcomes to callers and avoid re-applying sponsor
     /// rollbacks (which are *not* idempotent on `recordRollback`'s side
     /// — every call increments `rollbackCount`).
+    ///
+    /// Concurrency note (R2): the identity is inserted BEFORE the first
+    /// `await` (the `appendCorrectionEvent` call) so a concurrent task
+    /// landing on the actor's executor between our enter and the
+    /// suspension point sees the identity already reserved and short-
+    /// circuits to `.deduped`. Without this reservation, actor
+    /// reentrancy lets N tasks all pass the contains-check, run the
+    /// non-idempotent `recordRollback` N times, and report N×
+    /// `sponsorRollbacksApplied` for what the user authored as one
+    /// gesture. If any of the post-reservation awaits THROWS, we erase
+    /// the reservation in a `do/catch` so a transient SQLite failure
+    /// doesn't permanently mask future legitimate retries.
     private var seenIdentities: Set<String> = []
 
     private var counters = LearningIngestionDiagnostics()
@@ -137,38 +149,55 @@ actor LearningArtifactIngestor {
             )
         }
 
-        // Persist via the store's append path. The v23 UNIQUE INDEX
-        // upsert collapses any pre-existing duplicate row to one — so
-        // appending the same identity twice across processes is safe.
-        try await store.appendCorrectionEvent(correction)
+        // R2: reserve the identity BEFORE any `await` so concurrent
+        // re-entries on the actor see the identity already taken and
+        // short-circuit to `.deduped`. This closes the TOCTOU window
+        // between the contains-check above and the persistence/side-
+        // effect calls below — without it, 5 concurrent ingests of the
+        // same correction all pass the contains-check, all call the
+        // non-idempotent `recordRollback`, and the rollbackCount jumps
+        // to 5 for one gesture.
+        seenIdentities.insert(identityKey)
+        do {
+            // Persist via the store's append path. The v23 UNIQUE INDEX
+            // upsert collapses any pre-existing duplicate row to one — so
+            // appending the same identity twice across processes is safe.
+            try await store.appendCorrectionEvent(correction)
 
-        // Sponsor side effects fire only for `.sponsorOnShow` (the
-        // scope that names a sponsor). Other scopes contribute to
-        // training examples via the materializer but don't touch
-        // sponsor knowledge.
-        switch parsedScope {
-        case .sponsorOnShow(let podcastId, let sponsor):
-            try await applySponsorSideEffect(
-                podcastId: podcastId,
-                sponsor: sponsor,
-                kind: correction.source?.kind
-                    ?? correction.correctionType.map(Self.kindFor)
-                    ?? .falsePositive
+            // Sponsor side effects fire only for `.sponsorOnShow` (the
+            // scope that names a sponsor). Other scopes contribute to
+            // training examples via the materializer but don't touch
+            // sponsor knowledge.
+            switch parsedScope {
+            case .sponsorOnShow(let podcastId, let sponsor):
+                try await applySponsorSideEffect(
+                    podcastId: podcastId,
+                    sponsor: sponsor,
+                    kind: correction.source?.kind
+                        ?? correction.correctionType.map(Self.kindFor)
+                        ?? .falsePositive
+                )
+            default:
+                break
+            }
+
+            // Materialize after every new correction so downstream
+            // consumers see fresh artifacts without waiting for the next
+            // backfill pass. `replaceTrainingExamples` is id-keyed upsert,
+            // so a re-run is cheap and idempotent.
+            try await materializer.materialize(
+                forAsset: correction.analysisAssetId,
+                store: store
             )
-        default:
-            break
+        } catch {
+            // Roll the reservation back on error so a transient SQLite
+            // hiccup doesn't permanently mask future legitimate retries
+            // of this identity. The caller sees the throw and decides
+            // whether to retry.
+            seenIdentities.remove(identityKey)
+            throw error
         }
 
-        // Materialize after every new correction so downstream
-        // consumers see fresh artifacts without waiting for the next
-        // backfill pass. `replaceTrainingExamples` is id-keyed upsert,
-        // so a re-run is cheap and idempotent.
-        try await materializer.materialize(
-            forAsset: correction.analysisAssetId,
-            store: store
-        )
-
-        seenIdentities.insert(identityKey)
         counters.ingested += 1
         return LearningIngestionResult(
             outcome: .ingested,
