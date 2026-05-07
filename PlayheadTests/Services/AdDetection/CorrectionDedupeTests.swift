@@ -538,6 +538,146 @@ final class CorrectionDedupeTests: XCTestCase {
             "Both semantic types must survive read-side dedupe"
         )
     }
+
+    // MARK: - (h) V22 → V23 in-place SQL collapse migration (R3 audit Q1)
+
+    /// Pin the SQL collapse code path executed by
+    /// `migrateCorrectionEventsDedupeV23IfNeeded` when an existing v22
+    /// database carries duplicate correction_events rows.
+    ///
+    /// Prior tests covered:
+    ///   - the read-side `distinctSemanticCorrections` utility
+    ///     (testDogfoodFixtureKnownDuplicatesCollapseUnderReadSideDedupe)
+    ///   - the live `INSERT ... ON CONFLICT DO UPDATE` upsert path
+    ///     (testReplayRoundTripStillCollapsesAcrossReopen)
+    ///
+    /// This pins the third leg: the one-shot SQL collapse executed
+    /// during the v22 → v23 schema upgrade itself. The risk surface
+    /// covered here is migration-local — wrong survivor selection,
+    /// missing audit-column population, or failure to apply the
+    /// canonicalization rules consistently with the runtime model.
+    func testV22ToV23MigrationCollapsesPreExistingDuplicatesAndPopulatesAudit() async throws {
+        // 1. Bootstrap a fully-migrated v23 DB so all upstream tables
+        //    (including correction_events with the v22 column shape)
+        //    exist in the right schema.
+        let dir = try makeTempDir(prefix: "CorrectionV23MigrateCollapse")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let bootstrap = try AnalysisStore(directory: dir)
+        try await bootstrap.migrate()
+        let bootstrapVersion = try await bootstrap.schemaVersion()
+        XCTAssertEqual(bootstrapVersion, 23,
+            "Pre-condition: bootstrap must reach v23")
+        try await bootstrap.insertAsset(makeTestAsset(id: "asset-mig"))
+
+        // 2. Rewind: drop the v23 audit columns + UNIQUE INDEX, reset
+        //    _meta back to '22'. This puts the DB in the exact shape a
+        //    real pre-v23 device would have at upgrade time.
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        defer { sqlite3_close_v2(db) }
+        // Recreate the table without the v23 audit columns by copying
+        // through a v22-shape side table. This is the most faithful
+        // simulation of a real pre-v23 device, which never wrote those
+        // columns at all.
+        let rewind = """
+            DROP INDEX IF EXISTS idx_correction_events_identity;
+            CREATE TABLE correction_events_v22 (
+                id               TEXT PRIMARY KEY,
+                analysisAssetId  TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                scope            TEXT NOT NULL,
+                createdAt        REAL NOT NULL,
+                source           TEXT,
+                podcastId        TEXT,
+                correctionType   TEXT,
+                causalSource     TEXT,
+                targetRefsJSON   TEXT
+            );
+            DROP TABLE correction_events;
+            ALTER TABLE correction_events_v22 RENAME TO correction_events;
+            CREATE INDEX IF NOT EXISTS idx_correction_events_asset ON correction_events(analysisAssetId);
+            CREATE INDEX IF NOT EXISTS idx_correction_events_scope ON correction_events(scope);
+            UPDATE _meta SET value = '22' WHERE key = 'schema_version';
+            """
+        var errMsg: UnsafeMutablePointer<CChar>?
+        let rc = sqlite3_exec(db, rewind, nil, nil, &errMsg)
+        if rc != SQLITE_OK, let m = errMsg {
+            let msg = String(cString: m)
+            sqlite3_free(errMsg)
+            XCTFail("Rewind SQL failed: \(msg)")
+            return
+        }
+
+        // 3. Insert duplicate rows directly via SQL — bypassing the
+        //    upsert path entirely so we exercise the migration's
+        //    in-place collapse, not the live conflict resolver.
+        //    Cluster: 4 rows on the same `.exactTimeSpan` identity at
+        //    times that differ by < tolerance (<= 0.05s jitter).
+        let baseTime: Double = 1_700_000_000.0
+        let scopeStr = "exactTimeSpan:asset-mig:100.000:200.000"
+        let scopeJitterStr = "exactTimeSpan:asset-mig:100.020:200.020"  // same bucket
+        let insertRows: [(String, String, Double)] = [
+            ("dup-id-3", scopeStr,       baseTime + 30.0),  // newest
+            ("dup-id-1", scopeStr,       baseTime + 10.0),  // OLDEST → survivor
+            ("dup-id-4", scopeJitterStr, baseTime + 40.0),  // jitter, still same bucket
+            ("dup-id-2", scopeStr,       baseTime + 20.0),
+        ]
+        for (id, scope, ts) in insertRows {
+            let insertSQL = """
+                INSERT INTO correction_events
+                (id, analysisAssetId, scope, createdAt, source, correctionType)
+                VALUES ('\(id)', 'asset-mig', '\(scope)', \(ts), 'falseNegative', 'falseNegative')
+                """
+            XCTAssertEqual(sqlite3_exec(db, insertSQL, nil, nil, nil), SQLITE_OK,
+                "Direct SQL insert of duplicate must succeed (id=\(id))")
+        }
+        // Sanity: 4 rows landed.
+        var countStmt: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM correction_events", -1, &countStmt, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_step(countStmt), SQLITE_ROW)
+        let preCount = Int(sqlite3_column_int64(countStmt, 0))
+        sqlite3_finalize(countStmt)
+        XCTAssertEqual(preCount, 4, "Pre-condition: 4 raw rows seeded")
+
+        // 4. Re-migrate. This runs the v22 → v23 path, which must
+        //    collapse the cluster.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        let postMigrateVersion = try await store.schemaVersion()
+        XCTAssertEqual(postMigrateVersion, 23,
+            "Migration must reach v23")
+
+        // 5. Verify collapse + audit metadata via the public load path.
+        let cs = PersistentUserCorrectionStore(store: store)
+        let loaded = try await cs.activeCorrections(for: "asset-mig")
+        XCTAssertEqual(loaded.count, 1,
+            "v22 → v23 collapse must produce exactly one row from the 4-row cluster")
+        let row = try XCTUnwrap(loaded.first)
+        // Survivor must be `dup-id-1` (smallest createdAt, tie-broken by id).
+        XCTAssertEqual(row.id, "dup-id-1",
+            "Survivor must be the chronologically-earliest row in the bucket")
+        XCTAssertEqual(row.createdAt, baseTime + 10.0, accuracy: 0.001,
+            "Survivor's createdAt must pin the first observation")
+        XCTAssertEqual(row.submissionCount, 4,
+            "submissionCount must reflect cumulative bucket size")
+        XCTAssertEqual(row.lastSeenAt ?? -1, baseTime + 40.0, accuracy: 0.001,
+            "lastSeenAt must equal the bucket's max createdAt")
+
+        // 6. Idempotence: re-running the migration on an already-v23 DB
+        //    must be a no-op. Reset the migrated-paths cache, run again,
+        //    and confirm the row count + audit metadata are unchanged.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store2 = try AnalysisStore(directory: dir)
+        try await store2.migrate()
+        let cs2 = PersistentUserCorrectionStore(store: store2)
+        let loaded2 = try await cs2.activeCorrections(for: "asset-mig")
+        XCTAssertEqual(loaded2.count, 1, "Idempotent re-migrate must not duplicate rows")
+        XCTAssertEqual(loaded2.first?.submissionCount, 4,
+            "Idempotent re-migrate must preserve audit metadata exactly (no double-counting)")
+        XCTAssertEqual(loaded2.first?.id, "dup-id-1",
+            "Idempotent re-migrate must preserve the survivor identity")
+    }
 }
 
 // MARK: - InMemoryCorpusExportSource
