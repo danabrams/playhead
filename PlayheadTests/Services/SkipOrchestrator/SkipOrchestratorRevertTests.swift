@@ -834,4 +834,87 @@ struct SkipOrchestratorRevertTests {
         #expect(profile?.recentFalseSkipSignals == 1,
                 "exactly one false-skip signal must be recorded for one veto gesture")
     }
+
+    // R9 (hygc.1.8): managed-window symmetric trust-magnitude pin. The
+    // R7 test above pins suggest-tier-only revert at the full
+    // `falseSignalPenalty`. Without a parallel pin on the managed-window
+    // path, a future weak/strong split could quietly land on ONLY one
+    // surface — the symmetric pair makes any such split fail loudly on
+    // both tests in the same diff. This test mirrors the suggest-tier
+    // shape exactly except the AdWindow has `eligibilityGate = nil` (so
+    // it lands in the managed `windows` dict, not `suggestWindows`) and
+    // therefore the suggest-tier loop in `revertByTimeRange` is a no-op
+    // on this fixture — only the managed loop fires.
+    @Test("revertByTimeRange against ONLY a managed (auto-skip) window decrements trust by full falseSignalPenalty")
+    func revertByTimeRangeManagedDecrementsTrustByFullPenalty() async throws {
+        let trustStore = try await makeTestStore()
+        let initialTrust: Double = 0.90
+        try await trustStore.upsertProfile(
+            PodcastProfile(
+                podcastId: "podcast-1",
+                sponsorLexicon: nil,
+                normalizedAdSlotPriors: nil,
+                repeatedCTAFragments: nil,
+                jingleFingerprints: nil,
+                implicitFalsePositiveCount: 0,
+                skipTrustScore: initialTrust,
+                observationCount: 10,
+                mode: "auto",
+                recentFalseSkipSignals: 0
+            )
+        )
+        let trustConfig = TrustScoringConfig.default
+        let trustService = TrustScoringService(store: trustStore, config: trustConfig)
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // `makeSkipTestAdWindow` defaults `eligibilityGate = nil` →
+        // non-fusion producer → flows through to the managed `windows`
+        // dict (not `suggestWindows`).
+        let managed = makeSkipTestAdWindow(
+            id: "ad-managed-magnitude",
+            assetId: "asset-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.75,
+            decisionState: AdDecisionState.candidate.rawValue
+        )
+        try await store.insertAdWindow(managed)
+        await orchestrator.receiveAdWindows([managed])
+
+        // Sanity: this window is in the auto-skip dict, NOT suggest tier.
+        #expect(await orchestrator.activeWindowIDs().contains("ad-managed-magnitude"),
+                "managed AdWindow must enter the auto-skip windows dict")
+        #expect(!(await orchestrator.activeSuggestWindowIDs().contains("ad-managed-magnitude")),
+                "managed AdWindow must NOT enter the suggest dict")
+
+        // Veto.
+        await orchestrator.revertByTimeRange(start: 70, end: 110, podcastId: "podcast-1")
+
+        // Trust hit fires inside an unstructured Task — poll.
+        var profile: PodcastProfile?
+        for _ in 0..<20 {
+            profile = try await trustStore.fetchProfile(podcastId: "podcast-1")
+            if let p = profile, p.recentFalseSkipSignals == 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        let expectedTrust = initialTrust - trustConfig.falseSignalPenalty
+        #expect(abs((profile?.skipTrustScore ?? -1) - expectedTrust) < 1e-6,
+                "managed-window-only revert must decrement trust by the SAME falseSignalPenalty (\(trustConfig.falseSignalPenalty)) as the suggest-tier path; got skipTrustScore=\(profile?.skipTrustScore ?? -1) expected=\(expectedTrust)")
+        #expect(profile?.recentFalseSkipSignals == 1,
+                "exactly one false-skip signal must be recorded for one veto gesture")
+    }
 }
