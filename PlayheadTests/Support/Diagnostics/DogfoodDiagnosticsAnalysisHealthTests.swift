@@ -1179,10 +1179,24 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         // AND B's predicate routes to A. Each case is a single row
         // engineered to satisfy BOTH predicates; the assertion fails
         // loudly if a future reorder swaps the gate.
+        //
+        // R9: where two adjacent gates share the same `RecommendedAction`
+        // (notably `.wait` for healthyTerminalCompletion vs running, and
+        // `.wait` for cachedAndQueued's progress branch), the action
+        // alone cannot distinguish — so the Case also pins the
+        // expected NOTE string. A future swap that reroutes through a
+        // different gate but still happens to return `.wait` would
+        // pass an action-only assertion silently; the note assertion
+        // fails loudly.
         struct Case {
             let name: String
             let row: DogfoodDiagnosticsActivityRow
             let expected: DogfoodDiagnosticsAnalysisHealth.RecommendedAction
+            /// When non-nil, also assert the recommended_action_note
+            /// matches this string verbatim. Used for adjacent pairs
+            /// whose two gates emit the same action with different
+            /// notes — see header comment.
+            let expectedNote: String?
         }
         let cases: [Case] = [
             // failure outranks contradiction (terminal failure +
@@ -1190,6 +1204,16 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
             // wins; isTerminalCompletionState and
             // isTerminalFailureState are disjoint, but the ordering
             // is still a load-bearing contract — pin it.)
+            //
+            // R9 audit: `analysisState` is single-valued, and each
+            // string is either a terminal-failure name or a terminal-
+            // completion name (or neither), never both. So the failure
+            // and contradiction predicates cannot fire on the same
+            // row by construction — this Case is a "branch-order
+            // sanity pin" rather than a true dual-trigger row. The
+            // mutual exclusion is enforced in code by
+            // `isTerminalFailureState`/`isTerminalCompletionState`
+            // having disjoint case lists.
             Case(
                 name: "failure-vs-contradiction",
                 row: makeActivityRow(
@@ -1203,7 +1227,8 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                         featureCoverageEndSec: 100
                     )
                 ),
-                expected: .retry
+                expected: .retry,
+                expectedNote: nil
             ),
             // contradiction outranks healthyTerminalCompletion
             // (a `completeFull` row with low coverage IS a
@@ -1220,11 +1245,17 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                         featureCoverageEndSec: 100
                     )
                 ),
-                expected: .fileBug
+                expected: .fileBug,
+                expectedNote: nil
             ),
             // healthyTerminal outranks running (a row in a healthy
             // terminal-completion state should never be told
             // "currently running" even if isRunning leaks true).
+            //
+            // R9 fix: BOTH gates emit `.wait`, so the action alone
+            // cannot distinguish a swap of the gate order. Pin the
+            // note ("healthy_terminal_completion" vs "currently_running")
+            // so an order swap fails loudly.
             Case(
                 name: "healthyTerminal-vs-running",
                 row: makeActivityRow(
@@ -1238,7 +1269,8 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                         featureCoverageEndSec: 4000
                     )
                 ),
-                expected: .wait
+                expected: .wait,
+                expectedNote: "healthy_terminal_completion"
             ),
             // running outranks noCachedAudio.
             Case(
@@ -1255,7 +1287,8 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                         analysisPercent: "--%"
                     )
                 ),
-                expected: .wait
+                expected: .wait,
+                expectedNote: "currently_running"
             ),
             // running outranks staleLease.
             Case(
@@ -1268,7 +1301,8 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                     latestSession: makeSession(updatedAt: 200.0),
                     latestJob: makeJob(leasePresent: true, leaseExpiresAt: 100.0)
                 ),
-                expected: .wait
+                expected: .wait,
+                expectedNote: "currently_running"
             ),
             // running outranks staleWatermark (R7).
             Case(
@@ -1284,7 +1318,8 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                         fastTranscriptWatermarkSec: 90
                     )
                 ),
-                expected: .wait
+                expected: .wait,
+                expectedNote: "currently_running"
             ),
             // noCachedAudio outranks staleLease.
             Case(
@@ -1302,7 +1337,8 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                     latestSession: makeSession(updatedAt: 200.0),
                     latestJob: makeJob(leasePresent: true, leaseExpiresAt: 100.0)
                 ),
-                expected: .openApp
+                expected: .openApp,
+                expectedNote: nil
             ),
             // staleLease outranks staleWatermark.
             Case(
@@ -1319,7 +1355,8 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                     latestSession: makeSession(updatedAt: 200.0),
                     latestJob: makeJob(leasePresent: true, leaseExpiresAt: 100.0)
                 ),
-                expected: .clearStaleLease
+                expected: .clearStaleLease,
+                expectedNote: nil
             ),
             // staleWatermark outranks cachedAndQueued. The cached+queued
             // gate also runs on this shape; staleWatermark wins.
@@ -1338,10 +1375,19 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                         fastTranscriptWatermarkSec: 90
                     )
                 ),
-                expected: .plugInOrWait
+                expected: .plugInOrWait,
+                expectedNote: nil
             ),
             // cachedAndQueued outranks unknown (a queued cached row
             // with progress should not fall through to .unknown).
+            //
+            // R9 fix: cachedAndQueued's progress branch emits `.wait`
+            // with note "queued_with_progress"; if the gate were
+            // somehow reordered or removed and the row fell through
+            // to `.unknown`, the action would change to `.unknown`
+            // and the note would become nil — both distinguishable.
+            // Pin the note so a future drift in cachedAndQueued's
+            // emit shape is also caught here.
             Case(
                 name: "cachedAndQueued-vs-unknown",
                 row: makeActivityRow(
@@ -1355,7 +1401,8 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                         analysisPercent: "20%"
                     )
                 ),
-                expected: .wait
+                expected: .wait,
+                expectedNote: "queued_with_progress"
             )
         ]
         for testCase in cases {
@@ -1374,6 +1421,158 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
             #expect(
                 asset.recommendedAction == testCase.expected,
                 "wrong action for \(testCase.name): got \(asset.recommendedAction.rawValue), expected \(testCase.expected.rawValue)"
+            )
+            if let expectedNote = testCase.expectedNote {
+                #expect(
+                    asset.recommendedActionNote == expectedNote,
+                    "wrong note for \(testCase.name): got \(asset.recommendedActionNote ?? "<nil>"), expected \(expectedNote)"
+                )
+            }
+        }
+    }
+
+    @Test("unknown is reachable for a recognizable but non-actionable row shape")
+    func unknownIsReachableForResidualRowShape() {
+        // R9 (task #2): the catch-all `.unknown` branch is the
+        // last resort in `recommendation(for:)`. Earlier rounds
+        // (R4..R8) added gates that route what used to fall through
+        // — risking an unreachable `.unknown` branch in practice.
+        // Pin a row shape that genuinely lands in `.unknown` so a
+        // future reorder cannot accidentally make the branch dead
+        // without us noticing (an unreachable branch is a code
+        // smell that should be removed, not silently kept around).
+        //
+        // The row that hits `.unknown` is one that:
+        //   * is NOT terminal failure (analysisState="paused")
+        //   * is NOT terminal contradiction (paused is not a
+        //     completion state, so terminalCompletionContradiction
+        //     returns nil)
+        //   * is NOT terminal completion (paused is not a
+        //     completion state)
+        //   * is NOT running (isRunning=false)
+        //   * does NOT match noCachedAudio (cachedAudioPresent=true)
+        //   * does NOT match staleLease (no lease present)
+        //   * does NOT match staleWatermark (no drift > tolerance)
+        //   * does NOT match cachedAndQueued (disposition="paused",
+        //     not "queued")
+        // → falls through to `.unknown`.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-unknown",
+                disposition: "paused",
+                reason: "user_paused",
+                analysisState: "paused",
+                isRunning: false,
+                cachedAudioPresent: true,
+                pipeline: makePipeline(
+                    downloadPercent: "100%",
+                    transcriptPercent: "20%",
+                    analysisPercent: "10%"
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let asset = try! #require(health.assets.first)
+        #expect(asset.recommendedAction == .unknown)
+        #expect(asset.recommendedActionNote == nil)
+    }
+
+    @Test("running rows route to wait whether progress evidence is present or absent")
+    func runningRowRoutingIsIndependentOfProgressEvidence() {
+        // R9 (task #1): R8 placed the running gate ahead of every
+        // less-specific persistence-artifact gate (noCachedAudio,
+        // staleLease, staleWatermark). The R9 brief asks whether a
+        // row with `isRunning == true` AND no progress evidence at
+        // all (e.g. all percents "--%") should still recommend
+        // `.wait` — or whether the combination indicates a real
+        // problem (e.g. the audio file evicted while a job runs)
+        // that should bypass `.wait` for `.clearStaleLease` /
+        // `.fileBug` / similar.
+        //
+        // Decision: BOTH shapes route to `.wait "currently_running"`.
+        // The reasoning:
+        //   * `isRunning` is computed at snapshot time off
+        //     `runningEpisodeId` from the AnalysisStore — it is a
+        //     direct truth ("a job is processing this episode RIGHT
+        //     NOW"), not a persisted residue, so a stale "pseudo-
+        //     running" flag is not a thing.
+        //   * If the runner is mid-flight, the user's actionable
+        //     answer is "we're working on it, stand by" — even if
+        //     the snapshot's other fields look incoherent, those are
+        //     transient point-in-time observations the runner is in
+        //     the middle of resolving.
+        //   * The corresponding staleness flags
+        //     (`staleJobLease`, `staleFastTranscriptWatermark`,
+        //     `unknownProgressWithoutPause`) STILL surface for
+        //     support visibility; only the per-asset RECOMMENDATION
+        //     collapses to `.wait`.
+        //
+        // This test pins both ends of the spectrum: a running row
+        // with healthy progress, and a running row with no progress
+        // evidence at all. A future regression that splits the
+        // running gate into "running with evidence" vs "running
+        // without evidence" needs to update this test deliberately.
+        struct Shape {
+            let name: String
+            let row: DogfoodDiagnosticsActivityRow
+        }
+        let shapes: [Shape] = [
+            Shape(
+                name: "running_with_progress_evidence",
+                row: makeActivityRow(
+                    hash: "h-run-progress",
+                    analysisState: "backfill",
+                    isRunning: true,
+                    cachedAudioPresent: true,
+                    pipeline: makePipeline(
+                        downloadPercent: "100%",
+                        transcriptPercent: "60%",
+                        analysisPercent: "40%",
+                        episodeDurationSec: 3000,
+                        transcriptCoveredSec: 1800,
+                        fastTranscriptWatermarkSec: 1800
+                    )
+                )
+            ),
+            Shape(
+                name: "running_without_progress_evidence",
+                row: makeActivityRow(
+                    hash: "h-run-no-progress",
+                    analysisState: "backfill",
+                    isRunning: true,
+                    cachedAudioPresent: true,
+                    pipeline: makePipeline(
+                        downloadPercent: "--%",
+                        transcriptPercent: "--%",
+                        analysisPercent: "--%"
+                    )
+                )
+            )
+        ]
+        for shape in shapes {
+            let snapshot = DogfoodDiagnosticsActivitySnapshot(
+                generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                rows: [shape.row]
+            )
+            let health = DogfoodDiagnosticsAnalysisHealth.build(
+                from: snapshot,
+                generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+            )
+            let asset = try! #require(
+                health.assets.first,
+                "missing asset for \(shape.name)"
+            )
+            #expect(
+                asset.recommendedAction == .wait,
+                "wrong action for \(shape.name): got \(asset.recommendedAction.rawValue)"
+            )
+            #expect(
+                asset.recommendedActionNote == "currently_running",
+                "wrong note for \(shape.name)"
             )
         }
     }
