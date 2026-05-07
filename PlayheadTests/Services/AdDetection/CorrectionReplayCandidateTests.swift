@@ -473,6 +473,125 @@ struct CorrectionReplayCandidateTests {
                     "fresh correction-replay row id must not be in retiredWindowIDs: \(result.retiredWindowIDs)")
         }
     }
+
+    // MARK: - 7. R4: previously-persisted replay row not retired on a SUBSEQUENT run
+
+    /// playhead-hygc.1.8 R4: regression for the same-bug-shifted-by-one-run
+    /// case that R3 left uncovered.
+    ///
+    /// R3 fixed retirement of FRESHLY-emitted replay rows by subtracting the
+    /// in-flight emission set from `replayCandidateIDs`. But `correction
+    /// ReplayCandidates` short-circuits emission on subsequent runs (the
+    /// existing replay row's span overlaps the new FN range, so no new row is
+    /// produced). With no fresh emissions on run N, `correctionReplay
+    /// WindowIDs` is empty — and `hotPathCandidateIDs` (filtering by
+    /// `decisionState=.candidate, detectorVersion=current`) STILL includes
+    /// the previously-persisted replay row's ID. Without an algorithmic
+    /// match incoming, the row goes into `retiredWindowIDs` and is DELETED
+    /// at the end of run N. Net effect: replay row survives run 1, gets
+    /// deleted on run 2 — the same-run bug shifted by one run.
+    ///
+    /// Fix landed in R4: `hotPathCandidateIDs` filters out
+    /// `boundaryState == "correctionReplay"` at the source. The retirement
+    /// path is for stale algorithmic candidates only; replay rows are
+    /// retired exclusively by the user's veto via
+    /// `SkipOrchestrator.revertByTimeRange` (which sets
+    /// `decisionState = .reverted`, dropping them out of the candidate
+    /// filter naturally).
+    ///
+    /// The R0 idempotency test (`correctionReplayIsIdempotentAcrossRuns`)
+    /// passed for the wrong reason — it ran with empty chunks, which takes
+    /// the `chunks.isEmpty` early-return branch and never even reaches the
+    /// retirement logic. This test exercises the multi-run path with
+    /// chunks present so the bug is reachable.
+    @Test("correction-replay row survives a SECOND retirement-enabled hot-path run")
+    func correctionReplayRowSurvivesSecondRunRetirement() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-multi-run"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        try await appendFalseNegativeCorrection(
+            store: store,
+            assetId: assetId,
+            startTime: 600,
+            endTime: 680
+        )
+
+        // Chunks whose envelope (500..700) overlaps the FN range so that
+        // `replayCandidateIDs` would include the persisted replay row on
+        // run 2 (this is the precondition for the R4 bug to fire).
+        let chunks: [TranscriptChunk] = [
+            TranscriptChunk(
+                id: "chunk-1",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-1",
+                chunkIndex: 0,
+                startTime: 500,
+                endTime: 700,
+                text: "the speaker is talking about something benign",
+                normalizedText: "the speaker is talking about something benign",
+                pass: "final",
+                modelVersion: "speech-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil,
+                weakAnchorMetadata: nil
+            )
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+
+        // Run 1: emits replay row, R3-1 fix protects it from same-run retirement.
+        let result1 = try await service.runHotPathResult(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            retireUnmatchedReplayCandidates: true
+        )
+        let afterRun1 = try await store.fetchAdWindows(assetId: assetId)
+        let replayAfterRun1 = afterRun1.filter { $0.boundaryState == "correctionReplay" }
+        #expect(replayAfterRun1.count == 1,
+                "run 1 must persist exactly one replay row; got \(replayAfterRun1.count)")
+        let replayId = replayAfterRun1.first?.id ?? ""
+        #expect(!result1.retiredWindowIDs.contains(replayId),
+                "run 1 must not retire its own fresh replay row")
+
+        // Run 2: NO fresh emission (correctionReplayCandidates short-
+        // circuits because the row already exists). Without R4's fix,
+        // `replayCandidateIDs` would include the persisted row's ID and
+        // it would be retired. With R4's fix, the source filter excludes
+        // correctionReplay rows from `hotPathCandidateIDs` so the
+        // retirement set never contains them.
+        let result2 = try await service.runHotPathResult(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            retireUnmatchedReplayCandidates: true
+        )
+        let afterRun2 = try await store.fetchAdWindows(assetId: assetId)
+        let replayAfterRun2 = afterRun2.filter { $0.boundaryState == "correctionReplay" }
+        #expect(replayAfterRun2.count == 1,
+                "run 2 must NOT retire the previously-persisted replay row; got \(replayAfterRun2.count)")
+        #expect(replayAfterRun2.first?.id == replayId,
+                "row identity must be stable across runs; got id \(replayAfterRun2.first?.id ?? "<missing>") vs \(replayId)")
+        #expect(!result2.retiredWindowIDs.contains(replayId),
+                "run 2's retiredWindowIDs must not contain the replay row id; got \(result2.retiredWindowIDs)")
+
+        // And a third run for good measure — population is bounded.
+        _ = try await service.runHotPathResult(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            retireUnmatchedReplayCandidates: true
+        )
+        let afterRun3 = try await store.fetchAdWindows(assetId: assetId)
+        let replayAfterRun3 = afterRun3.filter { $0.boundaryState == "correctionReplay" }
+        #expect(replayAfterRun3.count == 1,
+                "run 3 must keep population bounded at one replay row; got \(replayAfterRun3.count)")
+    }
 }
 
 // MARK: - Test doubles

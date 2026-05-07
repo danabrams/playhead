@@ -1302,19 +1302,20 @@ actor AdDetectionService {
             )
         }
 
-        // playhead-hygc.1.8 (R3): exclude freshly-emitted correction-replay
-        // row IDs from `replayCandidateIDs`. The replay rows are persisted
-        // moments earlier in this same `runHotPathResult` call with
-        // `decisionState = .candidate` and `detectorVersion =
-        // config.detectorVersion`, so `hotPathCandidateIDs` (which filters
-        // by exactly that pair) would otherwise include them in the
-        // retirement set. When `retireUnmatchedReplayCandidates == true`
-        // (the live AnalysisCoordinator caller) AND the chunks envelope
-        // overlaps a freshly-emitted replay row, the row would be retired
-        // (DELETED) at the end of the same run that just inserted it —
-        // breaking idempotency, and triggering a `retireAdWindows` push to
-        // the orchestrator that would yank the suggest-tier banner. We
-        // intentionally insert these rows above any retirement window.
+        // playhead-hygc.1.8: correction-replay rows must NEVER be retired
+        // by the algorithmic-absence path. R3 found that fresh replay rows
+        // emitted in the same run were retired before the run finished;
+        // R4 found the same bug shifted by one run — a previously-emitted
+        // replay row, present in the DB on a subsequent run, would be
+        // included in `replayCandidateIDs` because `hotPathCandidateIDs`
+        // filters by `(decisionState=.candidate, detectorVersion=current)`
+        // — exactly the stamp on a replay row. The single authoritative
+        // fix lives in `hotPathCandidateIDs`, which now excludes any row
+        // whose `boundaryState == correctionReplay`. The local
+        // `subtracting` below is retained as a belt-and-suspenders defense
+        // against future regressions in that filter (e.g. a replay row
+        // mid-flight whose persisted boundaryState is somehow stale) — it
+        // is a no-op when the source filter is doing its job.
         let correctionReplayWindowIDs: Set<String> =
             Set(correctionReplayWindows.map(\.id))
         let replayCandidateIDs: Set<String>
@@ -3688,7 +3689,24 @@ actor AdDetectionService {
         return Set(
             windows
                 .filter { window in
-                    window.endTime > replayEnvelope.lowerBound
+                    // playhead-hygc.1.8 (R4): correction-replay rows are
+                    // user-correction-backed shadow windows that the
+                    // algorithmic detector by design does NOT re-emit (the
+                    // overlap check in `correctionReplayCandidates` short-
+                    // circuits whenever an existing AdWindow covers the FN
+                    // span). They therefore can never appear in the new
+                    // `adWindows` set produced by classification, so they
+                    // would always land in `retiredWindowIDs` on a run
+                    // whose chunks envelope overlaps them — which both R3
+                    // (same-run) and R4 (subsequent-run) had to defuse.
+                    // The cleanest invariant: correction-replay rows are
+                    // never retired by the algorithmic-absence path. They
+                    // are retired only by an explicit user veto via
+                    // `SkipOrchestrator.revertByTimeRange`, which flips
+                    // `decisionState` to `.reverted` (filtered out below
+                    // by `currentHotPathCandidateWindows`).
+                    window.boundaryState != Self.correctionReplayBoundaryState
+                        && window.endTime > replayEnvelope.lowerBound
                         && window.startTime < replayEnvelope.upperBound
                 }
                 .map(\.id)
