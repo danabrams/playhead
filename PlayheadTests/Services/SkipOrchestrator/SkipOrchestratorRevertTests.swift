@@ -416,4 +416,139 @@ struct SkipOrchestratorRevertTests {
             Issue.record("Expected exactTimeSpan scope from the revert, got \(corrections.first?.scope ?? "<none>")")
         }
     }
+
+    // MARK: - playhead-hygc.1.8: revertByTimeRange must also handle suggest-tier (markOnly) windows
+
+    @Test("revertByTimeRange reverts overlapping markOnly suggest-tier windows and persists decisionState")
+    func revertByTimeRangeRevertsSuggestTierMarkOnlyWindow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // Construct a markOnly AdWindow — the suggest-tier surface used by
+        // boundary-singleton recall, correction-replay, and any algorithmic
+        // path the precision gate demoted from auto-skip.
+        let markOnly = AdWindow(
+            id: "ad-suggest-1",
+            analysisAssetId: "asset-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.55,
+            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "test-1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: 60,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+        )
+        try await store.insertAdWindow(markOnly)
+        await orchestrator.receiveAdWindows([markOnly])
+
+        // Sanity: the window is in the suggest tier, not the auto-skip dict.
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-1"),
+                "markOnly AdWindow must enter the suggest dictionary")
+
+        // User vetoes via the time-range correction path.
+        await orchestrator.revertByTimeRange(start: 70, end: 110, podcastId: "podcast-1")
+
+        // The suggest-tier entry must be cleared.
+        #expect(!(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-1")),
+                "vetoed markOnly window must be removed from suggestWindows")
+
+        // The persisted decisionState must reflect the user's veto so a
+        // subsequent run / replay does not resurface the entry.
+        let persisted = try await store.fetchAdWindows(assetId: "asset-1")
+        let row = persisted.first { $0.id == "ad-suggest-1" }
+        #expect(row?.decisionState == AdDecisionState.reverted.rawValue,
+                "persisted markOnly window must be in .reverted state, got \(row?.decisionState ?? "<missing>")")
+
+        // And exactly one CorrectionEvent was persisted (one gesture, one event).
+        var corrections: [CorrectionEvent] = []
+        for _ in 0..<20 {
+            corrections = try await correctionStore.activeCorrections(for: "asset-1")
+            if !corrections.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(corrections.count == 1,
+                "one veto gesture against a markOnly window must produce exactly one CorrectionEvent")
+    }
+
+    @Test("revertByTimeRange does not increase auto-skip count when reverting a markOnly window")
+    func revertByTimeRangeMarkOnlyDoesNotPromoteToAutoSkip() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { ranges in
+            pushedCues = ranges
+        }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let markOnly = AdWindow(
+            id: "ad-suggest-noskip",
+            analysisAssetId: "asset-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.55,
+            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "test-1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: 60,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+        )
+        try await store.insertAdWindow(markOnly)
+        await orchestrator.receiveAdWindows([markOnly])
+
+        // markOnly must not produce a skip cue before the revert.
+        #expect(pushedCues.isEmpty,
+                "markOnly window must not emit auto-skip cues; got \(pushedCues.count)")
+
+        await orchestrator.revertByTimeRange(start: 70, end: 110, podcastId: "podcast-1")
+
+        // After revert: still no skip cues. The veto must NEVER promote to auto-skip.
+        #expect(pushedCues.isEmpty,
+                "veto of markOnly window must not promote to auto-skip; got \(pushedCues.count) cues")
+    }
 }

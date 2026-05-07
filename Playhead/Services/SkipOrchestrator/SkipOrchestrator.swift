@@ -1009,6 +1009,16 @@ actor SkipOrchestrator {
     /// Revert all managed windows overlapping the given time range.
     /// Used by the "Not an ad" banner and "This isn't an ad" popover paths,
     /// which identify the ad by its time span rather than a specific windowId.
+    ///
+    /// playhead-hygc.1.8: also reverts overlapping `suggestWindows` (markOnly
+    /// AdWindows surfaced as suggest-tier banners). Prior to this change
+    /// `revertByTimeRange` only iterated `windows` (the auto-skip eligible
+    /// dictionary), leaving algorithmic markOnly entries that the user has
+    /// explicitly said weren't ads still visible on the timeline / available
+    /// to be promoted via `acceptSuggestedSkip`. The May 6 dogfood eval found
+    /// 8 of 12 falsePositive corrections were against markOnly windows — the
+    /// suggest tier is the user-facing surface for borderline ads, so it must
+    /// honor user vetoes the same way the auto-skip surface does.
     func revertByTimeRange(start: Double, end: Double, podcastId: String?) async {
         var revertedAny = false
         // playhead-zskc: one user gesture produces one correction event — not
@@ -1051,6 +1061,43 @@ actor SkipOrchestrator {
                 )
             } catch {
                 logger.warning("Failed to persist revert for \(id): \(error.localizedDescription)")
+            }
+        }
+
+        // playhead-hygc.1.8: mirror the loop above for markOnly suggest-tier
+        // windows. These never enter `windows` (suggest tier is intentionally
+        // isolated from the auto-skip evaluation loop) so without this pass
+        // the user's veto would bounce off the mark-only surface entirely.
+        // We remove them outright rather than mark `decisionState = .reverted`
+        // in-memory because suggestWindows is a UI-surface dictionary, not a
+        // hysteresis state machine — once vetoed the suggest banner must
+        // disappear and never re-emit. The persisted AdWindow row gets
+        // `decisionState = .reverted` so a re-launch / replay does not
+        // resurface the entry.
+        for (id, suggested) in suggestWindows {
+            // Same overlap predicate as the windows loop.
+            guard suggested.startTime < end, suggested.endTime > start else { continue }
+
+            suggestWindows.removeValue(forKey: id)
+            // Also clear from the bannered set so a future ingest with the
+            // same id doesn't immediately re-emit the suggest banner.
+            suggestBanneredWindowIds.remove(id)
+            revertedAny = true
+            if assetIdForVeto == nil {
+                assetIdForVeto = suggested.analysisAssetId
+            }
+
+            logger.info(
+                "Revert (suggest tier): id=\(id, privacy: .public) range=[\(suggested.startTime), \(suggested.endTime)]"
+            )
+
+            do {
+                try await store.updateAdWindowDecision(
+                    id: id,
+                    decisionState: SkipDecisionState.reverted.rawValue
+                )
+            } catch {
+                logger.warning("Failed to persist suggest-tier revert for \(id): \(error.localizedDescription)")
             }
         }
 
@@ -1344,6 +1391,14 @@ actor SkipOrchestrator {
 
     func activeWindowIDs() -> Set<String> {
         Set(windows.keys)
+    }
+
+    /// playhead-hygc.1.8: test-only accessor to inspect the suggest-tier
+    /// (markOnly) dictionary. Used by revert-tier coverage tests to assert
+    /// that a user veto via `revertByTimeRange` actually clears suggest
+    /// entries — production callers must not couple to it.
+    func activeSuggestWindowIDs() -> Set<String> {
+        Set(suggestWindows.keys)
     }
 
     /// Snapshot of window IDs for which `emitBannerItem` actually
