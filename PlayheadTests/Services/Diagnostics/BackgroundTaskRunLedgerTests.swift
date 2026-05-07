@@ -352,6 +352,133 @@ struct BackgroundTaskRunLedgerTests {
         #expect(latest?.taskInstanceID == "instance-X")
     }
 
+    // MARK: - Orphan running rows (process-restart recovery)
+
+    @Test("Orphan `.running` row from a prior process survives close/reopen")
+    func orphanRunningRowSurvivesReopen() async throws {
+        // R1 audit-driven coverage: open a fresh DB, write a `.running`
+        // row WITHOUT a finishRun (simulating a process killed mid-
+        // handler), close the store, reopen at the same path, and
+        // verify the orphan row is still queryable as `.running`. This
+        // pins the persistence contract for in-flight rows — the bead
+        // spec calls out "persistence across process restart" but the
+        // pre-R1 test only covered TERMINAL rows.
+        let dir = try makeTempDir(prefix: "BgRunLedgerOrphan")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let firstStore = try AnalysisStore(directory: dir)
+        try await firstStore.migrate()
+        let firstLedger = AnalysisStoreBackgroundTaskRunLedger(store: firstStore)
+
+        let runId = await firstLedger.startRun(
+            entryPoint: .backfill,
+            taskIdentifier: BackgroundTaskID.backfillProcessing,
+            taskInstanceID: "orphan-instance",
+            scenePhase: "background"
+        )
+        // NOTE: deliberately no finishRun. The row stays at .running.
+
+        // Simulate process restart.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let secondStore = try AnalysisStore(directory: dir)
+        try await secondStore.migrate()
+        let secondLedger = AnalysisStoreBackgroundTaskRunLedger(store: secondStore)
+
+        let latest = await secondLedger.fetchLatestRun(for: .backfill)
+        #expect(latest?.runId == runId)
+        #expect(latest?.outcome == .running,
+                "An orphan running row from a prior process must remain visible as .running across reopen")
+        #expect(latest?.finishedAt == nil)
+    }
+
+    @Test("reapOrphansAtLaunch flips `.running` rows to .failed/orphan_at_launch")
+    func reapOrphansAtLaunchSweepsRunningRows() async throws {
+        // Pin the launch-time orphan reaper contract. After a prior
+        // process leaves a .running row behind, the next launch should
+        // call reapOrphansAtLaunch() to flip it to a terminal outcome
+        // so dogfood diagnostics doesn't see stale "in-flight" rows.
+        // Terminal rows (already finished) MUST NOT be touched by the
+        // reaper — only orphan running rows.
+        let store = try await makeTestStore()
+        let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+
+        // Row 1: terminal (admittedWork) — must be left alone.
+        let terminalRunId = await ledger.startRun(
+            entryPoint: .backfill,
+            taskIdentifier: BackgroundTaskID.backfillProcessing,
+            taskInstanceID: nil,
+            scenePhase: nil
+        )
+        await ledger.finishRun(
+            runId: terminalRunId,
+            update: BackgroundTaskRunOutcomeUpdate(
+                outcome: .admittedWork,
+                jobsAdmitted: 4
+            )
+        )
+
+        // Row 2 & 3: orphan running rows from a "prior process".
+        let orphanRunId1 = await ledger.startRun(
+            entryPoint: .backfill,
+            taskIdentifier: BackgroundTaskID.backfillProcessing,
+            taskInstanceID: "orphan-1",
+            scenePhase: "background"
+        )
+        let orphanRunId2 = await ledger.startRun(
+            entryPoint: .preAnalysisRecovery,
+            taskIdentifier: BackgroundTaskID.preAnalysisRecovery,
+            taskInstanceID: "orphan-2",
+            scenePhase: nil
+        )
+
+        // Reap.
+        let reaped = await ledger.reapOrphansAtLaunch()
+        #expect(reaped == 2,
+                "reapOrphansAtLaunch must sweep exactly the two orphan running rows")
+
+        // Terminal row untouched.
+        let terminalAfter = await ledger.fetchRecentRuns(limit: 10)
+            .first { $0.runId == terminalRunId }
+        #expect(terminalAfter?.outcome == .admittedWork)
+        #expect(terminalAfter?.jobsAdmitted == 4)
+        #expect(terminalAfter?.lastErrorCode == nil)
+
+        // Orphan rows flipped to .failed with a stable error code.
+        let orphan1After = await ledger.fetchRecentRuns(limit: 10)
+            .first { $0.runId == orphanRunId1 }
+        #expect(orphan1After?.outcome == .failed)
+        #expect(orphan1After?.lastErrorCode == "orphan_at_launch")
+        #expect(orphan1After?.finishedAt != nil)
+
+        let orphan2After = await ledger.fetchRecentRuns(limit: 10)
+            .first { $0.runId == orphanRunId2 }
+        #expect(orphan2After?.outcome == .failed)
+        #expect(orphan2After?.lastErrorCode == "orphan_at_launch")
+    }
+
+    @Test("reapOrphansAtLaunch is idempotent on a clean store")
+    func reapOrphansAtLaunchIsIdempotentNoOp() async throws {
+        // No orphan rows → reaper returns 0 and does nothing. Important
+        // because reapOrphansAtLaunch is called on every cold launch.
+        let store = try await makeTestStore()
+        let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+
+        let firstReap = await ledger.reapOrphansAtLaunch()
+        #expect(firstReap == 0)
+
+        // Second call still 0 — no rows changed.
+        let secondReap = await ledger.reapOrphansAtLaunch()
+        #expect(secondReap == 0)
+    }
+
+    @Test("reapOrphansAtLaunch on NoOp ledger returns 0 with no side effects")
+    func noOpLedgerReapOrphansReturnsZero() async {
+        let ledger = NoOpBackgroundTaskRunLedger()
+        let count = await ledger.reapOrphansAtLaunch()
+        #expect(count == 0)
+    }
+
     // MARK: - Diagnostic queries
 
     @Test("fetchRecentRuns orders by startedAt DESC and respects the limit")

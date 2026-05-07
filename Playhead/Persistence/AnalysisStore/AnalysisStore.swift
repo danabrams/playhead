@@ -3718,6 +3718,53 @@ actor AnalysisStore {
         )
     }
 
+    /// playhead-hygc.1.4 (R1 fix): reap orphan `running` ledger rows left
+    /// behind by a prior process that crashed or was OS-killed mid-run.
+    /// Called once at app launch from `PlayheadRuntime` after `migrate()`
+    /// succeeds, BEFORE any new BG-task handlers run. Sibling reaper to
+    /// `resetStrandedBackfillJobs` / `resetStrandedFinalPassJobs` (see
+    /// those for the same crash-recovery rationale).
+    ///
+    /// Why this matters for dogfood diagnostics:
+    ///   Without a reaper, a process killed by iOS mid-handler leaves a
+    ///   `.running` row in `background_task_runs`. The next launch's
+    ///   `fetchLatestRun(...)` would surface that orphan as if a BG task
+    ///   were currently in flight, defeating the whole point of the
+    ///   ledger (classifying overnight runs). The reaper flips orphan
+    ///   rows to `.failed` with `lastErrorCode = "orphan_at_launch"` so
+    ///   diagnostics distinguishes "this row was alive when we shut down"
+    ///   from "this row is alive RIGHT NOW".
+    ///
+    /// Safety invariant:
+    ///   This must run only at process boundaries, never concurrently
+    ///   with a live BG handler. It is safe to call exactly once on
+    ///   `PlayheadRuntime` startup because (a) the actor's serial
+    ///   executor isolates this update from any later `insertBackground…`
+    ///   call inside the same process, and (b) iOS guarantees the prior
+    ///   process is dead by the time the new one wakes — there is no
+    ///   cross-process writer to race.
+    ///
+    /// `finishedAt` is set to "now" so the row participates in
+    /// `fetchRecentRuns` ordering on a stable axis. The `expiration`
+    /// flag is left at its existing value (default 0 from insert) since
+    /// we genuinely do not know whether the prior process exited via
+    /// expiration callback or hard kill.
+    @discardableResult
+    func reapOrphanBackgroundTaskRuns() throws -> Int {
+        let sql = """
+            UPDATE background_task_runs
+            SET outcome = 'failed',
+                finishedAt = ?,
+                lastErrorCode = 'orphan_at_launch'
+            WHERE outcome = 'running'
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
+    }
+
     // MARK: - Repeated-ad cache (playhead-43ed, schema v21)
     //
     // These methods are the persistence-layer surface used by the

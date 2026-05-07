@@ -338,6 +338,19 @@ protocol BackgroundTaskRunLedger: Sendable {
     /// Diagnostic surface: latest run scoped to a specific asset.
     /// Returns nil when no run has ever recorded the asset id.
     func fetchLatestRun(forAssetId assetId: String) async -> BackgroundTaskRunRecord?
+
+    /// playhead-hygc.1.4 (R1 fix): one-shot launch-time reaper that
+    /// flips orphan `.running` rows (left over from a prior process
+    /// that crashed or was OS-killed) to `.failed` with
+    /// `lastErrorCode = "orphan_at_launch"`. Returns the number of rows
+    /// reaped. Must be called once at app launch BEFORE any new BG-task
+    /// handlers run. Sibling to the existing
+    /// `resetStrandedBackfillJobs` / `resetStrandedFinalPassJobs`
+    /// crash-recovery reapers — without this, dogfood diagnostics
+    /// cannot distinguish "this row was alive when we shut down" from
+    /// "this row is alive RIGHT NOW".
+    @discardableResult
+    func reapOrphansAtLaunch() async -> Int
 }
 
 // MARK: - NoOpBackgroundTaskRunLedger
@@ -367,6 +380,9 @@ struct NoOpBackgroundTaskRunLedger: BackgroundTaskRunLedger {
     func fetchRecentRuns(limit: Int) async -> [BackgroundTaskRunRecord] { [] }
 
     func fetchLatestRun(forAssetId assetId: String) async -> BackgroundTaskRunRecord? { nil }
+
+    @discardableResult
+    func reapOrphansAtLaunch() async -> Int { 0 }
 }
 
 // MARK: - AnalysisStoreBackgroundTaskRunLedger
@@ -471,6 +487,24 @@ struct AnalysisStoreBackgroundTaskRunLedger: BackgroundTaskRunLedger {
                 "fetchLatestRun(assetId:) failed: \(error.localizedDescription, privacy: .public)"
             )
             return nil
+        }
+    }
+
+    @discardableResult
+    func reapOrphansAtLaunch() async -> Int {
+        do {
+            let count = try await store.reapOrphanBackgroundTaskRuns()
+            if count > 0 {
+                logger.info(
+                    "Reaped \(count, privacy: .public) orphan running ledger row(s) at launch"
+                )
+            }
+            return count
+        } catch {
+            logger.warning(
+                "reapOrphansAtLaunch failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return 0
         }
     }
 }

@@ -53,6 +53,13 @@ final class PlayheadRuntime {
     /// `BackgroundFeedRefreshService` it constructs separately. Test
     /// hosts and preview runtimes get a no-op instance.
     let bgTaskTelemetryLogger: any BGTaskTelemetryLogging
+    /// playhead-hygc.1.4: durable per-run BG-task outcome ledger.
+    /// Held here so the deferred-startup Task can fire the orphan
+    /// reaper (`reapOrphansAtLaunch()`) once the AnalysisStore has
+    /// migrated — that flips any `running` rows left behind by a
+    /// crashed prior process to `failed/orphan_at_launch` so dogfood
+    /// diagnostics can distinguish stale rows from live ones.
+    let backgroundTaskRunLedger: any BackgroundTaskRunLedger
     let downloadManager: DownloadManager
     let analysisJobRunner: AnalysisJobRunner
     let analysisWorkScheduler: AnalysisWorkScheduler
@@ -1015,6 +1022,7 @@ final class PlayheadRuntime {
         // deferred / expired / failed / no-op) without raw JSONL grep.
         let runLedger: any BackgroundTaskRunLedger =
             AnalysisStoreBackgroundTaskRunLedger(store: analysisStore)
+        self.backgroundTaskRunLedger = runLedger
         self.backgroundProcessingService = BackgroundProcessingService(
             coordinator: analysisCoordinator,
             capabilitiesService: capabilitiesService,
@@ -1472,6 +1480,19 @@ final class PlayheadRuntime {
                     return  // Don't start the pipeline if tables don't exist
                 }
             }
+
+            // playhead-hygc.1.4 (R1 fix): reap orphan `.running` ledger
+            // rows left behind by a prior process that was killed
+            // mid-handler. iOS guarantees the prior process is dead by
+            // the time we wake here, so any row still at outcome=running
+            // is unambiguously stale and would otherwise pollute dogfood
+            // diagnostics' "what was the last BG task outcome" query.
+            // Sibling to the existing
+            // `AnalysisJobReconciler.resetStrandedBackfillJobs` sweep —
+            // see `AnalysisStore.reapOrphanBackgroundTaskRuns` for
+            // rationale. Best-effort: failure here just leaves diagnostics
+            // less precise for one launch, the reaper retries on the next.
+            await backgroundTaskRunLedger.reapOrphansAtLaunch()
 
             // Wake any UI that hit AnalysisStore before isOpen flipped true.
             AnalysisWorkScheduler.postActivityRefreshNotification()
