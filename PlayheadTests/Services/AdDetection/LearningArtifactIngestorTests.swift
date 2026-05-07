@@ -833,4 +833,85 @@ struct LearningArtifactIngestorTests {
         #expect(thirdInsert == true,
             "distinct identity must report `true` even when other rows exist for the same asset")
     }
+
+    /// playhead-hygc.1.7 R4 audit #5: pin the fourth branch of the
+    /// `appendCorrectionEvent` return contract.
+    ///
+    /// `INSERT OR IGNORE` plus a row-level PRIMARY KEY (`id`) means a
+    /// caller that re-uses a row id but with a DIFFERENT semantic
+    /// identity hits the OR-IGNORE arm — no new row is added, no audit
+    /// bump fires, the database state is unchanged. The pre-R4 logic
+    /// (`return !alreadyPresent`) collapsed this case into "fresh
+    /// insert" because the probe correctly reported "no row for this
+    /// new identity"; the bool would then drive a sponsor side effect
+    /// for a write that never landed. R4 fixes this by `AND`-ing the
+    /// probe result with `sqlite3_changes(db) > 0`, so the durable
+    /// "this call mutated the row set" signal must hold for the
+    /// function to claim `true`.
+    ///
+    /// Real callers (UserCorrectionStore, LearningArtifactIngestor)
+    /// always mint fresh UUIDs so this branch is astronomically rare,
+    /// but the contract is now correct in all four states. Pinned
+    /// directly because the higher-level ingest tests can't reach this
+    /// branch through their own factories.
+    @Test("appendCorrectionEvent reports `false` when INSERT OR IGNORE skips due to id-PK collision (R4 contract fix)")
+    func appendCorrectionEventReturnsFalseOnIdCollisionWithDifferentIdentity() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        let sharedId = "shared-correction-id-\(UUID().uuidString)"
+
+        // First call: a brand-new id with identity A. Real INSERT, returns true.
+        let scopeA = CorrectionScope.exactTimeSpan(
+            assetId: assetId,
+            startTime: 100,
+            endTime: 110
+        )
+        let eventA = CorrectionEvent(
+            id: sharedId,
+            analysisAssetId: assetId,
+            scope: scopeA.serialized,
+            createdAt: 1_700_000_000,
+            source: .manualVeto,
+            podcastId: podcastId,
+            correctionType: .falsePositive
+        )
+        let firstResult = try await store.appendCorrectionEvent(eventA)
+        #expect(firstResult == true,
+            "first append (fresh row) must report `true`")
+
+        // Second call: SAME row id, but a DIFFERENT semantic identity
+        // (different time bucket → different normalizedScopeKey). The
+        // identity probe will report "no row at this identity"; the
+        // ON CONFLICT clause won't fire (no identity match); INSERT
+        // OR IGNORE will skip due to the PK collision; no row added.
+        // Pre-R4 behavior: returned `true`, falsely claiming a fresh
+        // insert. Post-R4: returns `false` because `sqlite3_changes`
+        // reports zero changes.
+        let scopeB = CorrectionScope.exactTimeSpan(
+            assetId: assetId,
+            startTime: 500,
+            endTime: 510
+        )
+        let eventB = CorrectionEvent(
+            id: sharedId,                  // intentional: re-use the same id
+            analysisAssetId: assetId,
+            scope: scopeB.serialized,
+            createdAt: 1_700_000_500,
+            source: .manualVeto,
+            podcastId: podcastId,
+            correctionType: .falsePositive
+        )
+        let secondResult = try await store.appendCorrectionEvent(eventB)
+        #expect(secondResult == false,
+            "INSERT OR IGNORE that skipped due to id-PK collision must report `false` — no row was added")
+
+        // Confirm only one row landed and it carries identity A's scope
+        // (identity B never persisted).
+        let rows = try await store.loadCorrectionEvents(analysisAssetId: assetId)
+        #expect(rows.count == 1,
+            "id-collision-with-different-identity must NOT produce a second row; got \(rows.count)")
+        #expect(rows.first?.scope == scopeA.serialized,
+            "the surviving row must carry identity A's scope (identity B was never inserted)")
+    }
 }
