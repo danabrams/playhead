@@ -34,6 +34,7 @@ fixture's load-bearing surface.
 
 ## Fields retained
 
+- **Top-level metadata** — `schema_version` (currently `1`; bump on incompatible field shape changes), `captured_on` (the `YYYY-MM-DD` capture date — load-bearing for downstream beads that pin to the May 6 baseline), `source_diagnostics_filename` (the diagnostics export filename — purely informational, no path or device identifier).
 - **Activity rows** — `section`, `status.{disposition, reason, hint, playback_readiness}`, `analysis_state`, `is_running`, `queue_position`, `cached_audio_present`, and `pipeline.*` numerics (download/analysis/transcript fractions, percents, watermarks, episode duration) plus the source enums `pipeline.download_source` (e.g. `cached_audio`), `pipeline.analysis_source`, `pipeline.transcript_source`. The `download_source == cached_audio` reading is what proves the wedged state — every row already has the bytes locally, so the work-pump is starved waiting on something else.
 - **Analysis assets** — `analysis_state`, `episode_duration_sec`, `fast_transcript_coverage_end_sec`, `feature_coverage_end_sec`, `final_pass_coverage_end_sec`, `confirmed_ad_coverage_end_sec`, `terminal_reason`.
 - **Transcript chunk maxima** — per-(asset, pass) `MAX(endTime)` and `COUNT(*)`. No transcript text.
@@ -120,7 +121,13 @@ PLAYHEAD_HYGC_XCAPPDATA="/path/to/com.playhead.app .xcappdata" \
 
 The script writes
 `PlayheadTests/Fixtures/Dogfood/2026-05-06/analysis-health.json` (overwriting
-the prior file). Re-run the fixture-loader test suite — if any structural fact
+the prior file). The script also accepts an optional positional `<out_path>`
+argument (`python3 scripts/build-dogfood-fixture-2026-05-06.py /tmp/out.json`)
+which is useful for diff-checking a regen against the committed file before
+overwriting it. Exit codes: `0` on success, `2` when a required raw input is
+missing (preflight failure), `3` when the scrub-audit gate refused to write
+because the serialized fixture contained a forbidden token / UUID / SHA-256
+shape. Re-run the fixture-loader test suite — if any structural fact
 changed, update the corresponding assertion in
 `DogfoodAnalysisHealthFixtureTests.swift` together with this README.
 
