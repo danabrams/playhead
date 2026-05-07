@@ -1,0 +1,1551 @@
+{
+  "activity_snapshot": {
+    "row_count": 22,
+    "rows": [
+      {
+        "analysis_state": "backfill",
+        "cached_audio_present": true,
+        "id": "activity_001",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9997203579418344,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 3432,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 3432.96,
+          "fast_transcript_watermark_sec": 60,
+          "feature_coverage_end_sec": 3432,
+          "final_pass_coverage_end_sec": 3394.14,
+          "transcript_covered_sec": 3253.0800000000054,
+          "transcript_fraction": 0.947602069351232,
+          "transcript_percent": "95%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 3253.0800000000054
+        },
+        "queue_position": 2,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "backfill",
+        "cached_audio_present": true,
+        "id": "activity_002",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9999908910975902,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 2326,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 2326.0211875,
+          "fast_transcript_watermark_sec": 2326.0211875,
+          "feature_coverage_end_sec": 2326,
+          "final_pass_coverage_end_sec": 948,
+          "transcript_covered_sec": 2171.519999999998,
+          "transcript_fraction": 0.9335770506604631,
+          "transcript_percent": "93%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 2171.519999999998
+        },
+        "queue_position": 3,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "completeFull",
+        "cached_audio_present": true,
+        "id": "activity_003",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.999847522692211,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 2912,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 2912.4440816326533,
+          "fast_transcript_watermark_sec": 900,
+          "feature_coverage_end_sec": 2912,
+          "final_pass_coverage_end_sec": 2905.26,
+          "transcript_covered_sec": 2932.6126250000016,
+          "transcript_fraction": 1,
+          "transcript_percent": "100%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 2932.6126250000016
+        },
+        "queue_position": 4,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "queued",
+        "cached_audio_present": true,
+        "id": "activity_004",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.04889779945640588,
+          "analysis_percent": "5%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 90,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 1840.573625,
+          "fast_transcript_watermark_sec": 90,
+          "feature_coverage_end_sec": 90,
+          "final_pass_coverage_end_sec": null,
+          "transcript_covered_sec": 82.61999999999998,
+          "transcript_fraction": 0.04488817990098058,
+          "transcript_percent": "4%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 82.61999999999998
+        },
+        "queue_position": null,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "completeFull",
+        "cached_audio_present": true,
+        "id": "activity_005",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9996769978791834,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 4482,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 4483.448163265306,
+          "fast_transcript_watermark_sec": 3810,
+          "feature_coverage_end_sec": 4482,
+          "final_pass_coverage_end_sec": 88.86,
+          "transcript_covered_sec": 2584.4138750000047,
+          "transcript_fraction": 0.5764344274514306,
+          "transcript_percent": "58%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 2584.4138750000047
+        },
+        "queue_position": 5,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "completeFull",
+        "cached_audio_present": true,
+        "id": "activity_006",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9994933011860627,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 3958,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 3960.006530612245,
+          "fast_transcript_watermark_sec": 90,
+          "feature_coverage_end_sec": 3958,
+          "final_pass_coverage_end_sec": 3925.74,
+          "transcript_covered_sec": 3691.3893750000057,
+          "transcript_fraction": 0.9321674968120042,
+          "transcript_percent": "93%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 3691.3893750000057
+        },
+        "queue_position": 6,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "backfill",
+        "cached_audio_present": true,
+        "id": "activity_007",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.6682049594791162,
+          "analysis_percent": "67%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 1260,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 1885.6489795918367,
+          "fast_transcript_watermark_sec": 180,
+          "feature_coverage_end_sec": 1260,
+          "final_pass_coverage_end_sec": 96.42,
+          "transcript_covered_sec": 165.42000000000004,
+          "transcript_fraction": 0.08772576539447256,
+          "transcript_percent": "9%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 165.42000000000004
+        },
+        "queue_position": 7,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "backfill",
+        "cached_audio_present": true,
+        "id": "activity_008",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9995510104260997,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 3694,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 3695.6593125,
+          "fast_transcript_watermark_sec": 3695.6593125,
+          "feature_coverage_end_sec": 3694,
+          "final_pass_coverage_end_sec": 1866.63,
+          "transcript_covered_sec": 3571.8600000000047,
+          "transcript_fraction": 0.9665014272064356,
+          "transcript_percent": "97%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 3571.8600000000047
+        },
+        "queue_position": 8,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "completeFull",
+        "cached_audio_present": true,
+        "id": "activity_009",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9994473047104884,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 3224,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 3225.782875,
+          "fast_transcript_watermark_sec": 3225.782875,
+          "feature_coverage_end_sec": 3224,
+          "final_pass_coverage_end_sec": 3225.48,
+          "transcript_covered_sec": 3106.1399999999994,
+          "transcript_fraction": 0.9629104376716612,
+          "transcript_percent": "96%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 3106.1399999999994
+        },
+        "queue_position": 1,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "queued",
+        "cached_audio_present": true,
+        "id": "activity_010",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.019155097740515055,
+          "analysis_percent": "2%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 90,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 4698.488163265306,
+          "fast_transcript_watermark_sec": 90,
+          "feature_coverage_end_sec": 90,
+          "final_pass_coverage_end_sec": 80.16,
+          "transcript_covered_sec": 85.61999999999999,
+          "transcript_fraction": 0.018222882983809988,
+          "transcript_percent": "2%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 85.61999999999999
+        },
+        "queue_position": null,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "backfill",
+        "cached_audio_present": true,
+        "id": "activity_011",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.999317179525342,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 1350,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 1350.9224375,
+          "fast_transcript_watermark_sec": 1350.9224375,
+          "feature_coverage_end_sec": 1350,
+          "final_pass_coverage_end_sec": 1350.9224375,
+          "transcript_covered_sec": 1281.982437499999,
+          "transcript_fraction": 0.9489682026989051,
+          "transcript_percent": "95%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 1281.982437499999
+        },
+        "queue_position": null,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "backfill",
+        "cached_audio_present": true,
+        "id": "activity_012",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.349480771425311,
+          "analysis_percent": "35%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 2080,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 5951.6865306122445,
+          "fast_transcript_watermark_sec": 90,
+          "feature_coverage_end_sec": 2080,
+          "final_pass_coverage_end_sec": null,
+          "transcript_covered_sec": 524.1000000000006,
+          "transcript_fraction": 0.08805907322307967,
+          "transcript_percent": "9%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 524.1000000000006
+        },
+        "queue_position": 9,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "backfill",
+        "cached_audio_present": true,
+        "id": "activity_013",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.8311084474350559,
+          "analysis_percent": "83%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 6482,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 7799.222857142857,
+          "fast_transcript_watermark_sec": 6482.2401875,
+          "feature_coverage_end_sec": 6482,
+          "final_pass_coverage_end_sec": 6044.418,
+          "transcript_covered_sec": 6316.8299999999745,
+          "transcript_fraction": 0.8099306963917252,
+          "transcript_percent": "81%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 6316.8299999999745
+        },
+        "queue_position": 15,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "backfill",
+        "cached_audio_present": true,
+        "id": "activity_014",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.26286474139579225,
+          "analysis_percent": "26%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 2550,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 9700.806530612244,
+          "fast_transcript_watermark_sec": 90,
+          "feature_coverage_end_sec": 2550,
+          "final_pass_coverage_end_sec": null,
+          "transcript_covered_sec": 891.3821874999995,
+          "transcript_fraction": 0.09188743066745214,
+          "transcript_percent": "9%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 891.3821874999995
+        },
+        "queue_position": 0,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "backfill",
+        "cached_audio_present": true,
+        "id": "activity_015",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9999558374096041,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 1568,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 1568.06925,
+          "fast_transcript_watermark_sec": 1568.06925,
+          "feature_coverage_end_sec": 1568,
+          "final_pass_coverage_end_sec": 1566.7305263157893,
+          "transcript_covered_sec": 1514.8800000000008,
+          "transcript_fraction": 0.9660797825096059,
+          "transcript_percent": "97%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 1514.8800000000008
+        },
+        "queue_position": 10,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "completeFull",
+        "cached_audio_present": true,
+        "id": "activity_016",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9992232213415073,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 2180,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 2181.694693877551,
+          "fast_transcript_watermark_sec": 90,
+          "feature_coverage_end_sec": 2180,
+          "final_pass_coverage_end_sec": null,
+          "transcript_covered_sec": 2004.6599999999985,
+          "transcript_fraction": 0.9188545059148919,
+          "transcript_percent": "92%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 2004.6599999999985
+        },
+        "queue_position": 11,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "completeFull",
+        "cached_audio_present": true,
+        "id": "activity_017",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9992532327800936,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 1846,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 1847.3795625,
+          "fast_transcript_watermark_sec": 720,
+          "feature_coverage_end_sec": 1846,
+          "final_pass_coverage_end_sec": 1845.42,
+          "transcript_covered_sec": 1788.6000000000004,
+          "transcript_fraction": 0.9681821950977658,
+          "transcript_percent": "97%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 1788.6000000000004
+        },
+        "queue_position": 12,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "completeTranscriptPartial",
+        "cached_audio_present": true,
+        "id": "activity_018",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9997782167548473,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 5434,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 5435.2054375,
+          "fast_transcript_watermark_sec": 90,
+          "feature_coverage_end_sec": 5434,
+          "final_pass_coverage_end_sec": 31.250100545,
+          "transcript_covered_sec": 2134.320000000004,
+          "transcript_fraction": 0.39268432896286526,
+          "transcript_percent": "39%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 2134.320000000004
+        },
+        "queue_position": 13,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "completeFull",
+        "cached_audio_present": true,
+        "id": "activity_019",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.2285320842993794,
+          "analysis_percent": "23%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 1290,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 5644.7216326530615,
+          "fast_transcript_watermark_sec": 90,
+          "feature_coverage_end_sec": 1290,
+          "final_pass_coverage_end_sec": 29.82,
+          "transcript_covered_sec": 849.1530624999995,
+          "transcript_fraction": 0.1504331157072295,
+          "transcript_percent": "15%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 849.1530624999995
+        },
+        "queue_position": 14,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "completeTranscriptPartial",
+        "cached_audio_present": true,
+        "id": "activity_020",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9991038303419233,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 1822,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 1823.6342857142856,
+          "fast_transcript_watermark_sec": 330,
+          "feature_coverage_end_sec": 1822,
+          "final_pass_coverage_end_sec": null,
+          "transcript_covered_sec": 1378.4914374999996,
+          "transcript_fraction": 0.755903444182104,
+          "transcript_percent": "76%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 1378.4914374999996
+        },
+        "queue_position": null,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "queued",
+        "cached_audio_present": true,
+        "id": "activity_021",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.014619037773918509,
+          "analysis_percent": "1%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 90,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 6156.3559375,
+          "fast_transcript_watermark_sec": 60,
+          "feature_coverage_end_sec": 90,
+          "final_pass_coverage_end_sec": 58.563272727272725,
+          "transcript_covered_sec": 88.73999999999998,
+          "transcript_fraction": 0.014414371245083647,
+          "transcript_percent": "1%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 88.73999999999998
+        },
+        "queue_position": null,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      },
+      {
+        "analysis_state": "completeFull",
+        "cached_audio_present": true,
+        "id": "activity_022",
+        "is_running": false,
+        "pipeline": {
+          "analysis_fraction": 0.9999778643527537,
+          "analysis_percent": "100%",
+          "analysis_source": "feature_coverage",
+          "analysis_watermark_sec": 7228,
+          "download_fraction": 1,
+          "download_percent": "100%",
+          "episode_duration_sec": 7228.16,
+          "fast_transcript_watermark_sec": 7228.16,
+          "feature_coverage_end_sec": 7228,
+          "final_pass_coverage_end_sec": null,
+          "transcript_covered_sec": 7010.93999999999,
+          "transcript_fraction": 0.969948091907206,
+          "transcript_percent": "97%",
+          "transcript_source": "fast_transcript_chunks",
+          "transcript_watermark_sec": 7010.93999999999
+        },
+        "queue_position": null,
+        "section": "up_next",
+        "status": {
+          "disposition": "queued",
+          "hint": "wait",
+          "playback_readiness": "none",
+          "reason": "waiting_for_time"
+        }
+      }
+    ]
+  },
+  "ad_window_summaries": [
+    {
+      "algorithmic_count": 5,
+      "asset_id": "asset_019",
+      "max_end_time_sec": 58.563272727272725,
+      "total_count": 5,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 2,
+      "asset_id": "asset_005",
+      "max_end_time_sec": 2100.0,
+      "total_count": 2,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 2,
+      "asset_id": "asset_009",
+      "max_end_time_sec": 2080.624125,
+      "total_count": 2,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 2,
+      "asset_id": "asset_003",
+      "max_end_time_sec": 4680.0,
+      "total_count": 2,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 7,
+      "asset_id": "asset_017",
+      "max_end_time_sec": 1350.9224375,
+      "total_count": 7,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 1,
+      "asset_id": "asset_007",
+      "max_end_time_sec": 96.42,
+      "total_count": 1,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 7,
+      "asset_id": "asset_015",
+      "max_end_time_sec": 6044.418,
+      "total_count": 7,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 4,
+      "asset_id": "asset_002",
+      "max_end_time_sec": 1050.0,
+      "total_count": 4,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 6,
+      "asset_id": "asset_004",
+      "max_end_time_sec": 3925.74,
+      "total_count": 6,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 30,
+      "asset_id": "asset_012",
+      "max_end_time_sec": 3395.652,
+      "total_count": 30,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 9,
+      "asset_id": "asset_016",
+      "max_end_time_sec": 3225.48,
+      "total_count": 9,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 11,
+      "asset_id": "asset_001",
+      "max_end_time_sec": 3621.66,
+      "total_count": 11,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 15,
+      "asset_id": "asset_010",
+      "max_end_time_sec": 2305.095652173913,
+      "total_count": 15,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 25,
+      "asset_id": "asset_013",
+      "max_end_time_sec": 2905.26,
+      "total_count": 25,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 6,
+      "asset_id": "asset_011",
+      "max_end_time_sec": 1866.63,
+      "total_count": 6,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 1,
+      "asset_id": "asset_008",
+      "max_end_time_sec": 360.0,
+      "total_count": 1,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 7,
+      "asset_id": "asset_014",
+      "max_end_time_sec": 1845.42,
+      "total_count": 7,
+      "user_marked_count": 0
+    },
+    {
+      "algorithmic_count": 7,
+      "asset_id": "asset_006",
+      "max_end_time_sec": 1566.7305263157893,
+      "total_count": 7,
+      "user_marked_count": 0
+    }
+  ],
+  "analysis_assets": [
+    {
+      "analysis_state": "completeFull",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 4483.448163265306,
+      "fast_transcript_coverage_end_sec": 3810.0,
+      "feature_coverage_end_sec": 4482.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_001",
+      "terminal_reason": "full coverage: transcript 6.891, feature 8.106"
+    },
+    {
+      "analysis_state": "completeFull",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 5644.7216326530615,
+      "fast_transcript_coverage_end_sec": 90.0,
+      "feature_coverage_end_sec": 1290.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_002",
+      "terminal_reason": "full coverage: transcript 1.163, feature 1.724"
+    },
+    {
+      "analysis_state": "completeTranscriptPartial",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 5435.2054375,
+      "fast_transcript_coverage_end_sec": 90.0,
+      "feature_coverage_end_sec": 5434.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_003",
+      "terminal_reason": "partial transcript 2189.8/5435.2s (ratio 0.403 < 0.950)"
+    },
+    {
+      "analysis_state": "completeFull",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 3960.006530612245,
+      "fast_transcript_coverage_end_sec": 90.0,
+      "feature_coverage_end_sec": 3958.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_004",
+      "terminal_reason": "full coverage: transcript 1.000, feature 1.000"
+    },
+    {
+      "analysis_state": "completeFull",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 2181.694693877551,
+      "fast_transcript_coverage_end_sec": 90.0,
+      "feature_coverage_end_sec": 2180.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_005",
+      "terminal_reason": "full coverage: transcript 1.000, feature 0.999"
+    },
+    {
+      "analysis_state": "backfill",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 1568.06925,
+      "fast_transcript_coverage_end_sec": 1568.06925,
+      "feature_coverage_end_sec": 1568.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_006",
+      "terminal_reason": null
+    },
+    {
+      "analysis_state": "backfill",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 1885.6489795918367,
+      "fast_transcript_coverage_end_sec": 180.0,
+      "feature_coverage_end_sec": 1260.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_007",
+      "terminal_reason": null
+    },
+    {
+      "analysis_state": "backfill",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 9700.806530612244,
+      "fast_transcript_coverage_end_sec": 90.0,
+      "feature_coverage_end_sec": 2550.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_008",
+      "terminal_reason": null
+    },
+    {
+      "analysis_state": "backfill",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 5951.6865306122445,
+      "fast_transcript_coverage_end_sec": 90.0,
+      "feature_coverage_end_sec": 2080.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_009",
+      "terminal_reason": null
+    },
+    {
+      "analysis_state": "backfill",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 2326.0211875,
+      "fast_transcript_coverage_end_sec": 2326.0211875,
+      "feature_coverage_end_sec": 2326.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_010",
+      "terminal_reason": null
+    },
+    {
+      "analysis_state": "backfill",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 3695.6593125,
+      "fast_transcript_coverage_end_sec": 3695.6593125,
+      "feature_coverage_end_sec": 3694.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_011",
+      "terminal_reason": null
+    },
+    {
+      "analysis_state": "backfill",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 3432.96,
+      "fast_transcript_coverage_end_sec": 60.0,
+      "feature_coverage_end_sec": 3432.0,
+      "final_pass_coverage_end_sec": 300.0,
+      "id": "asset_012",
+      "terminal_reason": null
+    },
+    {
+      "analysis_state": "completeFull",
+      "confirmed_ad_coverage_end_sec": 2816.58,
+      "episode_duration_sec": 2912.4440816326533,
+      "fast_transcript_coverage_end_sec": 900.0,
+      "feature_coverage_end_sec": 2912.0,
+      "final_pass_coverage_end_sec": 2905.26,
+      "id": "asset_013",
+      "terminal_reason": "full coverage: transcript 0.998, feature 1.000"
+    },
+    {
+      "analysis_state": "completeFull",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 1847.3795625,
+      "fast_transcript_coverage_end_sec": 720.0,
+      "feature_coverage_end_sec": 1846.0,
+      "final_pass_coverage_end_sec": 1845.42,
+      "id": "asset_014",
+      "terminal_reason": "full coverage: transcript 0.999, feature 0.999"
+    },
+    {
+      "analysis_state": "backfill",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 7799.222857142857,
+      "fast_transcript_coverage_end_sec": 6482.2401875,
+      "feature_coverage_end_sec": 6482.0,
+      "final_pass_coverage_end_sec": 6044.418,
+      "id": "asset_015",
+      "terminal_reason": null
+    },
+    {
+      "analysis_state": "completeFull",
+      "confirmed_ad_coverage_end_sec": 2059.9,
+      "episode_duration_sec": 3225.782875,
+      "fast_transcript_coverage_end_sec": 3225.782875,
+      "feature_coverage_end_sec": 3224.0,
+      "final_pass_coverage_end_sec": 3225.48,
+      "id": "asset_016",
+      "terminal_reason": "full coverage: transcript 1.000, feature 0.999"
+    },
+    {
+      "analysis_state": "backfill",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 1350.9224375,
+      "fast_transcript_coverage_end_sec": 1350.9224375,
+      "feature_coverage_end_sec": 1350.0,
+      "final_pass_coverage_end_sec": 1350.9224375,
+      "id": "asset_017",
+      "terminal_reason": null
+    },
+    {
+      "analysis_state": "queued",
+      "confirmed_ad_coverage_end_sec": null,
+      "episode_duration_sec": 1840.573625,
+      "fast_transcript_coverage_end_sec": 90.0,
+      "feature_coverage_end_sec": 90.0,
+      "final_pass_coverage_end_sec": null,
+      "id": "asset_018",
+      "terminal_reason": null
+    },
+    {
+      "analysis_state": "queued",
+      "confirmed_ad_coverage_end_sec": 38.16,
+      "episode_duration_sec": 6156.3559375,
+      "fast_transcript_coverage_end_sec": 60.0,
+      "feature_coverage_end_sec": 90.0,
+      "final_pass_coverage_end_sec": 58.563272727272725,
+      "id": "asset_019",
+      "terminal_reason": null
+    }
+  ],
+  "background_task_events": {
+    "by_category": {
+      "com.playhead.app.analysis.backfill": {
+        "complete": 153,
+        "expire": 23,
+        "start": 197,
+        "submit": 298
+      },
+      "com.playhead.app.feed-refresh": {
+        "complete": 63,
+        "expire": 49,
+        "start": 69,
+        "submit": 292
+      },
+      "com.playhead.app.preanalysis.recovery": {
+        "complete": 191,
+        "expire": 6,
+        "start": 204,
+        "submit": 391
+      }
+    },
+    "overall": {
+      "appPhase": 397,
+      "complete": 407,
+      "expire": 78,
+      "start": 470,
+      "submit": 981
+    }
+  },
+  "captured_on": "2026-05-06",
+  "correction_rows": [
+    {
+      "correction_type": "falseNegative",
+      "count": 4,
+      "scope": "exactTimeSpan:asset_012:3386.000:3394.140"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 4,
+      "scope": "exactTimeSpan:asset_012:3394.140:3395.652"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 3,
+      "scope": "exactTimeSpan:asset_012:30.000:300.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 3,
+      "scope": "exactTimeSpan:asset_013:480.000:690.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 2,
+      "scope": "exactTimeSpan:asset_010:0.000:31.750"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 2,
+      "scope": "exactTimeSpan:asset_010:882.000:915.256"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 2,
+      "scope": "exactTimeSpan:asset_012:1298.250:1358.250"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 2,
+      "scope": "exactTimeSpan:asset_012:3246.000:3290.500"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 2,
+      "scope": "exactTimeSpan:asset_012:3246.000:3329.750"
+    },
+    {
+      "correction_type": "falsePositive",
+      "count": 2,
+      "scope": "exactTimeSpan:asset_012:1297.980:1321.080"
+    },
+    {
+      "correction_type": "falsePositive",
+      "count": 2,
+      "scope": "exactTimeSpan:asset_013:121.140:330.000"
+    },
+    {
+      "correction_type": "falsePositive",
+      "count": 2,
+      "scope": "exactTimeSpan:asset_013:480.000:690.000"
+    },
+    {
+      "correction_type": "falsePositive",
+      "count": 2,
+      "scope": "exactTimeSpan:asset_016:2048.760:2059.260"
+    },
+    {
+      "correction_type": "falsePositive",
+      "count": 2,
+      "scope": "exactTimeSpan:asset_017:33.060:47.820"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_001:1443.000:1609.620"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_001:1612.680:1670.400"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_001:1673.460:1746.960"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_001:3.000:43.980"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_001:3480.360:3542.100"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_001:3545.160:3621.660"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_001:41.373:42.960"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_001:46.320:88.860"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_002:0.000:1.904"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_002:0.000:29.820"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_003:0.000:31.250"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_010:1980.000:2070.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_010:38.000:71.750"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_010:420.000:600.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_010:47.000:107.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_010:91.000:154.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_010:912.000:948.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_011:0.900:20.400"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_011:10.000:12.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_011:20.580:51.060"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_012:0.000:29.820"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_012:1355.820:1412.040"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_012:1413.600:1421.580"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_012:1421.640:1480.620"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_012:30.000:88.860"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_012:3330.000:3432.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_012:88.920:90.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:1320.000:1350.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:2.000:34.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:2763.000:2791.080"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:2792.760:2799.120"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:2816.640:2846.520"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:2846.640:2905.260"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:30.000:330.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:34.260:44.580"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:44.640:60.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:53.700:82.440"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:60.240:90.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:90.000:330.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_013:90.300:118.980"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_014:0.000:60.000"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_014:1831.440:1845.420"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_014:1844.160:1845.294"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_016:0.120:20.340"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_016:12.000:12.840"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_016:12.000:13.684"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_016:20.460:81.360"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_016:3173.460:3225.480"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_017:0.000:46.503"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_017:1258.620:1288.860"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_017:1288.920:1350.922"
+    },
+    {
+      "correction_type": "falseNegative",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_017:1293.600:1294.304"
+    },
+    {
+      "correction_type": "falsePositive",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_012:1488.120:1500.000"
+    },
+    {
+      "correction_type": "falsePositive",
+      "count": 1,
+      "scope": "exactTimeSpan:asset_012:202.380:300.000"
+    }
+  ],
+  "learning_table_counts": {
+    "ad_copy_fingerprints": 0,
+    "boundary_priors": 0,
+    "implicit_feedback_events": 0,
+    "knowledge_candidate_events": 0,
+    "music_bracket_trust": 0,
+    "sponsor_knowledge_entries": 0,
+    "training_examples": 0
+  },
+  "schema_version": 1,
+  "shadow_fm_response_count": 1321,
+  "source_diagnostics_filename": "playhead-dogfood-diagnostics-2026-05-06T23-46-51Z.json",
+  "transcript_chunk_maxima": [
+    {
+      "asset_id": "asset_019",
+      "chunk_count": 85,
+      "max_end_time_sec": 90.0,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_019",
+      "chunk_count": 52,
+      "max_end_time_sec": 59.879999999999995,
+      "pass": "final"
+    },
+    {
+      "asset_id": "asset_018",
+      "chunk_count": 73,
+      "max_end_time_sec": 90.0,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_005",
+      "chunk_count": 1711,
+      "max_end_time_sec": 2181.18,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_009",
+      "chunk_count": 612,
+      "max_end_time_sec": 960.0,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_003",
+      "chunk_count": 2179,
+      "max_end_time_sec": 2189.82,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_017",
+      "chunk_count": 1470,
+      "max_end_time_sec": 1350.9224375,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_017",
+      "chunk_count": 178,
+      "max_end_time_sec": 1350.9224375,
+      "pass": "final"
+    },
+    {
+      "asset_id": "asset_007",
+      "chunk_count": 169,
+      "max_end_time_sec": 179.88,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_015",
+      "chunk_count": 5151,
+      "max_end_time_sec": 6482.2401875,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_015",
+      "chunk_count": 24,
+      "max_end_time_sec": 6060.0,
+      "pass": "final"
+    },
+    {
+      "asset_id": "asset_002",
+      "chunk_count": 798,
+      "max_end_time_sec": 870.0,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_004",
+      "chunk_count": 4334,
+      "max_end_time_sec": 3959.769375,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_012",
+      "chunk_count": 3265,
+      "max_end_time_sec": 3426.24,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_012",
+      "chunk_count": 348,
+      "max_end_time_sec": 300.0,
+      "pass": "final"
+    },
+    {
+      "asset_id": "asset_016",
+      "chunk_count": 3370,
+      "max_end_time_sec": 3225.48,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_016",
+      "chunk_count": 322,
+      "max_end_time_sec": 3225.48,
+      "pass": "final"
+    },
+    {
+      "asset_id": "asset_001",
+      "chunk_count": 2763,
+      "max_end_time_sec": 3810.0,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_010",
+      "chunk_count": 2210,
+      "max_end_time_sec": 2312.94,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_013",
+      "chunk_count": 3051,
+      "max_end_time_sec": 2905.26,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_013",
+      "chunk_count": 361,
+      "max_end_time_sec": 2905.44,
+      "pass": "final"
+    },
+    {
+      "asset_id": "asset_011",
+      "chunk_count": 3721,
+      "max_end_time_sec": 3694.86,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_008",
+      "chunk_count": 941,
+      "max_end_time_sec": 990.0,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_014",
+      "chunk_count": 1708,
+      "max_end_time_sec": 1845.42,
+      "pass": "fast"
+    },
+    {
+      "asset_id": "asset_014",
+      "chunk_count": 68,
+      "max_end_time_sec": 1845.42,
+      "pass": "final"
+    },
+    {
+      "asset_id": "asset_006",
+      "chunk_count": 1441,
+      "max_end_time_sec": 1568.04,
+      "pass": "fast"
+    }
+  ]
+}

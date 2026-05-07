@@ -152,6 +152,12 @@ targets:
           - "Fixtures/NarlEval/2026-04-23/**"
           - "Fixtures/NarlEval/2026-04-23-1354/**"
           - "Fixtures/NarlEval/2026-04-24/**"
+          # playhead-hygc.1.1: dated dogfood fixture subdir is read at
+          # runtime via #filePath through DogfoodAnalysisHealthFixtureLoader.
+          # Excluding it from the bundle avoids a "Multiple commands
+          # produce README.md" collision with Fixtures/NarlEval/2026-04-22/
+          # (Xcode resource copy step doesn't preserve subdirectory paths).
+          - "Fixtures/Dogfood/2026-05-06/**"
     dependencies:
       - target: Playhead
     settings:
