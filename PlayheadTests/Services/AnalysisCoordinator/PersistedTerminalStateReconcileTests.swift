@@ -448,6 +448,55 @@ struct PersistedTerminalStateReconcileTests {
         #expect(reason.contains("partial transcript 1800.0/3600.0s (ratio 0.500 < 0.950)"))
     }
 
+    @Test("Bad completeTranscriptPartial row with bug-shape ratio in reason repairs even if coverage looks fine")
+    func badRow_completeTranscriptPartial_impossibleRatioInReason_repairs() {
+        // R6 coverage gap: pin the `reasonClaimsImpossibleRatio` branch
+        // for .completeTranscriptPartial. The R5 coverage closed the
+        // feature-short branch and the .completeFeatureOnly impossible-
+        // ratio branch, but left the symmetric .completeTranscriptPartial
+        // impossible-ratio branch unpinned. Without this test, a
+        // regression that gates the impossible-ratio check on only the
+        // .completeFull / .completeFeatureOnly branches (mirroring the
+        // pattern of the duplicated `if state == ...` blocks above) would
+        // silently skip rows whose poisoned terminalReason is the only
+        // remaining signal of denominator-bug history.
+        //
+        // Shape: row claims transcript-partial completion against a
+        // 3600s episode; transcript coverage 1800s (ratio 0.500), feature
+        // 3590s (ratio 0.997 — adequate). The persisted terminalReason
+        // carries a stale-denominator ratio above 1.05. Classifier emits
+        // .completeTranscriptPartial again (transcript still short of
+        // 0.95), so this is a same-state repair whose only value is the
+        // audit trail.
+        let asset = makeTerminalAsset(
+            id: "tp-impossible",
+            analysisState: .completeTranscriptPartial,
+            terminalReason: "partial transcript 6000.0/3600.0s (ratio 1.667 < 0.950)",
+            episodeDurationSec: 3600,
+            featureCoverageEndTime: 3590,
+            fastTranscriptCoverageEndTime: 1800
+        )
+        let verdict = AnalysisCoordinator.reconcilePersistedTerminalAssetVerdict(
+            asset: asset,
+            transcriptCoverageEnd: 1800,
+            featureCoverageEnd: 3590,
+            episodeDuration: 3600
+        )
+        guard case .repair(let state, let reason) = verdict else {
+            #expect(Bool(false), "expected .repair (impossible ratio); got \(verdict)")
+            return
+        }
+        // Coverage values map to .completeTranscriptPartial again — this
+        // is a same-state repair that exists purely for the audit trail.
+        #expect(state == .completeTranscriptPartial)
+        // Pin audit-shape: regression dropping the prefix on same-state
+        // .completeTranscriptPartial repair would still leave a row that
+        // reports a healthy `partial transcript ...` reason while having
+        // no record of the bug-shape ratio that triggered the repair.
+        #expect(reason.hasPrefix(AnalysisCoordinator.terminalStateRepairedReasonPrefix))
+        #expect(reason.contains("partial transcript 6000.0/3600.0s (ratio 1.667 < 0.950)"))
+    }
+
     // MARK: - Pure verdict — fail-safes
 
     @Test("Unknown episode duration returns .skipUnknownDuration (not destructive)")
