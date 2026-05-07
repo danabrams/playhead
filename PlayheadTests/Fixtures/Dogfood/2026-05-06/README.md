@@ -34,7 +34,7 @@ fixture's load-bearing surface.
 
 ## Fields retained
 
-- **Activity rows** — `section`, `status.{disposition, reason, hint, playback_readiness}`, `analysis_state`, `is_running`, `queue_position`, `cached_audio_present`, and `pipeline.*` numerics (download/analysis/transcript fractions, percents, watermarks, sources, episode duration).
+- **Activity rows** — `section`, `status.{disposition, reason, hint, playback_readiness}`, `analysis_state`, `is_running`, `queue_position`, `cached_audio_present`, and `pipeline.*` numerics (download/analysis/transcript fractions, percents, watermarks, episode duration) plus the source enums `pipeline.download_source` (e.g. `cached_audio`), `pipeline.analysis_source`, `pipeline.transcript_source`. The `download_source == cached_audio` reading is what proves the wedged state — every row already has the bytes locally, so the work-pump is starved waiting on something else.
 - **Analysis assets** — `analysis_state`, `episode_duration_sec`, `fast_transcript_coverage_end_sec`, `feature_coverage_end_sec`, `final_pass_coverage_end_sec`, `confirmed_ad_coverage_end_sec`, `terminal_reason`.
 - **Transcript chunk maxima** — per-(asset, pass) `MAX(endTime)` and `COUNT(*)`. No transcript text.
 - **Ad window summaries** — per-asset total count, `userMarked` count, algorithmic count, max endTime. No advertiser / product / evidence text.

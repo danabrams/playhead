@@ -92,6 +92,7 @@ def build_activity_rows(diag: dict[str, Any]) -> list[dict[str, Any]]:
             "pipeline": {
                 "download_fraction": pipeline.get("download_fraction"),
                 "download_percent": pipeline.get("download_percent"),
+                "download_source": pipeline.get("download_source"),
                 "analysis_fraction": pipeline.get("analysis_fraction"),
                 "analysis_percent": pipeline.get("analysis_percent"),
                 "analysis_source": pipeline.get("analysis_source"),
@@ -490,8 +491,22 @@ def build(out_path: Path) -> None:
         sys.exit(3)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(serialized)
+    # Atomic-write: a partial run (Ctrl-C / disk-full / kill -9) must NOT leave
+    # the committed fixture half-written. Write to a sibling temp file in the
+    # same directory (so os.replace stays on one filesystem and is atomic on
+    # POSIX) then rename into place.
+    tmp_path = out_path.with_name(out_path.name + ".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(serialized)
+        os.replace(tmp_path, out_path)
+    except BaseException:
+        # Clean up the partial temp file on any failure (including KeyboardInterrupt).
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     print(f"wrote {out_path}")
 
 

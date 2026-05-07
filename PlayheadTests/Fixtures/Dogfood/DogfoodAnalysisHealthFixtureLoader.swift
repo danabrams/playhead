@@ -98,6 +98,7 @@ struct DogfoodAnalysisHealthFixture: Codable, Equatable {
         struct Pipeline: Codable, Equatable {
             let downloadFraction: Double?
             let downloadPercent: String?
+            let downloadSource: String?
             let analysisFraction: Double?
             let analysisPercent: String?
             let analysisSource: String?
@@ -115,6 +116,7 @@ struct DogfoodAnalysisHealthFixture: Codable, Equatable {
             enum CodingKeys: String, CodingKey {
                 case downloadFraction = "download_fraction"
                 case downloadPercent = "download_percent"
+                case downloadSource = "download_source"
                 case analysisFraction = "analysis_fraction"
                 case analysisPercent = "analysis_percent"
                 case analysisSource = "analysis_source"

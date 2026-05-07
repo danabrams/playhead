@@ -47,6 +47,12 @@ struct DogfoodAnalysisHealthFixtureTests {
                     "row \(row.id) download_fraction = \(row.pipeline.downloadFraction ?? -1), expected 1.0")
             #expect(row.pipeline.downloadPercent == "100%",
                     "row \(row.id) download_percent = \(row.pipeline.downloadPercent ?? "nil"), expected 100%")
+            // download_source proves the wedged-state narrative: every row
+            // already has bytes locally (`cached_audio`) so nothing's waiting
+            // on a network fetch. Downstream beads diagnosing why work
+            // doesn't move depend on this enum being stable.
+            #expect(row.pipeline.downloadSource == "cached_audio",
+                    "row \(row.id) download_source = \(row.pipeline.downloadSource ?? "nil"), expected cached_audio")
         }
     }
 
@@ -410,6 +416,27 @@ struct DogfoodAnalysisHealthFixtureTests {
                 #expect(assetIds.contains(parts[1]),
                         "correction_rows references unknown asset id: \(row.scope)")
             }
+        }
+    }
+
+    @Test("Loader surfaces fixtureNotFound with the requested URL when the file is missing")
+    func loaderReportsMissingFile() throws {
+        // Point #filePath at a nonexistent sibling directory so the loader
+        // resolves to a path that does not exist on disk. This exercises the
+        // public error surface downstream beads will hit if they ever rename
+        // or relocate the fixture without updating the loader's
+        // captureDateStamp.
+        let bogusFilePath = "/tmp/does-not-exist/DogfoodAnalysisHealthFixtureLoader.swift"
+        let expectedURL = DogfoodAnalysisHealthFixtureLoader.fixtureURL(filePath: bogusFilePath)
+
+        do {
+            _ = try DogfoodAnalysisHealthFixtureLoader.load(filePath: bogusFilePath)
+            Issue.record("expected load() to throw fixtureNotFound, but it returned a fixture")
+        } catch let DogfoodAnalysisHealthFixtureLoaderError.fixtureNotFound(url) {
+            #expect(url.path == expectedURL.path,
+                    "fixtureNotFound URL \(url.path) does not match expected \(expectedURL.path)")
+        } catch {
+            Issue.record("expected fixtureNotFound; got \(type(of: error)): \(error)")
         }
     }
 }
