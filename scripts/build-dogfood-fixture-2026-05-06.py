@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 from collections import Counter, defaultdict
@@ -183,20 +184,46 @@ def build_ad_window_summaries(conn: sqlite3.Connection, raw_to_syn: dict[str, st
     return out
 
 
+# Asset-bound CorrectionScope prefixes (see UserCorrectionStore.swift). Only
+# these prefixes can be safely sanitized via raw_to_syn — their second token is
+# always the analysisAssetId UUID. All other prefixes (sponsorOnShow,
+# phraseOnShow, campaignOnShow, domainOwnershipOnShow, jingleOnShow) embed a
+# podcastId + a free-form sponsor/phrase/campaign/domain/jingle string, neither
+# of which has a synthetic mapping in this fixture — those rows are DROPPED
+# rather than risk leaking sponsor/phrase text downstream.
+ASSET_BOUND_SCOPE_PREFIXES = ("exactSpan", "exactTimeSpan")
+
+
 def build_correction_rows(conn: sqlite3.Connection, raw_to_syn: dict[str, str]) -> list[dict[str, Any]]:
     """Reduce correction_events to (correction_type, scope-with-synthetic-asset-id, count).
 
-    Scope strings of the form `exactTimeSpan:<UUID>:<start>:<end>` get their
-    UUID swapped for the synthetic asset id. Counts preserve the duplicate
-    structure: a single (type, scope) row that appeared 4 times in raw becomes
-    `count: 4` here.
+    Scope strings of the form `exactTimeSpan:<UUID>:<start>:<end>` (or
+    `exactSpan:<UUID>:<lower>:<upper>`) get their UUID swapped for the
+    synthetic asset id. Counts preserve the duplicate structure: a single
+    (type, scope) row that appeared 4 times in raw becomes `count: 4` here.
+
+    Non-asset-bound scopes (sponsorOnShow / phraseOnShow / campaignOnShow /
+    domainOwnershipOnShow / jingleOnShow) are DROPPED with a count to stderr —
+    they would otherwise embed sponsor/phrase/podcastId text which has no
+    synthetic mapping in this fixture.
     """
     counter: Counter[tuple[str, str]] = Counter()
+    dropped: Counter[str] = Counter()
     cur = conn.execute("SELECT correctionType, scope FROM correction_events")
     for correction_type, scope in cur:
         ctype = correction_type or "unknown"
         rewritten = rewrite_scope(scope, raw_to_syn)
+        if rewritten is None:
+            prefix = (scope or "").split(":", 1)[0] or "<empty>"
+            dropped[prefix] += 1
+            continue
         counter[(ctype, rewritten)] += 1
+    if dropped:
+        print(
+            f"[build-dogfood-fixture] dropped {sum(dropped.values())} non-asset-bound "
+            f"correction rows (per-prefix: {dict(dropped)})",
+            file=sys.stderr,
+        )
     rows = [
         {"correction_type": ctype, "scope": scope, "count": count}
         for (ctype, scope), count in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -204,19 +231,27 @@ def build_correction_rows(conn: sqlite3.Connection, raw_to_syn: dict[str, str]) 
     return rows
 
 
-def rewrite_scope(scope: str, raw_to_syn: dict[str, str]) -> str:
-    """Replace any embedded raw asset UUID with its synthetic id.
+def rewrite_scope(scope: str, raw_to_syn: dict[str, str]) -> str | None:
+    """Sanitize a correction scope string for the fixture.
 
-    Production scopes look like `exactTimeSpan:<UUID>:<start>:<end>`. We split
-    on ':' and substitute the second token if it matches a known UUID.
+    Returns the rewritten string when the scope is asset-bound and its UUID
+    successfully resolves to a synthetic id; returns ``None`` when the scope
+    is non-asset-bound (sponsor/phrase/campaign/domain/jingle) or when the
+    embedded UUID is unknown. Callers MUST drop ``None`` rows rather than
+    emit them — the alternative is leaking sponsor/phrase text or unmapped
+    raw UUIDs.
     """
     if not scope:
-        return scope
+        return None
     parts = scope.split(":")
-    if len(parts) >= 2 and parts[1] in raw_to_syn:
-        parts[1] = raw_to_syn[parts[1]]
-        return ":".join(parts)
-    return scope
+    if len(parts) < 2:
+        return None
+    if parts[0] not in ASSET_BOUND_SCOPE_PREFIXES:
+        return None
+    if parts[1] not in raw_to_syn:
+        return None
+    parts[1] = raw_to_syn[parts[1]]
+    return ":".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -295,8 +330,89 @@ def build_shadow_fm_count(conn: sqlite3.Connection) -> int:
 
 FIXTURE_SCHEMA_VERSION = 1
 
+# Scrubber-audit gate. Before writing the fixture we serialize it to JSON and
+# search the bytes for anything that looks like raw user data. Any hit aborts
+# the write — the operator should never be able to overwrite the committed
+# fixture with a payload that would also fail
+# `DogfoodAnalysisHealthFixtureTests.fixtureIsScrubbed`.
+#
+# The substring list mirrors that test, plus a few extra brand strings the
+# May 6 capture is known to contain (so a regression in the per-table
+# sanitizer surfaces here, not in CI).
+FORBIDDEN_SUBSTRINGS: tuple[tuple[str, str], ...] = (
+    # Raw analysisAssetId UUID prefixes from the May 6 capture.
+    ("9C109975", "raw analysisAssetId UUID prefix"),
+    ("8A9DFC82", "raw analysisAssetId UUID prefix"),
+    ("C75C2E85", "raw analysisAssetId UUID prefix"),
+    ("E8F0F867", "raw analysisAssetId UUID prefix"),
+    # Feed / network identifiers.
+    ("flightcast", "raw feed URL component"),
+    ("simplecast", "raw feed URL component"),
+    ("libsyn", "raw feed URL component"),
+    ("acast", "raw feed URL component"),
+    ("https://", "raw URL"),
+    # Device-specific paths.
+    ("/var/mobile/", "device-specific filesystem path"),
+    ("AudioCache", "device-specific filesystem path"),
+    # Raw-bundle field names that should never appear in the sanitized output.
+    ("fmResponseBase64", "FM response payload field name"),
+    ("episode_id_hash", "raw activity-row hash field name"),
+    ("session_id", "raw session UUID field name"),
+    ("BuildProvenance", "build-stamp file referenced in raw bundle"),
+    # Show / sponsor brand keywords known to appear in sponsor/phrase
+    # corrections from the dogfood capture. None of these are sanitized via
+    # raw_to_syn — their presence in the fixture means a non-asset-bound
+    # correction scope leaked through.
+    ("Squarespace", "sponsor brand string"),
+    ("Conan", "show title fragment"),
+    ("Diary of a CEO", "show title fragment"),
+)
+
+UUID_PATTERN = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
+SHA256_PATTERN = re.compile(r"\b[0-9a-f]{64}\b")
+
+
+def audit_scrubbed(fixture_text: str) -> list[str]:
+    """Return a list of human-readable issues for any banned content.
+
+    An empty list means the fixture passes the scrub gate.
+    """
+    issues: list[str] = []
+    for token, why in FORBIDDEN_SUBSTRINGS:
+        if token in fixture_text:
+            issues.append(f"contains '{token}' ({why})")
+    if (m := UUID_PATTERN.search(fixture_text)) is not None:
+        issues.append(f"contains UUID-shaped string: '{m.group(0)}'")
+    if (m := SHA256_PATTERN.search(fixture_text)) is not None:
+        issues.append(f"contains SHA-256-shaped hex: '{m.group(0)}'")
+    return issues
+
+
+def preflight_inputs() -> None:
+    """Fail fast with a precise message when raw inputs are missing."""
+    missing: list[str] = []
+    for label, path in (
+        ("dogfood diagnostics JSON (PLAYHEAD_HYGC_DIAG)", diag_path()),
+        ("xcappdata bundle (PLAYHEAD_HYGC_XCAPPDATA)", xcappdata_path()),
+        ("analysis.sqlite", sqlite_path()),
+        ("bg-task-log.jsonl", bg_task_log_path()),
+    ):
+        if not os.path.exists(path):
+            missing.append(f"  - {label}: {path}")
+    if missing:
+        print(
+            "[build-dogfood-fixture] missing required inputs:\n"
+            + "\n".join(missing)
+            + "\nSet PLAYHEAD_HYGC_DIAG / PLAYHEAD_HYGC_XCAPPDATA env vars to point at the raw "
+              "evidence (see README in PlayheadTests/Fixtures/Dogfood/2026-05-06/).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
 
 def build(out_path: Path) -> None:
+    preflight_inputs()
+
     with open(diag_path(), "r", encoding="utf-8") as f:
         diag = json.load(f)
 
@@ -332,10 +448,21 @@ def build(out_path: Path) -> None:
         "shadow_fm_response_count": shadow_fm_response_count,
     }
 
+    serialized = json.dumps(fixture, indent=2, sort_keys=True) + "\n"
+    issues = audit_scrubbed(serialized)
+    if issues:
+        print(
+            "[build-dogfood-fixture] REFUSING to overwrite "
+            f"{out_path} — fixture failed scrub audit:",
+            file=sys.stderr,
+        )
+        for issue in issues:
+            print(f"  - {issue}", file=sys.stderr)
+        sys.exit(3)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(fixture, f, indent=2, sort_keys=True)
-        f.write("\n")
+        f.write(serialized)
     print(f"wrote {out_path}")
 
 

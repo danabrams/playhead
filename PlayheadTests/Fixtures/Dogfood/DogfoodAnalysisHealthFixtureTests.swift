@@ -84,7 +84,7 @@ struct DogfoodAnalysisHealthFixtureTests {
 
         // Sanity: at least one asset must be more than 30 minutes "ahead"
         // of its stored watermark — significantly more than the named case
-        // (~64 min). The exact pinning lives in the next test.
+        // (~64 min). The exact pinning lives below.
         #expect(
             maxDelta >= 30 * 60,
             "expected at least one asset with chunk coverage >= 30 min ahead of watermark; max delta was \(maxDelta) s on \(worstAssetId ?? "<none>")"
@@ -103,6 +103,27 @@ struct DogfoodAnalysisHealthFixtureTests {
                 "expected ~1.5 min watermark on \(worstAssetId ?? "?"); got \(worstWatermark) s")
         #expect(aroundSixtySixMinutes.contains(worstChunkMax),
                 "expected ~66 min chunk coverage on \(worstAssetId ?? "?"); got \(worstChunkMax) s")
+
+        // Anchor the contradiction structurally: the worst-offending asset
+        // must (a) be in `completeFull` — i.e. the system thinks it's done
+        // analyzing — and (b) have a fast watermark that's <5% of its
+        // duration, so the contradiction is "we said complete, but our own
+        // watermark says we barely transcribed anything." Without this
+        // anchoring a regenerated fixture could pin asset_004 by name while
+        // silently changing the underlying signal.
+        guard let id = worstAssetId, let asset = assetById[id] else {
+            Issue.record("worstAssetId did not resolve to an asset; got \(worstAssetId ?? "<none>")")
+            return
+        }
+        #expect(asset.analysisState == "completeFull",
+                "expected worst chunk-vs-watermark asset in completeFull; got \(asset.analysisState)")
+        if let dur = asset.episodeDurationSec {
+            #expect(dur > 0, "asset \(id) has nonpositive duration: \(dur)")
+            #expect(worstWatermark < dur * 0.05,
+                    "expected fast watermark to be < 5% of duration; got \(worstWatermark) / \(dur)")
+        } else {
+            Issue.record("asset \(id) missing episode_duration_sec")
+        }
     }
 
     // MARK: - completeFull contradictions
@@ -157,12 +178,39 @@ struct DogfoodAnalysisHealthFixtureTests {
         }
         #expect(!fnFour.isEmpty,
                 "expected at least one falseNegative scope with count == 4 (the dogfood capture had two)")
+        // Each falseNegative-x4 row must reference a real synthetic asset id —
+        // i.e. it must look like `exactTimeSpan:asset_NNN:start:end` with the
+        // assetId resolving against `analysis_assets`. This catches a
+        // regenerated fixture that fabricates a count==4 row with no
+        // structural backing.
+        let assetIds = Set(fixture.analysisAssets.map(\.id))
+        for row in fnFour {
+            let parts = row.scope.split(separator: ":").map(String.init)
+            #expect(parts.count == 4 && parts[0] == "exactTimeSpan",
+                    "falseNegative-x4 row has unexpected scope shape: \(row.scope)")
+            if parts.count >= 2 {
+                #expect(assetIds.contains(parts[1]),
+                        "falseNegative-x4 row references unknown asset id: \(row.scope)")
+            }
+        }
 
         // Every scope must use a synthetic asset id (no raw UUIDs leaked).
         let uuidPattern = #"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"#
         for row in fixture.correctionRows {
             #expect(row.scope.range(of: uuidPattern, options: .regularExpression) == nil,
                     "correction scope leaks a raw UUID: \(row.scope)")
+        }
+
+        // Scope shapes should be one of the asset-bound CorrectionScope
+        // prefixes (see UserCorrectionStore.swift). Non-asset-bound scopes
+        // (sponsorOnShow / phraseOnShow / campaignOnShow / domainOwnershipOnShow
+        // / jingleOnShow) MUST be filtered at scrub time because their
+        // payload (sponsor / phrase / podcastId) has no synthetic mapping.
+        let allowedPrefixes: Set<String> = ["exactSpan", "exactTimeSpan"]
+        for row in fixture.correctionRows {
+            let prefix = row.scope.split(separator: ":", maxSplits: 1).first.map(String.init) ?? ""
+            #expect(allowedPrefixes.contains(prefix),
+                    "correction scope uses non-asset-bound prefix '\(prefix)' (must be filtered): \(row.scope)")
         }
     }
 
@@ -224,6 +272,12 @@ struct DogfoodAnalysisHealthFixtureTests {
         // Forbidden substrings — picked from the source-of-truth dogfood
         // export. Each entry has a one-line rationale so future
         // contributors know why it's banned.
+        //
+        // The brand / show / sponsor keywords at the bottom catch a
+        // regression where a non-asset-bound CorrectionScope row (e.g.
+        // `sponsorOnShow:<podcastId>:Squarespace`) leaks through the
+        // build-script's scope filter. The May 6 capture has zero such rows;
+        // this test is a forward-looking gate for future regenerations.
         let forbidden: [(String, String)] = [
             ("9C109975", "raw analysisAssetId UUID prefix"),
             ("8A9DFC82", "raw analysisAssetId UUID prefix"),
@@ -240,6 +294,18 @@ struct DogfoodAnalysisHealthFixtureTests {
             ("episode_id_hash", "raw activity-row hash field name"),
             ("session_id", "raw session UUID field name"),
             ("BuildProvenance", "build-stamp file referenced in raw bundle"),
+            ("Squarespace", "sponsor brand string"),
+            ("Conan", "show title fragment"),
+            ("Diary of a CEO", "show title fragment"),
+            // Non-asset-bound CorrectionScope prefixes — see
+            // UserCorrectionStore.swift. These are dropped at scrub time
+            // because their payload has no synthetic mapping; their presence
+            // anywhere in the file means a leak.
+            ("sponsorOnShow", "non-asset-bound CorrectionScope prefix"),
+            ("phraseOnShow", "non-asset-bound CorrectionScope prefix"),
+            ("campaignOnShow", "non-asset-bound CorrectionScope prefix"),
+            ("domainOwnershipOnShow", "non-asset-bound CorrectionScope prefix"),
+            ("jingleOnShow", "non-asset-bound CorrectionScope prefix"),
         ]
 
         for (token, why) in forbidden {
@@ -271,6 +337,26 @@ struct DogfoodAnalysisHealthFixtureTests {
         let fixture = try DogfoodAnalysisHealthFixtureLoader.load()
         #expect(fixture.schemaVersion == 1)
         #expect(fixture.capturedOn == "2026-05-06")
-        #expect(!fixture.analysisAssets.isEmpty)
+        // All load-bearing collections must decode non-empty so downstream
+        // beads can rely on at least one row of each kind.
+        #expect(!fixture.analysisAssets.isEmpty, "analysis_assets is empty")
+        #expect(!fixture.activitySnapshot.rows.isEmpty, "activity_snapshot.rows is empty")
+        #expect(!fixture.transcriptChunkMaxima.isEmpty, "transcript_chunk_maxima is empty")
+        #expect(!fixture.adWindowSummaries.isEmpty, "ad_window_summaries is empty")
+        #expect(!fixture.correctionRows.isEmpty, "correction_rows is empty")
+        #expect(!fixture.backgroundTaskEvents.overall.isEmpty, "background_task_events.overall is empty")
+        // Cross-collection integrity: every transcript_chunk_maxima /
+        // ad_window_summaries / correction_rows asset reference must resolve
+        // against analysis_assets. This is what makes the fixture "joinable"
+        // for downstream beads.
+        let assetIds = Set(fixture.analysisAssets.map(\.id))
+        for chunkMax in fixture.transcriptChunkMaxima {
+            #expect(assetIds.contains(chunkMax.assetId),
+                    "transcript_chunk_maxima references unknown asset id: \(chunkMax.assetId)")
+        }
+        for window in fixture.adWindowSummaries {
+            #expect(assetIds.contains(window.assetId),
+                    "ad_window_summaries references unknown asset id: \(window.assetId)")
+        }
     }
 }

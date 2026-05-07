@@ -37,8 +37,8 @@ fields from them appear in the fixture.
 - **Analysis assets** — `analysis_state`, `episode_duration_sec`, `fast_transcript_coverage_end_sec`, `feature_coverage_end_sec`, `final_pass_coverage_end_sec`, `confirmed_ad_coverage_end_sec`, `terminal_reason`.
 - **Transcript chunk maxima** — per-(asset, pass) `MAX(endTime)` and `COUNT(*)`. No transcript text.
 - **Ad window summaries** — per-asset total count, `userMarked` count, algorithmic count, max endTime. No advertiser / product / evidence text.
-- **Correction rows** — `correction_type` + `scope` + duplicate `count`. Scopes preserve their `exactTimeSpan:<assetId>:<start>:<end>` shape after asset-id sanitization.
-- **Background-task events** — overall lifecycle event counts (`submit`, `start`, `complete`, `expire`, `appPhase`) and per-category counts for the four registered task identifiers.
+- **Correction rows** — `correction_type` + `scope` + duplicate `count`. Only asset-bound scopes (`exactSpan:<assetId>:…` and `exactTimeSpan:<assetId>:…`) are retained, and their `<assetId>` UUID is rewritten to the synthetic id. Non-asset-bound scopes (`sponsorOnShow`, `phraseOnShow`, `campaignOnShow`, `domainOwnershipOnShow`, `jingleOnShow`) are DROPPED at scrub time — they embed sponsor / phrase / podcastId text with no synthetic mapping in this fixture, and the build script logs a per-prefix dropped-row count to stderr when this happens. The May 6 capture has zero non-asset-bound rows.
+- **Background-task events** — overall lifecycle event counts (`submit`, `start`, `complete`, `expire`, `appPhase`) and per-category counts for the registered task identifiers that fired during the capture (`com.playhead.app.analysis.backfill`, `com.playhead.app.feed-refresh`, `com.playhead.app.preanalysis.recovery` — `analysis.continued` is registered but had no events on May 6).
 - **Learning-table counts** — row count per table (`sponsor_knowledge_entries`, `training_examples`, `ad_copy_fingerprints`, `boundary_priors`, `implicit_feedback_events`, `knowledge_candidate_events`, `music_bracket_trust`).
 - **Shadow FM responses** — count only.
 
