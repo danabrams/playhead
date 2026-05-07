@@ -509,6 +509,27 @@ actor AdDetectionService {
     /// Episode duration for position-based scoring.
     private var episodeDuration: Double = 0
 
+    /// playhead-hygc.1.8 (R7): per-asset in-flight tracker for
+    /// `runHotPathResult`. Enforces the no-concurrent-runs-per-asset
+    /// invariant that `correctionReplayCandidates` documents (UUID
+    /// allocation across actor `await`s could otherwise race and
+    /// double-insert replay rows). On entry the assetId is inserted; on
+    /// exit (`defer`) it is removed. A second in-flight call for the same
+    /// asset hits an `assertionFailure` (DEBUG: trap; RELEASE: no-op) and
+    /// also emits a `logger.warning` so RELEASE has at least an
+    /// observable footprint. R8: choosing `assertionFailure` over
+    /// `preconditionFailure` is deliberate — a single concurrent invocation
+    /// in production should NOT crash the player; the legacy
+    /// belt-and-suspenders dedupe in `correctionReplayCandidates`
+    /// (overlap check against the in-flight `emitted` set + the persisted
+    /// `existing` set) keeps the same-call duplicate-row hazard tolerable
+    /// even when the assertion is compiled out. Different assets remain
+    /// independent. The actor's serialized re-entrance via `await` is the
+    /// only realistic source of contention given the production caller
+    /// chain (`AnalysisCoordinator.handlePersistedTranscriptChunks` and
+    /// `AnalysisJobRunner.run` are both single-shot per asset).
+    private var hotPathRunInFlightAssetIds: Set<String> = []
+
     // playhead-gtt9.16: Last snapshot of the `AcousticFeaturePipeline` funnel.
     // Captured at the end of each `runBackfill` invocation so that tests (and
     // future telemetry surfaces) can inspect which features were computed /
@@ -690,6 +711,20 @@ actor AdDetectionService {
     /// path without log scraping.
     func bracketRefinementCountsForTesting() -> BracketRefinementCounts {
         lastBracketRefinementCounts
+    }
+
+    /// playhead-hygc.1.8 (R11): test seam exposing the per-asset in-flight
+    /// tracker so the `defer { hotPathRunInFlightAssetIds.remove(...) }`
+    /// post-condition documented at `runHotPathResult`'s entry can be
+    /// verified directly. Without this seam the cleanup contract is
+    /// observable only by triggering the assertionFailure (which crashes
+    /// in DEBUG) — leaving the "the defer ran" half of the concurrency
+    /// invariant unpinned. R7 added the assertionFailure; R11 pins the
+    /// release-side cleanup so a future refactor that drops the `defer`
+    /// (e.g. moving the insert/remove inside a child task that aborts
+    /// without unwinding the actor frame) fails this single test.
+    func hotPathInFlightAssetIdsForTesting() -> Set<String> {
+        hotPathRunInFlightAssetIds
     }
 
     /// Lazy accessor for `MusicBracketTrustStore`. Constructs the actor on
@@ -1217,7 +1252,61 @@ actor AdDetectionService {
         episodeDuration: Double,
         retireUnmatchedReplayCandidates: Bool = false
     ) async throws -> HotPathRunResult {
+        // playhead-hygc.1.8 (R7): enforce the documented
+        // no-concurrent-runHotPath-per-asset invariant. Actor reentrancy
+        // across `await`s could otherwise let a second caller compute
+        // fresh UUIDs for the same FN range and double-insert replay
+        // rows. In DEBUG we crash fast; in RELEASE we log a warning and
+        // proceed (the legacy belt-and-suspenders dedupe in
+        // `correctionReplayCandidates` keeps the same-call path
+        // tolerable, but no consumer should rely on that).
+        if hotPathRunInFlightAssetIds.contains(analysisAssetId) {
+            assertionFailure(
+                "runHotPathResult called concurrently for asset \(analysisAssetId)"
+            )
+            logger.warning(
+                "runHotPathResult: concurrent invocation detected for asset \(analysisAssetId, privacy: .public) — production caller chain expects single-shot serialization"
+            )
+        }
+        hotPathRunInFlightAssetIds.insert(analysisAssetId)
+        defer { hotPathRunInFlightAssetIds.remove(analysisAssetId) }
+
         self.episodeDuration = episodeDuration
+
+        // playhead-hygc.1.8: correction-replay recall step. A
+        // `.falseNegative` `.exactTimeSpan` correction event is the user's
+        // strongest possible label that "this WAS an ad" for a region the
+        // detector missed — but the detector itself produces no AdWindow
+        // for the region (no transcript token, no Tier-1 spike, no FM
+        // signal). On the same episode this lands as a `userMarked`
+        // AdWindow inside `recordUserMarkedAd`; on subsequent runs of the
+        // same episode (e.g. cross-launch preload, dogfood replay) the
+        // userMarked row persists and is observed via `fetchAdWindows`.
+        // For DOGFOOD-CAPTURED corrections that get replayed against the
+        // raw analysis SQLite via NARL, however, we need to surface the
+        // correction as a *detector-emitted* candidate so the replay
+        // counts it for recall. May 6 fixture: 41/65 unrecovered
+        // userMarked windows had a `.falseNegative` correction event but
+        // no overlapping algorithmic AdWindow; this step turns those
+        // missing rows into mark-only candidates without expanding
+        // auto-skip. The mark-only label keeps the precision contract
+        // intact — the user still has the suggest-tier banner and can
+        // veto it via `revertByTimeRange`, which (post-hygc.1.8) reverts
+        // the suggest-tier dictionary AND persists `decisionState =
+        // .reverted` so the next run does not re-emit.
+        let correctionReplayWindows = try await correctionReplayCandidates(
+            analysisAssetId: analysisAssetId
+        )
+        if !correctionReplayWindows.isEmpty {
+            try await store.upsertHotPathAdWindows(
+                correctionReplayWindows,
+                existingIDs: [],
+                retiredIDs: []
+            )
+            logger.info(
+                "Hot path: correction-replay emitted \(correctionReplayWindows.count) markOnly AdWindows"
+            )
+        }
 
         // playhead-gtt9.9: Tier 1 runs FIRST, independent of transcript
         // state. Emits one DecisionLogEntry per slot across [0, episodeDuration)
@@ -1259,15 +1348,36 @@ actor AdDetectionService {
                 )
                 logger.info("Hot path: aggregator persisted \(aggregatorWindows.count) AdWindows (chunks-empty branch)")
             }
-            return HotPathRunResult(windows: aggregatorWindows, retiredWindowIDs: [])
+            // playhead-hygc.1.8: include correction-replay windows in the
+            // returned set so SkipOrchestrator surfaces them as suggest-tier.
+            return HotPathRunResult(
+                windows: aggregatorWindows + correctionReplayWindows,
+                retiredWindowIDs: []
+            )
         }
 
+        // playhead-hygc.1.8: correction-replay rows must NEVER be retired
+        // by the algorithmic-absence path. R3 found that fresh replay rows
+        // emitted in the same run were retired before the run finished;
+        // R4 found the same bug shifted by one run — a previously-emitted
+        // replay row, present in the DB on a subsequent run, would be
+        // included in `replayCandidateIDs` because `hotPathCandidateIDs`
+        // filters by `(decisionState=.candidate, detectorVersion=current)`
+        // — exactly the stamp on a replay row. The single authoritative
+        // fix lives in `hotPathCandidateIDs`, which now excludes any row
+        // whose `boundaryState == correctionReplay`. The local
+        // `subtracting` below is retained as a belt-and-suspenders defense
+        // against future regressions in that filter (e.g. a replay row
+        // mid-flight whose persisted boundaryState is somehow stale) — it
+        // is a no-op when the source filter is doing its job.
+        let correctionReplayWindowIDs: Set<String> =
+            Set(correctionReplayWindows.map(\.id))
         let replayCandidateIDs: Set<String>
         if retireUnmatchedReplayCandidates {
             replayCandidateIDs = try await hotPathCandidateIDs(
                 analysisAssetId: analysisAssetId,
                 overlapping: replayEnvelope(for: chunks)
-            )
+            ).subtracting(correctionReplayWindowIDs)
         } else {
             replayCandidateIDs = []
         }
@@ -1301,8 +1411,9 @@ actor AdDetectionService {
             if !aggregatorWindows.isEmpty {
                 logger.info("Hot path: aggregator persisted \(aggregatorWindows.count) AdWindows (no-candidates branch)")
             }
+            // playhead-hygc.1.8: include correction-replay windows.
             return HotPathRunResult(
-                windows: aggregatorWindows,
+                windows: aggregatorWindows + correctionReplayWindows,
                 retiredWindowIDs: replayCandidateIDs
             )
         }
@@ -1395,7 +1506,11 @@ actor AdDetectionService {
                     retiredIDs: replayCandidateIDs
                 )
             }
-            return HotPathRunResult(windows: [], retiredWindowIDs: replayCandidateIDs)
+            // playhead-hygc.1.8: include correction-replay windows.
+            return HotPathRunResult(
+                windows: correctionReplayWindows,
+                retiredWindowIDs: replayCandidateIDs
+            )
         }
 
         let reconciledWindows = try await reconcileHotPathWindows(
@@ -1411,7 +1526,11 @@ actor AdDetectionService {
                     retiredIDs: replayCandidateIDs
                 )
             }
-            return HotPathRunResult(windows: [], retiredWindowIDs: replayCandidateIDs)
+            // playhead-hygc.1.8: include correction-replay windows.
+            return HotPathRunResult(
+                windows: correctionReplayWindows,
+                retiredWindowIDs: replayCandidateIDs
+            )
         }
 
         let matchedExistingIDs = Set(reconciledWindows.compactMap(\.matchedExistingID))
@@ -1439,8 +1558,14 @@ actor AdDetectionService {
 
         logger.info("Hot path: persisted \(reconciledWindows.count) single-window + \(aggregatorWindows.count) aggregator AdWindows")
 
+        // playhead-hygc.1.8: include correction-replay windows in the
+        // returned set so SkipOrchestrator surfaces them as suggest-tier.
+        // They were already persisted at the top of the function via a
+        // separate `upsertHotPathAdWindows` call so they appear in
+        // `fetchAdWindows` queries; we only attach them to the in-memory
+        // return list here.
         return HotPathRunResult(
-            windows: allWindowsToPersist,
+            windows: allWindowsToPersist + correctionReplayWindows,
             retiredWindowIDs: retiredWindowIDs
         )
     }
@@ -3618,7 +3743,24 @@ actor AdDetectionService {
         return Set(
             windows
                 .filter { window in
-                    window.endTime > replayEnvelope.lowerBound
+                    // playhead-hygc.1.8 (R4): correction-replay rows are
+                    // user-correction-backed shadow windows that the
+                    // algorithmic detector by design does NOT re-emit (the
+                    // overlap check in `correctionReplayCandidates` short-
+                    // circuits whenever an existing AdWindow covers the FN
+                    // span). They therefore can never appear in the new
+                    // `adWindows` set produced by classification, so they
+                    // would always land in `retiredWindowIDs` on a run
+                    // whose chunks envelope overlaps them — which both R3
+                    // (same-run) and R4 (subsequent-run) had to defuse.
+                    // The cleanest invariant: correction-replay rows are
+                    // never retired by the algorithmic-absence path. They
+                    // are retired only by an explicit user veto via
+                    // `SkipOrchestrator.revertByTimeRange`, which flips
+                    // `decisionState` to `.reverted` (filtered out below
+                    // by `currentHotPathCandidateWindows`).
+                    window.boundaryState != Self.correctionReplayBoundaryState
+                        && window.endTime > replayEnvelope.lowerBound
                         && window.startTime < replayEnvelope.upperBound
                 }
                 .map(\.id)
@@ -4566,6 +4708,10 @@ actor AdDetectionService {
             episodeDuration: episodeDuration
         )
         let surfacedSegments = promotedSegments + boundarySingletonSegments
+        // playhead-9ro7: boundary-singleton mark-only enforcement now
+        // lives in `precisionGateLabel` (slot-only firedSignals → demote
+        // to "markOnly"), so both this aggregator path and the single-
+        // window path at the top of `runHotPath` honor the same rule.
         guard !surfacedSegments.isEmpty else { return [] }
 
         // Observability: emit one decision-log entry per promoted segment
@@ -4700,6 +4846,181 @@ actor AdDetectionService {
         }
         logger.info("Hot path: aggregator produced \(newWindows.count) windows (of \(surfacedSegments.count) surfaced segments, \(surfacedSegments.count - surviving.count) deduped against single-window path)")
         return newWindows
+    }
+
+    // MARK: - Correction Replay (playhead-hygc.1.8)
+
+    /// `boundaryState` literal stamped on AdWindows produced by the
+    /// correction-replay recall step. Distinct from `userMarked` (the
+    /// `recordUserMarkedAd` row written when the user first reports the
+    /// ad) so dogfood / NARL telemetry can attribute recall recovery to
+    /// the replay path specifically.
+    private static let correctionReplayBoundaryState: String = "correctionReplay"
+
+    /// `metadataSource` stamp that mirrors `correctionReplayBoundaryState`
+    /// for correction-replay rows. Keeps the `userCorrection` source
+    /// (used by `recordUserMarkedAd` for the original userMarked write)
+    /// distinct from this replay-derived shadow row.
+    private static let correctionReplayMetadataSource: String = "userCorrectionReplay"
+
+    /// Build mark-only AdWindows from `.falseNegative` `.exactTimeSpan`
+    /// correction events that have no overlapping AdWindow on the asset.
+    ///
+    /// Why this exists: a `.falseNegative` correction is the user's
+    /// strongest possible label — they explicitly said "this WAS an ad."
+    /// In the live runtime path this becomes a `userMarked` AdWindow
+    /// inside `recordUserMarkedAd`, so subsequent runs of the same
+    /// episode see the row via `fetchAdWindows`. But for any analysis
+    /// SQLite that arrives mid-pipeline (cross-launch preload, NARL
+    /// dogfood replay, schema-rebased restore) where the userMarked
+    /// AdWindow row is missing while the correction event survives, we
+    /// MUST still surface a candidate or the recall metric drops on
+    /// every replay.
+    ///
+    /// Idempotency: rows whose span overlaps any existing AdWindow on
+    /// the asset are skipped — including AdWindows in `.reverted` state
+    /// (so a later `.falsePositive` veto via `revertByTimeRange` is not
+    /// undone by the next hot-path run). The first run synthesizes the
+    /// AdWindow; the second run finds it via `fetchAdWindows` and
+    /// short-circuits before re-emitting it.
+    ///
+    /// Suppression: a `.falseNegative` correction whose time range is
+    /// fully covered by any `.falsePositive` correction (regardless of
+    /// relative ordering — typically the FP is recorded after the FN, but
+    /// we don't depend on `createdAt` since clock skew can scramble it)
+    /// is suppressed. This protects the precision contract when the user
+    /// has effectively retracted their false-negative report (e.g.
+    /// reported the ad, then realised it was content and vetoed it).
+    ///
+    /// All emitted rows are stamped with `eligibilityGate = "markOnly"`
+    /// so the suggest-tier banner — and explicitly NOT auto-skip — is
+    /// the surface. This is the precision-safe recall lever.
+    ///
+    /// Concurrency precondition: this function runs to completion under
+    /// the `AdDetectionService` actor's serialization, BUT it spans
+    /// multiple `await`s (`loadCorrectionEvents`, `fetchAdWindows`, and
+    /// the caller's subsequent `upsertHotPathAdWindows`). Actor
+    /// reentrancy could in principle let two concurrent
+    /// `runHotPathResult` calls each compute fresh UUIDs from the same
+    /// FN range and double-insert. The production caller chain holds the
+    /// no-concurrent-runHotPath-per-asset invariant:
+    ///   - `AnalysisCoordinator.handlePersistedTranscriptChunks` is
+    ///     dispatched from a single `for await` loop (single-shot per
+    ///     `chunksPersisted` event, serialized).
+    ///   - `AnalysisJobRunner.run` invokes `runHotPath` once per asset
+    ///     job and the runner is itself a serial executor.
+    /// R7: the invariant is now ENFORCED — `runHotPathResult` tracks
+    /// per-asset in-flight state in `hotPathRunInFlightAssetIds` and
+    /// fires `assertionFailure` (DEBUG crash, RELEASE warning log) on a
+    /// concurrent re-entry for the same asset. The earlier rounds (R0–R6)
+    /// only documented the invariant; R7 added the runtime check so a
+    /// future caller cannot quietly violate it.
+    private func correctionReplayCandidates(
+        analysisAssetId: String
+    ) async throws -> [AdWindow] {
+        let events: [CorrectionEvent]
+        do {
+            events = try await store.loadCorrectionEvents(
+                analysisAssetId: analysisAssetId
+            )
+        } catch {
+            logger.warning("correctionReplayCandidates: loadCorrectionEvents failed: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+        guard !events.isEmpty else { return [] }
+
+        // Build the set of `.exactTimeSpan` ranges that have a
+        // `.falsePositive` correction. These mask `.falseNegative`
+        // ranges they fully cover so a vetoed span is never re-emitted.
+        var falsePositiveRanges: [(start: Double, end: Double)] = []
+        for event in events where event.correctionType == .falsePositive {
+            guard let scope = CorrectionScope.deserialize(event.scope) else { continue }
+            guard case .exactTimeSpan(_, let s, let e) = scope else { continue }
+            falsePositiveRanges.append((s, e))
+        }
+
+        // Collect unique `.falseNegative` `.exactTimeSpan` ranges.
+        var falseNegativeRanges: [(start: Double, end: Double)] = []
+        var seen: Set<String> = []
+        for event in events where event.correctionType == .falseNegative {
+            guard let scope = CorrectionScope.deserialize(event.scope) else { continue }
+            guard case .exactTimeSpan(_, let s, let e) = scope else { continue }
+            // Defensive: reject non-finite or zero-duration spans.
+            guard s.isFinite, e.isFinite, e > s else { continue }
+            // Suppress if any falsePositive range fully covers this span.
+            let suppressed = falsePositiveRanges.contains { fp in
+                fp.start <= s && fp.end >= e
+            }
+            if suppressed { continue }
+            // Dedupe by serialized %.3f-%.3f pair (matches scope serialization
+            // precision). One emit per unique span even if the user reported
+            // it multiple times.
+            let key = String(format: "%.3f-%.3f", s, e)
+            if seen.contains(key) { continue }
+            seen.insert(key)
+            falseNegativeRanges.append((s, e))
+        }
+        guard !falseNegativeRanges.isEmpty else { return [] }
+
+        // Skip ranges that already have an overlapping AdWindow (any
+        // decisionState — candidate, confirmed, applied, suppressed,
+        // reverted). `.reverted` rows persist a user veto, and we MUST
+        // NOT resurface those.
+        let existing: [AdWindow]
+        do {
+            existing = try await store.fetchAdWindows(assetId: analysisAssetId)
+        } catch {
+            logger.warning("correctionReplayCandidates: fetchAdWindows failed: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+
+        var emitted: [AdWindow] = []
+        let detectorVersion = config.detectorVersion
+        for (start, end) in falseNegativeRanges {
+            let overlapsExisting = existing.contains { window in
+                window.startTime < end && window.endTime > start
+            }
+            if overlapsExisting { continue }
+            // playhead-hygc.1.8 (R7): dedupe-by-overlap across the in-flight
+            // emit set. The exact-match `seen` key above (`%.3f-%.3f`)
+            // catches duplicate user reports with identical span numerics
+            // but not slightly-different overlapping spans (e.g. a single
+            // ad reported with ranges [600, 680] and [610, 690]). Without
+            // this guard both would persist, leaving two suggest banners
+            // — and an `acceptSuggestedSkip` on either would only veto its
+            // own row. Skip any FN range that already overlaps a row we
+            // just queued in this same call.
+            let overlapsEmitted = emitted.contains { window in
+                window.startTime < end && window.endTime > start
+            }
+            if overlapsEmitted { continue }
+            let id = UUID().uuidString
+            let row = AdWindow(
+                id: id,
+                analysisAssetId: analysisAssetId,
+                startTime: start,
+                endTime: end,
+                confidence: 1.0,
+                boundaryState: Self.correctionReplayBoundaryState,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: detectorVersion,
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: start,
+                metadataSource: Self.correctionReplayMetadataSource,
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: nil,
+                eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+                catalogStoreMatchSimilarity: nil
+            )
+            emitted.append(row)
+        }
+        return emitted
     }
 
     private func boundarySingletonPromotedSegments(
@@ -4981,7 +5302,34 @@ actor AdDetectionService {
             return nil
         case .uiCandidate:
             return "markOnly"
-        case .autoSkipEligible:
+        case .autoSkipEligible(let firedSignals):
+            // playhead-9ro7 (cycle-2 follow-up): metadataSlotPrior fires by
+            // construction whenever the segment center is in the first/last
+            // `slotFraction` of the episode. The pure gate admits any
+            // non-empty signal set so it preserves its single-knob
+            // contract (see `AutoSkipPrecisionGateTests
+            // .autoSkipAdmittedBySlotPriorPreRoll`), but the service-layer
+            // policy is stricter: a slot-only autoSkip is just "score in
+            // the slot," with no independent corroboration. Demote those
+            // to mark-only at the helper so both the single-window path
+            // (line ~1345) and the aggregator path (line ~4683) inherit
+            // the rule without bespoke per-call-site overrides.
+            //
+            // Modeled as an explicit "no strong corroborator" check rather
+            // than `firedSignals == [.metadataSlotPrior]` set-equality.
+            // The set-equality form silently re-admits the moment a
+            // second weak signal is introduced; the inclusion-list form
+            // forces any future SafetySignal author to decide whether
+            // their case counts as independent corroboration.
+            let strongCorroborators: Set<SafetySignal> = [
+                .strongLexicalAdPhrase,
+                .sustainedAcousticAdSignature,
+                .userConfirmedLocalPattern,
+                .catalogMatch,
+            ]
+            if firedSignals.isDisjoint(with: strongCorroborators) {
+                return "markOnly"
+            }
             return "autoSkip"
         }
     }

@@ -321,6 +321,42 @@ struct SegmentAggregatorWiringTests {
         #expect(sortedPersisted.last?.startTime == 3540)
     }
 
+    @Test("Boundary recall: high-score singleton stays markOnly even when score ≥ autoSkipThreshold")
+    func boundarySingletonHighScoreTier1CandidatesStayMarkOnly() async throws {
+        // Pin the H1 fix: a Tier-1 singleton whose score clears
+        // autoSkipThreshold (0.55) MUST still persist as markOnly when
+        // promoted via the boundary path. Without the override, the
+        // standard precision gate would emit autoSkip on
+        // `metadataSlotPrior` alone (the slot signal fires by
+        // construction in pre/post-roll).
+        let store = try await makeTestStore()
+        let assetId = "asset-boundary-singletons-highscore"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let duration: Double = 3600
+        try await insertUniformFeatureGrid(
+            store: store,
+            assetId: assetId,
+            duration: duration
+        )
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [
+            0.0: 0.85,
+            3540.0: 0.85
+        ], defaultScore: 0.10)
+        let service = makeService(store: store, classifier: classifier)
+
+        let windows = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        #expect(persisted.allSatisfy { $0.eligibilityGate == "markOnly" },
+                "high-score boundary singletons must NOT autoSkip via metadataSlotPrior alone; gates=\(persisted.map { String(describing: $0.eligibilityGate) })")
+        #expect(windows.count == 2)
+    }
+
     // MARK: - 5. Observability: decision log distinguishes the two paths
 
     @Test("Decision log marks aggregator-promoted segments distinctly from single-window promotions")

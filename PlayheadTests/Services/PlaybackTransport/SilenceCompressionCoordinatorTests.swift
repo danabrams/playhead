@@ -341,4 +341,98 @@ struct SilenceCompressionCoordinatorTests {
             "beginEpisode must cancel the prior asset's in-flight refresh; the suspended Task should observe Task.isCancelled when it resumes"
         )
     }
+
+    /// cycle-1 M1 regression test: a throwing `fetchWindows` (transient
+    /// SQLite error or a `CancellationError`) must NOT wipe the
+    /// previously-published plan. The original shape was
+    /// `(try? await source.fetchWindows(...)) ?? []`, which silently
+    /// fell back to `[]`, then handed `[]` to `compressor.replaceWindows`,
+    /// deriving an empty plan list and disengaging compression on the
+    /// next tick. That makes a single transient failure during a music
+    /// bed kick the compressor out for the rest of the cadence window.
+    /// The fix returns early on throw so the prior plan stays live.
+    @Test("Throwing fetchWindows preserves prior plan (no disengage)")
+    func throwingFetchPreservesPriorPlan() async {
+        actor ToggleableThrowingSource: SilenceCompressionAnalysisSourcing {
+            private let validWindows: [FeatureWindow]
+            private(set) var fetchCount: Int = 0
+
+            init(validWindows: [FeatureWindow]) {
+                self.validWindows = validWindows
+            }
+
+            func fetchWindows(
+                assetId: String, from: Double, to: Double
+            ) async throws -> [FeatureWindow] {
+                fetchCount += 1
+                if fetchCount == 1 {
+                    return validWindows.filter { window in
+                        window.endTime > from && window.startTime < to
+                    }
+                }
+                throw CancellationError()
+            }
+        }
+
+        let windows = (0..<6).map { i in
+            musicWindow(start: Double(i) * 2 + 10, end: Double(i + 1) * 2 + 10)
+        }
+        let playback = RecordingPlaybackController()
+        let source = ToggleableThrowingSource(validWindows: windows)
+        let coord = SilenceCompressionCoordinator(playback: playback, source: source)
+        await coord.beginEpisode(assetId: "asset-1", keepFullMusic: false)
+
+        // First tick: lastWindowsRefreshTime is -inf so the first
+        // fetch fires unconditionally and returns the valid windows.
+        await coord.notePlayhead(time: 0)
+        for _ in 0..<10 {
+            if await source.fetchCount >= 1 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        // Tick inside the music plan; engage compression so we have
+        // something to disengage if the buggy fallback path runs.
+        try? await Task.sleep(for: .milliseconds(50))
+        for _ in 0..<10 {
+            await coord.notePlayhead(time: 11)
+            if !(await playback.beginCalls.isEmpty) { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let preBeginCount = await playback.beginCalls.count
+        let preEndCount = await playback.endCallCount
+        #expect(
+            preBeginCount >= 1,
+            "Setup precondition failed: first fetch should have engaged compression"
+        )
+
+        // Drive past the 5s cadence to fire the second fetch (which
+        // throws). Tick at t=12 first (resets cadence anchor for the
+        // tick-side throttle), then sleep, then tick at t=18.
+        try? await Task.sleep(for: .milliseconds(60))
+        await coord.notePlayhead(time: 18)
+        for _ in 0..<10 {
+            if await source.fetchCount >= 2 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(
+            await source.fetchCount >= 2,
+            "Second fetch must have fired so the throw path is exercised"
+        )
+
+        // After the throwing fetch lands, tick a few more times
+        // inside the same music horizon. With the fix, the prior
+        // plan list survives and the compressor stays engaged. With
+        // the broken `(try? ...) ?? []` shape, plans collapse to []
+        // and the next tick would fire a `disengage` → endCallCount
+        // increments above the pre-throw baseline.
+        try? await Task.sleep(for: .milliseconds(50))
+        for _ in 0..<5 {
+            await coord.notePlayhead(time: 14)
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let postEndCount = await playback.endCallCount
+        #expect(
+            postEndCount == preEndCount,
+            "Throwing fetch must NOT wipe prior plan (would disengage); preEnd=\(preEndCount), postEnd=\(postEndCount)"
+        )
+    }
 }
