@@ -737,6 +737,229 @@ struct CorrectionReplayCandidateTests {
         #expect(algorithmicRows.first?.id == "algorithmic-coexist-1",
                 "algorithmic row identity must be unchanged")
     }
+
+    // MARK: - 9b. R8: replay row survives retirement-enabled run even when an algorithmic row co-exists
+
+    /// playhead-hygc.1.8 R8: the R7 dual-emission test
+    /// (`replayRowCoexistsWithOverlappingAlgorithmicRow`) used the
+    /// empty-chunks branch — which short-circuits before retirement
+    /// even runs — so it didn't actually verify that the replay row's
+    /// boundaryState filter (R4) holds in the production retirement-
+    /// enabled path when an algorithmic row is also present.
+    ///
+    /// This test pins the asymmetric contract:
+    ///   * The replay row is PROTECTED from retirement by the
+    ///     `boundaryState != "correctionReplay"` filter at
+    ///     `AdDetectionService.swift:hotPathCandidateIDs` (R4).
+    ///   * The algorithmic row, by contrast, follows the normal
+    ///     stale-candidate retirement contract: when it carries the
+    ///     CURRENT `detectorVersion` (so it appears in
+    ///     `currentHotPathCandidateWindows`) AND a chunks envelope
+    ///     overlapping it produces no incoming algorithmic match, it
+    ///     IS retired.
+    ///
+    /// The audit-point asymmetry matters because R7's residual-risk
+    /// note ("neither retires/reconciles the other") was true only of
+    /// the no-retirement path. The retirement-enabled path treats the
+    /// two rows differently — the replay row's protection is
+    /// load-bearing here.
+    @Test("retirement-enabled multi-run with co-existing algorithmic row: replay row protected, algorithmic row follows normal retirement")
+    func replayRowSurvivesRetirementWhileAlgorithmicFollowsNormalContract() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-coexist-retire"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        // FN at 600..680 → emits a replay row on run 1.
+        try await appendFalseNegativeCorrection(
+            store: store, assetId: assetId, startTime: 600, endTime: 680
+        )
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+
+        let chunks: [TranscriptChunk] = [
+            TranscriptChunk(
+                id: "chunk-coexist-retire-1",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-coexist-retire",
+                chunkIndex: 0,
+                startTime: 580,
+                endTime: 700,
+                text: "the speaker is talking about something benign",
+                normalizedText: "the speaker is talking about something benign",
+                pass: "final",
+                modelVersion: "speech-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil,
+                weakAnchorMetadata: nil
+            )
+        ]
+        try await store.insertTranscriptChunks(chunks)
+
+        // Run 1: emit replay row in the retirement-enabled path.
+        let r1 = try await service.runHotPathResult(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            retireUnmatchedReplayCandidates: true
+        )
+        let replayId = (try await store.fetchAdWindows(assetId: assetId))
+            .first { $0.boundaryState == "correctionReplay" }?.id ?? ""
+        #expect(!replayId.isEmpty, "run 1 must emit a replay row")
+        #expect(!r1.retiredWindowIDs.contains(replayId),
+                "run 1: replay row id must not be retired; got \(r1.retiredWindowIDs)")
+
+        // Now insert a co-existing algorithmic row stamped with the
+        // CURRENT detector version so it lands in
+        // `currentHotPathCandidateWindows` and is eligible for
+        // retirement on the next run.
+        let algorithmic = AdWindow(
+            id: "algorithmic-retire-coexist-1",
+            analysisAssetId: assetId,
+            startTime: 605,
+            endTime: 670,
+            confidence: 0.55,
+            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "hygc-1.8-test",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: 605,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+        )
+        try await store.insertAdWindow(algorithmic)
+
+        // Run 2: retirement-enabled, chunks envelope overlaps both rows.
+        let r2 = try await service.runHotPathResult(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            retireUnmatchedReplayCandidates: true
+        )
+
+        // CONTRACT: replay row id is NEVER in retiredWindowIDs (R4
+        // boundaryState filter is load-bearing here).
+        #expect(!r2.retiredWindowIDs.contains(replayId),
+                "replay row must be protected from retirement even when an algorithmic row co-exists; got \(r2.retiredWindowIDs)")
+
+        // Replay row must still be persisted.
+        let final = try await store.fetchAdWindows(assetId: assetId)
+        let replayAfter = final.filter { $0.boundaryState == "correctionReplay" }
+        #expect(replayAfter.count == 1,
+                "replay row must survive retirement-enabled run 2; got \(replayAfter.count)")
+        #expect(replayAfter.first?.id == replayId,
+                "replay row identity must be stable across runs; got \(replayAfter.first?.id ?? "<missing>") vs \(replayId)")
+    }
+
+    // MARK: - 10. R8: boundary semantics for overlap dedupe
+
+    /// playhead-hygc.1.8 R8: pin the boundary semantics of the
+    /// overlap-aware dedupe added in R7. The predicate is
+    /// `range1.startTime < range2.endTime && range1.endTime > range2.startTime`
+    /// — i.e. STRICT inequality on both sides. Adjacent ranges that share
+    /// an endpoint (e.g. [600, 680] and [680, 760]) do NOT overlap and
+    /// must produce two DISTINCT replay rows. Without this pin a future
+    /// "fix" that flips the comparison to `<=` / `>=` would silently merge
+    /// two genuinely-distinct user-reported ads into one row.
+    @Test("adjacent (boundary-touching) falseNegative ranges do NOT overlap and produce two distinct replay rows")
+    func adjacentFalseNegativeRangesAreNotDeduped() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-adjacent"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        // Two FN reports that touch at exactly t=680. Strict-inequality
+        // overlap means these are DISJOINT — both must emit.
+        try await appendFalseNegativeCorrection(
+            store: store, assetId: assetId, startTime: 600, endTime: 680
+        )
+        try await appendFalseNegativeCorrection(
+            store: store, assetId: assetId, startTime: 680, endTime: 760
+        )
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        let replayRows = persisted
+            .filter { $0.boundaryState == "correctionReplay" }
+            .sorted { $0.startTime < $1.startTime }
+        #expect(replayRows.count == 2,
+                "boundary-touching FN ranges must produce TWO distinct replay rows, not one; got \(replayRows.count)")
+        if replayRows.count == 2 {
+            #expect(abs(replayRows[0].startTime - 600) < 0.01 && abs(replayRows[0].endTime - 680) < 0.01,
+                    "first row must span 600..680; got \(replayRows[0].startTime)..\(replayRows[0].endTime)")
+            #expect(abs(replayRows[1].startTime - 680) < 0.01 && abs(replayRows[1].endTime - 760) < 0.01,
+                    "second row must span 680..760; got \(replayRows[1].startTime)..\(replayRows[1].endTime)")
+        }
+    }
+
+    // MARK: - 11. R8: explicit boundaryState + full stamp pin in one place
+
+    /// playhead-hygc.1.8 R8: consolidate the five replay-row stamps
+    /// (`boundaryState`, `metadataSource`, `eligibilityGate`,
+    /// `decisionState`, `confidence`) into one assertive test so a
+    /// regression on ANY one stamp fails this single test rather than
+    /// silently slipping through coverage spread across multiple files.
+    /// `falseNegativeCorrectionSurfacesMarkOnlyAdWindow` already covers 4
+    /// of the 5 explicitly + boundaryState via filter; this test pins
+    /// boundaryState as a direct `#expect` so the contract is loud.
+    @Test("replay row carries all five stamps: correctionReplay/userCorrectionReplay/markOnly/candidate/1.0")
+    func correctionReplayRowStampsArePinnedExplicitly() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-fn-replay-stamps"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 1800
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        try await appendFalseNegativeCorrection(
+            store: store, assetId: assetId, startTime: 800, endTime: 870
+        )
+
+        let classifier = SlotScoringClassifier(scoresByStartTime: [:], defaultScore: 0.05)
+        let service = makeService(store: store, classifier: classifier)
+        let returned = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        // Single replay row in both the returned set and the persisted
+        // store.
+        let returnedReplay = returned.filter { abs($0.startTime - 800) < 0.01 && abs($0.endTime - 870) < 0.01 }
+        #expect(returnedReplay.count == 1, "expected one returned replay row; got \(returnedReplay.count)")
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        let candidates = persisted.filter { abs($0.startTime - 800) < 0.01 && abs($0.endTime - 870) < 0.01 }
+        guard let row = candidates.first else {
+            Issue.record("expected one persisted replay row at 800..870; got \(candidates.count)")
+            return
+        }
+        // All five stamps pinned in one place. Any one regressing fails this test.
+        #expect(row.boundaryState == "correctionReplay",
+                "boundaryState stamp must be 'correctionReplay'; got \(row.boundaryState)")
+        #expect(row.metadataSource == "userCorrectionReplay",
+                "metadataSource stamp must be 'userCorrectionReplay'; got \(row.metadataSource ?? "<nil>")")
+        #expect(row.eligibilityGate == SkipEligibilityGate.markOnly.rawValue,
+                "eligibilityGate stamp must be 'markOnly'; got \(row.eligibilityGate ?? "<nil>")")
+        #expect(row.decisionState == AdDecisionState.candidate.rawValue,
+                "decisionState stamp must be 'candidate'; got \(row.decisionState)")
+        #expect(row.confidence == 1.0,
+                "confidence stamp must be 1.0; got \(row.confidence)")
+    }
 }
 
 // MARK: - Test doubles
