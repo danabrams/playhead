@@ -221,24 +221,34 @@ struct DogfoodDiagnosticsArchive: Codable, Sendable, Equatable {
     let generatedAt: Date
     let files: [DogfoodDiagnosticsArchiveFile]
     let activitySnapshot: DogfoodDiagnosticsActivitySnapshot?
+    /// Phase 1.5 playhead-hygc.1.9: optional structured "why did
+    /// this not progress?" summary. When non-nil the outer
+    /// `schema_version` is bumped to 2; older v1 readers see the
+    /// field as an unknown key and skip it. Older v1 archives still
+    /// decode against this struct because `analysisHealth` is
+    /// optional.
+    let analysisHealth: DogfoodDiagnosticsAnalysisHealth?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case generatedAt = "generated_at"
         case files
         case activitySnapshot = "activity_snapshot"
+        case analysisHealth = "analysis_health"
     }
 
     init(
         schemaVersion: Int,
         generatedAt: Date,
         files: [DogfoodDiagnosticsArchiveFile],
-        activitySnapshot: DogfoodDiagnosticsActivitySnapshot? = nil
+        activitySnapshot: DogfoodDiagnosticsActivitySnapshot? = nil,
+        analysisHealth: DogfoodDiagnosticsAnalysisHealth? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.generatedAt = generatedAt
         self.files = files
         self.activitySnapshot = activitySnapshot
+        self.analysisHealth = analysisHealth
     }
 }
 
@@ -484,7 +494,20 @@ enum DogfoodDiagnosticsExportError: Error, Equatable, LocalizedError {
 }
 
 enum DogfoodDiagnosticsExporter {
-    static let schemaVersion = 1
+    /// Schema version when no `analysis_health` is attached. Kept as
+    /// the historical v1 wire format so existing tooling continues
+    /// to read old exports byte-for-byte.
+    static let schemaVersionV1 = 1
+    /// Schema version when an `analysis_health` block is attached.
+    /// Older v1 readers see the extra key and ignore it; v2 readers
+    /// can rely on the field being present whenever the version is
+    /// 2.
+    static let schemaVersionV2 = 2
+    /// Public alias for callers that don't care about the version
+    /// boundary — points at the v1 baseline so test code that
+    /// constructs an archive without analysis_health gets the
+    /// historical shape unchanged.
+    static let schemaVersion = schemaVersionV1
     static let filenamePrefix = "playhead-dogfood-diagnostics"
 
     static func export(
@@ -492,7 +515,8 @@ enum DogfoodDiagnosticsExporter {
         outputDirectory: URL? = nil,
         now: Date = Date(),
         fileManager: FileManager = .default,
-        activitySnapshot: DogfoodDiagnosticsActivitySnapshot? = nil
+        activitySnapshot: DogfoodDiagnosticsActivitySnapshot? = nil,
+        analysisHealth: DogfoodDiagnosticsAnalysisHealth? = nil
     ) throws -> DogfoodDiagnosticsExportResult {
         let source: URL
         if let sourceDirectory {
@@ -535,11 +559,15 @@ enum DogfoodDiagnosticsExporter {
             )
         }
 
+        let effectiveSchemaVersion = analysisHealth == nil
+            ? schemaVersionV1
+            : schemaVersionV2
         let archive = DogfoodDiagnosticsArchive(
-            schemaVersion: schemaVersion,
+            schemaVersion: effectiveSchemaVersion,
             generatedAt: now,
             files: archiveFiles,
-            activitySnapshot: activitySnapshot
+            activitySnapshot: activitySnapshot,
+            analysisHealth: analysisHealth
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
