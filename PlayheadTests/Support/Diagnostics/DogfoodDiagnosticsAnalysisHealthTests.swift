@@ -1442,13 +1442,27 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         // without us noticing (an unreachable branch is a code
         // smell that should be removed, not silently kept around).
         //
+        // R11: realistic production scenario — a user-paused row whose
+        // analysis was mid-flight when the user hit pause. The row
+        // disposition is `paused` (real, written by the activity-snapshot
+        // section assignment), and the persisted `analysisState` is one
+        // of the in-progress `SessionState` raw values
+        // (`waitingForBackfill` here; could also be `spooling`,
+        // `featuresReady`, `hotPathReady`, or `backfill`). The earlier
+        // R9 comment named `analysisState="paused"`, which is NOT a
+        // valid `SessionState` raw value and cannot be written by
+        // production code — switching to a realistic value keeps the
+        // test honest while preserving the route to `.unknown`. The
+        // route is identical: `waitingForBackfill` is neither a
+        // completion nor a failure, so the contradiction predicate
+        // skips it and the running/no-cached/lease/watermark gates
+        // also skip.
+        //
         // The row that hits `.unknown` is one that:
-        //   * is NOT terminal failure (analysisState="paused")
-        //   * is NOT terminal contradiction (paused is not a
-        //     completion state, so terminalCompletionContradiction
-        //     returns nil)
-        //   * is NOT terminal completion (paused is not a
-        //     completion state)
+        //   * is NOT terminal failure (waitingForBackfill is non-terminal)
+        //   * is NOT terminal contradiction (non-completion state, so
+        //     terminalCompletionContradiction returns nil)
+        //   * is NOT terminal completion
         //   * is NOT running (isRunning=false)
         //   * does NOT match noCachedAudio (cachedAudioPresent=true)
         //   * does NOT match staleLease (no lease present)
@@ -1462,7 +1476,7 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
                 hash: "h-unknown",
                 disposition: "paused",
                 reason: "user_paused",
-                analysisState: "paused",
+                analysisState: "waitingForBackfill",
                 isRunning: false,
                 cachedAudioPresent: true,
                 pipeline: makePipeline(
@@ -2211,6 +2225,312 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         let decoded = try decoder.decode(DogfoodDiagnosticsAnalysisHealth.self, from: data)
         #expect(decoded.duplicates == duplicates)
         #expect(decoded.learning == learning)
+    }
+
+    @Test("populated analysis_health round-trips through encode/decode with full equality")
+    func populatedHealthFullRoundTrip() throws {
+        // R11: existing serialization tests check sub-fields
+        // (`globalSummaryCounts`'s `decodedHealth.global.totalAssets == 1`
+        // in `schemaVersionBumpsOnlyWhenHealthAttached`, the duplicates/
+        // learning struct in `duplicatesAndLearningRoundTrip`) but no
+        // test pins a populated multi-asset summary through encode →
+        // decode → full `==` equality. A typo in any sub-struct's
+        // `CodingKeys` raw value, or a future swap to manual encode that
+        // accidentally drops a field, would slip past every existing
+        // assertion.
+        //
+        // This test populates every observable field — multi-asset
+        // global counts, an asset summary with a non-nil watermarkDelta,
+        // a staleness flag, both caller-supplied aggregate blocks, and
+        // a captureNote — and asserts the decoded value `==` the
+        // encoded value via Equatable conformance. Because every
+        // sub-struct in the analysis_health graph is `Equatable`, a
+        // single `==` assertion exercises every field; if a CodingKey
+        // drifts the field comes back nil/default and the equality
+        // fails loudly.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [
+                // Asset 1: terminal-completion contradiction → flag +
+                // recommendation `.fileBug`. Drives a non-empty
+                // staleness_flags array AND an asset summary with
+                // populated watermarkDeltaSec / progressProvenance.
+                makeActivityRow(
+                    hash: "h-rt-contradicting",
+                    section: "up_next",
+                    analysisState: "completeFull",
+                    pipeline: makePipeline(
+                        downloadPercent: "100%",
+                        transcriptPercent: "5%",
+                        transcriptSource: "fast_transcript_chunks",
+                        analysisPercent: "5%",
+                        analysisSource: "feature_coverage",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 200,
+                        transcriptWatermarkSec: 200,
+                        fastTranscriptWatermarkSec: 90,
+                        analysisWatermarkSec: 200,
+                        featureCoverageEndSec: 200,
+                        confirmedAdCoverageEndSec: 50,
+                        finalPassCoverageEndSec: 200
+                    ),
+                    latestSession: makeSession(
+                        failureReason: nil,
+                        state: "backfill",
+                        updatedAt: 1_777_000_000
+                    ),
+                    latestJob: makeJob(
+                        state: "running",
+                        updatedAt: 1_777_001_000,
+                        nextEligibleAt: 1_777_100_000,
+                        leasePresent: false,
+                        lastErrorCode: "no_audio_yet"
+                    ),
+                    latestTerminalWork: makeWorkJournal(
+                        eventType: "preempted",
+                        timestamp: 1_777_002_000
+                    )
+                ),
+                // Asset 2: healthy completion. Drives terminalCompletedCount.
+                makeActivityRow(
+                    hash: "h-rt-healthy",
+                    analysisState: "completeFull",
+                    pipeline: makePipeline(
+                        downloadPercent: "100%",
+                        transcriptPercent: "98%",
+                        analysisPercent: "100%",
+                        episodeDurationSec: 4000,
+                        transcriptCoveredSec: 3960,
+                        fastTranscriptWatermarkSec: 3960,
+                        featureCoverageEndSec: 4000
+                    )
+                )
+            ],
+            captureError: "io_partial_read"
+        )
+        let duplicates = DogfoodDiagnosticsAnalysisHealth.DuplicateCounts(
+            duplicateCorrectionScopes: 7,
+            duplicateFinalPassWindows: 11
+        )
+        let learning = DogfoodDiagnosticsAnalysisHealth.LearningCounts(
+            rawCorrections: 19,
+            dedupedCorrections: 13,
+            shadowFMResponses: 503,
+            ingestedLearningArtifacts: 5,
+            skippedIngestionReasons: [
+                "duplicate_scope": 6,
+                "unverified_window": 2,
+                "transcript_unavailable": 1
+            ]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            duplicates: duplicates,
+            learning: learning,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        // Sanity: the populated summary is genuinely non-trivial — if
+        // any of these break it means the fixture above stopped
+        // exercising the relevant branches and the equality assertion
+        // below would be vacuous.
+        #expect(health.assets.count == 2)
+        #expect(!health.stalenessFlags.isEmpty)
+        #expect(health.global.terminalCompletedCount == 2)
+        #expect(health.captureNote != nil)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(health)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(DogfoodDiagnosticsAnalysisHealth.self, from: data)
+        // Single Equatable assertion — every nested struct conforms to
+        // Equatable, so a CodingKey drift on any sub-field surfaces here.
+        #expect(decoded == health)
+    }
+
+    @Test("encoded analysis_health uses snake_case wire keys for every field")
+    func encodedAnalysisHealthSnakeCaseWireKeys() throws {
+        // R11: every CodingKey raw value is a snake_case wire string
+        // — support tooling, Python parsers, and downstream archive
+        // ingest depend on the snake_case form. Existing tests pin
+        // RecommendedAction/StalenessFlag.Kind enum raw values and the
+        // outer `analysis_health` key (via the omit-when-nil test), but
+        // no test pins the inner field-name keys. A future refactor that
+        // accidentally drops a `case … = "snake_case"` line (or
+        // a developer renaming a Swift property without the matching
+        // CodingKeys update) would silently re-emit camelCase keys and
+        // break every downstream parser. Encode a populated archive,
+        // assert presence of every load-bearing snake_case key, AND
+        // assert the camelCase variants are absent.
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-keys",
+                analysisState: "completeFull",
+                terminalReason: "thermal_budget_exceeded",
+                pipeline: makePipeline(
+                    downloadPercent: "100%",
+                    transcriptPercent: "5%",
+                    transcriptSource: "fast_transcript_chunks",
+                    analysisPercent: "5%",
+                    analysisSource: "feature_coverage",
+                    episodeDurationSec: 4000,
+                    transcriptCoveredSec: 200,
+                    transcriptWatermarkSec: 200,
+                    fastTranscriptWatermarkSec: 90,
+                    analysisWatermarkSec: 200,
+                    featureCoverageEndSec: 200,
+                    confirmedAdCoverageEndSec: 50,
+                    finalPassCoverageEndSec: 200
+                ),
+                latestSession: makeSession(updatedAt: 1_777_000_000),
+                latestJob: makeJob(leasePresent: true, leaseExpiresAt: 1_700_001_000),
+                latestTerminalWork: makeWorkJournal(eventType: "finalized", timestamp: 1_777_002_000)
+            )]
+        )
+        let duplicates = DogfoodDiagnosticsAnalysisHealth.DuplicateCounts(
+            duplicateCorrectionScopes: 1,
+            duplicateFinalPassWindows: 1
+        )
+        let learning = DogfoodDiagnosticsAnalysisHealth.LearningCounts(
+            rawCorrections: 1,
+            dedupedCorrections: 1,
+            shadowFMResponses: 1,
+            ingestedLearningArtifacts: 1,
+            skippedIngestionReasons: [:]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            duplicates: duplicates,
+            learning: learning,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        let data = try encoder.encode(health)
+        let json = try #require(String(data: data, encoding: .utf8))
+
+        // Top-level keys.
+        let topLevelKeys = [
+            "summary_schema_version",
+            "generated_at",
+            "global",
+            "assets",
+            "staleness_flags",
+            "duplicates",
+            "learning"
+            // captureNote omitted — present-but-nil; tested elsewhere.
+        ]
+        for key in topLevelKeys {
+            #expect(json.contains("\"\(key)\""), "missing top-level key \(key)")
+        }
+
+        // GlobalSummary keys.
+        let globalKeys = [
+            "total_assets",
+            "running_count",
+            "queued_count",
+            "paused_count",
+            "failed_count",
+            "unavailable_count",
+            "terminal_completed_count",
+            "stale_terminal_count",
+            "stale_watermark_count",
+            "unknown_progress_count"
+            // latest_*_at / latest_*_outcome are nil-when-empty;
+            // covered by the populated round-trip test.
+        ]
+        for key in globalKeys {
+            #expect(json.contains("\"\(key)\""), "missing global key \(key)")
+        }
+
+        // AssetSummary keys.
+        let assetKeys = [
+            "episode_id_hash",
+            "analysis_state",
+            "is_running",
+            "cached_audio_present",
+            "download_percent",
+            "transcript_percent",
+            "analysis_percent",
+            "transcript_covered_sec",
+            "transcript_watermark_sec",
+            "fast_transcript_watermark_sec",
+            "watermark_delta_sec",
+            "analysis_watermark_sec",
+            "final_pass_coverage_end_sec",
+            "progress_provenance",
+            "latest_session_state",
+            "latest_job_state",
+            "latest_job_lease_present",
+            "latest_terminal_work_event",
+            "terminal_reason",
+            "recommended_action",
+            "recommended_action_note"
+        ]
+        for key in assetKeys {
+            #expect(json.contains("\"\(key)\""), "missing asset key \(key)")
+        }
+
+        // ProgressProvenance keys.
+        let provenanceKeys = ["download_source", "transcript_source", "analysis_source"]
+        for key in provenanceKeys {
+            #expect(json.contains("\"\(key)\""), "missing provenance key \(key)")
+        }
+
+        // DuplicateCounts keys.
+        let duplicateKeys = ["duplicate_correction_scopes", "duplicate_final_pass_windows"]
+        for key in duplicateKeys {
+            #expect(json.contains("\"\(key)\""), "missing duplicates key \(key)")
+        }
+
+        // LearningCounts keys.
+        let learningKeys = [
+            "raw_corrections",
+            "deduped_corrections",
+            "shadow_fm_responses",
+            "ingested_learning_artifacts",
+            "skipped_ingestion_reasons"
+        ]
+        for key in learningKeys {
+            #expect(json.contains("\"\(key)\""), "missing learning key \(key)")
+        }
+
+        // Camel-case variants of the most-renamed fields must NOT
+        // appear as JSON keys (they could legitimately appear as
+        // VALUES — e.g. "completeFull" — so guard with the trailing
+        // quote+colon to match key positions only).
+        let camelCaseProhibited = [
+            "summarySchemaVersion",
+            "generatedAt",
+            "totalAssets",
+            "runningCount",
+            "episodeIdHash",
+            "analysisState",
+            "isRunning",
+            "cachedAudioPresent",
+            "downloadPercent",
+            "transcriptPercent",
+            "analysisPercent",
+            "transcriptCoveredSec",
+            "fastTranscriptWatermarkSec",
+            "watermarkDeltaSec",
+            "progressProvenance",
+            "recommendedAction",
+            "recommendedActionNote",
+            "stalenessFlags",
+            "duplicateCorrectionScopes",
+            "rawCorrections",
+            "skippedIngestionReasons"
+        ]
+        for camelKey in camelCaseProhibited {
+            #expect(
+                !json.contains("\"\(camelKey)\" :"),
+                "found camelCase key \"\(camelKey)\" — CodingKey drifted"
+            )
+        }
     }
 
     @Test("no_snapshot factory produces an empty-but-noted summary")
