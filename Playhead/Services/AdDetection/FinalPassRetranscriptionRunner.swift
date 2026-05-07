@@ -255,12 +255,34 @@ actor FinalPassRetranscriptionRunner {
         }
 
         // Step 3 — filter. A window is eligible iff:
+        //   • its endTime is strictly greater than its startTime (a
+        //     window with `endTime <= startTime` is structurally
+        //     invalid — a zero-length or inverted span — and re-
+        //     transcribing it is a no-op that would still mark a
+        //     `complete` row, polluting coverage. Per the
+        //     playhead-hygc.1.5 contract: zero-length windows are
+        //     REJECTED at job creation time, not silently absorbed.
+        //     Non-zero but tiny spans (e.g. 0.001 s) are valid and
+        //     pass through; the 0-length cutoff is `endTime > startTime`,
+        //     not a fixed minimum duration), AND
         //   • its confidence cleared the configured floor, AND
         //   • its endTime is strictly past the watermark (resume guard).
         // The per-row `pass='final'` chunk overlap check is in
         // `retranscribeWindow` so it can short-circuit the full audio
         // decode without an extra DB hop here.
         let eligibleWindows = allWindows.filter { window in
+            // playhead-hygc.1.5: zero-length / inverted span guard.
+            // The May 6 dogfood `final_pass_jobs` had several rows with
+            // `windowStartTime == windowEndTime`; those produced
+            // `.complete` rows that consumed audit slots without
+            // re-transcribing anything. Filtering at job-creation time
+            // means a downstream query like `SELECT COUNT(*) FROM
+            // final_pass_jobs WHERE status='complete'` reflects real
+            // transcription work, not bookkeeping noise.
+            guard window.endTime > window.startTime else {
+                logger.debug("Final-pass: rejecting zero-length window \(window.id, privacy: .public) [\(window.startTime, privacy: .public)..\(window.endTime, privacy: .public)]")
+                return false
+            }
             guard window.confidence >= confidenceFloor else { return false }
             guard window.endTime > watermark else { return false }
             return true
@@ -294,29 +316,169 @@ actor FinalPassRetranscriptionRunner {
         // net previously; this avoids the wasted FM/ASR work upstream.
         var inDrainCoveredIntervals: [(Double, Double)] = []
 
-        // Step 4 — enqueue + run each window. Each window is its own row
-        // in `final_pass_jobs` so admission and retry tracking are
-        // per-window.
+        // Step 4 — collapse same-span AdWindows + enqueue + run.
+        //
+        // playhead-hygc.1.5: the May 6 dogfood DB carried duplicate
+        // final_pass_jobs rows because two AdWindow rows with different
+        // `adWindowId` values represented the same time span. Pre-fix,
+        // each one produced a distinct `fpj-<asset>-<adWindowId>` jobId
+        // and `INSERT OR IGNORE` happily accepted both. We now group
+        // eligible windows by `(start, end)` rounded to 1ms and pick
+        // ONE canonical AdWindow per group (lowest `id` lexicographically
+        // — deterministic, stable across re-enqueues). The non-canonical
+        // ids are recorded in `final_pass_job_aliases` so audit visibility
+        // is preserved.
+        //
+        // Canonical jobId is still `fpj-<asset>-<canonicalAdWindowId>`,
+        // so existing diagnostics that key off jobId continue to work.
+        // The store's `findFinalPassJob(forAssetId:canonicalSpanKey:)`
+        // protects against the cross-launch case where a prior run already
+        // landed a canonical row (possibly under a DIFFERENT
+        // canonicalAdWindowId because the AdWindow set has shifted): we
+        // attach the new contributing windows as aliases of THAT row
+        // rather than enqueuing a competing canonical job.
         let now = Date().timeIntervalSince1970
-        var jobs: [FinalPassJob] = []
+        struct CanonicalGroup {
+            let canonicalSpanKey: String
+            let canonicalWindow: AdWindow
+            let aliasWindowIds: [String]
+        }
+        // Group by canonical span key; sort the in-group windows by id
+        // so the canonical pick is deterministic regardless of fetch
+        // order.
+        var groupsByKey: [String: [AdWindow]] = [:]
         for window in eligibleWindows {
-            let job = FinalPassJob(
-                jobId: "fpj-\(input.analysisAssetId)-\(window.id)",
-                analysisAssetId: input.analysisAssetId,
-                podcastId: input.podcastId,
-                adWindowId: window.id,
-                windowStartTime: window.startTime,
-                windowEndTime: window.endTime,
-                status: .queued,
-                retryCount: 0,
-                deferReason: nil,
-                createdAt: now
+            let key = AnalysisStore.canonicalSpanKey(
+                start: window.startTime,
+                end: window.endTime
             )
-            do {
-                try await store.insertOrIgnoreFinalPassJob(job)
+            groupsByKey[key, default: []].append(window)
+        }
+        // Stable iteration order over groups: sort by span key (which is
+        // monotonic in (start,end)), then lexicographically by canonical
+        // id. Without this, two test runs over the same input set could
+        // pick different canonical AdWindow rows depending on dictionary
+        // ordering, which would break the
+        // "same windows produce one canonical job" invariant under
+        // `Equatable` assertions.
+        let canonicalGroups: [CanonicalGroup] = groupsByKey
+            .map { (key, windows) -> CanonicalGroup in
+                let sorted = windows.sorted { $0.id < $1.id }
+                let canonical = sorted.first!
+                let aliases = sorted.dropFirst().map(\.id)
+                return CanonicalGroup(
+                    canonicalSpanKey: key,
+                    canonicalWindow: canonical,
+                    aliasWindowIds: Array(aliases)
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.canonicalSpanKey != rhs.canonicalSpanKey {
+                    return lhs.canonicalSpanKey < rhs.canonicalSpanKey
+                }
+                return lhs.canonicalWindow.id < rhs.canonicalWindow.id
+            }
+        if canonicalGroups.count < eligibleWindows.count {
+            logger.info("Final-pass: collapsed \(eligibleWindows.count, privacy: .public) eligible windows into \(canonicalGroups.count, privacy: .public) canonical span(s) for asset \(input.analysisAssetId, privacy: .public) (playhead-hygc.1.5 dedupe)")
+        }
+
+        var jobs: [FinalPassJob] = []
+        // Track jobs we already added in this loop so two groups that
+        // resolve to the same canonical jobId across the
+        // `findFinalPassJob` lookup don't double-append the same row.
+        var seenJobIds = Set<String>()
+        for group in canonicalGroups {
+            // Cross-launch lookup: did a prior run already land a
+            // canonical row for this `(asset, span)`? If so, attach
+            // ALL of this group's contributing AdWindow ids as aliases
+            // of that pre-existing canonical and DO NOT enqueue a
+            // competing row. Note this can happen when:
+            //   • a thermal-deferred row from a prior process is
+            //     waking up; the AdWindow set has not changed but
+            //     `FinalPassThermalRecoveryObserver` re-walked the
+            //     same windows;
+            //   • the boundary detector has shifted and produced a
+            //     fresh AdWindow row with a different id but the same
+            //     span as a previously-completed job.
+            let existing = (try? await store.findFinalPassJob(
+                forAssetId: input.analysisAssetId,
+                canonicalSpanKey: group.canonicalSpanKey
+            )) ?? nil
+            let job: FinalPassJob
+            if let existing {
+                job = existing
+                // Record the canonical AdWindow + every alias against the
+                // pre-existing row's jobId. The canonical of THIS group
+                // may not equal the canonical the prior run picked, so
+                // we record both: the prior canonical row's own
+                // `adWindowId` is already the row's identity — we only
+                // need to attach the new contributors.
+                let contributors = [group.canonicalWindow.id] + group.aliasWindowIds
+                for contributorId in contributors where contributorId != existing.adWindowId {
+                    do {
+                        try await store.recordFinalPassJobAlias(
+                            jobId: existing.jobId,
+                            adWindowId: contributorId,
+                            addedAt: now
+                        )
+                    } catch {
+                        logger.warning("Final-pass: failed to record alias \(contributorId, privacy: .public) → \(existing.jobId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+            } else {
+                let newJob = FinalPassJob(
+                    jobId: "fpj-\(input.analysisAssetId)-\(group.canonicalWindow.id)",
+                    analysisAssetId: input.analysisAssetId,
+                    podcastId: input.podcastId,
+                    adWindowId: group.canonicalWindow.id,
+                    windowStartTime: group.canonicalWindow.startTime,
+                    windowEndTime: group.canonicalWindow.endTime,
+                    status: .queued,
+                    retryCount: 0,
+                    deferReason: nil,
+                    createdAt: now
+                )
+                do {
+                    try await store.insertOrIgnoreFinalPassJob(newJob)
+                } catch {
+                    logger.warning("Final-pass: failed to insert canonical job \(newJob.jobId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    continue
+                }
+                // Record every collapsed-in alias so audit visibility
+                // is preserved. The canonical AdWindow's own id is
+                // captured by `final_pass_jobs.adWindowId`; aliases
+                // are the remaining group members.
+                for aliasId in group.aliasWindowIds {
+                    do {
+                        try await store.recordFinalPassJobAlias(
+                            jobId: newJob.jobId,
+                            adWindowId: aliasId,
+                            addedAt: now
+                        )
+                    } catch {
+                        logger.warning("Final-pass: failed to record alias \(aliasId, privacy: .public) → \(newJob.jobId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+                job = newJob
+            }
+            // Two distinct canonical groups CAN resolve to the same
+            // existing jobId in pathological cases (e.g. an upstream
+            // pre-v23 row that got both canonical span keys via the
+            // backfill rounding). Filter at this layer rather than
+            // trusting INSERT OR IGNORE so the loop below doesn't try
+            // to mark the same row running twice in a drain.
+            //
+            // playhead-hygc.1.5: also skip canonical jobs that are
+            // already `.complete`. Without this, the runner would
+            // flip a complete row → running → complete again,
+            // wasting a heartbeat write and churning audit logs even
+            // though the inner `coversWindow` short-circuit means no
+            // ASR work runs. (The aliases were already recorded above
+            // — that's the only useful side-effect of finding a
+            // pre-existing complete canonical row.)
+            guard job.status != .complete else { continue }
+            if seenJobIds.insert(job.jobId).inserted {
                 jobs.append(job)
-            } catch {
-                logger.warning("Final-pass: failed to insert job \(job.jobId, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
 
