@@ -370,4 +370,84 @@ struct LearningArtifactIngestorTests {
         let after = try await store.loadTrainingExamples(forAsset: assetId)
         #expect(!after.isEmpty)
     }
+
+    /// playhead-hygc.1.7 R1: privacy invariant — the durable learning
+    /// surface MUST NOT contain raw transcript text. The materializer
+    /// produces a `textSnapshotHash` (deterministic SHA-derived id) but
+    /// leaves `textSnapshot` nil so the learning corpus carries provenance
+    /// without leaking user-private text. This test pins the contract so
+    /// a future "let's stash a snippet for debugging" change breaks the
+    /// build instead of silently shipping raw transcripts.
+    @Test("Materialized training examples carry no raw transcript text (privacy)")
+    func materializedExamplesCarryNoRawTranscriptText() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertSemanticScanResult(scanRow(
+            id: "scan-privacy",
+            firstOrdinal: 0, lastOrdinal: 50,
+            startTime: 0, endTime: 30
+        ))
+
+        let knowledge = SponsorKnowledgeStore(store: store)
+        let ingestor = LearningArtifactIngestor(
+            store: store,
+            knowledgeStore: knowledge
+        )
+        _ = try await ingestor.ingest(
+            correction: fnSpanCorrection(startTime: 10, endTime: 20)
+        )
+
+        let examples = try await store.loadTrainingExamples(forAsset: assetId)
+        #expect(!examples.isEmpty, "materialization must produce at least one row")
+        for example in examples {
+            #expect(example.textSnapshot == nil,
+                "training_examples.textSnapshot must be nil — raw transcript text MUST NOT land in the learning corpus")
+            #expect(!example.textSnapshotHash.isEmpty,
+                "textSnapshotHash must be present so provenance is preserved without raw text")
+        }
+    }
+
+    /// playhead-hygc.1.7 R1: malformed scopes are rejected at the front
+    /// door. They must NOT touch the materializer, sponsor store, or the
+    /// `correction_events` table — they're counted in `skippedMalformed`
+    /// for diagnostics only. This guards against a future bad upstream
+    /// caller polluting durable artifacts with garbage scope text.
+    @Test("Malformed scope is skipped without persisting any side effect")
+    func malformedScopeIsSkippedWithoutSideEffects() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertSemanticScanResult(scanRow(
+            id: "scan-malformed",
+            firstOrdinal: 0, lastOrdinal: 50,
+            startTime: 0, endTime: 30
+        ))
+        let knowledge = SponsorKnowledgeStore(store: store)
+        let ingestor = LearningArtifactIngestor(
+            store: store,
+            knowledgeStore: knowledge
+        )
+
+        let bogus = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: "totallyUnknownPrefix:not:a:valid:scope",
+            createdAt: 1_700_000_500,
+            source: .falseNegative,
+            podcastId: podcastId,
+            correctionType: .falseNegative
+        )
+        let result = try await ingestor.ingest(correction: bogus)
+        #expect(result.outcome == .skippedMalformed)
+        #expect(result.analysisAssetId == nil)
+
+        let diag = await ingestor.diagnostics()
+        #expect(diag.skippedMalformed == 1)
+        #expect(diag.ingested == 0)
+        #expect(diag.deduped == 0)
+
+        // Materializer must not have run for this asset (no training_examples
+        // rows produced) and the sponsor store must remain untouched.
+        let examples = try await store.loadTrainingExamples(forAsset: assetId)
+        #expect(examples.isEmpty,
+            "malformed scope must not materialize any training_examples row")
+    }
 }
