@@ -12,13 +12,18 @@ import Foundation
 // MARK: - ChapterSource
 
 /// Origin of a chapter marker.
-enum ChapterSource: String, Sendable, Codable, Equatable {
+enum ChapterSource: String, Sendable, Codable, Equatable, CaseIterable {
     /// ID3 CHAP/CTOC frame embedded in audio file metadata.
     case id3
     /// Podcasting 2.0 `podcast:chapters` external JSON.
     case pc20
     /// RSS inline `<podcast:chapter>` elements (PC20 namespace, but embedded in feed XML).
     case rssInline
+    /// Inferred chapter produced by the on-device chapter generation phase
+    /// (boundary detection + FM labeling). Quality scoring for `.inferred`
+    /// chapters comes from `ChapterLabelingService` confidence rather than
+    /// parser-based heuristics — see `ChapterQualityScorer.score(...)`.
+    case inferred
 }
 
 // MARK: - ChapterDisposition
@@ -52,6 +57,12 @@ struct ChapterEvidence: Sendable, Equatable, Codable {
     let disposition: ChapterDisposition
     /// Quality score in [0, 1] reflecting title specificity and structural reliability.
     /// Higher values indicate more trustworthy evidence.
+    ///
+    /// For parser-derived sources (`.id3`, `.pc20`, `.rssInline`) this score is
+    /// produced by `ChapterQualityScorer` from title content, disposition, and
+    /// time-bound completeness. For `.inferred` chapters the score is supplied
+    /// directly by `ChapterLabelingService` (FM confidence) at construction
+    /// time — `ChapterQualityScorer` is bypassed for inferred chapters.
     let qualityScore: Float
 }
 
@@ -230,6 +241,16 @@ struct ChapterQualityScorer: Sendable {
             score += 0.1
         case .id3:
             score += 0.05
+        case .inferred:
+            // Inferred chapters come from the on-device chapter generation
+            // phase (boundary detection + FM labeling). Their qualityScore
+            // is set directly from `ChapterLabelingService` confidence — the
+            // parser-based scorer is not the right oracle for them. If an
+            // `.inferred` chapter ever flows through this scorer, contribute
+            // no source-reliability bonus (the labeling service already
+            // captured the trustworthiness signal in the title-word and
+            // disposition components above).
+            score += 0.0
         }
 
         return min(score, 1.0)
