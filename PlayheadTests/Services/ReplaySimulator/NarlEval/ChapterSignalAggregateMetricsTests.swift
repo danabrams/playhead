@@ -260,8 +260,20 @@ struct ChapterSignalAggregateMetricsTests {
         let enabled = ChapterSignalAggregateMetrics.predictUnderMode(
             trace: trace, mode: .enabled, config: Self.defaultPredictorConfig
         )
+        // Pin equality on EVERY observable field of NarlPredictionResult,
+        // not just `windows`. A future patch that makes mode-aware
+        // prediction by manipulating `hasShadowCoverage` (or any other
+        // diagnostic field) without changing the windows would otherwise
+        // pass — and silently inflate FM-cost telemetry interpretation.
         #expect(off.windows == shadow.windows)
         #expect(off.windows == enabled.windows)
+        #expect(off.hasShadowCoverage == shadow.hasShadowCoverage,
+                "hasShadowCoverage must match across modes at the scaffold")
+        #expect(off.hasShadowCoverage == enabled.hasShadowCoverage)
+        // Sanity: the predictor receives the same config across all three
+        // modes (since predictUnderMode threads it through identically).
+        #expect(off.config == shadow.config)
+        #expect(off.config == enabled.config)
     }
 
     // MARK: - Phase / cost telemetry
@@ -327,7 +339,15 @@ struct ChapterSignalAggregateMetricsTests {
         let stubByEpisode: [String: Int] = Dictionary(uniqueKeysWithValues:
             zip((1...5).map { "ep-lat-\($0)" }, [1, 2, 3, 4, 5])
         )
+        // Pin syntheticFMCallLatencyMs and perEpisodeOverheadMs to the
+        // values referenced in the latency arithmetic above. Even though
+        // these match the production defaults today (25.0 and 5.0
+        // respectively), the test must NOT depend on those defaults — a
+        // future change to the defaults would break this test silently
+        // unless we pin the numbers locally.
         let config = ChapterSignalGate.Config(
+            syntheticFMCallLatencyMs: 25.0,
+            perEpisodeOverheadMs: 5.0,
             stubChapterCount: { trace in
                 stubByEpisode[trace.episodeId] ?? 1
             }
@@ -958,6 +978,80 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(vetoedShowEntry?.mode == .enabled,
                 "PerShowLiftDelta.mode must be .enabled even when episodeCount=0")
         #expect(cleanShowEntry?.mode == .enabled)
+    }
+
+    @Test("corpusSize equals the input traces.count even when some are excluded")
+    func corpusSizeIncludesExcludedTraces() {
+        // The corpusSize field on the report is documented as "number of
+        // distinct traces in the corpus this run consumed" — it must
+        // equal the input array length, NOT the post-exclusion subset.
+        // This is important because corpusSize gates the sample-size
+        // limitation note (< 25 → small-sample warning); if exclusions
+        // silently shrunk corpusSize, a corpus of "20 vetoed + 30 clean"
+        // would produce a misleading "small sample" warning.
+        let veto = FrozenTrace.FrozenCorrection(
+            source: "user.wholeAssetVeto",
+            scope: "exactSpan:asset-1:0:\(Int64.max)",
+            createdAt: 0,
+            correctionType: nil
+        )
+        let traceVetoed = FrozenTrace(
+            episodeId: "veto",
+            podcastId: "pod-vetoed",
+            episodeDuration: 600,
+            traceVersion: FrozenTrace.currentTraceVersion,
+            capturedAt: Self.testClock,
+            featureWindows: [],
+            atoms: [],
+            evidenceCatalog: [],
+            corrections: [veto],
+            decisionEvents: [],
+            baselineReplaySpanDecisions: [],
+            holdoutDesignation: .training
+        )
+        let traceClean = Self.makeTrace(
+            episodeId: "clean",
+            podcastId: "pod-clean",
+            episodeDuration: 300,
+            adStart: 30,
+            adEnd: 60
+        )
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [traceVetoed, traceClean],
+            runId: "corpus-size",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        #expect(report.corpusSize == 2,
+                "corpusSize counts the input traces, not the post-exclusion subset")
+        #expect(report.baseline.episodeCount + report.baseline.excludedEpisodeCount == report.corpusSize,
+                "episodeCount + excludedEpisodeCount must reconstruct corpusSize")
+    }
+
+    @Test("extra limitations augment, not replace, the structural ones")
+    func extraLimitationsAugmentNotReplace() {
+        // Strengthen the existing extraLimitationsAppended test: pin the
+        // EXACT count delta (structural-count + extra-count == final-count)
+        // so a future patch that mistakenly silences a structural note when
+        // an extra is present is caught. Without this, the existing test
+        // only checks that extras are appended — not that structural notes
+        // survive the append.
+        let baseReport = ChapterSignalAggregateMetrics.compute(
+            traces: [],
+            runId: "base",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId,
+            extraLimitations: []
+        )
+        let augmentedReport = ChapterSignalAggregateMetrics.compute(
+            traces: [],
+            runId: "aug",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId,
+            extraLimitations: ["extra-A", "extra-B", "extra-C"]
+        )
+        #expect(augmentedReport.limitations.count == baseReport.limitations.count + 3,
+                "augmented run must equal base + extras count, no structural notes lost")
     }
 
     // MARK: - Schema version is current
