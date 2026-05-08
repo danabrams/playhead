@@ -126,6 +126,67 @@ struct ChapterSignalAggregateMetricsTests {
 
     // MARK: - Detection math
 
+    @Test("compute() detection: asymmetric precision/recall produces correct F1 (harmonic mean)")
+    func asymmetricPrecisionRecallF1Math() {
+        // Build a trace where predicted > ground truth so precision < recall.
+        // Baseline span [60, 120] (60s) → predictor predicts [60, 120].
+        // falsePositive correction at [90, 120] (30s) → ground truth = [60, 90] (30s).
+        // Expected: TP=30, predicted=60, gt=30
+        //   precision = 30/60 = 0.5
+        //   recall    = 30/30 = 1.0
+        //   F1        = 2 * 0.5 * 1.0 / (0.5 + 1.0) = 1.0/1.5 = 0.6666...
+        // Pin the exact harmonic-mean math so a future patch that mistakenly
+        // computes arithmetic mean (would give 0.75) or weighted-something is
+        // caught.
+        let baseline = ReplaySpanDecision(
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9,
+            isAd: true,
+            sourceTag: "baseline-asymmetric"
+        )
+        // exactTimeSpan format: "exactTimeSpan:<assetId>:<start>:<end>"
+        let falsePositive = FrozenTrace.FrozenCorrection(
+            source: "user.falsePositive",
+            scope: "exactTimeSpan:asset-asym:90.000:120.000",
+            createdAt: 0,
+            correctionType: "falsePositive"
+        )
+        let trace = FrozenTrace(
+            episodeId: "ep-asym",
+            podcastId: "pod-asym",
+            episodeDuration: 600,
+            traceVersion: FrozenTrace.currentTraceVersion,
+            capturedAt: Self.testClock,
+            featureWindows: [],
+            atoms: [],
+            evidenceCatalog: [],
+            corrections: [falsePositive],
+            decisionEvents: [],
+            baselineReplaySpanDecisions: [baseline],
+            holdoutDesignation: .training
+        )
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [trace],
+            runId: "asym-f1",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        #expect(abs(report.baseline.predictedAdSeconds - 60) < 1e-9,
+                "predictor falls back to baseline span (60s)")
+        #expect(abs(report.baseline.groundTruthAdSeconds - 30) < 1e-9,
+                "ground truth subtracts the [90,120] falsePositive correction → 30s")
+        #expect(abs(report.baseline.truePositiveSeconds - 30) < 1e-9,
+                "true positives = intersection of predicted and ground truth = 30s")
+        #expect(abs(report.baseline.precision - 0.5) < 1e-9,
+                "precision = TP/predicted = 30/60 = 0.5")
+        #expect(abs(report.baseline.recall - 1.0) < 1e-9,
+                "recall = TP/GT = 30/30 = 1.0")
+        // F1 = 2 * 0.5 * 1.0 / 1.5 = 2/3 = 0.6666...
+        #expect(abs(report.baseline.f1 - (2.0 / 3.0)) < 1e-9,
+                "F1 = harmonic mean = 2*P*R/(P+R) = 0.6666... NOT arithmetic mean (0.75)")
+    }
+
     @Test("compute() detection: predictor that perfectly recovers ground truth yields precision=recall=f1=1")
     func perfectPredictionYieldsUnitMetrics() {
         // The default `NarlReplayPredictor` falls back to baseline ad
@@ -435,6 +496,37 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(!ChapterSignalAggregateMetrics.evaluateBar(
             liftPrecision: eps,
             liftRecall: -2 * eps,
+            fmCostMultiplier: 1.0
+        ))
+    }
+
+    @Test("evaluateBar: both axes at +epsilon (minimum measurable lift) → passes")
+    func evaluateBarBothAxesAtPlusEpsilon() {
+        // Pin that the symmetric-minimum case (BOTH axes at exactly +eps)
+        // passes the bar. This is the "barely passes" boundary — every
+        // input above it must also pass, every input below it must fail.
+        // Without this test, a future patch that tightens "measurable"
+        // to strict-greater-than (`> eps` instead of `>= eps`) could
+        // silently flip this case from pass to fail.
+        let eps = ChapterSignalAggregateMetrics.measurableLiftEpsilon
+        #expect(ChapterSignalAggregateMetrics.evaluateBar(
+            liftPrecision: eps,
+            liftRecall: eps,
+            fmCostMultiplier: 1.0
+        ))
+    }
+
+    @Test("evaluateBar: both axes at -epsilon (no measurable lift) → fails")
+    func evaluateBarBothAxesAtMinusEpsilon() {
+        // Mirror of `evaluateBarBothAxesAtPlusEpsilon`: when BOTH axes
+        // are at exactly -eps (within-tolerance regression on both),
+        // there's no measurable lift on either axis so clause (1) of the
+        // bar fails. Catches a future patch that mistakenly treats
+        // "-eps" as a lift via sign flip.
+        let eps = ChapterSignalAggregateMetrics.measurableLiftEpsilon
+        #expect(!ChapterSignalAggregateMetrics.evaluateBar(
+            liftPrecision: -eps,
+            liftRecall: -eps,
             fmCostMultiplier: 1.0
         ))
     }

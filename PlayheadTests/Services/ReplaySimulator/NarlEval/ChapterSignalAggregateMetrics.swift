@@ -530,6 +530,22 @@ enum ChapterSignalAggregateMetrics {
     /// external label remains `mode:` (matching the future signature)
     /// while the internal name `_` suppresses the unused-parameter
     /// warning at the bead scaffold.
+    ///
+    /// Future evolution path (bead 14/16 land):
+    ///   1. The predictor signature gains a `chapterPlan: ChapterPlan?`
+    ///      parameter. The plan is built by `ChapterSignalGate.replay` for
+    ///      `.shadow` and `.enabled` modes; `.off` passes `nil`.
+    ///   2. The compute() pipeline becomes responsible for threading the
+    ///      gate's per-trace plan into `predictUnderMode`. The cleanest
+    ///      shape is to fold the gate-result-with-plans into the same
+    ///      per-trace loop that today calls `predictDetection` — i.e.
+    ///      detection becomes gate-aware via the plan, not via the mode
+    ///      enum directly.
+    ///   3. The mode parameter on `predictUnderMode` becomes a no-op the
+    ///      same way it is today — `consumersReadChapterPlan` is gated by
+    ///      whether the caller passed a non-nil plan, not by the enum.
+    ///      The enum is a **routing** signal at the gate, not a behavior
+    ///      knob inside the predictor.
     static func predictUnderMode(
         trace: FrozenTrace,
         mode _: ChapterSignalMode,
@@ -785,6 +801,14 @@ enum ChapterSignalAggregateMetrics {
         return total
     }
 
+    /// Build the structural-limitations array. We compare baseline (`.off`)
+    /// against enabled (`.enabled`) for the FM-cost clamp note, NOT shadow,
+    /// because the production-bar ratio in `fmCostMultiplier` is also
+    /// `enabled / baseline` — the limitation note must reference the same
+    /// arms. `shadow.totalFMCalls` is a separate axis (today equal to
+    /// `enabled.totalFMCalls` because both run the phase the same way) and
+    /// surfacing it in the same note would conflate two distinct
+    /// comparisons.
     private static func makeStructuralLimitations(
         corpusSize: Int,
         baselineFMCalls: Int,
