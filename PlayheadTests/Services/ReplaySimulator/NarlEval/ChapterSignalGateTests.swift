@@ -97,12 +97,21 @@ struct ChapterSignalGateTests {
                 "mode=.off must be byte-for-byte identical across replays — this is the harness baseline-match contract.")
     }
 
-    @Test(".off ignores trace contents (creator chapters, atom count, custom config) — only episode/podcast id appear in output")
+    @Test(".off ignores trace BODY (atoms, evidence) and caller-supplied closures — only episode/podcast id reach the output")
     func offIgnoresTraceContents() {
         let trace = Self.makeTrace(atomCount: 1)
         // Even with a config that *would* fire the creator-chapters
         // branch and a stub-count override that would multiply FM cost,
-        // mode=.off must still return the structural zero.
+        // mode=.off must still return the structural zero. Note: `.off`
+        // does read `trace.episodeId` and `trace.podcastId` for outcome
+        // identification — the byte-for-byte contract is that no
+        // CONTENT-bearing trace field (atoms, featureWindows, evidence,
+        // corrections, decisionEvents) and no CALLER closure
+        // (stubChapterCount, creatorChaptersPresent) is consulted in
+        // `.off`. The closure-non-invocation half of that contract is
+        // pinned by `offDoesNotInvokeCallerClosures`; this test pins the
+        // counter side: nothing the caller supplies in `Config` can
+        // bleed into the `.off` output values.
         let weirdConfig = ChapterSignalGate.Config(
             syntheticFMCallLatencyMs: 999.0,
             perEpisodeOverheadMs: 999.0,
@@ -192,7 +201,7 @@ struct ChapterSignalGateTests {
     }
 
     @Test("Creator-chapter detector is per-trace, not global: only flagged traces short-circuit")
-    func creatorChaptersAreScopedPerTrace() {
+    func creatorChaptersAreScopedPerTrace() throws {
         let withCreator = Self.makeTrace(episodeId: "ep-creator", atomCount: 250)
         let withoutCreator = Self.makeTrace(episodeId: "ep-inferred", atomCount: 250)
         let cfg = ChapterSignalGate.Config(creatorChaptersPresent: { trace in
@@ -210,12 +219,22 @@ struct ChapterSignalGateTests {
         #expect(result.totalFMCallsForChapterLabeling == 5)
 
         // Identify which outcome is which without relying on array order.
-        let creator = result.perEpisodeOutcomes.first { $0.episodeId == "ep-creator" }
-        let inferred = result.perEpisodeOutcomes.first { $0.episodeId == "ep-inferred" }
-        #expect(creator?.skippedByCreatorChapters == true)
-        #expect(creator?.planGenerated == false)
-        #expect(inferred?.skippedByCreatorChapters == false)
-        #expect(inferred?.planGenerated == true)
+        // `try #require` on the lookups so a future bug that drops or
+        // collapses outcomes surfaces as a clear failure here rather
+        // than a silent pass via Optional?.field == value (which is
+        // nil-tolerant in unsafe ways).
+        let creator = try #require(
+            result.perEpisodeOutcomes.first { $0.episodeId == "ep-creator" },
+            "creator-chapter outcome must be present in perEpisodeOutcomes; missing it would mask a regression."
+        )
+        let inferred = try #require(
+            result.perEpisodeOutcomes.first { $0.episodeId == "ep-inferred" },
+            "inferred-chapter outcome must be present in perEpisodeOutcomes; missing it would mask a regression."
+        )
+        #expect(creator.skippedByCreatorChapters)
+        #expect(!creator.planGenerated)
+        #expect(!inferred.skippedByCreatorChapters)
+        #expect(inferred.planGenerated)
     }
 
     // MARK: - Mode-comparison helper
@@ -485,7 +504,7 @@ struct ChapterSignalGateTests {
     // MARK: - Multi-trace × multi-mode
 
     @Test("replay(traces:modes:) aggregates correctly across multiple traces AND multiple modes simultaneously")
-    func multiTraceMultiModeAggregation() {
+    func multiTraceMultiModeAggregation() throws {
         let traces = (0..<3).map { i in
             Self.makeTrace(episodeId: "ep-\(i)", atomCount: 250)
         }
@@ -496,8 +515,11 @@ struct ChapterSignalGateTests {
 
         #expect(results.count == 3)
 
-        // .off across 3 traces: structural zero, 3 outcomes.
-        let off = results[.off]!
+        // .off across 3 traces: structural zero, 3 outcomes. `try
+        // #require` instead of `!` so a missing key surfaces as a
+        // typed Issue rather than a fatalError trap that obscures the
+        // failing mode.
+        let off = try #require(results[.off])
         #expect(off.episodesProcessed == 3)
         #expect(off.planGeneratedCount == 0)
         #expect(off.totalFMCallsForChapterLabeling == 0)
@@ -505,7 +527,8 @@ struct ChapterSignalGateTests {
         #expect(off.perEpisodeOutcomes.count == 3)
 
         // .shadow across 3 traces: 5 chapters per trace × 3 traces = 15 FM calls.
-        let shadow = results[.shadow]!
+        // (130.0 × 3.0 is exact in IEEE 754; no float-fuzz needed.)
+        let shadow = try #require(results[.shadow])
         #expect(shadow.episodesProcessed == 3)
         #expect(shadow.planGeneratedCount == 3)
         #expect(shadow.totalFMCallsForChapterLabeling == 15)
@@ -513,31 +536,46 @@ struct ChapterSignalGateTests {
 
         // .enabled mirrors .shadow on the phase side (consumer-side
         // divergence is bead 14 / 16 / 19, not the gate's territory).
-        let enabled = results[.enabled]!
+        let enabled = try #require(results[.enabled])
         #expect(enabled.episodesProcessed == shadow.episodesProcessed)
         #expect(enabled.planGeneratedCount == shadow.planGeneratedCount)
         #expect(enabled.totalFMCallsForChapterLabeling == shadow.totalFMCallsForChapterLabeling)
         #expect(enabled.aggregateLatencyMs == shadow.aggregateLatencyMs)
+
+        // Pairwise alignment: `perEpisodeOutcomes` must come back in
+        // input-trace order across every mode. Bead 19 zips outcomes
+        // across modes to compute per-episode lift; if `.off` and
+        // `.shadow` disagreed on ordering the zip would silently mis-
+        // attribute lift to the wrong episode. Pin the alignment here.
+        let inputIds = traces.map(\.episodeId)
+        #expect(off.perEpisodeOutcomes.map(\.episodeId) == inputIds,
+                ".off perEpisodeOutcomes must preserve input trace order.")
+        #expect(shadow.perEpisodeOutcomes.map(\.episodeId) == inputIds,
+                ".shadow perEpisodeOutcomes must preserve input trace order.")
+        #expect(enabled.perEpisodeOutcomes.map(\.episodeId) == inputIds,
+                ".enabled perEpisodeOutcomes must preserve input trace order.")
     }
 
     @Test("replay(traces:modes:) with empty traces returns one result per mode, each at structural zero")
-    func multiTraceMultiModeEmptyTraces() {
+    func multiTraceMultiModeEmptyTraces() throws {
         // Empty traces × non-empty modes: dictionary keyed by mode,
         // every value is a structural zero. This pins the shape so
         // bead 19 can always assume `results[mode] != nil` for every
-        // mode in the request.
-        let results = ChapterSignalGate.replay(
-            traces: [],
-            modes: [.off, .shadow, .enabled]
-        )
-        #expect(results.count == 3)
-        for mode in ChapterSignalMode.allCases {
-            let r = results[mode]
-            #expect(r != nil, "missing entry for mode=\(mode)")
-            #expect(r?.episodesProcessed == 0)
-            #expect(r?.planGeneratedCount == 0)
-            #expect(r?.totalFMCallsForChapterLabeling == 0)
-            #expect(r?.perEpisodeOutcomes.isEmpty == true)
+        // mode in the request. Use `allCases` for both the request and
+        // the assertion loop so adding a new ChapterSignalMode case
+        // forces both halves of the test to update in lockstep
+        // (otherwise `r != nil` would silently fail on the new case
+        // and the failure message would be cryptic).
+        let allModes = Array(ChapterSignalMode.allCases)
+        let results = ChapterSignalGate.replay(traces: [], modes: allModes)
+        #expect(results.count == allModes.count)
+        for mode in allModes {
+            let r = try #require(results[mode],
+                                 "missing entry for mode=\(mode); replay(traces:modes:) must return one result per requested mode.")
+            #expect(r.episodesProcessed == 0)
+            #expect(r.planGeneratedCount == 0)
+            #expect(r.totalFMCallsForChapterLabeling == 0)
+            #expect(r.perEpisodeOutcomes.isEmpty)
         }
     }
 
