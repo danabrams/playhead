@@ -563,7 +563,7 @@ struct ChapterPlanQualityEvalThresholdTests {
     /// is also skipped from matching. A malformed fixture (`.infinity`,
     /// `-.infinity`, or `.nan`) must not poison metrics.
     @Test
-    func nonFiniteGoldenStart_isSkippedFromMatching() {
+    func nonFiniteGoldenStart_isSkippedFromMatching() throws {
         let golden = GoldenChapterSet(
             episodeId: "synthetic-nonfinite-golden",
             episodeContentHash: "synthetic-nonfinite-golden-hash",
@@ -611,6 +611,17 @@ struct ChapterPlanQualityEvalThresholdTests {
         #expect(report.topicLabelMatches.notApplicable == 1)
         #expect(report.topicLabelMatches.matched == 0)
         #expect(report.topicLabelMatches.mismatched == 0)
+
+        // Documented contract: non-finite goldens are NOT filtered
+        // from the input — the recall denominator counts them but
+        // they can never match any candidate, so they contribute
+        // to `missedBoundaries`. Three non-finite goldens here, so
+        // `missedBoundaries == 3`. Pin so a future change that
+        // silently drops malformed goldens from the denominator
+        // would surface as a behavior break here.
+        let perEp = try #require(report.perEpisode["synthetic-nonfinite-golden"])
+        #expect(perEp.missedBoundaries == 3)
+        #expect(perEp.falsePositiveBoundaries == 0)
     }
 }
 
