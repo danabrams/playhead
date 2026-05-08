@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "case_id": "case-06-pre-post-roll-edge",
-  "archetype": "conversational",
+  "archetype": "news",
   "category": "pre_post_roll_edge",
   "expected_behavior": "A short episode (~6 min) with dense atoms in the head and tail, modelling a tight pre-roll / post-roll layout. The default stub clamp lower-bounds at 1, so even a sparse trace gets exactly one inferred boundary segment — the pre-roll/post-roll bookends. Pre-au2v.1: no plan. Post-au2v.1: a single-chapter plan with 1 FM call. Pins the lower-clamp behaviour for short-format content where the chapter prior is most actionable for ad pocket placement.",
   "synthesis_notes": "Modeled on a short news / digest episode with a tight A/B/A structure. Synthetic; no transcript text or commercial-message attribution.",

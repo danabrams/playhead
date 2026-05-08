@@ -148,15 +148,37 @@ over the directory in addition to the per-case before/after assertions:
 
 - Every case JSON in this directory decodes cleanly under the v1 schema.
 - Every case-id is unique and matches its filename stem.
+- The total case count is in the bead-spec range `[5, 10]`.
 - The case set covers ≥3 conversational misses, ≥2 false-positive
   removals, ≥1 pre/post-roll edge, ≥1 monologue/short-episode edge, and
-  ≥1 sanity case (the bead-21 selection contract).
+  ≥1 sanity case (the bead-au2v.1.20 selection contract).
 - For every case, `ChapterSignalGate.replay(trace:mode:)` produces the
   documented `expected_before_off` counters under `mode=.off` and the
   documented `expected_after_enabled` counters under `mode=.enabled`.
+- For every case, the `.shadow` mode produces the same per-episode
+  counter shape as `.enabled` (consumer-side divergence lives in
+  `ChapterSignalMode.consumersReadChapterPlan`, not in gate output).
+- For every case, replaying the same trace twice yields Equatable-equal
+  results (replay determinism guard).
+- For every case, the documented `expected_before_off` and
+  `expected_after_enabled` counters differ on at least one of the four
+  fields — i.e., every case exercises observable gate lift.
+- For every case, `expected_behavior` and `synthesis_notes` are
+  non-empty after trimming whitespace.
+- For every case, all expected counters are non-negative; `.off`
+  counters are structural zeros; `gate_inputs.stub_chapter_count`,
+  `trace.atom_count`, `trace.atom_spacing_sec`, and
+  `trace.episode_duration_sec` are non-negative.
+- For every case, `episode_id_anon` matches the synthetic shape
+  `^episode_anon_<4-16 hex>$` and `podcast_id_archetype` equals
+  `show_archetype_<archetype>` (regex / equality pin on the
+  anonymization §1 / §2 wire shapes).
 - No fixture contains the substring "advertiser", any 32-hex-character
   identifier shape, or other forbidden tokens — a belt-and-suspenders
   scrub-audit gate that runs against the raw bytes of every case JSON.
+- The parameterized per-case suite is non-vacuous: the loader yields at
+  least one case so the case-by-case assertions actually run.
+- README.md is present in this directory.
 
 ## Why model fixtures rather than copy raw traces?
 

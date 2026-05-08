@@ -475,6 +475,45 @@ struct ChapterSignalCaseStudyDirectoryTests {
         }
     }
 
+    @Test("Every case carries a synthetic episode_id_anon (matches anonymization shape)")
+    func everyCaseHasSyntheticEpisodeId() throws {
+        // README anonymization §1 documents the canonical shape:
+        //   `episode_anon_<short hex>`. Pin the regex so a future case
+        // can't smuggle in an unredacted episode title or RSS GUID by
+        // forgetting to run the anonymization step. The current corpus
+        // uses six-char lowercase hex (e.g. "episode_anon_a1c01"); the
+        // regex permits 4-16 hex chars to give future cases a little
+        // headroom without weakening the redaction guarantee.
+        let pattern = try NSRegularExpression(
+            pattern: "^episode_anon_[0-9a-f]{4,16}$",
+            options: []
+        )
+        let cases = try CaseStudyPaths.loadAllCases().map(\.1)
+        for study in cases {
+            let id = study.trace.episodeIdAnon
+            let range = NSRange(id.startIndex..<id.endIndex, in: id)
+            #expect(pattern.firstMatch(in: id, range: range) != nil,
+                    "[\(study.caseId)] episode_id_anon \"\(id)\" must match ^episode_anon_<4-16 hex>$.")
+        }
+    }
+
+    @Test("Every case carries a podcast_id_archetype matching the four allowed archetypes")
+    func everyCaseHasArchetypePodcastId() throws {
+        // README anonymization §2 documents the canonical shape:
+        //   `show_archetype_<one of the four allowed archetypes>`. Pin
+        // it so a future case can't smuggle in a real show title or RSS
+        // URL by forgetting to redact. The archetype enum is decoded
+        // separately, so we don't need to re-validate the set here —
+        // we only need to check the wire-shape of `podcast_id_archetype`
+        // and that it agrees with the decoded `archetype`.
+        let cases = try CaseStudyPaths.loadAllCases().map(\.1)
+        for study in cases {
+            let expected = "show_archetype_\(study.archetype.rawValue)"
+            #expect(study.trace.podcastIdArchetype == expected,
+                    "[\(study.caseId)] podcast_id_archetype must equal \"\(expected)\"; got \"\(study.trace.podcastIdArchetype)\".")
+        }
+    }
+
     @Test("Every case exercises observable lift: .off and .enabled differ on at least one counter")
     func everyCaseExercisesObservableLift() throws {
         // A case-study corpus that documents identical .off and .enabled
