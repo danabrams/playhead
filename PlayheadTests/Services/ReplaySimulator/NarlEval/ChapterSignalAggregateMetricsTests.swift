@@ -814,8 +814,20 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(text.contains("\"mode\":\"enabled\""), "enabled.mode must encode as lowercase \"enabled\"")
     }
 
-    @Test("PerShowLiftDelta wire shape carries delta-prefixed field names")
+    @Test("PerShowLiftDelta wire shape carries every documented field name")
     func perShowLiftDeltaWireShape() throws {
+        // Pin EVERY one of the 18 PerShowLiftDelta fields on the wire.
+        // The earlier sparse list (6 keys) left ~10 fields unpinned —
+        // including `deltaPredictedAdSeconds`, `deltaGroundTruthAdSeconds`,
+        // `deltaTruePositiveSeconds`, all phase-latency P90/P99 deltas, the
+        // abort-category deltas, and the `episodeCount`/`mode` absolutes.
+        // Same wire-shape footgun the R12 perModeMetricsWireShape test
+        // closed for PerModeMetrics: synthesized Codable round-trips a
+        // rename successfully (CodingKeys aren't customized), so a rename
+        // like `deltaPrecision → deltaAccuracyP` would slip past every
+        // existing test until the rename hit a downstream dashboard.
+        // Bumping schemaVersion is the contract for any of these renames;
+        // the failure message names that contract directly.
         let trace = Self.makeTrace(
             episodeId: "ep-delta-wire",
             podcastId: "pod-delta-wire",
@@ -834,17 +846,35 @@ struct ChapterSignalAggregateMetricsTests {
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(report)
         let text = String(decoding: data, as: UTF8.self)
-        // Pin the delta-prefixed wire names so downstream tooling can
-        // distinguish per-show deltas from absolute PerModeMetrics.
+        // Every PerShowLiftDelta field, in declaration order on the
+        // struct, must appear at least once in the encoded payload.
         for key in [
+            // Absolutes (NOT deltas — the show's own counts at .enabled,
+            // which equal .off at the scaffold).
+            "\"mode\"",
+            "\"episodeCount\"",
+            "\"excludedEpisodeCount\"",
+            // Detection deltas.
             "\"deltaPrecision\"",
             "\"deltaRecall\"",
             "\"deltaF1\"",
+            "\"deltaPredictedAdSeconds\"",
+            "\"deltaGroundTruthAdSeconds\"",
+            "\"deltaTruePositiveSeconds\"",
+            // Phase / cost deltas.
             "\"deltaTotalFMCalls\"",
             "\"deltaPhaseLatencyP50Ms\"",
+            "\"deltaPhaseLatencyP90Ms\"",
+            "\"deltaPhaseLatencyP99Ms\"",
+            // Abort-category deltas.
+            "\"deltaAbortedByOperationalRate\"",
+            "\"deltaAbortedByPathologicalRate\"",
+            "\"deltaSkippedByCreatorChapters\"",
             "\"deltaAbortRate\"",
+            "\"deltaEpisodeReplayCount\"",
         ] {
-            #expect(text.contains(key), "perShowLift wire format must carry \(key)")
+            #expect(text.contains(key),
+                    "PerShowLiftDelta wire format must carry \(key) — renaming this field is a schemaVersion bump")
         }
     }
 
@@ -1239,6 +1269,43 @@ struct ChapterSignalAggregateMetricsTests {
             #expect(delta.deltaGroundTruthAdSeconds == 0,
                     "per-show ground-truth delta must be 0 (ground truth is mode-independent)")
         }
+    }
+
+    @Test("liftPrecision/liftRecall/liftF1 are arithmetically (enabled - baseline)")
+    func liftFieldsAreEnabledMinusBaseline() {
+        // Pin the subtraction direction of liftPrecision/liftRecall/liftF1
+        // as `enabled - baseline`. At the bead scaffold the predictor is
+        // mode-independent, so all three lifts are exactly 0 — making it
+        // possible for a future patch to silently swap the subtraction
+        // direction (`baseline - enabled`) without any test catching it.
+        // (Both directions produce 0 when the operands are equal.)
+        //
+        // The test asserts the IDENTITY directly from the report fields:
+        //   report.liftPrecision == report.enabled.precision - report.baseline.precision
+        // This holds at every corpus shape — even the scaffold zero case
+        // — because the identity is structural, not dependent on the
+        // numeric outcome. Once bead 14/16 wires mode-aware prediction
+        // and the lifts become non-zero, this test is the canary that
+        // catches a wrong-direction swap.
+        let trace = Self.makeTrace(
+            episodeId: "ep-lift-id",
+            podcastId: "pod-lift-id",
+            episodeDuration: 600,
+            adStart: 60,
+            adEnd: 90
+        )
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [trace],
+            runId: "lift-identity",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        #expect(report.liftPrecision == report.enabled.precision - report.baseline.precision,
+                "liftPrecision must be enabled.precision - baseline.precision (NOT the reverse)")
+        #expect(report.liftRecall == report.enabled.recall - report.baseline.recall,
+                "liftRecall must be enabled.recall - baseline.recall (NOT the reverse)")
+        #expect(report.liftF1 == report.enabled.f1 - report.baseline.f1,
+                "liftF1 must be enabled.f1 - baseline.f1 (NOT the reverse)")
     }
 
     @Test("per-show FM-call deltas sum to the cross-corpus FM-call delta")
