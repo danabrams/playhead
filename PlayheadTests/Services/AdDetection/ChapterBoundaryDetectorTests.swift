@@ -2031,4 +2031,90 @@ struct ChapterBoundaryDetectorDetectRefinedTests {
             Issue.record("expected skippedShortEpisode for 4min episode, got \(refined.outcome)")
         }
     }
+
+    @Test("detectRefined fires the cap-and-merge gate when detect produces too many boundaries")
+    func detectRefinedCapApplied() {
+        // Build a 30-min snapshot with many lexical hits at distinct
+        // 60s spacings — each should trigger a boundary, producing
+        // ~30 raw candidates. Cap for 30min = ceil(30/5) = 6 (no
+        // floor, <40min). So cap-and-merge fires and we expect
+        // retainedCount ≤ 7 (6 non-zero + t=0).
+        let detector = ChapterBoundaryDetector()
+        let dur: TimeInterval = 30 * 60
+        var hits: [ChapterLexicalHit] = []
+        let categories: [LexicalPatternCategory] = [
+            .sponsor, .promoCode, .urlCTA, .purchaseLanguage, .transitionMarker
+        ]
+        // 25 hits spaced 60s apart; rate before cap = 26/1800 ≈ 0.014
+        // > 1/90 = 0.011 → would trigger pathological. So use 18
+        // hits spaced 90s apart: 19/1800 = 0.0106 < 1/90.
+        for index in 0..<18 {
+            hits.append(ChapterLexicalHit(
+                startTime: TimeInterval(index + 1) * 90.0,
+                category: categories[index % categories.count]
+            ))
+        }
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: dur,
+            lexicalHits: hits
+        )
+        let refined = detector.detectRefined(features: snapshot)
+        guard case let .capApplied(detected, retained, _, mergeRecords) = refined.outcome else {
+            Issue.record("expected capApplied outcome, got \(refined.outcome)")
+            return
+        }
+        #expect(detected > retained,
+                "cap-and-merge must drop at least one candidate")
+        #expect(refined.candidates.count == retained,
+                "candidate list size must match retainedCount")
+        #expect(mergeRecords.count == detected - retained,
+                "merge-record count == drops")
+        #expect(refined.candidates.first?.startTime == 0,
+                "synthetic t=0 must remain at head after cap-and-merge")
+    }
+
+    @Test("detectRefined fires the pathological-rate gate when detect emits too dense candidates")
+    func detectRefinedPathologicalRate() {
+        // Engineer the bare detector to emit > 1 candidate per 90s on
+        // a 60-min show. Lexical hits at every 60s spacing produce
+        // ~60 candidates (one per hit) on the bare detector — rate
+        // 61/3600 = 0.017 > 1/90 = 0.011 → pathological gate fires.
+        let detector = ChapterBoundaryDetector()
+        let dur: TimeInterval = 60 * 60
+        var hits: [ChapterLexicalHit] = []
+        let categories: [LexicalPatternCategory] = [
+            .sponsor, .promoCode, .urlCTA, .purchaseLanguage, .transitionMarker
+        ]
+        // 60 hits at 60s spacing.
+        for index in 0..<60 {
+            hits.append(ChapterLexicalHit(
+                startTime: TimeInterval(index + 1) * 60.0,
+                category: categories[index % categories.count]
+            ))
+        }
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: dur,
+            lexicalHits: hits
+        )
+        let refined = detector.detectRefined(features: snapshot)
+        // The bare detector may consolidate adjacent hits within a
+        // ~12s merge window, so the actual emitted count will be
+        // smaller than `hits.count`. Skip if not above threshold —
+        // the test fixture engineering relies on the consolidation
+        // not eating the threshold; surface a clear message if not.
+        let bareCount = detector.detect(features: snapshot).count
+        guard Double(bareCount) / dur > 1.0 / 90.0 else {
+            Issue.record("test fixture failed to engineer > 1/90s density (bare detect emitted \(bareCount) on \(dur)s)")
+            return
+        }
+        guard case let .pathologicalRate(detected, episodeDur, perSec) = refined.outcome else {
+            Issue.record("expected pathologicalRate outcome, got \(refined.outcome)")
+            return
+        }
+        #expect(refined.candidates.isEmpty,
+                "pathological-rate abort must return empty candidate list")
+        #expect(detected == bareCount)
+        #expect(episodeDur == dur)
+        #expect(perSec > 1.0 / 90.0)
+    }
 }

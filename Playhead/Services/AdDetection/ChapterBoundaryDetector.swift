@@ -819,10 +819,14 @@ struct ChapterDensityMergeRecord: Sendable, Equatable, Hashable {
     /// Jaccard similarity between the dropped candidate's
     /// `triggeringSignals` and the absorbing neighbor's
     /// `triggeringSignals`, in `[0, 1]`. 1.0 = identical signal sets,
-    /// 0.0 = disjoint signal sets. When neither neighbor has any
-    /// signal-set overlap the merge falls back to confidence + time
-    /// tiebreak (see `applyDensityGates` for the full ordering); in
-    /// that case `signalOverlap` is `0`.
+    /// 0.0 = disjoint signal sets, intermediate values represent
+    /// partial overlap (e.g. 1/3 when one of three signals is shared).
+    /// When the prev/next neighbors have EQUAL similarity the merge
+    /// falls back to confidence → time-distance → prev-wins (see
+    /// `applyDensityGates` doc for the full ordering); the recorded
+    /// `signalOverlap` in that case is the (equal) similarity value
+    /// of either neighbor — typically `0` when both neighbors are
+    /// disjoint from the dropped boundary.
     let signalOverlap: Double
 }
 
@@ -841,17 +845,23 @@ enum ChapterDensityOutcome: Sendable, Equatable {
 
     /// The pathological-rate gate fired. The detector's candidates
     /// were aborted (returned as an empty list). The phase shell
-    /// emits `chapter_phase_pathological_rate` with these counters.
+    /// emits `chapter_phase_pathological_rate` with these counters
+    /// (mapping `detectedCount` here → factory's `candidateCount`).
     case pathologicalRate(
         detectedCount: Int,
         episodeDurationSec: Double,
         candidatesPerSecond: Double
     )
 
-    /// Cap-and-merge ran. `mergeRecords` describes which dropped
-    /// boundaries were absorbed into which retained survivors and is
-    /// non-empty whenever `detectedCount > retainedCount`. The phase
-    /// shell emits `chapter_phase_cap_applied` with these counters.
+    /// Cap-and-merge ran and trimmed at least one candidate. The
+    /// `mergeRecords` array has exactly `detectedCount - retainedCount`
+    /// entries — one per dropped boundary, identifying which retained
+    /// survivor absorbed it. The phase shell emits
+    /// `chapter_phase_cap_applied` with these counters (mapping
+    /// `retainedCount` here → factory's `cappedCount`); the
+    /// `mergeRecords` are not emitted as part of the diagnostic but
+    /// are available to the phase shell for downstream labeling
+    /// decisions.
     case capApplied(
         detectedCount: Int,
         retainedCount: Int,
