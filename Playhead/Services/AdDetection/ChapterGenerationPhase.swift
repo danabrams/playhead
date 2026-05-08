@@ -255,29 +255,22 @@ struct ChapterGenerationPhase: Sendable {
 
         // 3. Transcript snapshot capture. A `nil` here means the
         //    transcript pipeline has not produced anything to hash —
-        //    we treat that as a benign no-op (it is the phase being
-        //    invoked too early, which the orchestrator should fix,
-        //    not us). We DO emit a diagnostic so dogfood telemetry
-        //    can surface mis-scheduled invocations: an "admitted but
-        //    transcript unavailable" run that produced zero bytes
-        //    of cache should be visible.
+        //    typically the phase was invoked too early (an
+        //    orchestrator scheduling bug, not the shell's fault).
+        //    We emit `.noCandidates` so dogfood telemetry can surface
+        //    mis-scheduled invocations (an "admitted, no transcript,
+        //    zero bytes cached" run should be visible) and we exit
+        //    with `Outcome.transcriptUnavailable` so in-process
+        //    callers can distinguish this from a real "ran, found
+        //    nothing" result.
         guard let entryHash = await transcriptHashProvider.currentTranscriptHash() else {
-            // We piggyback on `noCandidates` semantically: zero
-            // chapter candidates, just for a different reason. A
-            // dedicated event type would be ideal but the bead .3
-            // wire is locked; the support engineer's grep cheat
-            // sheet treats `chapter_phase_no_candidates` as the
-            // "phase ran, produced nothing useful" signal regardless
-            // of *why*. The supplementary phase log carries the
-            // distinction for engineers who need it.
+            // The bead .3 wire has no dedicated "transcript unavailable"
+            // event; `.noCandidates` is the catch-all for "phase ran,
+            // produced nothing" and the supplementary phase log
+            // (below) carries the distinction for engineers who need it.
             logger.notice(
                 "chapterphase.transcript_unavailable_at_entry — emitting no_candidates"
             )
-            // Outcome=.transcriptUnavailable but event=.noCandidates by
-            // design — see the bead .3 schema comment above. The richer
-            // `Outcome` enum is for in-process callers that want to
-            // branch on "why nothing was produced"; the wire-format
-            // diagnostic stays in the bead .3 vocabulary.
             await emitNoCandidates(installID: installID, episodeId: episodeId)
             return .transcriptUnavailable
         }
@@ -288,6 +281,12 @@ struct ChapterGenerationPhase: Sendable {
         // requires this be paired with exactly one terminal event
         // (`.skippedAdmission` / `.noCandidates` / `.preempted` /
         // `.completed`) per run from this point onward.
+        //
+        // Timestamp note: we stamp `.started` with `startedAtTimestamp`
+        // captured BEFORE admission, not the wall-clock at this emit
+        // line. This makes `completed.latency_ms` =
+        // `completed.timestamp - started.timestamp` exactly, which
+        // is the contract telemetry consumers expect.
         await recordStarted(
             installID: installID,
             episodeId: episodeId,
@@ -330,10 +329,13 @@ struct ChapterGenerationPhase: Sendable {
         }
 
         // 5. Serial labeling pass. Per-call parallelism is bead .12.
-        //    A `nil` from the labeler is silently dropped; an
-        //    individual labeler throw on cancellation collapses the
-        //    whole run into a preempt (we discard partial state
-        //    rather than persist a half-labeled plan).
+        //    A `nil` from the labeler is silently dropped; a non-
+        //    cancellation throw is logged and skips that candidate
+        //    (the labeling service owns `chapter_phase_label_failed`
+        //    vocabulary, not the shell). A `CancellationError`
+        //    throw collapses the whole run into a preempt — we
+        //    discard partial state rather than persist a half-
+        //    labeled plan.
         var labeled: [ChapterEvidence] = []
         labeled.reserveCapacity(candidates.count)
         var fmCallCount = 0
