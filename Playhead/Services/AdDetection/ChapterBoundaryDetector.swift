@@ -435,39 +435,52 @@ struct ChapterBoundaryDetector: Sendable {
 
     // MARK: - Signal: speaker shifts
 
-    /// Detect cluster ID transitions where the new cluster sustains for
-    /// at least `minSpeakerRunDuration` of subsequent windows. Emits the
-    /// event at the start of the first window with the new cluster.
+    /// Detect cluster ID transitions where the new cluster sustains
+    /// for strictly more than `minSpeakerRunDuration`. Emits the event
+    /// at the start of the first window with the new cluster.
     ///
     /// Implementation: walk the speaker windows tracking the active
     /// cluster ID. On every change to a non-nil cluster ID, look ahead
-    /// to compute the contiguous run length of the new cluster and emit
-    /// only if it lasts at least `minSpeakerRunDuration`. Nil cluster
-    /// IDs are skipped — they neither start nor break a run. The
-    /// "active cluster" state persists across nil gaps so a brief
-    /// missing window in the middle of a sustained run does not falsely
-    /// register as a shift.
+    /// to compute the contiguous run length of the new cluster and
+    /// emit only if it lasts strictly longer than the minimum. Nil
+    /// cluster IDs are skipped during the lookahead — they do not add
+    /// to the run, but they also do not break it (otherwise chunked
+    /// diarization with sub-second gaps would never qualify). The run
+    /// breaks on the first non-nil cluster window with a different
+    /// cluster ID. Run duration is measured from the start of the
+    /// first matching window to the end of the last matching window
+    /// (gaps between matching windows count toward the duration so
+    /// that a 4s + 1s-nil-gap + 4s pattern measures 9s sustained, not
+    /// 8s).
     private func detectSpeakerShifts(
         _ windows: [ChapterSpeakerWindow]
     ) -> [SignalEvent] {
         guard !windows.isEmpty else { return [] }
 
         var out: [SignalEvent] = []
-        var activeCluster: Int? = nil
+        // The "established" cluster: the cluster ID we believe is
+        // currently speaking, set only when we have observed a run
+        // long enough to be confident (or when seeding the very first
+        // cluster of the episode). Brief candidate clusters that fail
+        // the >minSpeakerRunDuration gate do NOT advance this state —
+        // otherwise a 2s announcer interruption inside a 30s monologue
+        // would fabricate a spurious "shift back to host" event when
+        // the host resumes.
+        var establishedCluster: Int? = nil
 
         for index in 0..<windows.count {
             guard let candidateCluster = windows[index].clusterId else {
                 continue
             }
-            if activeCluster == candidateCluster {
+            if establishedCluster == candidateCluster {
                 continue
             }
             // Compute the sustained run length starting at `index`. We
             // skip nil-cluster windows during this lookahead — they do
             // not add to the run, but they also do not break it
-            // (they would otherwise penalize chunked diarization for
-            // having gaps). The run breaks on the first non-nil cluster
-            // window with a different cluster ID.
+            // (chunked diarization may have sub-second nil gaps inside
+            // a real sustained run). The run breaks on the first
+            // non-nil cluster window with a different cluster ID.
             var runEnd = windows[index].endTime
             var lookahead = index + 1
             while lookahead < windows.count {
@@ -483,14 +496,27 @@ struct ChapterBoundaryDetector: Sendable {
             // ("speaker cluster ID transition that lasts >5s"). A
             // shift sustained for exactly the minimum is treated as
             // crosstalk noise.
-            if runDuration > config.minSpeakerRunDuration && activeCluster != nil {
+            let isSustained = runDuration > config.minSpeakerRunDuration
+            if isSustained && establishedCluster != nil {
                 out.append(SignalEvent(
                     time: windows[index].startTime,
                     signal: .speakerShift,
                     weight: config.speakerShiftWeight
                 ))
             }
-            activeCluster = candidateCluster
+            // Advance establishedCluster only when the candidate
+            // sustains. Two cases:
+            //   1. First cluster of the episode (establishedCluster
+            //      nil): seed it on first sustained run so subsequent
+            //      shifts have a baseline to compare against.
+            //   2. Real shift (establishedCluster non-nil and
+            //      isSustained): update because we just emitted.
+            // Filtered (non-sustained) candidates leave the prior
+            // cluster intact; the next non-nil cluster window will be
+            // re-evaluated against it.
+            if isSustained {
+                establishedCluster = candidateCluster
+            }
         }
         return out
     }
@@ -592,8 +618,9 @@ struct ChapterBoundaryDetector: Sendable {
     // MARK: - Signal: long pauses
 
     /// Detect contiguous runs of pause windows (pauseProbability >=
-    /// `pauseThreshold`) totaling at least `minLongPauseDuration`.
-    /// Emits one event per qualifying run, at the start of the run.
+    /// `pauseThreshold`) totaling strictly more than
+    /// `minLongPauseDuration`. Emits one event per qualifying run, at
+    /// the start of the run.
     ///
     /// "Contiguous" is defined as adjacent windows in array order whose
     /// `pauseProbability` clears the threshold. We do not require the

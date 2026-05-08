@@ -266,12 +266,15 @@ struct ChapterBoundaryDetectorSpeakerTests {
         #expect(result.last?.startTime == 6.0)
     }
 
-    @Test("brief crosstalk (<5s shift) is filtered out")
+    @Test("brief crosstalk (<5s shift) is filtered out and does not fabricate a 'shift back' event")
     func briefShiftFilteredOut() {
         let detector = ChapterBoundaryDetector()
         // Cluster 1 for 10s, cluster 2 for ONLY 2s (interruption),
-        // then cluster 1 again. The 2s interruption should not produce
-        // a boundary.
+        // then cluster 1 resumes for 18s. The 2s interruption is
+        // filtered. The "return" to cluster 1 at t=12 must NOT fabricate
+        // a shift event — cluster 1 was the established baseline before
+        // the crosstalk and remains so. Only the synthetic t=0 boundary
+        // is expected.
         let speakers = [
             ChapterSpeakerWindow(startTime: 0, endTime: 10, clusterId: 1),
             ChapterSpeakerWindow(startTime: 10, endTime: 12, clusterId: 2),
@@ -282,11 +285,8 @@ struct ChapterBoundaryDetectorSpeakerTests {
             speakerWindows: speakers
         )
         let result = detector.detect(features: snapshot)
-        // The shift back to cluster 1 at t=12 sustains for 18s → that
-        // does count as a real shift. So we expect 2 boundaries (t=0
-        // and t=12 only), NOT the brief crosstalk at t=10.
-        #expect(result.count == 2)
-        #expect(result.last?.startTime == 12.0)
+        #expect(result.count == 1, "synthetic t=0 only; brief crosstalk should not surface as two shifts")
+        #expect(result.first?.startTime == 0.0)
     }
 
     @Test("single short shift only (<5s) emits no shift boundary")
