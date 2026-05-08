@@ -549,6 +549,14 @@ struct ChapterPlanQualityEvalThresholdTests {
         #expect(perEp.missedBoundaries == 0)
         #expect(perEp.dispositionMatchedPairs == 1)
         #expect(perEp.dispositionMatchedAgreed == 1)
+
+        // Topic-label outcomes: the matched pair carries nil/nil,
+        // which collapses to `.notApplicable`. Pin so a regression
+        // that bypassed the matcher for nil/nil pairs (and skipped
+        // the NA increment) would surface here.
+        #expect(report.topicLabelMatches.notApplicable == 1)
+        #expect(report.topicLabelMatches.matched == 0)
+        #expect(report.topicLabelMatches.mismatched == 0)
     }
 
     /// Symmetric edge: a GOLDEN with a non-finite `startTimeSeconds`
@@ -596,6 +604,13 @@ struct ChapterPlanQualityEvalThresholdTests {
         // with `nonFiniteCandidateStart_isSkippedFromMatching`.
         #expect(report.dispositionMatchedPairs == 1)
         #expect(report.dispositionMatchedAgreed == 1)
+
+        // Topic-label outcomes: the single matched pair carries
+        // nil/nil → `.notApplicable`. Pin for symmetry with the
+        // candidate-side test.
+        #expect(report.topicLabelMatches.notApplicable == 1)
+        #expect(report.topicLabelMatches.matched == 0)
+        #expect(report.topicLabelMatches.mismatched == 0)
     }
 }
 
@@ -717,6 +732,22 @@ struct ChapterPlanQualityEvalAggregationTests {
         // Per-episode entries should both exist.
         let perA = try #require(report.perEpisode["synthetic-happy-path"])
         let perB = try #require(report.perEpisode["synthetic-disposition-confusion"])
+
+        // Pin the per-episode numerical values so a regression that
+        // broke per-episode AND aggregate computation by the same
+        // shift can't slip past. (Pinning relations alone would not
+        // detect a "+1 everywhere" bug.) `synthetic-happy-path` is
+        // 5/5 boundaries with all 5 dispositions agreeing;
+        // `synthetic-disposition-confusion` is 4/4 boundaries with
+        // 3/4 dispositions agreeing.
+        #expect(perA.boundaryRecall.matched == 5)
+        #expect(perA.boundaryRecall.total == 5)
+        #expect(perA.dispositionMatchedPairs == 5)
+        #expect(perA.dispositionMatchedAgreed == 5)
+        #expect(perB.boundaryRecall.matched == 4)
+        #expect(perB.boundaryRecall.total == 4)
+        #expect(perB.dispositionMatchedPairs == 4)
+        #expect(perB.dispositionMatchedAgreed == 3)
 
         // Aggregate boundary counts equal the sum.
         #expect(report.boundaryRecall.matched == perA.boundaryRecall.matched + perB.boundaryRecall.matched)
