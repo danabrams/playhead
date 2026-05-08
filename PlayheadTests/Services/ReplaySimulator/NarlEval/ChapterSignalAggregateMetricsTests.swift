@@ -1,14 +1,24 @@
 // ChapterSignalAggregateMetricsTests.swift
 // playhead-au2v.1.19: deterministic synthetic-corpus tests for
 // `ChapterSignalAggregateMetrics`. Pin every observable contract:
-//   - structural fields (PerModeMetrics / ChapterSignalLiftReport shapes)
-//   - precision / recall / F1 math
+//   - structural fields (PerModeMetrics / ChapterSignalLiftReport /
+//     PerShowLiftDelta shapes)
+//   - precision / recall / F1 math (including asymmetric-input
+//     harmonic-mean math)
 //   - phase latency p50 / p90 / p99 from the gate's per-episode latency
 //   - FM-cost-multiplier semantics (including the zero-baseline clamp)
-//   - barMet evaluation under {lift, no-regression, cost} combinations
-//   - per-show breakdown determinism
-//   - JSON round-trip
+//   - barMet evaluation under {lift, no-regression, cost} combinations,
+//     including epsilon-boundary symmetry / asymmetry / gray-zone cases
+//   - per-show breakdown determinism + sum-equals-cross-corpus invariant
+//   - ground-truth mode-independence invariant
+//   - shadow-vs-enabled phase-telemetry equality (scaffold predictor)
+//   - JSON round-trip + byte-equal persistence + wire shape (compact AND
+//     pretty-printed) carrying the documented field names
 //   - persist() filename + payload contract
+//   - structural-limitations emission (always-on scaffold caveat,
+//     shadow-byte-for-byte note, sample-size warning, FM-cost clamp note)
+//   - corpusSize == input traces.count even with exclusions
+//   - extraLimitations augment, do not replace, structural notes
 
 import Foundation
 import Testing
@@ -64,13 +74,14 @@ struct ChapterSignalAggregateMetricsTests {
     /// Stable synthetic clock — lets tests assert on `generatedAt` and on
     /// the date stamped into the persisted filename.
     private static let testClock: Date = Date(timeIntervalSince1970: 1_777_708_800)
-    // 1_777_708_800 = 2026-05-02T00:00:00Z (a Saturday) — picked far
-    // enough from a UTC midnight that any small timezone slip would
-    // surface as a date-string mismatch in `persistsReportWithExpectedFilename`.
-
-    /// Default gate config used by tests: the production default. Overrides
-    /// land per-test.
-    private static let defaultGateConfig = ChapterSignalGate.Config.default
+    // 1_777_708_800 = 2026-05-02T08:00:00Z (a Saturday). Picked at 08:00
+    // UTC (rather than midnight) so any host-timezone leak in the
+    // filename formatter surfaces immediately: 08:00 UTC is the previous
+    // calendar day in any timezone west of UTC-08:00 (none in production)
+    // and the SAME calendar day everywhere else, so a buggy formatter
+    // that uses the host TZ would slip the filename to "2026-05-01" only
+    // when run by a developer in a UTC-eastern timezone — which would be
+    // caught by `filenameDateStringUTC` directly.
 
     /// Stable predictor config: production default.
     private static let defaultPredictorConfig = MetadataActivationConfig.default
@@ -85,16 +96,27 @@ struct ChapterSignalAggregateMetricsTests {
 
     @Test("PerModeMetrics.empty produces all-zero baseline metrics")
     func perModeEmptyIsZero() {
+        // Pin EVERY field on `PerModeMetrics.empty` to its zero value.
+        // Without exhaustive coverage, a future patch that adds a field
+        // (and forgets to zero it in `.empty`) would silently produce a
+        // non-zero default in the empty-corpus path.
         let m = PerModeMetrics.empty(mode: .off)
         #expect(m.mode == .off)
         #expect(m.episodeCount == 0)
+        #expect(m.excludedEpisodeCount == 0)
         #expect(m.precision == 0)
         #expect(m.recall == 0)
         #expect(m.f1 == 0)
+        #expect(m.predictedAdSeconds == 0)
+        #expect(m.groundTruthAdSeconds == 0)
+        #expect(m.truePositiveSeconds == 0)
         #expect(m.totalFMCalls == 0)
         #expect(m.phaseLatencyP50Ms == 0)
         #expect(m.phaseLatencyP90Ms == 0)
         #expect(m.phaseLatencyP99Ms == 0)
+        #expect(m.abortedByOperationalRate == 0)
+        #expect(m.abortedByPathologicalRate == 0)
+        #expect(m.skippedByCreatorChapters == 0)
         #expect(m.abortRate == 0)
         #expect(m.episodeReplayCount == 0)
     }
