@@ -135,19 +135,23 @@ struct FoundationModelClassifierBuildPromptParityTests {
 
     /// The full coarse-pass prompt with non-empty segments must include
     /// the H14 wrapping (open + close fences) AND the line-ref-prefixed
-    /// transcript lines exactly once each. This is the structural
-    /// invariant the chapter-context insertion must not disturb.
+    /// transcript lines exactly once each, with the transcript lines
+    /// strictly BETWEEN the fences. This is the structural invariant
+    /// the chapter-context insertion must not disturb.
     @Test("non-empty segments: prompt structure is preamble + lines + close fence")
-    func nonEmptySegmentsHasExpectedStructure() {
+    func nonEmptySegmentsHasExpectedStructure() throws {
         let segments = [
             makeSegment(index: 0, text: "first line"),
             makeSegment(index: 1, text: "second line")
         ]
         let prompt = FoundationModelClassifier.buildPrompt(for: segments)
-        #expect(prompt.contains("<<<TRANSCRIPT>>>"))
-        #expect(prompt.contains("<<<END TRANSCRIPT>>>"))
-        #expect(prompt.contains("L0> \"first line\""))
-        #expect(prompt.contains("L1> \"second line\""))
+        let openRange = try #require(prompt.range(of: "<<<TRANSCRIPT>>>"))
+        let closeRange = try #require(prompt.range(of: "<<<END TRANSCRIPT>>>"))
+        let firstLineRange = try #require(prompt.range(of: "L0> \"first line\""))
+        let secondLineRange = try #require(prompt.range(of: "L1> \"second line\""))
+        #expect(openRange.upperBound <= firstLineRange.lowerBound)
+        #expect(firstLineRange.upperBound <= secondLineRange.lowerBound)
+        #expect(secondLineRange.upperBound <= closeRange.lowerBound)
     }
 
     /// With non-empty segments, providing chapter context inserts the
