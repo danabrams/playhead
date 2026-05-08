@@ -2792,6 +2792,22 @@ struct FoundationModelClassifier: Sendable {
         try await runtime.tokenCount(coarsePromptPreamble())
     }
 
+    /// Build the coarse-pass prompt for a window of transcript segments.
+    ///
+    /// playhead-au2v.1.16: optional `chapterContext` is inserted between
+    /// the line-ref instruction and the transcript open fence so the
+    /// model reads it as orienting context above its input. Default
+    /// `nil` produces byte-identical output to the pre-bead-16 prompt
+    /// for the empty-segments case (locked in by
+    /// `FoundationModelClassifierChapterContextTests`). The first
+    /// production caller that passes a non-nil context is responsible
+    /// for emitting the `chapter_prompt_*` diagnostics from
+    /// `ChapterPhaseEvent`.
+    ///
+    /// When `injectionPreambleEnabled()` is `false` (bd-34e hypothesis-A
+    /// experiment), ALL wrapping lines are dropped — including any
+    /// `chapterContext` line — so the controlled experiment continues to
+    /// see only bare `L<n>> "..."` transcript lines.
     static func buildPrompt(
         for segments: [AdTranscriptSegment],
         redactor: PromptRedactor = .noop,
@@ -2815,10 +2831,13 @@ struct FoundationModelClassifier: Sendable {
             // open fence. This places the context just above the model
             // input it disambiguates without disturbing the
             // bd-34e / playhead-994 jailbreak-defense fence pair.
-            // Empty / over-budget contexts return `nil` from
-            // `format(maxTokens:)` and are silently omitted; the
+            // `format(maxTokens:)` returns `nil` only when even the
+            // topic-less baseline form exceeds the token budget; the
             // caller is responsible for emitting the
             // `chapter_prompt_dropped_budget` diagnostic in that case.
+            // (When the preamble is disabled above, this entire branch
+            // is skipped — chapter context is silently dropped along
+            // with the other wrapping lines.)
             if let context = chapterContext,
                let line = context.format() {
                 lines.append(line)
@@ -2863,11 +2882,16 @@ struct FoundationModelClassifier: Sendable {
         // the optional Evidence catalog. The bead spec asks for "before
         // the existing Evidence catalog block"; placing it before the
         // transcript lines too is consistent with the coarse-pass
-        // placement and unambiguous for the model. Half-budget aware:
-        // the refinement budget is sized via `coarseBudgetDivisor=8`
-        // upstream, so the same `format(maxTokens:)` cap (~50 tokens)
-        // is appropriate here. Over-budget cases drop to nil and the
-        // caller emits the `chapter_prompt_dropped_budget` diagnostic.
+        // placement and unambiguous for the model.
+        //
+        // Token budget: the same `defaultMaxTokens` (~50) cap is used
+        // in both passes — the refinement path runs at
+        // `refinementBudgetDivisor=2` and the coarse path runs at
+        // `coarseBudgetDivisor=8`, so 50 tokens is comfortably small
+        // relative to either prompt's budget. `format(maxTokens:)`
+        // returns nil only when even the topic-less baseline does not
+        // fit (rare); the caller emits
+        // `chapter_prompt_dropped_budget` in that case.
         if let context = chapterContext, let line = context.format() {
             lines.append(line)
         }
