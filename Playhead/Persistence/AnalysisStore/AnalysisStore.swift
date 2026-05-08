@@ -875,7 +875,7 @@ struct AdListenRewindRow: Sendable, Hashable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 24
+    nonisolated private static let currentSchemaVersion = 25
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1505,6 +1505,15 @@ actor AnalysisStore {
             // dogfood overnight runs are queryable without raw JSONL
             // grep. Bumps schema_version to 24.
             try migrateBackgroundTaskRunsV24IfNeeded()
+            // playhead-hygc.1.5: final-pass job semantic dedupe — adds
+            // `canonicalSpanKey` column to `final_pass_jobs` and the
+            // sibling `final_pass_job_aliases` audit table. Lets the
+            // runner collapse multiple AdWindows that share a span to a
+            // single ASR pass while preserving evidence of which
+            // windowIds contributed. Bumps schema_version to 25 (renumbered
+            // from v23 at integration time — bd-hygc.1.6 took v23 and
+            // bd-hygc.1.4 took v24).
+            try migrateFinalPassCanonicalSpanV25IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1761,6 +1770,9 @@ actor AnalysisStore {
         // playhead-hygc.1.4 (v24): mirror background_task_runs migration
         // into the ladder seam. Helper is fully idempotent.
         try migrateBackgroundTaskRunsV24IfNeeded()
+        // playhead-hygc.1.5 (v25): mirror final-pass canonical span
+        // migration into the ladder seam. Helper is fully idempotent.
+        try migrateFinalPassCanonicalSpanV25IfNeeded()
     }
     #endif
 
@@ -3852,7 +3864,7 @@ actor AnalysisStore {
                 observedSchemaVersion = "unknown"
             }
             logger.warning(
-                "reapOrphanBackgroundTaskRuns: background_task_runs table missing — skipping reap (likely cross-worktree schema drift; observed schema_version=\(observedSchemaVersion, privacy: .public); see migrateBackgroundTaskRunsV23IfNeeded)"
+                "reapOrphanBackgroundTaskRuns: background_task_runs table missing — skipping reap (likely cross-worktree schema drift; observed schema_version=\(observedSchemaVersion, privacy: .public); see migrateBackgroundTaskRunsV24IfNeeded)"
             )
             return 0
         }
@@ -3882,6 +3894,86 @@ actor AnalysisStore {
         bind(stmt, 2, startedBefore)
         try step(stmt, expecting: SQLITE_DONE)
         return Int(sqlite3_changes(db))
+    }
+
+    /// playhead-hygc.1.5 (v25, renumbered from v23 at integration time):
+    /// final-pass job semantic dedupe.
+    ///
+    /// **Background.** The v19 `final_pass_jobs.jobId` PRIMARY KEY is
+    /// `fpj-<analysisAssetId>-<adWindowId>`. That gives us row-level
+    /// idempotency on the same `adWindowId`, but the May 6 dogfood
+    /// xcappdata showed the same time span enqueued 4× under DIFFERENT
+    /// `adWindowId` values (asset C75C2E85 had span `3386.0-3394.14`
+    /// repeated 4× and `3394.14-3395.652` repeated 4×; asset 1874D961
+    /// had `24.0-38.16` repeated 4×). Each repeat consumed an ASR pass
+    /// and burned battery. The fix is to dedupe at the SEMANTIC level —
+    /// the (asset, normalized startTime, normalized endTime) triple
+    /// — not just at row level.
+    ///
+    /// **Schema additions:**
+    ///   1. `final_pass_jobs.canonicalSpanKey` (nullable TEXT) — the
+    ///      string `<startMs>-<endMs>` where each bound is rounded to
+    ///      the nearest millisecond (3 decimal places, see
+    ///      `AnalysisStore.canonicalSpanKey(start:end:)`). This is the
+    ///      semantic identity of the span. NULL for pre-v23 rows so
+    ///      the upgrade doesn't have to recompute every legacy row;
+    ///      new inserts (post-v23) populate it. The runner consults
+    ///      `findFinalPassJob(forAssetId:canonicalSpanKey:)` BEFORE
+    ///      enqueuing, so rows with NULL keys behave like pre-dedupe
+    ///      jobs (one row per `adWindowId`) until they age out — no
+    ///      data loss.
+    ///   2. Backfill: existing rows get their canonicalSpanKey computed
+    ///      in SQL via `printf('%.3f-%.3f', windowStartTime, windowEndTime)`.
+    ///      Rounding to milliseconds matches the in-Swift helper.
+    ///   3. Index `idx_final_pass_jobs_canonical` on
+    ///      `(analysisAssetId, canonicalSpanKey)` so the lookup is
+    ///      O(log n) per asset.
+    ///   4. New table `final_pass_job_aliases` that records every
+    ///      `adWindowId` whose span collapsed into a canonical job.
+    ///      Composite PK `(jobId, adWindowId)` plus FK CASCADE on the
+    ///      jobId so an asset deletion (which cascades to
+    ///      `final_pass_jobs`) cleans up aliases too.
+    ///
+    /// **Idempotent.** `addColumnIfNeeded` and the conditional UPDATE
+    /// (`WHERE canonicalSpanKey IS NULL`) make re-running the migration
+    /// a no-op. `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT
+    /// EXISTS` likewise.
+    private func migrateFinalPassCanonicalSpanV25IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 25 else { return }
+        if try tableExists("final_pass_jobs") {
+            try addColumnIfNeeded(
+                table: "final_pass_jobs",
+                column: "canonicalSpanKey",
+                definition: "TEXT"
+            )
+            // Backfill: stamp the canonical key on every existing row.
+            // `printf('%.3f-%.3f', start, end)` matches the in-Swift
+            // formatter used by `canonicalSpanKey(start:end:)`. Only
+            // rows where the column is NULL are touched, so re-running
+            // does not clobber rows the runner has already keyed.
+            try exec("""
+                UPDATE final_pass_jobs
+                SET canonicalSpanKey = printf('%.3f-%.3f', windowStartTime, windowEndTime)
+                WHERE canonicalSpanKey IS NULL
+                """)
+            try exec("""
+                CREATE INDEX IF NOT EXISTS idx_final_pass_jobs_canonical
+                ON final_pass_jobs(analysisAssetId, canonicalSpanKey)
+                """)
+        }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS final_pass_job_aliases (
+                jobId TEXT NOT NULL REFERENCES final_pass_jobs(jobId) ON DELETE CASCADE,
+                adWindowId TEXT NOT NULL,
+                addedAt REAL NOT NULL,
+                PRIMARY KEY (jobId, adWindowId)
+            )
+            """)
+        try exec("""
+            CREATE INDEX IF NOT EXISTS idx_final_pass_job_aliases_window
+            ON final_pass_job_aliases(adWindowId)
+            """)
+        try setSchemaVersion(25)
     }
 
     // MARK: - Repeated-ad cache (playhead-43ed, schema v21)
@@ -4507,6 +4599,37 @@ actor AnalysisStore {
             column: "updatedAt",
             definition: "REAL NOT NULL DEFAULT 0"
         )
+        // playhead-hygc.1.5 (v25): canonical span key. Defensive
+        // `addColumnIfNeeded` here in `createTables()` so a fresh DB
+        // (which builds the table from scratch via the CREATE above
+        // without this column) and a freshly-upgraded DB land at the
+        // same shape. The v25 migration also runs via the V*IfNeeded
+        // ladder for rolling upgrades; both paths converge.
+        try addColumnIfNeeded(
+            table: "final_pass_jobs",
+            column: "canonicalSpanKey",
+            definition: "TEXT"
+        )
+        try exec("""
+            CREATE INDEX IF NOT EXISTS idx_final_pass_jobs_canonical
+            ON final_pass_jobs(analysisAssetId, canonicalSpanKey)
+            """)
+        // playhead-hygc.1.5: sibling audit table that records every
+        // `adWindowId` whose span collapsed into a canonical
+        // `final_pass_jobs` row. Created defensively here so fresh DBs
+        // get it without waiting for the V25 ladder step.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS final_pass_job_aliases (
+                jobId TEXT NOT NULL REFERENCES final_pass_jobs(jobId) ON DELETE CASCADE,
+                adWindowId TEXT NOT NULL,
+                addedAt REAL NOT NULL,
+                PRIMARY KEY (jobId, adWindowId)
+            )
+            """)
+        try exec("""
+            CREATE INDEX IF NOT EXISTS idx_final_pass_job_aliases_window
+            ON final_pass_job_aliases(adWindowId)
+            """)
 
         // semantic_scan_results
         // C5: `reuseKeyHash` is a SHA-256 over the canonical concatenation of
@@ -8938,18 +9061,41 @@ actor AnalysisStore {
 
     // MARK: - CRUD: final_pass_jobs (Bug 9)
 
+    /// playhead-hygc.1.5: canonical, version-stable span identity used
+    /// to dedupe final-pass jobs whose AdWindow ids differ but whose
+    /// time spans match modulo sub-millisecond float noise. Round to
+    /// 3 decimal places (1ms) so two AdWindows with start=`3386.0` and
+    /// start=`3386.0000001` collapse to the same key.
+    ///
+    /// Format: `"<startMs>-<endMs>"` where each side is the seconds
+    /// value formatted to 3 decimal places via `String(format:)`. This
+    /// is intentionally the same shape the v23 SQL backfill produces
+    /// (`printf('%.3f-%.3f', ...)`), so a Swift-computed key always
+    /// matches the SQL-computed key for the same span.
+    nonisolated static func canonicalSpanKey(start: Double, end: Double) -> String {
+        String(format: "%.3f-%.3f", start, end)
+    }
+
     /// INSERT OR IGNORE — idempotent. The composite jobId
     /// (`fpj-<assetId>-<adWindowId>`) is stable across runs so a re-enqueue
     /// of the same window is a guaranteed no-op rather than an error.
     /// Mirrors the BackfillJobRunner enqueue contract; the runner relies on
     /// no-throw idempotency for its launch-time scan.
+    ///
+    /// playhead-hygc.1.5: also stamps `canonicalSpanKey` (computed from
+    /// the row's `windowStartTime`/`windowEndTime`) so the v23 dedupe
+    /// path (`findFinalPassJob(forAssetId:canonicalSpanKey:)`) can
+    /// match this row by span identity. Pre-v23 rows that lack a key
+    /// after the migration backfill DO get one from the SQL-side
+    /// `printf('%.3f-%.3f', ...)` UPDATE; new inserts populate the
+    /// column directly here so the key never has to be lazily computed.
     func insertOrIgnoreFinalPassJob(_ job: FinalPassJob) throws {
         let sql = """
             INSERT OR IGNORE INTO final_pass_jobs
             (jobId, analysisAssetId, podcastId, adWindowId,
              windowStartTime, windowEndTime, status, retryCount,
-             deferReason, createdAt, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             deferReason, createdAt, updatedAt, canonicalSpanKey)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -8966,7 +9112,189 @@ actor AnalysisStore {
         // H1: liveness clock seeded to createdAt; subsequent transitions
         // refresh it via `strftime('%s','now')` in the mark* helpers.
         bind(stmt, 11, job.createdAt)
+        bind(stmt, 12, Self.canonicalSpanKey(start: job.windowStartTime, end: job.windowEndTime))
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-hygc.1.5: locate an existing canonical final-pass job
+    /// for `(assetId, canonicalSpanKey)`. Returns the FIRST row by
+    /// `createdAt ASC` (stable: same span emits the same canonical
+    /// jobId across re-enqueues, so the "first" row IS the canonical
+    /// row). Used by `FinalPassRetranscriptionRunner`'s pre-insert
+    /// dedupe path so a window whose span already has a canonical job
+    /// does not enqueue a second row.
+    ///
+    /// Returns `nil` when:
+    ///   • no row exists for that `(asset, span)`, OR
+    ///   • the only matching rows have `canonicalSpanKey IS NULL`
+    ///     (pre-v23 legacy rows that the migration backfill missed —
+    ///     those rows still satisfy row-level idempotency via the
+    ///     `jobId` PK, so the new caller can enqueue freely).
+    ///
+    /// Caller responsibility: passing the canonicalSpanKey from
+    /// `Self.canonicalSpanKey(start:end:)` ensures the lookup matches
+    /// the format the migration backfill and `insertOrIgnoreFinalPassJob`
+    /// both produce.
+    func findFinalPassJob(
+        forAssetId assetId: String,
+        canonicalSpanKey key: String
+    ) throws -> FinalPassJob? {
+        let sql = """
+            SELECT jobId, analysisAssetId, podcastId, adWindowId,
+                   windowStartTime, windowEndTime, status, retryCount,
+                   deferReason, createdAt
+            FROM final_pass_jobs
+            WHERE analysisAssetId = ? AND canonicalSpanKey = ?
+            ORDER BY createdAt ASC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        bind(stmt, 2, key)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return try readFinalPassJob(stmt)
+    }
+
+    /// playhead-hygc.1.5: record an `adWindowId` that contributed to a
+    /// canonical `final_pass_jobs` row. INSERT OR IGNORE keeps the
+    /// composite PK `(jobId, adWindowId)` from throwing on a re-record
+    /// — same window can be observed against the same canonical job
+    /// multiple times (e.g. a re-enqueue after thermal recovery
+    /// re-walks the same AdWindow set) and the alias write must be a
+    /// no-op the second time around.
+    ///
+    /// Does NOT throw on a missing FK target — the FK is enforced by
+    /// SQLite's foreign-keys pragma, which `AnalysisStore` enables.
+    /// Callers MUST insert the canonical job FIRST so the alias write
+    /// doesn't fall foul of `SQLITE_CONSTRAINT_FOREIGNKEY`.
+    func recordFinalPassJobAlias(
+        jobId: String,
+        adWindowId: String,
+        addedAt: Double = Date().timeIntervalSince1970
+    ) throws {
+        let sql = """
+            INSERT OR IGNORE INTO final_pass_job_aliases
+            (jobId, adWindowId, addedAt)
+            VALUES (?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        bind(stmt, 2, adWindowId)
+        bind(stmt, 3, addedAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-hygc.1.5: fetch every `adWindowId` that has been
+    /// recorded as an alias of a canonical final-pass job. Used by
+    /// diagnostics + tests to prove evidence is preserved when
+    /// duplicate windows collapse to a single ASR pass.
+    func fetchFinalPassJobAliases(jobId: String) throws -> [String] {
+        let sql = """
+            SELECT adWindowId
+            FROM final_pass_job_aliases
+            WHERE jobId = ?
+            ORDER BY addedAt ASC, adWindowId ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        var rows: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append(text(stmt, 0))
+        }
+        return rows
+    }
+
+    /// playhead-hygc.1.5: enumerate all `final_pass_jobs` rows for an
+    /// asset, ordered by `createdAt ASC`. Used by tests + diagnostics
+    /// to assert no duplicate canonical-span rows are created and to
+    /// derive coverage from canonical-span set rather than row count.
+    func fetchFinalPassJobs(forAsset assetId: String) throws -> [FinalPassJob] {
+        let sql = """
+            SELECT jobId, analysisAssetId, podcastId, adWindowId,
+                   windowStartTime, windowEndTime, status, retryCount,
+                   deferReason, createdAt
+            FROM final_pass_jobs
+            WHERE analysisAssetId = ?
+            ORDER BY createdAt ASC, jobId ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        var rows: [FinalPassJob] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append(try readFinalPassJob(stmt))
+        }
+        return rows
+    }
+
+    /// playhead-hygc.1.5: derive coverage from the SET of canonical
+    /// completed spans, not the COUNT of completed rows. Returns the
+    /// distinct canonical span keys that have any `complete` row for
+    /// the given asset. A duplicate-row dogfood database where the
+    /// SAME span appears 4× as `complete` returns ONE entry here, not
+    /// four — proving "final-pass progress computation ignores
+    /// duplicate completed rows" (acceptance criterion).
+    ///
+    /// Returned values are pairs of `(canonicalSpanKey, [contributing
+    /// adWindowIds])` so progress UIs can answer both "which spans
+    /// are done?" and "which user-visible AdWindow rows do those
+    /// spans cover?". The contributing-id list combines the canonical
+    /// row's own `adWindowId` with any aliases recorded against it.
+    func canonicalCompleteFinalPassSpans(
+        forAsset assetId: String
+    ) throws -> [(canonicalSpanKey: String, adWindowIds: [String])] {
+        // Group canonical-key dedupe is done in SQL so a billion-row
+        // pathological DB doesn't materialize all rows in Swift. NULL
+        // keys (pre-v23 legacy rows the backfill missed) are treated
+        // as their own bucket via COALESCE so they don't all collapse.
+        //
+        // GROUP_CONCAT collects EVERY contributing `adWindowId` in the
+        // group, not just MIN(...) — this matters for legacy DBs where
+        // pre-fix duplicate spans persisted as N distinct rows with N
+        // distinct `adWindowId` values and zero alias-table rows. The
+        // canonical jobId is picked separately (MIN(jobId)) for the
+        // alias join, which catches post-fix DBs where the canonical
+        // is a single row with N alias entries.
+        let sql = """
+            SELECT
+                COALESCE(canonicalSpanKey, printf('%.3f-%.3f', windowStartTime, windowEndTime)) AS spanKey,
+                MIN(jobId) AS canonicalJobId,
+                GROUP_CONCAT(adWindowId, char(31)) AS allAdWindowIds
+            FROM final_pass_jobs
+            WHERE analysisAssetId = ? AND status = 'complete'
+            GROUP BY spanKey
+            ORDER BY spanKey ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        var rows: [(canonicalSpanKey: String, adWindowIds: [String])] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let spanKey = text(stmt, 0)
+            let canonicalJobId = text(stmt, 1)
+            let concat = text(stmt, 2)
+            // GROUP_CONCAT separator is ASCII Unit Separator (0x1f) so
+            // legitimate adWindowIds containing commas can't collide
+            // with the delimiter.
+            let rowAdWindowIds = concat
+                .split(separator: "\u{001F}", omittingEmptySubsequences: true)
+                .map(String.init)
+            // Collect ALL adWindowIds that contribute to this span:
+            // every row's own `adWindowId` (legacy duplicate-row shape)
+            // + every alias keyed off the canonical jobId (post-fix
+            // dedupe shape). The result is the closed set of
+            // user-visible AdWindow ids the span resolves.
+            var ids = rowAdWindowIds
+            let aliases = try fetchFinalPassJobAliases(jobId: canonicalJobId)
+            ids.append(contentsOf: aliases)
+            // De-dupe + stable sort so callers get a deterministic list.
+            let unique = Array(Set(ids)).sorted()
+            rows.append((canonicalSpanKey: spanKey, adWindowIds: unique))
+        }
+        return rows
     }
 
     func fetchFinalPassJob(byId jobId: String) throws -> FinalPassJob? {
