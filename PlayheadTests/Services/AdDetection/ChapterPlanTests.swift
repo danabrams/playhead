@@ -217,10 +217,12 @@ struct ChapterPlanTests {
     @Test("computePlanConfidence clamps a negative qualityScore to 0")
     func confidenceClampsNegativeQuality() {
         // Symmetric to the upper-bound clamp: a producer mis-emitting a
-        // negative score must not pull the aggregate below 0. We rely on
-        // the post-aggregate clamp because skipping negatives entirely
-        // would silently change duration weighting; clamping preserves
-        // weight intent while keeping the result a valid probability.
+        // negative finite score must not pull the aggregate below 0.
+        // Policy: finite-but-out-of-range scores are clamped (saturated
+        // at the boundary they're past); non-finite scores (NaN/Inf)
+        // are dropped entirely (see `confidenceSkipsNaNQuality`). The
+        // distinction is intentional — finite values still carry a
+        // direction signal (positive vs negative); NaN does not.
         let chapters = [
             Self.makeChapter(start: 0, end: 60, quality: -0.5),
         ]
@@ -230,10 +232,12 @@ struct ChapterPlanTests {
 
     @Test("non-finite startTime is skipped without poisoning confidence")
     func confidenceSkipsNonFiniteStart() {
-        // A chapter with NaN/Inf startTime is unusable: we cannot trust
-        // its 60s open-ended fallback (anchored on start) or any real
-        // interval. Skip it and weight the remaining valid chapters
-        // normally.
+        // A chapter with NaN/Inf startTime signals corrupt bounds. Even
+        // when `endTime` is nil (where the 60s fallback math doesn't
+        // depend on start), we still drop it: a chapter we cannot
+        // anchor in the timeline is not trustworthy enough to weight
+        // into the aggregate. Skip it and weight the remaining valid
+        // chapters normally.
         let bad = Self.makeChapter(start: .nan, end: nil, quality: 0.9)
         let good = Self.makeChapter(start: 0, end: 60, quality: 0.4)
         let confidence = ChapterPlan.computePlanConfidence([bad, good])
