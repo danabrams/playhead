@@ -274,7 +274,7 @@ struct ChapterGenerationPhaseTests {
 
     // MARK: - No candidates
 
-    @Test("detector returns empty candidates → no_candidates, no cache write, labeler not invoked")
+    @Test("detector returns empty candidates → started + no_candidates, no cache write, labeler not invoked")
     func noCandidatesPath() async {
         let cache = Self.makeCache()
         let sink = MockEventSink()
@@ -293,14 +293,15 @@ struct ChapterGenerationPhaseTests {
 
         #expect(outcome == .noCandidates)
         let events = await sink.snapshot()
-        #expect(events.count == 1)
-        #expect(events.first?.eventType == .noCandidates)
+        #expect(events.count == 2)
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .noCandidates)
         #expect(await labeler.invocationCount == 0)
         let stored = await cache.get(contentHash: "hash-A")
         #expect(stored == nil)
     }
 
-    @Test("detector throws (non-cancellation) → no_candidates, no cache write")
+    @Test("detector throws (non-cancellation) → started + no_candidates, no cache write")
     func detectorThrowsNonCancellation() async {
         struct DetectorError: Error {}
         let cache = Self.makeCache()
@@ -327,8 +328,9 @@ struct ChapterGenerationPhaseTests {
 
         #expect(outcome == .noCandidates)
         let events = await sink.snapshot()
-        #expect(events.count == 1)
-        #expect(events.first?.eventType == .noCandidates)
+        #expect(events.count == 2)
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .noCandidates)
         let stored = await cache.get(contentHash: "hash-A")
         #expect(stored == nil)
     }
@@ -355,8 +357,9 @@ struct ChapterGenerationPhaseTests {
 
         #expect(outcome == .raceAborted)
         let events = await sink.snapshot()
-        #expect(events.count == 1)
-        #expect(events.first?.eventType == .preempted)
+        #expect(events.count == 2)
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .preempted)
         #expect(await labeler.invocationCount == 2, "labeler runs serially over candidates before the recheck")
         // Plan must NOT be cached under either the entry or the recheck hash.
         let storedA = await cache.get(contentHash: "hash-A")
@@ -365,7 +368,7 @@ struct ChapterGenerationPhaseTests {
         #expect(storedB == nil)
     }
 
-    @Test("transcript hash becomes nil on recheck → preempted, plan discarded")
+    @Test("transcript hash becomes nil on recheck → started + preempted, plan discarded")
     func raceTranscriptDisappearsDiscardsPlan() async {
         let cache = Self.makeCache()
         let sink = MockEventSink()
@@ -383,8 +386,9 @@ struct ChapterGenerationPhaseTests {
 
         #expect(outcome == .raceAborted)
         let events = await sink.snapshot()
-        #expect(events.count == 1)
-        #expect(events.first?.eventType == .preempted)
+        #expect(events.count == 2)
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .preempted)
         let stored = await cache.get(contentHash: "hash-A")
         #expect(stored == nil)
     }
@@ -413,8 +417,15 @@ struct ChapterGenerationPhaseTests {
 
         #expect(outcome == .preempted)
         let events = await sink.snapshot()
-        #expect(events.count == 1)
-        #expect(events.first?.eventType == .preempted)
+        // The terminal event is always `.preempted`. Whether
+        // `.started` was emitted first depends on whether
+        // cancellation was observed before or after the entry-hash
+        // capture — both orderings are valid.
+        #expect(events.last?.eventType == .preempted)
+        #expect(events.count == 1 || events.count == 2)
+        if events.count == 2 {
+            #expect(events.first?.eventType == .started)
+        }
         // Allow either: labeler may or may not have run depending on
         // when cancel was observed; the contract is that the cache
         // never receives a partial write.
@@ -423,7 +434,7 @@ struct ChapterGenerationPhaseTests {
         #expect(stored == nil)
     }
 
-    @Test("CancellationError thrown by labeler → preempted, plan discarded, no cache write")
+    @Test("CancellationError thrown by labeler → started + preempted, plan discarded, no cache write")
     func labelerThrowsCancellationError() async {
         let cache = Self.makeCache()
         let sink = MockEventSink()
@@ -441,13 +452,14 @@ struct ChapterGenerationPhaseTests {
 
         #expect(outcome == .preempted)
         let events = await sink.snapshot()
-        #expect(events.count == 1)
-        #expect(events.first?.eventType == .preempted)
+        #expect(events.count == 2)
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .preempted)
         let stored = await cache.get(contentHash: "hash-A")
         #expect(stored == nil)
     }
 
-    @Test("CancellationError thrown by detector → preempted, no cache write")
+    @Test("CancellationError thrown by detector → started + preempted, no cache write")
     func detectorThrowsCancellationError() async {
         let cache = Self.makeCache()
         let sink = MockEventSink()
@@ -473,8 +485,9 @@ struct ChapterGenerationPhaseTests {
 
         #expect(outcome == .preempted)
         let events = await sink.snapshot()
-        #expect(events.count == 1)
-        #expect(events.first?.eventType == .preempted)
+        #expect(events.count == 2)
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .preempted)
         let stored = await cache.get(contentHash: "hash-A")
         #expect(stored == nil)
     }
@@ -511,8 +524,9 @@ struct ChapterGenerationPhaseTests {
             Issue.record("Expected .cached outcome, got \(outcome)")
         }
         let events = await sink.snapshot()
-        #expect(events.count == 1)
-        #expect(events.first?.eventType == .completed)
+        #expect(events.count == 2)
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .completed)
         // Cache write happened — the plan is empty but valid.
         let stored = await cache.get(contentHash: "hash-A")
         #expect(stored != nil)
@@ -551,9 +565,17 @@ struct ChapterGenerationPhaseTests {
         #expect(await labeler.invocationCount == 3)
 
         let events = await sink.snapshot()
-        #expect(events.count == 1)
-        #expect(events.first?.eventType == .completed)
-        if case let .completed(payload) = events.first?.payload {
+        #expect(events.count == 2)
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .completed)
+        // The `.started` event carries the entry transcript hash.
+        if case let .started(startedPayload) = events.first?.payload {
+            #expect(startedPayload.transcriptSnapshotHash == "hash-A")
+            #expect(startedPayload.mode == "enabled")
+        } else {
+            Issue.record("Expected started payload at events[0]")
+        }
+        if case let .completed(payload) = events.last?.payload {
             #expect(payload.chapterCount == 3)
             #expect(payload.fmCallCount == 3)
             #expect(payload.latencyMs >= 0)
@@ -588,8 +610,16 @@ struct ChapterGenerationPhaseTests {
             Issue.record("Expected .cached outcome under .shadow, got \(outcome)")
         }
         let events = await sink.snapshot()
-        #expect(events.count == 1)
-        #expect(events.first?.eventType == .completed)
+        #expect(events.count == 2)
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .completed)
+        // `.started` payload reflects the shadow mode raw value.
+        if case let .started(startedPayload) = events.first?.payload {
+            #expect(startedPayload.mode == "shadow")
+            #expect(startedPayload.transcriptSnapshotHash == "hash-A")
+        } else {
+            Issue.record("Expected started payload at events[0]")
+        }
     }
 
     // MARK: - Episode id hashing

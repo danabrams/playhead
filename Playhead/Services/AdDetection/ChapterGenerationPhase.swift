@@ -35,11 +35,21 @@
 //     service's responsibility (`.7` / `.8`).
 //
 // Logging discipline:
-//   Every exit path emits *exactly one* phase-completion diagnostic
-//   (success or specific failure). The single explicit no-op is
-//   `ChapterSignalMode.off`, which emits NO diagnostic at all — the
-//   feature is fully off, and we want zero surface area in shipped
-//   bundles when the flag is off.
+//   * Every exit path emits *exactly one* phase-completion diagnostic
+//     (success or specific failure). "Phase-completion" here means
+//     terminal events: `.skippedAdmission`, `.noCandidates`,
+//     `.preempted`, `.completed`. There is never more than one of
+//     those per run.
+//   * One `.started` event fires at phase entry (after the entry
+//     transcript-hash snapshot succeeds, since the started payload
+//     requires that hash). Paths that exit *before* the snapshot
+//     succeeds (`.off` / admission deny / transcript unavailable)
+//     do NOT emit `.started` — those exits are "phase never truly
+//     began" and the bead .3 diagnostic schema agrees with that
+//     reading.
+//   * `ChapterSignalMode.off` emits NO diagnostic at all — the
+//     feature is fully off, and we want zero surface area in shipped
+//     bundles when the flag is off.
 
 import Foundation
 import OSLog
@@ -214,8 +224,7 @@ struct ChapterGenerationPhase: Sendable {
             return .modeOff
         }
 
-        let startedAt = clock()
-        let startedAtTimestamp = startedAt.timeIntervalSince1970
+        let startedAtTimestamp = clock().timeIntervalSince1970
 
         // 2. Admission. We check admission BEFORE the entry-hash
         //    snapshot so a denied phase never even reads the
@@ -271,6 +280,20 @@ struct ChapterGenerationPhase: Sendable {
             )
             return .transcriptUnavailable
         }
+
+        // The phase has now "truly begun": admission passed AND we
+        // have a transcript snapshot to anchor the run. Emit the
+        // single `.started` lifecycle event — the bead .3 schema
+        // requires this be paired with exactly one terminal event
+        // (`.skippedAdmission` / `.noCandidates` / `.preempted` /
+        // `.completed`) per run from this point onward.
+        await recordStarted(
+            installID: installID,
+            episodeId: episodeId,
+            timestamp: startedAtTimestamp,
+            mode: mode.rawValue,
+            transcriptSnapshotHash: entryHash
+        )
 
         if Task.isCancelled {
             await recordPreempted(
@@ -346,8 +369,14 @@ struct ChapterGenerationPhase: Sendable {
                 return .preempted
             }
             do {
+                let evidenceOrNil = try await labeler.label(candidate: candidate)
+                // Only count calls that returned (success or nil)
+                // — throws (cancellation or labeler failures) are
+                // tracked through their own paths and would muddle
+                // the "FM cost incurred for this completed plan"
+                // semantic of `completed.fm_call_count`.
                 fmCallCount += 1
-                if let evidence = try await labeler.label(candidate: candidate) {
+                if let evidence = evidenceOrNil {
                     labeled.append(evidence)
                 }
             } catch is CancellationError {
@@ -437,7 +466,25 @@ struct ChapterGenerationPhase: Sendable {
         )
     }
 
-    // MARK: - Diagnostic emit helpers (one per terminal path)
+    // MARK: - Diagnostic emit helpers (one per lifecycle event)
+
+    private func recordStarted(
+        installID: UUID,
+        episodeId: String,
+        timestamp: Double,
+        mode: String,
+        transcriptSnapshotHash: String
+    ) async {
+        await eventSink.record(
+            .started(
+                installID: installID,
+                episodeId: episodeId,
+                timestamp: timestamp,
+                mode: mode,
+                transcriptSnapshotHash: transcriptSnapshotHash
+            )
+        )
+    }
 
     private func recordSkippedAdmission(
         installID: UUID,
