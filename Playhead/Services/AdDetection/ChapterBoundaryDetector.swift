@@ -656,8 +656,13 @@ struct ChapterBoundaryDetector: Sendable {
                 runEnd = nil
             }
         }
-        // Flush trailing run.
-        if let start = runStart, let end = runEnd, end - start >= config.minLongPauseDuration {
+        // Flush trailing run. Uses strict-greater to match the
+        // mid-loop branch above and the docstring contract — a pause
+        // run of exactly `minLongPauseDuration` does NOT emit, whether
+        // the run is followed by speech or simply ends the input. (R3
+        // fix: prior `>=` here meant a trailing 2s pause silently
+        // emitted while a non-trailing 2s pause did not.)
+        if let start = runStart, let end = runEnd, end - start > config.minLongPauseDuration {
             out.append(SignalEvent(
                 time: start,
                 signal: .longPause,
@@ -727,9 +732,14 @@ struct ChapterBoundaryDetector: Sendable {
 
         /// CaseIterable index of `signal`, used as a deterministic
         /// secondary sort key when two events share a time. Computed
-        /// lazily because `BoundarySignal.allCases` is an array; we
-        /// look up by `firstIndex(of:)` once per event but the input
-        /// arrays are small (4 entries), so it is O(1) in practice.
+        /// on each access; `BoundarySignal.allCases` has only 4
+        /// entries so `firstIndex(of:)` is effectively O(1) per call.
+        /// The sort itself invokes this property O(N log N) times for
+        /// N events; on a 60-min episode (low thousands of events)
+        /// this is well within the 50ms detector budget. If the
+        /// signal-set ever grows beyond a handful of cases, cache
+        /// this value into a stored property at SignalEvent
+        /// construction time.
         var signalSortIndex: Int {
             BoundarySignal.allCases.firstIndex(of: signal) ?? 0
         }

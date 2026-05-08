@@ -580,6 +580,73 @@ struct ChapterBoundaryDetectorPauseTests {
         let result = detector.detect(features: snapshot)
         #expect(result.count == 1, "exactly-2s pause is at the strict-> threshold; should not emit")
     }
+
+    @Test("trailing pause exactly at threshold does not emit (strict >, parity with mid-loop)")
+    func exactlyTwoSecondTrailingPauseFiltered() {
+        // R3 regression pin: prior code used `>=` in the trailing
+        // flush, so a 2s pause that *ends the episode* would emit
+        // while the same 2s pause followed by speech would not. This
+        // test reproduces the trailing-only path: speech, then a 2s
+        // pause that runs to the end of the input, away from t=0 so
+        // the synthetic-boundary dedup gate can't mask the bug.
+        let pauses = [
+            ChapterPauseWindow(startTime: 0, endTime: 5, pauseProbability: 0.1),
+            ChapterPauseWindow(startTime: 5, endTime: 7, pauseProbability: 0.95),
+        ]
+        let config = ChapterBoundaryDetectorConfig(
+            musicTransitionWeight: 0.4,
+            speakerShiftWeight: 0.3,
+            lexicalCategoryJumpWeight: 0.2,
+            longPauseWeight: 0.1,
+            musicProbabilityDelta: 0.5,
+            minSpeakerRunDuration: 5.0,
+            lexicalBinDuration: 30.0,
+            pauseThreshold: 0.5,
+            minLongPauseDuration: 2.0,
+            minBoundaryConfidence: 0.05,  // permissive so we test the duration gate, not the confidence gate
+            minBoundarySpacing: 1.0
+        )
+        let permissive = ChapterBoundaryDetector(config: config)
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 60,
+            pauseWindows: pauses
+        )
+        let result = permissive.detect(features: snapshot)
+        #expect(result.count == 1, "trailing 2s pause is at the strict-> threshold; should not emit even though it terminates the input array")
+    }
+
+    @Test("trailing pause strictly greater than threshold emits (parity with mid-loop)")
+    func trailingPauseAboveThresholdEmits() {
+        // Companion to `exactlyTwoSecondTrailingPauseFiltered`: a 3s
+        // trailing pause clears the strict-> threshold and should
+        // emit, confirming the trailing flush is wired up at all.
+        let pauses = [
+            ChapterPauseWindow(startTime: 0, endTime: 5, pauseProbability: 0.1),
+            ChapterPauseWindow(startTime: 5, endTime: 8, pauseProbability: 0.95),
+        ]
+        let config = ChapterBoundaryDetectorConfig(
+            musicTransitionWeight: 0.4,
+            speakerShiftWeight: 0.3,
+            lexicalCategoryJumpWeight: 0.2,
+            longPauseWeight: 0.1,
+            musicProbabilityDelta: 0.5,
+            minSpeakerRunDuration: 5.0,
+            lexicalBinDuration: 30.0,
+            pauseThreshold: 0.5,
+            minLongPauseDuration: 2.0,
+            minBoundaryConfidence: 0.05,
+            minBoundarySpacing: 1.0
+        )
+        let permissive = ChapterBoundaryDetector(config: config)
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 60,
+            pauseWindows: pauses
+        )
+        let result = permissive.detect(features: snapshot)
+        #expect(result.count == 2)
+        #expect(result.last?.startTime == 5.0)
+        #expect(result.last?.triggeringSignals == [.longPause])
+    }
 }
 
 // MARK: - Combined signals
