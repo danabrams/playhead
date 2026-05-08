@@ -96,6 +96,19 @@ enum ChapterPhaseEventType: String, Sendable, Hashable, Codable, CaseIterable {
     /// Cache decode failure on read (rare; emitted to detect cache
     /// corruption in field).
     case decodeFailure = "chapter_phase_decode_failure"
+
+    /// playhead-au2v.1.14: CoveragePlanner consumed chapter evidence to
+    /// guide audit-window selection. Payload records the configured
+    /// replacement fraction, the count of ad-chapter intervals it
+    /// included, and the count of content-chapter intervals it excluded.
+    case coveragePlanChapterInformed = "coverage_plan_chapter_informed"
+
+    /// playhead-au2v.1.14: CoveragePlanner had access to chapter
+    /// evidence (or could have had access) but decided NOT to use it.
+    /// Payload carries a snake_case reason raw value
+    /// (`mode_disabled`, `no_chapter_evidence`,
+    /// `no_usable_chapters`, `low_plan_confidence`).
+    case coveragePlanChapterSkipped = "coverage_plan_chapter_skipped"
 }
 
 // MARK: - Payloads
@@ -110,8 +123,8 @@ enum ChapterPhaseEventType: String, Sendable, Hashable, Codable, CaseIterable {
 /// addition of `title`, `text`, `transcript`, `advertiser`, or any
 /// String value sourced from episode metadata.
 ///
-/// Asymmetry note: `ChapterPhaseEventType` has 12 cases, this enum has 10.
-/// `noCandidates` and `preempted` are intentionally stateless — the
+/// Asymmetry note: `ChapterPhaseEventType` has 14 cases, this enum has
+/// 12. `noCandidates` and `preempted` are intentionally stateless — the
 /// emit-helper factories on `ChapterPhaseEvent` set `payload: nil` for
 /// those, and the encoded JSON omits the `payload` key entirely (see the
 /// "Golden — chapter_phase_preempted" / "…no_candidates" tests). Adding
@@ -130,6 +143,8 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
     case highUnclearRate(HighUnclearRate)
     case completed(Completed)
     case decodeFailure(DecodeFailure)
+    case coveragePlanChapterInformed(CoveragePlanChapterInformed)
+    case coveragePlanChapterSkipped(CoveragePlanChapterSkipped)
 
     /// Phase-started payload. `transcriptSnapshotHash` is a content hash
     /// over the transcript at the moment the phase entered, NOT the
@@ -315,6 +330,60 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         }
     }
 
+    /// CoveragePlanner consumed chapter evidence to guide audit-window
+    /// selection (playhead-au2v.1.14).
+    struct CoveragePlanChapterInformed: Sendable, Hashable, Equatable, Codable {
+        /// Configured fraction of audit slots that may be replaced
+        /// with chapter-informed selections (`replacementFraction`,
+        /// clamped to `[0, 1]`).
+        let fractionReplaced: Double
+        /// Number of ad-disposition chapters that cleared the
+        /// `adChapterMinQualityForAuditInclusion` floor and were
+        /// recommended for inclusion.
+        let adChapterIncludedCount: Int
+        /// Number of content-disposition chapters that cleared the
+        /// `contentChapterMinQualityForExclusion` floor and were
+        /// recommended for exclusion.
+        let contentChapterExcludedCount: Int
+        /// Duration-weighted plan confidence the planner used to gate
+        /// the chapter-informed code path. Reproducible from the
+        /// supplied evidence via `ChapterPlan.computePlanConfidence`.
+        let planConfidence: Double
+
+        enum CodingKeys: String, CodingKey {
+            case fractionReplaced = "fraction_replaced"
+            case adChapterIncludedCount = "ad_chapter_included_count"
+            case contentChapterExcludedCount = "content_chapter_excluded_count"
+            case planConfidence = "plan_confidence"
+        }
+    }
+
+    /// CoveragePlanner had access to chapter evidence (or could have)
+    /// but decided not to consult it (playhead-au2v.1.14). Reasons are
+    /// drawn from a closed snake_case vocabulary so the support
+    /// engineer's grep cheat sheet stays stable.
+    struct CoveragePlanChapterSkipped: Sendable, Hashable, Equatable, Codable {
+        /// Closed-vocabulary skip reason. One of:
+        ///   - `mode_disabled`  — `chapterSignalMode` was `.off` or
+        ///     `.shadow` (consumers do not read the plan in those modes).
+        ///   - `no_chapter_evidence` — `chapterEvidence` was `nil` or
+        ///     empty.
+        ///   - `no_usable_chapters` — every supplied chapter was
+        ///     ambiguous, dropped (corrupt bounds / NaN quality), or
+        ///     failed its quality gate.
+        ///   - `low_plan_confidence` — usable chapters survived the
+        ///     filters but the duration-weighted plan confidence was
+        ///     below `minPlanConfidence`.
+        let reason: String
+        /// Number of chapters supplied (counts only — never titles).
+        let evidenceCount: Int
+
+        enum CodingKeys: String, CodingKey {
+            case reason
+            case evidenceCount = "evidence_count"
+        }
+    }
+
     // MARK: Codable round-trip
     //
     // We round-trip via a single-keyed object: the outer event already
@@ -338,6 +407,8 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         case highUnclearRate = "high_unclear_rate"
         case completed
         case decodeFailure = "decode_failure"
+        case coveragePlanChapterInformed = "coverage_plan_chapter_informed"
+        case coveragePlanChapterSkipped = "coverage_plan_chapter_skipped"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -363,6 +434,10 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
             try container.encode(p, forKey: .completed)
         case .decodeFailure(let p):
             try container.encode(p, forKey: .decodeFailure)
+        case .coveragePlanChapterInformed(let p):
+            try container.encode(p, forKey: .coveragePlanChapterInformed)
+        case .coveragePlanChapterSkipped(let p):
+            try container.encode(p, forKey: .coveragePlanChapterSkipped)
         }
     }
 
@@ -410,6 +485,16 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
             DecodeFailure.self, forKey: .decodeFailure
         ) {
             self = .decodeFailure(p)
+        } else if let p = try container.decodeIfPresent(
+            CoveragePlanChapterInformed.self,
+            forKey: .coveragePlanChapterInformed
+        ) {
+            self = .coveragePlanChapterInformed(p)
+        } else if let p = try container.decodeIfPresent(
+            CoveragePlanChapterSkipped.self,
+            forKey: .coveragePlanChapterSkipped
+        ) {
+            self = .coveragePlanChapterSkipped(p)
         } else {
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
@@ -701,6 +786,54 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
                 ChapterPhasePayload.DecodeFailure(
                     stage: stage,
                     errorCode: errorCode
+                )
+            )
+        )
+    }
+
+    /// emitted by playhead-au2v.1.14 (CoveragePlanner consumed chapter
+    /// evidence and produced a chapter-informed audit selection).
+    static func coveragePlanChapterInformed(
+        installID: UUID,
+        episodeId: String,
+        timestamp: Double,
+        fractionReplaced: Double,
+        adChapterIncludedCount: Int,
+        contentChapterExcludedCount: Int,
+        planConfidence: Double
+    ) -> ChapterPhaseEvent {
+        ChapterPhaseEvent(
+            timestamp: timestamp,
+            eventType: .coveragePlanChapterInformed,
+            episodeIdHash: EpisodeIdHasher.hash(installID: installID, episodeId: episodeId),
+            payload: .coveragePlanChapterInformed(
+                ChapterPhasePayload.CoveragePlanChapterInformed(
+                    fractionReplaced: fractionReplaced,
+                    adChapterIncludedCount: adChapterIncludedCount,
+                    contentChapterExcludedCount: contentChapterExcludedCount,
+                    planConfidence: planConfidence
+                )
+            )
+        )
+    }
+
+    /// emitted by playhead-au2v.1.14 (CoveragePlanner had access but
+    /// declined to use chapter evidence).
+    static func coveragePlanChapterSkipped(
+        installID: UUID,
+        episodeId: String,
+        timestamp: Double,
+        reason: String,
+        evidenceCount: Int
+    ) -> ChapterPhaseEvent {
+        ChapterPhaseEvent(
+            timestamp: timestamp,
+            eventType: .coveragePlanChapterSkipped,
+            episodeIdHash: EpisodeIdHasher.hash(installID: installID, episodeId: episodeId),
+            payload: .coveragePlanChapterSkipped(
+                ChapterPhasePayload.CoveragePlanChapterSkipped(
+                    reason: reason,
+                    evidenceCount: evidenceCount
                 )
             )
         )
