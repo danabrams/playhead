@@ -78,6 +78,21 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         func decide() async -> ChapterPhaseAdmissionDecision { decision }
     }
 
+    /// Returns a canned creator-chapter set on every call. The default
+    /// initialiser yields `[]` (no creator chapters) so the
+    /// precedence-skip path is dormant unless a test opts in. Bead 11
+    /// added the precedence skip; bead 12's parallel-labeling tests
+    /// always run with the skip dormant.
+    private struct MockCreatorChapterProvider: CreatorChapterProviding {
+        let chapters: [ChapterEvidence]
+        init(chapters: [ChapterEvidence] = []) {
+            self.chapters = chapters
+        }
+        func creatorChapters(episodeId: String) async -> [ChapterEvidence] {
+            chapters
+        }
+    }
+
     private struct MockBoundaryDetector: ChapterBoundaryDetecting {
         let result: Result<[ChapterBoundaryCandidate], Error>
         init(candidates: [ChapterBoundaryCandidate]) {
@@ -354,6 +369,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -418,6 +434,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -484,6 +501,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -547,6 +565,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -612,6 +631,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -662,6 +682,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -719,6 +740,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         )
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: [
                 ChapterBoundaryCandidate(startTime: 0, endTime: 60),
             ]),
@@ -746,6 +768,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         )
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .deny(reason: "thermal_pressure")),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: [
                 ChapterBoundaryCandidate(startTime: 0, endTime: 60),
             ]),
@@ -773,6 +796,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         )
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: [
                 ChapterBoundaryCandidate(startTime: 0, endTime: 60),
             ]),
@@ -800,6 +824,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         )
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: []),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A"]),
@@ -826,6 +851,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         )
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(error: DetectorError()),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A"]),
@@ -851,6 +877,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         )
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: [
                 ChapterBoundaryCandidate(startTime: 0, endTime: 60),
                 ChapterBoundaryCandidate(startTime: 60, endTime: 120),
@@ -887,6 +914,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         )
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -944,6 +972,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -1004,6 +1033,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: [candidate]),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -1059,6 +1089,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -1142,6 +1173,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         )
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
@@ -1210,6 +1242,7 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
