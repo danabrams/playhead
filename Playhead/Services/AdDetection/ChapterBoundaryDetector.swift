@@ -936,12 +936,14 @@ extension ChapterBoundaryDetector {
     ///      An empty list signals the phase shell to write no plan.
     ///   4. Apply cap-and-merge. The synthetic t=0 boundary is
     ///      ALWAYS retained (load-bearing — chapter[0] starts at
-    ///      episode start). Non-zero boundaries below the cap are
-    ///      retained by descending `boundaryConfidence`; ties are
-    ///      broken by ascending `startTime` for determinism. Each
-    ///      dropped boundary records the retained neighbor it merged
-    ///      into (by signal-set overlap; falls back to higher
-    ///      confidence then earlier start time on a tie).
+    ///      episode start) and the cap is the budget for non-zero
+    ///      candidates ON TOP OF t=0. Non-zero boundaries below the
+    ///      cap are retained by descending `boundaryConfidence`,
+    ///      ties broken by ascending `startTime`, with stable input
+    ///      order as the final deterministic fallback. Each dropped
+    ///      boundary records the retained neighbor it merged into
+    ///      (selection: signal-set Jaccard similarity → boundary
+    ///      confidence → time-distance → prev-wins).
     ///   5. Re-sort survivors by `startTime` ascending and return.
     func detectRefined(
         features: ChapterFeatureSnapshot
@@ -958,6 +960,12 @@ extension ChapterBoundaryDetector {
     /// applies. Exposed so unit tests can drive the gates with
     /// hand-crafted candidate sets without engineering whole feature
     /// snapshots that produce them.
+    ///
+    /// `static` (vs `detectRefined` which is instance) because the
+    /// gates are stateless and have no dependency on the detector's
+    /// configuration — they need only the candidate list and the
+    /// episode duration. Production callers should prefer
+    /// `detectRefined(features:)`.
     static func applyDensityGates(
         candidates: [ChapterCandidate],
         episodeDuration: TimeInterval

@@ -1181,6 +1181,13 @@ struct ChapterBoundaryDetectorPerfTests {
         // the synthetic t=0 at head.
         #expect(refined.candidates.first?.startTime == 0,
                 "sparse-enough perf snapshot must survive density gates with t=0 at head")
+        // The whole point of this test is to exercise the post-detect
+        // path. Pathological-rate gate firing would be a regression in
+        // the test fixture (we'd be measuring an O(1) abort, not the
+        // sort + merge path). Assert a non-pathological outcome.
+        if case .pathologicalRate = refined.outcome {
+            Issue.record("perf test fixture must not trigger pathological-rate gate; got \(refined.outcome)")
+        }
     }
 }
 
