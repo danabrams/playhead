@@ -83,13 +83,14 @@ enum BoundarySignal: Sendable, Equatable, Hashable, CaseIterable {
     /// ad jingles.
     case musicTransition
     /// A speaker cluster ID change where the new cluster sustains for
-    /// at least `minSpeakerRunDuration`. Filters brief crosstalk.
+    /// strictly more than `minSpeakerRunDuration`. Filters brief
+    /// crosstalk (announcer cuts in for 2-3s, etc).
     case speakerShift
     /// The dominant lexical category in a `lexicalBinDuration`-wide
     /// window changes from the dominant category in the prior window.
     /// Catches normal-content → ad-cue density spikes and back.
     case lexicalCategoryJump
-    /// A run of low-energy pause windows totaling at least
+    /// A run of low-energy pause windows totaling strictly more than
     /// `minLongPauseDuration`. Often marks structural transitions.
     case longPause
 }
@@ -204,8 +205,9 @@ struct ChapterBoundaryDetectorConfig: Sendable, Equatable {
     // MARK: Speaker shift
 
     /// Minimum duration the new cluster must sustain after a shift for
-    /// the shift to be counted. The bead spec calls out 5s. Below this,
-    /// the apparent shift is treated as crosstalk noise.
+    /// the shift to be counted. The bead spec calls out 5s (strict).
+    /// At-or-below this duration the apparent shift is treated as
+    /// crosstalk noise.
     let minSpeakerRunDuration: TimeInterval
 
     // MARK: Lexical category
@@ -224,7 +226,8 @@ struct ChapterBoundaryDetectorConfig: Sendable, Equatable {
     /// 0.5 is the natural midpoint of the [0,1] probability.
     let pauseThreshold: Double
     /// Minimum cumulative silence duration that triggers `longPause`.
-    /// The bead spec calls out 2s.
+    /// The bead spec calls out 2s (strict). Runs of duration at or
+    /// below this value do not emit.
     let minLongPauseDuration: TimeInterval
 
     // MARK: Output shaping
@@ -268,11 +271,12 @@ struct ChapterBoundaryDetectorConfig: Sendable, Equatable {
         pauseThreshold: 0.5,
         minLongPauseDuration: 2.0,
 
-        // 0.10 = the smallest single weight (longPause). With this
-        // gate, longPause alone never produces a boundary on its own,
-        // but any stacked combination — even longPause + lexicalJump
-        // — will. Music alone (0.4) and speakerShift alone (0.3)
-        // both clear the gate.
+        // 0.10 = the smallest single weight (longPause). The gate is
+        // inclusive (`>=`), so longPause alone is exactly on the
+        // threshold and DOES emit; the other three signals all clear
+        // the gate on their own. Stacked combinations always clear
+        // the gate. Setting this gate above 0.10 (e.g. 0.11) would
+        // suppress the longPause signal entirely.
         minBoundaryConfidence: 0.10,
         // 1.0s prevents two adjacent music-transition windows (which
         // describe the same intro/outro on a 2s grid) from emitting
@@ -339,7 +343,17 @@ struct ChapterBoundaryDetector: Sendable {
         // weights (each signal counted at most once per cluster), and
         // its `triggeringSignals` is the deduplicated set of firing
         // signals.
-        signalEvents.sort { $0.time < $1.time }
+        //
+        // Sort uses a deterministic secondary key (the signal's
+        // CaseIterable position) so two events at the same time always
+        // hit the loop in the same order across runs. Without this,
+        // Swift's sort is not stable and identical inputs could
+        // produce different `clusterEarliestEventTime` values, which
+        // would feed back into `triggeringSignals` ordering downstream.
+        signalEvents.sort { lhs, rhs in
+            if lhs.time != rhs.time { return lhs.time < rhs.time }
+            return lhs.signalSortIndex < rhs.signalSortIndex
+        }
 
         var rawBoundaries: [ChapterCandidate] = []
         rawBoundaries.reserveCapacity(signalEvents.count)
@@ -465,7 +479,11 @@ struct ChapterBoundaryDetector: Sendable {
                 lookahead += 1
             }
             let runDuration = runEnd - windows[index].startTime
-            if runDuration >= config.minSpeakerRunDuration && activeCluster != nil {
+            // Strict greater-than matches the bead spec wording
+            // ("speaker cluster ID transition that lasts >5s"). A
+            // shift sustained for exactly the minimum is treated as
+            // crosstalk noise.
+            if runDuration > config.minSpeakerRunDuration && activeCluster != nil {
                 out.append(SignalEvent(
                     time: windows[index].startTime,
                     signal: .speakerShift,
@@ -479,15 +497,25 @@ struct ChapterBoundaryDetector: Sendable {
 
     // MARK: - Signal: lexical category jumps
 
-    /// Bin lexical hits into `lexicalBinDuration`-wide windows; for each
-    /// bin compute the dominant category (most-frequent), and emit an
-    /// event whenever the dominant category in bin `i` differs from the
-    /// dominant category in bin `i-1`. The event lands at the start of
-    /// bin `i`.
+    /// Bin lexical hits into `lexicalBinDuration`-wide windows; for
+    /// each bin compute the dominant category (most-frequent), and
+    /// emit an event whenever the just-closed bin's dominant differs
+    /// from the dominant of the most-recent prior non-empty bin. The
+    /// event lands at the START of the just-closed bin.
     ///
-    /// Empty bins (no hits) reset the previous-dominant tracker — a hit
-    /// after a hit-free stretch counts as a jump only if the new bin's
-    /// dominant differs from the most recent non-empty bin's dominant.
+    /// Empty bins (bins with zero hits) are simply skipped — they
+    /// neither reset the prior-dominant tracker nor emit an event.
+    /// Two non-empty bins separated by any number of empty bins
+    /// behave as if they were adjacent for jump-detection purposes.
+    ///
+    /// Implementation note on event time: the algorithm iterates
+    /// hits in time-sorted order. When a hit's bin index differs
+    /// from `currentBinIndex` we close out `currentBinIndex` — its
+    /// dominant gets compared to `lastDominant` and the event (if
+    /// any) is emitted BEFORE we advance `currentBinIndex` to the
+    /// new bin. Thus `time: TimeInterval(currentBinIndex) *
+    /// binDuration` is the start of the bin whose dominant just got
+    /// determined, i.e. the "jump-into" timestamp.
     private func detectLexicalCategoryJumps(
         _ hits: [ChapterLexicalHit]
     ) -> [SignalEvent] {
@@ -497,8 +525,17 @@ struct ChapterBoundaryDetector: Sendable {
         guard binDuration > 0 else { return [] }
 
         // Sort by time defensively. The detector contract says inputs
-        // can be in any order; test cases may not pre-sort.
-        let sortedHits = hits.sorted { $0.startTime < $1.startTime }
+        // can be in any order; test cases may not pre-sort. Drop
+        // hits with non-finite or negative timestamps — those would
+        // otherwise produce ill-formed bin indices (negative bin
+        // indices truncate toward zero, which silently merges
+        // pre-episode hits into bin 0). Real upstream producers
+        // should never emit those, but the detector should be
+        // robust to bad inputs.
+        let sortedHits = hits
+            .filter { $0.startTime.isFinite && $0.startTime >= 0 }
+            .sorted { $0.startTime < $1.startTime }
+        guard sortedHits.count >= 2 else { return [] }
 
         var out: [SignalEvent] = []
         var lastDominant: LexicalPatternCategory? = nil
@@ -581,7 +618,7 @@ struct ChapterBoundaryDetector: Sendable {
                 }
                 runEnd = window.endTime
             } else {
-                if let start = runStart, let end = runEnd, end - start >= config.minLongPauseDuration {
+                if let start = runStart, let end = runEnd, end - start > config.minLongPauseDuration {
                     out.append(SignalEvent(
                         time: start,
                         signal: .longPause,
@@ -617,16 +654,23 @@ struct ChapterBoundaryDetector: Sendable {
         signals: Set<BoundarySignal>,
         duration: TimeInterval
     ) -> ChapterCandidate {
-        var sum: Float = 0
+        // Accumulate in Double then narrow once at the end. Float
+        // accumulation of 0.4 + 0.3 + 0.2 + 0.1 produces 0.99999994,
+        // which when clamped to [0,1] reads as <1.0 and surprises
+        // downstream consumers that expect "all four signals fire =
+        // exactly 1.0". Doing the sum in Double avoids the drift,
+        // and the narrowing cast at the end is exact for values in
+        // [0, 1].
+        var sum: Double = 0
         var orderedSignals: [BoundarySignal] = []
         // Iterate in canonical CaseIterable order so `triggeringSignals`
         // is deterministic across runs (Set iteration is not).
         for signal in BoundarySignal.allCases where signals.contains(signal) {
-            sum += weight(for: signal)
+            sum += Double(weight(for: signal))
             orderedSignals.append(signal)
         }
         let clampedTime = max(0, min(time, duration))
-        let clampedConfidence = max(0, min(1, sum))
+        let clampedConfidence = Float(max(0, min(1, sum)))
         return ChapterCandidate(
             startTime: clampedTime,
             boundaryConfidence: clampedConfidence,
@@ -653,5 +697,14 @@ struct ChapterBoundaryDetector: Sendable {
         let time: TimeInterval
         let signal: BoundarySignal
         let weight: Float
+
+        /// CaseIterable index of `signal`, used as a deterministic
+        /// secondary sort key when two events share a time. Computed
+        /// lazily because `BoundarySignal.allCases` is an array; we
+        /// look up by `firstIndex(of:)` once per event but the input
+        /// arrays are small (4 entries), so it is O(1) in practice.
+        var signalSortIndex: Int {
+            BoundarySignal.allCases.firstIndex(of: signal) ?? 0
+        }
     }
 }

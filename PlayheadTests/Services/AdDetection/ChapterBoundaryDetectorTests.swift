@@ -214,7 +214,7 @@ struct ChapterBoundaryDetectorMusicTests {
 @Suite("ChapterBoundaryDetector / speaker shifts")
 struct ChapterBoundaryDetectorSpeakerTests {
 
-    @Test("shift sustained >=5s emits boundary")
+    @Test("shift sustained well past 5s emits boundary")
     func sustainedShiftEmits() {
         let detector = ChapterBoundaryDetector()
         // cluster 1 for first 10s, then cluster 2 for 10s → shift at t=10.
@@ -231,13 +231,31 @@ struct ChapterBoundaryDetectorSpeakerTests {
         #expect(result.last?.triggeringSignals == [.speakerShift])
     }
 
-    @Test("shift sustained exactly minSpeakerRunDuration emits boundary")
-    func shiftAtExactBoundaryEmits() {
+    @Test("shift sustained exactly minSpeakerRunDuration is filtered (strict >)")
+    func shiftAtExactBoundaryFiltered() {
         let detector = ChapterBoundaryDetector()
-        // cluster 1 for 6s, then cluster 2 for exactly 5s.
+        // cluster 1 for 6s, then cluster 2 for EXACTLY 5s. Spec says
+        // ">5s", so 5s exactly should be treated as crosstalk.
         let speakers = [
             ChapterSpeakerWindow(startTime: 0, endTime: 6, clusterId: 1),
             ChapterSpeakerWindow(startTime: 6, endTime: 11, clusterId: 2),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 60,
+            speakerWindows: speakers
+        )
+        let result = detector.detect(features: snapshot)
+        #expect(result.count == 1, "exactly-5s shift is below the strict > threshold")
+    }
+
+    @Test("shift sustained just over minSpeakerRunDuration emits boundary")
+    func shiftJustOverBoundaryEmits() {
+        let detector = ChapterBoundaryDetector()
+        // cluster 1 for 6s, then cluster 2 for 5.001s — strict-greater
+        // boundary clears.
+        let speakers = [
+            ChapterSpeakerWindow(startTime: 0, endTime: 6, clusterId: 1),
+            ChapterSpeakerWindow(startTime: 6, endTime: 11.001, clusterId: 2),
         ]
         let snapshot = ChapterFeatureSnapshot(
             episodeDuration: 60,
@@ -386,6 +404,50 @@ struct ChapterBoundaryDetectorLexicalTests {
         #expect(result.count == 1, "single bin should not produce a jump boundary")
     }
 
+    @Test("non-adjacent bins still emit jump using most-recent prior dominant")
+    func nonAdjacentBinJumpDetected() {
+        let detector = ChapterBoundaryDetector()
+        // Bin 0 (0-30s): sponsor.
+        // Bins 1,2,3 (30-120s): empty.
+        // Bin 4 (120-150s): promoCode.
+        // Expect a jump at the start of bin 4 (t=120) because the
+        // most-recent prior non-empty bin (bin 0) had a different
+        // dominant.
+        let hits: [ChapterLexicalHit] = [
+            .init(startTime: 5, category: .sponsor),
+            .init(startTime: 15, category: .sponsor),
+            .init(startTime: 125, category: .promoCode),
+            .init(startTime: 140, category: .promoCode),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 600,
+            lexicalHits: hits
+        )
+        let result = detector.detect(features: snapshot)
+        #expect(result.count == 2)
+        #expect(result.last?.startTime == 120.0)
+    }
+
+    @Test("negative-time hits are filtered out defensively")
+    func negativeTimeHitsFiltered() {
+        let detector = ChapterBoundaryDetector()
+        // Garbage upstream might emit hits with negative timestamps
+        // (e.g. from a chunking edge case). These should be dropped
+        // before binning rather than collapsed into bin 0.
+        let hits: [ChapterLexicalHit] = [
+            .init(startTime: -10, category: .sponsor),
+            .init(startTime: -5, category: .sponsor),
+            .init(startTime: 35, category: .promoCode),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 600,
+            lexicalHits: hits
+        )
+        let result = detector.detect(features: snapshot)
+        // Only one valid hit remains → not enough for a jump.
+        #expect(result.count == 1)
+    }
+
     @Test("hits in unsorted order still produce correct boundaries")
     func unsortedHitsHandled() {
         let detector = ChapterBoundaryDetector()
@@ -481,19 +543,42 @@ struct ChapterBoundaryDetectorPauseTests {
     @Test("non-contiguous pauses do not coalesce across speech")
     func nonContiguousPausesDoNotCoalesce() {
         let detector = ChapterBoundaryDetector()
-        // 1.5s pause, 2s speech, 1.5s pause — neither pause alone
-        // clears 2s; emits no longPause boundaries.
+        // Two 3s pauses (each individually >2s) separated by 2s of
+        // speech. Each run separately clears the >2s threshold and
+        // emits a boundary; the speech window between them must NOT
+        // bridge the two pauses into a single 8s run that produces a
+        // single boundary.
         let pauses = [
-            ChapterPauseWindow(startTime: 0, endTime: 1.5, pauseProbability: 0.9),
-            ChapterPauseWindow(startTime: 1.5, endTime: 3.5, pauseProbability: 0.1),
-            ChapterPauseWindow(startTime: 3.5, endTime: 5.0, pauseProbability: 0.9),
+            ChapterPauseWindow(startTime: 0, endTime: 3, pauseProbability: 0.9),
+            ChapterPauseWindow(startTime: 3, endTime: 5, pauseProbability: 0.1),
+            ChapterPauseWindow(startTime: 5, endTime: 8, pauseProbability: 0.9),
         ]
         let snapshot = ChapterFeatureSnapshot(
             episodeDuration: 60,
             pauseWindows: pauses
         )
         let result = detector.detect(features: snapshot)
-        #expect(result.count == 1)
+        // Boundary at t=0 is filtered (synthetic dedup), so we expect
+        // synthetic t=0 + boundary at t=5 only. The first pause's
+        // event lands at t=0 and is dropped by the synthetic-boundary
+        // dedup gate.
+        #expect(result.count == 2)
+        #expect(result.last?.startTime == 5.0)
+        #expect(result.last?.triggeringSignals == [.longPause])
+    }
+
+    @Test("brief pause (==2s) does not emit (strict >)")
+    func exactlyTwoSecondPauseFiltered() {
+        let detector = ChapterBoundaryDetector()
+        let pauses = [
+            ChapterPauseWindow(startTime: 0, endTime: 2, pauseProbability: 0.95),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 60,
+            pauseWindows: pauses
+        )
+        let result = detector.detect(features: snapshot)
+        #expect(result.count == 1, "exactly-2s pause is at the strict-> threshold; should not emit")
     }
 }
 
@@ -588,6 +673,71 @@ struct ChapterBoundaryDetectorCombinedTests {
         #expect(combined != nil)
         // 0.4 + 0.3 + 0.2 = 0.9.
         #expect(abs((combined?.boundaryConfidence ?? 0) - 0.9) < 0.0001)
+    }
+
+    @Test("all-four-signals confidence sums to exactly 1.0 (no Float drift)")
+    func confidenceSumsToOne() {
+        let detector = ChapterBoundaryDetector()
+        let music = [
+            ChapterMusicWindow(startTime: 28, endTime: 30, musicProbability: 0.05),
+            ChapterMusicWindow(startTime: 30, endTime: 32, musicProbability: 0.95),
+        ]
+        let speakers = [
+            ChapterSpeakerWindow(startTime: 0, endTime: 30, clusterId: 1),
+            ChapterSpeakerWindow(startTime: 30, endTime: 40, clusterId: 2),
+        ]
+        let hits: [ChapterLexicalHit] = [
+            .init(startTime: 5, category: .transitionMarker),
+            .init(startTime: 25, category: .transitionMarker),
+            .init(startTime: 35, category: .sponsor),
+            .init(startTime: 55, category: .sponsor),
+        ]
+        let pauses = [
+            ChapterPauseWindow(startTime: 30, endTime: 33, pauseProbability: 0.95),
+            ChapterPauseWindow(startTime: 33, endTime: 35, pauseProbability: 0.1),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 600,
+            musicWindows: music,
+            speakerWindows: speakers,
+            lexicalHits: hits,
+            pauseWindows: pauses
+        )
+        let result = detector.detect(features: snapshot)
+        let combined = result.first { $0.startTime == 30.0 }
+        #expect(combined?.boundaryConfidence == 1.0,
+                "Float accumulation of 0.4+0.3+0.2+0.1 must clamp to exactly 1.0")
+    }
+
+    @Test("output is deterministic across repeated calls")
+    func outputIsDeterministic() {
+        let detector = ChapterBoundaryDetector()
+        // Setup with multiple co-timed events to stress-test sort
+        // stability.
+        let music = [
+            ChapterMusicWindow(startTime: 8, endTime: 10, musicProbability: 0.05),
+            ChapterMusicWindow(startTime: 10, endTime: 12, musicProbability: 0.95),
+        ]
+        let speakers = [
+            ChapterSpeakerWindow(startTime: 0, endTime: 10, clusterId: 1),
+            ChapterSpeakerWindow(startTime: 10, endTime: 20, clusterId: 2),
+        ]
+        let pauses = [
+            ChapterPauseWindow(startTime: 10, endTime: 13, pauseProbability: 0.95),
+            ChapterPauseWindow(startTime: 13, endTime: 15, pauseProbability: 0.1),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 60,
+            musicWindows: music,
+            speakerWindows: speakers,
+            pauseWindows: pauses
+        )
+        // Run many times — assertions must hold every time.
+        let reference = detector.detect(features: snapshot)
+        for _ in 0..<20 {
+            let next = detector.detect(features: snapshot)
+            #expect(next == reference, "detector output must be byte-stable across runs")
+        }
     }
 
     @Test("output is in chronological order")
