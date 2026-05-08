@@ -122,6 +122,19 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(report.perShowLift.isEmpty)
         #expect(report.limitations.contains(where: { $0.contains("empty") }),
                 "limitations must call out the empty corpus")
+        // Latency percentiles must be 0 on every mode for an empty corpus.
+        // MetricMath.percentile returns 0 on empty input — pin that
+        // contract explicitly across all three modes (not just .off,
+        // which is structural-zero by design) so a future patch that
+        // changes percentile() to return NaN or a sentinel is caught.
+        for mode in [report.baseline, report.shadow, report.enabled] {
+            #expect(mode.phaseLatencyP50Ms == 0,
+                    "empty-corpus latency percentile must be 0 across all modes")
+            #expect(mode.phaseLatencyP90Ms == 0)
+            #expect(mode.phaseLatencyP99Ms == 0)
+            #expect(mode.totalFMCalls == 0,
+                    "empty-corpus FM-call count must be 0 across all modes")
+        }
     }
 
     // MARK: - Detection math

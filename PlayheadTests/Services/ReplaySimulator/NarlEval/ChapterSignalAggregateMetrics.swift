@@ -509,6 +509,25 @@ enum ChapterSignalAggregateMetrics {
     /// irrelevant once the seconds are computed. Dropping the FrozenTrace
     /// reference also avoids holding the (often-large) atom array alive
     /// across the aggregation pass.
+    ///
+    /// Field semantics:
+    ///   - When `isExcluded == true` (a whole-asset veto fired in
+    ///     `NarlGroundTruth.build`), all three second fields are forced
+    ///     to `0` as a sentinel. The aggregator filters these out
+    ///     BEFORE summing, so the zeros never reach precision/recall
+    ///     denominators.
+    ///   - When `isExcluded == false`, all three fields carry real
+    ///     measured durations:
+    ///       • `predictedAdSeconds == 0` legitimately means "predictor
+    ///         returned no windows for this trace" (no false positives,
+    ///         no true positives).
+    ///       • `groundTruthAdSeconds == 0` means "this trace genuinely
+    ///         has no ad spans" (a clean episode).
+    ///       • `truePositiveSeconds == 0` means "predictor's windows did
+    ///         not overlap any ad spans."
+    /// The dual meaning of `0` (sentinel vs real measurement) is
+    /// disambiguated only by `isExcluded` — callers MUST inspect that
+    /// flag before reading the second fields.
     struct DetectionPerTrace: Sendable, Equatable {
         let isExcluded: Bool
         let predictedAdSeconds: Double
