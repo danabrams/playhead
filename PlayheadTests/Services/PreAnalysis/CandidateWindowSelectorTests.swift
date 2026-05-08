@@ -145,9 +145,17 @@ struct CandidateWindowSelectorTests {
         )
 
         #expect(unplayed.count == 1)
-        #expect(unplayed[0].range == 0...(20 * 60))
+        let unplayedRange = unplayed[0].range
+        let unplayedLower: TimeInterval = 0
+        let unplayedUpper: TimeInterval = 20 * 60
+        #expect(unplayedRange.lowerBound == unplayedLower)
+        #expect(unplayedRange.upperBound == unplayedUpper)
         #expect(resumed.count == 1)
-        #expect(resumed[0].range == (30 * 60)...(45 * 60))
+        let resumedRange = resumed[0].range
+        let resumedLower: TimeInterval = 30 * 60
+        let resumedUpper: TimeInterval = 45 * 60
+        #expect(resumedRange.lowerBound == resumedLower)
+        #expect(resumedRange.upperBound == resumedUpper)
     }
 
     // MARK: - Sponsor-chapter seeding
@@ -169,9 +177,17 @@ struct CandidateWindowSelectorTests {
 
         #expect(windows.count == 2)
         #expect(windows[0].kind == .sponsorChapter)
-        #expect(windows[0].range == (25 * 60)...(27 * 60))
+        let sponsorRange = windows[0].range
+        let sponsorLower: TimeInterval = 25 * 60
+        let sponsorUpper: TimeInterval = 27 * 60
+        #expect(sponsorRange.lowerBound == sponsorLower)
+        #expect(sponsorRange.upperBound == sponsorUpper)
         #expect(windows[1].kind == .proximal)
-        #expect(windows[1].range == 0...(20 * 60))
+        let proximalRange = windows[1].range
+        let proximalLower: TimeInterval = 0
+        let proximalUpper: TimeInterval = 20 * 60
+        #expect(proximalRange.lowerBound == proximalLower)
+        #expect(proximalRange.upperBound == proximalUpper)
     }
 
     @Test("multiple sponsor chapters are seeded in episode-time order")
@@ -285,7 +301,11 @@ struct CandidateWindowSelectorTests {
         // is clamped to the episode end.
         let sponsors = windows.filter { $0.kind == .sponsorChapter }
         #expect(sponsors.count == 1)
-        #expect(sponsors[0].range == (58 * 60)...(60 * 60))
+        let sponsorRange = sponsors[0].range
+        let sponsorLower: TimeInterval = 58 * 60
+        let sponsorUpper: TimeInterval = 60 * 60
+        #expect(sponsorRange.lowerBound == sponsorLower)
+        #expect(sponsorRange.upperBound == sponsorUpper)
     }
 
     // MARK: - Determinism
@@ -371,7 +391,11 @@ struct CandidateWindowSelectorTests {
             chapterEvidence: [],
             config: config
         )
-        #expect(initial[0].range == (10 * 60)...(25 * 60))
+        let initialRange = initial[0].range
+        let initialLower: TimeInterval = 10 * 60
+        let initialUpper: TimeInterval = 25 * 60
+        #expect(initialRange.lowerBound == initialLower)
+        #expect(initialRange.upperBound == initialUpper)
 
         // User seeks to minute 40 — > 30s away → relatch.
         let relatched = CandidateWindowSelector.select(
@@ -380,6 +404,10 @@ struct CandidateWindowSelectorTests {
             chapterEvidence: [],
             config: config
         )
-        #expect(relatched[0].range == (40 * 60)...(55 * 60))
+        let relatchedRange = relatched[0].range
+        let relatchedLower: TimeInterval = 40 * 60
+        let relatchedUpper: TimeInterval = 55 * 60
+        #expect(relatchedRange.lowerBound == relatchedLower)
+        #expect(relatchedRange.upperBound == relatchedUpper)
     }
 }
