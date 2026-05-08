@@ -324,7 +324,10 @@ struct ChapterBoundaryDetector: Sendable {
     ///   - The first element is always a synthetic t=0 candidate.
     ///   - Boundaries are returned in chronological order.
     ///   - No two boundaries are closer than `config.minBoundarySpacing`.
-    ///   - All boundary times are within `[0, episodeDuration]`.
+    ///   - All boundary times are within `[0, episodeDuration)` —
+    ///     a boundary at exactly `episodeDuration` is filtered out
+    ///     because it would represent a chapter starting at episode
+    ///     end (zero-length).
     ///   - `boundaryConfidence` is in `[0, 1]`.
     func detect(features: ChapterFeatureSnapshot) -> [ChapterCandidate] {
         // Always include the synthetic episode-start boundary.
