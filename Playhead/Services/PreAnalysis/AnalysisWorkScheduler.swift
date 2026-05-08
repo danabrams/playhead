@@ -1778,6 +1778,26 @@ actor AnalysisWorkScheduler {
         wakeSchedulerLoop()
     }
 
+    /// playhead-hygc.1.4: count rows in `analysis_jobs` that the
+    /// scheduler considers candidate work for the durable run-outcome
+    /// ledger. Mirrors the polling-loop view in `AnalysisCoordinator.fetchPendingJobCount`
+    /// (queued + running + paused) but is exposed here as a dedicated
+    /// helper so `BackgroundProcessingService` can capture a baseline
+    /// without depending on the coordinator's polling loop. Returns 0
+    /// on read failure rather than throwing — the caller is on a 30 s
+    /// BGProcessingTask budget and does not want a transient SQLite
+    /// hiccup to surface as a thrown error.
+    func pendingJobCountForLedger() async -> Int {
+        let states = ["queued", "running", "paused"]
+        var total = 0
+        for state in states {
+            if let rows = try? await store.fetchJobsByState(state) {
+                total += rows.count
+            }
+        }
+        return total
+    }
+
     /// Install a lane-preemption handler. This bead (playhead-r835) only
     /// defines the protocol surface — it installs no default handler. A
     /// later bead (playhead-01t8) will wire an implementation that pauses
