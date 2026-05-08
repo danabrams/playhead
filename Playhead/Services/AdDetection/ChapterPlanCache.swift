@@ -51,8 +51,8 @@ actor ChapterPlanCache {
     private var resolvedDirectory: URL?
     private var didEnsureDirectory = false
 
-    /// JSON encoder/decoder are lazily-initialized constants. Default
-    /// configuration matches existing on-device FM artifact caches.
+    /// JSON encoder/decoder. Default configuration matches existing
+    /// on-device FM artifact caches.
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
