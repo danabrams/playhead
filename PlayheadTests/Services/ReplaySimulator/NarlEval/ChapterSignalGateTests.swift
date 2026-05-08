@@ -359,6 +359,99 @@ struct ChapterSignalGateTests {
         #expect(ChapterSignalGate.Config.defaultStubChapterCount(huge) == 12)
     }
 
+    // MARK: - Cross-mode invariants (R1 review)
+
+    @Test("Outcome accounting invariant: every episode falls in at most one bucket (skipped | aborted-op | aborted-path | planGenerated)")
+    func outcomeAccountingInvariant() {
+        // Mix three traces: one creator-chapter, two normal.
+        let creator = Self.makeTrace(episodeId: "ep-creator", atomCount: 250)
+        let plain1 = Self.makeTrace(episodeId: "ep-plain-1", atomCount: 250)
+        let plain2 = Self.makeTrace(episodeId: "ep-plain-2", atomCount: 250)
+        let cfg = ChapterSignalGate.Config(creatorChaptersPresent: { trace in
+            trace.episodeId == "ep-creator"
+        })
+        let result = ChapterSignalGate.replay(
+            traces: [creator, plain1, plain2],
+            mode: .shadow,
+            config: cfg
+        )
+
+        // Each EpisodeOutcome must be in at most one of {skipped, aborted-op,
+        // aborted-path, planGenerated}. The "nothing" bucket is the
+        // implicit "phase ran with no output" — currently empty in the
+        // stub, but the invariant must hold across all combinations.
+        for outcome in result.perEpisodeOutcomes {
+            let buckets = [
+                outcome.skippedByCreatorChapters,
+                outcome.abortedByOperationalRate,
+                outcome.abortedByPathologicalRate,
+                outcome.planGenerated
+            ]
+            let trueCount = buckets.filter { $0 }.count
+            #expect(trueCount <= 1,
+                    "Outcome \(outcome.episodeId) is in \(trueCount) buckets; must be ≤ 1.")
+        }
+
+        // Aggregate buckets must not exceed episodesProcessed (a sanity
+        // upper bound for bead 19's fraction-style metrics).
+        let sumOfBuckets = result.skippedByCreatorChapters
+            + result.planAbortedByOperationalRate
+            + result.planAbortedByPathologicalRate
+            + result.planGeneratedCount
+        #expect(sumOfBuckets <= result.episodesProcessed,
+                "Aggregate buckets (\(sumOfBuckets)) must not exceed episodesProcessed (\(result.episodesProcessed)).")
+    }
+
+    @Test("Mode order in replay(trace:modes:) does not affect any individual mode's value (carry-forward-free design)")
+    func modeOrderIndependence() {
+        let trace = Self.makeTrace(atomCount: 250)
+        let resultsA = ChapterSignalGate.replay(trace: trace, modes: [.off, .shadow, .enabled])
+        let resultsB = ChapterSignalGate.replay(trace: trace, modes: [.enabled, .off, .shadow])
+        let resultsC = ChapterSignalGate.replay(trace: trace, modes: [.shadow, .enabled, .off])
+
+        // Each mode's per-replay result must be Equatable-equal across
+        // the three orderings — the guarantee the carry-forward-free
+        // design promises in the gate's doc comment.
+        for mode in ChapterSignalMode.allCases {
+            #expect(resultsA[mode] == resultsB[mode],
+                    "mode=\(mode) result drifted between orderings A and B.")
+            #expect(resultsA[mode] == resultsC[mode],
+                    "mode=\(mode) result drifted between orderings A and C.")
+        }
+    }
+
+    @Test("Shadow and enabled produce phase-side-identical EpisodeOutcomes after mode normalization")
+    func shadowAndEnabledArePhaseSideIdentical() {
+        let traces = (0..<4).map { i in
+            Self.makeTrace(episodeId: "ep-\(i)", atomCount: 250)
+        }
+        let shadow = ChapterSignalGate.replay(traces: traces, mode: .shadow)
+        let enabled = ChapterSignalGate.replay(traces: traces, mode: .enabled)
+
+        // Re-stamp the mode field on each outcome so we can compare
+        // EpisodeOutcomes directly via Equatable. Phase-side equivalence
+        // is exactly: every other field must match. The consumer-side
+        // divergence (consumersReadChapterPlan) lives in beads 14 / 16,
+        // not in this gate.
+        func normalize(_ outcomes: [ChapterSignalGate.EpisodeOutcome]) -> [ChapterSignalGate.EpisodeOutcome] {
+            outcomes.map { o in
+                ChapterSignalGate.EpisodeOutcome(
+                    episodeId: o.episodeId,
+                    podcastId: o.podcastId,
+                    mode: .shadow,
+                    planGenerated: o.planGenerated,
+                    skippedByCreatorChapters: o.skippedByCreatorChapters,
+                    abortedByOperationalRate: o.abortedByOperationalRate,
+                    abortedByPathologicalRate: o.abortedByPathologicalRate,
+                    fmCallsForChapterLabeling: o.fmCallsForChapterLabeling,
+                    phaseLatencyMs: o.phaseLatencyMs
+                )
+            }
+        }
+        #expect(normalize(shadow.perEpisodeOutcomes) == normalize(enabled.perEpisodeOutcomes),
+                "Shadow and enabled must produce phase-side-identical outcomes; the only divergence lives in the consumer-read step (bead 14 / 16), which the gate does not exercise.")
+    }
+
     // MARK: - Determinism (the byte-for-byte guarantee)
 
     @Test("Identical input → identical output across all three modes (Equatable equality)")
