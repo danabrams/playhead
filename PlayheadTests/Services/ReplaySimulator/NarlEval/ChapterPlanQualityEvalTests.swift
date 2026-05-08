@@ -21,8 +21,10 @@
 //     zero-denominator contract for empty plan, empty golden, and
 //     both-empty edges.
 //   * ChapterPlanQualityRunnerTests — runner happy-path + error
-//     surfaces (cache miss, content-hash mismatch via direct + via
-//     runFromCache).
+//     surfaces (cache miss on `runFromCache`, content-hash mismatch
+//     on `run(plan:golden:)`, custom-evaluator threading). The
+//     "mismatched-hash via cache" scenario collapses to the direct
+//     surface and is exercised against `run(plan:golden:)`.
 //   * ChapterPlanQualityEvalCodableTests — round-trip the report
 //     through JSON to confirm the custom Codable conformance is
 //     correct, including the all-zero confusion path and

@@ -43,10 +43,13 @@
 //     Lightweight keyword overlap. Both labels are tokenized to
 //     lowercased alphanumeric words (length >= 1); a shared token is
 //     a match. Overlap = |intersection| / |union| (Jaccard). The
-//     matcher returns `.match` when both descriptors are present and
-//     overlap >= `topicOverlapMinimum`, `.miss` when both are present
-//     but overlap is below threshold, and `.notApplicable` when at
-//     least one descriptor is nil/empty.
+//     matcher returns `.match` when both descriptors tokenize to
+//     a non-empty set and overlap >= `topicOverlapMinimum`, `.miss`
+//     when both tokenize to non-empty sets but overlap is below
+//     threshold, and `.notApplicable` when EITHER side tokenizes to
+//     the empty set (nil, empty string, or any string composed
+//     entirely of non-alphanumeric characters such as whitespace
+//     or punctuation).
 //
 // Zero-denominator contract (documented; tests pin):
 //   When a denominator is zero (empty plan or empty golden set or no
