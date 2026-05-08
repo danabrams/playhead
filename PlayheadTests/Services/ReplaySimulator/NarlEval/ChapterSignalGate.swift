@@ -335,14 +335,25 @@ enum ChapterSignalGate {
         // non-negative count so a buggy custom closure cannot drive
         // negative FM cost into the aggregate.
         let safeCount = max(0, chapterCount)
-        let latency = config.perEpisodeOverheadMs
-            + Double(safeCount) * config.syntheticFMCallLatencyMs
+
+        // When boundary detection returns 0 candidates, production
+        // emits `chapter_phase_no_candidates` and writes NO plan (see
+        // ChapterPhaseDiagnostics.swift `noCandidates` event). Mirror
+        // that contract here so `planGenerated` truthfully reflects
+        // "a plan was emitted", not just "the phase ran". Latency is
+        // still charged at the per-episode-overhead rate because the
+        // boundary detector ran (and would have computed candidates
+        // even if it produced none).
+        let planEmitted = safeCount > 0
+        let latency = planEmitted
+            ? config.perEpisodeOverheadMs + Double(safeCount) * config.syntheticFMCallLatencyMs
+            : config.perEpisodeOverheadMs
 
         return EpisodeOutcome(
             episodeId: trace.episodeId,
             podcastId: trace.podcastId,
             mode: mode,
-            planGenerated: true,
+            planGenerated: planEmitted,
             skippedByCreatorChapters: false,
             abortedByOperationalRate: false,
             abortedByPathologicalRate: false,

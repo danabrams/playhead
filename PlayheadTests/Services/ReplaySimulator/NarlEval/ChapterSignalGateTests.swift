@@ -326,18 +326,48 @@ struct ChapterSignalGateTests {
         #expect(result.aggregateLatencyMs == 205.0)
     }
 
-    @Test("Negative stubChapterCount is clamped to 0 (defensive against caller bugs)")
+    @Test("Negative stubChapterCount is clamped to 0 and produces planGenerated=false (mirrors production chapter_phase_no_candidates)")
     func negativeStubChapterCountClampsToZero() {
         let trace = Self.makeTrace(atomCount: 250)
         let cfg = ChapterSignalGate.Config(stubChapterCount: { _ in -3 })
         let result = ChapterSignalGate.replay(trace: trace, mode: .shadow, config: cfg)
         #expect(result.totalFMCallsForChapterLabeling == 0)
-        // Latency = perEpisodeOverhead only (5), since safeCount==0.
+        // Latency = perEpisodeOverhead only (5), since safeCount==0 and
+        // the boundary detector still ran (produced no candidates).
         #expect(result.aggregateLatencyMs == 5.0)
-        // But planGenerated is still true — the phase ran, it just
-        // produced an empty plan. (A real labelling failure would
-        // surface as abortedByOperationalRate/PathologicalRate.)
-        #expect(result.planGeneratedCount == 1)
+        // planGenerated must be FALSE: production emits
+        // `chapter_phase_no_candidates` and writes NO plan when the
+        // boundary detector returns 0 candidates (see
+        // ChapterPhaseDiagnostics.swift `noCandidates`). The replay gate
+        // mirrors that semantic so `planGeneratedCount` truthfully
+        // reflects "a plan was emitted" rather than "the phase ran".
+        #expect(result.planGeneratedCount == 0)
+        let outcome = result.perEpisodeOutcomes[0]
+        #expect(!outcome.planGenerated)
+        #expect(outcome.fmCallsForChapterLabeling == 0)
+    }
+
+    @Test("Zero stubChapterCount produces planGenerated=false (no-candidates path is the production contract)")
+    func zeroStubChapterCountProducesNoPlan() {
+        // Distinct from the negative-count test: a stub that explicitly
+        // returns 0 (the legitimate "no candidates" outcome) must be
+        // observationally identical to the clamp path. This pins the
+        // production parity for the no-candidates event class.
+        let trace = Self.makeTrace(atomCount: 250)
+        let cfg = ChapterSignalGate.Config(stubChapterCount: { _ in 0 })
+        let result = ChapterSignalGate.replay(trace: trace, mode: .shadow, config: cfg)
+        #expect(result.planGeneratedCount == 0)
+        #expect(result.totalFMCallsForChapterLabeling == 0)
+        #expect(result.aggregateLatencyMs == 5.0)
+        let outcome = result.perEpisodeOutcomes[0]
+        #expect(!outcome.planGenerated)
+        // It is also NOT classified as creator-skipped or aborted: the
+        // bucket is "phase ran, no plan". This is the (currently empty)
+        // "nothing" bucket the outcomeAccountingInvariant test treats
+        // as legal.
+        #expect(!outcome.skippedByCreatorChapters)
+        #expect(!outcome.abortedByOperationalRate)
+        #expect(!outcome.abortedByPathologicalRate)
     }
 
     @Test("Default stubChapterCount is bounded to [1, 12] across atom-count extremes")
@@ -452,6 +482,74 @@ struct ChapterSignalGateTests {
                 "Shadow and enabled must produce phase-side-identical outcomes; the only divergence lives in the consumer-read step (bead 14 / 16), which the gate does not exercise.")
     }
 
+    // MARK: - Multi-trace × multi-mode
+
+    @Test("replay(traces:modes:) aggregates correctly across multiple traces AND multiple modes simultaneously")
+    func multiTraceMultiModeAggregation() {
+        let traces = (0..<3).map { i in
+            Self.makeTrace(episodeId: "ep-\(i)", atomCount: 250)
+        }
+        let results = ChapterSignalGate.replay(
+            traces: traces,
+            modes: [.off, .shadow, .enabled]
+        )
+
+        #expect(results.count == 3)
+
+        // .off across 3 traces: structural zero, 3 outcomes.
+        let off = results[.off]!
+        #expect(off.episodesProcessed == 3)
+        #expect(off.planGeneratedCount == 0)
+        #expect(off.totalFMCallsForChapterLabeling == 0)
+        #expect(off.aggregateLatencyMs == 0.0)
+        #expect(off.perEpisodeOutcomes.count == 3)
+
+        // .shadow across 3 traces: 5 chapters per trace × 3 traces = 15 FM calls.
+        let shadow = results[.shadow]!
+        #expect(shadow.episodesProcessed == 3)
+        #expect(shadow.planGeneratedCount == 3)
+        #expect(shadow.totalFMCallsForChapterLabeling == 15)
+        #expect(shadow.aggregateLatencyMs == 3.0 * 130.0)
+
+        // .enabled mirrors .shadow on the phase side (consumer-side
+        // divergence is bead 14 / 16 / 19, not the gate's territory).
+        let enabled = results[.enabled]!
+        #expect(enabled.episodesProcessed == shadow.episodesProcessed)
+        #expect(enabled.planGeneratedCount == shadow.planGeneratedCount)
+        #expect(enabled.totalFMCallsForChapterLabeling == shadow.totalFMCallsForChapterLabeling)
+        #expect(enabled.aggregateLatencyMs == shadow.aggregateLatencyMs)
+    }
+
+    @Test("replay(traces:modes:) with empty traces returns one result per mode, each at structural zero")
+    func multiTraceMultiModeEmptyTraces() {
+        // Empty traces × non-empty modes: dictionary keyed by mode,
+        // every value is a structural zero. This pins the shape so
+        // bead 19 can always assume `results[mode] != nil` for every
+        // mode in the request.
+        let results = ChapterSignalGate.replay(
+            traces: [],
+            modes: [.off, .shadow, .enabled]
+        )
+        #expect(results.count == 3)
+        for mode in ChapterSignalMode.allCases {
+            let r = results[mode]
+            #expect(r != nil, "missing entry for mode=\(mode)")
+            #expect(r?.episodesProcessed == 0)
+            #expect(r?.planGeneratedCount == 0)
+            #expect(r?.totalFMCallsForChapterLabeling == 0)
+            #expect(r?.perEpisodeOutcomes.isEmpty == true)
+        }
+    }
+
+    @Test("replay(traces:modes:) with empty modes returns empty dictionary regardless of trace count")
+    func multiTraceMultiModeEmptyModes() {
+        let traces = (0..<5).map { i in
+            Self.makeTrace(episodeId: "ep-\(i)", atomCount: 250)
+        }
+        let results = ChapterSignalGate.replay(traces: traces, modes: [])
+        #expect(results.isEmpty)
+    }
+
     // MARK: - Determinism (the byte-for-byte guarantee)
 
     @Test("Identical input → identical output across all three modes (Equatable equality)")
@@ -488,10 +586,23 @@ struct ChapterSignalGateTests {
 
 // MARK: - Test support
 
-/// Trivial reference-typed counter so tests can observe whether a
-/// closure was called from inside a value-type config struct. Local to
-/// the test file (no production parity required).
+/// Reference-typed counter so tests can observe whether a closure was
+/// called from inside a value-type config struct. The gate's replay path
+/// is single-threaded today, but the closures themselves are `@Sendable`
+/// — meaning a future cross-task call site is permitted by the type
+/// system. Lock the counter so this test stays correct under that
+/// future shape rather than encoding "single-threaded today" into the
+/// test's failure mode. Local to the test file (no production parity
+/// required).
 private final class ClosureCallCounter: @unchecked Sendable {
-    private(set) var count: Int = 0
-    func increment() { count += 1 }
+    private let lock = NSLock()
+    private var _count: Int = 0
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _count
+    }
+    func increment() {
+        lock.lock(); defer { lock.unlock() }
+        _count += 1
+    }
 }
