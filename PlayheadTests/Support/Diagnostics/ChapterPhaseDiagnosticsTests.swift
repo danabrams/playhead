@@ -124,6 +124,13 @@ struct ChapterPhaseDiagnosticsTests {
                 labeledCount: 10, operationalUnclearCount: 4,
                 operationalUnclearRate: 0.4, threshold: 0.3
             ),
+            .highUnclearRate(
+                installID: Self.installID, episodeId: Self.rawEpisodeId,
+                timestamp: Self.timestamp,
+                labeledCount: 10, operationalUnclearCount: 2,
+                semanticUnclearCount: 4,
+                totalUnclearRate: 0.6, threshold: 0.5
+            ),
             .completed(
                 installID: Self.installID, episodeId: Self.rawEpisodeId,
                 timestamp: Self.timestamp,
@@ -286,6 +293,28 @@ struct ChapterPhaseDiagnosticsTests {
         #expect(try decode(ChapterPhaseEvent.self, from: encode(event)) == event)
     }
 
+    @Test("Golden — chapter_phase_high_unclear_rate")
+    func goldenHighUnclearRate() throws {
+        // playhead-au2v.1.8: emitted when (operational + semantic) /
+        // labeled exceeds 50% but operational alone stayed below the
+        // 30% abort threshold. The plan is still written; the event
+        // is the support-engineer breadcrumb that this episode's
+        // chapter labels are coarsely trusted.
+        let event = ChapterPhaseEvent.highUnclearRate(
+            installID: Self.installID, episodeId: Self.rawEpisodeId,
+            timestamp: Self.timestamp,
+            labeledCount: 10, operationalUnclearCount: 2,
+            semanticUnclearCount: 4,
+            totalUnclearRate: 0.6, threshold: 0.5
+        )
+        let str = try #require(String(data: try encode(event), encoding: .utf8))
+        let expected = """
+        {"episode_id_hash":"\(Self.expectedEpisodeIdHash)","event_type":"chapter_phase_high_unclear_rate","payload":{"high_unclear_rate":{"labeled_count":10,"operational_unclear_count":2,"semantic_unclear_count":4,"threshold":0.5,"total_unclear_rate":0.6}},"timestamp":1700000500}
+        """
+        #expect(str == expected)
+        #expect(try decode(ChapterPhaseEvent.self, from: encode(event)) == event)
+    }
+
     @Test("Golden — chapter_phase_completed")
     func goldenCompleted() throws {
         let event = ChapterPhaseEvent.completed(
@@ -398,6 +427,13 @@ struct ChapterPhaseDiagnosticsTests {
                 timestamp: Self.timestamp,
                 labeledCount: 5, operationalUnclearCount: 3,
                 operationalUnclearRate: 0.6, threshold: 0.3
+            ),
+            .highUnclearRate(
+                installID: Self.installID, episodeId: pollutedEpisodeId,
+                timestamp: Self.timestamp,
+                labeledCount: 8, operationalUnclearCount: 1,
+                semanticUnclearCount: 4,
+                totalUnclearRate: 0.625, threshold: 0.5
             ),
             .completed(
                 installID: Self.installID, episodeId: pollutedEpisodeId,
@@ -642,6 +678,14 @@ struct ChapterPhaseDiagnosticsTests {
                     timestamp: Self.timestamp,
                     labeledCount: 8, operationalUnclearCount: 3,
                     operationalUnclearRate: 0.375, threshold: 0.3
+                )
+            case .highUnclearRate:
+                return .highUnclearRate(
+                    installID: Self.installID, episodeId: Self.rawEpisodeId,
+                    timestamp: Self.timestamp,
+                    labeledCount: 8, operationalUnclearCount: 1,
+                    semanticUnclearCount: 4,
+                    totalUnclearRate: 0.625, threshold: 0.5
                 )
             case .completed:
                 return .completed(
