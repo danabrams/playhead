@@ -43,8 +43,6 @@ import Testing
 /// rest of the test target can't accidentally couple to them.
 struct ChapterSignalCaseStudy: Decodable, Equatable, Sendable, CustomStringConvertible {
 
-    var description: String { caseId }
-
     let schemaVersion: Int
     let caseId: String
     let archetype: Archetype
@@ -55,6 +53,13 @@ struct ChapterSignalCaseStudy: Decodable, Equatable, Sendable, CustomStringConve
     let gateInputs: GateInputs
     let expectedBeforeOff: ExpectedCounters
     let expectedAfterEnabled: ExpectedCounters
+
+    /// The `caseId` is what surfaces in Swift Testing's parameterized
+    /// test argument labels (`Test case passing 1 argument study →
+    /// case-NN-…`). Implementing `CustomStringConvertible` instead of
+    /// relying on the auto-derived dump keeps the per-case names short
+    /// and stable across schema additions.
+    var description: String { caseId }
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -294,6 +299,51 @@ struct ChapterSignalCaseStudyTests {
         #expect(enabled.perEpisodeOutcomes.count == 1)
         #expect(enabled.perEpisodeOutcomes[0].episodeId == study.trace.episodeIdAnon)
         #expect(enabled.perEpisodeOutcomes[0].podcastId == study.trace.podcastIdArchetype)
+
+        // Phase-side parity: `.shadow` mirrors `.enabled` on every
+        // additive counter. The gate's contract (au2v.1.18 doc comment)
+        // is that consumer-side divergence between shadow and enabled
+        // lives in `ChapterSignalMode.consumersReadChapterPlan`, NOT in
+        // the gate's per-episode outputs. Pin it through the case-study
+        // substrate so a regression in the gate's mode dispatch
+        // surfaces here as well as in `ChapterSignalGateTests`.
+        let shadow = ChapterSignalGate.replay(trace: trace, mode: .shadow, config: config)
+        #expect(shadow.mode == .shadow,
+                "[\(study.caseId)] mode mismatch on .shadow result.")
+        #expect(shadow.planGeneratedCount == enabled.planGeneratedCount,
+                "[\(study.caseId)] .shadow planGeneratedCount must equal .enabled.")
+        #expect(shadow.skippedByCreatorChapters == enabled.skippedByCreatorChapters,
+                "[\(study.caseId)] .shadow skippedByCreatorChapters must equal .enabled.")
+        #expect(shadow.totalFMCallsForChapterLabeling == enabled.totalFMCallsForChapterLabeling,
+                "[\(study.caseId)] .shadow totalFMCallsForChapterLabeling must equal .enabled.")
+        #expect(shadow.aggregateLatencyMs == enabled.aggregateLatencyMs,
+                "[\(study.caseId)] .shadow aggregateLatencyMs must equal .enabled.")
+
+        // Determinism: replaying the same case twice in each mode must
+        // yield Equatable-equal results. This catches regressions that
+        // would introduce non-determinism in the trace synthesis (e.g.,
+        // a future change to `makeTrace` that accidentally read a
+        // wall-clock value) before they corrupt the harness's
+        // byte-for-byte parity contract.
+        let off2 = ChapterSignalGate.replay(trace: trace, mode: .off, config: config)
+        let enabled2 = ChapterSignalGate.replay(trace: trace, mode: .enabled, config: config)
+        #expect(off == off2,
+                "[\(study.caseId)] .off result is non-deterministic across replays.")
+        #expect(enabled == enabled2,
+                "[\(study.caseId)] .enabled result is non-deterministic across replays.")
+    }
+
+    @Test("Per-case loader produced at least one case (parameterized suite is non-vacuous)")
+    func perCaseSuiteIsNonVacuous() throws {
+        // The parameterized `caseAssertsBeforeAndAfter` test silently
+        // runs zero iterations if `loadAllCasesOrEmpty()` returned [].
+        // The directory-integrity suite catches that on the loader path,
+        // but THIS suite should also pin its own non-vacuity so a future
+        // refactor that disables the directory suite can't accidentally
+        // ship empty case coverage in this suite too.
+        let cases = CaseStudyPaths.loadAllCasesOrEmpty()
+        #expect(!cases.isEmpty,
+                "loadAllCasesOrEmpty() returned empty — the parameterized per-case suite would otherwise pass vacuously.")
     }
 }
 
