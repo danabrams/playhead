@@ -346,10 +346,23 @@ enum ChapterSignalGate {
     /// reaching into the private `runShadowOrEnabled` body.
     static let maxStubChapterCount: Int = 10_000
 
-    /// Core stub for shadow / enabled. Encapsulates the synthetic
+    /// Core stub for any non-`.off` mode. Encapsulates the synthetic
     /// chapter-generation pipeline so the public API stays narrow.
     /// When bead 4 / 12 / 13 land, this is the only function that
     /// changes — the result-struct shape is the public contract.
+    ///
+    /// New-mode default: if a future `ChapterSignalMode` case is added
+    /// (e.g., a `.canary` or `.experimental` mode), the public
+    /// `replay(traces:mode:)` will route it here unchanged because the
+    /// fast path is keyed on `mode == .off`. That is intentional — the
+    /// gate's job is to "run the phase or not", and every non-off mode
+    /// runs the phase by definition. Mode-specific consumer behavior
+    /// (e.g., whether to read the plan) lives in
+    /// `ChapterSignalMode.consumersReadChapterPlan` (au2v.1.2 / bead 14
+    /// / bead 16), NOT in this gate. If you add a non-off mode that
+    /// SHOULD NOT run the phase, the gate's contract has shifted — you
+    /// must update the fast-path predicate and the doc comment on
+    /// `ChapterSignalReplayResult.offResult` together.
     private static func runShadowOrEnabled(
         trace: FrozenTrace,
         mode: ChapterSignalMode,

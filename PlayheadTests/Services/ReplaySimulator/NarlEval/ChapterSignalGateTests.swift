@@ -218,8 +218,9 @@ struct ChapterSignalGateTests {
         // `phase ran, no plan` (with `perEpisodeOverheadMs` charged),
         // silently breaking bead 19's bucket accounting.
         let trace = Self.makeTrace(atomCount: 250)
+        let stubCalls = ClosureCallCounter()
         let cfg = ChapterSignalGate.Config(
-            stubChapterCount: { _ in 0 },
+            stubChapterCount: { _ in stubCalls.increment(); return 0 },
             creatorChaptersPresent: { _ in true }
         )
         let result = ChapterSignalGate.replay(trace: trace, mode: .shadow, config: cfg)
@@ -232,6 +233,15 @@ struct ChapterSignalGateTests {
                 "Creator-chapter short-circuit must charge zero latency, not perEpisodeOverheadMs.")
         #expect(result.skippedByCreatorChapters == 1)
         #expect(result.planGeneratedCount == 0)
+        // Tightest precedence pin: when creator chapters fire,
+        // stubChapterCount must NOT be invoked at all. A future bug
+        // that called the stub eagerly (e.g., to read the would-be
+        // count for telemetry) before the creator-chapter check would
+        // burn FM/CPU on traces we explicitly chose to skip — this
+        // assertion catches that class of regression even when the
+        // public-result fields above happen to look correct.
+        #expect(stubCalls.count == 0,
+                "stubChapterCount must NOT be invoked when creator chapters short-circuit; observed \(stubCalls.count) calls.")
     }
 
     @Test("Creator-chapter detector is per-trace, not global: only flagged traces short-circuit")
