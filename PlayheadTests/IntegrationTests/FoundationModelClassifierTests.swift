@@ -2822,7 +2822,7 @@ struct FoundationModelClassifierTests {
     @available(iOS 26.4, *)
     @Test("schema-aware coarse token count includes the @Generable overhead Apple sees on call")
     func schemaTokenCountReflectsGenerableSchemaOverhead() async throws {
-        #if canImport(FoundationModels)
+        #if canImport(FoundationModels) && compiler(>=6.3)
         let model = SystemLanguageModel.default
         guard case .available = model.availability else {
             // Foundation Models not available on this simulator/device —

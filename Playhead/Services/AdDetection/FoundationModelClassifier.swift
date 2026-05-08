@@ -983,6 +983,9 @@ struct FoundationModelClassifier: Sendable {
         let estimate = Int(ceil(Double(wordCount) * 2.0)) + 16
         return max(1, estimate + 128)
     }
+    // Xcode 26.2's FoundationModels SDK lacks the native budget APIs, so
+    // those builds must not reference the symbols even behind #available.
+    private static let fallbackFoundationModelContextSize = 4_096
     private static let fallbackCoarseSchemaTokenEstimate = 128
     private static let fallbackRefinementSchemaTokenEstimate = 256
     private static let fallbackBoundarySchemaTokenEstimate = 256
@@ -4928,46 +4931,58 @@ private extension FoundationModelClassifier {
             },
             contextSize: {
                 guard #available(iOS 26.0, *) else { return 0 }
+                #if compiler(>=6.3)
                 return SystemLanguageModel.default.contextSize
+                #else
+                return fallbackFoundationModelContextSize
+                #endif
             },
             tokenCount: { prompt in
                 guard #available(iOS 26.0, *) else {
                     return fallbackTokenEstimate(for: prompt)
                 }
+                #if compiler(>=6.3)
                 let model = SystemLanguageModel.default
                 if #available(iOS 26.4, *) {
                     return try await model.tokenCount(for: prompt)
                 }
+                #endif
                 return fallbackTokenEstimate(for: prompt)
             },
             coarseSchemaTokenCount: {
                 guard #available(iOS 26.0, *) else {
                     return fallbackCoarseSchemaTokenEstimate
                 }
+                #if compiler(>=6.3)
                 let model = SystemLanguageModel.default
                 if #available(iOS 26.4, *) {
                     return try await model.tokenCount(for: CoarseScreeningSchema.generationSchema)
                 }
+                #endif
                 return fallbackCoarseSchemaTokenEstimate
             },
             refinementSchemaTokenCount: {
                 guard #available(iOS 26.0, *) else {
                     return fallbackRefinementSchemaTokenEstimate
                 }
+                #if compiler(>=6.3)
                 let model = SystemLanguageModel.default
                 if #available(iOS 26.4, *) {
                     return try await model.tokenCount(for: RefinementWindowSchema.generationSchema)
                 }
+                #endif
                 return fallbackRefinementSchemaTokenEstimate
             },
             boundarySchemaTokenCount: {
                 guard #available(iOS 26.0, *) else {
                     return fallbackBoundarySchemaTokenEstimate
                 }
+                #if compiler(>=6.3)
                 let model = SystemLanguageModel.default
                 if #available(iOS 26.4, *) {
                     return try await model.tokenCount(for: FMBoundarySchema.generationSchema)
                 }
+                #endif
                 return fallbackBoundarySchemaTokenEstimate
             },
             makeSession: {
