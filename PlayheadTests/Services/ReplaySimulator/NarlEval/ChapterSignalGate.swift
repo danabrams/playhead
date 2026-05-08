@@ -356,6 +356,18 @@ enum ChapterSignalGate {
         // (2026-05-06) — "when an episode already has any
         // ChapterEvidence with source ∈ {id3, pc20, rssInline},
         // ChapterGenerationPhase exits early without invoking FM."
+        //
+        // Latency = 0.0 here is a deliberate asymmetry vs the
+        // no-candidates path (which charges `perEpisodeOverheadMs`).
+        // Rationale: the creator-chapter check is essentially a cache
+        // / metadata lookup that can fire BEFORE any phase setup work,
+        // so the "phase ran enough to write the skip event" cost is
+        // microsecond-class and modeled as zero in the synthetic
+        // latency model. The no-candidates path, by contrast, requires
+        // running the full boundary-detector pipeline before
+        // discovering there are no candidates — so it charges the
+        // per-episode overhead. Bead 19's cost-lift metrics depend on
+        // this asymmetry being explicit.
         if config.creatorChaptersPresent(trace) {
             return EpisodeOutcome(
                 episodeId: trace.episodeId,

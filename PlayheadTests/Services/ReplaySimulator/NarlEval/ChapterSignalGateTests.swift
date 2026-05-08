@@ -167,7 +167,12 @@ struct ChapterSignalGateTests {
         // The mode field itself differs, of course.
         #expect(shadow.mode == .shadow)
         #expect(enabled.mode == .enabled)
-        // Per-episode outcomes carry their own mode but otherwise match.
+        // Length-aware equality on per-episode outcomes. We previously
+        // used `zip(...)` which silently truncates when lengths differ;
+        // assert lengths first, then walk in lockstep so a length
+        // regression surfaces here.
+        #expect(shadow.perEpisodeOutcomes.count == enabled.perEpisodeOutcomes.count,
+                "perEpisodeOutcomes lengths must match between shadow and enabled.")
         for (s, e) in zip(shadow.perEpisodeOutcomes, enabled.perEpisodeOutcomes) {
             #expect(s.episodeId == e.episodeId)
             #expect(s.podcastId == e.podcastId)
@@ -175,7 +180,10 @@ struct ChapterSignalGateTests {
             #expect(s.fmCallsForChapterLabeling == e.fmCallsForChapterLabeling)
             #expect(s.phaseLatencyMs == e.phaseLatencyMs)
             #expect(s.skippedByCreatorChapters == e.skippedByCreatorChapters)
-            #expect(s.mode == .shadow || s.mode == .enabled)
+            #expect(s.abortedByOperationalRate == e.abortedByOperationalRate)
+            #expect(s.abortedByPathologicalRate == e.abortedByPathologicalRate)
+            #expect(s.mode == .shadow)
+            #expect(e.mode == .enabled)
         }
     }
 
