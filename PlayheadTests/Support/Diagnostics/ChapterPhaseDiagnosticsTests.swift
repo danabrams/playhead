@@ -145,6 +145,20 @@ struct ChapterPhaseDiagnosticsTests {
                 installID: Self.installID, episodeId: Self.rawEpisodeId,
                 timestamp: Self.timestamp,
                 stage: "chapter_plan_cache", errorCode: "corrupt_data"
+            ),
+            .coveragePlanChapterInformed(
+                installID: Self.installID, episodeId: Self.rawEpisodeId,
+                timestamp: Self.timestamp,
+                fractionReplaced: 0.5,
+                adChapterIncludedCount: 2,
+                contentChapterExcludedCount: 1,
+                planConfidence: 0.65
+            ),
+            .coveragePlanChapterSkipped(
+                installID: Self.installID, episodeId: Self.rawEpisodeId,
+                timestamp: Self.timestamp,
+                reason: "low_plan_confidence",
+                evidenceCount: 4
             )
         ]
 
@@ -361,6 +375,40 @@ struct ChapterPhaseDiagnosticsTests {
         #expect(try decode(ChapterPhaseEvent.self, from: encode(event)) == event)
     }
 
+    @Test("Golden — coverage_plan_chapter_informed")
+    func goldenCoveragePlanChapterInformed() throws {
+        let event = ChapterPhaseEvent.coveragePlanChapterInformed(
+            installID: Self.installID, episodeId: Self.rawEpisodeId,
+            timestamp: Self.timestamp,
+            fractionReplaced: 0.5,
+            adChapterIncludedCount: 2,
+            contentChapterExcludedCount: 1,
+            planConfidence: 0.65
+        )
+        let str = try #require(String(data: try encode(event), encoding: .utf8))
+        let expected = """
+        {"episode_id_hash":"\(Self.expectedEpisodeIdHash)","event_type":"coverage_plan_chapter_informed","payload":{"coverage_plan_chapter_informed":{"ad_chapter_included_count":2,"content_chapter_excluded_count":1,"fraction_replaced":0.5,"plan_confidence":0.65}},"timestamp":1700000500}
+        """
+        #expect(str == expected)
+        #expect(try decode(ChapterPhaseEvent.self, from: encode(event)) == event)
+    }
+
+    @Test("Golden — coverage_plan_chapter_skipped")
+    func goldenCoveragePlanChapterSkipped() throws {
+        let event = ChapterPhaseEvent.coveragePlanChapterSkipped(
+            installID: Self.installID, episodeId: Self.rawEpisodeId,
+            timestamp: Self.timestamp,
+            reason: "low_plan_confidence",
+            evidenceCount: 4
+        )
+        let str = try #require(String(data: try encode(event), encoding: .utf8))
+        let expected = """
+        {"episode_id_hash":"\(Self.expectedEpisodeIdHash)","event_type":"coverage_plan_chapter_skipped","payload":{"coverage_plan_chapter_skipped":{"evidence_count":4,"reason":"low_plan_confidence"}},"timestamp":1700000500}
+        """
+        #expect(str == expected)
+        #expect(try decode(ChapterPhaseEvent.self, from: encode(event)) == event)
+    }
+
     // MARK: - Privacy regression: known PII fixture
 
     /// The privacy regression: a fixture episode whose raw id collides
@@ -449,6 +497,20 @@ struct ChapterPhaseDiagnosticsTests {
                 installID: Self.installID, episodeId: pollutedEpisodeId,
                 timestamp: Self.timestamp,
                 stage: "boundary_candidates_cache", errorCode: "version_mismatch"
+            ),
+            .coveragePlanChapterInformed(
+                installID: Self.installID, episodeId: pollutedEpisodeId,
+                timestamp: Self.timestamp,
+                fractionReplaced: 0.5,
+                adChapterIncludedCount: 1,
+                contentChapterExcludedCount: 1,
+                planConfidence: 0.55
+            ),
+            .coveragePlanChapterSkipped(
+                installID: Self.installID, episodeId: pollutedEpisodeId,
+                timestamp: Self.timestamp,
+                reason: "no_usable_chapters",
+                evidenceCount: 3
             )
         ]
         #expect(events.count == ChapterPhaseEventType.allCases.count)
@@ -704,6 +766,22 @@ struct ChapterPhaseDiagnosticsTests {
                     installID: Self.installID, episodeId: Self.rawEpisodeId,
                     timestamp: Self.timestamp,
                     stage: "chapter_plan_cache", errorCode: "truncated_payload"
+                )
+            case .coveragePlanChapterInformed:
+                return .coveragePlanChapterInformed(
+                    installID: Self.installID, episodeId: Self.rawEpisodeId,
+                    timestamp: Self.timestamp,
+                    fractionReplaced: 0.5,
+                    adChapterIncludedCount: 3,
+                    contentChapterExcludedCount: 2,
+                    planConfidence: 0.72
+                )
+            case .coveragePlanChapterSkipped:
+                return .coveragePlanChapterSkipped(
+                    installID: Self.installID, episodeId: Self.rawEpisodeId,
+                    timestamp: Self.timestamp,
+                    reason: "mode_disabled",
+                    evidenceCount: 0
                 )
             }
         }
