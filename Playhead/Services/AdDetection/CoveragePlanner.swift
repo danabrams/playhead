@@ -198,14 +198,6 @@ struct CoveragePlan: Sendable, Equatable {
     let phases: [BackfillJobPhase]
     let auditWindowSampleRate: Double?
 
-    /// playhead-au2v.1.14: chapter-informed audit-window guidance.
-    /// Non-nil only on `targetedWithAudit` plans where the planner
-    /// successfully consulted chapter evidence. Nil means the
-    /// downstream consumer should fall back to today's
-    /// random-audit-window selection (no behaviour change vs.
-    /// pre-au2v.1.14).
-    let chapterInformedAudit: ChapterInformedAuditSelection?
-
     /// playhead-au2v.1.14: discriminated diagnostic summary describing
     /// what the planner did with chapter evidence on a
     /// `targetedWithAudit` plan. `nil` on `fullCoverage` /
@@ -221,17 +213,34 @@ struct CoveragePlan: Sendable, Equatable {
     /// access to install/episode ids.
     let chapterAuditDiagnostic: ChapterAuditDiagnostic?
 
+    /// playhead-au2v.1.14: chapter-informed audit-window guidance.
+    /// Non-nil only on `targetedWithAudit` plans where the planner
+    /// successfully consulted chapter evidence. Nil means the
+    /// downstream consumer should fall back to today's
+    /// random-audit-window selection (no behaviour change vs.
+    /// pre-au2v.1.14).
+    ///
+    /// Derived from `chapterAuditDiagnostic` to keep the two fields
+    /// from drifting out of sync: `.informed(selection)` ⇒
+    /// `chapterInformedAudit == selection`; everything else (`.skipped`,
+    /// `nil`) ⇒ `chapterInformedAudit == nil`. Single source of truth
+    /// is the diagnostic.
+    var chapterInformedAudit: ChapterInformedAuditSelection? {
+        switch chapterAuditDiagnostic {
+        case .informed(let selection): return selection
+        case .skipped, .none:          return nil
+        }
+    }
+
     init(
         policy: CoveragePolicy,
         phases: [BackfillJobPhase],
         auditWindowSampleRate: Double?,
-        chapterInformedAudit: ChapterInformedAuditSelection? = nil,
         chapterAuditDiagnostic: ChapterAuditDiagnostic? = nil
     ) {
         self.policy = policy
         self.phases = phases
         self.auditWindowSampleRate = auditWindowSampleRate
-        self.chapterInformedAudit = chapterInformedAudit
         self.chapterAuditDiagnostic = chapterAuditDiagnostic
     }
 }
@@ -368,12 +377,8 @@ struct CoveragePlanner: Sendable {
         }
 
         if context.observedEpisodeCount >= coldStartEpisodeThreshold && context.stableRecall {
-            let diagnostic = chapterAuditDiagnostic(for: context)
-            let informed: ChapterInformedAuditSelection?
-            switch diagnostic {
-            case .informed(let selection): informed = selection
-            case .skipped:                 informed = nil
-            }
+            // Single-source-of-truth: store the diagnostic only;
+            // `CoveragePlan.chapterInformedAudit` derives from it.
             return CoveragePlan(
                 policy: .targetedWithAudit,
                 phases: [
@@ -382,8 +387,7 @@ struct CoveragePlanner: Sendable {
                     .scanRandomAuditWindows,
                 ],
                 auditWindowSampleRate: auditWindowSampleRate,
-                chapterInformedAudit: informed,
-                chapterAuditDiagnostic: diagnostic
+                chapterAuditDiagnostic: chapterAuditDiagnostic(for: context)
             )
         }
 
