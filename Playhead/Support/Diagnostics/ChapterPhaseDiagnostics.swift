@@ -144,8 +144,8 @@ enum ChapterPhaseEventType: String, Sendable, Hashable, Codable, CaseIterable {
 /// addition of `title`, `text`, `transcript`, `advertiser`, or any
 /// String value sourced from episode metadata.
 ///
-/// Asymmetry note: `ChapterPhaseEventType` has 14 cases, this enum has
-/// 12. `noCandidates` and `preempted` are intentionally stateless — the
+/// Asymmetry note: `ChapterPhaseEventType` has 17 cases, this enum has
+/// 15. `noCandidates` and `preempted` are intentionally stateless — the
 /// emit-helper factories on `ChapterPhaseEvent` set `payload: nil` for
 /// those, and the encoded JSON omits the `payload` key entirely (see the
 /// "Golden — chapter_phase_preempted" / "…no_candidates" tests). Adding

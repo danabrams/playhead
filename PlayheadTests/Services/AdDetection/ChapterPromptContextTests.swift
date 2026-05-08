@@ -458,3 +458,56 @@ struct FoundationModelClassifierChapterContextTests {
         #expect(prompt.hasPrefix("Chapter context: 1/3 content."))
     }
 }
+
+// `FoundationModelExtractor.buildPrompt` lives behind
+// `#if canImport(FoundationModels)`. Bead 16 widened its visibility from
+// `private` to `static` and added the optional `chapterContext` argument.
+// We guard the byte-identical-when-nil regression with the same canImport
+// gate so the test target compiles on hosts that lack FoundationModels.
+#if canImport(FoundationModels)
+@Suite("FoundationModelExtractor prompt builder accepts chapter context")
+struct FoundationModelExtractorChapterContextTests {
+
+    @Test("buildPrompt with nil context preserves byte-identical output")
+    func buildPromptNilContextPreservesOutput() {
+        let baseline = FoundationModelExtractor.buildPrompt(
+            evidenceText: "sample evidence",
+            windowStartTime: 12.0,
+            windowEndTime: 24.0
+        )
+        let withNil = FoundationModelExtractor.buildPrompt(
+            evidenceText: "sample evidence",
+            windowStartTime: 12.0,
+            windowEndTime: 24.0,
+            chapterContext: nil
+        )
+        #expect(baseline == withNil)
+    }
+
+    @Test("buildPrompt with chapter context inserts line above transcript")
+    func buildPromptWithContextInsertsLine() {
+        let ctx = ChapterPromptContext(
+            chapterIndex: 4,
+            totalChapters: 7,
+            dispositionToken: "adBreak",
+            previousDispositionToken: "content",
+            topicDescriptor: "Promo"
+        )
+        let prompt = FoundationModelExtractor.buildPrompt(
+            evidenceText: "sample evidence",
+            windowStartTime: 12.0,
+            windowEndTime: 24.0,
+            chapterContext: ctx
+        )
+        #expect(prompt.contains("Chapter context: 4/7 adBreak."))
+        // Chapter line must appear before the Transcript: section so it
+        // reads as orienting context, not as transcript content.
+        if let chapterRange = prompt.range(of: "Chapter context:"),
+           let transcriptRange = prompt.range(of: "Transcript:") {
+            #expect(chapterRange.lowerBound < transcriptRange.lowerBound)
+        } else {
+            Issue.record("expected both chapter line and Transcript: marker in prompt")
+        }
+    }
+}
+#endif
