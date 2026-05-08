@@ -229,50 +229,57 @@ struct FoundationModelExtractorChapterBudgetTests {
         #expect(chapterLine.hasPrefix("Chapter context: 1/2 content."))
     }
 
-    /// Formatter contract anchor: when `format(maxTokens: 0)` returns
-    /// nil (the "even baseline doesn't fit" path), we anchor that the
-    /// extractor — at the formatter's default budget — DOES emit a
-    /// chapter line for a typical context. This protects against a
-    /// silent regression where the builder ignores `format()`'s nil
-    /// return and tries to render anyway.
-    @Test("formatter nil-budget path is observable: format(maxTokens: 0) returns nil")
-    func formatterNilBudgetPathObservable() {
+    /// When even the topic-less baseline does not fit the default
+    /// token budget, the formatter returns `nil` and the extractor
+    /// builder MUST drop the chapter line entirely, falling back to
+    /// the no-context baseline output (no chapter line, no orphan
+    /// blank line gap that wasn't there before).
+    ///
+    /// Drive the drop path with a dispositionToken padded to ~200
+    /// characters — this pushes the baseline form past 50 tokens
+    /// under the `ceil(chars/3)` estimator.
+    @Test("over-budget baseline drops the chapter line entirely from extractor output")
+    func overBudgetBaselineDropsChapterLineFromExtractorOutput() {
+        let oversizedDisposition = String(repeating: "z", count: 200)
         let ctx = ChapterPromptContext(
             chapterIndex: 1,
             totalChapters: 2,
-            dispositionToken: "content",
+            dispositionToken: oversizedDisposition,
             previousDispositionToken: nil,
             topicDescriptor: nil
         )
-        #expect(ctx.format(maxTokens: 0) == nil)
-        // Default-budget path: the line IS emitted.
-        let prompt = FoundationModelExtractor.buildPrompt(
-            evidenceText: "evidence",
-            windowStartTime: 1.0,
-            windowEndTime: 2.0,
+        #expect(ctx.format() == nil)
+
+        let baseline = FoundationModelExtractor.buildPrompt(
+            evidenceText: "evidence body",
+            windowStartTime: 5.0,
+            windowEndTime: 10.0
+        )
+        let withOversizedCtx = FoundationModelExtractor.buildPrompt(
+            evidenceText: "evidence body",
+            windowStartTime: 5.0,
+            windowEndTime: 10.0,
             chapterContext: ctx
         )
-        #expect(prompt.contains("Chapter context: 1/2 content."))
+        #expect(baseline == withOversizedCtx)
+        #expect(!withOversizedCtx.contains("Chapter context:"))
+        #expect(!withOversizedCtx.contains(oversizedDisposition))
     }
 
-    /// When the formatter is forced to drop the chapter line entirely
-    /// (we simulate this by passing a context whose `format()` is
-    /// guaranteed to fit at the default budget — i.e. the line IS
-    /// emitted — and verifying the extractor preserves the
-    /// `Transcript:` anchor regardless), the prompt structure does
-    /// not regress.
-    @Test("chapter line drop does not duplicate Transcript: marker or strand blank lines")
-    func chapterLineDropDoesNotRegressStructure() {
+    /// No-context baseline: exactly one `Transcript:` marker, no
+    /// `Chapter context:` line, no extra blank-line gap. Locks in the
+    /// extractor's structural shape so a future `chapterContext = nil`
+    /// regression that introduces a phantom blank line is loud.
+    @Test("no-context baseline emits exactly one Transcript: marker and no chapter line")
+    func noContextBaselineSingleTranscriptMarker() {
         let prompt = FoundationModelExtractor.buildPrompt(
             evidenceText: "evidence body",
             windowStartTime: 5.0,
             windowEndTime: 10.0,
             chapterContext: nil
         )
-        // Exactly one `Transcript:` marker.
         let occurrences = prompt.components(separatedBy: "Transcript:").count - 1
         #expect(occurrences == 1)
-        // No `Chapter context:` line in the no-context baseline.
         #expect(!prompt.contains("Chapter context:"))
     }
 }

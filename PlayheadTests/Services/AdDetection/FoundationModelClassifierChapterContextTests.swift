@@ -318,50 +318,79 @@ struct FoundationModelClassifierChapterBudgetTests {
         )
     }
 
-    /// When even the topic-less baseline does not fit (degenerate case
-    /// — the formatter returns `nil`), the builder MUST drop the chapter
-    /// line entirely. The acceptance criterion phrases this as "if still
-    /// over budget, dropped entirely with diagnostic" — the diagnostic
-    /// is the caller's responsibility; the builder's contract is to
-    /// emit no chapter line.
+    /// When even the topic-less baseline does not fit the formatter's
+    /// default token budget, the formatter returns `nil` and the
+    /// builder MUST drop the chapter line entirely. The acceptance
+    /// criterion phrases this as "if still over budget, dropped
+    /// entirely with diagnostic" — the diagnostic is the caller's
+    /// responsibility; the builder's contract is to emit no chapter
+    /// line in this case.
     ///
-    /// We exercise this path by passing a context whose `format()`
-    /// returns `nil`. The simplest reliable trigger: a context with
-    /// huge index/total/topic AND a budget supplied via the formatter's
-    /// `maxTokens` argument. Since the builder does NOT expose a
-    /// budget knob, we instead verify that the BUILDER respects a `nil`
-    /// `format()` return by checking the builder output equals the no-
-    /// context baseline whenever `format()` would return nil. We can
-    /// only directly observe this through the formatter contract; here
-    /// we anchor the invariant by asserting that the emitted prompt
-    /// contains zero chapter-context lines whenever the formatter
-    /// returns nil.
-    ///
-    /// Implementation detail: we assert the formatter contract directly
-    /// (it returns nil for `maxTokens: 0`), then assert that the builder
-    /// would NOT have emitted a chapter line — by checking the
-    /// no-context baseline is unchanged from the with-budget-zero path.
-    /// (Since the builder always uses the formatter's default budget,
-    /// we cannot directly drive it to `nil` via the public surface
-    /// here; this assertion is therefore a contract anchor.)
-    @Test("formatter nil propagates as 'no chapter line' in the builder output (contract anchor)")
-    func formatterNilContractAnchor() {
+    /// We drive the drop path through the public API by constructing a
+    /// context whose baseline form (`Chapter context: i/n disp.`)
+    /// already exceeds the default 50-token budget. A
+    /// dispositionToken padded to ~200 characters pushes the baseline
+    /// well past 50 tokens under the conservative `ceil(chars/3)`
+    /// estimator, so `format()` returns `nil` and the builder must
+    /// emit a prompt byte-identical to the no-context baseline.
+    @Test("over-budget baseline drops the chapter line entirely from coarse builder output")
+    func overBudgetBaselineDropsChapterLineFromCoarseOutput() {
+        let oversizedDisposition = String(repeating: "x", count: 200)
         let ctx = ChapterPromptContext(
             chapterIndex: 1,
             totalChapters: 2,
-            dispositionToken: "content",
+            dispositionToken: oversizedDisposition,
             previousDispositionToken: nil,
             topicDescriptor: nil
         )
-        // The formatter returns nil when even baseline does not fit.
-        #expect(ctx.format(maxTokens: 0) == nil)
-        // The builder uses the default budget, where the baseline
-        // always fits — so the line IS emitted in the default path.
-        let prompt = FoundationModelClassifier.buildPrompt(
-            for: [],
+        // Sanity: the formatter at default budget cannot fit even the
+        // topic-less baseline form for this oversized disposition, so
+        // it returns `nil`.
+        #expect(ctx.format() == nil)
+
+        let segments = [makeSegment(index: 0, text: "audio")]
+        let baseline = FoundationModelClassifier.buildPrompt(for: segments)
+        let withOversizedCtx = FoundationModelClassifier.buildPrompt(
+            for: segments,
             chapterContext: ctx
         )
-        #expect(prompt.contains("Chapter context: 1/2 content."))
+        // Builder must drop the chapter line and emit prompt identical
+        // to the no-context baseline.
+        #expect(baseline == withOversizedCtx)
+        #expect(!withOversizedCtx.contains("Chapter context:"))
+        // Defensive: the oversized disposition token must not leak
+        // into the prompt via any other path.
+        #expect(!withOversizedCtx.contains(oversizedDisposition))
+    }
+
+    /// Same drop-path verification for the refinement builder.
+    @Test("over-budget baseline drops the chapter line entirely from refinement builder output")
+    func overBudgetBaselineDropsChapterLineFromRefinementOutput() {
+        let oversizedDisposition = String(repeating: "y", count: 200)
+        let ctx = ChapterPromptContext(
+            chapterIndex: 1,
+            totalChapters: 2,
+            dispositionToken: oversizedDisposition,
+            previousDispositionToken: nil,
+            topicDescriptor: nil
+        )
+        #expect(ctx.format() == nil)
+
+        let segments = [makeSegment(index: 0, text: "ad copy")]
+        let baseline = FoundationModelClassifier.buildRefinementPrompt(
+            for: segments,
+            promptEvidence: [],
+            maximumSpans: 1
+        )
+        let withOversizedCtx = FoundationModelClassifier.buildRefinementPrompt(
+            for: segments,
+            promptEvidence: [],
+            maximumSpans: 1,
+            chapterContext: ctx
+        )
+        #expect(baseline == withOversizedCtx)
+        #expect(!withOversizedCtx.contains("Chapter context:"))
+        #expect(!withOversizedCtx.contains(oversizedDisposition))
     }
 }
 
