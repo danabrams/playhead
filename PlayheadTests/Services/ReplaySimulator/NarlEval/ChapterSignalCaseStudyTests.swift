@@ -10,15 +10,18 @@
 // the documented counters.
 //
 // In addition to the per-case before/after assertions, this file ships
-// directory-level invariants:
-//   * Every case JSON in the directory decodes under the v1 schema.
-//   * Case ids are unique and match their filename stem.
-//   * The case mix satisfies the bead-spec selection contract
-//     (≥3 conversational misses, ≥2 false-positive removals, ≥1
-//     pre/post-roll edge, ≥1 monologue/short-episode edge, ≥1 sanity
-//     case).
-//   * The bytes of every case JSON pass a forbidden-token scrub audit
-//     (no "advertiser" substring, no 32-hex identifier shape, etc.).
+// directory-level invariants. See `README.md` in the fixture directory
+// for the canonical list — at a high level they cover:
+//   * Schema v1 decode and case-id uniqueness / filename agreement.
+//   * Bead-spec selection coverage and total case count in [5, 10].
+//   * Per-case observable lift (.off and .enabled differ).
+//   * Per-case non-empty documentation strings.
+//   * Per-case anonymization shapes (episode_id_anon regex,
+//     podcast_id_archetype equality vs decoded archetype enum).
+//   * Per-case structural sanity (non-negative counters, .off zeroes).
+//   * Forbidden-token scrub of case JSONs (substring + hex + URL).
+//   * Show-specific token scrub of README.md (concept words allowed).
+//   * Loader non-vacuity guard for the parameterized suite.
 //
 // SCAFFOLDING NOTE: Until the real `ChapterBoundaryDetector` /
 // `ChapterLabelingService` land (beads 4 / 12 / 13), the gate uses a
