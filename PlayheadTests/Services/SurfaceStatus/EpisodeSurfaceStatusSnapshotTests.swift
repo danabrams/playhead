@@ -152,15 +152,20 @@ struct EpisodeSurfaceStatusSnapshotTests {
             // left a mangled partial fixture on disk — can see why
             // regen didn't fire.
             let headPreview = String(decoding: existing.prefix(16), as: UTF8.self)
-            Issue.record(
-                Comment(rawValue: """
+            let message = """
                 skipping placeholder rewrite — on-disk fixture does not match the \
                 3-byte placeholder (\(existing.count) bytes, starts with \"\(headPreview)\"…). \
                 To regenerate: overwrite \(url.path) with `{}\\n` (e.g. \
                 `printf '{}\\n' > \(url.path)`) and re-run the suite.
-                """),
+                """
+            #if compiler(>=6.3)
+            Issue.record(
+                Comment(rawValue: message),
                 severity: .warning
             )
+            #else
+            print(message)
+            #endif
             return
         }
         let rendered = try Self.renderMatrixJSON()
