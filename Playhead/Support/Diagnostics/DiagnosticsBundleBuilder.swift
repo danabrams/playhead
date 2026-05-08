@@ -105,6 +105,15 @@ enum DiagnosticsBundleBuilder {
     /// newest-first (`ORDER BY timestamp DESC`) rows. This guards
     /// against the `.suffix(N)` inversion bug where a DESC-ordered
     /// caller would otherwise leak the OLDEST N rows into the tail.
+    ///
+    /// `chapterPhaseEvents` is passed through unchanged (no sort, no
+    /// cap). Capping is the caller's responsibility — it lives in the
+    /// persistence-backed fetch closure that the consumer beads will
+    /// land (mirrors how `WorkJournalEntry` capping is delegated to
+    /// the `journalFetch` / `analysisStore` query, NOT this builder).
+    /// Adding a cap here without a use case would force a sort key
+    /// (timestamp? generation_id?) decision before the consumer beads
+    /// have shipped.
     static func buildDefault(
         appVersion: String,
         osVersion: String,
