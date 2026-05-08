@@ -832,6 +832,7 @@
 		F50BF4625ADCA70B34BE3CA2 /* PipelineProgressStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1D3D54093F76B6ABEE2B06 /* PipelineProgressStripView.swift */; };
 		F551CC33E09E1FB8A0805056 /* Phase4ShadowBenchmarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED4E2DA89CA712CC334C564F /* Phase4ShadowBenchmarkTests.swift */; };
 		F57E7D83317923215D13A494 /* BackgroundFeedRefreshAnnouncementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45585700D7C36C8F1E57F284 /* BackgroundFeedRefreshAnnouncementTests.swift */; };
+		F66090957848E413C376DE68 /* DogfoodAnalysisHealthFixtureLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = E01C81F41F0956AE0CD2709A /* DogfoodAnalysisHealthFixtureLoader.swift */; };
 		F692FD975E5D1993271873BE /* SensitiveWindowRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD516C469A9F125F88DE996E /* SensitiveWindowRouterTests.swift */; };
 		F69744A5F61FF6C9464EF57F /* DiagnosticsOptInResetPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B80D862BD3E04C867A450845 /* DiagnosticsOptInResetPolicy.swift */; };
 		F6C2BE7108DFD3B58C343899 /* DiagnosticExportRedactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A23B4B1C97B6C25B705004F /* DiagnosticExportRedactionTests.swift */; };
@@ -868,6 +869,7 @@
 		FEFCC10CFF7EF39FD043123F /* SensitiveWindowRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117F1E41DE084B613166D952 /* SensitiveWindowRouter.swift */; };
 		FF4B955033ADAE3CA17F5C77 /* EpisodeStatusLineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75E4BD6B8E5FD41FE2C52FF3 /* EpisodeStatusLineView.swift */; };
 		FF5D6E825A52787AC7DD3218 /* DiagnosticsExportServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E85B05A45ED2EC4D70244642 /* DiagnosticsExportServiceTests.swift */; };
+		FF72F362C357CE04D243BE90 /* DogfoodAnalysisHealthFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE788787DE99DBB8E496981B /* DogfoodAnalysisHealthFixtureTests.swift */; };
 		FF7AE172A90350F9F28ECFC3 /* AdCatalogStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA38E3CD24228CDDC55D126B /* AdCatalogStoreTests.swift */; };
 		FFAF04927F83DB6DDE50F1F8 /* BoundarySnapDiagnosticLoggingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 949FDBAD9F21BD739D142E1B /* BoundarySnapDiagnosticLoggingTests.swift */; };
 		FFCE561B2115E48CA2895A4D /* PlaybackQueueFinishObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD745BB6950D33FBC35F30A1 /* PlaybackQueueFinishObserver.swift */; };
@@ -1642,6 +1644,7 @@
 		DDDF6A4D80EC486E347160A6 /* SkipOrchestrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkipOrchestrator.swift; sourceTree = "<group>"; };
 		DF4274F11E2DC27DD157E593 /* FileHasher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileHasher.swift; sourceTree = "<group>"; };
 		DFC796B09661BDE128DCFE42 /* CauseAttributionPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CauseAttributionPolicyTests.swift; sourceTree = "<group>"; };
+		E01C81F41F0956AE0CD2709A /* DogfoodAnalysisHealthFixtureLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DogfoodAnalysisHealthFixtureLoader.swift; sourceTree = "<group>"; };
 		E05BE83D47269AB128C0FE0F /* CapabilityBackedEligibilityProvidersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilityBackedEligibilityProvidersTests.swift; sourceTree = "<group>"; };
 		E0725D92A93B99D677149114 /* DebugDiagnosticsHatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugDiagnosticsHatchTests.swift; sourceTree = "<group>"; };
 		E07D0901C223F4B4EBE492B2 /* MinimalContiguousSpanDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinimalContiguousSpanDecoder.swift; sourceTree = "<group>"; };
@@ -1746,6 +1749,7 @@
 		FE3A9F770BF0B8F996BBAC04 /* TranscriptPeekViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptPeekViewModel.swift; sourceTree = "<group>"; };
 		FE5DD1A344E740FC5E1E183E /* BackfillProgressCursorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillProgressCursorTests.swift; sourceTree = "<group>"; };
 		FE60055EE7FD54970B500C31 /* BrowseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowseView.swift; sourceTree = "<group>"; };
+		FE788787DE99DBB8E496981B /* DogfoodAnalysisHealthFixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DogfoodAnalysisHealthFixtureTests.swift; sourceTree = "<group>"; };
 		FEBEB34D187C4123D24FE254 /* PlayheadRuntimeNoteCommittedPlayheadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayheadRuntimeNoteCommittedPlayheadTests.swift; sourceTree = "<group>"; };
 		FF045B17B4F22BA08A3F4582 /* DownloadNextViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadNextViewTests.swift; sourceTree = "<group>"; };
 		FF38243D35CA07BE595A877C /* FoundationModelExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationModelExtractor.swift; sourceTree = "<group>"; };
@@ -2047,6 +2051,15 @@
 				FC01A898A195026C336AA1E8 /* StreamingDownloadTests.swift */,
 			);
 			path = Downloads;
+			sourceTree = "<group>";
+		};
+		25CCF12718B865F48081643E /* Dogfood */ = {
+			isa = PBXGroup;
+			children = (
+				E01C81F41F0956AE0CD2709A /* DogfoodAnalysisHealthFixtureLoader.swift */,
+				FE788787DE99DBB8E496981B /* DogfoodAnalysisHealthFixtureTests.swift */,
+			);
+			path = Dogfood;
 			sourceTree = "<group>";
 		};
 		28945E5C3579B21FCCFD898D /* AnalysisCoordinator */ = {
@@ -2916,6 +2929,7 @@
 				AAF7D1F6FF66375B129F988D /* FixtureManifestIntegrityTests.swift */,
 				AA09B659861A02D611C35A8C /* Corpus */,
 				0919E8D4FF13B97A79864FF0 /* Diagnostics */,
+				25CCF12718B865F48081643E /* Dogfood */,
 				355F06FE6E055CB754CE9B00 /* NarlEval */,
 				CBCDD8D7B3BBD22E7072522A /* OPML */,
 				ED802AD28F62D28484D4FF2A /* RealEpisodes */,
@@ -4208,6 +4222,8 @@
 				FF5D6E825A52787AC7DD3218 /* DiagnosticsExportServiceTests.swift in Sources */,
 				65400347C4D02C7B06CC90EB /* DiagnosticsOptInResetPolicyTests.swift in Sources */,
 				69D60F371446C8A2A71BFD9D /* DiagnosticsTestSupport.swift in Sources */,
+				F66090957848E413C376DE68 /* DogfoodAnalysisHealthFixtureLoader.swift in Sources */,
+				FF72F362C357CE04D243BE90 /* DogfoodAnalysisHealthFixtureTests.swift in Sources */,
 				289D590EA6CA1606CE2A932C /* DogfoodDiagnosticsAnalysisHealthTests.swift in Sources */,
 				8B48C8705A7C1915D767DC4E /* DownloadBatchEvictorTests.swift in Sources */,
 				FA2277442EBED4BFB47810F1 /* DownloadBatchSchemaTests.swift in Sources */,
