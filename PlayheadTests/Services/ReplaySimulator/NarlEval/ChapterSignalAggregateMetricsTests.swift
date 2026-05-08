@@ -1151,6 +1151,61 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(cleanShowEntry?.mode == .enabled)
     }
 
+    @Test("compute() on a clean (no-ad) episode produces zero metrics, not NaN")
+    func cleanEpisodeProducesZeroMetricsNotNaN() {
+        // Pin the "clean episode" case: a trace with NO baseline ad spans
+        // and NO veto correction. Ground truth is empty (no positives →
+        // groundTruthAdSeconds = 0), predictor falls back to baseline
+        // (which is also empty → predictedAdSeconds = 0).
+        //
+        // Both guards must short-circuit cleanly:
+        //   precision = predictedSum > 0 ? ... : 0   → 0 path
+        //   recall    = groundTruthSum > 0 ? ... : 0 → 0 path
+        //   F1        = (P + R > 0) ? ... : 0        → 0 path
+        // Not NaN. A future patch that mistakenly switches the precision
+        // guard to `>= 0` (always true) silently produces 0/0 = NaN on a
+        // clean trace — exactly the production-fleet skew case where
+        // many episodes have no ads at all.
+        let cleanTrace = FrozenTrace(
+            episodeId: "ep-clean",
+            podcastId: "pod-clean",
+            episodeDuration: 600,
+            traceVersion: FrozenTrace.currentTraceVersion,
+            capturedAt: Self.testClock,
+            featureWindows: [],
+            atoms: [],
+            evidenceCatalog: [],
+            corrections: [],
+            decisionEvents: [],
+            // CRITICAL: no baseline ad spans → ground truth is empty.
+            baselineReplaySpanDecisions: [],
+            holdoutDesignation: .training
+        )
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [cleanTrace],
+            runId: "clean-episode",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        for mode in [report.baseline, report.shadow, report.enabled] {
+            #expect(mode.episodeCount == 1,
+                    "clean episode is INCLUDED (no veto), so episodeCount == 1")
+            #expect(mode.excludedEpisodeCount == 0,
+                    "clean episode is not excluded (no whole-asset veto)")
+            #expect(mode.predictedAdSeconds == 0,
+                    "predictor falls back to baseline; no baseline → 0 predicted seconds")
+            #expect(mode.groundTruthAdSeconds == 0,
+                    "no baseline spans → no ground truth ad seconds")
+            #expect(mode.truePositiveSeconds == 0)
+            #expect(mode.precision == 0, "0/0 guard must produce 0 (NOT NaN) for clean episode")
+            #expect(mode.recall == 0, "0/0 guard must produce 0 (NOT NaN) for clean episode")
+            #expect(mode.f1 == 0, "(P+R == 0) guard must produce 0 (NOT NaN) for clean episode")
+            #expect(!mode.precision.isNaN)
+            #expect(!mode.recall.isNaN)
+            #expect(!mode.f1.isNaN)
+        }
+    }
+
     @Test("compute() handles a corpus where every trace is excluded without dividing by zero")
     func allTracesExcludedDoesNotDivideByZero() {
         // Pin the all-excluded degenerate case. When every trace is
