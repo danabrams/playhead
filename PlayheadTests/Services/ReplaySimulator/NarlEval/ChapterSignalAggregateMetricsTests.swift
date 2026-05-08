@@ -159,8 +159,22 @@ struct ChapterSignalAggregateMetricsTests {
         // byte" contract until bead 14/16's consumer wiring lands.
         #expect(report.shadow.precision == report.baseline.precision)
         #expect(report.shadow.recall == report.baseline.recall)
+        #expect(report.shadow.f1 == report.baseline.f1)
         #expect(report.enabled.precision == report.baseline.precision)
         #expect(report.enabled.recall == report.baseline.recall)
+        #expect(report.enabled.f1 == report.baseline.f1)
+        // Cross-corpus lift values must be exactly 0 when modes are
+        // identical at the scaffold.
+        #expect(report.liftPrecision == 0)
+        #expect(report.liftRecall == 0)
+        #expect(report.liftF1 == 0)
+        // barMet must be FALSE at the scaffold: zero-lift on both axes
+        // does not satisfy "measurable lift on at least one axis". This
+        // is the key safety invariant for production rollout — we must
+        // never accidentally ship `barMet == true` until bead 14/16 wire
+        // mode-aware prediction.
+        #expect(report.barMet == false,
+                "scaffold mode-independence must produce barMet == false")
     }
 
     @Test("compute() detection: predictUnderMode is the single mode-aware swap point")
@@ -384,6 +398,34 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(ChapterSignalAggregateMetrics.evaluateBar(
             liftPrecision: 0.10,
             liftRecall: 0.05,
+            fmCostMultiplier: 1.0
+        ))
+    }
+
+    @Test("evaluateBar: one axis at +epsilon, other at -epsilon → passes (epsilon tolerance)")
+    func evaluateBarBoundaryEpsilonSymmetry() {
+        // Pin the symmetric epsilon-tolerance: lift exactly at +eps is
+        // "measurable", and a regression of exactly -eps is "not
+        // regressed" (within tolerance). Together this means the bar
+        // passes at the symmetric boundary. If a future patch tightens
+        // this (e.g. requires strictly > eps), this test must update
+        // intentionally.
+        let eps = ChapterSignalAggregateMetrics.measurableLiftEpsilon
+        #expect(ChapterSignalAggregateMetrics.evaluateBar(
+            liftPrecision: eps,
+            liftRecall: -eps,
+            fmCostMultiplier: 1.0
+        ))
+    }
+
+    @Test("evaluateBar: one axis at +epsilon, other regressed past -epsilon → fails")
+    func evaluateBarBoundaryEpsilonAsymmetric() {
+        // The other side of the symmetric boundary: when the regression
+        // is past -epsilon (strictly more negative), the bar must fail.
+        let eps = ChapterSignalAggregateMetrics.measurableLiftEpsilon
+        #expect(!ChapterSignalAggregateMetrics.evaluateBar(
+            liftPrecision: eps,
+            liftRecall: -2 * eps,
             fmCostMultiplier: 1.0
         ))
     }
@@ -612,6 +654,48 @@ struct ChapterSignalAggregateMetricsTests {
                 "persist() must round-trip without losing fields")
     }
 
+    @Test("persist() output bytes are deterministic across two runs")
+    func persistDeterministicAcrossRuns() throws {
+        // Pin BYTE-EQUAL output for two compute()+persist() cycles with
+        // identical inputs. The round-trip test only verifies decoder
+        // re-parses; this catches a future encoder change that produces
+        // logically-equal but byte-unequal output (e.g. unsorted keys,
+        // pretty-printed -> compact, ISO-8601 fractional-second drift).
+        let trace = Self.makeTrace(
+            episodeId: "ep-det-bytes",
+            podcastId: "pod-det-bytes",
+            episodeDuration: 300,
+            adStart: 30,
+            adEnd: 60
+        )
+        let report1 = ChapterSignalAggregateMetrics.compute(
+            traces: [trace],
+            runId: "det-bytes",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        let report2 = ChapterSignalAggregateMetrics.compute(
+            traces: [trace],
+            runId: "det-bytes",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        let dir1 = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chapter-signal-lift-det1-\(UUID().uuidString)")
+        let dir2 = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chapter-signal-lift-det2-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: dir1)
+            try? FileManager.default.removeItem(at: dir2)
+        }
+        let url1 = try ChapterSignalAggregateMetrics.persist(report: report1, to: dir1)
+        let url2 = try ChapterSignalAggregateMetrics.persist(report: report2, to: dir2)
+        let bytes1 = try Data(contentsOf: url1)
+        let bytes2 = try Data(contentsOf: url2)
+        #expect(bytes1 == bytes2,
+                "persist() must produce byte-equal output for identical inputs")
+    }
+
     @Test("persist() creates the output directory if missing")
     func persistsCreatesOutputDirectoryIfMissing() throws {
         let report = ChapterSignalAggregateMetrics.compute(
@@ -679,6 +763,11 @@ struct ChapterSignalAggregateMetricsTests {
         let last2 = Array(report.limitations.suffix(2))
         #expect(last2 == ["custom note 1", "custom note 2"],
                 "extra limitations must be appended in caller-supplied order, after structural ones")
+        // Tightened invariant: structural limitations come FIRST. The
+        // first entry must be the scaffold-mode caveat (the always-on
+        // structural note that appears in every run).
+        #expect(report.limitations.first?.contains("ChapterPlan") == true,
+                "first limitation must be the structural scaffold-mode caveat, not a caller-supplied note")
     }
 
     // MARK: - Excluded episodes
