@@ -68,13 +68,20 @@ struct PerModeMetrics: Sendable, Codable, Equatable {
     let excludedEpisodeCount: Int
 
     // MARK: Detection
-    /// Sum of correctly-predicted ad seconds across the corpus, divided by
-    /// total predicted ad seconds. 0.0 when no ad seconds were predicted.
+    /// Sum of correctly-predicted ad seconds across the corpus, divided
+    /// by total predicted ad seconds. 0.0 when no ad seconds were
+    /// predicted (also reported as 0.0 — distinguishable from a true
+    /// "0% precision" only by inspecting `predictedAdSeconds`).
     let precision: Double
-    /// Sum of correctly-predicted ad seconds across the corpus, divided by
-    /// total ground-truth ad seconds. 0.0 when ground truth has no ads.
+    /// Sum of correctly-predicted ad seconds across the corpus, divided
+    /// by total ground-truth ad seconds. 0.0 when ground truth has no
+    /// ads (distinguishable from a true "0% recall" only by inspecting
+    /// `groundTruthAdSeconds`).
     let recall: Double
-    /// Harmonic mean of precision/recall. 0.0 when both are 0.
+    /// Harmonic mean of precision/recall. 0.0 when `precision + recall
+    /// == 0` (this includes both "both metrics are 0" and the impossible
+    /// case where one is negative — in practice both inputs are in
+    /// `[0, 1]` so the condition is equivalent to "both are 0").
     let f1: Double
     /// Total ad seconds in the predicted set across the corpus. Reported
     /// alongside precision/recall so a reader can sanity-check the
@@ -263,7 +270,9 @@ struct ChapterSignalLiftReport: Sendable, Codable, Equatable {
     /// `.off` always has 0 FM calls, so the denominator is clamped to 1
     /// in the divisor — when `baseline.totalFMCalls == 0`, the multiplier
     /// is `Double(enabled.totalFMCalls)` (i.e. "enabled charges N calls
-    /// over a zero-baseline"). Documented in `limitations`.
+    /// over a zero-baseline"). The clamp is documented in `limitations`.
+    /// Above `ChapterSignalAggregateMetrics.maxFMCostMultiplier`, this
+    /// flips `barMet` to false even if the lift bar would otherwise pass.
     let fmCostMultiplier: Double
 
     /// Per-show-keyed lift, where the value is `enabled - off` for that
@@ -279,10 +288,11 @@ struct ChapterSignalLiftReport: Sendable, Codable, Equatable {
     let perShowLift: [String: PerShowLiftDelta]
 
     /// `true` iff the gating bar is met:
-    ///   - measurable lift (≥ `measurableLiftEpsilon`) on at least one of
-    ///     {recall, precision}, AND
-    ///   - no regression (≥ `-measurableLiftEpsilon`) on the other, AND
-    ///   - `fmCostMultiplier ≤ maxFMCostMultiplier` (default 2.0).
+    ///   - measurable lift (≥ `ChapterSignalAggregateMetrics.measurableLiftEpsilon`)
+    ///     on at least one of {recall, precision}, AND
+    ///   - no regression (≥ `-ChapterSignalAggregateMetrics.measurableLiftEpsilon`)
+    ///     on the other, AND
+    ///   - `fmCostMultiplier ≤ ChapterSignalAggregateMetrics.maxFMCostMultiplier`.
     /// Surfaced as a single bool so a CI gate can read one field.
     let barMet: Bool
 

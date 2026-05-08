@@ -230,6 +230,15 @@ struct ChapterSignalAggregateMetricsTests {
         // .shadow / .enabled both run the phase, so FM calls > 0.
         #expect(report.shadow.totalFMCalls > 0)
         #expect(report.enabled.totalFMCalls > 0)
+        // Phase telemetry must be byte-identical between shadow and
+        // enabled (both run the phase the same way; only consumer
+        // wiring differs, which doesn't affect phase counters). Pin
+        // this so a future regression where shadow and enabled diverge
+        // on phase telemetry is caught.
+        #expect(report.shadow.totalFMCalls == report.enabled.totalFMCalls,
+                "shadow and enabled must charge identical FM cost")
+        #expect(report.shadow.phaseLatencyP50Ms == report.enabled.phaseLatencyP50Ms,
+                "shadow and enabled must report identical phase latency")
     }
 
     @Test("compute() phase: latency percentiles match a hand-computed corpus")
@@ -426,6 +435,22 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(!ChapterSignalAggregateMetrics.evaluateBar(
             liftPrecision: eps,
             liftRecall: -2 * eps,
+            fmCostMultiplier: 1.0
+        ))
+    }
+
+    @Test("evaluateBar: one axis lifted, other in gray zone (0, +eps) → passes")
+    func evaluateBarGrayZoneOnOtherAxis() {
+        // The "gray zone" between strict-zero and epsilon: when one axis
+        // is genuinely lifted (≥ eps) and the other is positive but
+        // sub-epsilon (counts as "not measurably lifted" but also "not
+        // regressed"), the bar should pass. Pin the contract so a
+        // future patch that requires both axes to clear epsilon is an
+        // intentional change.
+        let eps = ChapterSignalAggregateMetrics.measurableLiftEpsilon
+        #expect(ChapterSignalAggregateMetrics.evaluateBar(
+            liftPrecision: 10 * eps,
+            liftRecall: 0.5 * eps, // gray zone — not a "measurable lift" but not a regression
             fmCostMultiplier: 1.0
         ))
     }
@@ -834,6 +859,13 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(cleanShowEntry?.episodeCount == 1,
                 "clean show contributes 1 to detection episode count")
         #expect(cleanShowEntry?.excludedEpisodeCount == 0)
+        // PerShowLiftDelta.mode is documented as "always .enabled" — the
+        // higher arm of the diff. Pin this even on degenerate (all-
+        // excluded) shows so a future patch that conditions mode on
+        // detection contribution is caught.
+        #expect(vetoedShowEntry?.mode == .enabled,
+                "PerShowLiftDelta.mode must be .enabled even when episodeCount=0")
+        #expect(cleanShowEntry?.mode == .enabled)
     }
 
     // MARK: - Schema version is current
