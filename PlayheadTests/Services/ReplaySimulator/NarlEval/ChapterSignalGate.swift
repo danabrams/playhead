@@ -179,9 +179,14 @@ enum ChapterSignalGate {
         /// Default stub chapter count: clamp(#atoms / 50, 1, 12). Picked
         /// to land in the 4–12 range the design doc cites for typical
         /// 60-min episodes (atoms count ≈ 200–600 in real fixtures), and
-        /// to never return zero for non-empty traces (the stub's job is
-        /// to produce a non-degenerate "would have run" signal so the
-        /// harness can validate the plumbing).
+        /// to never return zero (the stub's job is to produce a non-
+        /// degenerate "would have run" signal so the harness can
+        /// validate the plumbing). The lower clamp at 1 holds for empty
+        /// traces too, by design — an empty trace at the default config
+        /// still produces `planGenerated == true`. Callers who want to
+        /// model the production `chapter_phase_no_candidates` event must
+        /// supply a custom `stubChapterCount` that returns 0; see
+        /// `zeroStubChapterCountProducesNoPlan` in the gate tests.
         static func defaultStubChapterCount(_ trace: FrozenTrace) -> Int {
             let raw = trace.atoms.count / 50
             return min(12, max(1, raw))
