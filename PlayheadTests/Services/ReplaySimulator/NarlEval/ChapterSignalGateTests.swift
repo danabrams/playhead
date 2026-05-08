@@ -310,7 +310,7 @@ struct ChapterSignalGateTests {
     }
 
     @Test("replay(trace:modes:) with all-.off duplicate modes still produces one structural-zero entry")
-    func modeComparisonDuplicateOffStillProducesEntry() {
+    func modeComparisonDuplicateOffStillProducesEntry() throws {
         // Edge case: deduplication must not erase `.off` from the
         // result dictionary. `[.off, .off, .off]` → 1 entry, not 0.
         // The fast-path inside `replay(traces:mode:)` short-circuits
@@ -330,7 +330,16 @@ struct ChapterSignalGateTests {
             config: cfg
         )
         #expect(results.count == 1)
-        #expect(results.keys.contains(.off))
+        let off = try #require(results[.off],
+                               ".off entry must survive dedup of an all-.off mode list.")
+        // Tight check: the surviving entry must itself be a
+        // structural-zero result for the input trace.
+        #expect(off.mode == .off)
+        #expect(off.episodesProcessed == 1)
+        #expect(off.planGeneratedCount == 0)
+        #expect(off.totalFMCallsForChapterLabeling == 0)
+        #expect(off.aggregateLatencyMs == 0.0)
+        #expect(off.perEpisodeOutcomes.count == 1)
         #expect(stubCalls.count == 0,
                 "All-.off mode list must not invoke stubChapterCount; observed \(stubCalls.count) calls.")
         #expect(creatorCalls.count == 0,
@@ -447,6 +456,28 @@ struct ChapterSignalGateTests {
         #expect(!outcome.skippedByCreatorChapters)
         #expect(!outcome.abortedByOperationalRate)
         #expect(!outcome.abortedByPathologicalRate)
+    }
+
+    @Test("Pathologically large stubChapterCount (Int.max) is clamped to maxStubChapterCount, preventing Double-overflow in latency math and Int-overflow in aggregates")
+    func pathologicalStubChapterCountIsClampedHigh() {
+        // A buggy / malicious custom stub returning Int.max would
+        // overflow `Double(safeCount) * syntheticFMCallLatencyMs` to
+        // infinity (then NaN downstream) and overflow the aggregate
+        // Int counter. The gate's defensive `min(maxStubChapterCount,
+        // …)` clamp prevents both. Pin the upper bound here.
+        let trace = Self.makeTrace(atomCount: 250)
+        let cfg = ChapterSignalGate.Config(stubChapterCount: { _ in Int.max })
+        let result = ChapterSignalGate.replay(trace: trace, mode: .shadow, config: cfg)
+
+        #expect(result.totalFMCallsForChapterLabeling == ChapterSignalGate.maxStubChapterCount,
+                "Pathologically large stub output must be clamped to maxStubChapterCount.")
+        // Latency = perEpisodeOverhead (5) + maxStubChapterCount * 25.
+        let expectedLatency = 5.0 + Double(ChapterSignalGate.maxStubChapterCount) * 25.0
+        #expect(result.aggregateLatencyMs == expectedLatency)
+        #expect(result.aggregateLatencyMs.isFinite,
+                "Latency must remain finite even for pathological stub output.")
+        #expect(result.planGeneratedCount == 1,
+                "A clamped count > 0 still emits a plan; the clamp prevents overflow, not legitimate signal.")
     }
 
     @Test("Default stubChapterCount is bounded to [1, 12] across atom-count extremes")

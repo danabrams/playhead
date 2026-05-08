@@ -338,6 +338,14 @@ enum ChapterSignalGate {
 
     // MARK: - Internal
 
+    /// Defensive upper bound on caller-supplied `stubChapterCount`
+    /// outputs. Set far above any plausible per-episode chapter count
+    /// so well-behaved callers never hit it. See `runShadowOrEnabled`
+    /// for the rationale; this constant exists at file scope so a
+    /// future test can pin the clamp without reaching into the gate's
+    /// private body.
+    static let maxStubChapterCount: Int = 10_000
+
     /// Core stub for shadow / enabled. Encapsulates the synthetic
     /// chapter-generation pipeline so the public API stays narrow.
     /// When bead 4 / 12 / 13 land, this is the only function that
@@ -383,10 +391,19 @@ enum ChapterSignalGate {
         }
 
         let chapterCount = config.stubChapterCount(trace)
-        // Defensive: stubChapterCount is caller-supplied; clamp to a
-        // non-negative count so a buggy custom closure cannot drive
-        // negative FM cost into the aggregate.
-        let safeCount = max(0, chapterCount)
+        // Defensive clamp on caller-supplied output:
+        //   - Lower bound 0: a buggy custom closure cannot drive
+        //     negative FM cost into the aggregate.
+        //   - Upper bound `maxStubChapterCount`: a buggy custom closure
+        //     returning `Int.max` cannot overflow the per-episode latency
+        //     (`Double(safeCount) * syntheticFMCallLatencyMs` → ∞) or the
+        //     aggregate `totalFMCallsForChapterLabeling` Int counter.
+        //     The cap is set far above any plausible per-episode chapter
+        //     count (the default stub clamps at 12; real production
+        //     boundary detectors emit on the order of single-digits to
+        //     tens), so it is invisible to well-behaved callers and
+        //     only catches bugs.
+        let safeCount = min(Self.maxStubChapterCount, max(0, chapterCount))
 
         // When boundary detection returns 0 candidates, production
         // emits `chapter_phase_no_candidates` and writes NO plan (see
