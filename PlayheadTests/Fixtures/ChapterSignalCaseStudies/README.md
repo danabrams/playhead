@@ -10,7 +10,7 @@ The fixtures themselves are intentionally tiny structural shells: every
 case carries enough state for the gate to run (episode/podcast id,
 duration, atom count + spacing, creator-chapter flag, optional
 boundary-detector stub count) and the documented before/after counters,
-plus a plain-English `expected_behavior` description and an
+plus a plain-English `expected_behavior` description and a
 `synthesis_notes` field describing the corpus signal each case was modeled
 on.
 
