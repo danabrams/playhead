@@ -624,3 +624,18 @@ struct AdDetectionServiceChapterPhaseWiringTests {
                 "test invariant: resolved-episode hash must differ from naive-asset hash so the regression is detectable")
     }
 }
+
+// NOTE on asset-row-missing fallback:
+// `runChapterGenerationPhaseIfWired` falls back to `analysisAssetId`
+// when `store.fetchAsset(id:)` returns nil or throws. We considered
+// adding a test that drives that fallback by NOT inserting the asset
+// row — but `runBackfill` itself fails at an earlier step
+// (decoded-span persistence) when the asset row is absent, so the
+// missing-row state is unreachable from the wire-up in practice. The
+// fallback is genuine defense-in-depth against a future scenario
+// where `runBackfill` becomes resilient to a missing row OR another
+// caller deletes the row across an actor suspension between
+// `runBackfill`'s entry and Step 11.5; we keep the rails (with their
+// notice/error logs) so dogfood diagnostics surface the case if it
+// ever happens, without manufacturing a brittle test that fights
+// other invariants of `runBackfill`.
