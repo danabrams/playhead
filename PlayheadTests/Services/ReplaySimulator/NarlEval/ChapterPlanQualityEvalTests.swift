@@ -171,6 +171,9 @@ struct ChapterPlanQualityEvalSyntheticTests {
         let perEp = try #require(report.perEpisode["synthetic-partial-recall"])
         #expect(perEp.missedBoundaries == 1)
         #expect(perEp.falsePositiveBoundaries == 0)
+        // Single-episode: per-episode disposition counts equal aggregate.
+        #expect(perEp.dispositionMatchedPairs == 4)
+        #expect(perEp.dispositionMatchedAgreed == 4)
     }
 
     // ---- Disposition confusion: boundaries align, but the labeler
@@ -217,6 +220,18 @@ struct ChapterPlanQualityEvalSyntheticTests {
         // Per-episode confusion equals aggregate (single-episode).
         let perEp = try #require(report.perEpisode["synthetic-disposition-confusion"])
         #expect(perEp.perDispositionConfusion == expectedConfusion)
+
+        // Topic-label outcomes per pair:
+        //   pair 1: gold="intro segment" / cand="intro segment" → match
+        //   pair 2: gold=nil               / cand=nil            → NA
+        //   pair 3: gold="main interview"  / cand="main interview" → match
+        //   pair 4: gold=nil               / cand=nil            → NA
+        // The disposition-confusion fixture is dispositions only;
+        // pin topic-label counts so a regression that fed `title`
+        // through where it shouldn't surfaces here.
+        #expect(report.topicLabelMatches.matched == 2)
+        #expect(report.topicLabelMatches.mismatched == 0)
+        #expect(report.topicLabelMatches.notApplicable == 2)
     }
 
     // ---- Topic-label miss: boundaries + dispositions all match, but
