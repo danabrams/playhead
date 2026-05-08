@@ -288,6 +288,19 @@ struct ChapterPlanQualityEval: Sendable {
         // ascending, candidateIndex ascending) so ties are broken
         // deterministically, then walk the list and assign each pair
         // greedily, marking both endpoints used.
+        //
+        // Why greedy (and not minimum-weight bipartite matching):
+        // boundaries inside `boundaryToleranceSeconds` of one another
+        // are rare in real episodes (the boundary detector deduplicates
+        // at the candidate level upstream). Greedy by ascending
+        // distance produces the optimal pairing whenever no two pairs
+        // can both gain by swapping, which holds for any case where
+        // each candidate's nearest in-tolerance golden is also that
+        // golden's nearest in-tolerance candidate. We accept a small
+        // sub-optimality penalty for the (rare) interleaved case in
+        // exchange for a simple deterministic implementation; bead 22
+        // can swap the matcher for Hungarian if real-data goldens
+        // surface such cases.
         struct PairCandidate {
             let goldenIndex: Int
             let candidateIndex: Int
@@ -330,6 +343,20 @@ struct ChapterPlanQualityEval: Sendable {
             confusion[expected, default: [:]][observed, default: 0] += 1
             if expected == observed { agreed += 1 }
 
+            // Topic comparison: for inferred chapters produced by
+            // the chapter-generation phase, the FM-emitted
+            // `topicDescriptor` (see `ChapterLabel.topicDescriptor`)
+            // is what the labeler stores into `ChapterEvidence.title`
+            // — `title` is the only string field available on the
+            // production type, and the assembler in
+            // `ChapterPlanAssembler` writes the descriptor into
+            // `title` for inferred-source chapters. We compare
+            // golden's `expectedTopicLabel` against plan's `title`
+            // here. For creator-source chapters (`.id3`/`.pc20`/
+            // `.rssInline`) the title is the creator-supplied
+            // chapter title and the matcher's output should be
+            // interpreted as "label-text overlap" rather than
+            // strictly "FM topic descriptor agreement".
             switch Self.topicLabelOutcome(
                 expected: goldens[gi].expectedTopicLabel,
                 observed: candidates[ci].title,

@@ -191,16 +191,23 @@ struct ChapterPlanQualityEvalSyntheticTests {
         #expect(report.dispositionMatchedPairs == 4)
         #expect(report.dispositionAccuracy == 0.75)
 
-        // Confusion entries:
+        // Pin the FULL confusion matrix so an unintended cell shift
+        // surfaces here, not just on the cells we name.
+        // Layout:
         //   golden=content, plan=content: 2 (chapters 1 and 3).
         //   golden=adBreak, plan=content: 1 (the swap on chapter 2).
         //   golden=adBreak, plan=adBreak: 1 (chapter 4).
-        let confusion = report.perDispositionConfusion
-        #expect(confusion[.content]?[.content] == 2)
-        #expect(confusion[.adBreak]?[.content] == 1)
-        #expect(confusion[.adBreak]?[.adBreak] == 1)
-        // The reverse off-diagonal stays zero.
-        #expect(confusion[.content]?[.adBreak] == 0)
+        //   every other cell: 0.
+        let expectedConfusion: [ChapterDisposition: [ChapterDisposition: Int]] = [
+            .content:   [.content: 2, .adBreak: 0, .ambiguous: 0],
+            .adBreak:   [.content: 1, .adBreak: 1, .ambiguous: 0],
+            .ambiguous: [.content: 0, .adBreak: 0, .ambiguous: 0]
+        ]
+        #expect(report.perDispositionConfusion == expectedConfusion)
+
+        // Per-episode confusion equals aggregate (single-episode).
+        let perEp = try #require(report.perEpisode["synthetic-disposition-confusion"])
+        #expect(perEp.perDispositionConfusion == expectedConfusion)
     }
 
     // ---- Topic-label miss: boundaries + dispositions all match, but
@@ -356,6 +363,114 @@ struct ChapterPlanQualityEvalThresholdTests {
                 threshold: 0.0
             ) == .match
         )
+    }
+
+    /// Tolerance == 0 means "exact-match boundaries only". A
+    /// candidate at exactly the same `Double` value as the golden
+    /// boundary still matches; anything else does not.
+    @Test
+    func boundaryTolerance_zeroIsExactMatchOnly() {
+        let golden = GoldenChapterSet(
+            episodeId: "synthetic-zero-tolerance",
+            episodeContentHash: "synthetic-zero-tolerance-hash",
+            chapters: [
+                GoldenChapter(startTimeSeconds: 600.0, expectedDisposition: .adBreak, expectedTopicLabel: nil),
+                GoldenChapter(startTimeSeconds: 720.0, expectedDisposition: .content, expectedTopicLabel: nil)
+            ],
+            notes: nil
+        )
+        let plan = makePlan(
+            contentHash: golden.episodeContentHash,
+            chapters: [
+                // Exact-match candidate.
+                makeInferredChapter(start: 600.0, end: 720.0, title: nil, disposition: .adBreak),
+                // 1ms off — within ±15 default but NOT within ±0.
+                makeInferredChapter(start: 720.001, end: nil, title: nil, disposition: .content)
+            ]
+        )
+
+        let exact = ChapterPlanQualityEval(boundaryToleranceSeconds: 0.0)
+            .evaluate(pairs: [(plan, golden)])
+
+        // Recall: only the t=600 golden has an exact-matching candidate.
+        #expect(exact.boundaryRecall.matched == 1)
+        #expect(exact.boundaryRecall.total == 2)
+        // Precision: only the t=600 candidate has an exact-matching
+        // golden; t=720.001 is a false positive.
+        #expect(exact.boundaryPrecision.matched == 1)
+        #expect(exact.boundaryPrecision.total == 2)
+
+        // Disposition accuracy is over the single matched pair, which
+        // agrees: golden adBreak / plan adBreak.
+        #expect(exact.dispositionMatchedAgreed == 1)
+        #expect(exact.dispositionMatchedPairs == 1)
+    }
+
+    /// Negative or non-finite tolerance is clamped to 0 by the
+    /// initializer (defensive guard). A negative tolerance must NOT
+    /// silently match nothing or match everything — it must equal
+    /// the documented exact-match behavior.
+    @Test
+    func initializer_clampsNegativeAndNonFiniteTolerance() {
+        let negative = ChapterPlanQualityEval(boundaryToleranceSeconds: -10.0)
+        #expect(negative.thresholds.boundaryToleranceSeconds == 0.0)
+
+        let nan = ChapterPlanQualityEval(boundaryToleranceSeconds: .nan)
+        #expect(nan.thresholds.boundaryToleranceSeconds == 0.0)
+
+        let infinity = ChapterPlanQualityEval(boundaryToleranceSeconds: .infinity)
+        // Positive infinity is finite-checked: `.infinity.isFinite` is
+        // false, so the guard clamps it to 0. Documented behavior:
+        // we treat any non-finite tolerance as a misconfiguration.
+        #expect(infinity.thresholds.boundaryToleranceSeconds == 0.0)
+
+        // Topic-overlap minimum: clamp into [0, 1], non-finite falls
+        // back to the default 0.5.
+        let overOne = ChapterPlanQualityEval(topicOverlapMinimum: 1.5)
+        #expect(overOne.thresholds.topicOverlapMinimum == 1.0)
+
+        let negativeOverlap = ChapterPlanQualityEval(topicOverlapMinimum: -0.25)
+        #expect(negativeOverlap.thresholds.topicOverlapMinimum == 0.0)
+
+        let nanOverlap = ChapterPlanQualityEval(topicOverlapMinimum: .nan)
+        #expect(nanOverlap.thresholds.topicOverlapMinimum == ChapterPlanQualityEval.defaultTopicOverlapMinimum)
+    }
+
+    /// A chapter with a non-finite (NaN/Inf) `startTime` cannot match
+    /// any boundary and must not poison aggregate metrics. The plan
+    /// still contains the chapter (we don't filter from input), but
+    /// the matcher's `isFinite` guards skip it.
+    @Test
+    func nonFiniteCandidateStart_isSkippedFromMatching() {
+        let golden = GoldenChapterSet(
+            episodeId: "synthetic-nonfinite",
+            episodeContentHash: "synthetic-nonfinite-hash",
+            chapters: [
+                GoldenChapter(startTimeSeconds: 600.0, expectedDisposition: .adBreak, expectedTopicLabel: nil)
+            ],
+            notes: nil
+        )
+        let plan = makePlan(
+            contentHash: golden.episodeContentHash,
+            chapters: [
+                // NaN start: skipped by the matcher.
+                makeInferredChapter(start: .nan, end: nil, title: nil, disposition: .adBreak),
+                // Real candidate: matches the golden.
+                makeInferredChapter(start: 605.0, end: nil, title: nil, disposition: .adBreak)
+            ]
+        )
+
+        let report = ChapterPlanQualityEval().evaluate(pairs: [(plan, golden)])
+
+        // Recall: 1/1 (the real candidate matches the golden).
+        #expect(report.boundaryRecall.matched == 1)
+        #expect(report.boundaryRecall.total == 1)
+        // Precision: numerator counts candidates that found a match,
+        // denominator is the input length. The NaN candidate is
+        // counted in the denominator (it was emitted by the detector)
+        // but never finds a match → 1 / 2.
+        #expect(report.boundaryPrecision.matched == 1)
+        #expect(report.boundaryPrecision.total == 2)
     }
 }
 
