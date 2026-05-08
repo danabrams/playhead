@@ -109,6 +109,27 @@ enum ChapterPhaseEventType: String, Sendable, Hashable, Codable, CaseIterable {
     /// (`mode_disabled`, `no_chapter_evidence`,
     /// `no_usable_chapters`, `low_plan_confidence`).
     case coveragePlanChapterSkipped = "coverage_plan_chapter_skipped"
+
+    /// playhead-au2v.1.16: FM prompt builder injected compact chapter
+    /// context before the per-window transcript / evidence body.
+    /// Payload records the chapter index/total and disposition token
+    /// for offline tuning (counts only — never titles or descriptors).
+    case chapterPromptInjected = "chapter_prompt_injected"
+
+    /// playhead-au2v.1.16: FM prompt builder skipped chapter-context
+    /// injection because even the abbreviated form exceeded the
+    /// per-call token-budget guard. Rare; surfaced so an unexpectedly
+    /// long descriptor or future preamble growth shows up in
+    /// dogfood diagnostics rather than silently degrading prompt
+    /// guidance.
+    case chapterPromptDroppedBudget = "chapter_prompt_dropped_budget"
+
+    /// playhead-au2v.1.16: FM prompt builder had access to a usable
+    /// `ChapterPlan` but no chapter overlapped the window's time
+    /// range (window in unscanned region). Sanity-check signal that
+    /// surfaces shrinkage in chapter coverage relative to the segment
+    /// stream the FM is asked to classify.
+    case chapterPromptNoChapterForWindow = "chapter_prompt_no_chapter_for_window"
 }
 
 // MARK: - Payloads
@@ -123,8 +144,8 @@ enum ChapterPhaseEventType: String, Sendable, Hashable, Codable, CaseIterable {
 /// addition of `title`, `text`, `transcript`, `advertiser`, or any
 /// String value sourced from episode metadata.
 ///
-/// Asymmetry note: `ChapterPhaseEventType` has 14 cases, this enum has
-/// 12. `noCandidates` and `preempted` are intentionally stateless — the
+/// Asymmetry note: `ChapterPhaseEventType` has 17 cases, this enum has
+/// 15. `noCandidates` and `preempted` are intentionally stateless — the
 /// emit-helper factories on `ChapterPhaseEvent` set `payload: nil` for
 /// those, and the encoded JSON omits the `payload` key entirely (see the
 /// "Golden — chapter_phase_preempted" / "…no_candidates" tests). Adding
@@ -145,6 +166,9 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
     case decodeFailure(DecodeFailure)
     case coveragePlanChapterInformed(CoveragePlanChapterInformed)
     case coveragePlanChapterSkipped(CoveragePlanChapterSkipped)
+    case chapterPromptInjected(ChapterPromptInjected)
+    case chapterPromptDroppedBudget(ChapterPromptDroppedBudget)
+    case chapterPromptNoChapterForWindow(ChapterPromptNoChapterForWindow)
 
     /// Phase-started payload. `transcriptSnapshotHash` is a content hash
     /// over the transcript at the moment the phase entered, NOT the
@@ -411,6 +435,72 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         }
     }
 
+    /// FM prompt builder injected chapter context (playhead-au2v.1.16).
+    /// Counts-only: no titles, descriptors, or transcript text. The
+    /// disposition raw value is the closed-vocabulary
+    /// `ChapterDisposition` rawValue (`adBreak` / `content` /
+    /// `ambiguous`).
+    struct ChapterPromptInjected: Sendable, Hashable, Equatable, Codable {
+        /// 1-based chapter ordinal within the plan's chapter list.
+        let chapterIndex: Int
+        /// Total chapters in the plan at the moment of injection.
+        let totalChapters: Int
+        /// Snake_case `ChapterDisposition` raw value for this chapter.
+        let disposition: String
+        /// Snake_case `ChapterDisposition` raw value for the previous
+        /// chapter, or `nil` when this is the first chapter (in which
+        /// case the encoded JSON omits the `previous_disposition` key
+        /// entirely — matches the wire shape of the formatted prompt
+        /// line, which omits the `Prev:` clause for chapter 1).
+        let previousDisposition: String?
+        /// Whether the formatted line included a `Topic:` clause. The
+        /// boolean is privacy-safe; the descriptor itself is never
+        /// emitted.
+        let topicIncluded: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case chapterIndex = "chapter_index"
+            case totalChapters = "total_chapters"
+            case disposition
+            case previousDisposition = "previous_disposition"
+            case topicIncluded = "topic_included"
+        }
+    }
+
+    /// FM prompt builder dropped chapter context because even the
+    /// abbreviated form exceeded the per-call budget cap
+    /// (playhead-au2v.1.16). Rare — surfaced for dogfood telemetry
+    /// so unexpectedly long descriptors or preamble growth do not
+    /// silently degrade prompt guidance.
+    struct ChapterPromptDroppedBudget: Sendable, Hashable, Equatable, Codable {
+        /// Token cap that was applied (typically
+        /// `ChapterPromptContext.defaultMaxTokens`).
+        let budgetTokens: Int
+        /// Estimated tokens of the abbreviated form we tried last.
+        /// Allows a support engineer to see how far over budget the
+        /// payload landed.
+        let abbreviatedFormTokens: Int
+
+        enum CodingKeys: String, CodingKey {
+            case budgetTokens = "budget_tokens"
+            case abbreviatedFormTokens = "abbreviated_form_tokens"
+        }
+    }
+
+    /// FM prompt builder had access to a usable plan but no chapter
+    /// overlapped the window (playhead-au2v.1.16). Sanity-check
+    /// signal: window is in an unscanned region.
+    struct ChapterPromptNoChapterForWindow: Sendable, Hashable, Equatable, Codable {
+        /// Number of chapters present in the plan when the lookup
+        /// failed; lets dogfood reviewers correlate with a "chapter
+        /// coverage shrank" hypothesis.
+        let chapterCount: Int
+
+        enum CodingKeys: String, CodingKey {
+            case chapterCount = "chapter_count"
+        }
+    }
+
     // MARK: Codable round-trip
     //
     // We round-trip via a single-keyed object: the outer event already
@@ -436,6 +526,9 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         case decodeFailure = "decode_failure"
         case coveragePlanChapterInformed = "coverage_plan_chapter_informed"
         case coveragePlanChapterSkipped = "coverage_plan_chapter_skipped"
+        case chapterPromptInjected = "chapter_prompt_injected"
+        case chapterPromptDroppedBudget = "chapter_prompt_dropped_budget"
+        case chapterPromptNoChapterForWindow = "chapter_prompt_no_chapter_for_window"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -465,6 +558,12 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
             try container.encode(p, forKey: .coveragePlanChapterInformed)
         case .coveragePlanChapterSkipped(let p):
             try container.encode(p, forKey: .coveragePlanChapterSkipped)
+        case .chapterPromptInjected(let p):
+            try container.encode(p, forKey: .chapterPromptInjected)
+        case .chapterPromptDroppedBudget(let p):
+            try container.encode(p, forKey: .chapterPromptDroppedBudget)
+        case .chapterPromptNoChapterForWindow(let p):
+            try container.encode(p, forKey: .chapterPromptNoChapterForWindow)
         }
     }
 
@@ -522,6 +621,21 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
             forKey: .coveragePlanChapterSkipped
         ) {
             self = .coveragePlanChapterSkipped(p)
+        } else if let p = try container.decodeIfPresent(
+            ChapterPromptInjected.self,
+            forKey: .chapterPromptInjected
+        ) {
+            self = .chapterPromptInjected(p)
+        } else if let p = try container.decodeIfPresent(
+            ChapterPromptDroppedBudget.self,
+            forKey: .chapterPromptDroppedBudget
+        ) {
+            self = .chapterPromptDroppedBudget(p)
+        } else if let p = try container.decodeIfPresent(
+            ChapterPromptNoChapterForWindow.self,
+            forKey: .chapterPromptNoChapterForWindow
+        ) {
+            self = .chapterPromptNoChapterForWindow(p)
         } else {
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
@@ -901,6 +1015,82 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
                 ChapterPhasePayload.CoveragePlanChapterSkipped(
                     reason: reason,
                     evidenceCount: evidenceCount
+                )
+            )
+        )
+    }
+
+    /// emitted by playhead-au2v.1.16 (FM prompt builder injected
+    /// chapter context for a per-window FM call).
+    ///
+    /// Pass `previousDisposition: nil` for the first chapter — the
+    /// emitted JSON omits the `previous_disposition` key entirely,
+    /// matching the formatted prompt line which drops the `Prev:`
+    /// clause for chapter 1.
+    static func chapterPromptInjected(
+        installID: UUID,
+        episodeId: String,
+        timestamp: Double,
+        chapterIndex: Int,
+        totalChapters: Int,
+        disposition: String,
+        previousDisposition: String?,
+        topicIncluded: Bool
+    ) -> ChapterPhaseEvent {
+        ChapterPhaseEvent(
+            timestamp: timestamp,
+            eventType: .chapterPromptInjected,
+            episodeIdHash: EpisodeIdHasher.hash(installID: installID, episodeId: episodeId),
+            payload: .chapterPromptInjected(
+                ChapterPhasePayload.ChapterPromptInjected(
+                    chapterIndex: chapterIndex,
+                    totalChapters: totalChapters,
+                    disposition: disposition,
+                    previousDisposition: previousDisposition,
+                    topicIncluded: topicIncluded
+                )
+            )
+        )
+    }
+
+    /// emitted by playhead-au2v.1.16 (FM prompt builder dropped
+    /// chapter context because even the abbreviated form exceeded
+    /// the per-call budget cap).
+    static func chapterPromptDroppedBudget(
+        installID: UUID,
+        episodeId: String,
+        timestamp: Double,
+        budgetTokens: Int,
+        abbreviatedFormTokens: Int
+    ) -> ChapterPhaseEvent {
+        ChapterPhaseEvent(
+            timestamp: timestamp,
+            eventType: .chapterPromptDroppedBudget,
+            episodeIdHash: EpisodeIdHasher.hash(installID: installID, episodeId: episodeId),
+            payload: .chapterPromptDroppedBudget(
+                ChapterPhasePayload.ChapterPromptDroppedBudget(
+                    budgetTokens: budgetTokens,
+                    abbreviatedFormTokens: abbreviatedFormTokens
+                )
+            )
+        )
+    }
+
+    /// emitted by playhead-au2v.1.16 (FM prompt builder had a usable
+    /// plan but no chapter overlapped the window's time range).
+    static func chapterPromptNoChapterForWindow(
+        installID: UUID,
+        episodeId: String,
+        timestamp: Double,
+        chapterCount: Int
+    ) -> ChapterPhaseEvent {
+        ChapterPhaseEvent(
+            timestamp: timestamp,
+            eventType: .chapterPromptNoChapterForWindow,
+            episodeIdHash: EpisodeIdHasher.hash(installID: installID, episodeId: episodeId),
+            payload: .chapterPromptNoChapterForWindow(
+                ChapterPhasePayload.ChapterPromptNoChapterForWindow(
+                    chapterCount: chapterCount
                 )
             )
         )

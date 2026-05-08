@@ -2792,9 +2792,26 @@ struct FoundationModelClassifier: Sendable {
         try await runtime.tokenCount(coarsePromptPreamble())
     }
 
+    /// Build the coarse-pass prompt for a window of transcript segments.
+    ///
+    /// playhead-au2v.1.16: optional `chapterContext` is inserted between
+    /// the line-ref instruction and the transcript open fence so the
+    /// model reads it as orienting context above its input. Default
+    /// `nil` produces byte-identical output to the pre-bead-16 prompt
+    /// for the empty-segments case (locked in by
+    /// `FoundationModelClassifierChapterContextTests`). The first
+    /// production caller that passes a non-nil context is responsible
+    /// for emitting the `chapter_prompt_*` diagnostics from
+    /// `ChapterPhaseEvent`.
+    ///
+    /// When `injectionPreambleEnabled()` is `false` (bd-34e hypothesis-A
+    /// experiment), ALL wrapping lines are dropped — including any
+    /// `chapterContext` line — so the controlled experiment continues to
+    /// see only bare `L<n>> "..."` transcript lines.
     static func buildPrompt(
         for segments: [AdTranscriptSegment],
-        redactor: PromptRedactor = .noop
+        redactor: PromptRedactor = .noop,
+        chapterContext: ChapterPromptContext? = nil
     ) -> String {
         // bd-34e: when the preamble is disabled we drop ALL the wrapping
         // lines (prefix, injection preamble, line-ref instruction, fences),
@@ -2807,9 +2824,25 @@ struct FoundationModelClassifier: Sendable {
             lines.append(contentsOf: [
                 parts.prefix,
                 parts.preamble,
-                parts.lineRef,
-                transcriptOpenFence
+                parts.lineRef
             ])
+            // playhead-au2v.1.16: inject compact chapter context, if
+            // any, between the line-ref instruction and the transcript
+            // open fence. This places the context just above the model
+            // input it disambiguates without disturbing the
+            // bd-34e / playhead-994 jailbreak-defense fence pair.
+            // `format(maxTokens:)` returns `nil` only when even the
+            // topic-less baseline form exceeds the token budget; the
+            // caller is responsible for emitting the
+            // `chapter_prompt_dropped_budget` diagnostic in that case.
+            // (When the preamble is disabled above, this entire branch
+            // is skipped — chapter context is silently dropped along
+            // with the other wrapping lines.)
+            if let context = chapterContext,
+               let line = context.format() {
+                lines.append(line)
+            }
+            lines.append(transcriptOpenFence)
         }
         // bd-1en: redact each segment's visible text BEFORE escaping. The
         // line-ref number (`L<n>>`) is preserved so the FM's response
@@ -2826,11 +2859,12 @@ struct FoundationModelClassifier: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    private static func buildRefinementPrompt(
+    static func buildRefinementPrompt(
         for segments: [AdTranscriptSegment],
         promptEvidence: [PromptEvidenceEntry],
         maximumSpans: Int,
-        redactor: PromptRedactor = .noop
+        redactor: PromptRedactor = .noop,
+        chapterContext: ChapterPromptContext? = nil
     ) -> String {
         // playhead-cay: the preamble (prefix, injectionPreamble,
         // lineRefInstruction, "Transcript:", fences) has been removed.
@@ -2843,6 +2877,24 @@ struct FoundationModelClassifier: Sendable {
         // is therefore redundant and removing it further reduces the
         // hidden augmented input surface that triggers false positives.
         var lines: [String] = []
+        // playhead-au2v.1.16: chapter context lands at the very top of
+        // the refinement prompt, before the transcript line-refs and
+        // the optional Evidence catalog. The bead spec asks for "before
+        // the existing Evidence catalog block"; placing it before the
+        // transcript lines too is consistent with the coarse-pass
+        // placement and unambiguous for the model.
+        //
+        // Token budget: the same `defaultMaxTokens` (~50) cap is used
+        // in both passes — the refinement path runs at
+        // `refinementBudgetDivisor=2` and the coarse path runs at
+        // `coarseBudgetDivisor=8`, so 50 tokens is comfortably small
+        // relative to either prompt's budget. `format(maxTokens:)`
+        // returns nil only when even the topic-less baseline does not
+        // fit (rare); the caller emits
+        // `chapter_prompt_dropped_budget` in that case.
+        if let context = chapterContext, let line = context.format() {
+            lines.append(line)
+        }
         // bd-1en: redaction is applied to the visible segment text only;
         // the L<n>> prefix is preserved so the runner's downstream
         // lineRef → segment mapping is intact.
