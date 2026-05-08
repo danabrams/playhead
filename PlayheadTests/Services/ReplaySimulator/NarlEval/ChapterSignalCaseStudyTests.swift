@@ -607,10 +607,10 @@ struct ChapterSignalCaseStudyDirectoryTests {
     @Test("Every case's expected counters are self-consistent")
     func expectedCountersSelfConsistent() throws {
         // Every well-formed case must have non-negative counter values
-        // (Int Int.signum check — a fixture with -1 latency would still
-        // decode, but is meaningless), and `.off` must always be a
-        // structural zero EXCEPT for the perEpisodeOutcomes carrying
-        // the input ids.
+        // — a fixture with -1 latency would still decode but is
+        // meaningless — and `.off` must always be a structural zero
+        // EXCEPT for `perEpisodeOutcomes` carrying the input ids
+        // (which the per-case test pins separately).
         let cases = try CaseStudyPaths.loadAllCases().map(\.1)
         for study in cases {
             #expect(study.expectedBeforeOff.planGeneratedCount == 0,
