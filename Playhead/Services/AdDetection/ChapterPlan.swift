@@ -120,17 +120,22 @@ struct ChapterPlan: Sendable, Codable, Equatable {
     /// Compute duration-weighted plan confidence:
     ///   `sum(chapter.qualityScore × duration) / total_duration`
     ///
-    /// Duration semantics:
+    /// Duration semantics (see `effectiveDuration` for the full rule):
     /// - `endTime` present and `> startTime` → use the real interval.
     /// - `endTime` is `nil` → 60s nominal (matches
     ///   `ChapterMetadataEvidenceBuilder` open-ended fallback).
     /// - `endTime` set but `<= startTime` (malformed) → chapter is
-    ///   skipped (treated as zero contribution to numerator and
-    ///   denominator).
+    ///   skipped (zero contribution to numerator and denominator).
+    /// - `startTime` or `endTime` is non-finite (NaN/Inf) → chapter
+    ///   is skipped (corrupt bounds; we will not invent a duration).
     ///
-    /// `qualityScore` values outside the documented `[0, 1]` range are
-    /// folded back into `[0, 1]` after the weighted average so the
-    /// returned confidence is always a valid probability.
+    /// Quality semantics:
+    /// - `qualityScore` is non-finite (NaN/Inf) → chapter is skipped
+    ///   so a single corrupt input cannot poison the aggregate.
+    /// - `qualityScore` is finite but outside `[0, 1]` → contributes
+    ///   to the weighted average; the post-aggregate result is
+    ///   clamped back into `[0, 1]` so the return is always a valid
+    ///   probability.
     ///
     /// Returns `0.0` for an empty chapter list or when no chapter has
     /// usable duration.
