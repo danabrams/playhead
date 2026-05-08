@@ -1150,8 +1150,24 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         let readyEvents = await ready.snapshot()
         #expect(readyEvents.isEmpty, "ChapterPlanReady must not fire on cache-put failure")
 
-        // No `.completed` diagnostic, since no plan was observably written.
+        // The phase must have actually entered the labeling pass before
+        // failing — otherwise this test would pass vacuously for a phase
+        // that short-circuited at admission, transcript-hash, or
+        // boundary-detection. We assert all three signals:
+        //   (a) the `.started` event was emitted,
+        //   (b) the labeler was invoked at least once (FM work happened),
+        //   (c) `.preempted` was emitted as the terminal,
+        // and crucially `.completed` was NOT emitted (no observable plan).
         let events = await sink.snapshot()
+        #expect(
+            events.contains(where: { $0.eventType == .started }),
+            "Cache-put-failure path must still fire `.started` (phase entered labeling)"
+        )
+        let invocations = await labeler.invocationCount
+        #expect(
+            invocations > 0,
+            "Cache-put-failure path must still invoke the labeler (FM work happened before write failed)"
+        )
         #expect(!events.contains(where: { $0.eventType == .completed }))
         #expect(events.contains(where: { $0.eventType == .preempted }))
 
