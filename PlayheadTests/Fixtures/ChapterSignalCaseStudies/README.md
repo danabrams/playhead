@@ -173,9 +173,15 @@ over the directory in addition to the per-case before/after assertions:
   `^episode_anon_<4-16 hex>$` and `podcast_id_archetype` equals
   `show_archetype_<archetype>` (regex / equality pin on the
   anonymization §1 / §2 wire shapes).
-- No fixture contains the substring "advertiser", any 32-hex-character
+- No case JSON contains the substring "advertiser", any 32-hex-character
   identifier shape, or other forbidden tokens — a belt-and-suspenders
   scrub-audit gate that runs against the raw bytes of every case JSON.
+- README.md is exempt from concept-word forbidden tokens (the README
+  legitimately uses words like "advertiser" / "sponsor" while
+  *describing* anonymization), but is audited separately for
+  show-specific tokens (the same set the case-JSON scrub uses, minus
+  the concept words). The exact token list lives in the test source so
+  it can't be smuggled into this documentation surface.
 - The parameterized per-case suite is non-vacuous: the loader yields at
   least one case so the case-by-case assertions actually run.
 - README.md is present in this directory.
