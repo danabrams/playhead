@@ -72,7 +72,7 @@ enum ChapterPhaseEventType: String, Sendable, Hashable, Codable, CaseIterable {
     /// Payload records before/after counts.
     case capApplied = "chapter_phase_cap_applied"
 
-    /// Per-call FM labelling failure (op-vs-semantic flag), retried,
+    /// Per-call FM labeling failure (op-vs-semantic flag), retried,
     /// final outcome recorded.
     case labelFailed = "chapter_phase_label_failed"
 
@@ -128,10 +128,12 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
     /// transcript text. Used to detect "did the input change under us"
     /// during race-protection in the `.10` shell.
     struct Started: Sendable, Hashable, Equatable, Codable {
-        /// Snake_case mode raw value (`heuristic_only`, `heuristic_plus_fm`,
-        /// …) — the actual vocabulary lands with the phase shell in
-        /// `playhead-au2v.1.10`. Free String today so this bead does not
-        /// invent the enum prematurely.
+        /// `ChapterSignalMode.rawValue` — currently one of `shadow` /
+        /// `enabled` (the `.off` mode never reaches `.started` because
+        /// the shell short-circuits at the mode gate). Encoded as
+        /// `String` rather than the enum so the wire format is stable
+        /// even if `ChapterSignalMode` grows new cases without
+        /// versioning the schema.
         let mode: String
         /// SHA-256 hex of the transcript chunks visible at phase entry.
         /// Same shape as `episode_id_hash` (64 lowercase hex chars).
@@ -204,9 +206,9 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         let operational: Bool
         /// Snake_case error code raw value (e.g. `fm_timeout`,
         /// `fm_decode_failure`). The exact vocabulary lands with the
-        /// labelling service in `playhead-au2v.1.7`.
+        /// labeling service in `playhead-au2v.1.7`.
         let errorCode: String
-        /// How many retries the labelling call burned before settling
+        /// How many retries the labeling call burned before settling
         /// on `finalOutcome`.
         let retryCount: Int
         /// Snake_case final outcome (`success`, `gave_up`,
@@ -427,7 +429,7 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
         )
     }
 
-    /// emitted by playhead-au2v.1.10 (admission-check short-circuit)
+    /// emitted by playhead-au2v.1.11 (creator-chapter short-circuit)
     static func skippedCreatorChapters(
         installID: UUID,
         episodeId: String,
@@ -614,7 +616,7 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
         )
     }
 
-    /// emitted by playhead-au2v.1.10 (cache-read decode failure path)
+    /// emitted by playhead-au2v.1.1 (ChapterPlanCache decode failure path)
     static func decodeFailure(
         installID: UUID,
         episodeId: String,
