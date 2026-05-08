@@ -99,6 +99,12 @@ enum ChapterSignalGate {
         /// identically across runs given the same input traces — this is
         /// the contract the harness depends on for "off baseline matches
         /// today's narl-eval behavior".
+        // Visibility: this is `fileprivate` not `private` because the
+        // call site is in the outer enum's `replay(traces:mode:)` —
+        // `private` would scope to the enclosing struct's body and
+        // block the outer call. `fileprivate` is the tightest the
+        // language allows here, and it confines new call sites to
+        // this file.
         fileprivate static func offResult(traces: [FrozenTrace]) -> ChapterSignalReplayResult {
             let outcomes = traces.map { trace in
                 EpisodeOutcome(
@@ -188,10 +194,18 @@ enum ChapterSignalGate {
 
     /// Replay a frozen trace under one `ChapterSignalMode`.
     ///
-    /// Preconditions: none beyond `FrozenTrace` validity. Empty atom
-    /// arrays are tolerated — they produce `stubChapterCount(trace) >= 1`
-    /// FM calls in shadow/enabled mode, which is the deterministic
-    /// "phase ran on a degenerate input" signal the harness expects.
+    /// Preconditions: none beyond `FrozenTrace` validity.
+    ///
+    /// In `.shadow`/`.enabled`:
+    /// - The default `Config.stubChapterCount` returns at least 1 for
+    ///   any trace (clamped to `[1, 12]`), so empty atom arrays still
+    ///   yield `planGenerated == true`.
+    /// - A custom `stubChapterCount` may legitimately return `0`,
+    ///   modelling the production `chapter_phase_no_candidates` event:
+    ///   the phase ran, the boundary detector produced no candidates,
+    ///   and no plan is emitted. In that case `planGenerated == false`
+    ///   and `fmCallsForChapterLabeling == 0`, but the per-episode
+    ///   overhead latency is still charged (the boundary detector ran).
     ///
     /// `mode == .off` is a fast path that does NOT inspect trace
     /// contents beyond `episodeId` / `podcastId` and produces the
@@ -271,9 +285,12 @@ enum ChapterSignalGate {
     /// per-podcast trust threading, which mutates state across
     /// episodes).
     ///
-    /// Duplicates in `modes` collapse to the single mapped value (the
-    /// last write wins, but every replay for the same mode produces an
-    /// identical value, so this is observationally a no-op).
+    /// Duplicates in `modes` are deduplicated before iteration so each
+    /// mode is replayed exactly once. Result-equality across duplicates
+    /// is also a property the gate provides (given pure caller
+    /// closures), but deduplication makes the cost behavior obvious
+    /// rather than requiring callers to argue from "every replay for
+    /// the same mode is observationally identical".
     static func replay(
         trace: FrozenTrace,
         modes: [ChapterSignalMode],
@@ -284,13 +301,36 @@ enum ChapterSignalGate {
 
     /// Multi-trace, multi-mode replay. Same shape as the single-trace
     /// variant; each mode aggregates across all traces.
+    ///
+    /// Determinism: for any pair of replays with the same input
+    /// `traces`, `modes`, and `config`, the returned dictionary is
+    /// `Equatable`-equal — provided the caller-supplied closures
+    /// (`config.stubChapterCount`, `config.creatorChaptersPresent`)
+    /// are themselves deterministic. Tests of the gate use pure
+    /// closures and pin the property; production wiring (bead 19)
+    /// must do the same.
     static func replay(
         traces: [FrozenTrace],
         modes: [ChapterSignalMode],
         config: Config = .default
     ) -> [ChapterSignalMode: ChapterSignalReplayResult] {
+        // Deduplicate while preserving first-seen order. We don't use
+        // `Set(modes)` directly because Set iteration order is
+        // unspecified — and although the result is a dictionary
+        // (so iteration order at the call site is also unspecified),
+        // doing the work in deterministic order keeps replay logs
+        // (e.g., printf-style telemetry someone might add later)
+        // stable across runs.
+        var seen: Set<ChapterSignalMode> = []
+        var unique: [ChapterSignalMode] = []
+        unique.reserveCapacity(modes.count)
+        for mode in modes where seen.insert(mode).inserted {
+            unique.append(mode)
+        }
+
         var results: [ChapterSignalMode: ChapterSignalReplayResult] = [:]
-        for mode in modes {
+        results.reserveCapacity(unique.count)
+        for mode in unique {
             results[mode] = replay(traces: traces, mode: mode, config: config)
         }
         return results

@@ -277,6 +277,30 @@ struct ChapterSignalGateTests {
         #expect(results.keys.contains(.enabled))
     }
 
+    @Test("replay(trace:modes:) with duplicate modes invokes caller closures only once per unique mode (cost discipline)")
+    func modeComparisonDeduplicatesWork() {
+        let trace = Self.makeTrace(atomCount: 250)
+        let stubCalls = ClosureCallCounter()
+        let creatorCalls = ClosureCallCounter()
+        let cfg = ChapterSignalGate.Config(
+            stubChapterCount: { _ in stubCalls.increment(); return 5 },
+            creatorChaptersPresent: { _ in creatorCalls.increment(); return false }
+        )
+        // 5 entries: .off (closures not called), .shadow ×2 (one call
+        // each), .enabled ×2 (one call each). After deduplication the
+        // caller closures should be invoked once per unique non-.off
+        // mode = 2 calls total per closure.
+        _ = ChapterSignalGate.replay(
+            trace: trace,
+            modes: [.off, .shadow, .shadow, .enabled, .enabled],
+            config: cfg
+        )
+        #expect(stubCalls.count == 2,
+                "stubChapterCount must be invoked once per unique non-.off mode after deduplication; observed \(stubCalls.count) calls.")
+        #expect(creatorCalls.count == 2,
+                "creatorChaptersPresent must be invoked once per unique non-.off mode after deduplication; observed \(creatorCalls.count) calls.")
+    }
+
     @Test("replay(trace:modes:) with empty modes returns empty dictionary")
     func modeComparisonHelperEmptyModes() {
         let trace = Self.makeTrace()
