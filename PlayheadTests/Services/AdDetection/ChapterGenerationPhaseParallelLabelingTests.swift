@@ -692,6 +692,18 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         let events = await sink.snapshot()
         #expect(events.last?.eventType == .preempted)
         #expect(!events.contains(where: { $0.eventType == .completed }))
+        // Verify the test exercised the in-flight-tasks-cancelled path
+        // rather than vacuously passing because cancellation arrived
+        // before labeling started. With a 30ms warmup and mocks that
+        // return instantly until the labeler's 200ms sleep, at least
+        // one labeling call must have entered (and been cancelled by
+        // the TaskGroup's `cancelAll`). If this trips, increase the
+        // pre-cancel sleep or investigate phase entry latency.
+        let invocations = await labeler.invocationCount
+        #expect(
+            invocations > 0,
+            "Cancellation test must exercise in-flight FM calls — invocationCount was 0, meaning the cancel raced ahead of labeling and the TaskGroup cancelAll path was not exercised"
+        )
     }
 
     // MARK: - ChapterPlanReady never fires on failure paths
