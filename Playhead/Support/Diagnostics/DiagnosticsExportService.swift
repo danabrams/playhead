@@ -157,6 +157,14 @@ protocol DiagnosticsExportPresenter {
 /// `AnalysisStore` directly — tests supply a canned list.
 typealias DiagnosticsJournalFetch = @Sendable () async throws -> [WorkJournalEntry]
 
+/// Async fetch closure for the chapter-phase events stream
+/// (playhead-au2v.1.3). Mirrors `DiagnosticsJournalFetch` so the
+/// coordinator can stay decoupled from whichever persistence layer the
+/// chapter-phase consumers eventually land (likely AnalysisStore in a
+/// later bead). Until those consumers ship, the production wiring uses
+/// the default `{ [] }` closure and tests supply a canned list directly.
+typealias DiagnosticsChapterPhaseEventsFetch = @Sendable () async throws -> [ChapterPhaseEvent]
+
 /// Seam for flipping `Episode.diagnosticsOptIn = false` on the rows
 /// that actually shipped in the bundle. Abstracted so the coordinator
 /// remains pure-logic and the SwiftData/ModelContext dependency lives in

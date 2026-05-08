@@ -2,6 +2,9 @@
   "default" : {
     "app_version" : "1.0.0",
     "build_type" : "release",
+    "chapter_phase_events" : [
+
+    ],
     "device_class" : "iPhone17Pro",
     "eligibility_snapshot" : {
       "appleIntelligenceEnabled" : true,
