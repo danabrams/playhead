@@ -257,10 +257,13 @@ actor ChapterPlanCache {
         return result.isEmpty ? "__empty__" : result
     }
 
-    /// 12-char prefix of SHA256(contentHash), hex. 12 chars × 4 bits =
-    /// 48 bits → collision probability is ~1 in 2^24 even at hundreds
-    /// of thousands of cached plans, far below realistic episode counts
-    /// on any device. Internal for test pinning.
+    /// 12-char prefix of SHA256(contentHash), hex (48 bits of entropy).
+    /// By the birthday bound, the probability of any two cached
+    /// content-hashes producing colliding suffixes after N inserts is
+    /// roughly `N^2 / 2^49`; at 10,000 cached plans that is
+    /// ~1.8 × 10^-7. Realistic device episode counts are far below
+    /// that, so 12 hex chars is well-padded against collision while
+    /// keeping the filename short. Internal for test pinning.
     static func disambiguationSuffix(for contentHash: String) -> String {
         let digest = SHA256.hash(data: Data(contentHash.utf8))
         let hex = digest.map { String(format: "%02x", $0) }.joined()

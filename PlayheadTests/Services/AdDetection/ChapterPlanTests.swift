@@ -166,6 +166,28 @@ struct ChapterPlanTests {
         #expect(abs(confidence - 0.7) < 1e-6)
     }
 
+    @Test("all-malformed chapter list yields 0.0 (no usable duration)")
+    func confidenceAllMalformedIsZero() {
+        // Every chapter has end <= start → effectiveDuration is 0
+        // for all of them → totalDuration is 0 → returns 0 by the
+        // "no usable duration" guard, not NaN.
+        let chapters = [
+            Self.makeChapter(start: 100, end: 100, quality: 0.5),
+            Self.makeChapter(start: 200, end: 150, quality: 0.9),
+        ]
+        let confidence = ChapterPlan.computePlanConfidence(chapters)
+        #expect(confidence == 0.0)
+    }
+
+    @Test("non-finite endTime is skipped without producing NaN confidence")
+    func confidenceSkipsNonFiniteEnd() {
+        let bad = Self.makeChapter(start: 0, end: .infinity, quality: 0.7)
+        let good = Self.makeChapter(start: 100, end: 200, quality: 0.4)
+        let confidence = ChapterPlan.computePlanConfidence([bad, good])
+        #expect(confidence.isFinite)
+        #expect(abs(confidence - 0.4) < 1e-6)
+    }
+
     @Test("computePlanConfidence clamps out-of-range qualityScore inputs")
     func confidenceClampsOutOfRange() {
         // Defensive: even if an upstream producer mis-emits a score
