@@ -739,4 +739,278 @@ struct CoveragePlannerTests {
         // emits the type's default rather than the configured value.
         #expect(informed.replacementFraction != CoveragePlanner.defaultReplacementFraction)
     }
+
+    // MARK: - playhead-au2v.1.15 gap-fill tests
+    //
+    // au2v.1.14 already shipped happy-path / mode-gate / quality-gate /
+    // confidence / projection / clamp / replacement-fraction /
+    // periodic-rescan / nil-end / defensive-filtering / order-preserving
+    // tests. The cases below fill the residual gaps the bead-15 spec
+    // enumerates:
+    //
+    //   1. `.off` + non-empty evidence parity (companion to the
+    //      pre-existing `.shadow` parity test).
+    //   2. The canonical 5-chapter scenario (2 ad: 0.6/0.8, 2 content:
+    //      0.9/0.5, 1 ambiguous) with strict-`>` gate semantics.
+    //   3. `replacementFraction` boundary values 0.0 and 1.0.
+    //   4. `planConfidence` boundary at exactly `minPlanConfidence`
+    //      (the gate is `>=`).
+    //   5. Source-agnostic parity extended to `.id3` and `.rssInline`
+    //      (au2v.1.14 only covered `.pc20` vs `.inferred`).
+    //   6. Empty `[]` evidence (distinct from `nil`).
+    //   7. Pin behaviour for sparse coverage of the episode (planner
+    //      does NOT consult episode duration).
+
+    @Test("chapter-informed: .off mode + non-empty evidence yields parity with baseline (companion to shadow parity)")
+    func testChapterInformedOffModeWithEvidenceParity() {
+        let planner = CoveragePlanner()
+        let chapters = [
+            adChapter(start: 60, end: 120, quality: 0.9),
+            contentChapter(start: 200, end: 600, quality: 0.85)
+        ]
+        let baseline = planner.plan(for: matureStableContext())
+        let off = planner.plan(for: matureStableContext(
+            chapterSignalMode: .off,
+            chapterEvidence: chapters
+        ))
+        // Byte-identical observable plan — `.off` must NOT consult
+        // chapter evidence even when it's available, mirroring the
+        // existing `.shadow` parity contract.
+        #expect(off.policy == baseline.policy)
+        #expect(off.phases == baseline.phases)
+        #expect(off.auditWindowSampleRate == baseline.auditWindowSampleRate)
+        #expect(off.chapterInformedAudit == nil)
+        // Diagnostic: `.skipped(modeDisabled)` with the FULL evidence
+        // count — the planner short-circuits before filtering, so
+        // `evidenceCount` reflects the raw input (chapters.count == 2),
+        // not the post-filter count.
+        switch off.chapterAuditDiagnostic {
+        case .skipped(let reason, let count):
+            #expect(reason == .modeDisabled)
+            #expect(count == chapters.count)
+        default:
+            Issue.record("Expected .skipped(modeDisabled, \(chapters.count)), got \(String(describing: off.chapterAuditDiagnostic))")
+        }
+    }
+
+    @Test("chapter-informed: canonical 5-chapter scenario (2 ad / 2 content / 1 ambiguous) honours strict-> gates")
+    func testChapterInformedCanonicalFiveChapterScenario() throws {
+        let planner = CoveragePlanner()
+        // Canonical scenario from the bead spec:
+        //   - 2 ad-disposition  : qualityScore 0.6 and 0.8 — both
+        //                         clear the 0.4 strict-> include floor.
+        //   - 2 content-disposition: qualityScore 0.9 (excluded; > 0.7)
+        //                         and 0.5 (NOT excluded; gate is
+        //                         strict-`>` so 0.5 passes through to
+        //                         the consumer's random selection).
+        //   - 1 ambiguous       : passes through (omitted from both
+        //                         lists by design).
+        // Plan-confidence math (duration-weighted; non-overlapping):
+        //   ad   60→180  q=0.6  d=120 w= 72
+        //   ad  200→320  q=0.8  d=120 w= 96
+        //   ct  400→600  q=0.9  d=200 w=180
+        //   ct  700→900  q=0.5  d=200 w=100
+        //   amb 1000→1100 q=0.5 d=100 w= 50
+        //   Σd = 740, Σw = 498  ⇒ planConfidence ≈ 0.673
+        // Comfortably above the default 0.3 floor.
+        let chapters: [ChapterEvidence] = [
+            adChapter(start: 60, end: 180, quality: 0.6),
+            adChapter(start: 200, end: 320, quality: 0.8),
+            contentChapter(start: 400, end: 600, quality: 0.9),
+            contentChapter(start: 700, end: 900, quality: 0.5),
+            ambiguousChapter(start: 1000, end: 1100, quality: 0.5)
+        ]
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: chapters
+        ))
+        let informed = try #require(plan.chapterInformedAudit)
+        // Both ad chapters appear in includes, in input order.
+        #expect(informed.includes.count == 2)
+        #expect(informed.includes[0].kind == .adChapter)
+        #expect(informed.includes[0].qualityScore == 0.6)
+        #expect(informed.includes[0].startTime == 60)
+        #expect(informed.includes[1].qualityScore == 0.8)
+        #expect(informed.includes[1].startTime == 200)
+        // Only the high-quality content chapter appears in excludes —
+        // the 0.5-quality content chapter does NOT (gate is strict-`>`).
+        #expect(informed.excludes.count == 1)
+        #expect(informed.excludes[0].kind == .contentExcluded)
+        #expect(informed.excludes[0].qualityScore == 0.9)
+        #expect(informed.excludes[0].startTime == 400)
+        // evidenceCount counts every supplied chapter (including the
+        // ambiguous and the 0.5-quality content one) so the diagnostic
+        // can be reproduced from the inputs alone.
+        #expect(informed.evidenceCount == chapters.count)
+        // planConfidence is finite, in [0,1], and clears the default
+        // floor by a sensible margin — assert the documented formula
+        // numerically rather than the >= floor alone, otherwise a
+        // regression that drifted the formula by 10% could still pass.
+        #expect(abs(informed.planConfidence - (498.0 / 740.0)) < 1e-9)
+        #expect(informed.planConfidence > CoveragePlanner.defaultMinPlanConfidence)
+    }
+
+    @Test("chapter-informed: replacementFraction == 0.0 propagates verbatim onto the selection")
+    func testChapterInformedReplacementFractionZero() throws {
+        // Bead-15 boundary: 0.0 means "no replacement" — the audit
+        // window narrower (later bead) will multiply slot count by
+        // this and produce zero replaced slots. The PLANNER's only
+        // job is to faithfully propagate the configured value.
+        let planner = CoveragePlanner(replacementFraction: 0.0)
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: [adChapter(start: 60, end: 180, quality: 0.9)]
+        ))
+        let informed = try #require(plan.chapterInformedAudit)
+        #expect(informed.replacementFraction == 0.0)
+        // The planner must NOT short-circuit when the fraction is 0 —
+        // emitting the selection (and the diagnostic) is still useful
+        // signal even if the consumer ultimately allocates zero
+        // chapter-informed slots.
+        #expect(!informed.includes.isEmpty)
+    }
+
+    @Test("chapter-informed: replacementFraction == 1.0 propagates verbatim onto the selection")
+    func testChapterInformedReplacementFractionOne() throws {
+        // Bead-15 boundary: 1.0 means "all slots may be replaced" —
+        // identical propagation contract as 0.0; just on the other
+        // end of the clamp range.
+        let planner = CoveragePlanner(replacementFraction: 1.0)
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: [adChapter(start: 60, end: 180, quality: 0.9)]
+        ))
+        let informed = try #require(plan.chapterInformedAudit)
+        #expect(informed.replacementFraction == 1.0)
+    }
+
+    @Test("chapter-informed: planConfidence == minPlanConfidence is on the inclusive side of the gate (>= semantics)")
+    func testChapterInformedPlanConfidenceBoundaryInclusive() throws {
+        // The planner gates the chapter-informed path on
+        //   `planConfidence >= minPlanConfidence`.
+        // Pin the boundary: with `minPlanConfidence = 0.5` and a single
+        // ad chapter at qualityScore 0.5, computePlanConfidence returns
+        // exactly 0.5 (single chapter ⇒ weighted average = quality).
+        // The chapter clears the 0.4 strict-> include floor (0.5 > 0.4),
+        // so it survives filtering. The boundary case `0.5 >= 0.5` MUST
+        // produce `.informed`, not `.skipped(lowPlanConfidence)`.
+        let planner = CoveragePlanner(minPlanConfidence: 0.5)
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: [adChapter(start: 60, end: 180, quality: 0.5)]
+        ))
+        let informed = try #require(
+            plan.chapterInformedAudit,
+            "planConfidence == minPlanConfidence must use the plan (>= semantics)"
+        )
+        #expect(informed.planConfidence == 0.5)
+    }
+
+    @Test("chapter-informed: planConfidence just below minPlanConfidence falls back to random")
+    func testChapterInformedPlanConfidenceJustBelowFloor() {
+        // Companion to the boundary test: the same planner config with
+        // a chapter whose quality is BELOW the floor must produce
+        // `.skipped(lowPlanConfidence)`. Quality 0.45 still clears the
+        // 0.4 strict-> include filter (so the gate is reached on
+        // confidence, not on the include filter), but planConfidence
+        // 0.45 fails the `0.45 >= 0.5` floor.
+        let planner = CoveragePlanner(minPlanConfidence: 0.5)
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: [adChapter(start: 60, end: 180, quality: 0.45)]
+        ))
+        #expect(plan.chapterInformedAudit == nil)
+        switch plan.chapterAuditDiagnostic {
+        case .skipped(let reason, let count):
+            #expect(reason == .lowPlanConfidence)
+            #expect(count == 1)
+        default:
+            Issue.record("Expected .skipped(lowPlanConfidence), got \(String(describing: plan.chapterAuditDiagnostic))")
+        }
+    }
+
+    @Test("chapter-informed: every ChapterSource (id3/pc20/rssInline/inferred) yields identical selection output")
+    func testChapterInformedSourceAgnosticAllSources() throws {
+        // Bead-15 source-agnostic parity, extended from au2v.1.14's
+        // pc20-vs-inferred coverage to ALL four `ChapterSource` cases.
+        // The planner must NOT branch on source — `qualityScore` is
+        // the only trust signal.
+        let planner = CoveragePlanner()
+        let plans = ChapterSource.allCases.map { source in
+            planner.plan(for: matureStableContext(
+                chapterSignalMode: .enabled,
+                chapterEvidence: [adChapter(start: 60, end: 120, quality: 0.9, source: source)]
+            ))
+        }
+        // Every source must yield a populated selection, and every
+        // selection must equal the first one. Comparing all-vs-first
+        // surfaces both "source X regresses" and "the test fixture
+        // accidentally lined up". `ChapterSource.allCases` is the
+        // belt-and-suspenders against a future case being added
+        // without touching this test.
+        #expect(ChapterSource.allCases.count >= 4,
+                "Expected at least the four documented sources (id3/pc20/rssInline/inferred)")
+        let first = try #require(plans.first?.chapterInformedAudit)
+        for plan in plans {
+            let informed = try #require(plan.chapterInformedAudit)
+            #expect(informed == first)
+            #expect(plan.chapterAuditDiagnostic == plans[0].chapterAuditDiagnostic)
+        }
+    }
+
+    @Test("chapter-informed: empty `[]` chapter evidence is treated as no-evidence (distinct from nil)")
+    func testChapterInformedEmptyArrayEvidence() {
+        // `nil` chapterEvidence is covered by
+        // `testChapterInformedNoEvidenceFallback`; this sibling test
+        // pins the empty-array path, which threads through the same
+        // `noChapterEvidence` skip reason but via a different code
+        // line (`!chapters.isEmpty` rather than `let chapters = …`).
+        let planner = CoveragePlanner()
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: []
+        ))
+        #expect(plan.chapterInformedAudit == nil)
+        switch plan.chapterAuditDiagnostic {
+        case .skipped(let reason, let count):
+            #expect(reason == .noChapterEvidence)
+            #expect(count == 0)
+        default:
+            Issue.record("Expected .skipped(noChapterEvidence, 0), got \(String(describing: plan.chapterAuditDiagnostic))")
+        }
+    }
+
+    @Test("chapter-informed: planner does NOT consult episode duration — sparse coverage is honoured verbatim")
+    func testChapterInformedSparseCoverageBehavior() throws {
+        // The bead-15 spec asks us to PIN behaviour for chapter
+        // evidence that covers <50% of the episode duration. Today's
+        // production CoveragePlanner has no episode-duration input
+        // (`CoveragePlannerContext` does not carry one), so it
+        // CANNOT compute coverage at all. Behaviour is: it processes
+        // whatever chapters it receives, wherever they fall on the
+        // timeline. This test pins that contract so a future
+        // duration-aware refactor must update both production code
+        // and this assertion in lockstep.
+        //
+        // Concretely: a single 60-second ad chapter at the start of
+        // an episode "covers" a tiny fraction of, say, an hour-long
+        // episode. The planner still produces the chapter-informed
+        // selection — it does not gate on coverage.
+        let planner = CoveragePlanner()
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: [adChapter(start: 0, end: 60, quality: 0.9)]
+        ))
+        let informed = try #require(
+            plan.chapterInformedAudit,
+            "Sparse coverage must NOT cause the planner to fall back; episode duration is not an input"
+        )
+        #expect(informed.includes.count == 1)
+        #expect(informed.includes.first?.endTime == 60)
+        // Defensive: the planner does not synthesise a fictional
+        // "uncovered region" exclude. Excludes are derived only from
+        // high-quality content-disposition chapters, of which there
+        // are none here.
+        #expect(informed.excludes.isEmpty)
+    }
 }
