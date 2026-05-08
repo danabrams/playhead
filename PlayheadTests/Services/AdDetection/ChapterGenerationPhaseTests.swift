@@ -1,8 +1,13 @@
 // ChapterGenerationPhaseTests.swift
 // playhead-au2v.1.10: Tests for the ChapterGenerationPhase shell.
+// playhead-au2v.1.11: Creator-chapter precedence skip coverage added.
 //
 // The shell is exercised entirely through deterministic test doubles:
 //  * `MockAdmission` — canned admit/deny decisions.
+//  * `MockCreatorChapterProvider` — canned creator-chapter set
+//    returned for the precedence-skip check (au2v.1.11). Default
+//    returns `[]` so the existing 14 happy-path / failure-path tests
+//    continue to flow into boundary detection and labeling.
 //  * `MockBoundaryDetector` — canned candidate list (or thrown error).
 //  * `MockLabeler` — canned per-candidate label (or thrown error).
 //  * `MockTranscriptHashProvider` — sequence of hash values; supports
@@ -35,6 +40,19 @@ struct ChapterGenerationPhaseTests {
     private struct MockAdmission: ChapterPhaseAdmissionPolicy {
         let decision: ChapterPhaseAdmissionDecision
         func decide() async -> ChapterPhaseAdmissionDecision { decision }
+    }
+
+    /// Returns a canned creator-chapter set on every call. The default
+    /// initialiser yields `[]` (no creator chapters) so the
+    /// precedence-skip path is dormant unless a test opts in.
+    private struct MockCreatorChapterProvider: CreatorChapterProviding {
+        let chapters: [ChapterEvidence]
+        init(chapters: [ChapterEvidence] = []) {
+            self.chapters = chapters
+        }
+        func creatorChapters(episodeId: String) async -> [ChapterEvidence] {
+            chapters
+        }
     }
 
     private struct MockBoundaryDetector: ChapterBoundaryDetecting {
@@ -163,6 +181,7 @@ struct ChapterGenerationPhaseTests {
 
     private static func makePhase(
         admission: ChapterPhaseAdmissionDecision = .admit,
+        creatorChapters: [ChapterEvidence] = [],
         candidates: [ChapterBoundaryCandidate] = [
             ChapterBoundaryCandidate(startTime: 0, endTime: 60),
             ChapterBoundaryCandidate(startTime: 60, endTime: 120),
@@ -178,6 +197,9 @@ struct ChapterGenerationPhaseTests {
         let labeler = MockLabeler(behavior: labelerBehavior)
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: admission),
+            creatorChapterProvider: MockCreatorChapterProvider(
+                chapters: creatorChapters
+            ),
             boundaryDetector: MockBoundaryDetector(candidates: candidates),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(transcriptHashes),
@@ -186,6 +208,26 @@ struct ChapterGenerationPhaseTests {
             clock: clock
         )
         return (phase, labeler)
+    }
+
+    /// Builds a `ChapterEvidence` with a fixed disposition / quality so
+    /// creator-chapter scenario tests stay readable. Time bounds are
+    /// inferred from the index (each chapter is 60 s, abutting).
+    private static func creatorChapter(
+        index: Int,
+        source: ChapterSource,
+        title: String? = "Topic",
+        disposition: ChapterDisposition = .content,
+        qualityScore: Float = 0.7
+    ) -> ChapterEvidence {
+        ChapterEvidence(
+            startTime: TimeInterval(index) * 60,
+            endTime: TimeInterval(index + 1) * 60,
+            title: title,
+            source: source,
+            disposition: disposition,
+            qualityScore: qualityScore
+        )
     }
 
     // MARK: - Mode gate
@@ -309,6 +351,7 @@ struct ChapterGenerationPhaseTests {
         ))
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(error: DetectorError()),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A"]),
@@ -468,6 +511,7 @@ struct ChapterGenerationPhaseTests {
         ))
         let phase = ChapterGenerationPhase(
             admissionPolicy: MockAdmission(decision: .admit),
+            creatorChapterProvider: MockCreatorChapterProvider(),
             boundaryDetector: MockBoundaryDetector(error: CancellationError()),
             labeler: labeler,
             transcriptHashProvider: MockTranscriptHashProvider(["hash-A"]),
@@ -662,4 +706,470 @@ struct ChapterGenerationPhaseTests {
         #expect(events.first?.episodeIdHash != rawEpisodeId)
         #expect(events.first?.episodeIdHash.count == 64) // 32-byte hex
     }
+
+    // MARK: - Creator-chapter precedence (au2v.1.11)
+
+    /// Helper that asserts the supplied event payload is a
+    /// `skippedCreatorChapters` payload and runs the closure against
+    /// it. Avoids re-pattern-matching the same enum at every test site.
+    private func skippedCreatorPayload(
+        _ event: ChapterPhaseEvent?
+    ) -> ChapterPhasePayload.SkippedCreatorChapters? {
+        guard let event,
+              case let .skippedCreatorChapters(p) = event.payload
+        else { return nil }
+        return p
+    }
+
+    @Test("creator chapters from .id3 → skip FM, single skipped_creator_chapters event, no .started, no cache write")
+    func creatorChaptersId3Skip() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [
+                Self.creatorChapter(index: 0, source: .id3),
+                Self.creatorChapter(index: 1, source: .id3),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        #expect(outcome == .skippedCreatorChapters(creatorChapterCount: 2))
+        let events = await sink.snapshot()
+        // Bead spec: diagnostic emitted exactly once; no `.started`
+        // (phase never truly began — same shape as admission deny).
+        #expect(events.count == 1)
+        #expect(events.first?.eventType == .skippedCreatorChapters)
+        let payload = skippedCreatorPayload(events.first)
+        #expect(payload?.creatorChapterCount == 2)
+        #expect(payload?.creatorChapterSources == ["id3"])
+        // FM cost was NOT incurred.
+        #expect(await labeler.invocationCount == 0)
+        // No plan was written under the entry transcript hash.
+        let stored = await cache.get(contentHash: "hash-A")
+        #expect(stored == nil)
+    }
+
+    @Test("creator chapters from .pc20 → skip FM, sources reports pc20")
+    func creatorChaptersPC20Skip() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [
+                Self.creatorChapter(index: 0, source: .pc20),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        #expect(outcome == .skippedCreatorChapters(creatorChapterCount: 1))
+        let events = await sink.snapshot()
+        #expect(events.count == 1)
+        #expect(events.first?.eventType == .skippedCreatorChapters)
+        let payload = skippedCreatorPayload(events.first)
+        #expect(payload?.creatorChapterCount == 1)
+        #expect(payload?.creatorChapterSources == ["pc20"])
+        #expect(await labeler.invocationCount == 0)
+    }
+
+    @Test("creator chapters from .rssInline → skip FM, sources reports rss_inline (snake_case)")
+    func creatorChaptersRSSInlineSkip() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [
+                Self.creatorChapter(index: 0, source: .rssInline),
+                Self.creatorChapter(index: 1, source: .rssInline),
+                Self.creatorChapter(index: 2, source: .rssInline),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        #expect(outcome == .skippedCreatorChapters(creatorChapterCount: 3))
+        let events = await sink.snapshot()
+        #expect(events.count == 1)
+        let payload = skippedCreatorPayload(events.first)
+        #expect(payload?.creatorChapterCount == 3)
+        // .rssInline (camelCase enum raw) maps to "rss_inline" wire form.
+        #expect(payload?.creatorChapterSources == ["rss_inline"])
+        #expect(await labeler.invocationCount == 0)
+    }
+
+    @Test("creator chapters from mixed sources (id3 + pc20) → skip FM, sources array deduped + sorted")
+    func creatorChaptersMixedSourcesSkip() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [
+                // Order intentionally non-alphabetical to exercise the
+                // sort step. Two pc20s + one id3 also exercises dedup.
+                Self.creatorChapter(index: 0, source: .pc20),
+                Self.creatorChapter(index: 1, source: .id3),
+                Self.creatorChapter(index: 2, source: .pc20),
+                Self.creatorChapter(index: 3, source: .rssInline),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        #expect(outcome == .skippedCreatorChapters(creatorChapterCount: 4))
+        let events = await sink.snapshot()
+        #expect(events.count == 1)
+        let payload = skippedCreatorPayload(events.first)
+        // Each chapter counted once; sources deduped, sorted.
+        #expect(payload?.creatorChapterCount == 4)
+        #expect(payload?.creatorChapterSources == ["id3", "pc20", "rss_inline"])
+        #expect(await labeler.invocationCount == 0)
+    }
+
+    @Test("creator chapters all .content disposition (no ads) → STILL skip FM (trust creator's implicit signal)")
+    func creatorChaptersAllContentDispositionStillSkips() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [
+                Self.creatorChapter(
+                    index: 0, source: .pc20,
+                    title: "Interview part 1",
+                    disposition: .content,
+                    qualityScore: 0.8
+                ),
+                Self.creatorChapter(
+                    index: 1, source: .pc20,
+                    title: "Interview part 2",
+                    disposition: .content,
+                    qualityScore: 0.8
+                ),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        #expect(outcome == .skippedCreatorChapters(creatorChapterCount: 2))
+        #expect(await labeler.invocationCount == 0)
+    }
+
+    @Test("creator chapters with low quality (qualityScore < 0.5) → STILL skip FM (policy: even low-quality beats inference)")
+    func creatorChaptersLowQualityStillSkips() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [
+                Self.creatorChapter(
+                    index: 0, source: .id3,
+                    title: nil, // untitled → low quality
+                    disposition: .ambiguous,
+                    qualityScore: 0.05
+                ),
+                Self.creatorChapter(
+                    index: 1, source: .id3,
+                    title: nil,
+                    disposition: .ambiguous,
+                    qualityScore: 0.45
+                ),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        #expect(outcome == .skippedCreatorChapters(creatorChapterCount: 2))
+        let events = await sink.snapshot()
+        let payload = skippedCreatorPayload(events.first)
+        // Both scores are below 0.5; min/max/avg reflect the raw set.
+        // Compare with a tolerance because qualityScore is a `Float`
+        // widened to `Double` in the payload — the mantissa expands
+        // and an exact `==` would be brittle.
+        #expect(closeEnough(payload?.creatorQualityScoreMin, 0.05))
+        #expect(closeEnough(payload?.creatorQualityScoreMax, 0.45))
+        #expect(closeEnough(payload?.creatorQualityScoreAvg, 0.25))
+        #expect(await labeler.invocationCount == 0)
+    }
+
+    @Test("creator chapters with PARTIAL coverage (only first half) → STILL skip FM (mixed creator+inferred is a follow-up bead)")
+    func creatorChaptersPartialCoverageStillSkips() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        // Two creator chapters covering only minutes 0-2 of a (let's
+        // imagine) 60-minute episode. The phase doesn't compute
+        // coverage today; the policy is "any creator chapter wins".
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [
+                Self.creatorChapter(index: 0, source: .pc20),
+                Self.creatorChapter(index: 1, source: .pc20),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        #expect(outcome == .skippedCreatorChapters(creatorChapterCount: 2))
+        #expect(await labeler.invocationCount == 0)
+    }
+
+    @Test("0 creator chapters but provider ran → phase proceeds normally (no override)")
+    func zeroCreatorChaptersDoesNotOverride() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [], // explicit
+            transcriptHashes: ["hash-A", "hash-A"],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        // Reaches the happy path: started + completed, FM invoked.
+        if case .cached = outcome {
+            // ok
+        } else {
+            Issue.record("Expected .cached outcome with no creator chapters, got \(outcome)")
+        }
+        #expect(await labeler.invocationCount == 2)
+        let events = await sink.snapshot()
+        #expect(events.count == 2)
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .completed)
+    }
+
+    @Test(".inferred chapters returned by provider are NOT a creator source → phase proceeds to FM")
+    func inferredChaptersDoNotTriggerSkip() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [
+                Self.creatorChapter(
+                    index: 0, source: .inferred,
+                    title: "Inferred topic",
+                    qualityScore: 0.9
+                ),
+                Self.creatorChapter(
+                    index: 1, source: .inferred,
+                    title: "Inferred topic 2",
+                    qualityScore: 0.9
+                ),
+            ],
+            transcriptHashes: ["hash-A", "hash-A"],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        // .inferred is filtered out → phase reaches happy path.
+        if case .cached = outcome {
+            // ok
+        } else {
+            Issue.record("Expected .cached when only inferred chapters present, got \(outcome)")
+        }
+        #expect(await labeler.invocationCount == 2)
+        let events = await sink.snapshot()
+        #expect(events.first?.eventType == .started)
+        #expect(events.last?.eventType == .completed)
+        // No `skippedCreatorChapters` event should appear at all.
+        #expect(!events.contains { $0.eventType == .skippedCreatorChapters })
+    }
+
+    @Test("provider mixes .inferred + creator chapters → skip triggers, only creator sources counted/listed")
+    func mixedInferredAndCreatorOnlyCountsCreator() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [
+                Self.creatorChapter(
+                    index: 0, source: .inferred,
+                    qualityScore: 0.9
+                ),
+                Self.creatorChapter(
+                    index: 1, source: .id3,
+                    qualityScore: 0.6
+                ),
+                Self.creatorChapter(
+                    index: 2, source: .inferred,
+                    qualityScore: 0.9
+                ),
+                Self.creatorChapter(
+                    index: 3, source: .pc20,
+                    qualityScore: 0.8
+                ),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        // Only the 2 creator-source chapters count; .inferred ignored.
+        #expect(outcome == .skippedCreatorChapters(creatorChapterCount: 2))
+        let events = await sink.snapshot()
+        #expect(events.count == 1)
+        let payload = skippedCreatorPayload(events.first)
+        #expect(payload?.creatorChapterCount == 2)
+        #expect(payload?.creatorChapterSources == ["id3", "pc20"])
+        // Quality stats span ONLY the creator chapters (0.6, 0.8) —
+        // the 0.9 inferred values must not bleed into min/max/avg.
+        // Float→Double widening introduces small drift; tolerate it.
+        #expect(closeEnough(payload?.creatorQualityScoreMin, 0.6))
+        #expect(closeEnough(payload?.creatorQualityScoreMax, 0.8))
+        #expect(closeEnough(payload?.creatorQualityScoreAvg, 0.7))
+        #expect(await labeler.invocationCount == 0)
+    }
+
+    @Test("admission denied takes precedence over creator-chapter skip (admission check runs first)")
+    func admissionDenyTakesPrecedenceOverCreatorChapterSkip() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            admission: .deny(reason: "thermal_pressure"),
+            creatorChapters: [
+                Self.creatorChapter(index: 0, source: .id3),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        // Admission deny wins; the creator-chapter skip never gets a
+        // chance to query the provider.
+        #expect(outcome == .admissionDenied(reason: "thermal_pressure"))
+        let events = await sink.snapshot()
+        #expect(events.count == 1)
+        #expect(events.first?.eventType == .skippedAdmission)
+        // No skipped_creator_chapters event must appear when admission denied.
+        #expect(!events.contains { $0.eventType == .skippedCreatorChapters })
+        #expect(await labeler.invocationCount == 0)
+    }
+
+    @Test("mode == .off takes precedence over creator-chapter skip (no diagnostic at all)")
+    func modeOffTakesPrecedenceOverCreatorChapterSkip() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, labeler) = Self.makePhase(
+            creatorChapters: [
+                Self.creatorChapter(index: 0, source: .id3),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let outcome = await phase.run(
+            mode: .off,
+            episodeId: "ep-1",
+            installID: UUID()
+        )
+
+        #expect(outcome == .modeOff)
+        let events = await sink.snapshot()
+        #expect(events.isEmpty, "mode .off must emit zero diagnostics even with creator chapters present")
+        #expect(await labeler.invocationCount == 0)
+    }
+
+    @Test("creator-chapter skip emits hashed episode id (PII parity with other phase events)")
+    func creatorChapterSkipHashesEpisodeId() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let clock = MockClock()
+        let (phase, _) = Self.makePhase(
+            creatorChapters: [
+                Self.creatorChapter(index: 0, source: .pc20),
+            ],
+            cache: cache, sink: sink, clock: clock.now
+        )
+
+        let installID = UUID()
+        let rawEpisodeId = "raw-episode-id-with-PII-prefix"
+        _ = await phase.run(
+            mode: .enabled,
+            episodeId: rawEpisodeId,
+            installID: installID
+        )
+
+        let events = await sink.snapshot()
+        #expect(events.count == 1)
+        #expect(events.first?.eventType == .skippedCreatorChapters)
+        let expectedHash = EpisodeIdHasher.hash(
+            installID: installID,
+            episodeId: rawEpisodeId
+        )
+        #expect(events.first?.episodeIdHash == expectedHash)
+        #expect(events.first?.episodeIdHash.count == 64)
+        #expect(events.first?.episodeIdHash != rawEpisodeId)
+    }
+}
+
+// MARK: - Numerical helpers (test-only)
+
+/// Approximate equality for `Double?` fixtures that originate as a
+/// `Float` (`ChapterEvidence.qualityScore`) and are widened to
+/// `Double` for the diagnostic payload. The widening introduces
+/// round-trip drift in the last bits of the mantissa, so the tests
+/// allow up to `tolerance` deviation. Default tolerance (`1e-5`) is
+/// looser than `Float.ulpOfOne` (≈ `1.2e-7`) but tighter than any
+/// rounding any test fixture above could legitimately produce.
+private func closeEnough(
+    _ value: Double?,
+    _ expected: Double,
+    tolerance: Double = 1e-5
+) -> Bool {
+    guard let value else { return false }
+    return abs(value - expected) <= tolerance
 }

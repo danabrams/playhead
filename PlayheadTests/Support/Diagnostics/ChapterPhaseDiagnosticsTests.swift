@@ -91,7 +91,11 @@ struct ChapterPhaseDiagnosticsTests {
             .skippedCreatorChapters(
                 installID: Self.installID, episodeId: Self.rawEpisodeId,
                 timestamp: Self.timestamp,
-                chapterSource: "id3", chapterCount: 7
+                creatorChapterCount: 7,
+                creatorChapterSources: ["id3"],
+                creatorQualityScoreMin: 0.5,
+                creatorQualityScoreMax: 0.95,
+                creatorQualityScoreAvg: 0.75
             ),
             .skippedAdmission(
                 installID: Self.installID, episodeId: Self.rawEpisodeId,
@@ -205,11 +209,15 @@ struct ChapterPhaseDiagnosticsTests {
         let event = ChapterPhaseEvent.skippedCreatorChapters(
             installID: Self.installID, episodeId: Self.rawEpisodeId,
             timestamp: Self.timestamp,
-            chapterSource: "id3", chapterCount: 7
+            creatorChapterCount: 7,
+            creatorChapterSources: ["id3", "pc20"],
+            creatorQualityScoreMin: 0.5,
+            creatorQualityScoreMax: 0.95,
+            creatorQualityScoreAvg: 0.75
         )
         let str = try #require(String(data: try encode(event), encoding: .utf8))
         let expected = """
-        {"episode_id_hash":"\(Self.expectedEpisodeIdHash)","event_type":"chapter_phase_skipped_creator_chapters","payload":{"skipped_creator_chapters":{"chapter_count":7,"chapter_source":"id3"}},"timestamp":1700000500}
+        {"episode_id_hash":"\(Self.expectedEpisodeIdHash)","event_type":"chapter_phase_skipped_creator_chapters","payload":{"skipped_creator_chapters":{"creator_chapter_count":7,"creator_chapter_sources":["id3","pc20"],"creator_quality_score_avg":0.75,"creator_quality_score_max":0.95,"creator_quality_score_min":0.5}},"timestamp":1700000500}
         """
         #expect(str == expected)
         #expect(try decode(ChapterPhaseEvent.self, from: encode(event)) == event)
@@ -443,7 +451,11 @@ struct ChapterPhaseDiagnosticsTests {
             .skippedCreatorChapters(
                 installID: Self.installID, episodeId: pollutedEpisodeId,
                 timestamp: Self.timestamp,
-                chapterSource: "pc20", chapterCount: 5
+                creatorChapterCount: 5,
+                creatorChapterSources: ["pc20"],
+                creatorQualityScoreMin: 0.4,
+                creatorQualityScoreMax: 0.85,
+                creatorQualityScoreAvg: 0.6
             ),
             .skippedAdmission(
                 installID: Self.installID, episodeId: pollutedEpisodeId,
@@ -701,7 +713,11 @@ struct ChapterPhaseDiagnosticsTests {
                 return .skippedCreatorChapters(
                     installID: Self.installID, episodeId: Self.rawEpisodeId,
                     timestamp: Self.timestamp,
-                    chapterSource: "rss_inline", chapterCount: 1
+                    creatorChapterCount: 1,
+                    creatorChapterSources: ["rss_inline"],
+                    creatorQualityScoreMin: 0.7,
+                    creatorQualityScoreMax: 0.7,
+                    creatorQualityScoreAvg: 0.7
                 )
             case .skippedAdmission:
                 return .skippedAdmission(

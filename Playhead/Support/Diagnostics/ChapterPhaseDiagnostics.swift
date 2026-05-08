@@ -169,15 +169,38 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
     }
 
     /// Skipped because the episode already has creator-supplied chapters.
+    ///
+    /// Multiple creator sources (`id3` AND `pc20` for the same episode, etc.)
+    /// are reported as a deduplicated, sorted array in `creatorChapterSources`
+    /// so a downstream analyst can ask "which sources contributed?" without
+    /// double-counting chapters. Quality stats span the full creator
+    /// chapter set (across all sources) and are clamped to `[0, 1]` to
+    /// match `ChapterQualityScorer.score(...)`'s domain.
     struct SkippedCreatorChapters: Sendable, Hashable, Equatable, Codable {
-        /// Snake_case `ChapterSource` raw value: `id3`, `pc20`, `rss_inline`.
-        let chapterSource: String
-        /// How many creator chapters were already present.
-        let chapterCount: Int
+        /// Total creator chapters seen for this episode (sum across sources).
+        let creatorChapterCount: Int
+        /// Snake_case `ChapterSource` raw values that contributed at least
+        /// one chapter, deduplicated and sorted alphabetically so the wire
+        /// shape is deterministic across runs (`["id3", "pc20"]`).
+        /// Permitted values: `id3`, `pc20`, `rss_inline`.
+        let creatorChapterSources: [String]
+        /// Minimum `qualityScore` across the creator chapter set, in [0, 1].
+        /// Captured even when below `0.5` — bead spec is explicit that
+        /// low-quality creator chapters still beat statistical inference;
+        /// the field exists so shadow-eval can revisit that policy.
+        let creatorQualityScoreMin: Double
+        /// Maximum `qualityScore` across the creator chapter set, in [0, 1].
+        let creatorQualityScoreMax: Double
+        /// Mean `qualityScore` across the creator chapter set, in [0, 1].
+        /// Always equals `min` when `creatorChapterCount == 1`.
+        let creatorQualityScoreAvg: Double
 
         enum CodingKeys: String, CodingKey {
-            case chapterSource = "chapter_source"
-            case chapterCount = "chapter_count"
+            case creatorChapterCount = "creator_chapter_count"
+            case creatorChapterSources = "creator_chapter_sources"
+            case creatorQualityScoreMin = "creator_quality_score_min"
+            case creatorQualityScoreMax = "creator_quality_score_max"
+            case creatorQualityScoreAvg = "creator_quality_score_avg"
         }
     }
 
@@ -561,12 +584,26 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
     }
 
     /// emitted by playhead-au2v.1.11 (creator-chapter short-circuit)
+    ///
+    /// `creatorChapterSources` MUST be a deduplicated, alphabetically-sorted
+    /// list of snake_case `ChapterSource` raw values (`id3`, `pc20`,
+    /// `rss_inline`). Callers should use
+    /// `ChapterPhaseEvent.snakeCaseSourceName(_:)` to produce the snake_case
+    /// representation rather than `ChapterSource.rawValue`, which is
+    /// camelCase for `.rssInline`.
+    ///
+    /// Quality-score arguments are summary statistics (min/max/avg) across
+    /// the creator chapter set, in `[0, 1]`. The phase shell computes them
+    /// before calling this factory.
     static func skippedCreatorChapters(
         installID: UUID,
         episodeId: String,
         timestamp: Double,
-        chapterSource: String,
-        chapterCount: Int
+        creatorChapterCount: Int,
+        creatorChapterSources: [String],
+        creatorQualityScoreMin: Double,
+        creatorQualityScoreMax: Double,
+        creatorQualityScoreAvg: Double
     ) -> ChapterPhaseEvent {
         ChapterPhaseEvent(
             timestamp: timestamp,
@@ -574,11 +611,37 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
             episodeIdHash: EpisodeIdHasher.hash(installID: installID, episodeId: episodeId),
             payload: .skippedCreatorChapters(
                 ChapterPhasePayload.SkippedCreatorChapters(
-                    chapterSource: chapterSource,
-                    chapterCount: chapterCount
+                    creatorChapterCount: creatorChapterCount,
+                    creatorChapterSources: creatorChapterSources,
+                    creatorQualityScoreMin: creatorQualityScoreMin,
+                    creatorQualityScoreMax: creatorQualityScoreMax,
+                    creatorQualityScoreAvg: creatorQualityScoreAvg
                 )
             )
         )
+    }
+
+    /// Maps a `ChapterSource` to the snake_case wire string used by the
+    /// `chapter_phase_skipped_creator_chapters` payload's
+    /// `creator_chapter_sources` array. `ChapterSource.rawValue` is
+    /// already snake_case for `.id3` and `.pc20` but uses camelCase for
+    /// `.rssInline` — this helper normalises that case (and gives us a
+    /// single switch to update if we add a new creator source).
+    ///
+    /// The `.inferred` case maps to `inferred` for completeness (so
+    /// callers don't crash on a forced-unwrap), but the chapter-phase
+    /// short-circuit only ever passes creator sources here.
+    static func snakeCaseSourceName(_ source: ChapterSource) -> String {
+        switch source {
+        case .id3:
+            return "id3"
+        case .pc20:
+            return "pc20"
+        case .rssInline:
+            return "rss_inline"
+        case .inferred:
+            return "inferred"
+        }
     }
 
     /// emitted by playhead-au2v.1.10 (admission-check short-circuit)
