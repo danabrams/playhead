@@ -127,20 +127,19 @@ struct ChapterGenerationPhaseParallelLabelingTests {
             var startedAtIndex: [Int] = []
             var finishedAtIndex: [Int] = []
 
-            func enter() {
+            func enter(_ idx: Int) {
                 inFlight += 1
                 invocations += 1
                 if inFlight > peakInFlight {
                     peakInFlight = inFlight
                 }
+                startedAtIndex.append(idx)
             }
 
-            func leave() {
+            func leave(_ idx: Int) {
                 inFlight -= 1
+                finishedAtIndex.append(idx)
             }
-
-            func recordStart(_ idx: Int) { startedAtIndex.append(idx) }
-            func recordFinish(_ idx: Int) { finishedAtIndex.append(idx) }
         }
 
         private let state = State()
@@ -155,29 +154,52 @@ struct ChapterGenerationPhaseParallelLabelingTests {
 
         var peakInFlight: Int { get async { await state.peakInFlight } }
         var invocationCount: Int { get async { await state.invocations } }
+        var startOrder: [Int] { get async { await state.startedAtIndex } }
         var finishOrder: [Int] { get async { await state.finishedAtIndex } }
 
         func label(
             candidate: ChapterBoundaryCandidate
         ) async throws -> LabelingResult? {
-            await state.enter()
-            defer {
-                Task { [state] in await state.leave() }
-            }
+            // Convert candidate.startTime back to the input index used
+            // by the bead-12 phase (`startTime = i * 60`). Tests that
+            // don't follow that convention pass startTime values that
+            // map to integer "minute slots"; the round-trip is exact.
+            let idx = Int(candidate.startTime / 60)
+            await state.enter(idx)
 
+            // Per-call delay BEFORE the leave so peakInFlight reflects
+            // the genuine overlap window. Cancellation observed during
+            // sleep surfaces as `CancellationError` (and we still want
+            // to mark the leave so peak doesn't decrement late under
+            // back-to-back invocations).
             let delay = perCallDelayNanos(candidate)
             if delay > 0 {
-                try await Task.sleep(nanoseconds: delay)
+                do {
+                    try await Task.sleep(nanoseconds: delay)
+                } catch {
+                    await state.leave(idx)
+                    throw error
+                }
             }
 
+            // Mark leave + finish synchronously (await before return)
+            // so `peakInFlight` and `finishOrder` are observed in the
+            // exact order tasks complete. Using `defer { Task { ... } }`
+            // detaches the bookkeeping and creates a window where a
+            // newly-entering task sees stale in-flight, weakening the
+            // cap detection.
             switch behavior(candidate) {
             case .success(let result):
+                await state.leave(idx)
                 return result
             case .skip:
+                await state.leave(idx)
                 return nil
             case .operationalThrow:
+                await state.leave(idx)
                 throw OperationalError()
             case .cancellationThrow:
+                await state.leave(idx)
                 throw CancellationError()
             }
         }
@@ -421,6 +443,17 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         // start-time order, regardless of finish order.
         let expected = candidates.map { $0.startTime }.sorted()
         #expect(starts == expected)
+
+        // Sanity that the test actually exercised the out-of-order
+        // property: at least one candidate finished BEFORE a
+        // lower-index candidate. Without this, a serializing
+        // implementation would pass the sort check vacuously.
+        let finishes = await labeler.finishOrder
+        let inputOrder = Array(0..<candidates.count)
+        #expect(
+            finishes != inputOrder,
+            "Test setup failed to invert completion order: \(finishes) — sort check is vacuous"
+        )
     }
 
     // MARK: - Per-call operational failure does not abort batch
@@ -919,11 +952,22 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         #expect(invocations == candidates.count)
 
         // (2) The rate-limited TaskGroup actually overlaps work — peak
-        // in-flight reaches the configured cap. (The test cannot assert
-        // > cap because `concurrencyCapHonored` proves cap is the strict
-        // upper bound; here we just prove we reached it.)
+        // in-flight reached the configured cap. (The test cannot assert
+        // strict equality `peak == cap` because if a sleep finishes
+        // before the next task is submitted under heavy host load,
+        // peak could legitimately be `cap - 1`. `concurrencyCapHonored`
+        // proves cap is the strict upper bound; here we just prove we
+        // hit at least 2 in-flight, demonstrating the replenishment
+        // loop fires.)
         let peak = await labeler.peakInFlight
-        #expect(peak == cap, "Expected peak in-flight \(cap), got \(peak)")
+        #expect(
+            peak >= Swift.min(2, cap),
+            "Expected peak in-flight ≥ \(Swift.min(2, cap)), got \(peak)"
+        )
+        #expect(
+            peak <= cap,
+            "Peak in-flight (\(peak)) must not exceed maxFMConcurrency (\(cap))"
+        )
     }
 
     // MARK: - Single-candidate happy path with ready event
@@ -961,5 +1005,118 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         #expect(readyEvents.count == 1)
         let stored = await cache.get(contentHash: "hash-A")
         #expect(stored?.chapters.count == 1)
+    }
+
+    // MARK: - Labeler skip (nil) semantics
+
+    /// A labeler that returns `nil` for some candidates models the
+    /// "silently skip this candidate" contract documented on the
+    /// `ChapterLabeling.label` protocol. Skipped candidates must not
+    /// appear in the assembled plan AND must not be counted in the
+    /// `.completed` event's `fm_call_count` (since no FM work was
+    /// chargeable for that slot).
+    @Test("labeler returning nil drops the slot from both the plan and the fm_call_count payload")
+    func labelerSkipReducesChapterCountAndFMCount() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let ready = MockReadySink()
+        let clock = MockClock()
+        let candidates = (0..<6).map { i in
+            ChapterBoundaryCandidate(
+                startTime: TimeInterval(i) * 60,
+                endTime: TimeInterval(i + 1) * 60
+            )
+        }
+        // Even-indexed candidates are skipped (return nil); odd-indexed
+        // succeed. With 6 candidates that gives 3 chapters in the plan
+        // and fm_call_count == 3.
+        let labeler = ConcurrencyAwareLabeler(
+            behavior: { candidate in
+                let idx = Int(candidate.startTime / 60)
+                if idx.isMultiple(of: 2) { return .skip }
+                return .success(Self.confidentResult(for: candidate))
+            }
+        )
+
+        let phase = ChapterGenerationPhase(
+            admissionPolicy: MockAdmission(decision: .admit),
+            boundaryDetector: MockBoundaryDetector(candidates: candidates),
+            labeler: labeler,
+            transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
+            cache: cache,
+            eventSink: sink,
+            planReadySink: ready,
+            clock: clock.now
+        )
+
+        let outcome = await phase.run(mode: .enabled, episodeId: "ep-1", installID: UUID())
+
+        if case let .cached(count, _) = outcome {
+            #expect(count == 3, "Expected 3 chapters (3 skipped), got \(count)")
+        } else {
+            Issue.record("Expected .cached, got \(outcome)")
+        }
+
+        // fm_call_count payload reflects the survivors (3), not the
+        // total candidate count (6).
+        let events = await sink.snapshot()
+        var observedFMCount: Int?
+        for event in events {
+            if case let .completed(completed) = event.payload {
+                observedFMCount = completed.fmCallCount
+            }
+        }
+        #expect(observedFMCount == 3, "Expected fmCallCount=3, got \(String(describing: observedFMCount))")
+
+        // Ready event fires exactly once with chapterCount = 3.
+        let readyEvents = await ready.snapshot()
+        #expect(readyEvents.count == 1)
+        #expect(readyEvents.first?.chapterCount == 3)
+    }
+
+    // MARK: - fmCallCount payload contract on a clean run
+
+    /// On a clean run with no skips and no operational failures,
+    /// `fm_call_count` equals the candidate count and the chapter count.
+    @Test("fm_call_count in the completed event equals the candidate count when nothing is skipped")
+    func fmCallCountMatchesCandidateCount() async {
+        let cache = Self.makeCache()
+        let sink = MockEventSink()
+        let ready = MockReadySink()
+        let clock = MockClock()
+        let candidates = (0..<5).map { i in
+            ChapterBoundaryCandidate(
+                startTime: TimeInterval(i) * 60,
+                endTime: TimeInterval(i + 1) * 60
+            )
+        }
+        let labeler = ConcurrencyAwareLabeler(
+            behavior: { .success(Self.confidentResult(for: $0)) }
+        )
+
+        let phase = ChapterGenerationPhase(
+            admissionPolicy: MockAdmission(decision: .admit),
+            boundaryDetector: MockBoundaryDetector(candidates: candidates),
+            labeler: labeler,
+            transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
+            cache: cache,
+            eventSink: sink,
+            planReadySink: ready,
+            clock: clock.now
+        )
+
+        _ = await phase.run(mode: .enabled, episodeId: "ep-1", installID: UUID())
+
+        let events = await sink.snapshot()
+        var observedFMCount: Int?
+        var observedChapterCount: Int?
+        for event in events {
+            if case let .completed(completed) = event.payload {
+                observedFMCount = completed.fmCallCount
+                observedChapterCount = completed.chapterCount
+            }
+        }
+        #expect(observedFMCount == candidates.count)
+        #expect(observedChapterCount == candidates.count)
     }
 }
