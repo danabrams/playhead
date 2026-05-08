@@ -586,10 +586,14 @@ struct AdDetectionServiceChapterPhaseWiringTests {
         )
 
         // Recompute what the diagnostic hash MUST be if the wire-up
-        // forwarded the injected UUID verbatim.
+        // forwarded the injected UUID verbatim. The wire-up resolves
+        // the analysisAssetId → AnalysisAsset.episodeId via the store
+        // before invoking the phase, so the hash is derived from the
+        // actual episodeId — which `makeAsset` sets to `"ep-\(id)"`.
+        let resolvedEpisodeId = "ep-\(assetId)"
         let expectedEpisodeHash = EpisodeIdHasher.hash(
             installID: testInstallID,
-            episodeId: assetId
+            episodeId: resolvedEpisodeId
         )
         let events = await factory.eventSink.snapshot()
         #expect(!events.isEmpty,
@@ -597,10 +601,26 @@ struct AdDetectionServiceChapterPhaseWiringTests {
         // EVERY event from this run must carry the same episodeIdHash
         // because the provider returned a stable UUID. If the wire-up
         // ignored the closure and made fresh UUIDs, hashes would differ
-        // (or differ from `expectedEpisodeHash`).
+        // (or differ from `expectedEpisodeHash`). And if the wire-up
+        // skipped the asset → episode resolution, the hash would
+        // collide with `EpisodeIdHasher.hash(..., episodeId: assetId)`
+        // — see resolvedEpisodeId construction above for the
+        // expected vs naive distinction.
         for event in events {
             #expect(event.episodeIdHash == expectedEpisodeHash,
-                    "event \(event.eventType) must carry the hash derived from the injected install UUID")
+                    "event \(event.eventType) must carry the hash derived from the injected install UUID + resolved episodeId")
         }
+
+        // Defense against silent regression: if the wire-up reverted to
+        // passing analysisAssetId verbatim as episodeId, the hash would
+        // equal this naive value instead. Asserting the two values
+        // differ pins that the asset-to-episode resolution is actually
+        // happening.
+        let naiveHashSkippingResolution = EpisodeIdHasher.hash(
+            installID: testInstallID,
+            episodeId: assetId
+        )
+        #expect(expectedEpisodeHash != naiveHashSkippingResolution,
+                "test invariant: resolved-episode hash must differ from naive-asset hash so the regression is detectable")
     }
 }

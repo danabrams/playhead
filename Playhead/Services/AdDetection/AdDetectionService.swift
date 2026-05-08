@@ -2649,11 +2649,44 @@ actor AdDetectionService {
         // wiring rebuilds the phase per call so the
         // `TranscriptHashProviding` it captures observes the
         // most-recently-published transcript hash.
+        //
+        // Resolve the actual episode identifier from the analysis asset.
+        // The phase API takes `episodeId: String` and uses it as (a) the
+        // key for `creatorChapterProvider.creatorChapters(episodeId:)`
+        // — production providers look up creator chapters by EPISODE,
+        // not by re-analysis ASSET — and (b) the privacy-locked input
+        // to `EpisodeIdHasher.hash(installID:episodeId:)`, which must
+        // hash the same episode across re-analysis attempts so dogfood
+        // diagnostics correlate events from the same listener session.
+        // Passing `analysisAssetId` here would break both: the provider
+        // would miss real chapters, and the hash would shift per
+        // re-analysis. Falls back to `analysisAssetId` only when the
+        // store lookup fails (deleted asset row, transient SQLite
+        // error) — better to emit a phase event keyed to the asset
+        // than to skip the phase entirely. The fallback is logged so
+        // dogfood bundles surface the lookup miss.
+        let resolvedEpisodeId: String
+        do {
+            if let asset = try await store.fetchAsset(id: analysisAssetId) {
+                resolvedEpisodeId = asset.episodeId
+            } else {
+                logger.notice(
+                    "chapterphase.backfill_wireup: asset row missing for asset=\(analysisAssetId, privacy: .public) — falling back to analysisAssetId as episodeId"
+                )
+                resolvedEpisodeId = analysisAssetId
+            }
+        } catch {
+            logger.error(
+                "chapterphase.backfill_wireup: asset lookup failed for asset=\(analysisAssetId, privacy: .public) — falling back to analysisAssetId as episodeId, error=\(String(describing: error), privacy: .public)"
+            )
+            resolvedEpisodeId = analysisAssetId
+        }
+
         let phase = factory()
         let installID = chapterPhaseInstallIDProvider()
         let outcome = await phase.run(
             mode: config.chapterSignalMode,
-            episodeId: analysisAssetId,
+            episodeId: resolvedEpisodeId,
             installID: installID
         )
 
