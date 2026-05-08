@@ -188,6 +188,18 @@ struct ChapterPlanTests {
         #expect(abs(confidence - 0.4) < 1e-6)
     }
 
+    @Test("NaN qualityScore is skipped without poisoning the aggregate")
+    func confidenceSkipsNaNQuality() {
+        // A single .nan input must not turn the whole aggregate into
+        // NaN. We skip it and weight the remaining valid chapters
+        // normally.
+        let bad = Self.makeChapter(start: 0, end: 60, quality: .nan)
+        let good = Self.makeChapter(start: 60, end: 120, quality: 0.5)
+        let confidence = ChapterPlan.computePlanConfidence([bad, good])
+        #expect(confidence.isFinite)
+        #expect(abs(confidence - 0.5) < 1e-6)
+    }
+
     @Test("computePlanConfidence clamps out-of-range qualityScore inputs")
     func confidenceClampsOutOfRange() {
         // Defensive: even if an upstream producer mis-emits a score

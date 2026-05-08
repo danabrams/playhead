@@ -144,6 +144,10 @@ struct ChapterPlan: Sendable, Codable, Equatable {
             let duration = effectiveDuration(of: chapter)
             guard duration > 0, duration.isFinite else { continue }
             let quality = Double(chapter.qualityScore)
+            // Skip non-finite quality (NaN/Inf) so a single corrupt
+            // input cannot poison the aggregate to NaN. The clamp
+            // below only handles finite out-of-range values.
+            guard quality.isFinite else { continue }
             weightedSum += quality * duration
             totalDuration += duration
         }
