@@ -2583,6 +2583,21 @@ actor AdDetectionService {
         analysisAssetId: String,
         transcriptVersion: String
     ) async {
+        // Cancellation pre-check. The call site re-checks
+        // `Task.checkCancellation()` after this helper returns, but if
+        // the parent task was already cancelled when we got here, we
+        // would otherwise still pay for the factory build, the cache
+        // get, and the phase entry just to have the phase observe
+        // cancellation and return `.preempted`. Bailing now skips that
+        // wasted work and matches the "honor cancellation early" pattern
+        // used elsewhere in `runBackfill`.
+        guard !Task.isCancelled else {
+            logger.debug(
+                "chapterphase.backfill_wireup: cancellation observed at entry for asset=\(analysisAssetId, privacy: .public) — skipping phase"
+            )
+            return
+        }
+
         // Empty transcript hash → nothing to cache against, nothing
         // for the phase to anchor on. Logged at `.debug` so dogfood
         // OS log searches can confirm the gate fired without polluting
@@ -2650,9 +2665,13 @@ actor AdDetectionService {
             // predicate (a bug in either the phase or in
             // `ChapterSignalMode.runsChapterGeneration`). The error log
             // gives a single greppable signal during dogfood without
-            // crashing.
+            // crashing release builds; in DEBUG we trip an
+            // `assertionFailure` so the desync is loud at test time.
             logger.error(
                 "chapterphase.backfill_wireup: unexpected modeOff outcome for asset=\(analysisAssetId, privacy: .public) — phase/gate desync"
+            )
+            assertionFailure(
+                "chapterphase.backfill_wireup: phase returned .modeOff while ChapterSignalMode.runsChapterGeneration was true — gate/phase desync"
             )
         case .admissionDenied(let reason):
             logger.notice(
@@ -2683,8 +2702,14 @@ actor AdDetectionService {
                 "chapterphase.backfill_wireup: op-rate exceeded for asset=\(analysisAssetId, privacy: .public) rate=\(rate, privacy: .public) threshold=\(threshold, privacy: .public)"
             )
         case .cached(let chapterCount, let planConfidence):
+            // Phase-level `.cached` is the SUCCESS terminal: the phase
+            // ran end-to-end, generated a plan, and persisted it via
+            // its internal cache write. Not to be confused with the
+            // service-level cache short-circuit above, which logs at
+            // `.debug` ("cache hit … skipping phase") because no phase
+            // run occurred.
             logger.info(
-                "chapterphase.backfill_wireup: cached plan for asset=\(analysisAssetId, privacy: .public) chapters=\(chapterCount, privacy: .public) confidence=\(planConfidence, privacy: .public)"
+                "chapterphase.backfill_wireup: plan generated and cached for asset=\(analysisAssetId, privacy: .public) chapters=\(chapterCount, privacy: .public) confidence=\(planConfidence, privacy: .public)"
             )
         }
     }

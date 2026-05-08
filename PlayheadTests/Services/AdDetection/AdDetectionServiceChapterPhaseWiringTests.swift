@@ -111,13 +111,16 @@ struct AdDetectionServiceChapterPhaseWiringTests {
     /// called when mode=.off". The factory closure itself constructs a
     /// real `ChapterGenerationPhase` — we are testing the wire-up, not
     /// the phase internals.
+    ///
+    /// The invocation counter is a synchronous `OSAllocatedUnfairLock`
+    /// rather than an actor + unstructured `Task { await }` so the
+    /// increment lands BEFORE `runBackfill` returns to the test (which
+    /// `await`s the phase factory in-line). That removes the need for a
+    /// `waitForInvocationsToSettle` poll — once the test's
+    /// `try await service.runBackfill(...)` returns, every factory call
+    /// the service made has already incremented the counter.
     private final class RecordingPhaseFactory: @unchecked Sendable {
-        private actor Counter {
-            var value = 0
-            func increment() { value += 1 }
-        }
-
-        private let counter = Counter()
+        private let invocationLock = OSAllocatedUnfairLock(initialState: 0)
         let cache: ChapterPlanCache
         let eventSink: RecordingEventSink
         let planReadySink: RecordingPlanReadySink
@@ -152,11 +155,12 @@ struct AdDetectionServiceChapterPhaseWiringTests {
             self.hashProvider = StickyHashProvider(hash: transcriptHash)
         }
 
-        var invocationCount: Int { get async { await counter.value } }
+        var invocationCount: Int { invocationLock.withLock { $0 } }
 
-        /// Build the @Sendable factory closure. Captures `self` weakly via
-        /// the actor counter and value-typed mocks so it remains
-        /// Sendable.
+        /// Build the @Sendable factory closure. Captures the lock and
+        /// value-typed mocks so it remains Sendable. The lock is
+        /// incremented synchronously inside the closure so the count is
+        /// observable as soon as the closure returns.
         func makeFactory() -> @Sendable () -> ChapterGenerationPhase {
             let cache = self.cache
             let eventSink = self.eventSink
@@ -166,9 +170,9 @@ struct AdDetectionServiceChapterPhaseWiringTests {
             let boundaryDetector = self.boundaryDetector
             let creatorProvider = self.creatorProvider
             let hashProvider = self.hashProvider
-            let counter = self.counter
+            let lock = self.invocationLock
             return {
-                Task { await counter.increment() }
+                lock.withLock { $0 += 1 }
                 return ChapterGenerationPhase(
                     admissionPolicy: admissionPolicy,
                     creatorChapterProvider: creatorProvider,
@@ -179,17 +183,6 @@ struct AdDetectionServiceChapterPhaseWiringTests {
                     eventSink: eventSink,
                     planReadySink: planReadySink
                 )
-            }
-        }
-
-        /// Wait briefly for any in-flight `Task { … increment() }` to
-        /// settle. The factory closure fires the increment via an
-        /// unstructured `Task` to avoid forcing the closure to be
-        /// `async`. The wait yields a few times so the increment lands
-        /// before the test reads `invocationCount`.
-        func waitForInvocationsToSettle() async {
-            for _ in 0..<10 {
-                await Task.yield()
             }
         }
     }
@@ -318,8 +311,7 @@ struct AdDetectionServiceChapterPhaseWiringTests {
             episodeDuration: 200.0
         )
 
-        await factory.waitForInvocationsToSettle()
-        #expect(await factory.invocationCount == 0,
+        #expect(factory.invocationCount == 0,
                 "mode=.off must short-circuit BEFORE any factory invocation")
         #expect(await factory.eventSink.snapshot().isEmpty,
                 "mode=.off must emit zero phase diagnostics")
@@ -357,8 +349,7 @@ struct AdDetectionServiceChapterPhaseWiringTests {
             episodeDuration: 200.0
         )
 
-        await factory.waitForInvocationsToSettle()
-        #expect(await factory.invocationCount == 1,
+        #expect(factory.invocationCount == 1,
                 "mode=.shadow must invoke the factory exactly once")
         let plan = await cache.get(contentHash: hash)
         #expect(plan != nil, "mode=.shadow must persist a plan")
@@ -401,8 +392,7 @@ struct AdDetectionServiceChapterPhaseWiringTests {
             episodeDuration: 200.0
         )
 
-        await factory.waitForInvocationsToSettle()
-        #expect(await factory.invocationCount == 1)
+        #expect(factory.invocationCount == 1)
         let plan = await cache.get(contentHash: hash)
         #expect(plan != nil)
         #expect(ChapterSignalMode.enabled.consumersReadChapterPlan == true,
@@ -499,11 +489,10 @@ struct AdDetectionServiceChapterPhaseWiringTests {
             episodeDuration: 200.0
         )
 
-        await factory.waitForInvocationsToSettle()
-        #expect(await factory.invocationCount == 0,
+        #expect(factory.invocationCount == 0,
                 "cache hit must short-circuit BEFORE the factory is called")
         #expect(await factory.labeler.invocationCount == 0,
-                "cache hit ⇒ zero FM cost")
+                "cache hit ⇒ zero FM cost (no labeler call)")
         // The pre-seeded plan must still be the cached plan (not
         // overwritten).
         let plan = await cache.get(contentHash: hash)
@@ -547,8 +536,71 @@ struct AdDetectionServiceChapterPhaseWiringTests {
             episodeDuration: 200.0
         )
 
-        await factory.waitForInvocationsToSettle()
-        #expect(await factory.invocationCount == 2,
+        #expect(factory.invocationCount == 2,
                 "no short-circuit cache ⇒ factory invoked on every backfill")
+    }
+
+    // MARK: - Install-ID provider plumbing
+
+    /// The wire-up takes a `chapterPhaseInstallIDProvider` closure that
+    /// production wiring uses to thread a stable per-install UUID into
+    /// `phase.run(installID:)`. Diagnostic events hash this UUID
+    /// together with the episodeId via `EpisodeIdHasher.hash(...)`. By
+    /// injecting a deterministic UUID here and recomputing the same
+    /// hash from the test, we prove the wire-up actually consults the
+    /// injected closure (rather than, e.g., silently constructing a
+    /// fresh UUID inline).
+    @Test("install-ID provider closure: injected UUID flows into emitted phase events")
+    func wireup_installIDProviderIsConsulted() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-au2v.1.13-installid"
+        try await store.insertAsset(Self.makeAsset(id: assetId))
+
+        let chunks = Self.makeChunks(assetId: assetId)
+        let hash = Self.transcriptVersionFor(
+            chunks: chunks, analysisAssetId: assetId
+        )
+        let cache = Self.makeCache()
+        let factory = RecordingPhaseFactory(
+            cache: cache, transcriptHash: hash
+        )
+
+        // Stable test install UUID. The provider closure returns this
+        // exact value every call, so the diagnostic hash is fully
+        // deterministic.
+        let testInstallID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+
+        let service = Self.makeService(
+            store: store,
+            chapterSignalMode: .enabled,
+            chapterPlanCache: cache,
+            chapterGenerationPhaseFactory: factory.makeFactory(),
+            installID: testInstallID
+        )
+
+        try await service.runBackfill(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            podcastId: "show-au2v.1.13",
+            episodeDuration: 200.0
+        )
+
+        // Recompute what the diagnostic hash MUST be if the wire-up
+        // forwarded the injected UUID verbatim.
+        let expectedEpisodeHash = EpisodeIdHasher.hash(
+            installID: testInstallID,
+            episodeId: assetId
+        )
+        let events = await factory.eventSink.snapshot()
+        #expect(!events.isEmpty,
+                "phase must have emitted at least one event in mode=.enabled with admit + candidates")
+        // EVERY event from this run must carry the same episodeIdHash
+        // because the provider returned a stable UUID. If the wire-up
+        // ignored the closure and made fresh UUIDs, hashes would differ
+        // (or differ from `expectedEpisodeHash`).
+        for event in events {
+            #expect(event.episodeIdHash == expectedEpisodeHash,
+                    "event \(event.eventType) must carry the hash derived from the injected install UUID")
+        }
     }
 }

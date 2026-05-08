@@ -557,6 +557,45 @@ struct ChapterGenerationPhaseIntegrationTests {
 
     // MARK: - Cancellation
 
+    /// Labeler that yields cooperatively until the parent task is
+    /// cancelled, then throws `CancellationError`. This pins a
+    /// deterministic synchronization point INSIDE the phase: the phase
+    /// is guaranteed to be mid-`labeler.label(...)` when the test
+    /// cancels the parent task, so cancellation reliably hits the
+    /// phase's `Task.isCancelled` rail.
+    ///
+    /// Implementation is a `Task.yield`-loop rather than a continuation
+    /// so we never get into "store-then-resume" races against the
+    /// cancellation handler — `Task.isCancelled` is sampled directly
+    /// each iteration, which Swift Concurrency guarantees observes the
+    /// cancellation flag deterministically after `Task.cancel()`.
+    private final class BlockingLabeler: ChapterLabeling, @unchecked Sendable {
+        private let entered = OSAllocatedUnfairLock(initialState: false)
+
+        /// True once the phase has entered `label(...)` at least once.
+        var hasEntered: Bool { entered.withLock { $0 } }
+
+        func label(
+            candidate: ChapterBoundaryCandidate
+        ) async throws -> LabelingResult? {
+            entered.withLock { $0 = true }
+            // Spin yielding until the parent task is cancelled. Bounded
+            // to ~5s of wall time as a safety net so a regression in
+            // cancellation propagation surfaces as a test failure, not
+            // a CI hang. With normal test execution the cancellation
+            // arrives within a handful of yields.
+            let deadline = Date().addingTimeInterval(5.0)
+            while !Task.isCancelled {
+                if Date() > deadline {
+                    Issue.record("BlockingLabeler timed out waiting for cancellation")
+                    return nil
+                }
+                await Task.yield()
+            }
+            throw CancellationError()
+        }
+    }
+
     @Test("parent task cancellation: runBackfill propagates cancellation; phase tears down cleanly")
     func integration_cancellationPropagates() async throws {
         let store = try await makeTestStore()
@@ -567,9 +606,33 @@ struct ChapterGenerationPhaseIntegrationTests {
             chunks: chunks, analysisAssetId: assetId
         )
         let cache = Self.makeCache()
-        let (factory, _, planReadySink) = Self.makeFactory(
-            cache: cache, hashBehavior: .sticky(hash)
-        )
+
+        // Custom factory using BlockingLabeler so the phase suspends
+        // mid-label until we cancel the parent task.
+        let blockingLabeler = BlockingLabeler()
+        let eventSink = RecordingEventSink()
+        let planReadySink = RecordingPlanReadySink()
+        let admissionPolicy = MockAdmission(decision: .admit)
+        let creatorProvider = MockCreatorChapterProvider(chapters: [])
+        let boundaryDetector = MockBoundaryDetector(candidates: [
+            ChapterBoundaryCandidate(startTime: 0, endTime: 60),
+            ChapterBoundaryCandidate(startTime: 60, endTime: 120)
+        ])
+        let hashProvider = ScriptedHashProvider(.sticky(hash))
+
+        let factory: @Sendable () -> ChapterGenerationPhase = {
+            ChapterGenerationPhase(
+                admissionPolicy: admissionPolicy,
+                creatorChapterProvider: creatorProvider,
+                boundaryDetector: boundaryDetector,
+                labeler: blockingLabeler,
+                transcriptHashProvider: hashProvider,
+                cache: cache,
+                eventSink: eventSink,
+                planReadySink: planReadySink
+            )
+        }
+
         let service = Self.makeService(
             store: store,
             chapterSignalMode: .enabled,
@@ -577,11 +640,6 @@ struct ChapterGenerationPhaseIntegrationTests {
             chapterGenerationPhaseFactory: factory
         )
 
-        // Wrap the backfill in a child Task so we can cancel before
-        // entering. With the cancellation already requested at entry,
-        // the phase's `Task.isCancelled` checks observe it and return
-        // `.preempted`; the post-phase `Task.checkCancellation()` in
-        // `runBackfill` then surfaces the cancellation to the caller.
         let task = Task { () -> Result<Void, Error> in
             do {
                 try await service.runBackfill(
@@ -595,31 +653,54 @@ struct ChapterGenerationPhaseIntegrationTests {
                 return .failure(error)
             }
         }
+
+        // Synchronize: wait until the phase has actually entered the
+        // labeler. After this point we know runBackfill has progressed
+        // PAST the chapter-phase wire-up's pre-checks and is suspended
+        // inside the phase. We poll a sync flag with `Task.yield()`
+        // rather than a continuation to avoid store/resume races
+        // against the cancellation handler. Bounded poll: a regression
+        // that prevents the phase from reaching the labeler surfaces
+        // here as a fail, not a hang.
+        let entryDeadline = Date().addingTimeInterval(5.0)
+        while !blockingLabeler.hasEntered {
+            if Date() > entryDeadline {
+                Issue.record("phase did not enter labeler within deadline")
+                task.cancel()
+                _ = await task.value
+                return
+            }
+            await Task.yield()
+        }
+
+        // Now cancel — guaranteed to land while the labeler is
+        // suspended, so the phase's cancellation rail is the path that
+        // unwinds.
         task.cancel()
         let outcome = await task.value
 
-        // Either of two acceptable outcomes:
-        //  (a) the cancellation arrived before any non-cancellable
-        //      work completed and the call threw `CancellationError`;
-        //  (b) the cancellation landed AFTER the phase finished but
-        //      the `try Task.checkCancellation()` post-phase still
-        //      caught it (so the call still threw).
-        // In either case the call must NOT have completed
-        // successfully — `runBackfill` is required to respect
-        // cancellation when the parent task asks for it.
+        // The cancellation MUST surface as an error from runBackfill.
+        // Without the post-phase `try Task.checkCancellation()`, the
+        // call would have returned `.success` after the phase emitted
+        // `.preempted` — so this assertion specifically pins that the
+        // wire-up forwards cancellation upward rather than swallowing
+        // it.
         switch outcome {
         case .success:
-            // It is possible (depending on scheduler) for the cancel
-            // to arrive AFTER `runBackfill` already finished. Accept
-            // success only if the plan is observable AND no ready
-            // event fired more than once.
-            let ready = await planReadySink.snapshot()
-            #expect(ready.count <= 1,
-                    "ready event must fire at most once across cancellation paths")
+            Issue.record("runBackfill must propagate cancellation; got success")
         case .failure(let err):
             #expect(err is CancellationError,
                     "expected CancellationError, got \(err)")
         }
+
+        // Plan must NOT have been written because the phase observed
+        // cancellation before its cache write.
+        let plan = await cache.get(contentHash: hash)
+        #expect(plan == nil,
+                "cancelled phase must not persist a plan")
+        let ready = await planReadySink.snapshot()
+        #expect(ready.isEmpty,
+                "cancellation must NOT fire a ready event")
     }
 
     // MARK: - Cache hit short-circuit (integration angle)
