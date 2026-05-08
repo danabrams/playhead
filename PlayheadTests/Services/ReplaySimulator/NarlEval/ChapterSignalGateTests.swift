@@ -208,6 +208,32 @@ struct ChapterSignalGateTests {
         #expect(outcome.fmCallsForChapterLabeling == 0)
     }
 
+    @Test("Creator-chapter precedence wins over stubChapterCount==0: an episode with creator chapters is classified as skipped, not as no-candidates")
+    func creatorChaptersWinOverZeroStubCount() {
+        // Pin the precedence ordering inside `runShadowOrEnabled`:
+        // even if the stub would have returned 0 (no-candidates), a
+        // trace with creator chapters must still be classified as
+        // `skippedByCreatorChapters`. A future refactor that flipped
+        // the order of these checks would mis-classify the trace as
+        // `phase ran, no plan` (with `perEpisodeOverheadMs` charged),
+        // silently breaking bead 19's bucket accounting.
+        let trace = Self.makeTrace(atomCount: 250)
+        let cfg = ChapterSignalGate.Config(
+            stubChapterCount: { _ in 0 },
+            creatorChaptersPresent: { _ in true }
+        )
+        let result = ChapterSignalGate.replay(trace: trace, mode: .shadow, config: cfg)
+        let outcome = result.perEpisodeOutcomes[0]
+        #expect(outcome.skippedByCreatorChapters,
+                "Creator-chapter precedence must short-circuit before the stub-count check.")
+        #expect(!outcome.planGenerated)
+        #expect(outcome.fmCallsForChapterLabeling == 0)
+        #expect(outcome.phaseLatencyMs == 0.0,
+                "Creator-chapter short-circuit must charge zero latency, not perEpisodeOverheadMs.")
+        #expect(result.skippedByCreatorChapters == 1)
+        #expect(result.planGeneratedCount == 0)
+    }
+
     @Test("Creator-chapter detector is per-trace, not global: only flagged traces short-circuit")
     func creatorChaptersAreScopedPerTrace() throws {
         let withCreator = Self.makeTrace(episodeId: "ep-creator", atomCount: 250)
@@ -645,6 +671,24 @@ struct ChapterSignalGateTests {
                 ".shadow perEpisodeOutcomes must preserve input trace order.")
         #expect(enabled.perEpisodeOutcomes.map(\.episodeId) == inputIds,
                 ".enabled perEpisodeOutcomes must preserve input trace order.")
+
+        // Per-outcome mode field must match the dictionary key. A bug
+        // that mis-stamped the mode on outcomes (e.g., reused a cached
+        // outcome from .shadow when filling .enabled) would corrupt
+        // bead 19's mode-attributed lift metrics in ways that wouldn't
+        // surface from the aggregate counters alone.
+        for outcome in off.perEpisodeOutcomes {
+            #expect(outcome.mode == .off,
+                    "results[.off] outcome carries mode=\(outcome.mode); expected .off.")
+        }
+        for outcome in shadow.perEpisodeOutcomes {
+            #expect(outcome.mode == .shadow,
+                    "results[.shadow] outcome carries mode=\(outcome.mode); expected .shadow.")
+        }
+        for outcome in enabled.perEpisodeOutcomes {
+            #expect(outcome.mode == .enabled,
+                    "results[.enabled] outcome carries mode=\(outcome.mode); expected .enabled.")
+        }
     }
 
     @Test("replay(traces:modes:) with empty traces returns one result per mode, each at structural zero")

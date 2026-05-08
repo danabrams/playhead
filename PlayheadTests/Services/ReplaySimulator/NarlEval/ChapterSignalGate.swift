@@ -341,9 +341,9 @@ enum ChapterSignalGate {
     /// Defensive upper bound on caller-supplied `stubChapterCount`
     /// outputs. Set far above any plausible per-episode chapter count
     /// so well-behaved callers never hit it. See `runShadowOrEnabled`
-    /// for the rationale; this constant exists at file scope so a
-    /// future test can pin the clamp without reaching into the gate's
-    /// private body.
+    /// for the rationale; this constant is exposed at the enum's
+    /// internal scope so tests can pin the clamp value without
+    /// reaching into the private `runShadowOrEnabled` body.
     static let maxStubChapterCount: Int = 10_000
 
     /// Core stub for shadow / enabled. Encapsulates the synthetic
