@@ -596,6 +596,52 @@ actor AdDetectionService {
     /// real `RepeatedAdCacheService`; tests inject deterministic seams.
     private let repeatedAdCache: RepeatedAdCacheService?
 
+    /// playhead-au2v.1.13: optional factory that constructs a
+    /// `ChapterGenerationPhase` per-backfill. When `nil`, the chapter-
+    /// signal phase is never invoked from `runBackfill` regardless of
+    /// `config.chapterSignalMode` — the wire-in is dormant. Production
+    /// wiring (a later runtime bead) installs a factory that captures
+    /// the live admission policy, boundary detector, labeler, plan
+    /// cache, and event sinks. Tests inject deterministic factories
+    /// closing over canned mocks.
+    ///
+    /// The factory shape is `() -> ChapterGenerationPhase` (no
+    /// per-backfill arguments) because every dependency the phase
+    /// requires is either episode-stable (admission policy, labeler,
+    /// cache) or supplied at `phase.run(...)` call time (`mode`,
+    /// `episodeId`, `installID`). A factory rather than a single shared
+    /// instance is used so the production wiring can rebuild the phase
+    /// with a fresh transcript-hash provider per call (the snapshot vs
+    /// recheck contract requires the provider to read whatever the
+    /// transcript pipeline most recently published).
+    private let chapterGenerationPhaseFactory: (@Sendable () -> ChapterGenerationPhase)?
+
+    /// playhead-au2v.1.13: optional cache used for the cache-hit
+    /// short-circuit in `runBackfill`. When non-nil and a valid plan is
+    /// found for the current content hash, the chapter-generation phase
+    /// is skipped entirely (zero FM cost). When `nil`, every run that
+    /// would otherwise hit the phase invokes it unconditionally — the
+    /// phase still owns its own internal cache write on success, so no
+    /// data is lost; the only effect of a missing short-circuit cache is
+    /// re-running the phase even if a fresh plan is already on disk.
+    /// Tests typically inject the same cache they pass into the
+    /// factory's `ChapterGenerationPhase` so the read here and the
+    /// phase's write target the same store.
+    private let chapterPlanCache: ChapterPlanCache?
+
+    /// playhead-au2v.1.13: producer of the install identifier the
+    /// chapter-phase diagnostics need to emit privacy-locked event
+    /// payloads. Not stored in `init` parameters list as a keyword arg
+    /// because the production runtime needs a stable per-install UUID
+    /// (matches the wider diagnostics privacy contract — see
+    /// `EpisodeIdHasher`); tests can pass `{ UUID() }` for ergonomic
+    /// fixtures. Defaults to a fresh UUID per call so an unwired test
+    /// does not crash, but a production wiring bug that omits this
+    /// closure surfaces as a per-run UUID churn rather than a stable
+    /// hash — one of the integration tests asserts the wiring uses the
+    /// injected closure verbatim.
+    private let chapterPhaseInstallIDProvider: @Sendable () -> UUID
+
     // MARK: - Init
 
     init(
@@ -614,7 +660,10 @@ actor AdDetectionService {
         episodeMetadataProvider: EpisodeMetadataProvider = NullEpisodeMetadataProvider(),
         decisionLogger: DecisionLoggerProtocol? = nil,
         classifierCalibrationProfile: ClassifierCalibrationProfile = .production,
-        repeatedAdCache: RepeatedAdCacheService? = nil
+        repeatedAdCache: RepeatedAdCacheService? = nil,
+        chapterGenerationPhaseFactory: (@Sendable () -> ChapterGenerationPhase)? = nil,
+        chapterPlanCache: ChapterPlanCache? = nil,
+        chapterPhaseInstallIDProvider: @escaping @Sendable () -> UUID = { UUID() }
     ) {
         self.store = store
         self.classifier = classifier
@@ -641,6 +690,9 @@ actor AdDetectionService {
         }
         self.classifierCalibrationProfile = classifierCalibrationProfile
         self.repeatedAdCache = repeatedAdCache
+        self.chapterGenerationPhaseFactory = chapterGenerationPhaseFactory
+        self.chapterPlanCache = chapterPlanCache
+        self.chapterPhaseInstallIDProvider = chapterPhaseInstallIDProvider
     }
 
     #if DEBUG
@@ -1787,6 +1839,74 @@ actor AdDetectionService {
             "Backfill: asset=\(analysisAssetId) atoms=\(atoms.count) anchored=\(atomEvidence.filter(\.isAnchored).count) spans=\(decodedSpans.count)"
         )
 
+        // ── Step 11.5: ChapterGenerationPhase (playhead-au2v.1.13) ───────────
+        // Wired between final-pass transcript completion (steps 1–11 above
+        // produced the atom set, evidence projector, and decoded spans the
+        // chapter signal will eventually feed into) and the
+        // BackfillEvidenceFusion path that begins at step 12 below.
+        //
+        // Three gating layers, evaluated in order:
+        //   a) `config.chapterSignalMode.runsChapterGeneration` — `.off`
+        //      short-circuits BEFORE any factory invocation, so the
+        //      `.off` path is byte-for-byte identical to pre-au2v.1.13
+        //      behavior (no allocations, no FM cost, no diagnostic
+        //      surface). The `chapterSignalMode == .off` default in
+        //      `AdDetectionConfig` keeps shipping production silent
+        //      until the runtime flag is flipped.
+        //   b) `chapterGenerationPhaseFactory` non-nil — a missing
+        //      factory means "no production wiring yet". Logged at
+        //      `.debug` only; not an error in any mode (lets the
+        //      runtime stand up the config flag before the phase
+        //      dependencies exist). When the mode is `.shadow` or
+        //      `.enabled` and the factory is nil, the phase silently
+        //      no-ops — equivalent to mode=.off but observable in the
+        //      OS log if a follow-up bead needs to debug the gap.
+        //   c) `chapterPlanCache.get(...)` cache hit — when a valid
+        //      plan already exists for the current content hash, the
+        //      phase is short-circuited and zero FM cost is incurred.
+        //      The cache hit emits no diagnostic — the phase's
+        //      `chapter_phase_completed` event from the original write
+        //      already documented that landing; firing another event
+        //      on every re-run would over-count and pollute eval. The
+        //      cache short-circuit is also gated on `chapterPlanCache`
+        //      being non-nil; without a cache the phase runs every
+        //      time and uses its own internal cache write only.
+        //
+        // Outcome handling: every non-`.cached` outcome is logged but
+        // NEVER thrown. The phase already emits its own diagnostics
+        // for each terminal state (admission deny, creator-chapter
+        // skip, transcript unavailable, race abort, op-rate exceeded,
+        // explicit cancellation). Re-emitting them here would
+        // duplicate the events. The fusion step that runs immediately
+        // after this block is independent of the chapter signal in
+        // mode `.shadow` (the consumers only read the plan when
+        // `consumersReadChapterPlan == true`, which is `.enabled`-only
+        // — a contract deliberately encoded in `ChapterSignalMode`).
+        //
+        // Cancellation: `runBackfill` is `async throws` and the phase
+        // honors `Task.isCancelled` internally, returning `.preempted`
+        // on cancel. We additionally re-check `Task.isCancelled` after
+        // the phase finishes so a request to cancel that arrived
+        // mid-phase still propagates upward — matching the existing
+        // `try Task.checkCancellation()` usage elsewhere in the
+        // backfill pipeline.
+        //
+        // Transcript-revision race: the phase captures a transcript
+        // hash on entry and re-checks it before its cache write. If
+        // the transcript pipeline produces a new version mid-run, the
+        // phase's recheck observes the change, discards the plan, and
+        // returns `.raceAborted`. We log the abort here at `.notice`
+        // so dogfood diagnostic bundles surface a single greppable
+        // marker without losing the structured event payload.
+        if config.chapterSignalMode.runsChapterGeneration {
+            await runChapterGenerationPhaseIfWired(
+                analysisAssetId: analysisAssetId,
+                transcriptVersion: transcriptVersion.transcriptVersion
+            )
+            // Honor cancellation requests that landed during the phase.
+            try Task.checkCancellation()
+        }
+
         // ── Steps 12–14: Fusion + DecisionMapper + SkipPolicyMatrix ──────────
 
         // Fetch any persisted FM scan results for this asset to build FM ledger entries.
@@ -2424,6 +2544,149 @@ actor AdDetectionService {
         logger.info(
             "[arf8] backfill bracket counts: refined=\(arf8Counts.bracketRefined) noBracket=\(arf8Counts.noBracket) trustGated=\(arf8Counts.trustGated) coarseGated=\(arf8Counts.coarseGated) fineGated=\(arf8Counts.fineConfidenceGated) legacyBypass=\(arf8Counts.legacyBypass) showTrust=\(String(format: "%.2f", bracketShowTrust))"
         )
+    }
+
+    // MARK: - ChapterGenerationPhase wire-up (playhead-au2v.1.13)
+
+    /// Invoke the chapter-generation phase from `runBackfill` when a
+    /// production factory has been wired in. The mode gate is checked
+    /// at the call site (only `.shadow` and `.enabled` reach this
+    /// helper); the cache short-circuit, factory presence, and outcome
+    /// logging live here.
+    ///
+    /// `transcriptVersion` is the same hash `TranscriptAtomizer.atomize`
+    /// computed for the current final-pass atom set. We use it as the
+    /// cache key for the short-circuit because the phase will use the
+    /// same hash internally (its `TranscriptHashProviding` returns the
+    /// active transcript content hash, which is what `transcriptVersion`
+    /// represents — a stable hash of the atom sequence). Aligning the
+    /// short-circuit key with the phase's cache write key is what makes
+    /// "valid plan exists for content hash → skip phase" hold without
+    /// either side computing the hash differently.
+    ///
+    /// Outcomes are logged via the actor's `logger` and never thrown:
+    /// the phase already emits structured `ChapterPhaseEvent`s for each
+    /// terminal state, so a re-throw here would force every backfill
+    /// caller to add a `try` site for what is, in product terms, an
+    /// optional signal generator. Cancellation is the one exception: a
+    /// `Task.isCancelled` check after this helper returns lets upstream
+    /// callers observe cancellation through the existing `try`
+    /// machinery in `runBackfill` (the caller-side `try
+    /// Task.checkCancellation()` handles propagation; the phase itself
+    /// returns `.preempted` and never raises).
+    ///
+    /// `transcriptVersion` empty (e.g. no atoms produced) is a no-op:
+    /// the hash isn't a useful cache key in that case and the phase's
+    /// `TranscriptHashProviding` would itself surface
+    /// `.transcriptUnavailable`. Bailing here saves the round-trip.
+    private func runChapterGenerationPhaseIfWired(
+        analysisAssetId: String,
+        transcriptVersion: String
+    ) async {
+        // Empty transcript hash → nothing to cache against, nothing
+        // for the phase to anchor on. Logged at `.debug` so dogfood
+        // OS log searches can confirm the gate fired without polluting
+        // the default-level logs.
+        guard !transcriptVersion.isEmpty else {
+            logger.debug(
+                "chapterphase.backfill_wireup: empty transcriptVersion for asset=\(analysisAssetId, privacy: .public) — skipping phase"
+            )
+            return
+        }
+
+        // Factory not wired → mode is on but no production dependencies
+        // exist yet. Mode-gate ensures we only get here on `.shadow` or
+        // `.enabled`; logging at `.debug` keeps the gap observable
+        // without alarming dogfood reports.
+        guard let factory = chapterGenerationPhaseFactory else {
+            logger.debug(
+                "chapterphase.backfill_wireup: mode=\(self.config.chapterSignalMode.rawValue, privacy: .public) but no phase factory wired — skipping"
+            )
+            return
+        }
+
+        // Cache short-circuit. A non-nil cache + a hit on the current
+        // content hash is a "fresh plan already on disk" signal — we
+        // refuse to pay FM cost re-running the phase for an unchanged
+        // input. The cache returns `nil` on schema mismatch / decode
+        // failure / missing file (all treated as misses by
+        // `ChapterPlanCache.get`), which correctly falls through to
+        // re-running the phase. We deliberately do NOT emit a
+        // diagnostic for the cache hit — the original phase run that
+        // produced the plan already emitted `chapter_phase_completed`,
+        // and re-emitting on every replay would over-count plan
+        // generations in eval. The phase's own internal cache write
+        // path is unchanged.
+        if let cache = chapterPlanCache {
+            if let cachedPlan = await cache.get(contentHash: transcriptVersion) {
+                logger.debug(
+                    "chapterphase.backfill_wireup: cache hit for asset=\(analysisAssetId, privacy: .public) hash=\(transcriptVersion, privacy: .public) chapters=\(cachedPlan.chapters.count, privacy: .public) — skipping phase"
+                )
+                return
+            }
+        }
+
+        // Cache miss (or no cache wired) → invoke the phase. Production
+        // wiring rebuilds the phase per call so the
+        // `TranscriptHashProviding` it captures observes the
+        // most-recently-published transcript hash.
+        let phase = factory()
+        let installID = chapterPhaseInstallIDProvider()
+        let outcome = await phase.run(
+            mode: config.chapterSignalMode,
+            episodeId: analysisAssetId,
+            installID: installID
+        )
+
+        // One-line outcome log per run. The structured event payload is
+        // already emitted by the phase via its `ChapterPhaseEventSink`;
+        // this string is for greppable dogfood diagnostics.
+        switch outcome {
+        case .modeOff:
+            // Unreachable here — call site checks
+            // `runsChapterGeneration` before invoking the helper. Logged
+            // at `.error` because reaching this branch indicates the
+            // phase's internal mode handling diverged from the gate's
+            // predicate (a bug in either the phase or in
+            // `ChapterSignalMode.runsChapterGeneration`). The error log
+            // gives a single greppable signal during dogfood without
+            // crashing.
+            logger.error(
+                "chapterphase.backfill_wireup: unexpected modeOff outcome for asset=\(analysisAssetId, privacy: .public) — phase/gate desync"
+            )
+        case .admissionDenied(let reason):
+            logger.notice(
+                "chapterphase.backfill_wireup: admission denied for asset=\(analysisAssetId, privacy: .public) reason=\(reason, privacy: .public)"
+            )
+        case .skippedCreatorChapters(let creatorChapterCount):
+            logger.notice(
+                "chapterphase.backfill_wireup: skipped — \(creatorChapterCount, privacy: .public) creator chapters present for asset=\(analysisAssetId, privacy: .public)"
+            )
+        case .noCandidates:
+            logger.notice(
+                "chapterphase.backfill_wireup: no candidates for asset=\(analysisAssetId, privacy: .public)"
+            )
+        case .transcriptUnavailable:
+            logger.notice(
+                "chapterphase.backfill_wireup: transcript unavailable for asset=\(analysisAssetId, privacy: .public)"
+            )
+        case .raceAborted:
+            logger.notice(
+                "chapterphase.backfill_wireup: transcript race for asset=\(analysisAssetId, privacy: .public) — plan discarded"
+            )
+        case .preempted:
+            logger.notice(
+                "chapterphase.backfill_wireup: preempted for asset=\(analysisAssetId, privacy: .public)"
+            )
+        case .operationalRateExceeded(let rate, let threshold):
+            logger.notice(
+                "chapterphase.backfill_wireup: op-rate exceeded for asset=\(analysisAssetId, privacy: .public) rate=\(rate, privacy: .public) threshold=\(threshold, privacy: .public)"
+            )
+        case .cached(let chapterCount, let planConfidence):
+            logger.info(
+                "chapterphase.backfill_wireup: cached plan for asset=\(analysisAssetId, privacy: .public) chapters=\(chapterCount, privacy: .public) confidence=\(planConfidence, privacy: .public)"
+            )
+        }
     }
 
     // MARK: - Fusion Evidence Construction (playhead-4my.6.4)
