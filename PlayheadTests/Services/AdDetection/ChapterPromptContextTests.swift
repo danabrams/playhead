@@ -83,6 +83,33 @@ struct ChapterPromptContextFormatterTests {
         // A budget of zero tokens cannot fit any form.
         #expect(ctx.format(maxTokens: 0) == nil)
     }
+
+    // R1 finding 2 regression: a single-word topic with no whitespace
+    // that does not fit the budget must NOT cause the truncation loop
+    // to spin (the previous `max(1, count/2)` kept the length pinned at
+    // 1 forever). This test would deadlock the suite if the bug
+    // reappears.
+    @Test("single-word over-budget topic falls back without spinning")
+    func singleWordOverBudgetTopicFallsBack() throws {
+        let ctx = ChapterPromptContext(
+            chapterIndex: 1,
+            totalChapters: 2,
+            dispositionToken: "content",
+            previousDispositionToken: nil,
+            // 200-character single word, no whitespace — purposely
+            // beyond any reasonable token budget so we exercise the
+            // halve-loop path.
+            topicDescriptor: String(repeating: "x", count: 200)
+        )
+        // Tight budget: forces the loop to halve repeatedly.
+        let formatted = try #require(
+            ctx.format(maxTokens: 12)
+        )
+        // Either the topic fit at some halved length or it dropped
+        // entirely — either is acceptable. The point of the test is
+        // that the call returns rather than spins.
+        #expect(formatted.contains("Chapter context: 1/2 content."))
+    }
 }
 
 @Suite("ChapterPromptContextSelector")
@@ -328,6 +355,38 @@ struct ChapterPromptDiagnosticEventsTests {
         let decoded = try JSONDecoder().decode(ChapterPhaseEvent.self, from: data)
         #expect(decoded == event)
         #expect(decoded.eventType == .chapterPromptNoChapterForWindow)
+    }
+
+    // R1 finding 1 regression: passing `previousDisposition: nil`
+    // through the factory must omit `previous_disposition` from the
+    // encoded JSON — same wire shape the formatted prompt line has
+    // when the chapter is the first one (no `Prev:` clause).
+    @Test("chapter_prompt_injected omits previous_disposition for first chapter")
+    func chapterPromptInjectedFirstChapterOmitsPrev() throws {
+        let event = ChapterPhaseEvent.chapterPromptInjected(
+            installID: UUID(),
+            episodeId: "ep-1",
+            timestamp: 12.5,
+            chapterIndex: 1,
+            totalChapters: 5,
+            disposition: "content",
+            previousDisposition: nil,
+            topicIncluded: false
+        )
+        let data = try JSONEncoder().encode(event)
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("previous_disposition"),
+                "previous_disposition must be omitted when nil")
+
+        // Decode round-trip: the missing key should round-trip back
+        // to nil, not to "" or some other sentinel.
+        let decoded = try JSONDecoder().decode(ChapterPhaseEvent.self, from: data)
+        #expect(decoded == event)
+        if case let .chapterPromptInjected(payload) = decoded.payload {
+            #expect(payload.previousDisposition == nil)
+        } else {
+            Issue.record("expected .chapterPromptInjected payload")
+        }
     }
 }
 

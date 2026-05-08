@@ -112,21 +112,29 @@ struct ChapterPromptContext: Sendable, Equatable {
         let full = renderLine(topic: topicDescriptor)
         if counter(full) <= maxTokens { return full }
 
-        // 2) Try a truncated topic. Halve repeatedly until either the
-        //    line fits or the topic is empty.
+        // 2) Try a truncated topic. Drop a trailing word per iteration
+        //    when whitespace is available; otherwise halve. The loop
+        //    ALWAYS makes strict progress (the truncated length must
+        //    shrink each iteration) so a degenerate one-character or
+        //    no-whitespace input cannot spin forever.
         if let topic = topicDescriptor, !topic.isEmpty {
             var truncated = topic
             while !truncated.isEmpty {
-                // Whitespace-aware truncation: drop the trailing word
-                // until the topic shrinks. Falls back to a hard char
-                // truncation if the topic has no whitespace.
+                let nextTruncated: String
                 if let lastSpace = truncated.lastIndex(where: { $0.isWhitespace }) {
-                    truncated = String(truncated[..<lastSpace])
+                    nextTruncated = String(truncated[..<lastSpace])
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                 } else {
-                    let halved = max(1, truncated.count / 2)
-                    truncated = String(truncated.prefix(halved))
+                    // Hard halve. Guarantee strict progress: when the
+                    // length is 1, the next length is 0 (loop exits).
+                    let halved = truncated.count / 2
+                    nextTruncated = String(truncated.prefix(halved))
                 }
+                // Defensive: if the truncation rule did not shrink the
+                // string, stop rather than spin. This should not happen
+                // given the rules above but guards against future edits.
+                if nextTruncated.count >= truncated.count { break }
+                truncated = nextTruncated
                 if truncated.isEmpty { break }
                 let candidate = renderLine(topic: truncated)
                 if counter(candidate) <= maxTokens { return candidate }

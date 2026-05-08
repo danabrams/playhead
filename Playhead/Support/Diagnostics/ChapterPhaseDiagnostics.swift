@@ -448,9 +448,11 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         /// Snake_case `ChapterDisposition` raw value for this chapter.
         let disposition: String
         /// Snake_case `ChapterDisposition` raw value for the previous
-        /// chapter, or empty string for the first chapter (so the
-        /// payload struct stays a closed schema).
-        let previousDisposition: String
+        /// chapter, or `nil` when this is the first chapter (in which
+        /// case the encoded JSON omits the `previous_disposition` key
+        /// entirely — matches the wire shape of the formatted prompt
+        /// line, which omits the `Prev:` clause for chapter 1).
+        let previousDisposition: String?
         /// Whether the formatted line included a `Topic:` clause. The
         /// boolean is privacy-safe; the descriptor itself is never
         /// emitted.
@@ -1020,6 +1022,11 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
 
     /// emitted by playhead-au2v.1.16 (FM prompt builder injected
     /// chapter context for a per-window FM call).
+    ///
+    /// Pass `previousDisposition: nil` for the first chapter — the
+    /// emitted JSON omits the `previous_disposition` key entirely,
+    /// matching the formatted prompt line which drops the `Prev:`
+    /// clause for chapter 1.
     static func chapterPromptInjected(
         installID: UUID,
         episodeId: String,
@@ -1027,7 +1034,7 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
         chapterIndex: Int,
         totalChapters: Int,
         disposition: String,
-        previousDisposition: String,
+        previousDisposition: String?,
         topicIncluded: Bool
     ) -> ChapterPhaseEvent {
         ChapterPhaseEvent(
