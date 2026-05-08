@@ -542,9 +542,10 @@ struct ShadowCaptureStorageTests {
 
     /// playhead-hygc.1.7: explicit acceptance check — running the v24
     /// backfill migration twice MUST yield identical state. After the first
-    /// `migrate()` brings the DB to v24 and stamps the summary columns, a
-    /// second `migrate()` (e.g. process restart, `resetMigratedPathsForTesting`
-    /// followed by re-open) MUST observe `schemaVersion == 24` and skip the
+    /// `migrate()` climbs through the v24 step (stamping the summary
+    /// columns) and on to the current schema version, a second `migrate()`
+    /// (e.g. process restart, `resetMigratedPathsForTesting` followed by
+    /// re-open) MUST observe the same `schemaVersion` and skip the v24
     /// backfill — column values must not change, row count must not change.
     @Test("V24 migration is idempotent: running twice does not alter row state")
     func v24MigrationIsIdempotentAcrossReruns() async throws {
@@ -552,7 +553,7 @@ struct ShadowCaptureStorageTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         AnalysisStore.resetMigratedPathsForTesting()
 
-        // Bring up a fresh store at v24 with one ad row + one organic row.
+        // Bring up a fresh, fully-migrated store with one ad row + one organic row.
         let initial = try AnalysisStore(directory: dir)
         try await initial.migrate()
         let adBlob = try encodedAdPayload(certainty: .strong)
@@ -576,21 +577,21 @@ struct ShadowCaptureStorageTests {
 
         let firstSnapshot = try await initial.loadShadowSummaryRows()
         let firstVersion = try await initial.schemaVersion()
-        #expect(firstVersion == 24)
+        #expect(firstVersion == AnalysisStore.currentSchemaVersion)
         #expect(firstSnapshot.count == 2)
 
-        // Second open + migrate. Schema is already at v24 so the v24
-        // helper must short-circuit on its `< 24` guard. Backfill MUST NOT
-        // re-run; row state and counts MUST be byte-identical.
+        // Second open + migrate. The DB is already fully migrated, so the
+        // v24 backfill helper must short-circuit on its `< 24` guard.
+        // Row state and counts MUST be byte-identical to the first open.
         AnalysisStore.resetMigratedPathsForTesting()
         let reopened = try AnalysisStore(directory: dir)
         try await reopened.migrate()
 
         let secondSnapshot = try await reopened.loadShadowSummaryRows()
         let secondVersion = try await reopened.schemaVersion()
-        #expect(secondVersion == 24)
+        #expect(secondVersion == AnalysisStore.currentSchemaVersion)
         #expect(secondSnapshot == firstSnapshot,
-            "V24 migration must be idempotent: re-running on an already-v24 DB MUST NOT change row state")
+            "V24 migration must be idempotent: re-running on an already-migrated DB MUST NOT change row state")
     }
 
     // MARK: - Helpers

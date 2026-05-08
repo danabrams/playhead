@@ -875,7 +875,11 @@ struct AdListenRewindRow: Sendable, Hashable {
 
 actor AnalysisStore {
 
-    nonisolated private static let currentSchemaVersion = 26
+    /// Latest persisted schema version. Tests reference this so migration
+    /// assertions automatically follow the production constant — hardcoding
+    /// the integer in tests has been a recurring source of stale-assertion
+    /// flakes whenever the schema bumps.
+    nonisolated static let currentSchemaVersion = 26
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time

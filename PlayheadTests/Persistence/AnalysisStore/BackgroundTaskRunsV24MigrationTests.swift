@@ -36,7 +36,7 @@ struct BackgroundTaskRunsV24MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 24)
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         #expect(try probeTableExists(in: dir, table: "background_task_runs"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_background_task_runs_entry_started"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_background_task_runs_started"))
@@ -51,7 +51,7 @@ struct BackgroundTaskRunsV24MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let bootstrap = try AnalysisStore(directory: dir)
         try await bootstrap.migrate()
-        #expect(try await bootstrap.schemaVersion() == 24)
+        #expect(try await bootstrap.schemaVersion() == AnalysisStore.currentSchemaVersion)
 
         // Rewind: drop the v24 table/indexes and reset _meta to '23' so
         // the v23 → v24 block runs on the next open.
@@ -75,7 +75,7 @@ struct BackgroundTaskRunsV24MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 24)
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         #expect(try probeTableExists(in: dir, table: "background_task_runs"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_background_task_runs_entry_started"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_background_task_runs_started"))
@@ -96,8 +96,8 @@ struct BackgroundTaskRunsV24MigrationTests {
         try await store.migrate()
         let v2 = try await store.schemaVersion()
 
-        #expect(v1 == 24)
-        #expect(v2 == 24)
+        #expect(v1 == AnalysisStore.currentSchemaVersion)
+        #expect(v2 == AnalysisStore.currentSchemaVersion)
     }
 
     @Test("background_task_runs has every column from the design hint")

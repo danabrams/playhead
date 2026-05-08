@@ -570,8 +570,8 @@ final class CorrectionDedupeTests: XCTestCase {
         let bootstrap = try AnalysisStore(directory: dir)
         try await bootstrap.migrate()
         let bootstrapVersion = try await bootstrap.schemaVersion()
-        XCTAssertEqual(bootstrapVersion, 24,
-            "Pre-condition: bootstrap must reach v24")
+        XCTAssertEqual(bootstrapVersion, AnalysisStore.currentSchemaVersion,
+            "Pre-condition: bootstrap must reach the current schema version")
         try await bootstrap.insertAsset(makeTestAsset(id: "asset-mig"))
 
         // 2. Rewind: drop the v23 audit columns + UNIQUE INDEX, reset
@@ -650,8 +650,8 @@ final class CorrectionDedupeTests: XCTestCase {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
         let postMigrateVersion = try await store.schemaVersion()
-        XCTAssertEqual(postMigrateVersion, 24,
-            "Migration must reach v24")
+        XCTAssertEqual(postMigrateVersion, AnalysisStore.currentSchemaVersion,
+            "Migration must reach the current schema version")
 
         // 5. Verify collapse + audit metadata via the public load path.
         let cs = PersistentUserCorrectionStore(store: store)

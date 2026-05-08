@@ -65,7 +65,7 @@ struct FinalPassCanonicalSpanV23MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 25)
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         #expect(try probeColumnExists(in: dir, table: "final_pass_jobs", column: "canonicalSpanKey"))
         #expect(try probeTableExists(in: dir, table: "final_pass_job_aliases"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_final_pass_jobs_canonical"))
@@ -80,7 +80,7 @@ struct FinalPassCanonicalSpanV23MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let bootstrap = try AnalysisStore(directory: dir)
         try await bootstrap.migrate()
-        #expect(try await bootstrap.schemaVersion() == 25)
+        #expect(try await bootstrap.schemaVersion() == AnalysisStore.currentSchemaVersion)
 
         // Rewind: drop the v23 additions and reset _meta to '22' so
         // the v22 → v23 block runs on the next open.
@@ -125,7 +125,7 @@ struct FinalPassCanonicalSpanV23MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 25)
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         #expect(try probeColumnExists(in: dir, table: "final_pass_jobs", column: "canonicalSpanKey"))
         #expect(try probeTableExists(in: dir, table: "final_pass_job_aliases"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_final_pass_jobs_canonical"))
@@ -145,8 +145,8 @@ struct FinalPassCanonicalSpanV23MigrationTests {
         try await store.migrate()
         let v2 = try await store.schemaVersion()
 
-        #expect(v1 == 25)
-        #expect(v2 == 25)
+        #expect(v1 == AnalysisStore.currentSchemaVersion)
+        #expect(v2 == AnalysisStore.currentSchemaVersion)
     }
 
     @Test("backfill populates canonicalSpanKey on existing rows with the Swift-helper format")
@@ -271,11 +271,12 @@ struct FinalPassCanonicalSpanV23MigrationTests {
         sqlite3_close_v2(db)
 
         // Re-run migrate(): this should add canonicalSpanKey + run the
-        // SQL backfill against EVERY row.
+        // SQL backfill against EVERY row, then continue climbing the
+        // ladder all the way to the current schema version.
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
-        #expect(try await store.schemaVersion() == 23)
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
 
         // For every seeded row, the SQL-side backfill must have
         // produced a key byte-equal to the Swift helper.
