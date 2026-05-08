@@ -429,7 +429,7 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
         )
     }
 
-    /// emitted by playhead-au2v.1.10 (admission-check short-circuit)
+    /// emitted by playhead-au2v.1.11 (creator-chapter short-circuit)
     static func skippedCreatorChapters(
         installID: UUID,
         episodeId: String,
@@ -616,7 +616,7 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
         )
     }
 
-    /// emitted by playhead-au2v.1.10 (cache-read decode failure path)
+    /// emitted by playhead-au2v.1.1 (ChapterPlanCache decode failure path)
     static func decodeFailure(
         installID: UUID,
         episodeId: String,

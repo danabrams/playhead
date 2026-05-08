@@ -17,11 +17,19 @@
 //      write. A mismatch aborts the run, discards the plan, and emits
 //      a `chapter_phase_preempted` diagnostic (the same event used by
 //      explicit cancellation — both express "the input we built this
-//      plan against is no longer current"; see the per-call comment
-//      in `recordPreempted` below for why we collapse them).
-//   4. Cooperative cancellation honoring `Task.checkCancellation()`,
-//      mirroring `FoundationModelClassifier`'s pattern (search for
-//      `try Task.checkCancellation()` there).
+//      plan against is no longer current"; the inline comment at the
+//      recheck-mismatch branch in `run()` explains why we collapse
+//      cancellation and recheck-mismatch onto the same wire event).
+//   4. Cooperative cancellation honoring task cancellation. We use
+//      `Task.isCancelled` checks at every yield point (rather than
+//      `try Task.checkCancellation()`) so the shell can collapse a
+//      cancellation into the structured `Outcome.preempted` return —
+//      keeping the call site exhaustive over the `Outcome` enum
+//      without forcing callers into a `do/catch CancellationError`.
+//      Throws of `CancellationError` from the detector or labeler are
+//      ALSO honored (caught and routed through the same `preempt`
+//      helper) — the `FoundationModelClassifier` pattern of throwing
+//      cancellation is still respected at the seam.
 //   5. Cache write into `ChapterPlanCache` (bead .1) on success, with
 //      a `chapter_phase_completed` diagnostic.
 //

@@ -122,8 +122,9 @@ struct ChapterGenerationPhaseTests {
         }
     }
 
-    /// Monotonic clock: starts at `epoch` and advances by `step` per
-    /// call. Test asserts can compute exact `latency_ms` values.
+    /// Monotonic clock: starts at a fixed epoch (`2023-11-14T22:13:20Z`,
+    /// `1_700_000_000` UNIX seconds) and advances by `step` per call.
+    /// Test asserts can compute exact `latency_ms` values.
     ///
     /// `OSAllocatedUnfairLock` (rather than `NSLock`, which is async-
     /// hostile in current Swift, or an actor, which would force an
