@@ -521,6 +521,16 @@ struct ChapterGenerationPhaseTests {
         #expect(events.count == 2)
         #expect(events.first?.eventType == .started)
         #expect(events.last?.eventType == .completed)
+        // `fm_call_count` is "FM calls successfully serviced for this
+        // plan" — both labeler calls threw, so the count is 0 even
+        // though the labeler's invocation counter saw 2 calls. Pins
+        // the R1 increment-after-return contract.
+        if case let .completed(payload) = events.last?.payload {
+            #expect(payload.fmCallCount == 0)
+            #expect(payload.chapterCount == 0)
+        } else {
+            Issue.record("Expected completed payload")
+        }
         // Cache write happened — the plan is empty but valid.
         let stored = await cache.get(contentHash: "hash-A")
         #expect(stored != nil)

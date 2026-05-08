@@ -35,11 +35,14 @@
 //     service's responsibility (`.7` / `.8`).
 //
 // Logging discipline:
-//   * Every exit path emits *exactly one* phase-completion diagnostic
-//     (success or specific failure). "Phase-completion" here means
-//     terminal events: `.skippedAdmission`, `.noCandidates`,
-//     `.preempted`, `.completed`. There is never more than one of
-//     those per run.
+//   * Every exit path EXCEPT the `.off` short-circuit emits exactly
+//     one phase-completion diagnostic (success or specific failure).
+//     "Phase-completion" here means terminal events:
+//     `.skippedAdmission`, `.noCandidates`, `.preempted`,
+//     `.completed`. There is never more than one of those per run.
+//     Note that `transcriptUnavailable` exits early but DOES emit
+//     `.noCandidates` — we still want telemetry on "phase admitted
+//     but had no transcript" for dogfood mis-scheduling debugging.
 //   * One `.started` event fires at phase entry (after the entry
 //     transcript-hash snapshot succeeds, since the started payload
 //     requires that hash). Paths that exit *before* the snapshot
@@ -105,10 +108,12 @@ protocol ChapterLabeling: Sendable {
 /// Source of the "current transcript content hash". The shell calls
 /// this twice per run: once on entry (snapshot), once before the
 /// cache write (race re-check). `nil` indicates the transcript is
-/// not yet available; the shell treats `nil` on entry as a benign
-/// skip (no diagnostic — the gate above already chose to run, we
-/// simply have nothing to hash yet) and `nil` on the re-check as
-/// a mismatch (the input went away under us).
+/// not yet available; the shell treats `nil` on entry as
+/// `Outcome.transcriptUnavailable` (emits the bead .3 `.noCandidates`
+/// event, since that's the catch-all "ran but produced nothing"
+/// signal in the wire vocabulary) and `nil` on the re-check as a
+/// mismatch (`Outcome.raceAborted` with a `.preempted` event — the
+/// input went away under us).
 protocol TranscriptHashProviding: Sendable {
     func currentTranscriptHash() async -> String?
 }
