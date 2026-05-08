@@ -322,6 +322,17 @@ struct ChapterPlanQualityEvalThresholdTests {
         #expect(loose.boundaryPrecision.total == 2)
         #expect(loose.boundaryPrecision.fraction == 0.5)
 
+        // Greedy disposition pairing pin (R2): at the loose tolerance
+        // both goldens claim cand@603 as a candidate, but the greedy
+        // matcher consumes each candidate at most once. The closest
+        // pair (gold@600 ↔ cand@603, Δ=3) wins; gold@620 finds no
+        // remaining in-tolerance candidate. So even though boundary
+        // recall counts 2/2, dispositionMatchedPairs is exactly 1.
+        // Without this pin a regression that swapped greedy for "match
+        // each golden independently" would silently change semantics.
+        #expect(loose.dispositionMatchedPairs == 1)
+        #expect(loose.dispositionMatchedAgreed == 1) // gold@600.adBreak == cand@603.adBreak
+
         // Thresholds appear in the report verbatim.
         #expect(tight.thresholdsUsed.boundaryToleranceSeconds == 5.0)
         #expect(defaultTol.thresholdsUsed.boundaryToleranceSeconds == 15.0)
@@ -555,6 +566,100 @@ struct ChapterPlanQualityEvalAggregationTests {
         #expect(report.perDispositionConfusion == perEp.perDispositionConfusion)
         #expect(report.topicLabelMatches == perEp.topicLabelMatches)
     }
+
+    /// Multi-episode aggregation: two distinct episodes, one perfect
+    /// match and one with a single disposition swap. Aggregate counts
+    /// must equal the SUM of per-episode counts (not just one of them).
+    /// This pins the accumulators in `evaluate(pairs:)` against a
+    /// regression that drops aggregation across episodes.
+    @Test
+    func multiEpisode_aggregatesAreSumOfPerEpisode() throws {
+        let goldenA = try ChapterPlanGoldenSetLoader.loadSynthetic(named: "synthetic-happy-path")
+        let planA = makePlan(
+            contentHash: goldenA.episodeContentHash,
+            chapters: [
+                makeInferredChapter(start: 0.0,    end: 600.0,  title: "intro segment",   disposition: .content),
+                makeInferredChapter(start: 600.0,  end: 720.0,  title: nil,               disposition: .adBreak),
+                makeInferredChapter(start: 720.0,  end: 1800.0, title: "main interview",  disposition: .content),
+                makeInferredChapter(start: 1800.0, end: 1920.0, title: nil,               disposition: .adBreak),
+                makeInferredChapter(start: 1920.0, end: nil,    title: "wrap up",         disposition: .content)
+            ]
+        )
+        let goldenB = try ChapterPlanGoldenSetLoader.loadSynthetic(named: "synthetic-disposition-confusion")
+        let planB = makePlan(
+            contentHash: goldenB.episodeContentHash,
+            chapters: [
+                makeInferredChapter(start: 0.0,    end: 600.0,  title: "intro segment",  disposition: .content),
+                // Disposition swap (matches the disposition-confusion
+                // fixture: golden says adBreak, plan says content).
+                makeInferredChapter(start: 600.0,  end: 720.0,  title: nil,              disposition: .content),
+                makeInferredChapter(start: 720.0,  end: 1800.0, title: "main interview", disposition: .content),
+                makeInferredChapter(start: 1800.0, end: nil,    title: nil,              disposition: .adBreak)
+            ]
+        )
+
+        let report = ChapterPlanQualityEval().evaluate(pairs: [(planA, goldenA), (planB, goldenB)])
+
+        // Per-episode entries should both exist.
+        let perA = try #require(report.perEpisode["synthetic-happy-path"])
+        let perB = try #require(report.perEpisode["synthetic-disposition-confusion"])
+
+        // Aggregate boundary counts equal the sum.
+        #expect(report.boundaryRecall.matched == perA.boundaryRecall.matched + perB.boundaryRecall.matched)
+        #expect(report.boundaryRecall.total == perA.boundaryRecall.total + perB.boundaryRecall.total)
+        #expect(report.boundaryPrecision.matched == perA.boundaryPrecision.matched + perB.boundaryPrecision.matched)
+        #expect(report.boundaryPrecision.total == perA.boundaryPrecision.total + perB.boundaryPrecision.total)
+
+        // Aggregate disposition counts equal the sum.
+        #expect(report.dispositionMatchedAgreed == perA.dispositionMatchedAgreed + perB.dispositionMatchedAgreed)
+        #expect(report.dispositionMatchedPairs == perA.dispositionMatchedPairs + perB.dispositionMatchedPairs)
+
+        // Aggregate topic counts equal the sum.
+        #expect(report.topicLabelMatches.matched == perA.topicLabelMatches.matched + perB.topicLabelMatches.matched)
+        #expect(report.topicLabelMatches.mismatched == perA.topicLabelMatches.mismatched + perB.topicLabelMatches.mismatched)
+        #expect(report.topicLabelMatches.notApplicable == perA.topicLabelMatches.notApplicable + perB.topicLabelMatches.notApplicable)
+
+        // Aggregate confusion is the cell-wise sum of per-episode
+        // confusion. Spot-check the swap cell (golden=adBreak, plan=content):
+        // 0 in A + 1 in B = 1 in aggregate.
+        #expect(report.perDispositionConfusion[.adBreak]?[.content] == 1)
+        #expect(report.perDispositionConfusion[.content]?[.content]
+            == (perA.perDispositionConfusion[.content]?[.content] ?? 0)
+             + (perB.perDispositionConfusion[.content]?[.content] ?? 0))
+    }
+
+    /// Documented duplicate-episode-id contract from `evaluate(pairs:)`:
+    /// aggregates double-count across the duplicate pair while the
+    /// `perEpisode` dictionary single-counts (later entry wins). The
+    /// caller doc-comment documents this; without this regression test
+    /// a future "dedupe in aggregates" change would silently alter the
+    /// API contract.
+    @Test
+    func duplicateEpisodeId_aggregatesDoubleCount_perEpisodeSingleCount() throws {
+        let golden = try ChapterPlanGoldenSetLoader.loadSynthetic(named: "synthetic-happy-path")
+        let plan = makePlan(
+            contentHash: golden.episodeContentHash,
+            chapters: [
+                makeInferredChapter(start: 0.0,    end: 600.0,  title: "intro segment",  disposition: .content),
+                makeInferredChapter(start: 600.0,  end: 720.0,  title: nil,              disposition: .adBreak),
+                makeInferredChapter(start: 720.0,  end: 1800.0, title: "main interview", disposition: .content),
+                makeInferredChapter(start: 1800.0, end: 1920.0, title: nil,              disposition: .adBreak),
+                makeInferredChapter(start: 1920.0, end: nil,    title: "wrap up",        disposition: .content)
+            ]
+        )
+
+        let report = ChapterPlanQualityEval().evaluate(pairs: [(plan, golden), (plan, golden)])
+
+        // perEpisode contains exactly one entry (later overwrites earlier).
+        #expect(report.perEpisode.count == 1)
+        // Aggregates double-count: each happy-path pair contributes
+        // 5 boundary matches and 5 matched pairs, so the aggregate
+        // should be 10.
+        #expect(report.boundaryRecall.matched == 10)
+        #expect(report.boundaryRecall.total == 10)
+        #expect(report.dispositionMatchedPairs == 10)
+        #expect(report.dispositionMatchedAgreed == 10)
+    }
 }
 
 // MARK: - Empty-plan contract
@@ -765,6 +870,47 @@ struct ChapterPlanQualityRunnerTests {
             )
         }
     }
+
+    /// `runFromCache` with a plan whose content hash matches the
+    /// cache key but DIFFERS from the golden's. This can only happen
+    /// if the runner's contract is violated upstream (the cache lookup
+    /// is keyed by the golden's hash, so a hit implies parity), but we
+    /// pin the defensive guard regardless: any future refactor that
+    /// dropped the hash equality check on `run(plan:golden:)` would
+    /// surface here.
+    ///
+    /// We bypass the cache lookup directly by calling the synchronous
+    /// `run(plan:golden:)` surface — the cached + mismatched scenario
+    /// collapses to the same code path. This test keeps the contract
+    /// explicit alongside the cache-miss test above.
+    @Test
+    func runFromCache_mismatchedContentHashThrowsViaRunDirect() throws {
+        // A plan and a golden carrying different content hashes. The
+        // runner's hash-equality guard MUST throw rather than silently
+        // returning a (meaningless) report computed across mismatched
+        // episodes.
+        let golden = GoldenChapterSet(
+            episodeId: "synthetic-cross-hash",
+            episodeContentHash: "synthetic-cross-hash-A",
+            chapters: [
+                GoldenChapter(startTimeSeconds: 0.0, expectedDisposition: .content, expectedTopicLabel: nil)
+            ],
+            notes: nil
+        )
+        let plan = makePlan(
+            contentHash: "synthetic-cross-hash-B",
+            chapters: [
+                makeInferredChapter(start: 0.0, end: nil, title: nil, disposition: .content)
+            ]
+        )
+
+        #expect(throws: ChapterPlanQualityRunner.RunnerError.contentHashMismatch(
+            planHash: "synthetic-cross-hash-B",
+            goldenHash: "synthetic-cross-hash-A"
+        )) {
+            _ = try ChapterPlanQualityRunner.run(plan: plan, golden: golden)
+        }
+    }
 }
 
 // MARK: - Codable round-trip
@@ -793,6 +939,59 @@ struct ChapterPlanQualityEvalCodableTests {
         let decoded = try JSONDecoder().decode(ChapterPlanQualityReport.self, from: data)
 
         #expect(decoded == report)
+    }
+
+    /// Round-trip an empty-plan report (every confusion-matrix cell is
+    /// 0). The custom Codable conformance must survive the all-zero
+    /// rows path: a decoder that drops zero-valued cells from the wire
+    /// format would silently change `Equatable` comparisons here.
+    @Test
+    func report_jsonRoundTripIsLosslessForEmptyPlan() throws {
+        let golden = try ChapterPlanGoldenSetLoader.loadSynthetic(named: "synthetic-happy-path")
+        let plan = makePlan(contentHash: golden.episodeContentHash, chapters: [])
+
+        let report = ChapterPlanQualityEval().evaluate(pairs: [(plan, golden)])
+        let data = try JSONEncoder().encode(report)
+        let decoded = try JSONDecoder().decode(ChapterPlanQualityReport.self, from: data)
+
+        #expect(decoded == report)
+        // Pin: the decoded matrix has every disposition row keyed,
+        // each containing every disposition column with count 0.
+        for expected in [ChapterDisposition.adBreak, .content, .ambiguous] {
+            for observed in [ChapterDisposition.adBreak, .content, .ambiguous] {
+                #expect(decoded.perDispositionConfusion[expected]?[observed] == 0)
+            }
+        }
+    }
+
+    /// A wire-format JSON containing an unknown `ChapterDisposition`
+    /// raw value (e.g. a future enum case loaded by an older binary)
+    /// must throw `DecodingError.dataCorrupted` rather than silently
+    /// dropping the cell or producing `nil`. This pins the runtime
+    /// guard inside `DispositionConfusionWire.init(from:)`.
+    @Test
+    func report_decodingFailsOnUnknownDispositionRawValue() {
+        // A minimal JSON shaped like a `ChapterPlanQualityReport`,
+        // with the confusion matrix containing one valid outer key
+        // and a single bogus inner key. Every other field carries a
+        // well-formed but trivial value — the goal is to surface the
+        // disposition guard in isolation.
+        let json = """
+        {
+          "boundaryRecall": { "matched": 0, "total": 0 },
+          "boundaryPrecision": { "matched": 0, "total": 0 },
+          "dispositionMatchedAgreed": 0,
+          "dispositionMatchedPairs": 0,
+          "perDispositionConfusion": { "content": { "future_unknown_case": 1 } },
+          "topicLabelMatches": { "matched": 0, "mismatched": 0, "notApplicable": 0 },
+          "perEpisode": {},
+          "thresholdsUsed": { "boundaryToleranceSeconds": 15.0, "topicOverlapMinimum": 0.5 }
+        }
+        """.data(using: .utf8)!
+
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(ChapterPlanQualityReport.self, from: json)
+        }
     }
 }
 
