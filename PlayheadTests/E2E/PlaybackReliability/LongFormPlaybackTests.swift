@@ -83,17 +83,12 @@ struct LongFormPlaybackTests {
 
             // Set & clear skip cues many times.
             for i in 0..<20 {
-                let cues = (0..<5).map { offset in
-                    CMTimeRange(
-                        start: CMTime(
-                            seconds: Double(i * 100 + offset * 30),
-                            preferredTimescale: 600
-                        ),
-                        end: CMTime(
-                            seconds: Double(i * 100 + offset * 30 + 20),
-                            preferredTimescale: 600
-                        )
-                    )
+                let cues: [CMTimeRange] = (0..<5).map { offset -> CMTimeRange in
+                    let startSeconds = Double(i * 100 + offset * 30)
+                    let endSeconds = startSeconds + 20
+                    let start = CMTime(seconds: startSeconds, preferredTimescale: 600)
+                    let end = CMTime(seconds: endSeconds, preferredTimescale: 600)
+                    return CMTimeRange(start: start, end: end)
                 }
                 await service.setSkipCues(cues)
             }
