@@ -412,17 +412,21 @@ struct ChapterLabelingService: Sendable {
     // MARK: - Result construction
 
     /// Build the success `LabelingResult`. Confidence is clamped to
-    /// `[0, 1]`; non-finite values fall back to 0.
+    /// `[0, 1]`; non-finite values fall back to 0. The `topicDescriptor`
+    /// is sanitized exactly once and reused for both the chapter title
+    /// and the `LabelingResult.topicDescriptor` so the two cannot
+    /// diverge.
     private static func successResult(
         for candidate: ChapterLabelingCandidate,
         label: ChapterLabel,
         attempts: Int
     ) -> LabelingResult {
         let confidence = clampConfidence(label.confidence)
+        let title = label.topicDescriptor.flatMap(sanitizedTitle)
         let chapter = ChapterEvidence(
             startTime: candidate.startTime,
             endTime: candidate.endTime,
-            title: label.topicDescriptor.flatMap(sanitizedTitle),
+            title: title,
             source: .inferred,
             disposition: label.disposition.mappedDisposition,
             qualityScore: Float(confidence)
@@ -430,7 +434,7 @@ struct ChapterLabelingService: Sendable {
         return LabelingResult(
             chapter: chapter,
             labelDisposition: label.disposition,
-            topicDescriptor: label.topicDescriptor.flatMap(sanitizedTitle),
+            topicDescriptor: title,
             failureMode: nil,
             attempts: attempts
         )
@@ -439,7 +443,9 @@ struct ChapterLabelingService: Sendable {
     /// Build a `LabelingResult` for a semantic `.unclear` answer. The
     /// chapter is still emitted (with `.ambiguous` mapped disposition);
     /// `failureMode == .semantic` so plan-level callers can count
-    /// these without dropping the plan.
+    /// these without dropping the plan. As with `successResult`, the
+    /// topic descriptor is sanitized once and reused so chapter title
+    /// and result topicDescriptor stay aligned.
     private static func semanticResult(
         for candidate: ChapterLabelingCandidate,
         rawConfidence: Double,
@@ -447,10 +453,11 @@ struct ChapterLabelingService: Sendable {
         attempts: Int
     ) -> LabelingResult {
         let confidence = clampConfidence(rawConfidence)
+        let title = topicDescriptor.flatMap(sanitizedTitle)
         let chapter = ChapterEvidence(
             startTime: candidate.startTime,
             endTime: candidate.endTime,
-            title: topicDescriptor.flatMap(sanitizedTitle),
+            title: title,
             source: .inferred,
             disposition: ChapterDispositionRaw.unclear.mappedDisposition,
             qualityScore: Float(confidence)
@@ -458,7 +465,7 @@ struct ChapterLabelingService: Sendable {
         return LabelingResult(
             chapter: chapter,
             labelDisposition: .unclear,
-            topicDescriptor: topicDescriptor.flatMap(sanitizedTitle),
+            topicDescriptor: title,
             failureMode: .semantic,
             attempts: attempts
         )
