@@ -24,6 +24,27 @@ enum ChapterSource: String, Sendable, Codable, Equatable, CaseIterable {
     /// chapters comes from `ChapterLabelingService` confidence rather than
     /// parser-based heuristics — see `ChapterQualityScorer.score(...)`.
     case inferred
+
+    /// `true` for sources where the chapter was explicitly authored by
+    /// the podcast creator (ID3, PC20 JSON, RSS inline). The
+    /// `ChapterGenerationPhase` (au2v.1.11) treats these as
+    /// near-ground-truth and short-circuits the FM generation pipeline
+    /// when at least one creator-source chapter is present for an
+    /// episode. `.inferred` chapters are produced by the phase itself
+    /// and are NOT a creator source.
+    ///
+    /// This computed property exists so future creator origins (e.g. a
+    /// hypothetical user-edit override) can be added in one place
+    /// rather than scattering `case .id3, .pc20, .rssInline` switches
+    /// across the codebase.
+    var isCreatorSource: Bool {
+        switch self {
+        case .id3, .pc20, .rssInline:
+            return true
+        case .inferred:
+            return false
+        }
+    }
 }
 
 // MARK: - ChapterDisposition

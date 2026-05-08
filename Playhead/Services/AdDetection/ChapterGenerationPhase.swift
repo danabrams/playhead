@@ -1,5 +1,6 @@
 // ChapterGenerationPhase.swift
 // playhead-au2v.1.10: Shell of the chapter-generation phase.
+// playhead-au2v.1.11: Creator-chapter precedence short-circuit added.
 //
 // This file is the *skeleton* that ties together the (future) boundary
 // detector (playhead-au2v.1.4 / .5) and the (future) chapter labeler
@@ -12,7 +13,21 @@
 //      `FoundationModelExtractor` — the policy here is a thin DI
 //      seam so the phase can be tested without spinning up the live
 //      capability service).
-//   3. Transcript-snapshot race protection: a content hash is captured
+//   3. Creator-chapter precedence (au2v.1.11). Before any FM cost is
+//      incurred (no boundary detection, no labeling), the shell asks
+//      the injected `CreatorChapterProviding` whether the episode
+//      already has at least one `ChapterEvidence` with a creator
+//      `ChapterSource` (`.id3`, `.pc20`, `.rssInline`). If so the
+//      phase exits early with `chapter_phase_skipped_creator_chapters`
+//      and writes nothing — creator chapters are near-ground-truth and
+//      we will not pay FM cost when ground truth is available. Low
+//      quality scores, partial coverage, and all-`.content`
+//      dispositions still trigger the skip; the spec is explicit that
+//      even imperfect creator chapters beat statistical inference, and
+//      shadow eval can revisit that policy via a follow-up bead.
+//      `.inferred` chapters are NOT a creator source and never trigger
+//      the skip.
+//   4. Transcript-snapshot race protection: a content hash is captured
 //      at phase entry, then re-fetched immediately before the cache
 //      write. A mismatch aborts the run, discards the plan, and emits
 //      a `chapter_phase_preempted` diagnostic (the same event used by
@@ -20,7 +35,7 @@
 //      plan against is no longer current"; the inline comment at the
 //      recheck-mismatch branch in `run()` explains why we collapse
 //      cancellation and recheck-mismatch onto the same wire event).
-//   4. Cooperative cancellation honoring task cancellation. We use
+//   5. Cooperative cancellation honoring task cancellation. We use
 //      `Task.isCancelled` checks at every yield point (rather than
 //      `try Task.checkCancellation()`) so the shell can collapse a
 //      cancellation into the structured `Outcome.preempted` return —
@@ -30,7 +45,7 @@
 //      ALSO honored (caught and routed through the same `preempt`
 //      helper) — the `FoundationModelClassifier` pattern of throwing
 //      cancellation is still respected at the seam.
-//   5. Cache write into `ChapterPlanCache` (bead .1) on success, with
+//   6. Cache write into `ChapterPlanCache` (bead .1) on success, with
 //      a `chapter_phase_completed` diagnostic.
 //
 // Out of scope (later beads):
@@ -46,18 +61,19 @@
 //   * Every exit path EXCEPT the `.off` short-circuit emits exactly
 //     one phase-completion diagnostic (success or specific failure).
 //     "Phase-completion" here means terminal events:
-//     `.skippedAdmission`, `.noCandidates`, `.preempted`,
-//     `.completed`. There is never more than one of those per run.
+//     `.skippedAdmission`, `.skippedCreatorChapters`, `.noCandidates`,
+//     `.preempted`, `.completed`. There is never more than one of
+//     those per run.
 //     Note that `transcriptUnavailable` exits early but DOES emit
 //     `.noCandidates` — we still want telemetry on "phase admitted
 //     but had no transcript" for dogfood mis-scheduling debugging.
 //   * One `.started` event fires at phase entry (after the entry
 //     transcript-hash snapshot succeeds, since the started payload
 //     requires that hash). Paths that exit *before* the snapshot
-//     succeeds (`.off` / admission deny / transcript unavailable)
-//     do NOT emit `.started` — those exits are "phase never truly
-//     began" and the bead .3 diagnostic schema agrees with that
-//     reading.
+//     succeeds (`.off` / admission deny / creator-chapter skip /
+//     transcript unavailable) do NOT emit `.started` — those exits
+//     are "phase never truly began" and the bead .3 diagnostic
+//     schema agrees with that reading.
 //   * `ChapterSignalMode.off` emits NO diagnostic at all — the
 //     feature is fully off, and we want zero surface area in shipped
 //     bundles when the flag is off.
@@ -126,6 +142,44 @@ protocol TranscriptHashProviding: Sendable {
     func currentTranscriptHash() async -> String?
 }
 
+/// Source of pre-existing creator-supplied chapters (bead .11).
+///
+/// The phase calls this AFTER admission and BEFORE any FM cost is
+/// incurred. If the source returns one or more `ChapterEvidence` whose
+/// `source` is a creator origin (`.id3`, `.pc20`, `.rssInline`), the
+/// phase short-circuits with `chapter_phase_skipped_creator_chapters`.
+///
+/// `.inferred` chapters returned by this seam are ignored for the
+/// purpose of the precedence skip — only `.id3`, `.pc20`, and
+/// `.rssInline` are creator sources. (The shell filters on
+/// `ChapterSource.isCreatorSource`; if the seam returns a mixed
+/// payload that includes inferred chapters it is silently filtered.)
+///
+/// Production wiring is deferred to bead .13 (the production adapter
+/// will bridge to whichever cache/parser layer holds creator chapters
+/// for an episode); the spec acknowledges that creator-chapter
+/// storage may live in a different cache layer than the ad-detection
+/// artifacts cache, and this seam intentionally hides that detail.
+/// Tests inject a mock that returns a canned creator-chapter set per
+/// scenario.
+///
+/// The seam is keyed by raw `episodeId` rather than a transcript
+/// content hash because creator chapters are sourced from episode
+/// metadata (RSS/ID3/PC20) — they exist independently of (and
+/// typically before) the transcript pipeline producing a hashable
+/// snapshot. This also lets the phase short-circuit for episodes
+/// where the transcript is not yet available but creator chapters
+/// already are. The adapter is free to derive a content hash
+/// internally if its underlying cache requires one.
+protocol CreatorChapterProviding: Sendable {
+    /// Returns the set of `ChapterEvidence` already known for this
+    /// episode from creator-supplied sources (and possibly other
+    /// origins; the phase filters on `ChapterSource.isCreatorSource`).
+    /// An empty array means "no creator chapters present" and the
+    /// phase proceeds to FM generation.
+    func creatorChapters(episodeId: String) async -> [ChapterEvidence]
+}
+
 /// Sink for `ChapterPhaseEvent`s. Production wiring (bead .13 / a
 /// later persistence bead) will route these into the diagnostics
 /// store; tests inject an in-memory recorder.
@@ -171,6 +225,7 @@ struct ChapterGenerationPhase: Sendable {
     // MARK: Dependencies
 
     private let admissionPolicy: ChapterPhaseAdmissionPolicy
+    private let creatorChapterProvider: CreatorChapterProviding
     private let boundaryDetector: ChapterBoundaryDetecting
     private let labeler: ChapterLabeling
     private let transcriptHashProvider: TranscriptHashProviding
@@ -183,6 +238,7 @@ struct ChapterGenerationPhase: Sendable {
 
     init(
         admissionPolicy: ChapterPhaseAdmissionPolicy,
+        creatorChapterProvider: CreatorChapterProviding,
         boundaryDetector: ChapterBoundaryDetecting,
         labeler: ChapterLabeling,
         transcriptHashProvider: TranscriptHashProviding,
@@ -192,6 +248,7 @@ struct ChapterGenerationPhase: Sendable {
         logger: Logger = Logger(subsystem: "com.playhead", category: "ChapterGenerationPhase")
     ) {
         self.admissionPolicy = admissionPolicy
+        self.creatorChapterProvider = creatorChapterProvider
         self.boundaryDetector = boundaryDetector
         self.labeler = labeler
         self.transcriptHashProvider = transcriptHashProvider
@@ -209,6 +266,14 @@ struct ChapterGenerationPhase: Sendable {
     enum Outcome: Sendable, Hashable, Equatable {
         case modeOff
         case admissionDenied(reason: String)
+        /// Phase short-circuited because the episode already has at
+        /// least one creator-supplied chapter (`.id3` / `.pc20` /
+        /// `.rssInline`). No FM cost was incurred and no
+        /// `ChapterPlan` was written. The associated value mirrors
+        /// the diagnostic payload's count so callers can surface a
+        /// quick "we already had N creator chapters" message without
+        /// re-querying the provider.
+        case skippedCreatorChapters(creatorChapterCount: Int)
         case noCandidates
         case transcriptUnavailable
         case raceAborted
@@ -261,7 +326,55 @@ struct ChapterGenerationPhase: Sendable {
             return await preempt(installID: installID, episodeId: episodeId)
         }
 
-        // 3. Transcript snapshot capture. A `nil` here means the
+        // 3. Creator-chapter precedence (au2v.1.11). If the episode
+        //    already exposes at least one creator-supplied chapter
+        //    (`.id3` / `.pc20` / `.rssInline`), short-circuit BEFORE
+        //    boundary detection or labeling — both incur FM cost we
+        //    refuse to pay when ground truth is available. The check
+        //    runs after admission but before the transcript-hash
+        //    snapshot, so this exit (like the `.off` and admission-
+        //    deny exits) emits no `.started` event: the phase never
+        //    truly began. The diagnostic
+        //    `chapter_phase_skipped_creator_chapters` is the single
+        //    terminal event for this exit path.
+        //
+        //    Edge-case policy (encoded by FILTERING and not by extra
+        //    branches, so each rule is exercised by an explicit
+        //    test):
+        //      * Low qualityScore (< 0.5) — STILL skip. Even imperfect
+        //        creator chapters beat statistical inference; shadow
+        //        eval can revisit if this proves wrong.
+        //      * Partial coverage (only first half of episode) —
+        //        STILL skip. Mixed creator+inferred plans are a
+        //        follow-up bead.
+        //      * All `.content` disposition (no ads) — STILL skip.
+        //        Trust the creator's "no ads here" implicit signal.
+        //      * `.inferred` chapters returned by the provider —
+        //        ignored; only creator sources count via
+        //        `ChapterSource.isCreatorSource`. A provider that
+        //        accidentally mixes inferred+creator chapters still
+        //        triggers the skip iff creator chapters exist.
+        let allChapters = await creatorChapterProvider.creatorChapters(
+            episodeId: episodeId
+        )
+        let creatorChapters = allChapters.filter { $0.source.isCreatorSource }
+        if !creatorChapters.isEmpty {
+            await recordSkippedCreatorChapters(
+                installID: installID,
+                episodeId: episodeId,
+                timestamp: clock().timeIntervalSince1970,
+                creatorChapters: creatorChapters
+            )
+            return .skippedCreatorChapters(
+                creatorChapterCount: creatorChapters.count
+            )
+        }
+
+        if Task.isCancelled {
+            return await preempt(installID: installID, episodeId: episodeId)
+        }
+
+        // 4. Transcript snapshot capture. A `nil` here means the
         //    transcript pipeline has not produced anything to hash —
         //    typically the phase was invoked too early (an
         //    orchestrator scheduling bug, not the shell's fault).
@@ -283,12 +396,16 @@ struct ChapterGenerationPhase: Sendable {
             return .transcriptUnavailable
         }
 
-        // The phase has now "truly begun": admission passed AND we
-        // have a transcript snapshot to anchor the run. Emit the
-        // single `.started` lifecycle event — the bead .3 schema
+        // The phase has now "truly begun": admission passed, the
+        // creator-chapter precedence check did not short-circuit,
+        // AND we have a transcript snapshot to anchor the run. Emit
+        // the single `.started` lifecycle event — the bead .3 schema
         // requires this be paired with exactly one terminal event
-        // (`.skippedAdmission` / `.noCandidates` / `.preempted` /
-        // `.completed`) per run from this point onward.
+        // (`.noCandidates` / `.preempted` / `.completed`) per run
+        // from this point onward. The earlier short-circuit exits
+        // (`.modeOff` / `.skippedAdmission` / `.skippedCreatorChapters`)
+        // are themselves single-terminal-event paths that bypass
+        // `.started` entirely (the phase never truly began on those).
         //
         // Timestamp note: we stamp `.started` with `startedAtTimestamp`
         // captured BEFORE admission, not the wall-clock at this emit
@@ -307,7 +424,7 @@ struct ChapterGenerationPhase: Sendable {
             return await preempt(installID: installID, episodeId: episodeId)
         }
 
-        // 4. Boundary detection. The detector itself may throw
+        // 5. Boundary detection. The detector itself may throw
         //    `CancellationError` on a cooperative cancel; treat that
         //    as a preempt. Any other thrown error is logged and
         //    surfaced as `noCandidates` (the bead .3 wire offers no
@@ -336,7 +453,7 @@ struct ChapterGenerationPhase: Sendable {
             return .noCandidates
         }
 
-        // 5. Serial labeling pass. Per-call parallelism is bead .12.
+        // 6. Serial labeling pass. Per-call parallelism is bead .12.
         //    A `nil` from the labeler is silently dropped; a non-
         //    cancellation throw is logged and skips that candidate
         //    (the labeling service owns `chapter_phase_label_failed`
@@ -380,8 +497,8 @@ struct ChapterGenerationPhase: Sendable {
             return await preempt(installID: installID, episodeId: episodeId)
         }
 
-        // 6. Race re-check. We re-fetch the transcript hash and
-        //    compare it to the snapshot taken in step 3. If the
+        // 7. Race re-check. We re-fetch the transcript hash and
+        //    compare it to the snapshot taken in step 4. If the
         //    transcript changed under us (re-transcription, edit,
         //    user re-imported), discard the plan; do NOT cache. We
         //    emit `preempted` rather than inventing a new event
@@ -405,7 +522,7 @@ struct ChapterGenerationPhase: Sendable {
             return .raceAborted
         }
 
-        // 7. Build the plan and persist.
+        // 8. Build the plan and persist.
         let planConfidence = ChapterPlan.computePlanConfidence(labeled)
         let plan = ChapterPlan(
             episodeContentHash: entryHash,
@@ -511,6 +628,74 @@ struct ChapterGenerationPhase: Sendable {
                 episodeId: episodeId,
                 timestamp: timestamp,
                 denyReason: denyReason
+            )
+        )
+    }
+
+    /// Records the `chapter_phase_skipped_creator_chapters` event for
+    /// the au2v.1.11 short-circuit. Computes the deduplicated, sorted
+    /// `creator_chapter_sources` list and the min/max/avg quality
+    /// score across the supplied creator chapter set. The caller is
+    /// responsible for filtering out non-creator sources before
+    /// invoking this helper (we assert the invariant in DEBUG so a
+    /// drift in the call site is loud).
+    ///
+    /// `creatorChapters` MUST be non-empty; the call site guards on
+    /// `!isEmpty` before calling, so an empty array here is a
+    /// programmer error and we trap with a precondition rather than
+    /// silently emit a divide-by-zero average.
+    private func recordSkippedCreatorChapters(
+        installID: UUID,
+        episodeId: String,
+        timestamp: Double,
+        creatorChapters: [ChapterEvidence]
+    ) async {
+        precondition(
+            !creatorChapters.isEmpty,
+            "recordSkippedCreatorChapters called with empty creator chapters"
+        )
+        #if DEBUG
+        assert(
+            creatorChapters.allSatisfy { $0.source.isCreatorSource },
+            "recordSkippedCreatorChapters received non-creator-source chapter — caller must pre-filter"
+        )
+        #endif
+
+        // Deduplicate sources, normalize to snake_case wire form, and
+        // sort alphabetically so the wire shape is deterministic
+        // across runs (matters for golden tests + bundle diff review).
+        let sources = Set(creatorChapters.map { $0.source })
+        let sourceWireValues = sources
+            .map { ChapterPhaseEvent.snakeCaseSourceName($0) }
+            .sorted()
+
+        // Compute quality stats. `qualityScore` is a `Float` clamped
+        // to `[0, 1]` by the scorer; we widen to `Double` for the
+        // wire payload (the rest of the diagnostic surface uses
+        // `Double` for fractional fields). We compute on the typed
+        // values rather than pre-widening so the loop body stays
+        // allocation-free.
+        var minScore: Float = 1.0
+        var maxScore: Float = 0.0
+        var sum: Double = 0.0
+        for chapter in creatorChapters {
+            let score = chapter.qualityScore
+            if score < minScore { minScore = score }
+            if score > maxScore { maxScore = score }
+            sum += Double(score)
+        }
+        let avgScore = sum / Double(creatorChapters.count)
+
+        await eventSink.record(
+            .skippedCreatorChapters(
+                installID: installID,
+                episodeId: episodeId,
+                timestamp: timestamp,
+                creatorChapterCount: creatorChapters.count,
+                creatorChapterSources: sourceWireValues,
+                creatorQualityScoreMin: Double(minScore),
+                creatorQualityScoreMax: Double(maxScore),
+                creatorQualityScoreAvg: avgScore
             )
         )
     }
