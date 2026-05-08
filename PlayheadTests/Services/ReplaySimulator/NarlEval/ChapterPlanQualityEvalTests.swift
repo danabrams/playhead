@@ -246,6 +246,14 @@ struct ChapterPlanQualityEvalSyntheticTests {
         #expect(report.topicLabelMatches.matched == 2)
         #expect(report.topicLabelMatches.mismatched == 1)
         #expect(report.topicLabelMatches.notApplicable == 0)
+
+        // Per-episode parity: the single-episode aggregate IS the
+        // per-episode entry. Pin the topic counts explicitly so a
+        // regression that aggregates topic counts at the report
+        // level but skips them per-episode (or vice versa) surfaces
+        // here.
+        let perEp = try #require(report.perEpisode["synthetic-topic-mismatch"])
+        #expect(perEp.topicLabelMatches == report.topicLabelMatches)
     }
 }
 
@@ -516,11 +524,14 @@ struct ChapterPlanQualityEvalThresholdTests {
         #expect(report.dispositionMatchedPairs == 1)
         #expect(report.dispositionMatchedAgreed == 1)
 
-        // Per-episode false-positive count must be consistent with
-        // the aggregate: 4 candidates, 1 matched → 3 false positives.
+        // Per-episode counts must be consistent with the aggregate:
+        // 4 candidates, 1 matched → 3 false positives, 0 missed,
+        // 1 disposition-matched pair that agrees (both .adBreak).
         let perEp = try #require(report.perEpisode["synthetic-nonfinite"])
         #expect(perEp.falsePositiveBoundaries == 3)
         #expect(perEp.missedBoundaries == 0)
+        #expect(perEp.dispositionMatchedPairs == 1)
+        #expect(perEp.dispositionMatchedAgreed == 1)
     }
 
     /// Symmetric edge: a GOLDEN with a non-finite `startTimeSeconds`
@@ -847,6 +858,15 @@ struct ChapterPlanQualityEvalEmptyPlanTests {
         #expect(report.boundaryRecall.total == 0)
         #expect(report.boundaryPrecision.matched == 0)
         #expect(report.boundaryPrecision.total == 0)
+        // Aggregate disposition counts must be zero (the zero-pair
+        // contract is what makes `dispositionAccuracy` resolve to
+        // 0.0 instead of NaN). Pin both numerator and denominator
+        // explicitly so a regression that, say, defaulted
+        // `dispositionMatchedPairs` to 1 to dodge a divide-by-zero
+        // would surface here rather than silently flipping the
+        // accuracy field.
+        #expect(report.dispositionMatchedPairs == 0)
+        #expect(report.dispositionMatchedAgreed == 0)
         #expect(report.dispositionAccuracy == 0.0)
 
         // Per-episode entry must still be emitted even when both
