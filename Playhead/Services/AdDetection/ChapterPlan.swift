@@ -163,9 +163,11 @@ struct ChapterPlan: Sendable, Codable, Equatable {
     ///
     /// Cases:
     /// 1. `startTime` is non-finite (NaN/Inf) → return 0 so the chapter
-    ///    is skipped. A corrupt start time means we cannot trust either
-    ///    the real interval or the 60s open-ended fallback — both lean
-    ///    on the start anchor as a sanity reference.
+    ///    is skipped. A NaN/Inf start signals that the chapter's bounds
+    ///    are corrupt; rather than count a 60s nominal contribution
+    ///    from a chapter we cannot anchor in the timeline, we drop it
+    ///    entirely. This mirrors the symmetric `endTime.isFinite` guard
+    ///    below.
     /// 2. `endTime` is set and `> startTime` → use the real interval.
     /// 3. `endTime` is nil → fall back to 60s nominal (matches
     ///    `ChapterMetadataEvidenceBuilder`'s open-ended-chapter rule).
