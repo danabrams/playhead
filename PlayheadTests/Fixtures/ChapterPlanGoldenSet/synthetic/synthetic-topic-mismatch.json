@@ -1,0 +1,22 @@
+{
+  "episodeId": "synthetic-topic-mismatch",
+  "episodeContentHash": "synthetic-topic-mismatch-hash",
+  "notes": "Synthetic fixture: boundaries and dispositions match perfectly, but the labeler emits topic descriptors with no keyword overlap with ground truth on one chapter. Exercises the topic-label sanity matcher.",
+  "chapters": [
+    {
+      "startTimeSeconds": 0.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "intro segment"
+    },
+    {
+      "startTimeSeconds": 600.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "deep dive interview"
+    },
+    {
+      "startTimeSeconds": 1200.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "listener questions"
+    }
+  ]
+}

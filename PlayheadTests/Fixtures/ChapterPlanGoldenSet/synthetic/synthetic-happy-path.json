@@ -1,0 +1,32 @@
+{
+  "episodeId": "synthetic-happy-path",
+  "episodeContentHash": "synthetic-happy-path-hash",
+  "notes": "Synthetic fixture: ground truth and detector match perfectly. recall=1, precision=1, dispositionAccuracy=1.0.",
+  "chapters": [
+    {
+      "startTimeSeconds": 0.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "intro segment"
+    },
+    {
+      "startTimeSeconds": 600.0,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": null
+    },
+    {
+      "startTimeSeconds": 720.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "main interview"
+    },
+    {
+      "startTimeSeconds": 1800.0,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": null
+    },
+    {
+      "startTimeSeconds": 1920.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "wrap up"
+    }
+  ]
+}
