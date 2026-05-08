@@ -140,11 +140,12 @@ struct SkipOrchestratorBlockedGateGuardTests {
         // Subscribe BEFORE delivery so an erroneously emitted
         // auto-skip banner can't slip past the test.
         let stream = await orchestrator.bannerItemStream()
-        nonisolated(unsafe) var received: [AdSkipBannerItem] = []
-        let collectTask = Task {
+        let collectTask = Task<[AdSkipBannerItem], Never> {
+            var items: [AdSkipBannerItem] = []
             for await item in stream {
-                received.append(item)
+                items.append(item)
             }
+            return items
         }
 
         let windowId = "ad-blocked-\(gateRaw)"
@@ -153,6 +154,7 @@ struct SkipOrchestratorBlockedGateGuardTests {
 
         try await Task.sleep(for: .milliseconds(100))
         collectTask.cancel()
+        let received = await collectTask.value
 
         // 1. NOT in the confirmed/active managed-window set.
         let confirmed = await orchestrator.confirmedWindows()

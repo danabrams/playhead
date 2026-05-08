@@ -833,16 +833,16 @@ struct SkipOrchestratorBannerItemStreamTests {
         await orchestrator.receiveAdWindows([window])
 
         // Collect one item from the stream with a bounded timeout.
-        nonisolated(unsafe) var received: AdSkipBannerItem?
-        let collectTask = Task {
+        let collectTask = Task<AdSkipBannerItem?, Never> {
             for await item in stream {
-                received = item
-                break
+                return item
             }
+            return nil
         }
         // Give the actor time to process and emit.
         try await Task.sleep(for: .milliseconds(100))
         collectTask.cancel()
+        let received = await collectTask.value
 
         let item = try #require(received, "Expected a banner item for a confirmed window")
         #expect(item.windowId == "ad-banner-1")
@@ -878,15 +878,15 @@ struct SkipOrchestratorBannerItemStreamTests {
         )
         await orchestrator.receiveAdWindows([window])
 
-        nonisolated(unsafe) var received: AdSkipBannerItem?
-        let collectTask = Task {
+        let collectTask = Task<AdSkipBannerItem?, Never> {
             for await item in stream {
-                received = item
-                break
+                return item
             }
+            return nil
         }
         try await Task.sleep(for: .milliseconds(100))
         collectTask.cancel()
+        let received = await collectTask.value
 
         let item = try #require(received, "Expected a banner item for an applied window")
         #expect(item.windowId == "ad-banner-auto")
@@ -921,15 +921,17 @@ struct SkipOrchestratorBannerItemStreamTests {
         await orchestrator.receiveAdWindows([window])
 
         // Collect up to two items, but expect exactly one.
-        nonisolated(unsafe) var count = 0
-        let collectTask = Task {
+        let collectTask = Task<Int, Never> {
+            var count = 0
             for await _ in stream {
                 count += 1
                 if count >= 2 { break }
             }
+            return count
         }
         try await Task.sleep(for: .milliseconds(150))
         collectTask.cancel()
+        let count = await collectTask.value
 
         #expect(count == 1, "Banner must fire only once per window, got \(count)")
     }
@@ -957,15 +959,15 @@ struct SkipOrchestratorBannerItemStreamTests {
         )
         await orchestrator.receiveAdWindows([window])
 
-        nonisolated(unsafe) var received: AdSkipBannerItem?
-        let collectTask = Task {
+        let collectTask = Task<AdSkipBannerItem?, Never> {
             for await item in stream {
-                received = item
-                break
+                return item
             }
+            return nil
         }
         try await Task.sleep(for: .milliseconds(100))
         collectTask.cancel()
+        let received = await collectTask.value
 
         #expect(received == nil, "Suppressed windows must not emit banners")
     }
@@ -1040,15 +1042,15 @@ struct SkipOrchestratorSuggestTierTests {
         let window = makeMarkOnlyAdWindow(id: "ad-suggest-emit")
         await orchestrator.receiveAdWindows([window])
 
-        nonisolated(unsafe) var received: AdSkipBannerItem?
-        let collectTask = Task {
+        let collectTask = Task<AdSkipBannerItem?, Never> {
             for await item in stream {
-                received = item
-                break
+                return item
             }
+            return nil
         }
         try await Task.sleep(for: .milliseconds(100))
         collectTask.cancel()
+        let received = await collectTask.value
 
         let item = try #require(received,
             "markOnly windows must surface as a suggest-tier banner (playhead-gtt9.23)")
@@ -1189,11 +1191,12 @@ struct SkipOrchestratorSuggestTierTests {
         // Subscribe to the banner stream BEFORE delivery so a (wrongly
         // emitted) suggest-tier banner can't slip through unnoticed.
         let stream = await orchestrator.bannerItemStream()
-        nonisolated(unsafe) var receivedBanners: [AdSkipBannerItem] = []
-        let collectTask = Task {
+        let collectTask = Task<[AdSkipBannerItem], Never> {
+            var items: [AdSkipBannerItem] = []
             for await item in stream {
-                receivedBanners.append(item)
+                items.append(item)
             }
+            return items
         }
 
         await orchestrator.receiveAdWindows([window])
@@ -1201,6 +1204,7 @@ struct SkipOrchestratorSuggestTierTests {
         // Allow any banner-stream yields to drain.
         try await Task.sleep(for: .milliseconds(100))
         collectTask.cancel()
+        let receivedBanners = await collectTask.value
 
         // Positive: the window IS in the standard managed path.
         let confirmed = await orchestrator.confirmedWindows()
@@ -1320,15 +1324,17 @@ struct SkipOrchestratorSuggestTierTests {
         await orchestrator.receiveAdWindows([window])
         await orchestrator.receiveAdWindows([window])
 
-        nonisolated(unsafe) var count = 0
-        let collectTask = Task {
+        let collectTask = Task<Int, Never> {
+            var count = 0
             for await _ in stream {
                 count += 1
                 if count >= 2 { break }
             }
+            return count
         }
         try await Task.sleep(for: .milliseconds(150))
         collectTask.cancel()
+        let count = await collectTask.value
 
         #expect(count == 1,
             "Suggest banner must dedupe across repeated markOnly deliveries; got \(count)")
@@ -1447,12 +1453,13 @@ struct SkipOrchestratorSuggestTierTests {
         // Collect every banner emission so we can assert exactly one
         // span surface materialises end-to-end.
         let bannerStream = await orchestrator.bannerItemStream()
-        nonisolated(unsafe) var receivedBanners: [AdSkipBannerItem] = []
-        let collectTask = Task {
+        let collectTask = Task<[AdSkipBannerItem], Never> {
+            var items: [AdSkipBannerItem] = []
             for await item in bannerStream {
-                receivedBanners.append(item)
-                if receivedBanners.count >= 4 { break }
+                items.append(item)
+                if items.count >= 4 { break }
             }
+            return items
         }
 
         // 1. markOnly arrives → suggest banner emitted, suggestWindows populated.
@@ -1490,6 +1497,7 @@ struct SkipOrchestratorSuggestTierTests {
 
         try await Task.sleep(for: .milliseconds(150))
         collectTask.cancel()
+        let receivedBanners = await collectTask.value
 
         // Exactly one applied/confirmed managed window should exist
         // for the original span — the UUID-keyed promotion. The late
