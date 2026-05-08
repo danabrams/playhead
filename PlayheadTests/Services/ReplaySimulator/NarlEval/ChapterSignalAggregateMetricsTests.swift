@@ -255,13 +255,17 @@ struct ChapterSignalAggregateMetricsTests {
             generatedAt: Self.testClock,
             showName: Self.showNameByPodcastId
         )
-        #expect(report.shadow.phaseLatencyP50Ms == 80)
-        // Use approximate equality on p90 / p99 — interpolation can
-        // produce tiny FP residue.
+        // Use approximate equality on all three percentiles for
+        // consistency. Even though p50 lands exactly on a sample point
+        // (no interpolation needed at index 2 for 5 samples), pinning
+        // exact equality across the board protects against a future
+        // change to MetricMath.percentile that introduces a sub-eps
+        // FP residue at sample-aligned percentiles.
+        #expect(abs(report.shadow.phaseLatencyP50Ms - 80) < 1e-9)
         #expect(abs(report.shadow.phaseLatencyP90Ms - 120) < 1e-9)
         #expect(abs(report.shadow.phaseLatencyP99Ms - 129) < 1e-9)
         // Same shape for enabled (phase-side identical to shadow).
-        #expect(report.enabled.phaseLatencyP50Ms == 80)
+        #expect(abs(report.enabled.phaseLatencyP50Ms - 80) < 1e-9)
     }
 
     @Test("compute() FM-cost-multiplier: zero baseline clamps denominator to 1")
@@ -734,5 +738,28 @@ struct ChapterSignalAggregateMetricsTests {
             showName: Self.showNameByPodcastId
         )
         #expect(report.schemaVersion == ChapterSignalLiftReport.currentSchemaVersion)
+    }
+
+    @Test("schemaVersion encodes as `\"schemaVersion\":1` on the wire")
+    func schemaVersionWireValue() throws {
+        // Pin not just the field NAME (covered by wireShapeCarriesDocumentedFields)
+        // but also the literal numeric VALUE on the wire. Without this,
+        // a future patch that changes the default schemaVersion without
+        // bumping `currentSchemaVersion` would silently encode the new
+        // number while the symbolic test still passed (both sides drift
+        // together).
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [],
+            runId: "schema-wire",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(report)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("\"schemaVersion\":1"),
+                "wire format must carry the literal numeric schemaVersion 1; bump this test when bumping the schema")
     }
 }

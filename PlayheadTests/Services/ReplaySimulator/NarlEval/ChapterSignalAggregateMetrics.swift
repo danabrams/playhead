@@ -27,10 +27,11 @@
 //   - Bar evaluation: `barMet == true` iff
 //        (measurable lift on ≥1 of {recall, precision}) AND
 //        (no regression on the other) AND
-//        (`fmCostMultiplier ≤ 2.0`).
-//     "Measurable lift" uses a small epsilon (`Self.measurableLiftEpsilon`)
-//     so floating-point noise doesn't trip the bar. "No regression" is
-//     `>= -epsilon` (strict equality is allowed).
+//        (`fmCostMultiplier ≤ ChapterSignalAggregateMetrics.maxFMCostMultiplier`).
+//     "Measurable lift" uses a small epsilon
+//     (`ChapterSignalAggregateMetrics.measurableLiftEpsilon`) so floating-
+//     point noise doesn't trip the bar. "No regression" is `>= -epsilon`
+//     (strict equality is allowed).
 //
 // Determinism:
 //   - All ordering is stable: per-show keys are sorted, mode iteration is
@@ -484,11 +485,12 @@ enum ChapterSignalAggregateMetrics {
     // MARK: - Internals
 
     /// Per-trace prediction result, used by the aggregate to roll up
-    /// precision/recall/F1.
-    /// Not `Equatable` because `FrozenTrace` is not — a trace identity
-    /// match is irrelevant for the aggregate (we sum scalars).
-    struct DetectionPerTrace: Sendable {
-        let trace: FrozenTrace
+    /// precision/recall/F1. The originating trace is intentionally NOT
+    /// retained — the aggregate sums scalars, and per-trace identity is
+    /// irrelevant once the seconds are computed. Dropping the FrozenTrace
+    /// reference also avoids holding the (often-large) atom array alive
+    /// across the aggregation pass.
+    struct DetectionPerTrace: Sendable, Equatable {
         let isExcluded: Bool
         let predictedAdSeconds: Double
         let groundTruthAdSeconds: Double
@@ -505,8 +507,10 @@ enum ChapterSignalAggregateMetrics {
     /// aggregate is mode-correct the moment the predictor learns to
     /// read the plan, with no shape change to `PerModeMetrics`.
     ///
-    /// The `_ mode` underscore on the parameter name suppresses the
-    /// unused-parameter warning without an inline `_ = mode` discard.
+    /// Note the parameter is declared `mode _: ChapterSignalMode` so the
+    /// external label remains `mode:` (matching the future signature)
+    /// while the internal name `_` suppresses the unused-parameter
+    /// warning at the bead scaffold.
     static func predictUnderMode(
         trace: FrozenTrace,
         mode _: ChapterSignalMode,
@@ -524,7 +528,6 @@ enum ChapterSignalAggregateMetrics {
             let gt = NarlGroundTruth.build(for: trace)
             if gt.isExcluded {
                 return DetectionPerTrace(
-                    trace: trace,
                     isExcluded: true,
                     predictedAdSeconds: 0,
                     groundTruthAdSeconds: 0,
@@ -536,7 +539,6 @@ enum ChapterSignalAggregateMetrics {
             let groundTruth = totalSeconds(gt.adWindows)
             let tp = intersectSeconds(pred.windows, gt.adWindows)
             return DetectionPerTrace(
-                trace: trace,
                 isExcluded: false,
                 predictedAdSeconds: predicted,
                 groundTruthAdSeconds: groundTruth,
@@ -714,8 +716,12 @@ enum ChapterSignalAggregateMetrics {
 
     /// Sum the durations of a non-overlapping set of time ranges. The
     /// predictor and ground-truth builders both produce non-overlapping
-    /// outputs, so a naive sum is correct; the `assert` guards against
-    /// future regressions where overlap creeps in unnoticed.
+    /// outputs by contract, so a naive sum is correct. We do NOT assert
+    /// non-overlap here because the assertion would fire on a degenerate
+    /// frozen-trace fixture (overlap is a fixture-quality issue, not a
+    /// metric-correctness issue) and would make the eval harness fragile.
+    /// If overlap-counting becomes a real problem, switch to a sweep-line
+    /// merge before summation.
     private static func totalSeconds(_ ranges: [NarlTimeRange]) -> Double {
         ranges.reduce(0.0) { $0 + $1.duration }
     }
@@ -723,7 +729,10 @@ enum ChapterSignalAggregateMetrics {
     /// Sum of intersection seconds between two range sets. We do NOT
     /// assume either side is non-overlapping or sorted; the O(n*m) walk
     /// is fine on typical corpus sizes (tens of windows per episode,
-    /// hundreds of episodes).
+    /// hundreds of episodes — bounded by predictor output and ground-
+    /// truth ad-span counts, both of which today produce << 100 windows
+    /// per trace). If a future predictor produces dense outputs, switch
+    /// to a sorted sweep-line merge.
     private static func intersectSeconds(
         _ a: [NarlTimeRange],
         _ b: [NarlTimeRange]
@@ -760,6 +769,13 @@ enum ChapterSignalAggregateMetrics {
                 + "for both .off and .shadow."
             )
         }
+        // Corpus-size threshold rationale: warn when < 25 episodes
+        // (signals likely noise-dominated at this scale) and recommend
+        // ≥ 50 episodes for the bar to be a deployment gate. The two
+        // numbers are intentionally different — `< 25` is the "almost
+        // certainly noise" floor, `≥ 50` is the "trust the lift signal"
+        // ceiling. Episodes between [25, 50) get no note (interpretation
+        // is up to the reader).
         if corpusSize == 0 {
             notes.append("Corpus is empty — barMet is meaningless and reported as false.")
         } else if corpusSize < 25 {
