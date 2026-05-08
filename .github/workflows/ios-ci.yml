@@ -56,6 +56,8 @@ jobs:
             -scheme "$SCHEME" \
             -destination "$DESTINATION" \
             -derivedDataPath "$DERIVED_DATA_PATH" \
+            -parallel-testing-enabled NO \
+            -maximum-parallel-testing-workers 1 \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Upload Xcode results
