@@ -4,8 +4,9 @@
 //
 // Storage model: one JSON file per `episodeContentHash`, written under a
 // dedicated subdirectory of `Application Support/`. Files are written
-// atomically (`.atomicWrite`) so a partially-written plan never gets
-// observed.
+// atomically (`.atomic`, an `NSData.WritingOptions` flag that writes to a
+// temp file and renames into place) so a partially-written plan never
+// gets observed.
 //
 // Schema versioning: `ChapterPlan.schemaVersion` is checked on read. A
 // mismatch is treated as a cache miss (we return `nil`); the chapter
