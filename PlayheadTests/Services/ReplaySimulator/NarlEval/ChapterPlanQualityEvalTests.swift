@@ -487,6 +487,10 @@ struct ChapterPlanQualityEvalThresholdTests {
             chapters: [
                 // NaN start: skipped by the matcher.
                 makeInferredChapter(start: .nan, end: nil, title: nil, disposition: .adBreak),
+                // +Infinity start: also skipped.
+                makeInferredChapter(start: .infinity, end: nil, title: nil, disposition: .adBreak),
+                // -Infinity start: also skipped (symmetric guard).
+                makeInferredChapter(start: -.infinity, end: nil, title: nil, disposition: .adBreak),
                 // Real candidate: matches the golden.
                 makeInferredChapter(start: 605.0, end: nil, title: nil, disposition: .adBreak)
             ]
@@ -498,11 +502,60 @@ struct ChapterPlanQualityEvalThresholdTests {
         #expect(report.boundaryRecall.matched == 1)
         #expect(report.boundaryRecall.total == 1)
         // Precision: numerator counts candidates that found a match,
-        // denominator is the input length. The NaN candidate is
-        // counted in the denominator (it was emitted by the detector)
-        // but never finds a match → 1 / 2.
+        // denominator is the input length. All three non-finite
+        // candidates are counted in the denominator (they were emitted
+        // by the detector) but never find a match → 1 / 4.
         #expect(report.boundaryPrecision.matched == 1)
-        #expect(report.boundaryPrecision.total == 2)
+        #expect(report.boundaryPrecision.total == 4)
+        // Disposition: only the real candidate participates in pair
+        // matching. NaN/+Inf/-Inf are filtered before pairing (R3
+        // explicit-isFinite guard inside evaluateEpisode).
+        #expect(report.dispositionMatchedPairs == 1)
+        #expect(report.dispositionMatchedAgreed == 1)
+    }
+
+    /// Symmetric edge: a GOLDEN with a non-finite `startTimeSeconds`
+    /// is also skipped from matching. A malformed fixture (`.infinity`,
+    /// `-.infinity`, or `.nan`) must not poison metrics.
+    @Test
+    func nonFiniteGoldenStart_isSkippedFromMatching() {
+        let golden = GoldenChapterSet(
+            episodeId: "synthetic-nonfinite-golden",
+            episodeContentHash: "synthetic-nonfinite-golden-hash",
+            chapters: [
+                // NaN golden: skipped.
+                GoldenChapter(startTimeSeconds: .nan, expectedDisposition: .adBreak, expectedTopicLabel: nil),
+                // +Infinity golden: skipped.
+                GoldenChapter(startTimeSeconds: .infinity, expectedDisposition: .adBreak, expectedTopicLabel: nil),
+                // -Infinity golden: skipped.
+                GoldenChapter(startTimeSeconds: -.infinity, expectedDisposition: .adBreak, expectedTopicLabel: nil),
+                // Real golden: should match.
+                GoldenChapter(startTimeSeconds: 600.0, expectedDisposition: .adBreak, expectedTopicLabel: nil)
+            ],
+            notes: nil
+        )
+        let plan = makePlan(
+            contentHash: golden.episodeContentHash,
+            chapters: [
+                makeInferredChapter(start: 605.0, end: nil, title: nil, disposition: .adBreak)
+            ]
+        )
+
+        let report = ChapterPlanQualityEval().evaluate(pairs: [(plan, golden)])
+
+        // Recall numerator: only the real golden can match. Denominator:
+        // all 4 goldens (we don't filter from input — denominator is
+        // the input length). So 1/4. Three non-finite goldens are
+        // missed boundaries.
+        #expect(report.boundaryRecall.matched == 1)
+        #expect(report.boundaryRecall.total == 4)
+        // Precision numerator: the only candidate finds the real
+        // golden. Denominator: 1 candidate. So 1/1.
+        #expect(report.boundaryPrecision.matched == 1)
+        #expect(report.boundaryPrecision.total == 1)
+        // Disposition: only the (real golden, real candidate) pair
+        // participates.
+        #expect(report.dispositionMatchedPairs == 1)
     }
 }
 
