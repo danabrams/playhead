@@ -711,7 +711,14 @@ struct ChapterGenerationPhaseIntegrationTests {
         // against the cancellation handler. Bounded poll: a regression
         // that prevents the phase from reaching the labeler surfaces
         // here as a fail, not a hang.
-        let entryDeadline = Date().addingTimeInterval(5.0)
+        //
+        // Deadline 30s (not 5s) because under the full PlayheadFastTests
+        // run (~6k tests in parallel), SQLite contention on the shared
+        // simulator can slow the asset-row resolution hop in the
+        // wire-up to several seconds. Normal local runs hit the
+        // labeler within milliseconds; the generous deadline only
+        // matters when CI/parallel-load is in play.
+        let entryDeadline = Date().addingTimeInterval(30.0)
         while !blockingLabeler.hasEntered {
             if Date() > entryDeadline {
                 Issue.record("phase did not enter labeler within deadline")
