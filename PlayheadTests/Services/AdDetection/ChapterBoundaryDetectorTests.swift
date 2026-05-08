@@ -832,12 +832,12 @@ struct ChapterBoundaryDetectorCombinedTests {
         #expect(times.first == 0)
     }
 
-    @Test("co-clustered signals within minBoundarySpacing dedupe weights")
-    func coClusteredDoesNotDoubleCount() {
+    @Test("transitions further than minBoundarySpacing emit as separate boundaries")
+    func separatedTransitionsEmitSeparately() {
         let detector = ChapterBoundaryDetector()
-        // Two music transitions exactly minBoundarySpacing apart should
-        // collapse into one boundary with a single .musicTransition
-        // contribution (not two), so confidence stays at 0.4.
+        // Two music transitions 2s apart with 1s default min spacing
+        // → they DO emit as separate boundaries. Each carries its
+        // single .musicTransition contribution (confidence 0.4).
         let music = [
             ChapterMusicWindow(startTime: 0, endTime: 2, musicProbability: 0.05),
             ChapterMusicWindow(startTime: 2, endTime: 4, musicProbability: 0.95),
@@ -848,13 +848,56 @@ struct ChapterBoundaryDetectorCombinedTests {
             musicWindows: music
         )
         let result = detector.detect(features: snapshot)
-        // Both transitions are at 2.0 and 4.0 respectively; spacing 2s
-        // > 1s default min spacing → they DO emit as separate
-        // boundaries. This test confirms separation works as designed.
         #expect(result.count == 3, "two separated transitions emit two boundaries")
         for candidate in result.dropFirst() {
             #expect(abs(candidate.boundaryConfidence - 0.4) < 0.0001)
         }
+    }
+
+    @Test("repeated same-signal events within minBoundarySpacing dedupe to one contribution")
+    func repeatedSameSignalDeduplicates() {
+        // R5 regression pin: the cluster algorithm uses a Set to
+        // deduplicate signal contributions per cluster. Two music
+        // transitions 0.5s apart (well within the 1s
+        // minBoundarySpacing) must collapse into ONE boundary
+        // carrying ONE .musicTransition contribution (confidence
+        // 0.4), not two contributions (which would push confidence to
+        // 0.8 and double-weight a single oscillation as if it were
+        // two distinct events).
+        //
+        // The events are placed AFTER t=minBoundarySpacing (1.0s) so
+        // that they land in the post-synthetic-dedup window and we
+        // test the cluster-merge path, not the t=0 dedup path. Test
+        // geometry uses 0.5s windows so two probability flips can
+        // happen 0.5s apart:
+        //   [10.0-10.5] prob 0.05 (silent)
+        //   [10.5-11.0] prob 0.95 (music)   delta > 0.5 → event @ t=10.5
+        //   [11.0-11.5] prob 0.05 (silent)  delta > 0.5 → event @ t=11.0
+        //   [11.5-12.0] prob 0.05 (silent)  no delta
+        // Events at t=10.5 and t=11.0 are 0.5s apart — well within
+        // 1.0s minBoundarySpacing → cluster together.
+        let detector = ChapterBoundaryDetector()
+        let music = [
+            ChapterMusicWindow(startTime: 10.0, endTime: 10.5, musicProbability: 0.05),
+            ChapterMusicWindow(startTime: 10.5, endTime: 11.0, musicProbability: 0.95),
+            ChapterMusicWindow(startTime: 11.0, endTime: 11.5, musicProbability: 0.05),
+            ChapterMusicWindow(startTime: 11.5, endTime: 12.0, musicProbability: 0.05),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 60,
+            musicWindows: music
+        )
+        let result = detector.detect(features: snapshot)
+        // Synthetic t=0 + one merged boundary at t=10.5 (the earlier
+        // of the two co-clustered events). Confidence = 0.4
+        // (single-signal weight), NOT 0.8 (would indicate
+        // double-counting).
+        #expect(result.count == 2, "two co-clustered same-signal events should produce ONE boundary, not two")
+        let merged = result.last
+        #expect(merged?.startTime == 10.5)
+        #expect(abs((merged?.boundaryConfidence ?? 0) - 0.4) < 0.0001,
+                "co-clustered same-signal events must deduplicate to a single 0.4-weight contribution, not double-count to 0.8")
+        #expect(merged?.triggeringSignals == [.musicTransition])
     }
 }
 

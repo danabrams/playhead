@@ -468,6 +468,21 @@ struct ChapterBoundaryDetector: Sendable {
     /// (gaps between matching windows count toward the duration so
     /// that a 4s + 1s-nil-gap + 4s pattern measures 9s sustained, not
     /// 8s).
+    ///
+    /// Complexity: in the common case of clusters that persist for
+    /// many windows the loop is O(N) — sustained windows are skipped
+    /// via the `establishedCluster == candidateCluster` early-out and
+    /// each lookahead amortizes against many subsequent skip
+    /// iterations. Pathological adversarial input (e.g. every
+    /// adjacent window a different cluster, with no run sustaining)
+    /// degrades to O(N²) because each non-sustained candidate redoes
+    /// its own bounded lookahead. Real diarization output never looks
+    /// like that — production runs persist on the order of tens of
+    /// seconds — and the perf test (1800-window 60-min show with
+    /// cluster toggling every ~30s) confirms <50ms wall time on
+    /// device. If a future input distribution invalidates this
+    /// assumption, hoist the lookahead state out of the per-window
+    /// loop.
     private func detectSpeakerShifts(
         _ windows: [ChapterSpeakerWindow]
     ) -> [SignalEvent] {
