@@ -1349,6 +1349,58 @@ struct ChapterSignalAggregateMetricsTests {
                 "the byte-for-byte note must reference the consumersReadChapterPlan contract")
     }
 
+    @Test("dogfood-skew limitation note is always emitted")
+    func dogfoodSkewLimitationFires() {
+        // Pin the always-on dogfood-skew note. The
+        // `makeStructuralLimitations` helper unconditionally appends a
+        // note about Conan + DoaC corpus heaviness on every run (empty
+        // corpus, single-trace, large-corpus, all paths). This is the
+        // honesty gate — a future patch that drops the note would let
+        // the lift report look more authoritative than it is on a
+        // production-fleet basis. Without an explicit test, the note
+        // could silently disappear in a refactor.
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [],
+            runId: "dogfood-skew",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        #expect(report.limitations.contains(where: { $0.contains("dogfood-only") }),
+                "dogfood-skew note must always be emitted")
+        #expect(report.limitations.contains(where: { $0.contains("NOT generalize") }),
+                "dogfood-skew note must call out the generalization caveat")
+    }
+
+    @Test("per-show deltaPredictedAdSeconds and deltaEpisodeReplayCount are 0 at scaffold")
+    func perShowSymmetricInvariantsAreZeroAtScaffold() {
+        // Pin the documented "deltaEpisodeReplayCount should be 0" and
+        // the symmetric "deltaPredictedAdSeconds should be 0" invariants.
+        // The PerShowLiftDelta doc explicitly says replay count is
+        // mode-independent — this test makes that contract a hard pin.
+        // For predicted seconds, the predictor is mode-independent at the
+        // scaffold (per the file-header limitation), so per-show predicted
+        // deltas must also be 0.
+        let traces = [
+            Self.makeTrace(episodeId: "a1", podcastId: "showA",
+                           episodeDuration: 300, adStart: 30, adEnd: 60),
+            Self.makeTrace(episodeId: "b1", podcastId: "showB",
+                           episodeDuration: 300, adStart: 30, adEnd: 60),
+        ]
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: traces,
+            runId: "per-show-invariants",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        #expect(!report.perShowLift.isEmpty, "test pre-condition: per-show breakdown must populate")
+        for (show, delta) in report.perShowLift {
+            #expect(delta.deltaPredictedAdSeconds == 0,
+                    "per-show \(show) deltaPredictedAdSeconds must be 0 at scaffold (predictor is mode-independent)")
+            #expect(delta.deltaEpisodeReplayCount == 0,
+                    "per-show \(show) deltaEpisodeReplayCount must be 0 (gate replays the same traces regardless of mode)")
+        }
+    }
+
     @Test("extra limitations augment, not replace, the structural ones")
     func extraLimitationsAugmentNotReplace() {
         // Strengthen the existing extraLimitationsAppended test: pin the
