@@ -123,6 +123,21 @@ struct AdDetectionConfig: Sendable {
     /// identical to pre-kgby behaviour.
     let transcriptBoundaryCueEnabled: Bool
 
+    /// playhead-au2v.1.2: Tri-state gate for the chapter-signal feature
+    /// (epic playhead-au2v.1). Defaults to `.off` for production safety
+    /// — the chapter-generation phase, CoveragePlanner audit-window read,
+    /// and FM-prompt chapter-context read are all no-ops until this is
+    /// flipped. See `ChapterSignalMode` for the per-mode contract.
+    ///
+    /// Insertion points (planned, no live consumers yet):
+    ///   - `ChapterGenerationPhase` entry guard (playhead-au2v.1.10):
+    ///     `guard config.chapterSignalMode.runsChapterGeneration else { return }`
+    ///   - CoveragePlanner audit-window read (playhead-au2v.1.14):
+    ///     `if config.chapterSignalMode.consumersReadChapterPlan { ... }`
+    ///   - FM prompt builders (playhead-au2v.1.16):
+    ///     same `consumersReadChapterPlan` predicate.
+    let chapterSignalMode: ChapterSignalMode
+
     /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
     /// Requires candidate < markOnly < confirmation < autoSkip (asserted in debug).
     var bandThresholds: ConfidenceBandThresholds {
@@ -152,7 +167,8 @@ struct AdDetectionConfig: Sendable {
         bracketRefinementMinTrust: Double = 0.40,
         bracketRefinementMinCoarseScore: Double = 0.30,
         bracketRefinementMinFineConfidence: Double = 0.20,
-        transcriptBoundaryCueEnabled: Bool = true
+        transcriptBoundaryCueEnabled: Bool = true,
+        chapterSignalMode: ChapterSignalMode = .off
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -172,6 +188,7 @@ struct AdDetectionConfig: Sendable {
         self.bracketRefinementMinCoarseScore = bracketRefinementMinCoarseScore
         self.bracketRefinementMinFineConfidence = bracketRefinementMinFineConfidence
         self.transcriptBoundaryCueEnabled = transcriptBoundaryCueEnabled
+        self.chapterSignalMode = chapterSignalMode
     }
 
     static let `default` = AdDetectionConfig(
@@ -192,7 +209,8 @@ struct AdDetectionConfig: Sendable {
         bracketRefinementMinTrust: 0.40,
         bracketRefinementMinCoarseScore: 0.30,
         bracketRefinementMinFineConfidence: 0.20,
-        transcriptBoundaryCueEnabled: true
+        transcriptBoundaryCueEnabled: true,
+        chapterSignalMode: .off
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
