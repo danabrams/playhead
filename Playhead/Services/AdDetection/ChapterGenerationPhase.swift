@@ -70,7 +70,14 @@
 //      When the assembler flags high-unclear, the warning event fires
 //      BEFORE `chapter_phase_completed` so support engineers see the
 //      reduced-confidence signal aligned with the run that produced
-//      it.
+//      it. If the cache write itself fails (`ChapterPlanCache.put`
+//      returns `false` — disk full, directory creation refused,
+//      encoder crash), neither `chapter_phase_completed` nor
+//      `ChapterPlanReadyEvent` fires; the run emits
+//      `chapter_phase_preempted` and returns `.preempted`. This
+//      preserves the consumer-facing invariant that
+//      "ChapterPlanReady ⇒ a fresh plan is observable in
+//      `ChapterPlanCache`".
 //
 // Out of scope (later beads):
 //   * Wiring into `AdDetectionService`'s backfill path (.13).
@@ -335,6 +342,13 @@ struct ChapterGenerationPhase: Sendable {
         case noCandidates
         case transcriptUnavailable
         case raceAborted
+        /// Returned for any "no observable plan landed" non-race
+        /// terminal state: explicit cancellation, labeler throwing
+        /// `CancellationError`, OR a cache-put failure (disk full,
+        /// directory creation refused, encoder crash). Bead-12
+        /// callers cannot today distinguish those three sub-cases —
+        /// if a future bead needs that, split this case rather than
+        /// reading the diagnostic event log.
         case preempted
         /// Plan-level operational-unclear rate exceeded the assembler's
         /// strict 30% threshold; no plan was written.
