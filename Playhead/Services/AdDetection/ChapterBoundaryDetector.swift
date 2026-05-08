@@ -141,19 +141,35 @@ struct ChapterPauseWindow: Sendable, Equatable {
 /// `TranscriptChunk`, `LexicalHit`, etc.). All four input arrays are
 /// allowed to be empty; the detector still returns at least the
 /// synthetic t=0 boundary.
+///
+/// Input ordering contract:
+///   - `musicWindows`, `speakerWindows`, and `pauseWindows` MUST be in
+///     non-decreasing `startTime` order. Their detectors walk the
+///     arrays as time-series and rely on contiguous adjacency to
+///     compute deltas / sustained runs / pause durations. Out-of-order
+///     elements would silently produce wrong output.
+///   - `lexicalHits` may be in any order; the detector sorts hits
+///     internally and filters non-finite / negative timestamps because
+///     the hit producers (`LexicalScanner`) emit per-chunk and a
+///     consumer may concatenate hits from chunks processed out of
+///     order.
 struct ChapterFeatureSnapshot: Sendable, Equatable {
     /// Episode duration in seconds. Used to clamp boundaries and avoid
     /// emitting candidates past the end of the episode. A duration of 0
     /// or less degenerates to "t=0 only" output.
     let episodeDuration: TimeInterval
-    /// Music probability per ~2s window, in chronological order.
+    /// Music probability per ~2s window. MUST be sorted by
+    /// `startTime` ascending; see snapshot-level docstring.
     let musicWindows: [ChapterMusicWindow]
-    /// Speaker cluster windows. Need not be the same cadence as
-    /// `musicWindows`; the detector treats them independently.
+    /// Speaker cluster windows. MUST be sorted by `startTime`
+    /// ascending. Need not be the same cadence as `musicWindows`; the
+    /// detector treats them independently.
     let speakerWindows: [ChapterSpeakerWindow]
-    /// Lexical hits across the episode.
+    /// Lexical hits across the episode. May be in any order; the
+    /// detector sorts and sanity-filters internally.
     let lexicalHits: [ChapterLexicalHit]
-    /// Pause/silence per-window observations.
+    /// Pause/silence per-window observations. MUST be sorted by
+    /// `startTime` ascending.
     let pauseWindows: [ChapterPauseWindow]
 
     init(
