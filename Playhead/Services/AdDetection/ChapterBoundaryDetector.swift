@@ -1,5 +1,10 @@
 // ChapterBoundaryDetector.swift
 // playhead-au2v.1.4: Heuristic chapter boundary candidate generator.
+// playhead-au2v.1.5: Density safety nets (pathological-rate gate +
+//   cap-and-merge) layered on top of the bead-4 detector via the
+//   `detectRefined(features:)` post-processing entry point. The
+//   underlying `detect(features:)` output shape is unchanged — gates
+//   are pure post-processing on its result.
 //
 // This is the "B1" stage of the inferred-chapter pipeline. It reads
 // already-cached features from upstream services (FeatureExtractionService
@@ -12,12 +17,14 @@
 //   - It does not run any new acoustic / DSP work. All inputs are already
 //     computed and cached upstream. The detector is a pure function on
 //     a pre-built `ChapterFeatureSnapshot`.
-//   - It does not apply density gates (rate caps, cap-and-merge,
-//     pathological-rate abort). That is bead 5 (au2v.1.5).
 //   - It does not label chapters with disposition / type / title.
 //     That is bead 7 (au2v.1.7) via the FM labeler.
 //   - It does not wire up the phase that produces the `ChapterPlan`
 //     consumed by the rest of the pipeline. That is bead 12 (au2v.1.12).
+//     The phase shell is the place that translates the
+//     `ChapterDensityOutcome` returned by `detectRefined` into an
+//     emitted `ChapterPhaseEvent` (it has the install-id + episode-id
+//     context the detector deliberately does not).
 //
 // Adapter rationale (`ChapterFeatureSnapshot`):
 //   The upstream feature shapes (`FeatureWindow`, `LexicalHit`, transcript
@@ -777,5 +784,533 @@ struct ChapterBoundaryDetector: Sendable {
         var signalSortIndex: Int {
             BoundarySignal.allCases.firstIndex(of: signal) ?? 0
         }
+    }
+}
+
+// MARK: - Density gates (playhead-au2v.1.5)
+//
+// The two gates below run AFTER `detect(features:)` and never modify the
+// upstream candidate shape. They live in this file so the constants
+// (target density, floor, pathological-rate threshold, short-episode
+// skip threshold) are co-located with the detector that produces the
+// candidates they refine.
+//
+// The gates are exposed as a single high-level `detectRefined(features:)`
+// entry point that orchestrates: detect → pathological-rate guard →
+// cap-and-merge → re-sort → return. The bead-12 phase wiring will call
+// `detectRefined` (not `detect` directly) and translate the returned
+// `ChapterDensityOutcome` into emitted `ChapterPhaseEvent`s — the
+// detector itself does not emit events because it does not (and should
+// not) carry the `installID` / `episodeId` context required by the
+// `ChapterPhaseEvent` factory helpers.
+
+/// Per-boundary record describing where a dropped boundary's "content"
+/// was conceptually merged. The cap step never mutates a survivor's
+/// `triggeringSignals` / `boundaryConfidence` — it only emits these
+/// records so the phase shell (and tests) can reason about the merge
+/// without inflating per-boundary confidence beyond the contract that
+/// `boundaryConfidence` is the normalized sum of THAT boundary's own
+/// firing signals.
+struct ChapterDensityMergeRecord: Sendable, Equatable, Hashable {
+    /// The dropped candidate's `startTime`.
+    let droppedStartTime: TimeInterval
+    /// The retained-survivor candidate this drop was merged into.
+    let absorbedIntoStartTime: TimeInterval
+    /// Jaccard similarity between the dropped candidate's
+    /// `triggeringSignals` and the absorbing neighbor's
+    /// `triggeringSignals`, in `[0, 1]`. 1.0 = identical signal sets,
+    /// 0.0 = disjoint signal sets. When neither neighbor has any
+    /// signal-set overlap the merge falls back to confidence + time
+    /// tiebreak (see `applyDensityGates` for the full ordering); in
+    /// that case `signalOverlap` is `0`.
+    let signalOverlap: Double
+}
+
+/// What the density gates decided about a candidate set. Carries the
+/// numeric inputs the phase shell needs to populate diagnostic events
+/// (`chapter_phase_pathological_rate`, `chapter_phase_cap_applied`)
+/// without re-running the detector.
+enum ChapterDensityOutcome: Sendable, Equatable {
+    /// Episode duration is below the short-episode skip threshold
+    /// (5 min). BOTH gates are skipped — the candidates pass through
+    /// untouched. No diagnostic should be emitted by the phase shell
+    /// for this branch (the spec explicitly calls for "skip both
+    /// gates byte-for-byte"); the absence of any density-event for
+    /// short episodes is itself the signal.
+    case skippedShortEpisode
+
+    /// The pathological-rate gate fired. The detector's candidates
+    /// were aborted (returned as an empty list). The phase shell
+    /// emits `chapter_phase_pathological_rate` with these counters.
+    case pathologicalRate(
+        detectedCount: Int,
+        episodeDurationSec: Double,
+        candidatesPerSecond: Double
+    )
+
+    /// Cap-and-merge ran. `mergeRecords` describes which dropped
+    /// boundaries were absorbed into which retained survivors and is
+    /// non-empty whenever `detectedCount > retainedCount`. The phase
+    /// shell emits `chapter_phase_cap_applied` with these counters.
+    case capApplied(
+        detectedCount: Int,
+        retainedCount: Int,
+        targetDensity: Double,
+        mergeRecords: [ChapterDensityMergeRecord]
+    )
+
+    /// No gate fired (sparse candidate set, or floor saved a near-cap
+    /// detection). Phase shell emits no density-related diagnostic.
+    case noChange
+}
+
+/// Combined result of `detectRefined(features:)`. The candidates list
+/// is what the phase shell hands to downstream consumers; the outcome
+/// is for diagnostics only.
+struct ChapterRefinedDetection: Sendable, Equatable {
+    let candidates: [ChapterCandidate]
+    let outcome: ChapterDensityOutcome
+}
+
+extension ChapterBoundaryDetector {
+
+    // MARK: - Density-gate constants
+    //
+    // Co-located with the detector so the bead-12 phase shell does
+    // not need to thread tuning values through its own configuration
+    // surface. These are deliberately NOT on `ChapterBoundaryDetectorConfig`
+    // — that struct tunes the per-signal heuristic detector. The
+    // gates are an upper-layer policy and have a different lifecycle
+    // (they would change in lockstep with the FM-labeler budget, not
+    // the heuristic weights).
+
+    /// Episode duration below this threshold (in seconds) skips BOTH
+    /// density gates. 5 minutes matches the bead spec's "short
+    /// episode" carve-out: shows shorter than this rarely have more
+    /// than one chapter and the cap math (target = ceil(minutes/5))
+    /// degenerates to N=1 which would force the synthetic t=0 to be
+    /// the only retained boundary regardless of detector signal.
+    static let densityGateShortEpisodeThreshold: TimeInterval = 5 * 60
+
+    /// Episode duration at or above this threshold (in seconds) is
+    /// where the floor of 8 chapters applies. 40 minutes is the spec
+    /// value: at 40 min the natural target (40/5 = 8) coincides with
+    /// the floor, so the gate is continuous across the threshold.
+    static let densityGateFloorThreshold: TimeInterval = 40 * 60
+
+    /// Floor on the cap for episodes ≥ `densityGateFloorThreshold`.
+    /// At least this many chapters are retained, but only when the
+    /// detector actually produced that many — the floor never
+    /// fabricates boundaries.
+    static let densityGateChapterFloor: Int = 8
+
+    /// Target chapter density expressed as a chapter count per second
+    /// of episode runtime (1 chapter per 5 minutes = 1/300 per sec).
+    /// Used to compute the natural cap (`ceil(episodeMinutes / 5)`)
+    /// and surfaced in the `capApplied` outcome so the phase-emitted
+    /// diagnostic carries the configured target.
+    static let densityGateTargetChaptersPerSecond: Double = 1.0 / 300.0
+
+    /// The pathological-rate threshold expressed as candidates-per-
+    /// second. Equivalent to "1 candidate per 90 s avg" — anything
+    /// strictly above this is treated as a detector glitch (a
+    /// well-tuned upstream pipeline does not emit chapter boundaries
+    /// every <90 s on real episodes; that density is segmentation,
+    /// not chapter-level structure).
+    static let densityGatePathologicalRateThreshold: Double = 1.0 / 90.0
+
+    // MARK: - Public API: detect + density-gate refinement
+
+    /// Detect chapter boundary candidates and apply density safety
+    /// nets in a single call. This is the entry point the
+    /// chapter-generation phase shell consumes — `detect(features:)`
+    /// alone does NOT enforce density limits.
+    ///
+    /// Order of operations:
+    ///   1. Run `detect(features:)` to obtain raw candidates.
+    ///   2. If `episodeDuration < densityGateShortEpisodeThreshold`,
+    ///      skip BOTH gates and return the raw candidates with the
+    ///      `.skippedShortEpisode` outcome (no diagnostic emission).
+    ///   3. Apply the pathological-rate gate. If it fires, return an
+    ///      empty candidate list with the `.pathologicalRate` outcome.
+    ///      An empty list signals the phase shell to write no plan.
+    ///   4. Apply cap-and-merge. The synthetic t=0 boundary is
+    ///      ALWAYS retained (load-bearing — chapter[0] starts at
+    ///      episode start). Non-zero boundaries below the cap are
+    ///      retained by descending `boundaryConfidence`; ties are
+    ///      broken by ascending `startTime` for determinism. Each
+    ///      dropped boundary records the retained neighbor it merged
+    ///      into (by signal-set overlap; falls back to higher
+    ///      confidence then earlier start time on a tie).
+    ///   5. Re-sort survivors by `startTime` ascending and return.
+    func detectRefined(
+        features: ChapterFeatureSnapshot
+    ) -> ChapterRefinedDetection {
+        let raw = detect(features: features)
+        return ChapterBoundaryDetector.applyDensityGates(
+            candidates: raw,
+            episodeDuration: features.episodeDuration
+        )
+    }
+
+    /// Public testable entry point. Takes a candidate list (typically
+    /// from `detect`) and applies the same gates `detectRefined`
+    /// applies. Exposed so unit tests can drive the gates with
+    /// hand-crafted candidate sets without engineering whole feature
+    /// snapshots that produce them.
+    static func applyDensityGates(
+        candidates: [ChapterCandidate],
+        episodeDuration: TimeInterval
+    ) -> ChapterRefinedDetection {
+        // (a) Short-episode carve-out. Skips BOTH gates by spec; the
+        // outcome carries no counters because the phase shell emits
+        // no diagnostic for this branch. We also skip when episode
+        // duration is non-positive — a degenerate input with no
+        // duration cannot be evaluated for a "rate" at all without a
+        // divide-by-zero, and the bead-4 detector already returns
+        // just the synthetic t=0 boundary in that case.
+        guard episodeDuration > 0,
+              episodeDuration >= densityGateShortEpisodeThreshold else {
+            return ChapterRefinedDetection(
+                candidates: candidates,
+                outcome: .skippedShortEpisode
+            )
+        }
+
+        // (b) Pathological-rate gate. Runs first because it is O(1).
+        // Compare strictly greater than the threshold so that an
+        // exactly-on-threshold rate (e.g. 100 candidates on a
+        // 9000-second episode = exactly 1/90s) does NOT abort. This
+        // matches the bead-3 diagnostic helper docstring ("multiply
+        // by 90 to confirm the threshold was breached") and the spec
+        // wording (">1 candidate per 90 seconds avg").
+        let candidateCount = candidates.count
+        let candidatesPerSecond = Double(candidateCount) / episodeDuration
+        if candidatesPerSecond > densityGatePathologicalRateThreshold {
+            return ChapterRefinedDetection(
+                candidates: [],
+                outcome: .pathologicalRate(
+                    detectedCount: candidateCount,
+                    episodeDurationSec: episodeDuration,
+                    candidatesPerSecond: candidatesPerSecond
+                )
+            )
+        }
+
+        // (c) Cap-and-merge. Compute the cap from the floor + target
+        // formula. The cap is the budget for NON-ZERO candidates;
+        // the synthetic t=0 is retained separately on top. We
+        // short-circuit to `.noChange` when the non-zero count
+        // already fits within the cap (no trimming needed). The
+        // total `candidateCount` is still passed into `densityCap`
+        // because the spec formula is min(detected, ...) — clamping
+        // a cap above the total candidate count would produce a
+        // misleading outcome payload.
+        let cap = densityCap(
+            detectedCount: candidateCount,
+            episodeDuration: episodeDuration
+        )
+        let hasT0 = candidates.contains(where: { $0.startTime == 0 })
+        let nonZeroCount = hasT0 ? candidateCount - 1 : candidateCount
+        if nonZeroCount <= cap {
+            return ChapterRefinedDetection(
+                candidates: candidates,
+                outcome: .noChange
+            )
+        }
+
+        let (retained, mergeRecords) = capAndMerge(
+            candidates: candidates,
+            cap: cap
+        )
+        return ChapterRefinedDetection(
+            candidates: retained,
+            outcome: .capApplied(
+                detectedCount: candidateCount,
+                retainedCount: retained.count,
+                targetDensity: densityGateTargetChaptersPerSecond,
+                mergeRecords: mergeRecords
+            )
+        )
+    }
+
+    // MARK: - Cap-and-merge internals
+
+    /// Compute the cap N for a candidate set on an episode of the
+    /// given duration. Matches the spec formula:
+    ///
+    ///     N = min(detected, max(floor, ceil(episodeMinutes / 5)))
+    ///
+    /// where `floor` is `densityGateChapterFloor` (8) iff
+    /// `episodeDuration >= densityGateFloorThreshold` (40 min), and
+    /// is 1 otherwise. The 1-floor (rather than 0) keeps the cap
+    /// math from collapsing to 0 on near-zero-duration episodes that
+    /// somehow squeaked past the short-episode carve-out — the
+    /// synthetic t=0 boundary is always retained anyway, so a cap
+    /// of 1 is consistent with "keep just t=0".
+    static func densityCap(
+        detectedCount: Int,
+        episodeDuration: TimeInterval
+    ) -> Int {
+        let episodeMinutes = episodeDuration / 60.0
+        let target = Int(ceil(episodeMinutes / 5.0))
+        let floorValue = episodeDuration >= densityGateFloorThreshold
+            ? densityGateChapterFloor
+            : 1
+        let raw = max(floorValue, target)
+        return min(detectedCount, raw)
+    }
+
+    /// Apply the cap and merge logic. Returns (retained, merge
+    /// records) where:
+    ///   * The synthetic t=0 boundary, if present, is always in
+    ///     retained — even if other boundaries with confidence ≥ 1.0
+    ///     would otherwise crowd it out. This is load-bearing for
+    ///     downstream chapter consumers that index chapter[0] as
+    ///     "starts at episode start".
+    ///   * Non-zero boundaries are kept by descending
+    ///     `boundaryConfidence`, ties broken by ascending `startTime`,
+    ///     and (final tiebreak) by stable input order.
+    ///   * Each dropped boundary contributes a `ChapterDensityMergeRecord`
+    ///     identifying which retained neighbor absorbed it. Selection
+    ///     is by Jaccard similarity of `triggeringSignals` first, then
+    ///     by neighbor `boundaryConfidence` desc, then by absolute
+    ///     time-distance asc — these tiebreakers come into play when
+    ///     the dropped boundary's signals are disjoint from both
+    ///     neighbors (similarity = 0 on both sides).
+    ///   * Retained survivors are returned re-sorted by `startTime`
+    ///     ascending. Their `triggeringSignals` and `boundaryConfidence`
+    ///     are NOT mutated — `boundaryConfidence` remains the sum of
+    ///     that boundary's own firing signals (per the bead-4 contract).
+    private static func capAndMerge(
+        candidates: [ChapterCandidate],
+        cap: Int
+    ) -> ([ChapterCandidate], [ChapterDensityMergeRecord]) {
+        // Partition synthetic t=0 from the rest. The bead-4 detector
+        // emits at most one boundary at t=0 (the synthetic one);
+        // defensively pull the FIRST t=0 candidate out and keep the
+        // remainder in original order so a malformed input that
+        // happens to include multiple t=0 candidates still produces
+        // a sensible cap result.
+        var t0Boundary: ChapterCandidate? = nil
+        var nonZero: [ChapterCandidate] = []
+        nonZero.reserveCapacity(candidates.count)
+        for candidate in candidates {
+            if candidate.startTime == 0 && t0Boundary == nil {
+                t0Boundary = candidate
+            } else {
+                nonZero.append(candidate)
+            }
+        }
+
+        // The cap is the budget for non-zero candidates. The
+        // synthetic t=0 boundary is load-bearing and always retained
+        // ON TOP OF the cap — it is not counted against it. So when
+        // a 60-min episode has cap=12, we keep 12 non-zero + 1 t=0 = 13
+        // total survivors. (See `denseCapKeepsTopN` test.)
+        let nonZeroCap = cap
+
+        // Pair each non-zero candidate with its original index so
+        // we can preserve a stable input-order tiebreaker after the
+        // confidence sort. Without the index, equal-confidence ties
+        // would be at the mercy of `Array.sorted`'s stability
+        // guarantee (currently stable in Swift 5.x but not
+        // contractually so for all sequences).
+        let indexed = nonZero.enumerated().map { (offset, candidate) in
+            (originalIndex: offset, candidate: candidate)
+        }
+        let rankedDesc = indexed.sorted { lhs, rhs in
+            if lhs.candidate.boundaryConfidence != rhs.candidate.boundaryConfidence {
+                return lhs.candidate.boundaryConfidence > rhs.candidate.boundaryConfidence
+            }
+            if lhs.candidate.startTime != rhs.candidate.startTime {
+                return lhs.candidate.startTime < rhs.candidate.startTime
+            }
+            return lhs.originalIndex < rhs.originalIndex
+        }
+
+        let retainedTopN = Array(rankedDesc.prefix(nonZeroCap))
+        let droppedTopN = Array(rankedDesc.dropFirst(nonZeroCap))
+
+        // Reconstruct the final retained list in startTime order.
+        // We build the survivor list now (sorted) so that merge
+        // selection can find true neighbors (the boundaries
+        // immediately before/after the dropped boundary in time).
+        var retainedSorted = retainedTopN
+            .map(\.candidate)
+            .sorted { $0.startTime < $1.startTime }
+        if let t0 = t0Boundary {
+            // Insert t=0 at the head if it's not already there
+            // (it should always be the first by startTime since
+            // 0 is the minimum valid time).
+            retainedSorted.insert(t0, at: 0)
+        }
+
+        // Compute merge records for dropped boundaries. We process
+        // drops in input order so the records are deterministic
+        // across runs (rather than ordered by drop priority, which
+        // would vary on confidence ties).
+        let dropped = droppedTopN
+            .sorted { $0.originalIndex < $1.originalIndex }
+            .map(\.candidate)
+
+        var mergeRecords: [ChapterDensityMergeRecord] = []
+        mergeRecords.reserveCapacity(dropped.count)
+        for drop in dropped {
+            if let pick = pickMergeNeighbor(
+                drop: drop,
+                retained: retainedSorted
+            ) {
+                mergeRecords.append(pick)
+            }
+        }
+
+        return (retainedSorted, mergeRecords)
+    }
+
+    /// Pick the retained neighbor (in `retained`, which MUST be
+    /// sorted by `startTime` ascending) that best absorbs `drop`.
+    /// Returns `nil` only if `retained` is empty — which cannot
+    /// happen in normal flow because the synthetic t=0 boundary is
+    /// always retained, but is handled defensively for callers that
+    /// might pass a candidate list with no t=0.
+    ///
+    /// Selection rules, applied in order:
+    ///   1. Find the immediate prev (largest startTime <= drop's)
+    ///      and next (smallest startTime > drop's) retained
+    ///      neighbors.
+    ///   2. Compute Jaccard similarity of `triggeringSignals`
+    ///      between `drop` and each neighbor.
+    ///   3. Pick the neighbor with the HIGHER similarity. If
+    ///      similarities are equal, pick the neighbor with HIGHER
+    ///      `boundaryConfidence`. If still equal, pick the
+    ///      time-CLOSER neighbor. If still equal, prefer prev
+    ///      (deterministic — prev comes first in the sorted
+    ///      retained list).
+    private static func pickMergeNeighbor(
+        drop: ChapterCandidate,
+        retained: [ChapterCandidate]
+    ) -> ChapterDensityMergeRecord? {
+        guard !retained.isEmpty else { return nil }
+
+        // Locate prev / next neighbors. Linear scan is fine here —
+        // the retained list size is bounded by the cap (≤
+        // `ceil(episodeMinutes/5)`, so at most ~24 for a 2h show).
+        var prev: ChapterCandidate? = nil
+        var next: ChapterCandidate? = nil
+        for candidate in retained {
+            if candidate.startTime <= drop.startTime {
+                prev = candidate
+            } else {
+                next = candidate
+                break
+            }
+        }
+
+        // Single-sided cases: drop is before all retained → only
+        // `next` exists. After all retained → only `prev` exists.
+        // Both nil is impossible because we asserted retained is
+        // non-empty above.
+        switch (prev, next) {
+        case (let p?, nil):
+            return ChapterDensityMergeRecord(
+                droppedStartTime: drop.startTime,
+                absorbedIntoStartTime: p.startTime,
+                signalOverlap: jaccardSimilarity(drop.triggeringSignals, p.triggeringSignals)
+            )
+        case (nil, let n?):
+            return ChapterDensityMergeRecord(
+                droppedStartTime: drop.startTime,
+                absorbedIntoStartTime: n.startTime,
+                signalOverlap: jaccardSimilarity(drop.triggeringSignals, n.triggeringSignals)
+            )
+        case (let p?, let n?):
+            let prevSim = jaccardSimilarity(drop.triggeringSignals, p.triggeringSignals)
+            let nextSim = jaccardSimilarity(drop.triggeringSignals, n.triggeringSignals)
+            let chosen = chooseNeighbor(
+                drop: drop,
+                prev: p,
+                prevSim: prevSim,
+                next: n,
+                nextSim: nextSim
+            )
+            return chosen
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    private static func chooseNeighbor(
+        drop: ChapterCandidate,
+        prev: ChapterCandidate,
+        prevSim: Double,
+        next: ChapterCandidate,
+        nextSim: Double
+    ) -> ChapterDensityMergeRecord {
+        // 1. Higher similarity wins.
+        if prevSim != nextSim {
+            let pickPrev = prevSim > nextSim
+            let neighbor = pickPrev ? prev : next
+            let sim = pickPrev ? prevSim : nextSim
+            return ChapterDensityMergeRecord(
+                droppedStartTime: drop.startTime,
+                absorbedIntoStartTime: neighbor.startTime,
+                signalOverlap: sim
+            )
+        }
+        // 2. Higher confidence wins.
+        if prev.boundaryConfidence != next.boundaryConfidence {
+            let pickPrev = prev.boundaryConfidence > next.boundaryConfidence
+            let neighbor = pickPrev ? prev : next
+            return ChapterDensityMergeRecord(
+                droppedStartTime: drop.startTime,
+                absorbedIntoStartTime: neighbor.startTime,
+                signalOverlap: pickPrev ? prevSim : nextSim
+            )
+        }
+        // 3. Time-closer wins.
+        let prevDist = abs(drop.startTime - prev.startTime)
+        let nextDist = abs(drop.startTime - next.startTime)
+        if prevDist != nextDist {
+            let pickPrev = prevDist < nextDist
+            let neighbor = pickPrev ? prev : next
+            return ChapterDensityMergeRecord(
+                droppedStartTime: drop.startTime,
+                absorbedIntoStartTime: neighbor.startTime,
+                signalOverlap: pickPrev ? prevSim : nextSim
+            )
+        }
+        // 4. Deterministic final fallback: prev wins.
+        return ChapterDensityMergeRecord(
+            droppedStartTime: drop.startTime,
+            absorbedIntoStartTime: prev.startTime,
+            signalOverlap: prevSim
+        )
+    }
+
+    /// Jaccard similarity between two `BoundarySignal` lists, treated
+    /// as sets:
+    ///
+    ///     |A ∩ B| / |A ∪ B|
+    ///
+    /// Returns `0.0` when both sets are empty (Jaccard is undefined
+    /// for the empty/empty case; treating it as 0 means an
+    /// all-empty-signals scenario falls through to the confidence
+    /// tiebreaker rather than tying both neighbors at undefined-but-
+    /// equal similarity). Returns `1.0` when both are non-empty
+    /// and identical.
+    private static func jaccardSimilarity(
+        _ lhs: [BoundarySignal],
+        _ rhs: [BoundarySignal]
+    ) -> Double {
+        let lhsSet = Set(lhs)
+        let rhsSet = Set(rhs)
+        if lhsSet.isEmpty && rhsSet.isEmpty {
+            return 0.0
+        }
+        let intersection = lhsSet.intersection(rhsSet).count
+        let union = lhsSet.union(rhsSet).count
+        guard union > 0 else { return 0.0 }
+        return Double(intersection) / Double(union)
     }
 }
