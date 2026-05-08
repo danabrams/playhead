@@ -474,9 +474,14 @@ struct ChapterPlanQualityEval: Sendable {
         if expTokens.isEmpty || obsTokens.isEmpty {
             return .notApplicable
         }
+        // Both token sets are non-empty here, so the union is also
+        // non-empty (size >= max(|expTokens|, |obsTokens|)) and the
+        // division below cannot divide by zero. A defensive
+        // `!union.isEmpty` guard would be dead code given the
+        // earlier `isEmpty` check; we omit it to avoid implying a
+        // contract the function does not actually enforce.
         let intersection = expTokens.intersection(obsTokens)
         let union = expTokens.union(obsTokens)
-        guard !union.isEmpty else { return .notApplicable }
         let overlap = Double(intersection.count) / Double(union.count)
         return overlap >= threshold ? .match : .miss
     }

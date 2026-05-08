@@ -10,19 +10,26 @@
 //     against each named synthetic fixture.
 //   * ChapterPlanQualityEvalThresholdTests — sweeps the boundary
 //     tolerance and topic-overlap minimum on the same fixture and
-//     pins the resulting metric movement.
+//     pins the resulting metric movement, plus initializer-clamp
+//     and non-finite-input regression tests.
 //   * ChapterPlanQualityEvalTopicMatcherTests — pin the topic-label
 //     matcher in isolation (no plan, no golden set).
 //   * ChapterPlanQualityEvalAggregationTests — single-episode
-//     aggregation parity check.
+//     parity, multi-episode aggregation parity, and the documented
+//     duplicate-episode-id contract.
 //   * ChapterPlanQualityEvalEmptyPlanTests — pin the documented
-//     zero-denominator contract for an empty plan against a
-//     non-empty golden set.
+//     zero-denominator contract for empty plan, empty golden, and
+//     both-empty edges.
 //   * ChapterPlanQualityRunnerTests — runner happy-path + error
-//     surfaces (cache miss, content-hash mismatch).
+//     surfaces (cache miss, content-hash mismatch via direct + via
+//     runFromCache).
 //   * ChapterPlanQualityEvalCodableTests — round-trip the report
 //     through JSON to confirm the custom Codable conformance is
-//     correct (bead 22 will persist reports).
+//     correct, including the all-zero confusion path and
+//     unknown-disposition decode-error guards.
+//   * ChapterPlanGoldenSetDirectoryTests — fixture-directory hygiene
+//     (every fixture decodes; required basenames present; ids and
+//     content hashes are unique and synthetic-prefixed).
 
 import Foundation
 import Testing
@@ -883,6 +890,43 @@ struct ChapterPlanQualityRunnerTests {
                 golden: golden
             )
         }
+    }
+
+    /// The runner accepts a custom `evaluator` (defaulting to one
+    /// constructed with default thresholds). A non-default evaluator
+    /// MUST be used by the runner — otherwise the `evaluator:` arg is
+    /// dead code. Pin this by passing a tight-tolerance evaluator and
+    /// observing the resulting threshold appears in the report.
+    @Test
+    func runDirect_respectsCustomEvaluatorThresholds() throws {
+        let golden = GoldenChapterSet(
+            episodeId: "synthetic-custom-evaluator",
+            episodeContentHash: "synthetic-custom-evaluator-hash",
+            chapters: [
+                GoldenChapter(startTimeSeconds: 0.0, expectedDisposition: .content, expectedTopicLabel: nil),
+                GoldenChapter(startTimeSeconds: 100.0, expectedDisposition: .adBreak, expectedTopicLabel: nil)
+            ],
+            notes: nil
+        )
+        let plan = makePlan(
+            contentHash: golden.episodeContentHash,
+            chapters: [
+                makeInferredChapter(start: 0.0,    end: 100.0, title: nil, disposition: .content),
+                // 8s away from gold@100 — within default ±15 but NOT within ±5.
+                makeInferredChapter(start: 108.0,  end: nil,   title: nil, disposition: .adBreak)
+            ]
+        )
+
+        // Default (15s) → both goldens matched.
+        let defaultReport = try ChapterPlanQualityRunner.run(plan: plan, golden: golden)
+        #expect(defaultReport.boundaryRecall.matched == 2)
+        #expect(defaultReport.thresholdsUsed.boundaryToleranceSeconds == 15.0)
+
+        // Custom tight (5s) → only gold@0 matches; gold@100 is missed.
+        let tight = ChapterPlanQualityEval(boundaryToleranceSeconds: 5.0)
+        let tightReport = try ChapterPlanQualityRunner.run(plan: plan, golden: golden, evaluator: tight)
+        #expect(tightReport.boundaryRecall.matched == 1)
+        #expect(tightReport.thresholdsUsed.boundaryToleranceSeconds == 5.0)
     }
 
     /// `runFromCache` with a plan whose content hash matches the
