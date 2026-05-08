@@ -266,6 +266,13 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(abs(report.shadow.phaseLatencyP99Ms - 129) < 1e-9)
         // Same shape for enabled (phase-side identical to shadow).
         #expect(abs(report.enabled.phaseLatencyP50Ms - 80) < 1e-9)
+        // .off must produce structural-zero percentiles regardless of
+        // input shape — pinning this catches regressions where .off
+        // accidentally records non-zero latency from measurement
+        // overhead.
+        #expect(report.baseline.phaseLatencyP50Ms == 0)
+        #expect(report.baseline.phaseLatencyP90Ms == 0)
+        #expect(report.baseline.phaseLatencyP99Ms == 0)
     }
 
     @Test("compute() FM-cost-multiplier: zero baseline clamps denominator to 1")
@@ -725,6 +732,19 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(report.baseline.episodeReplayCount == 2)
         #expect(report.shadow.episodeReplayCount == 2)
         #expect(report.enabled.episodeReplayCount == 2)
+        // Per-show breakdown: vetoed and clean traces have different
+        // podcastIds, so they appear in separate per-show entries. The
+        // vetoed show must surface its excludedEpisodeCount, the clean
+        // show must surface its real episodeCount.
+        let vetoedShowEntry = report.perShowLift["pod-vetoed"]
+        let cleanShowEntry = report.perShowLift["pod-clean"]
+        #expect(vetoedShowEntry?.episodeCount == 0,
+                "vetoed show contributes 0 to detection episode count")
+        #expect(vetoedShowEntry?.excludedEpisodeCount == 1,
+                "vetoed show carries the exclusion count through to per-show breakdown")
+        #expect(cleanShowEntry?.episodeCount == 1,
+                "clean show contributes 1 to detection episode count")
+        #expect(cleanShowEntry?.excludedEpisodeCount == 0)
     }
 
     // MARK: - Schema version is current
@@ -738,6 +758,28 @@ struct ChapterSignalAggregateMetricsTests {
             showName: Self.showNameByPodcastId
         )
         #expect(report.schemaVersion == ChapterSignalLiftReport.currentSchemaVersion)
+    }
+
+    @Test("empty corpus encodes perShowLift as {} (not null) on the wire")
+    func emptyPerShowLiftWireShape() throws {
+        // Defensive pin: an empty dictionary must encode as `{}` not
+        // `null` — downstream parsers that expect a key-value map (e.g.
+        // a CI dashboard's deserializer) will throw on null. Without
+        // this test, a future change to the encoding strategy could
+        // silently break wire compatibility on empty-corpus runs.
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [],
+            runId: "empty-wire",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(report)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("\"perShowLift\":{}"),
+                "empty perShowLift must encode as {} (object), not null")
     }
 
     @Test("schemaVersion encodes as `\"schemaVersion\":1` on the wire")

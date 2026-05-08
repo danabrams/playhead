@@ -313,6 +313,15 @@ enum ChapterSignalAggregateMetrics {
 
     /// Compute the lift report.
     ///
+    /// Cost note: each trace is replayed through the gate **5 times**
+    /// per `compute()` call — three cross-corpus passes (one per mode)
+    /// plus two per-show passes (`.off` and `.enabled`). Detection is
+    /// run 5 times symmetrically. This is a deliberate trade-off: the
+    /// per-show breakdown is recomputed from scratch (rather than
+    /// derived from the cross-corpus aggregate) to avoid Simpson's-
+    /// paradox aggregation bugs. The gate is fast (microseconds per
+    /// trace) so 5x is acceptable on a < 100-trace corpus.
+    ///
     /// - Parameters:
     ///   - traces: the corpus to replay (every trace in this list is fed
     ///     through the gate for each mode; ground truth is built from
