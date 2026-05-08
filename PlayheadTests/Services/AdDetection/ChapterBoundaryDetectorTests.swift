@@ -1084,6 +1084,104 @@ struct ChapterBoundaryDetectorPerfTests {
         // t=0 boundary.
         #expect(result.first?.startTime == 0)
     }
+
+    @Test("detectRefined on a 60-minute episode completes within budget")
+    func detectRefinedSixtyMinuteUnderBudget() {
+        // 60-min snapshot exercised through the bead-5
+        // `detectRefined` entry point (adds two density gates on top
+        // of `detect`). The added work is O(n log n) for the cap
+        // sort plus O(retainedCap × dropped) for merge selection;
+        // both bounded by `ceil(episodeMinutes/5)` (≤24 for a 2h
+        // show). Microseconds on top.
+        //
+        // The synthetic input is intentionally less-dense than the
+        // bare-`detect` perf test so the candidate density stays
+        // below the pathological-rate threshold (1/90s avg). The
+        // bare-detect test packs many same-second lexical/speaker
+        // hits and produces ≥40 candidates on a 60-min episode →
+        // 40/3600 = 0.011 ≈ 1/90s, on the threshold. We use sparser
+        // signals here so refinement runs cap-and-merge (or noChange),
+        // not pathological abort, which is the path we actually want
+        // perf coverage for.
+        let detector = ChapterBoundaryDetector()
+        let windowCount = 1800
+        let dur = TimeInterval(windowCount * 2)
+
+        var music: [ChapterMusicWindow] = []
+        music.reserveCapacity(windowCount)
+        for index in 0..<windowCount {
+            let t = TimeInterval(index) * 2.0
+            // 4 music intros / outros per episode (same as bare-detect
+            // test). These dominate the candidate set and produce
+            // ~4 boundaries.
+            let phase = (index / 450) % 2 == 0 ? 0.1 : 0.9
+            music.append(ChapterMusicWindow(
+                startTime: t,
+                endTime: t + 2,
+                musicProbability: phase
+            ))
+        }
+        var speakers: [ChapterSpeakerWindow] = []
+        speakers.reserveCapacity(windowCount)
+        for index in 0..<windowCount {
+            let t = TimeInterval(index) * 2.0
+            // Speaker cluster toggles every ~5 minutes (300s = 150
+            // windows) so we get ~12 speaker shifts on a 60-min show.
+            speakers.append(ChapterSpeakerWindow(
+                startTime: t,
+                endTime: t + 2,
+                clusterId: (index / 150) % 2
+            ))
+        }
+        // 12 sparse lexical hits (every 5 min). Enough to exercise the
+        // lexical signal path without dominating the candidate count.
+        var hits: [ChapterLexicalHit] = []
+        hits.reserveCapacity(12)
+        let categories: [LexicalPatternCategory] = [
+            .sponsor, .promoCode, .urlCTA, .purchaseLanguage, .transitionMarker
+        ]
+        for index in 0..<12 {
+            hits.append(ChapterLexicalHit(
+                startTime: TimeInterval(index) * 300.0,
+                category: categories[index % categories.count]
+            ))
+        }
+        // ~15 long-pause spikes (every 4 min).
+        var pauses: [ChapterPauseWindow] = []
+        pauses.reserveCapacity(windowCount)
+        for index in 0..<windowCount {
+            let t = TimeInterval(index) * 2.0
+            let p = (index % 120 == 0) ? 0.95 : 0.05
+            pauses.append(ChapterPauseWindow(
+                startTime: t,
+                endTime: t + 2,
+                pauseProbability: p
+            ))
+        }
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: dur,
+            musicWindows: music,
+            speakerWindows: speakers,
+            lexicalHits: hits,
+            pauseWindows: pauses
+        )
+
+        // Warm up.
+        _ = detector.detectRefined(features: snapshot)
+
+        let start = ContinuousClock.now
+        let refined = detector.detectRefined(features: snapshot)
+        let elapsed = ContinuousClock.now - start
+
+        // Same simulator-tolerant 200ms budget as the bare detect
+        // perf test. The gate work is microseconds on top.
+        #expect(elapsed < .milliseconds(200))
+        // Sanity: refined result is non-empty (sparse-enough input
+        // does NOT trigger the pathological-rate gate) and still has
+        // the synthetic t=0 at head.
+        #expect(refined.candidates.first?.startTime == 0,
+                "sparse-enough perf snapshot must survive density gates with t=0 at head")
+    }
 }
 
 // MARK: - Density gates (playhead-au2v.1.5)
@@ -1619,6 +1717,137 @@ struct ChapterBoundaryDetectorCapAndMergeTests {
         #expect(pick.signalOverlap == 0.0)
     }
 
+    @Test("merge records carry partial Jaccard overlap when neighbor sets overlap partially")
+    func mergePartialOverlapRecorded() {
+        // Build a dense set where the dropped boundary has a HALF
+        // overlap with one neighbor and ZERO with the other — the
+        // merge record should adopt the higher-overlap neighbor and
+        // the recorded `signalOverlap` should be 0.5 (not 0 or 1).
+        // Episode 60 min → cap 12. Build 13 non-zero so exactly 1
+        // drop happens.
+        let dur: TimeInterval = 3600
+        var cands: [ChapterCandidate] = [
+            ChapterCandidate(startTime: 0, boundaryConfidence: 1.0, triggeringSignals: [])
+        ]
+        let strongConfidence: Float = 0.99
+        for index in 0..<12 {
+            let time = TimeInterval(60 + index * 60)
+            let signals: [BoundarySignal]
+            let confidence: Float
+            if time == 240 {
+                // Prev neighbor: shares ONE signal with dropped t=300.
+                // Jaccard(t=300, t=240) = |{music}| / |{music,speaker,lex}|
+                //                       = 1 / 3 ≈ 0.333.
+                signals = [.musicTransition]
+                confidence = strongConfidence
+            } else if time == 360 {
+                // Next neighbor: disjoint from t=300's signal set.
+                signals = [.longPause]
+                confidence = strongConfidence
+            } else if time == 300 {
+                signals = [.musicTransition, .speakerShift, .lexicalCategoryJump]
+                confidence = 0.10 // weakest → dropped
+            } else {
+                signals = [.musicTransition]
+                confidence = strongConfidence
+            }
+            cands.append(
+                ChapterCandidate(
+                    startTime: time,
+                    boundaryConfidence: confidence,
+                    triggeringSignals: signals
+                )
+            )
+        }
+        cands.append(
+            ChapterCandidate(
+                startTime: 780,
+                boundaryConfidence: strongConfidence,
+                triggeringSignals: [.musicTransition]
+            )
+        )
+        let result = ChapterBoundaryDetector.applyDensityGates(
+            candidates: cands,
+            episodeDuration: dur
+        )
+        guard case let .capApplied(_, _, _, mergeRecords) = result.outcome else {
+            Issue.record("expected capApplied outcome, got \(result.outcome)")
+            return
+        }
+        #expect(mergeRecords.count == 1)
+        let pick = mergeRecords[0]
+        #expect(pick.droppedStartTime == 300)
+        #expect(pick.absorbedIntoStartTime == 240,
+                "prev neighbor (t=240) shares 1/3 of dropped signals; should be picked over disjoint next")
+        // Jaccard for {music,speaker,lex} ∩ {music} = 1; ∪ = 3 → 1/3.
+        #expect(abs(pick.signalOverlap - (1.0 / 3.0)) < 1e-9,
+                "partial overlap should record exact Jaccard, not be rounded to 0 or 1")
+    }
+
+    @Test("merge falls back to time-distance when sim and confidence are equal")
+    func mergeFallsBackOnTimeDistance() {
+        // Both neighbors at equal sim (0) AND equal confidence. The
+        // dropped boundary is closer in time to `next` than to `prev`,
+        // so the merge should pick `next`.
+        let dur: TimeInterval = 3600
+        var cands: [ChapterCandidate] = [
+            ChapterCandidate(startTime: 0, boundaryConfidence: 1.0, triggeringSignals: [])
+        ]
+        // Place the dropped at t=350; prev (kept) at t=240, next (kept)
+        // at t=360. Distance: 110 vs 10 → next wins on time-closer.
+        for index in 0..<12 {
+            let time = TimeInterval(60 + index * 60)
+            let signals: [BoundarySignal]
+            let confidence: Float
+            if time == 240 || time == 360 {
+                signals = [.musicTransition]
+                confidence = 0.99 // equal between the two neighbors
+            } else {
+                signals = [.musicTransition]
+                confidence = 0.99
+            }
+            cands.append(
+                ChapterCandidate(
+                    startTime: time,
+                    boundaryConfidence: confidence,
+                    triggeringSignals: signals
+                )
+            )
+        }
+        // Replace t=300 with t=350 (asymmetric position) and lower
+        // its confidence so it's the one dropped.
+        cands.removeAll { $0.startTime == 300 }
+        cands.append(
+            ChapterCandidate(
+                startTime: 350,
+                boundaryConfidence: 0.10,
+                triggeringSignals: [.lexicalCategoryJump] // disjoint from neighbors
+            )
+        )
+        // Add a 13th non-zero so the cap of 12 forces exactly the
+        // weakest drop.
+        cands.append(
+            ChapterCandidate(
+                startTime: 780,
+                boundaryConfidence: 0.99,
+                triggeringSignals: [.musicTransition]
+            )
+        )
+        let result = ChapterBoundaryDetector.applyDensityGates(
+            candidates: cands,
+            episodeDuration: dur
+        )
+        guard case let .capApplied(_, _, _, mergeRecords) = result.outcome else {
+            Issue.record("expected capApplied outcome, got \(result.outcome)")
+            return
+        }
+        #expect(mergeRecords.count == 1)
+        let pick = mergeRecords[0]
+        #expect(pick.droppedStartTime == 350)
+        #expect(pick.absorbedIntoStartTime == 360,
+                "equal sim + equal confidence → time-closer neighbor (360, dist 10) wins over (240, dist 110)")
+    }
+
     @Test("cap-and-merge survivors are sorted by startTime ascending")
     func survivorsSortedByStartTime() {
         // Construct candidates in a non-time-sorted confidence order so
@@ -1716,13 +1945,15 @@ struct ChapterBoundaryDetectorShortEpisodeSkipTests {
         // candidate set dense enough that cap-and-merge must fire,
         // but rate ≤ 1/90 to avoid pathological abort.
         let dur: TimeInterval = 5 * 60
-        // Cap = ceil(5/5) = 1. Floor doesn't apply (<40min). cap =
-        // 1. Detected = 3 (1 t=0 + 2 non-zero) → cap to 1 (just
-        // t=0). Pathological: rate 3/300 = 0.01 < 1/90 ≈ 0.011 →
-        // safe.
+        // Cap = ceil(5/5) = 1. Floor doesn't apply (<40min). Detected
+        // = 3 (1 t=0 + 2 non-zero); nonZeroCap = 1 → 1 non-zero kept
+        // + t=0 = 2 retained. Pathological: rate 3/300 = 0.01 < 1/90
+        // ≈ 0.011 → safe.
+        // Higher-confidence non-zero (t=60, conf 0.7) wins over
+        // t=200 (conf 0.5).
         let cands: [ChapterCandidate] = [
             ChapterCandidate(startTime: 0, boundaryConfidence: 1.0, triggeringSignals: []),
-            ChapterCandidate(startTime: 60, boundaryConfidence: 0.5, triggeringSignals: [.musicTransition]),
+            ChapterCandidate(startTime: 60, boundaryConfidence: 0.7, triggeringSignals: [.musicTransition]),
             ChapterCandidate(startTime: 200, boundaryConfidence: 0.5, triggeringSignals: [.musicTransition]),
         ]
         let result = ChapterBoundaryDetector.applyDensityGates(
@@ -1731,7 +1962,18 @@ struct ChapterBoundaryDetectorShortEpisodeSkipTests {
         )
         if case .skippedShortEpisode = result.outcome {
             Issue.record("episode at exactly 5min must NOT skip gates; gates run from threshold up")
+            return
         }
+        guard case let .capApplied(_, retained, _, mergeRecords) = result.outcome else {
+            Issue.record("expected capApplied outcome, got \(result.outcome)")
+            return
+        }
+        #expect(retained == 2, "cap=1 non-zero + synthetic t=0 = 2 retained")
+        #expect(result.candidates.count == 2)
+        #expect(result.candidates.map(\.startTime) == [0, 60],
+                "higher-confidence non-zero (t=60) wins over t=200")
+        #expect(mergeRecords.count == 1)
+        #expect(mergeRecords[0].droppedStartTime == 200)
     }
 }
 

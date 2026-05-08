@@ -1001,11 +1001,14 @@ extension ChapterBoundaryDetector {
         // formula. The cap is the budget for NON-ZERO candidates;
         // the synthetic t=0 is retained separately on top. We
         // short-circuit to `.noChange` when the non-zero count
-        // already fits within the cap (no trimming needed). The
-        // total `candidateCount` is still passed into `densityCap`
-        // because the spec formula is min(detected, ...) — clamping
-        // a cap above the total candidate count would produce a
-        // misleading outcome payload.
+        // already fits within the cap (no trimming needed).
+        //
+        // We pass the total `candidateCount` into `densityCap` to
+        // honor the spec formula `min(detected, max(floor, target))`
+        // verbatim. Functionally the `min(detected, ...)` clamp is
+        // redundant given the `nonZeroCount <= cap` early-return
+        // below — but keeping the formula literal preserves the
+        // doc-style mapping from spec to code.
         let cap = densityCap(
             detectedCount: candidateCount,
             episodeDuration: episodeDuration
