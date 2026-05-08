@@ -418,12 +418,16 @@ enum CorpusExporter {
     /// emitted into the corpus.
     ///
     /// - `distinctSemantic` (default): one JSONL line per
-    ///   semantic-identity (asset + type + normalized scope key). Audit
-    ///   metadata (`submissionCount`, `lastSeenAt`) on the surviving
-    ///   row reflects the cumulative gesture history. This is the
-    ///   correct default for downstream learning / metrics — we want
-    ///   one vote per logical correction, not one vote per duplicated
-    ///   row caused by a pre-v23 write path.
+    ///   semantic-identity (asset + type + normalized scope key). On a
+    ///   fully-migrated v23+ database the surviving row's persisted
+    ///   audit metadata (`submissionCount`, `lastSeenAt`) already
+    ///   reflects the cumulative gesture history — that bookkeeping is
+    ///   maintained by the storage layer's idempotent upsert path
+    ///   (`AnalysisStore.appendCorrectionEvent`), not by the
+    ///   `distinctSemanticCorrections` collapse, which returns survivor
+    ///   fields unchanged. This is the correct default for downstream
+    ///   learning / metrics — we want one vote per logical correction,
+    ///   not one vote per duplicated row caused by a pre-v23 write path.
     ///
     /// - `rawEvents`: every persisted row, including pre-v23
     ///   duplicates. Intended for debugging the dedupe pipeline
@@ -601,11 +605,13 @@ enum CorpusExporter {
             // playhead-hygc.1.6: distinct-by-default. The default
             // `.distinctSemantic` mode collapses pre-v23 duplicate
             // rows so downstream learning / metrics see one vote per
-            // logical correction. The audit metadata
-            // (`submissionCount`, `lastSeenAt`) is preserved on the
-            // surviving row by `distinctSemanticCorrections`. The
-            // `.rawEvents` mode bypasses the collapse for debugging
-            // the dedupe pipeline.
+            // logical correction. On a v23+ database the surviving
+            // row's `submissionCount` / `lastSeenAt` already carry
+            // the cumulative gesture history (maintained by the
+            // storage-layer upsert); `distinctSemanticCorrections`
+            // returns survivor fields unchanged. The `.rawEvents`
+            // mode bypasses the collapse for debugging the dedupe
+            // pipeline.
             let events: [CorrectionEvent]
             switch correctionMode {
             case .distinctSemantic:

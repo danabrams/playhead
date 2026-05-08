@@ -699,11 +699,11 @@ struct SponsorKnowledgeMatcherIntegrationTests {
 @Suite("SponsorKnowledge — Schema Migration")
 struct SponsorKnowledgeSchemaMigrationTests {
 
-    @Test("V7 migration creates both tables and sets schema version to 7")
+    @Test("V7 migration creates both tables and sets schema version to current")
     func v7MigrationCreates() async throws {
         let analysisStore = try await makeTestStore()
         let version = try await analysisStore.schemaVersion()
-        #expect(version == 25, "Schema version should be 24 after migration")
+        #expect(version == 26, "Schema version should be 24 after migration")
     }
 
     @Test("V7 migration is idempotent")
@@ -712,7 +712,7 @@ struct SponsorKnowledgeSchemaMigrationTests {
         // migrate() is called by makeTestStore; call it again.
         try await analysisStore.migrate()
         let version = try await analysisStore.schemaVersion()
-        #expect(version == 25)
+        #expect(version == 26)
     }
 }
 

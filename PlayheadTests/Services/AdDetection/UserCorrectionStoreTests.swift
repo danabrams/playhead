@@ -804,6 +804,101 @@ final class UserCorrectionStoreTests: XCTestCase {
             "manualVeto source must infer falsePositive correctionType")
     }
 
+    // MARK: - LearningArtifactIngestor wiring (playhead-hygc.1.7)
+
+    /// When a `LearningArtifactIngestor` is wired into the correction store
+    /// via `setLearningArtifactIngestor(_:)`, every `record(_:)` /
+    /// `recordVeto(...)` call must route through the ingestor so durable
+    /// learning artifacts (training_examples) are produced as a side
+    /// effect of the gesture. Without this wire, corrections land in
+    /// `correction_events` but the materializer never fires and downstream
+    /// consumers (NARL exporter, learning eval) miss the labels.
+    func testRecordVetoRoutesThroughLearningIngestorWhenWired() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        let assetId = "asset-ingest-wired"
+        try await analysisStore.insertAsset(makeTestAsset(id: assetId))
+        // Seed a scan-result spine row so materialization has something
+        // to materialize.
+        try await analysisStore.insertSemanticScanResult(SemanticScanResult(
+            id: "scan-wired",
+            analysisAssetId: assetId,
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 50,
+            windowStartTime: 0,
+            windowEndTime: 30,
+            scanPass: "coarse",
+            transcriptQuality: .good,
+            disposition: .uncertain,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: 100,
+            outputTokenCount: 20,
+            latencyMs: 50,
+            prewarmHit: false,
+            scanCohortJSON: ScanCohort.productionJSON(),
+            transcriptVersion: "tv-wired",
+            reuseScope: nil,
+            runMode: .targeted,
+            jobPhase: BackfillJobPhase.fullEpisodeScan.rawValue
+        ))
+
+        let knowledge = SponsorKnowledgeStore(store: analysisStore)
+        let ingestor = LearningArtifactIngestor(
+            store: analysisStore,
+            knowledgeStore: knowledge
+        )
+        await correctionStore.setLearningArtifactIngestor(ingestor)
+
+        await correctionStore.recordVeto(
+            startTime: 5,
+            endTime: 15,
+            assetId: assetId,
+            podcastId: "pod-wired",
+            source: .falseNegative
+        )
+
+        // Diagnostics should show one ingested correction.
+        let diag = await ingestor.diagnostics()
+        XCTAssertEqual(diag.raw, 1)
+        XCTAssertEqual(diag.ingested, 1)
+
+        // Materialization fired as a side effect: training_examples row exists.
+        let examples = try await analysisStore.loadTrainingExamples(forAsset: assetId)
+        XCTAssertEqual(examples.count, 1)
+        XCTAssertEqual(examples.first?.userAction, "reportedAd")
+    }
+
+    /// Without an ingestor wired, the existing record path is preserved
+    /// — corrections land in `correction_events` but no materialization
+    /// runs. This guards against accidental regressions on legacy
+    /// callers (and back-compat with tests that don't construct an
+    /// ingestor).
+    func testRecordVetoSkipsLearningIngestorWhenUnwired() async throws {
+        let analysisStore = try await makeTestStore()
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        let assetId = "asset-ingest-unwired"
+        try await analysisStore.insertAsset(makeTestAsset(id: assetId))
+
+        await correctionStore.recordVeto(
+            startTime: 5,
+            endTime: 15,
+            assetId: assetId,
+            podcastId: nil,
+            source: .manualVeto
+        )
+
+        // Correction persisted as before.
+        let events = try await correctionStore.activeCorrections(for: assetId)
+        XCTAssertEqual(events.count, 1)
+        // No materialization fired (no ingestor wired).
+        let examples = try await analysisStore.loadTrainingExamples(forAsset: assetId)
+        XCTAssertEqual(examples.count, 0,
+            "legacy unwired path must not auto-materialize — back-compat guard")
+    }
+
     func testRecordVetoTimeRangeFalseNegativeSourceSetsFalseNegativeType() async throws {
         let analysisStore = try await makeTestStore()
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)

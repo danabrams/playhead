@@ -285,22 +285,33 @@ extension CorrectionEvent {
 }
 
 /// Read-side dedupe utility: collapse a list of `CorrectionEvent` rows
-/// into one row per semantic identity. Audit metadata is preserved on
-/// the surviving row:
-///   - `createdAt` is the OLDEST row's createdAt (first observed).
-///   - The dropped rows' createdAt values are NOT preserved beyond the
-///     count — callers that need full provenance should consume the
-///     raw rows directly.
+/// into one row per semantic identity.
+///
+/// Survivor selection: the surviving row is the chronologically
+/// earliest row in the input bucket (oldest `createdAt` wins; ties are
+/// broken by the row `id` to keep the output deterministic across
+/// runs). The survivor's stored fields — including its persisted
+/// `submissionCount` and `lastSeenAt` — are returned UNCHANGED. This
+/// utility does NOT mutate any field on the survivor; callers that
+/// want the post-collapse audit count for a bucket consult the
+/// returned `submissionCounts` side dictionary instead.
+///
+/// Dropped rows' `createdAt` values are NOT preserved beyond the
+/// returned count — callers that need full provenance should consume
+/// the raw rows directly.
 ///
 /// Used by Activity, learning ingestion, and corpus export so that a
 /// pre-migration database with duplicate rows still presents a
 /// deduplicated view to consumers. Post-migration databases have at
-/// most one row per identity already, in which case this is a no-op.
+/// most one row per identity already, in which case this is a no-op
+/// and `submissionCounts[survivor.id]` is 1.
 ///
-/// Returns `(distinct, audit)` where `audit[id]` is the submission
-/// count observed for the surviving row's identity. The surviving row
-/// is the chronologically earliest row in the input; ties are broken
-/// by the row `id` to keep the output deterministic across runs.
+/// Returns `(distinct, submissionCounts)` where
+/// `submissionCounts[survivorId]` is the COUNT OF ROWS in the input
+/// bucket (in-memory observation), not the survivor's persisted
+/// `submissionCount`. On a fully-migrated database these are equal;
+/// on a partially-migrated input they may differ — the side dict is
+/// the authoritative pre-collapse multiplicity.
 func distinctSemanticCorrections(
     _ events: [CorrectionEvent]
 ) -> (distinct: [CorrectionEvent], submissionCounts: [String: Int]) {
@@ -485,8 +496,26 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     private let store: AnalysisStore
     private let logger = Logger(subsystem: "com.playhead", category: "UserCorrectionStore")
 
+    /// playhead-hygc.1.7: optional durable-learning ingestor. When set,
+    /// every `record(_:)` call routes through it so the same gesture
+    /// that produces a `correction_events` row also triggers training-
+    /// example materialization and sponsor-knowledge side effects. The
+    /// ingestor lives outside the actor's init contract so the runtime
+    /// can wire it post-init (mirrors the SwiftData/episodeMetadataProvider
+    /// pattern used elsewhere). When nil, the existing behavior is
+    /// preserved exactly — important for legacy tests and offline
+    /// replay paths that don't want side effects.
+    private var learningIngestor: LearningArtifactIngestor?
+
     init(store: AnalysisStore) {
         self.store = store
+    }
+
+    /// Install (or replace) the learning-artifact ingestor. Idempotent —
+    /// calling with the same ingestor is a no-op; calling with a new
+    /// ingestor replaces the previous one. Pass `nil` to detach.
+    func setLearningArtifactIngestor(_ ingestor: LearningArtifactIngestor?) {
+        self.learningIngestor = ingestor
     }
 
     // MARK: - UserCorrectionStore
@@ -632,7 +661,18 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     }
 
     /// Persist a fully-formed correction event.
+    ///
+    /// playhead-hygc.1.7: when a `LearningArtifactIngestor` is wired,
+    /// the event is routed through it instead of going directly to
+    /// `appendCorrectionEvent`. The ingestor handles persistence,
+    /// dedupe, materialization, and sponsor side effects in a single
+    /// idempotent step. Without an ingestor, behavior is unchanged
+    /// from pre-1.7 — direct append, no side effects.
     func record(_ event: CorrectionEvent) async throws {
+        if let learningIngestor {
+            _ = try await learningIngestor.ingest(correction: event)
+            return
+        }
         try await store.appendCorrectionEvent(event)
     }
 

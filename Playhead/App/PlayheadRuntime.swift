@@ -768,6 +768,35 @@ final class PlayheadRuntime {
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
         self.correctionStore = correctionStore
 
+        // playhead-hygc.1.7: wire the LearningArtifactIngestor as the
+        // single seam that turns recorded corrections into durable
+        // learning artifacts (training_examples + sponsor knowledge).
+        // The ingestor is itself idempotent (in-process semantic-identity
+        // dedupe + v23 UNIQUE INDEX upsert on the persistence side), so
+        // even if SkipOrchestrator and AdDetectionService both observe
+        // the same gesture and re-record it, only the first call drives
+        // side effects.
+        //
+        // SponsorKnowledgeStore is constructed here too so sponsor-scoped
+        // FN/FP corrections actually move the knowledge graph (FN →
+        // recordCandidate confirmation, FP → recordRollback). Both stores
+        // are thin actors over the already-open AnalysisStore.
+        //
+        // The setter pattern mirrors `setUserCorrectionStore` below: an
+        // async setter on the actor, called from a Task. Until that Task
+        // completes, `record(_:)` falls back to the direct
+        // `appendCorrectionEvent` path — the safe default (correction
+        // still persists, just without the second-order materialization
+        // pass that this Task installs).
+        let sponsorKnowledgeStore = SponsorKnowledgeStore(store: analysisStore)
+        let learningIngestor = LearningArtifactIngestor(
+            store: analysisStore,
+            knowledgeStore: sponsorKnowledgeStore
+        )
+        Task { [correctionStore, learningIngestor] in
+            await correctionStore.setLearningArtifactIngestor(learningIngestor)
+        }
+
         // playhead-o45p: construct ONE shared SurfaceStatusInvariantLogger
         // instance and thread it through both the SkipOrchestrator (which
         // emits `auto_skip_fired`) and the EpisodeSurfaceStatusObserver

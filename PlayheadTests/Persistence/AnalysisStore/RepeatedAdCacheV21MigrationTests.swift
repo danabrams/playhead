@@ -42,7 +42,7 @@ struct RepeatedAdCacheV21MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 25)
+        #expect(try await store.schemaVersion() == 26)
         #expect(try probeTableExists(in: dir, table: "repeated_ad_cache"))
         #expect(try probeTableExists(in: dir, table: "repeated_ad_cache_outcomes"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_repeated_ad_cache_lastseen"))
@@ -59,7 +59,7 @@ struct RepeatedAdCacheV21MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let bootstrap = try AnalysisStore(directory: dir)
         try await bootstrap.migrate()
-        #expect(try await bootstrap.schemaVersion() == 25)
+        #expect(try await bootstrap.schemaVersion() == 26)
 
         // Rewind: drop the v21 tables/indexes and reset _meta to '20' so
         // the v20 → v21 block runs on the next open.
@@ -86,7 +86,7 @@ struct RepeatedAdCacheV21MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 25)
+        #expect(try await store.schemaVersion() == 26)
         #expect(try probeTableExists(in: dir, table: "repeated_ad_cache"))
         #expect(try probeTableExists(in: dir, table: "repeated_ad_cache_outcomes"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_repeated_ad_cache_lastseen"))
@@ -108,8 +108,8 @@ struct RepeatedAdCacheV21MigrationTests {
         try await store.migrate()
         let v2 = try await store.schemaVersion()
 
-        #expect(v1 == 25)
-        #expect(v2 == 25)
+        #expect(v1 == 26)
+        #expect(v2 == 26)
     }
 
     // MARK: - Adapter round-trip
