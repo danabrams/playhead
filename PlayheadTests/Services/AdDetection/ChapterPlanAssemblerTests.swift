@@ -629,6 +629,45 @@ struct ChapterPlanAssemblerTests {
         }
     }
 
+    @Test("operational rows are EXCLUDED from planConfidence (their qualityScore=0 does not drag the average down)")
+    func operationalRowsExcludedFromConfidence() {
+        // 10 chapters: 2 operational (20%, below abort threshold) + 8
+        // confident at uniform quality 0.9 with uniform 60s durations.
+        // Operational rows have qualityScore=0; if they leaked into the
+        // confidence computation, the duration-weighted average would
+        // be (8 × 0.9 × 60 + 2 × 0 × 60) / (10 × 60) = 0.72.
+        // After dropping operational rows, the average over the 8 kept
+        // chapters is 0.9. Pinning that distinguishes "filter then
+        // compute" from "compute then filter".
+        let opChapters = (0..<2).map { i in
+            Self.operationalFailure(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60)
+            )
+        }
+        let confidentChapters = (2..<10).map { i in
+            Self.confident(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60),
+                confidence: 0.9
+            )
+        }
+        let result = Self.assembler.assemble(
+            results: opChapters + confidentChapters,
+            episodeContentHash: Self.testHash,
+            candidatesDetected: 10,
+            candidatesKept: 10,
+            generatedAt: Self.fixedDate
+        )
+        switch result {
+        case .assembled(let plan, _):
+            #expect(plan.chapters.count == 8)
+            #expect(abs(plan.planConfidence - 0.9) < 1e-6)
+        case .aborted:
+            Issue.record("20% operational must not abort")
+        }
+    }
+
     @Test("removal preserves order; first kept chapter is the first non-operational result")
     func removalPreservesOrder() {
         // 3 op + 7 confident = 30% (does NOT abort under strict `>`).
