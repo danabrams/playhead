@@ -486,6 +486,32 @@ struct ChapterSignalCaseStudyDirectoryTests {
         }
     }
 
+    @Test("README.md does not contain any show-specific forbidden tokens")
+    func readmeHasNoShowSpecificTokens() throws {
+        // The README is a documentation surface and legitimately uses
+        // concept-level words like "advertiser" / "sponsor" / "brand"
+        // when describing the anonymization pipeline (see anonymization
+        // §3). It must NOT, however, name any specific real show or
+        // identifier that the case fixtures were ever modeled on. This
+        // test guards against an accidental copy-paste from a corpus
+        // analysis note that smuggles a real show name into the
+        // documentation surface.
+        let readme = CaseStudyPaths.fixturesDir().appendingPathComponent("README.md")
+        let bytes = try Data(contentsOf: readme)
+        let text = String(decoding: bytes, as: UTF8.self).lowercased()
+        let showSpecificForbidden = [
+            "flightcast",
+            "simplecast",
+            "doac",
+            "conan",
+            "kelly ripa"
+        ]
+        for token in showSpecificForbidden {
+            #expect(!text.contains(token.lowercased()),
+                    "show-specific forbidden token \"\(token)\" found in README.md")
+        }
+    }
+
     @Test("Every case carries a synthetic episode_id_anon (matches anonymization shape)")
     func everyCaseHasSyntheticEpisodeId() throws {
         // README anonymization §1 documents the canonical shape:
