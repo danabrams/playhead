@@ -91,8 +91,10 @@ checked in here.** The anonymization pipeline that produced each fixture
 is:
 
 1. **Episode titles → `episode_id_anon` synthetic id.** Each case has a
-   short opaque id of the shape `episode_anon_<six-character hex>` chosen
-   so it cannot be reversed to a podcast feed URL or RSS GUID.
+   short opaque id of the shape `episode_anon_<short hex>` (the test
+   pins the regex `^episode_anon_[0-9a-f]{4,16}$`; current cases use
+   six chars) chosen so it cannot be reversed to a podcast feed URL or
+   RSS GUID.
 2. **Podcast / show titles → `podcast_id_archetype` slot.** The fixture
    only retains the archetype label (one of `conversational`,
    `narrative`, `comedy`, `news`) — never the show name, RSS URL, or
