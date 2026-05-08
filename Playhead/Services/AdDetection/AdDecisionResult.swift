@@ -261,6 +261,18 @@ struct CorrectionEvent: Sendable, Equatable {
     let causalSource: CausalSource?
     /// ef2.3.1: JSON-encoded CorrectionTargetRefs for downstream analysis.
     let targetRefs: CorrectionTargetRefs?
+    /// playhead-hygc.1.6: Cumulative submission count for this semantic
+    /// identity. `1` for a freshly-recorded correction; increments by 1
+    /// every time the same logical correction is re-submitted (idempotent
+    /// upsert at the persistence layer). `nil` for legacy rows that
+    /// pre-date schema v23 and were never re-submitted post-migration —
+    /// readers should treat `nil` as `1`.
+    let submissionCount: Int?
+    /// playhead-hygc.1.6: Wall-clock of the most recent submission of
+    /// this semantic identity. Equal to `createdAt` for a fresh
+    /// correction; updated on each idempotent upsert. `nil` for legacy
+    /// rows; readers should treat `nil` as `createdAt`.
+    let lastSeenAt: Double?
 
     init(
         id: String = UUID().uuidString,
@@ -271,7 +283,9 @@ struct CorrectionEvent: Sendable, Equatable {
         podcastId: String? = nil,
         correctionType: CorrectionType? = nil,
         causalSource: CausalSource? = nil,
-        targetRefs: CorrectionTargetRefs? = nil
+        targetRefs: CorrectionTargetRefs? = nil,
+        submissionCount: Int? = nil,
+        lastSeenAt: Double? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -282,5 +296,7 @@ struct CorrectionEvent: Sendable, Equatable {
         self.correctionType = correctionType
         self.causalSource = causalSource
         self.targetRefs = targetRefs
+        self.submissionCount = submissionCount
+        self.lastSeenAt = lastSeenAt
     }
 }

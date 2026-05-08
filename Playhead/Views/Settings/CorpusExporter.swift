@@ -352,6 +352,11 @@ enum CorpusExporter {
 
     /// Serialize a `CorrectionEvent` as a single JSONL line body. Returns nil if
     /// the row has an unparseable `scope` string, signalling the caller to skip it.
+    ///
+    /// playhead-hygc.1.6: emits the `submissionCount` and `lastSeenAt`
+    /// audit columns so downstream tooling can distinguish "user
+    /// hammered the button 4 times" from "user submitted once" without
+    /// needing access to the raw event log.
     static func correctionLine(_ event: CorrectionEvent) throws -> Data? {
         // Reject rows whose scope cannot be deserialized — corrupt persisted
         // input that would confuse downstream replay tools. We still let the
@@ -378,6 +383,11 @@ enum CorpusExporter {
             "correctionType": event.correctionType?.rawValue as Any? ?? NSNull(),
             "causalSource": event.causalSource?.rawValue as Any? ?? NSNull(),
             "targetRefs": targetRefsAny,
+            // playhead-hygc.1.6 audit columns. Explicit JSON null for
+            // legacy rows that pre-date the dedupe migration so old
+            // exports remain decodable on the consumer side.
+            "submissionCount": event.submissionCount as Any? ?? NSNull(),
+            "lastSeenAt": event.lastSeenAt as Any? ?? NSNull(),
         ]
         return try jsonLineData(from: obj)
     }
@@ -404,12 +414,32 @@ enum CorpusExporter {
     /// just-written file is removed and the prior file's URL is
     /// returned. Counts in the result still reflect the rows the
     /// current call observed; only the on-disk artifact is collapsed.
+    /// playhead-hygc.1.6: Mode that controls how `correction_events` are
+    /// emitted into the corpus.
+    ///
+    /// - `distinctSemantic` (default): one JSONL line per
+    ///   semantic-identity (asset + type + normalized scope key). Audit
+    ///   metadata (`submissionCount`, `lastSeenAt`) on the surviving
+    ///   row reflects the cumulative gesture history. This is the
+    ///   correct default for downstream learning / metrics — we want
+    ///   one vote per logical correction, not one vote per duplicated
+    ///   row caused by a pre-v23 write path.
+    ///
+    /// - `rawEvents`: every persisted row, including pre-v23
+    ///   duplicates. Intended for debugging the dedupe pipeline
+    ///   itself; should NOT be wired into Activity / learning paths.
+    enum CorrectionExportMode: Sendable {
+        case distinctSemantic
+        case rawEvents
+    }
+
     static func export(
         store: some CorpusExportSource,
         documentsURL: URL,
         now: Date = Date(),
         dedupMemo: CorpusExportDedupMemo = .shared,
-        dedupWindow: TimeInterval = defaultDedupWindow
+        dedupWindow: TimeInterval = defaultDedupWindow,
+        correctionMode: CorrectionExportMode = .distinctSemantic
     ) async throws -> CorpusExportResult {
         let fm = FileManager.default
         if !fm.fileExists(atPath: documentsURL.path) {
@@ -559,14 +589,29 @@ enum CorpusExporter {
             }
 
             // correction records for this asset
-            let events: [CorrectionEvent]
+            let rawEvents: [CorrectionEvent]
             do {
-                events = try await store.loadCorrectionEvents(analysisAssetId: asset.id)
+                rawEvents = try await store.loadCorrectionEvents(analysisAssetId: asset.id)
             } catch {
                 logger.warning(
                     "export: loadCorrectionEvents failed for asset=\(asset.id, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting 0 corrections for this asset"
                 )
-                events = []
+                rawEvents = []
+            }
+            // playhead-hygc.1.6: distinct-by-default. The default
+            // `.distinctSemantic` mode collapses pre-v23 duplicate
+            // rows so downstream learning / metrics see one vote per
+            // logical correction. The audit metadata
+            // (`submissionCount`, `lastSeenAt`) is preserved on the
+            // surviving row by `distinctSemanticCorrections`. The
+            // `.rawEvents` mode bypasses the collapse for debugging
+            // the dedupe pipeline.
+            let events: [CorrectionEvent]
+            switch correctionMode {
+            case .distinctSemantic:
+                events = distinctSemanticCorrections(rawEvents).distinct
+            case .rawEvents:
+                events = rawEvents
             }
             for event in events {
                 guard let data = try correctionLine(event) else {

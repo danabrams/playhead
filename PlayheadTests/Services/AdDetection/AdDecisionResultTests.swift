@@ -222,11 +222,36 @@ struct CorrectionEventPersistenceTests {
         try await store.appendCorrectionEvent(event)
         let loaded = try await store.loadCorrectionEvents(analysisAssetId: "asset1")
         #expect(loaded.count == 1)
-        #expect(loaded[0] == event)
+        // playhead-hygc.1.6: the round-tripped row carries the audit
+        // columns (`submissionCount`, `lastSeenAt`) populated by the
+        // upsert path. Compare on the user-supplied fields and audit
+        // them separately rather than expecting `==` against the
+        // stripped-down input event.
+        let row = loaded[0]
+        #expect(row.id == event.id)
+        #expect(row.analysisAssetId == event.analysisAssetId)
+        #expect(row.scope == event.scope)
+        #expect(row.createdAt == event.createdAt)
+        #expect(row.source == event.source)
+        #expect(row.podcastId == event.podcastId)
+        #expect(row.correctionType == event.correctionType)
+        #expect(row.causalSource == event.causalSource)
+        #expect(row.targetRefs == event.targetRefs)
+        // First insert always lands at submissionCount = 1 with
+        // lastSeenAt pinned to createdAt.
+        #expect(row.submissionCount == 1)
+        #expect(row.lastSeenAt == event.createdAt)
     }
 
-    @Test("correction events are append-only — multiple preserved in order")
+    @Test("correction events with distinct identities are preserved in order")
     func appendOnly() async throws {
+        // playhead-hygc.1.6: the persistence layer is now
+        // identity-keyed, so two submissions with the SAME scope and
+        // type collapse into one row + audit count = 2 (verified by
+        // `CorrectionDedupeTests.testIdenticalSubmissionsCollapseAndAuditCount`).
+        // The "append-only" contract still holds for events with
+        // DISTINCT identities — preserve that here using non-overlapping
+        // ordinal ranges.
         let store = try await makeStore()
         try await store.insertAsset(AnalysisAsset(
             id: "asset1", episodeId: "ep1", assetFingerprint: "fp1",
@@ -235,8 +260,20 @@ struct CorrectionEventPersistenceTests {
             confirmedAdCoverageEndTime: nil, analysisState: "new",
             analysisVersion: 1, capabilitySnapshot: nil
         ))
-        try await store.appendCorrectionEvent(makeEvent(id: "c1", createdAt: 1.0))
-        try await store.appendCorrectionEvent(makeEvent(id: "c2", createdAt: 2.0))
+        let scope1 = CorrectionScope.exactSpan(assetId: "asset1", ordinalRange: 10...25)
+        let scope2 = CorrectionScope.exactSpan(assetId: "asset1", ordinalRange: 100...125)
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            id: "c1",
+            analysisAssetId: "asset1",
+            scope: scope1.serialized,
+            createdAt: 1.0
+        ))
+        try await store.appendCorrectionEvent(CorrectionEvent(
+            id: "c2",
+            analysisAssetId: "asset1",
+            scope: scope2.serialized,
+            createdAt: 2.0
+        ))
         let loaded = try await store.loadCorrectionEvents(analysisAssetId: "asset1")
         #expect(loaded.count == 2)
         #expect(loaded[0].id == "c1")

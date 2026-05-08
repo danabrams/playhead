@@ -89,7 +89,7 @@ struct AdListenRewindsV22MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 22)
+        #expect(try await store.schemaVersion() == 23)
         #expect(try probeTableExists(in: dir, table: "ad_listen_rewinds"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_ad_listen_rewinds_window"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_ad_listen_rewinds_podcast_time"))
@@ -103,7 +103,7 @@ struct AdListenRewindsV22MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let bootstrap = try AnalysisStore(directory: dir)
         try await bootstrap.migrate()
-        #expect(try await bootstrap.schemaVersion() == 22)
+        #expect(try await bootstrap.schemaVersion() == 23)
 
         // Rewind: drop the v22 table/indexes and reset _meta to '21' so
         // the v21 → v22 block runs on the next open.
@@ -126,7 +126,7 @@ struct AdListenRewindsV22MigrationTests {
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 22)
+        #expect(try await store.schemaVersion() == 23)
         #expect(try probeTableExists(in: dir, table: "ad_listen_rewinds"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_ad_listen_rewinds_window"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_ad_listen_rewinds_podcast_time"))
@@ -146,8 +146,8 @@ struct AdListenRewindsV22MigrationTests {
         try await store.migrate()
         let v2 = try await store.schemaVersion()
 
-        #expect(v1 == 22)
-        #expect(v2 == 22)
+        #expect(v1 == 23)
+        #expect(v2 == 23)
     }
 
     // MARK: - Round-trip
