@@ -218,7 +218,7 @@ struct ChapterLabelingService: Sendable {
             // retry loop would keep going after the parent Task was
             // cancelled.
             if Task.isCancelled {
-                return Self.operationalResult(
+                return self.operationalResult(
                     for: candidate,
                     attempts: attempts,
                     cause: "cancelled"
@@ -236,7 +236,7 @@ struct ChapterLabelingService: Sendable {
                     } catch {
                         // Cooperative cancellation during backoff —
                         // surface as operational and stop retrying.
-                        return Self.operationalResult(
+                        return self.operationalResult(
                             for: candidate,
                             attempts: attempts,
                             cause: "cancelled during backoff"
@@ -273,7 +273,7 @@ struct ChapterLabelingService: Sendable {
                 // Cancellation must propagate through the orchestrator
                 // — but the public API never throws. We emit an
                 // operational result and stop retrying.
-                return Self.operationalResult(
+                return self.operationalResult(
                     for: candidate,
                     attempts: attempts,
                     cause: "cancelled"
@@ -290,7 +290,7 @@ struct ChapterLabelingService: Sendable {
 
         // Exhausted retries.
         let cause = lastError.map { String(describing: $0) } ?? "unknown"
-        return Self.operationalResult(
+        return self.operationalResult(
             for: candidate,
             attempts: attempts,
             cause: cause
@@ -466,12 +466,18 @@ struct ChapterLabelingService: Sendable {
 
     /// Build a `LabelingResult` for an operational failure. The
     /// chapter is emitted with `.ambiguous` mapped disposition,
-    /// `qualityScore = 0`, and `labelDisposition = .unclear`.
-    private static func operationalResult(
+    /// `qualityScore = 0`, and `labelDisposition = .unclear`. The
+    /// `cause` is logged at debug level so dogfood diagnostics can
+    /// distinguish (e.g.) a timeout-only chapter from a decoding-only
+    /// one without exposing it on the public `LabelingResult` shape.
+    private func operationalResult(
         for candidate: ChapterLabelingCandidate,
         attempts: Int,
         cause: String
     ) -> LabelingResult {
+        logger.debug(
+            "chapter_label_operational_result attempts=\(attempts, privacy: .public) cause=\(cause, privacy: .public)"
+        )
         let chapter = ChapterEvidence(
             startTime: candidate.startTime,
             endTime: candidate.endTime,
@@ -480,7 +486,6 @@ struct ChapterLabelingService: Sendable {
             disposition: ChapterDispositionRaw.unclear.mappedDisposition,
             qualityScore: 0.0
         )
-        _ = cause // captured by the caller's logger; reserved for future telemetry plumbing.
         return LabelingResult(
             chapter: chapter,
             labelDisposition: .unclear,
