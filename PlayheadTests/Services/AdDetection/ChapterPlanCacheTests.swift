@@ -294,6 +294,36 @@ struct ChapterPlanCacheTests {
         let s2 = ChapterPlanCache.disambiguationSuffix(for: "stable-input")
         #expect(s1 == s2)
         #expect(s1.count == 12)
-        #expect(s1.allSatisfy { $0.isHexDigit })
+        // The suffix is lowercase ASCII hex by construction
+        // (`String(format: "%02x", _)` over SHA256 bytes). Pin that
+        // exact contract — `Character.isHexDigit` would accept
+        // uppercase and non-ASCII Unicode hex digits we never emit.
+        let asciiHex: Set<Character> = Set("0123456789abcdef")
+        #expect(s1.allSatisfy { asciiHex.contains($0) })
+    }
+
+    // MARK: migrate() idempotency
+
+    @Test("migrate is idempotent across repeated calls")
+    func migrateIsIdempotent() async {
+        let dir = Self.makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cache = ChapterPlanCache(directory: dir)
+
+        // First call resolves and creates the directory.
+        await cache.migrate()
+        #expect(FileManager.default.fileExists(atPath: dir.path))
+
+        // Second call must be a silent no-op (no throw, dir still present).
+        await cache.migrate()
+        #expect(FileManager.default.fileExists(atPath: dir.path))
+
+        // And subsequent puts/gets still work afterward.
+        let stored = await cache.put(
+            contentHash: "post-migrate",
+            plan: Self.makePlan(contentHash: "post-migrate")
+        )
+        #expect(stored == true)
+        #expect(await cache.get(contentHash: "post-migrate") != nil)
     }
 }
