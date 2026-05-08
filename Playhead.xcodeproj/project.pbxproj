@@ -466,6 +466,7 @@
 		82C5E95BB0B97D07E3A0368D /* AppleSpeechAssetBootstrapperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1103B54030908AEACB017B9B /* AppleSpeechAssetBootstrapperTests.swift */; };
 		831B0A9036B585D334545620 /* TrainingExampleMaterializer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9176182E203D8E6D4DD061A /* TrainingExampleMaterializer.swift */; };
 		837F2D68A2989CED47B9EDDE /* EpisodeListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBA65DE1F0FE58539F95E479 /* EpisodeListView.swift */; };
+		838514157064445DE48DC793 /* ChapterPlanAssembler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A4EF22699061107A9B3904B /* ChapterPlanAssembler.swift */; };
 		839630CD08B9EC85C4AEE5AA /* EpisodeExecutionLease.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB23CCE7F9824CCFC539F5F7 /* EpisodeExecutionLease.swift */; };
 		845006A50923648B7A1864C1 /* BoundaryExtractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63ECA5A9C13C1E98DB81817 /* BoundaryExtractionTests.swift */; };
 		8469D82F613A7FA4E60C0C61 /* SurfaceStatusInvariants.swift in Sources */ = {isa = PBXBuildFile; fileRef = F58F4A913B1456A6E818F5B3 /* SurfaceStatusInvariants.swift */; };
@@ -783,6 +784,7 @@
 		D967CC837BF707EBF5FA4382 /* UserDefaultsNewEpisodeLedgerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01C47B6081E4A03EF0B4C168 /* UserDefaultsNewEpisodeLedgerTests.swift */; };
 		D9E4B89EE12D8827AF27DFD4 /* SettingsViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70C176DAB2EF84EC8547BA27 /* SettingsViewTests.swift */; };
 		D9E6BB3BEB753D94745631E6 /* FrozenTraceListenRewindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5B492578AB1041366C20A6A /* FrozenTraceListenRewindTests.swift */; };
+		DA2B04837BB17E5F7D03A3F0 /* ChapterPlanAssemblerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97FBACC95C2A64704AD9781F /* ChapterPlanAssemblerTests.swift */; };
 		DA5CBC8E533620B7280A9BB9 /* BackgroundFeedRefreshServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D53934B5B81337A0C181B77 /* BackgroundFeedRefreshServiceTests.swift */; };
 		DAE33EB9CC141A6202203370 /* SwiftSourceInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACBF3E12A834DFA6062ADA9D /* SwiftSourceInspector.swift */; };
 		DB0D1807B461853C27E2F8C9 /* BackfillEvidenceFusion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A65337CCC0AA10C7696E87A /* BackfillEvidenceFusion.swift */; };
@@ -1299,6 +1301,7 @@
 		69B26E504FD88A4FB4797A30 /* AnalysisWorkSchedulerOutcomeBookkeepingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisWorkSchedulerOutcomeBookkeepingTests.swift; sourceTree = "<group>"; };
 		69F4DFB4E81926A74E29FEA9 /* BuildInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildInfo.swift; sourceTree = "<group>"; };
 		69F6E321702BE4389A710AD1 /* ActivitySnapshotProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivitySnapshotProvider.swift; sourceTree = "<group>"; };
+		6A4EF22699061107A9B3904B /* ChapterPlanAssembler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterPlanAssembler.swift; sourceTree = "<group>"; };
 		6A890EAEDC77D650C466B01E /* SwiftDataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftDataStore.swift; sourceTree = "<group>"; };
 		6AA2EAAB9CB381B00F169AC7 /* PlayheadRuntimeWiringSourceCanaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayheadRuntimeWiringSourceCanaryTests.swift; sourceTree = "<group>"; };
 		6AE11A07191B8ECD0A219164 /* EpisodeIdHasher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeIdHasher.swift; sourceTree = "<group>"; };
@@ -1469,6 +1472,7 @@
 		97A8A895FFC4F2D71D848140 /* FinalPassRetranscriptionRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalPassRetranscriptionRunner.swift; sourceTree = "<group>"; };
 		97C935EDF20B75F571AF6417 /* TranscriptAtom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptAtom.swift; sourceTree = "<group>"; };
 		97F2E1131D97A205594F3B65 /* PersistedTerminalStateReconcileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistedTerminalStateReconcileTests.swift; sourceTree = "<group>"; };
+		97FBACC95C2A64704AD9781F /* ChapterPlanAssemblerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterPlanAssemblerTests.swift; sourceTree = "<group>"; };
 		9808710B63D3B976EFF5BEAA /* BoundaryExpanderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundaryExpanderTests.swift; sourceTree = "<group>"; };
 		9829946DDBD851906C051C56 /* ForceQuitResumeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForceQuitResumeTests.swift; sourceTree = "<group>"; };
 		984C08FF44101A6D5239439B /* ForegroundAssistHandoff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForegroundAssistHandoff.swift; sourceTree = "<group>"; };
@@ -2525,6 +2529,7 @@
 				9620563D646B299A68E77A92 /* ChapterLabelSchema.swift */,
 				D9784E2DC96954DFAE4332B5 /* ChapterMetadataEvidenceBuilder.swift */,
 				CC6383DE0E8A74A55CE1976B /* ChapterPlan.swift */,
+				6A4EF22699061107A9B3904B /* ChapterPlanAssembler.swift */,
 				DC1733B75FD79F5A28970EC7 /* ChapterPlanCache.swift */,
 				959FE06CDC98EAF94640B386 /* ChapterSignalMode.swift */,
 				085759357B6ABBC8130C9148 /* ClassifierCalibration.swift */,
@@ -3123,6 +3128,7 @@
 				FB9FC1A788E799AE284C8DCF /* ChapterGenerationPhaseTests.swift */,
 				19A085ADE55B22D1F6AC6F0C /* ChapterLabelingServiceTests.swift */,
 				D7D6F924C8A94182E3E31CFD /* ChapterMetadataEvidenceBuilderTests.swift */,
+				97FBACC95C2A64704AD9781F /* ChapterPlanAssemblerTests.swift */,
 				BD0BE363090598235B4AEFC0 /* ChapterPlanCacheTests.swift */,
 				868CACC6ECACB11F82FE919F /* ChapterPlanTests.swift */,
 				7D627401378D3B05E0F3494D /* ClassifierCalibrationTests.swift */,
@@ -3888,6 +3894,7 @@
 				38B54452814645AA4472FD39 /* ChapterMetadataEvidenceBuilder.swift in Sources */,
 				7939733DB65A8D2BC03198A4 /* ChapterPhaseDiagnostics.swift in Sources */,
 				5B71BC6AA9167DA9E1A9CB3D /* ChapterPlan.swift in Sources */,
+				838514157064445DE48DC793 /* ChapterPlanAssembler.swift in Sources */,
 				A8313F20CD48F34E30A9BD59 /* ChapterPlanCache.swift in Sources */,
 				9A0DB1288E0377717B70AF33 /* ChapterSignalMode.swift in Sources */,
 				D79996B1F7748304E353476F /* ClassifierCalibration.swift in Sources */,
@@ -4261,6 +4268,7 @@
 				1290E414F9694C70D53C09D7 /* ChapterLabelingServiceTests.swift in Sources */,
 				88336CCAF7E7AF73B10EDF78 /* ChapterMetadataEvidenceBuilderTests.swift in Sources */,
 				B365D42405744F78AB1613D4 /* ChapterPhaseDiagnosticsTests.swift in Sources */,
+				DA2B04837BB17E5F7D03A3F0 /* ChapterPlanAssemblerTests.swift in Sources */,
 				3F6A36FC547C0E3AF73E0454 /* ChapterPlanCacheTests.swift in Sources */,
 				8DC353E9EDCC64E147BCD707 /* ChapterPlanTests.swift in Sources */,
 				21334B56EE2E23823EDD31F0 /* ChapterSignalGate.swift in Sources */,

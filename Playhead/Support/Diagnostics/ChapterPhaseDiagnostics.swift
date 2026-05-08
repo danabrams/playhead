@@ -79,6 +79,13 @@ enum ChapterPhaseEventType: String, Sendable, Hashable, Codable, CaseIterable {
     /// Operational-unclear rate exceeded threshold (>30%); plan dropped.
     case operationalUnclearRateExceeded = "chapter_phase_operational_unclear_rate_exceeded"
 
+    /// Total-unclear rate (operational + semantic) exceeded warning
+    /// threshold (>50%) but operational alone stayed below the abort
+    /// threshold; plan was still written, but the caller surfaces the
+    /// reduced-trust signal so dogfood diagnostics can correlate
+    /// downstream consumer behaviour with patchy plans.
+    case highUnclearRate = "chapter_phase_high_unclear_rate"
+
     /// Phase succeeded; plan written. Payload carries chapter count,
     /// plan confidence, FM-call count, and latency.
     case completed = "chapter_phase_completed"
@@ -103,7 +110,7 @@ enum ChapterPhaseEventType: String, Sendable, Hashable, Codable, CaseIterable {
 /// addition of `title`, `text`, `transcript`, `advertiser`, or any
 /// String value sourced from episode metadata.
 ///
-/// Asymmetry note: `ChapterPhaseEventType` has 11 cases, this enum has 9.
+/// Asymmetry note: `ChapterPhaseEventType` has 12 cases, this enum has 10.
 /// `noCandidates` and `preempted` are intentionally stateless — the
 /// emit-helper factories on `ChapterPhaseEvent` set `payload: nil` for
 /// those, and the encoded JSON omits the `payload` key entirely (see the
@@ -120,6 +127,7 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
     case capApplied(CapApplied)
     case labelFailed(LabelFailed)
     case operationalUnclearRateExceeded(OperationalUnclearRateExceeded)
+    case highUnclearRate(HighUnclearRate)
     case completed(Completed)
     case decodeFailure(DecodeFailure)
 
@@ -246,6 +254,33 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         }
     }
 
+    /// >50% of labeled chapters were unclear (operational + semantic
+    /// combined), but operational alone stayed below the abort
+    /// threshold. The plan was assembled — per-chapter `qualityScore`
+    /// weighting handles trust at the consumer side — but support
+    /// engineers and dogfood reviewers want to be able to grep for
+    /// reduced-confidence runs.
+    ///
+    /// Spelling: US English (`labeled`) for grep-cheat-sheet
+    /// consistency, identical to `OperationalUnclearRateExceeded`.
+    struct HighUnclearRate: Sendable, Hashable, Equatable, Codable {
+        let labeledCount: Int
+        let operationalUnclearCount: Int
+        let semanticUnclearCount: Int
+        /// Fraction in [0, 1]: `(operational + semantic) / labeled`.
+        let totalUnclearRate: Double
+        /// Configured threshold (e.g. 0.50) at the time of the event.
+        let threshold: Double
+
+        enum CodingKeys: String, CodingKey {
+            case labeledCount = "labeled_count"
+            case operationalUnclearCount = "operational_unclear_count"
+            case semanticUnclearCount = "semantic_unclear_count"
+            case totalUnclearRate = "total_unclear_rate"
+            case threshold
+        }
+    }
+
     /// Phase completed successfully.
     struct Completed: Sendable, Hashable, Equatable, Codable {
         let chapterCount: Int
@@ -300,6 +335,7 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         case capApplied = "cap_applied"
         case labelFailed = "label_failed"
         case operationalUnclearRateExceeded = "operational_unclear_rate_exceeded"
+        case highUnclearRate = "high_unclear_rate"
         case completed
         case decodeFailure = "decode_failure"
     }
@@ -321,6 +357,8 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
             try container.encode(p, forKey: .labelFailed)
         case .operationalUnclearRateExceeded(let p):
             try container.encode(p, forKey: .operationalUnclearRateExceeded)
+        case .highUnclearRate(let p):
+            try container.encode(p, forKey: .highUnclearRate)
         case .completed(let p):
             try container.encode(p, forKey: .completed)
         case .decodeFailure(let p):
@@ -360,6 +398,10 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
             forKey: .operationalUnclearRateExceeded
         ) {
             self = .operationalUnclearRateExceeded(p)
+        } else if let p = try container.decodeIfPresent(
+            HighUnclearRate.self, forKey: .highUnclearRate
+        ) {
+            self = .highUnclearRate(p)
         } else if let p = try container.decodeIfPresent(
             Completed.self, forKey: .completed
         ) {
@@ -571,6 +613,33 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
                     labeledCount: labeledCount,
                     operationalUnclearCount: operationalUnclearCount,
                     operationalUnclearRate: operationalUnclearRate,
+                    threshold: threshold
+                )
+            )
+        )
+    }
+
+    /// emitted by playhead-au2v.1.13 (high-unclear warning surface)
+    static func highUnclearRate(
+        installID: UUID,
+        episodeId: String,
+        timestamp: Double,
+        labeledCount: Int,
+        operationalUnclearCount: Int,
+        semanticUnclearCount: Int,
+        totalUnclearRate: Double,
+        threshold: Double
+    ) -> ChapterPhaseEvent {
+        ChapterPhaseEvent(
+            timestamp: timestamp,
+            eventType: .highUnclearRate,
+            episodeIdHash: EpisodeIdHasher.hash(installID: installID, episodeId: episodeId),
+            payload: .highUnclearRate(
+                ChapterPhasePayload.HighUnclearRate(
+                    labeledCount: labeledCount,
+                    operationalUnclearCount: operationalUnclearCount,
+                    semanticUnclearCount: semanticUnclearCount,
+                    totalUnclearRate: totalUnclearRate,
                     threshold: threshold
                 )
             )
