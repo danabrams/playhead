@@ -17,7 +17,7 @@
 //   false_ready_rate = numerator / denominator
 //
 // Usage:
-//   swift scripts/false_ready_rate.swift <path> [--window-seconds N]
+//   swift scripts/false_ready_rate.swift <path> [--window-seconds N] [--audit]
 //
 // `<path>` is a directory (all *.jsonl files and dogfood archive *.json
 // files recursively), a single JSONL file, or a single dogfood archive.
@@ -42,6 +42,15 @@
 // Expected strict output: denominator=3, numerator=2, rate=66.67%.
 // The script also splits rollups by ready_entered trigger so cold-start
 // observations do not get mistaken for analysis-completed dogfood failures.
+//
+// Audit mode:
+//   swift scripts/false_ready_rate.swift <path> --audit
+//
+// Audit mode keeps the raw reference rollup but adds a session-aware
+// dogfood gate classification. Its playback proxy is a unique
+// (session_id, episode_id_hash) pair that emitted auto_skip_fired.
+// ready_entered rows without same-session playback evidence are
+// unscored rather than treated as confirmed false-ready failures.
 
 import Foundation
 
@@ -50,6 +59,8 @@ import Foundation
 struct Options {
     var paths: [String] = []
     var windowSeconds: Double = 60.0
+    var auditMode = false
+    var minPlaybackProxies = 20
 }
 
 func parseArgs(_ argv: [String]) -> Options {
@@ -58,12 +69,22 @@ func parseArgs(_ argv: [String]) -> Options {
     while i < argv.count {
         let arg = argv[i]
         switch arg {
+        case "--audit":
+            opts.auditMode = true
+            i += 1
         case "--window-seconds":
             if i + 1 < argv.count, let n = Double(argv[i + 1]) {
                 opts.windowSeconds = n
                 i += 2
             } else {
                 fatalError("--window-seconds requires a numeric value")
+            }
+        case "--min-playback-proxies":
+            if i + 1 < argv.count, let n = Int(argv[i + 1]), n >= 0 {
+                opts.minPlaybackProxies = n
+                i += 2
+            } else {
+                fatalError("--min-playback-proxies requires a non-negative integer")
             }
         case "--help", "-h":
             printUsage()
@@ -82,7 +103,7 @@ func parseArgs(_ argv: [String]) -> Options {
 
 func printUsage() {
     let msg = """
-    Usage: swift scripts/false_ready_rate.swift <path> [<path> ...] [--window-seconds N]
+    Usage: swift scripts/false_ready_rate.swift <path> [<path> ...] [--window-seconds N] [--audit]
 
       <path>             Either a directory (recursively scanned for *.jsonl
                          files and dogfood archive *.json files), a single
@@ -91,9 +112,16 @@ func printUsage() {
       --window-seconds N Match window after a ready_entered event in which
                          an auto_skip_fired on the same episode counts as
                          "fired". Default: 60.
+      --audit            Add session-aware dogfood gate classification.
+      --min-playback-proxies N
+                         Minimum unique (session_id, episode_id_hash)
+                         auto_skip_fired pairs required for audit PASS.
+                         Default: 20.
 
     Output: one line per input path with the total denominator, numerator,
             and false_ready_rate percentage, plus a rollup across all inputs.
+            With --audit, also prints playback-proxy and ready-transition
+            classification tables plus DOGFOOD_GATE_AUDIT.
     """
     FileHandle.standardError.write(Data(msg.utf8))
     FileHandle.standardError.write(Data("\n".utf8))
@@ -109,6 +137,7 @@ func printUsage() {
 struct Event {
     let source: String
     let timestamp: Date
+    let sessionId: String?
     let episodeIdHash: String?
     let eventType: String
     let entryTrigger: String?
@@ -200,6 +229,7 @@ func readEvents(fromJSONL text: String, source: String) -> [Event] {
                 as? [String: Any] else { continue }
         let tsStr = json["timestamp"] as? String ?? ""
         guard let ts = iso.date(from: tsStr) else { continue }
+        let sessionId = json["session_id"] as? String
         let episodeIdHash = json["episode_id_hash"] as? String
         // Default: legacy entries with no event_type are invariant_violation.
         let eventType = (json["event_type"] as? String) ?? "invariant_violation"
@@ -210,6 +240,7 @@ func readEvents(fromJSONL text: String, source: String) -> [Event] {
             Event(
                 source: source,
                 timestamp: ts,
+                sessionId: sessionId,
                 episodeIdHash: episodeIdHash,
                 eventType: eventType,
                 entryTrigger: entryTrigger,
@@ -285,6 +316,160 @@ func readyTriggers(in events: [Event]) -> [String] {
         .sorted()
 }
 
+// MARK: - Dogfood audit classification
+
+struct SessionEpisodeKey: Hashable {
+    let sessionId: String
+    let episodeIdHash: String
+}
+
+struct AuditResult {
+    let autoSkipFired: Int
+    let sessionsWithAutoSkip: Int
+    let uniqueSessionEpisodePairs: Int
+    let uniqueEpisodeHashesWithAutoSkip: Int
+    let readyEntered: Int
+    let classificationCounts: [String: Int]
+    let triggerClassificationCounts: [String: [String: Int]]
+
+    var confirmedFalseReady: Int {
+        classificationCounts["confirmed_false_ready", default: 0]
+    }
+}
+
+let auditClassificationOrder = [
+    "same_session_skip_after_ready",
+    "same_session_skip_after_ready_within_window",
+    "same_session_skip_after_ready_late",
+    "skip_before_ready_only",
+    "no_playback_evidence",
+    "confirmed_false_ready",
+]
+
+func computeAuditResult(events: [Event], windowSeconds: Double) -> AuditResult {
+    var skipsByKey: [SessionEpisodeKey: [Event]] = [:]
+    var sessionsWithAutoSkip = Set<String>()
+    var episodeHashesWithAutoSkip = Set<String>()
+    var autoSkipFired = 0
+
+    for event in events where event.eventType == "auto_skip_fired" {
+        autoSkipFired += 1
+        guard let sessionId = event.sessionId,
+              let episodeIdHash = event.episodeIdHash
+        else { continue }
+        sessionsWithAutoSkip.insert(sessionId)
+        episodeHashesWithAutoSkip.insert(episodeIdHash)
+        let key = SessionEpisodeKey(
+            sessionId: sessionId,
+            episodeIdHash: episodeIdHash
+        )
+        skipsByKey[key, default: []].append(event)
+    }
+
+    for key in Array(skipsByKey.keys) {
+        skipsByKey[key]?.sort { $0.timestamp < $1.timestamp }
+    }
+
+    var classificationCounts: [String: Int] = [:]
+    var triggerClassificationCounts: [String: [String: Int]] = [:]
+    var readyEntered = 0
+
+    func record(_ classification: String, trigger: String) {
+        classificationCounts[classification, default: 0] += 1
+        triggerClassificationCounts[trigger, default: [:]][classification, default: 0] += 1
+    }
+
+    for ready in events where ready.eventType == "ready_entered" {
+        readyEntered += 1
+        let trigger = ready.entryTrigger ?? "none"
+        guard let sessionId = ready.sessionId,
+              let episodeIdHash = ready.episodeIdHash
+        else {
+            record("no_playback_evidence", trigger: trigger)
+            continue
+        }
+
+        let key = SessionEpisodeKey(
+            sessionId: sessionId,
+            episodeIdHash: episodeIdHash
+        )
+        guard let skips = skipsByKey[key], !skips.isEmpty else {
+            record("no_playback_evidence", trigger: trigger)
+            continue
+        }
+
+        if let nextSkip = skips.first(where: { $0.timestamp >= ready.timestamp }) {
+            record("same_session_skip_after_ready", trigger: trigger)
+            let delta = nextSkip.timestamp.timeIntervalSince(ready.timestamp)
+            if delta <= windowSeconds {
+                record("same_session_skip_after_ready_within_window", trigger: trigger)
+            } else {
+                record("same_session_skip_after_ready_late", trigger: trigger)
+            }
+        } else if skips.contains(where: { $0.timestamp < ready.timestamp }) {
+            record("skip_before_ready_only", trigger: trigger)
+        } else {
+            record("confirmed_false_ready", trigger: trigger)
+        }
+    }
+
+    return AuditResult(
+        autoSkipFired: autoSkipFired,
+        sessionsWithAutoSkip: sessionsWithAutoSkip.count,
+        uniqueSessionEpisodePairs: skipsByKey.keys.count,
+        uniqueEpisodeHashesWithAutoSkip: episodeHashesWithAutoSkip.count,
+        readyEntered: readyEntered,
+        classificationCounts: classificationCounts,
+        triggerClassificationCounts: triggerClassificationCounts
+    )
+}
+
+func printAuditResult(
+    _ result: AuditResult,
+    windowSeconds: Double,
+    minPlaybackProxies: Int
+) {
+    print("---")
+    print("audit_mode=playback_window")
+    print("audit_window_seconds=\(windowSeconds)")
+    print("audit_note\tPlayback proxy is a unique session_id + episode_id_hash pair with auto_skip_fired. ready_entered rows without same-session playback evidence are unscored, not confirmed false-ready failures.")
+    print("audit_playback_proxies\tsessions_with_auto_skip\tunique_session_episode_pairs\tunique_episode_hashes\tauto_skip_fired")
+    print("audit_playback_proxies\t\(result.sessionsWithAutoSkip)\t\(result.uniqueSessionEpisodePairs)\t\(result.uniqueEpisodeHashesWithAutoSkip)\t\(result.autoSkipFired)")
+    print("---")
+    print("audit_ready_classification\tclassification\tcount")
+    print("audit_ready_classification\tready_entered\t\(result.readyEntered)")
+    for classification in auditClassificationOrder {
+        print("audit_ready_classification\t\(classification)\t\(result.classificationCounts[classification, default: 0])")
+    }
+
+    let triggers = result.triggerClassificationCounts.keys.sorted()
+    if !triggers.isEmpty {
+        print("---")
+        print("audit_by_trigger\ttrigger\tclassification\tcount")
+        for trigger in triggers {
+            let counts = result.triggerClassificationCounts[trigger, default: [:]]
+            for classification in auditClassificationOrder {
+                let count = counts[classification, default: 0]
+                if count > 0 {
+                    print("audit_by_trigger\t\(trigger)\t\(classification)\t\(count)")
+                }
+            }
+        }
+    }
+
+    let conclusion: String
+    if result.confirmedFalseReady > 0 {
+        conclusion = "FAIL"
+    } else if result.uniqueSessionEpisodePairs < minPlaybackProxies {
+        conclusion = "INSUFFICIENT_PLAYBACK_PROXIES"
+    } else {
+        conclusion = "PASS"
+    }
+
+    print("---")
+    print("DOGFOOD_GATE_AUDIT\t\(conclusion)\tconfirmed_false_ready\t\(result.confirmedFalseReady)\tplayback_proxy_pairs\t\(result.uniqueSessionEpisodePairs)\tmin_playback_proxy_pairs\t\(minPlaybackProxies)")
+}
+
 // MARK: - main
 
 let options = parseArgs(CommandLine.arguments)
@@ -337,4 +522,16 @@ if !triggers.isEmpty {
     if triggers.contains("cold_start") {
         print("note\tcold_start rows are initial observed ready states; inspect separately before treating them as false-ready failures.")
     }
+}
+
+if options.auditMode {
+    let audit = computeAuditResult(
+        events: allEvents,
+        windowSeconds: options.windowSeconds
+    )
+    printAuditResult(
+        audit,
+        windowSeconds: options.windowSeconds,
+        minPlaybackProxies: options.minPlaybackProxies
+    )
 }

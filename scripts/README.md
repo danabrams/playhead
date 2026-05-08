@@ -69,11 +69,19 @@ archive produced by Settings > Diagnostics > Export dogfood logs.
 ```sh
 swift scripts/false_ready_rate.swift scripts/fixtures/false_ready_rate_sample.jsonl
 swift scripts/false_ready_rate.swift path/to/playhead-dogfood-diagnostics-2026-05-06T22-24-59Z.json
+swift scripts/false_ready_rate.swift path/to/Diagnostics --audit
 ```
 
 The strict rollup preserves the original false-ready metric. The trigger
 rollup separates `analysis_completed` from `cold_start` so initial observed
 ready states do not contaminate the dogfood gate candidate.
+
+`--audit` adds a session-aware dogfood classification. It uses each unique
+`(session_id, episode_id_hash)` pair with `auto_skip_fired` as the playback
+proxy, separates skip-after-ready from skip-before-ready ordering, marks
+ready rows without same-session playback evidence as unscored, and prints a
+`DOGFOOD_GATE_AUDIT` conclusion. The default minimum is 20 playback proxies;
+override with `--min-playback-proxies N` for fixtures.
 
 ## `rotate-fixtures.swift`
 
