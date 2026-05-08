@@ -633,6 +633,64 @@ struct ChapterPhaseDiagnosticsTests {
         #expect(decoded.default.chapterPhaseEvents == allEvents)
     }
 
+    // MARK: - Decoder resilience: unknown payload variants and missing payload
+
+    @Test("Decoder rejects a payload object with no known variant key (typed dataCorrupted)")
+    func decoderRejectsUnknownPayloadVariant() {
+        // An event whose payload object carries ONLY an unknown variant
+        // key. The decoder must not silently succeed with a default
+        // payload — it must throw `dataCorrupted` so eval-pipeline
+        // readers can detect schema drift.
+        let json = """
+        {
+          "timestamp": 1700000500,
+          "event_type": "chapter_phase_completed",
+          "episode_id_hash": "\(Self.expectedEpisodeIdHash)",
+          "payload": {"future_variant_we_have_not_shipped": {"foo": 1}}
+        }
+        """.data(using: .utf8)!
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(ChapterPhaseEvent.self, from: json)
+        }
+    }
+
+    @Test("Decoder accepts an event whose `payload` key is absent (parity with stateless events)")
+    func decoderAcceptsEventWithMissingPayloadKey() throws {
+        // Stateless events (`preempted`, `no_candidates`) ship without
+        // a `payload` key. Stricter event types (`completed`, etc.)
+        // would still ship one — but a forwards-compatible reader must
+        // treat the missing key as "no payload" rather than throwing,
+        // so an older v=au2v.1.3 reader can decode a future bundle
+        // whose `chapter_phase_completed` event later loses a field.
+        let json = """
+        {
+          "timestamp": 1700000500,
+          "event_type": "chapter_phase_preempted",
+          "episode_id_hash": "\(Self.expectedEpisodeIdHash)"
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(ChapterPhaseEvent.self, from: json)
+        #expect(decoded.payload == nil)
+        #expect(decoded.eventType == .preempted)
+    }
+
+    @Test("Decoder rejects an event whose `event_type` is an unknown raw string")
+    func decoderRejectsUnknownEventType() {
+        // `ChapterPhaseEventType` is a closed enum: an unknown raw
+        // value must surface as a typed decoding error rather than
+        // silently downgrading to a sentinel.
+        let json = """
+        {
+          "timestamp": 1700000500,
+          "event_type": "chapter_phase_NOT_A_REAL_TYPE",
+          "episode_id_hash": "\(Self.expectedEpisodeIdHash)"
+        }
+        """.data(using: .utf8)!
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(ChapterPhaseEvent.self, from: json)
+        }
+    }
+
     // MARK: - Backwards-compatible decode of pre-au2v.1.3 bundles
 
     @Test("Default bundle decodes to chapter_phase_events == [] when the field is absent (forward-compat with v<au2v.1.3 fixtures)")

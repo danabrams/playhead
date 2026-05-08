@@ -4,6 +4,10 @@
 // user explicitly opts a given episode in via `Episode.diagnosticsOptIn`.
 //
 // Scope: playhead-ghon (Phase 1.5 — support-safe diagnostics bundle classes).
+//        playhead-au2v.1.3 (chapter signal diagnostics events — additive
+//        `chapter_phase_events` array on `DefaultBundle`, with a
+//        `decodeIfPresent`-tolerant `init(from:)` so older fixtures
+//        continue to decode unchanged).
 //
 // JSON key shape: every public field uses snake_case via explicit
 // `CodingKeys`. The shape is part of the support engineer's contract —
