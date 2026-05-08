@@ -431,11 +431,12 @@ struct ChapterGenerationPhase: Sendable {
     // MARK: - Cancellation / no-candidates collapse helpers
 
     /// Records a `.preempted` event with a fresh timestamp and returns
-    /// the matching `Outcome`. Used by every cancellation and
-    /// cancellation-throw site in `run()` so the recordPreempted call
-    /// pattern lives in one place. The recheck-mismatch branch does
-    /// NOT use this helper because its outcome is `.raceAborted`, not
-    /// `.preempted`.
+    /// the matching `.preempted` `Outcome`. Used by every site in
+    /// `run()` that observes cancellation — both explicit
+    /// `Task.isCancelled` checks AND `catch is CancellationError`
+    /// branches — so the timestamp/emit pattern lives in one place.
+    /// The recheck-mismatch branch does NOT use this helper because
+    /// its outcome is `.raceAborted`, not `.preempted`.
     private func preempt(
         installID: UUID,
         episodeId: String

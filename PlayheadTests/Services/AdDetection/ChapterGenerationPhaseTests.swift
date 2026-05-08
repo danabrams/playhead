@@ -62,12 +62,11 @@ struct ChapterGenerationPhaseTests {
         enum Behavior: Sendable {
             case returnEvidence(template: @Sendable (ChapterBoundaryCandidate) -> ChapterEvidence?)
             case throwOnCall(Error)
-            case throwAfterN(Int, Error)
         }
 
         private actor Counter {
             var value = 0
-            func increment() -> Int { value += 1; return value }
+            func increment() { value += 1 }
         }
 
         let behavior: Behavior
@@ -82,15 +81,12 @@ struct ChapterGenerationPhaseTests {
         func label(
             candidate: ChapterBoundaryCandidate
         ) async throws -> ChapterEvidence? {
-            let count = await counter.increment()
+            await counter.increment()
             switch behavior {
             case .returnEvidence(let template):
                 return template(candidate)
             case .throwOnCall(let error):
                 throw error
-            case .throwAfterN(let limit, let error):
-                if count > limit { throw error }
-                return Self.defaultEvidence(for: candidate)
             }
         }
 
