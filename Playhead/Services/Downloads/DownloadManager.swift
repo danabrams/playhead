@@ -335,8 +335,8 @@ actor DownloadManager {
         // `persistResumeData` to complete, so the Task hop introduces
         // no loss-of-write risk.
         self.sessionDelegate.onResumeDataHarvested = { [weak manager = self] episodeId, data in
-            Task {
-                guard let manager else { return }
+            guard let manager else { return }
+            Task { [manager, episodeId, data] in
                 do {
                     try await manager.persistResumeData(episodeId: episodeId, data: data)
                 } catch {
@@ -372,8 +372,8 @@ actor DownloadManager {
         // `deinit` cleanup of the willResignActive observer.
         self.sessionDelegate.onBackgroundDownloadStaged = {
             [weak manager = self] episodeId, stagedURL, originalURL, metadata in
-            Task {
-                guard let manager else { return }
+            guard let manager else { return }
+            Task { [manager, episodeId, stagedURL, originalURL, metadata] in
                 await manager.handleBackgroundDownloadComplete(
                     episodeId: episodeId,
                     stagedURL: stagedURL,
