@@ -438,10 +438,11 @@ struct CoveragePlannerTests {
     @Test("chapter-informed: corrupt time bounds and NaN qualityScore are dropped before the gates")
     func testChapterInformedDefensiveFiltering() {
         let planner = CoveragePlanner()
-        // None of these are usable: NaN start, end-before-start,
-        // non-finite end, NaN quality. Keep the gate honest by
-        // mixing in a single ambiguous chapter so `chapterEvidence`
-        // is non-empty but produces zero usable intervals.
+        // None of these are usable: NaN start, end-before-start (==
+        // and < cases), non-finite end, NaN quality. Keep the gate
+        // honest by mixing in a single ambiguous chapter so
+        // `chapterEvidence` is non-empty but produces zero usable
+        // intervals.
         let chapters: [ChapterEvidence] = [
             ChapterEvidence(
                 startTime: .nan, endTime: 60, title: nil,
@@ -449,6 +450,10 @@ struct CoveragePlannerTests {
             ),
             ChapterEvidence(
                 startTime: 30, endTime: 30, title: nil,
+                source: .pc20, disposition: .adBreak, qualityScore: 0.9
+            ),
+            ChapterEvidence(
+                startTime: 60, endTime: 30, title: nil,
                 source: .pc20, disposition: .adBreak, qualityScore: 0.9
             ),
             ChapterEvidence(
@@ -473,6 +478,33 @@ struct CoveragePlannerTests {
         default:
             Issue.record("Expected .skipped(noUsableChapters), got \(String(describing: plan.chapterAuditDiagnostic))")
         }
+    }
+
+    @Test("chapter-informed: includes/excludes preserve input iteration order")
+    func testChapterInformedPreservesInputOrder() throws {
+        let planner = CoveragePlanner()
+        // Hand chapters to the planner in a deliberately non-monotonic
+        // order — both temporally and by disposition. The contract on
+        // ChapterInformedAuditSelection says "preserve iteration
+        // order"; verify it.
+        let chapters: [ChapterEvidence] = [
+            adChapter(start: 500, end: 560, quality: 0.9),       // includes[0]
+            contentChapter(start: 100, end: 240, quality: 0.85), // excludes[0]
+            ambiguousChapter(start: 800, end: 900),              // dropped
+            adChapter(start: 50, end: 80, quality: 0.95),        // includes[1]
+            contentChapter(start: 700, end: 750, quality: 0.8),  // excludes[1]
+        ]
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: chapters
+        ))
+        let informed = try #require(plan.chapterInformedAudit)
+        #expect(informed.includes.count == 2)
+        #expect(informed.includes[0].startTime == 500)
+        #expect(informed.includes[1].startTime == 50)
+        #expect(informed.excludes.count == 2)
+        #expect(informed.excludes[0].startTime == 100)
+        #expect(informed.excludes[1].startTime == 700)
     }
 
     @Test("chapter-informed: enabled mode + usable evidence emits chapter-informed selection")
