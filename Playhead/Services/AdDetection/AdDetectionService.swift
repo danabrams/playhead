@@ -2556,13 +2556,17 @@ actor AdDetectionService {
     ///
     /// `transcriptVersion` is the same hash `TranscriptAtomizer.atomize`
     /// computed for the current final-pass atom set. We use it as the
-    /// cache key for the short-circuit because the phase will use the
-    /// same hash internally (its `TranscriptHashProviding` returns the
-    /// active transcript content hash, which is what `transcriptVersion`
-    /// represents — a stable hash of the atom sequence). Aligning the
-    /// short-circuit key with the phase's cache write key is what makes
-    /// "valid plan exists for content hash → skip phase" hold without
-    /// either side computing the hash differently.
+    /// cache key for the short-circuit on the assumption that production
+    /// wiring installs a `TranscriptHashProviding` whose output matches
+    /// `transcriptVersion` for the same atom set — that contract is what
+    /// makes "valid plan exists for content hash → skip phase" coherent.
+    ///
+    /// Tests intentionally diverge the two (e.g. by injecting a
+    /// `.race(entry:recheck:)` or `.unavailable` hash provider that the
+    /// service-level short-circuit knows nothing about) to exercise the
+    /// phase's internal protections in isolation; that's a feature of
+    /// the test seam, not a contract violation. Production wiring is
+    /// responsible for keeping the two keys aligned (see runtime bead).
     ///
     /// Outcomes are logged via the actor's `logger` and never thrown:
     /// the phase already emits structured `ChapterPhaseEvent`s for each
