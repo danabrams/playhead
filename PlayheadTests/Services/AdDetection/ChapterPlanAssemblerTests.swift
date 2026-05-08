@@ -453,6 +453,10 @@ struct ChapterPlanAssemblerTests {
             #expect(warnings.highUnclearRateExceeded == true)
             #expect(warnings.totalUnclearCount == 13)
             #expect(warnings.labeledCount == 20)
+            // Pin the threshold reported in the warning struct so the
+            // caller (diagnostic emitter) sees the same numeric
+            // constant the assembler used to make the decision.
+            #expect(warnings.threshold == ChapterPlanAssembler.highUnclearRateWarningThreshold)
         case .aborted:
             Issue.record("expected assembled (op below threshold)")
         }
