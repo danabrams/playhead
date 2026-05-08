@@ -981,6 +981,63 @@ struct ChapterSignalAggregateMetricsTests {
 
     // MARK: - Limitations always populated
 
+    @Test("small-sample warning fires for corpusSize in [1, 25) and is suppressed at 25")
+    func smallSampleWarningBoundary() {
+        // Pin the EXACT corpus-size threshold for the small-sample warning.
+        // The implementation says `if corpusSize < 25 { emit warning }` —
+        // i.e. 1..<25 fires, 25 does not. Without this test, a future patch
+        // that flips the comparator (`<=` instead of `<`) or shifts the
+        // threshold (24 / 30 / etc.) would silently change the warning
+        // behavior on real corpora that hover near 25 episodes (which
+        // is exactly where the dogfood corpus lives today).
+        //
+        // We probe three points: 1 (clearly small), 24 (just-below-bar),
+        // 25 (exactly at bar — must NOT fire).
+        let smallSampleNote = "Lift signals may be noise-dominated"
+
+        // corpusSize == 1 → warning fires.
+        let oneTrace = (0..<1).map { i in
+            Self.makeTrace(
+                episodeId: "small-\(i)", podcastId: "pod-small",
+                episodeDuration: 300, adStart: 30, adEnd: 60
+            )
+        }
+        let r1 = ChapterSignalAggregateMetrics.compute(
+            traces: oneTrace, runId: "small-1",
+            generatedAt: Self.testClock, showName: Self.showNameByPodcastId
+        )
+        #expect(r1.limitations.contains(where: { $0.contains(smallSampleNote) }),
+                "small-sample warning must fire at corpusSize == 1")
+
+        // corpusSize == 24 → warning still fires (just-below-threshold).
+        let twentyFourTraces = (0..<24).map { i in
+            Self.makeTrace(
+                episodeId: "small-\(i)", podcastId: "pod-small",
+                episodeDuration: 300, adStart: 30, adEnd: 60
+            )
+        }
+        let r24 = ChapterSignalAggregateMetrics.compute(
+            traces: twentyFourTraces, runId: "small-24",
+            generatedAt: Self.testClock, showName: Self.showNameByPodcastId
+        )
+        #expect(r24.limitations.contains(where: { $0.contains(smallSampleNote) }),
+                "small-sample warning must fire at corpusSize == 24")
+
+        // corpusSize == 25 → warning suppressed (exactly at the boundary).
+        let twentyFiveTraces = (0..<25).map { i in
+            Self.makeTrace(
+                episodeId: "small-\(i)", podcastId: "pod-small",
+                episodeDuration: 300, adStart: 30, adEnd: 60
+            )
+        }
+        let r25 = ChapterSignalAggregateMetrics.compute(
+            traces: twentyFiveTraces, runId: "small-25",
+            generatedAt: Self.testClock, showName: Self.showNameByPodcastId
+        )
+        #expect(!r25.limitations.contains(where: { $0.contains(smallSampleNote) }),
+                "small-sample warning must NOT fire at corpusSize == 25 (the strict-less-than threshold)")
+    }
+
     @Test("compute() always emits at least one limitation note")
     func limitationsAlwaysPopulated() {
         let trace = Self.makeTrace(
