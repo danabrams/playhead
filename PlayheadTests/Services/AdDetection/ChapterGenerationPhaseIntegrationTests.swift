@@ -471,6 +471,55 @@ struct ChapterGenerationPhaseIntegrationTests {
         #expect(skipped.count == 1)
     }
 
+    // MARK: - Transcript unavailable at entry
+
+    @Test("hash provider returns nil at entry: phase emits noCandidates (transcript unavailable), no plan")
+    func integration_transcriptUnavailableAtEntry() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-int-transcript-unavail"
+        try await store.insertAsset(Self.makeAsset(id: assetId))
+        let chunks = Self.makeChunks(assetId: assetId)
+        let cache = Self.makeCache()
+        // `.unavailable` makes the hash provider return nil for every
+        // call. The phase observes this at the entry-snapshot site and
+        // exits via the transcript-unavailable rail (folded into a
+        // noCandidates terminal — the phase emits a noCandidates event
+        // with `transcript_unavailable_at_entry` context).
+        let (factory, eventSink, planReadySink) = Self.makeFactory(
+            cache: cache,
+            hashBehavior: .unavailable
+        )
+        let service = Self.makeService(
+            store: store,
+            chapterSignalMode: .enabled,
+            chapterPlanCache: cache,
+            chapterGenerationPhaseFactory: factory
+        )
+
+        try await service.runBackfill(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            podcastId: "show-int",
+            episodeDuration: 200.0
+        )
+
+        // We don't know what hash the phase tried to look up (it was
+        // nil), but a service-level cache hit can't have happened
+        // either since we never pre-seeded; verify NO plan landed.
+        let attemptedHash = Self.transcriptVersionFor(
+            chunks: chunks, analysisAssetId: assetId
+        )
+        let plan = await cache.get(contentHash: attemptedHash)
+        #expect(plan == nil)
+        let ready = await planReadySink.snapshot()
+        #expect(ready.isEmpty,
+                "transcript unavailable must NOT fire ready event")
+        let events = await eventSink.snapshot()
+        let noCandidates = events.filter { $0.eventType == .noCandidates }
+        #expect(noCandidates.count == 1,
+                "exactly one noCandidates terminal on transcript unavailable")
+    }
+
     // MARK: - Boundary detector failure → noCandidates
 
     @Test("boundary detector throws non-cancellation: phase emits noCandidates, no plan")
