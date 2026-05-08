@@ -106,6 +106,25 @@ struct AdDetectionConfigTests {
                 "init default parameter must be .off so callers that omit chapterSignalMode get the safe default.")
     }
 
+    @Test("AdDetectionConfig.init threads chapterSignalMode through to the field")
+    func initThreadsChapterSignalModeThrough() {
+        // Pin the contract that the constructor stores the param verbatim
+        // for every mode. This catches a future "init wrote .off ignoring
+        // the param" regression in one shot.
+        for mode in ChapterSignalMode.allCases {
+            let config = AdDetectionConfig(
+                candidateThreshold: 0.5,
+                confirmationThreshold: 0.8,
+                suppressionThreshold: 0.3,
+                hotPathLookahead: 60,
+                detectorVersion: "test-v1",
+                chapterSignalMode: mode
+            )
+            #expect(config.chapterSignalMode == mode,
+                    "init must store the chapterSignalMode argument verbatim (mode=\(mode))")
+        }
+    }
+
     @Test("ChapterSignalMode covers exactly off, shadow, enabled")
     func chapterSignalModeCases() {
         let cases = Set(ChapterSignalMode.allCases)
