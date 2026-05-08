@@ -25,10 +25,19 @@
 //     candidates.
 //
 //   Disposition accuracy:
-//     Pair each ground-truth boundary with the nearest plan candidate
-//     within ±toleranceSeconds via a deterministic greedy nearest
-//     matcher (each plan candidate participates in at most one pair).
-//     Accuracy = pairs whose dispositions agree / total matched pairs.
+//     Pairs are formed via a deterministic greedy nearest-pair matcher.
+//     Step 1: enumerate every (golden, candidate) cross-product where
+//     |golden.start - candidate.start| <= toleranceSeconds. Step 2:
+//     repeatedly take the smallest-distance pair from the remaining
+//     candidates, marking both sides used; ties break by smaller
+//     golden index, then smaller candidate index, deterministically.
+//     Step 3: accuracy = pairs whose dispositions agree / total
+//     matched pairs. Note: this matcher is for disposition pairing
+//     ONLY — recall and precision use a simpler "is there ANY
+//     within-tolerance counterpart?" criterion (see above) and
+//     therefore can report higher matched counts than this pair set
+//     when goldens or candidates have multiple within-tolerance
+//     neighbors.
 //
 //   Topic overlap (sanity):
 //     Lightweight keyword overlap. Both labels are tokenized to

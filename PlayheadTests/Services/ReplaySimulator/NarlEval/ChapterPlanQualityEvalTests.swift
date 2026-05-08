@@ -346,9 +346,12 @@ struct ChapterPlanQualityEvalThresholdTests {
         #expect(loose.thresholdsUsed.boundaryToleranceSeconds == 25.0)
     }
 
-    /// Same expected/observed strings, swept threshold. At threshold
-    /// 0.4 a 0.5 overlap is `.match`; at threshold 0.6 the same
-    /// 0.5 overlap is `.miss`.
+    /// Same expected/observed strings, swept threshold. The token
+    /// sets `{deep, dive}` and `{deep, interview}` produce a Jaccard
+    /// overlap of 1/3 (~0.333). At threshold 0.3 that overlap is a
+    /// `.match`; at threshold 0.5 the same overlap is a `.miss`. We
+    /// also pin the degenerate threshold = 0 case (any overlap,
+    /// including zero, matches) to lock the `>=` boundary.
     @Test
     func topicOverlap_thresholdAppliedAtBoundary() {
         // expected = {"deep", "dive"}, observed = {"deep", "interview"}
@@ -473,7 +476,7 @@ struct ChapterPlanQualityEvalThresholdTests {
     /// still contains the chapter (we don't filter from input), but
     /// the matcher's `isFinite` guards skip it.
     @Test
-    func nonFiniteCandidateStart_isSkippedFromMatching() {
+    func nonFiniteCandidateStart_isSkippedFromMatching() throws {
         let golden = GoldenChapterSet(
             episodeId: "synthetic-nonfinite",
             episodeContentHash: "synthetic-nonfinite-hash",
@@ -512,6 +515,12 @@ struct ChapterPlanQualityEvalThresholdTests {
         // explicit-isFinite guard inside evaluateEpisode).
         #expect(report.dispositionMatchedPairs == 1)
         #expect(report.dispositionMatchedAgreed == 1)
+
+        // Per-episode false-positive count must be consistent with
+        // the aggregate: 4 candidates, 1 matched → 3 false positives.
+        let perEp = try #require(report.perEpisode["synthetic-nonfinite"])
+        #expect(perEp.falsePositiveBoundaries == 3)
+        #expect(perEp.missedBoundaries == 0)
     }
 
     /// Symmetric edge: a GOLDEN with a non-finite `startTimeSeconds`
@@ -554,8 +563,11 @@ struct ChapterPlanQualityEvalThresholdTests {
         #expect(report.boundaryPrecision.matched == 1)
         #expect(report.boundaryPrecision.total == 1)
         // Disposition: only the (real golden, real candidate) pair
-        // participates.
+        // participates. Both sides are `.adBreak`, so the pair
+        // agrees — pin both numerator and denominator for symmetry
+        // with `nonFiniteCandidateStart_isSkippedFromMatching`.
         #expect(report.dispositionMatchedPairs == 1)
+        #expect(report.dispositionMatchedAgreed == 1)
     }
 }
 
@@ -820,7 +832,7 @@ struct ChapterPlanQualityEvalEmptyPlanTests {
 
     /// Both empty: every metric collapses to 0/0 → 0.0.
     @Test
-    func bothEmpty_allMetricsAreZero() {
+    func bothEmpty_allMetricsAreZero() throws {
         let golden = GoldenChapterSet(
             episodeId: "synthetic-vacuous",
             episodeContentHash: "synthetic-vacuous-hash",
@@ -836,6 +848,16 @@ struct ChapterPlanQualityEvalEmptyPlanTests {
         #expect(report.boundaryPrecision.matched == 0)
         #expect(report.boundaryPrecision.total == 0)
         #expect(report.dispositionAccuracy == 0.0)
+
+        // Per-episode entry must still be emitted even when both
+        // sides are empty — downstream callers iterate `perEpisode`
+        // to surface coverage. A vacuous episode has zero of every
+        // count.
+        let perEp = try #require(report.perEpisode["synthetic-vacuous"])
+        #expect(perEp.missedBoundaries == 0)
+        #expect(perEp.falsePositiveBoundaries == 0)
+        #expect(perEp.dispositionMatchedPairs == 0)
+        #expect(perEp.dispositionMatchedAgreed == 0)
     }
 }
 
