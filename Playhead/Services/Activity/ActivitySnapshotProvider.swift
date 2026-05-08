@@ -180,23 +180,25 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         let downloadFractions = await downloadProgressProvider()
         let downloadedEpisodeIds = await downloadedEpisodeIdsProvider(Set(eligibleEpisodeIds))
 
-        // playhead-3bv.2: the persisted fast-transcript watermark is a
-        // scheduler high-water mark, not a reliable display summary of
-        // actual transcript rows. Dogfood databases can have stale
-        // `fastTranscriptCoverageEndTime` values even though
-        // `transcript_chunks` covers nearly the whole episode. Aggregate
-        // real fast-pass chunk seconds once and prefer that value when
-        // present; fall back to the asset watermark for legacy rows or
-        // rows whose chunks have not landed yet.
-        let transcriptCoveredSecondsByAssetId: [String: Double]
+        // playhead-hygc.1.2: pull the canonical coverage summary (interval-
+        // unioned fast-transcript seconds + high-water `MAX(endTime)` +
+        // feature/final-pass/ad watermarks with provenance tags) once, then
+        // drive the per-row display from it. Pre-hygc.1.2 the provider
+        // SUMmed fast-chunk durations, which (a) double-counted overlapping
+        // chunks and (b) under-explained gaps. Pre-hygc.1.2 it also fell
+        // through to the asset's fast watermark when a chunk-derived value
+        // was absent — a single canonical read model lets every coverage
+        // scalar carry its own provenance so the UI never silently shows a
+        // stale watermark when richer artifacts already exist.
+        let assetIds = Set(allAssets.values.map(\.id))
+        let coverageSummariesByAssetId: [String: AnalysisCoverageSummary]
         do {
-            transcriptCoveredSecondsByAssetId = try await store.fetchFastTranscriptCoveredSecondsByAssetIds(
-                Set(allAssets.values.map(\.id))
+            coverageSummariesByAssetId = try await store.fetchCoverageSummariesByAssetIds(
+                assetIds
             )
         } catch {
-            transcriptCoveredSecondsByAssetId = [:]
+            coverageSummariesByAssetId = [:]
         }
-        let assetIds = Set(allAssets.values.map(\.id))
         let episodeIdSet = Set(eligibleEpisodeIds)
         let latestSessionsByAssetId = (
             try? await store.fetchLatestSessionByAssetIdMap(assetIds: assetIds)
@@ -286,28 +288,40 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
 
             let isRunning = (episodeId == runningEpisodeId)
 
-            // playhead-btoa.3: compute the three pipeline-progress
-            // fractions for the row payload. Clamping happens here (in
-            // the provider) so the row struct's contract can be
+            // playhead-btoa.3 / playhead-hygc.1.2: compute the three
+            // pipeline-progress fractions from the canonical
+            // ``AnalysisCoverageSummary`` read model. Clamping happens
+            // here (in the provider) so the row struct's contract can be
             // "already in `[0, 1]` if non-nil" — the strip view never
             // has to defend against overflow.
             //
             // Transcript / analysis fractions are coverage-seconds /
-            // duration ratios. Transcript prefers actual fast-pass
-            // chunk seconds, then falls back to the asset watermark;
-            // analysis uses the broad feature/ad coverage watermark
-            // rather than detected-ad existence alone. A missing or
-            // non-positive `episodeDurationSec` (legacy rows,
-            // placeholder rows pre-decode) collapses both to `nil`
-            // rather than synthesising a fake 0% bar from a
-            // divide-by-zero.
-            let durationSec = asset.episodeDurationSec ?? 0
-            let transcriptWatermark = transcriptCoveredSecondsByAssetId[asset.id]
-                ?? asset.fastTranscriptCoverageEndTime
-            let transcriptFraction = fraction(transcriptWatermark, durationSec: durationSec)
+            // duration ratios. The summary already reconciles "stale
+            // watermark vs. real chunks": its `fastTranscriptCoveredSec`
+            // is the interval-unioned chunk seconds when chunks landed,
+            // and falls back to the asset's `fastTranscriptCoverageEndTime`
+            // only when no chunks exist. Analysis uses the broad
+            // feature/ad coverage watermark rather than detected-ad
+            // existence alone. A missing or non-positive
+            // `episodeDurationSec` (legacy rows, placeholder rows
+            // pre-decode) collapses both to `nil` rather than
+            // synthesising a fake 0% bar from a divide-by-zero.
+            //
+            // playhead-hygc.1.2 / R3: every coverage scalar reads from
+            // the summary only — no `?? asset.*` fallback. Keeping the
+            // UI path symmetric with the dogfood path (which omits the
+            // asset.* fallbacks to prevent `analysis_source` /
+            // `analysis_fraction` disagreement) means the displayed
+            // fractions never come from a contradictory source either.
+            let summary = coverageSummariesByAssetId[asset.id]
+            let durationSec = summary?.episodeDurationSec ?? 0
+            let transcriptFraction = fraction(
+                summary?.fastTranscriptCoveredSec,
+                durationSec: durationSec
+            )
             let analysisWatermark = maxKnown(
-                asset.featureCoverageEndTime,
-                asset.confirmedAdCoverageEndTime
+                summary?.featureCoverageEndSec,
+                summary?.confirmedAdCoverageEndSec
             )
             let analysisFraction = fraction(analysisWatermark, durationSec: durationSec)
             // Download fraction comes from the (already-snapshotted)
@@ -405,15 +419,21 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         let downloadFractions = await downloadProgressProvider()
         let downloadedEpisodeIds = await downloadedEpisodeIdsProvider(Set(eligibleEpisodeIds))
 
-        let transcriptCoveredSecondsByAssetId: [String: Double]
+        // playhead-hygc.1.2: same canonical read model the UI rows
+        // consume. The dogfood snapshot is the diagnostic surface where
+        // provenance tags matter most — Activity already shows the
+        // reconciled value, but operators inspecting a stuck device need
+        // to know whether a 39% transcript bar came from real chunk data
+        // or a stale watermark.
+        let assetIds = Set(allAssets.values.map(\.id))
+        let coverageSummariesByAssetId: [String: AnalysisCoverageSummary]
         do {
-            transcriptCoveredSecondsByAssetId = try await store.fetchFastTranscriptCoveredSecondsByAssetIds(
-                Set(allAssets.values.map(\.id))
+            coverageSummariesByAssetId = try await store.fetchCoverageSummariesByAssetIds(
+                assetIds
             )
         } catch {
-            transcriptCoveredSecondsByAssetId = [:]
+            coverageSummariesByAssetId = [:]
         }
-        let assetIds = Set(allAssets.values.map(\.id))
         let episodeIdSet = Set(eligibleEpisodeIds)
         let latestSessionsByAssetId = (
             try? await store.fetchLatestSessionByAssetIdMap(assetIds: assetIds)
@@ -460,15 +480,31 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             )
 
             let isRunning = (episodeId == runningEpisodeId)
-            let durationSec = asset.episodeDurationSec ?? 0
-            let transcriptCoveredSec = transcriptCoveredSecondsByAssetId[asset.id]
-            let transcriptWatermark = transcriptCoveredSec ?? asset.fastTranscriptCoverageEndTime
-            let transcriptFraction = fraction(transcriptWatermark, durationSec: durationSec)
-            let analysisWatermark = maxKnown(
-                asset.featureCoverageEndTime,
-                asset.confirmedAdCoverageEndTime
-            )
+            // playhead-hygc.1.2 / R3: every coverage scalar AND its
+            // companion `*_source` wire token reads from the canonical
+            // summary only. Earlier R0/R1/R2 drafts fell back to
+            // `asset.*` columns when the summary lookup threw — but the
+            // `dogfood*Source(summary:)` helpers below have no such
+            // fallback, so a thrown summary fetch produced rows where
+            // e.g. `analysis_fraction = 0.1` from the asset watermark
+            // while `analysis_source = "unknown"`. The bead spec
+            // requires `analysis_source` and `analysis_fraction` to
+            // agree on every row; symmetric collapse to nil + "unknown"
+            // is the only honest representation when the summary
+            // catch fires. (Production callers always have a summary
+            // entry per ``AnalysisStore.fetchCoverageSummariesByAssetIds``'s
+            // contract, so this only matters when the SQLite read
+            // itself throws — rare but the wire must stay self-consistent.)
+            let summary = coverageSummariesByAssetId[asset.id]
+            let durationSec = summary?.episodeDurationSec ?? 0
+            let transcriptCoveredSec = summary?.fastTranscriptCoveredSec
+            let transcriptFraction = fraction(transcriptCoveredSec, durationSec: durationSec)
+            let featureCoverageEndSec = summary?.featureCoverageEndSec
+            let confirmedAdCoverageEndSec = summary?.confirmedAdCoverageEndSec
+            let analysisWatermark = maxKnown(featureCoverageEndSec, confirmedAdCoverageEndSec)
             let analysisFraction = fraction(analysisWatermark, durationSec: durationSec)
+            let fastTranscriptWatermarkSec = summary?.fastTranscriptCoverageEndSec
+            let finalPassCoverageEndSec = summary?.finalPassCoverageEndSec
             let liveDownloadFraction = downloadFractions[episodeId].map(clampFraction)
             let cachedAudioPresent = downloadedEpisodeIds.contains(episodeId)
             let downloadFraction = liveDownloadFraction ?? (cachedAudioPresent ? 1.0 : nil)
@@ -476,6 +512,8 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                 liveDownloadFraction: liveDownloadFraction,
                 cachedAudioPresent: cachedAudioPresent
             )
+            let transcriptSource = dogfoodTranscriptSource(summary: summary)
+            let analysisSource = dogfoodAnalysisSource(summary: summary)
 
             let session = latestSessionsByAssetId[asset.id]
             let job = latestJobsByEpisodeId[episodeId]
@@ -507,24 +545,20 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                         downloadSource: downloadSource,
                         transcriptFraction: transcriptFraction,
                         transcriptPercent: formatPercent(transcriptFraction),
-                        transcriptSource: dogfoodTranscriptSource(
-                            transcriptCoveredSec: transcriptCoveredSec,
-                            fastTranscriptWatermarkSec: asset.fastTranscriptCoverageEndTime
-                        ),
+                        transcriptSource: transcriptSource,
                         analysisFraction: analysisFraction,
                         analysisPercent: formatPercent(analysisFraction),
-                        analysisSource: dogfoodAnalysisSource(
-                            featureCoverageEndSec: asset.featureCoverageEndTime,
-                            confirmedAdCoverageEndSec: asset.confirmedAdCoverageEndTime
-                        ),
-                        episodeDurationSec: asset.episodeDurationSec,
+                        analysisSource: analysisSource,
+                        episodeDurationSec: summary?.episodeDurationSec,
                         transcriptCoveredSec: transcriptCoveredSec,
-                        transcriptWatermarkSec: transcriptWatermark,
-                        fastTranscriptWatermarkSec: asset.fastTranscriptCoverageEndTime,
+                        transcriptWatermarkSec: transcriptCoveredSec,
+                        fastTranscriptWatermarkSec: fastTranscriptWatermarkSec,
                         analysisWatermarkSec: analysisWatermark,
-                        featureCoverageEndSec: asset.featureCoverageEndTime,
-                        confirmedAdCoverageEndSec: asset.confirmedAdCoverageEndTime,
-                        finalPassCoverageEndSec: asset.finalPassCoverageEndTime
+                        featureCoverageEndSec: featureCoverageEndSec,
+                        confirmedAdCoverageEndSec: confirmedAdCoverageEndSec,
+                        finalPassCoverageEndSec: finalPassCoverageEndSec,
+                        fastTranscriptCoverageEndSource: dogfoodFastTranscriptEndSource(summary: summary),
+                        finalPassCoverageEndSource: dogfoodFinalPassEndSource(summary: summary)
                     ),
                     analysisAsset: analysisAssetSnapshot(asset),
                     latestSession: session.map(analysisSessionSnapshot),
@@ -688,24 +722,48 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         return "unknown"
     }
 
-    private func dogfoodTranscriptSource(
-        transcriptCoveredSec: Double?,
-        fastTranscriptWatermarkSec: Double?
-    ) -> String {
-        if transcriptCoveredSec != nil {
+    /// playhead-hygc.1.2: derive the dogfood `transcript_source` wire
+    /// string from the canonical ``AnalysisCoverageSummary``. Wire token
+    /// vocabulary matches the bead's allowlist
+    /// (`fast_transcript_chunks`, `asset_watermark`, `unknown`) so the
+    /// `transcript_source` field and the `fast_transcript_coverage_end_source`
+    /// field never disagree on the name of the same provenance.
+    private func dogfoodTranscriptSource(summary: AnalysisCoverageSummary?) -> String {
+        guard let summary else { return "unknown" }
+        switch summary.fastTranscriptCoveredSource {
+        case .fastTranscriptChunks:
             return "fast_transcript_chunks"
+        case .assetWatermark:
+            return "asset_watermark"
+        case .unknown:
+            return "unknown"
+        case .finalPassChunks, .adWindows, .cachedAudio:
+            // Not currently produced for `fastTranscriptCoveredSource`,
+            // but keep the switch exhaustive without crashing if a
+            // future pipeline change starts emitting one. The dogfood
+            // wire format treats unfamiliar provenance the same as
+            // unknown so downstream consumers stay forward-compatible.
+            return "unknown"
         }
-        if fastTranscriptWatermarkSec != nil {
-            return "asset_fast_watermark"
-        }
-        return "unknown"
     }
 
-    private func dogfoodAnalysisSource(
-        featureCoverageEndSec: Double?,
-        confirmedAdCoverageEndSec: Double?
-    ) -> String {
-        switch (featureCoverageEndSec, confirmedAdCoverageEndSec) {
+    /// playhead-hygc.1.2: derive the dogfood `analysis_source` wire
+    /// string. The wire enum stays
+    /// `feature_coverage | confirmed_ad_coverage | unknown` — exactly the
+    /// pre-hygc.1.2 surface — because `analysisFraction` is computed from
+    /// `max(featureCoverageEndSec, confirmedAdCoverageEndSec)` only.
+    /// Reporting `final_pass_chunks` here would create a wire-level
+    /// contradiction: `analysis_source` would name a coverage source whose
+    /// seconds were not actually used to compute `analysis_fraction`. The
+    /// final-pass provenance signal is still exposed independently via
+    /// the dedicated `final_pass_coverage_end_source` field, so dogfood
+    /// inspectors can still tell when final-pass chunks have advanced
+    /// beyond feature/ad watermarks.
+    private func dogfoodAnalysisSource(summary: AnalysisCoverageSummary?) -> String {
+        guard let summary else { return "unknown" }
+        let feature = summary.featureCoverageEndSec
+        let confirmed = summary.confirmedAdCoverageEndSec
+        switch (feature, confirmed) {
         case let (feature?, confirmed?):
             return confirmed >= feature ? "confirmed_ad_coverage" : "feature_coverage"
         case (_?, nil):
@@ -715,6 +773,29 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         case (nil, nil):
             return "unknown"
         }
+    }
+
+    /// playhead-hygc.1.2: provenance string for the high-water
+    /// `fast_transcript_watermark_sec` field surfaced in the dogfood
+    /// snapshot. Distinguishes "we got this from chunk MAX(endTime)"
+    /// from "we got this from the stale asset watermark", which is the
+    /// load-bearing diagnostic when an asset is wedged.
+    private func dogfoodFastTranscriptEndSource(summary: AnalysisCoverageSummary?) -> String {
+        provenanceWireString(summary?.fastTranscriptCoverageEndSource)
+    }
+
+    /// playhead-hygc.1.2: same shape as
+    /// ``dogfoodFastTranscriptEndSource(summary:)`` but for final-pass
+    /// coverage. Acceptance criterion (g): final-pass coverage must
+    /// appear in dogfood provenance.
+    private func dogfoodFinalPassEndSource(summary: AnalysisCoverageSummary?) -> String {
+        provenanceWireString(summary?.finalPassCoverageEndSource)
+    }
+
+    private func provenanceWireString(
+        _ provenance: AnalysisCoverageSummary.CoverageProvenance?
+    ) -> String {
+        provenance?.rawValue ?? "unknown"
     }
 
     private func statusSnapshot(

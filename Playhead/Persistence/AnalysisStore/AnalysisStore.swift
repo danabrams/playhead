@@ -408,6 +408,121 @@ struct AdWindow: Sendable {
 // were deleted. `SkipOrchestrator.beginEpisode` now reads
 // confirmed-confidence `AdWindow` rows directly.
 
+/// playhead-hygc.1.2: canonical pipeline-progress read model used by Activity
+/// rows and the dogfood diagnostics snapshot.
+///
+/// Reconciles per-asset coverage from the most trustworthy persisted artifact
+/// available at read time, without rewriting the underlying watermark columns
+/// (long-term watermark repair lives in a separate state-machine bead).
+///
+/// Two distinct fast-transcript numbers are exposed because they answer
+/// different questions:
+///   - ``fastTranscriptCoveredSec`` is the **interval-unioned seconds of fast
+///     transcript actually present** for the asset. Overlapping chunks count
+///     once; gaps are excluded. This is the "how much fast text is real?"
+///     answer that drives the displayed transcript fraction.
+///   - ``fastTranscriptCoverageEndSec`` is the **high-water max(endTime)** of
+///     fast chunks (or the asset watermark when no chunks landed yet). This
+///     answers "how far into the audio has the runner reached?" — a useful
+///     supplementary signal that does not collapse on gaps.
+/// Summing chunk durations would overstate overlapping chunks AND
+/// under-explain gaps, so the read model keeps both numbers explicit.
+///
+/// Each scalar is paired with a ``CoverageProvenance`` tag describing where
+/// the value came from: callers surface this in dogfood diagnostics so the
+/// "is this 39% from real chunks or a stale watermark?" question has an
+/// answer that doesn't require database forensics.
+struct AnalysisCoverageSummary: Sendable, Equatable {
+
+    /// Provenance tag for a derived coverage scalar. Exactly the surface
+    /// described in the bead spec; new sources require a deliberate enum
+    /// case to keep the dogfood schema and downstream NARL eval aligned.
+    enum CoverageProvenance: String, Sendable, Equatable {
+        /// Value derived from `transcript_chunks` rows whose `pass = 'fast'`.
+        case fastTranscriptChunks = "fast_transcript_chunks"
+        /// Value derived from `transcript_chunks` rows whose `pass = 'final'`.
+        case finalPassChunks = "final_pass_chunks"
+        /// Value read directly from one of the `analysis_assets` watermark
+        /// columns (`fastTranscriptCoverageEndTime`, `featureCoverageEndTime`,
+        /// `confirmedAdCoverageEndTime`, `finalPassCoverageEndTime`).
+        case assetWatermark = "asset_watermark"
+        /// Value derived from `ad_windows` rows (e.g. `MAX(endTime)`).
+        case adWindows = "ad_windows"
+        /// Value derived from cached audio state (download-progress side).
+        case cachedAudio = "cached_audio"
+        /// Coverage genuinely unknown — no chunks, no watermark, no ad
+        /// windows present. Surfaces as `nil` fractions / `--%` rather than
+        /// a synthetic 0% bar.
+        case unknown
+    }
+
+    let assetId: String
+    let episodeDurationSec: Double?
+    /// Interval-unioned seconds of fast transcript actually present.
+    /// `nil` when no fast chunks landed AND no watermark is recorded.
+    let fastTranscriptCoveredSec: Double?
+    let fastTranscriptCoveredSource: CoverageProvenance
+    /// `MAX(endTime)` of fast chunks, or the asset watermark when no chunks
+    /// landed yet. `nil` when both signals are absent.
+    let fastTranscriptCoverageEndSec: Double?
+    let fastTranscriptCoverageEndSource: CoverageProvenance
+    let featureCoverageEndSec: Double?
+    let featureCoverageEndSource: CoverageProvenance
+    let confirmedAdCoverageEndSec: Double?
+    let confirmedAdCoverageEndSource: CoverageProvenance
+    /// `MAX(endTime)` over `pass='final'` chunks, falling back to the asset
+    /// watermark column when chunks are absent. `nil` when both are absent.
+    let finalPassCoverageEndSec: Double?
+    let finalPassCoverageEndSource: CoverageProvenance
+}
+
+/// playhead-hygc.1.2: shared arithmetic for ``AnalysisCoverageSummary``.
+/// Pure value-type math so unit tests can hit it directly without touching
+/// SQLite.
+enum AnalysisCoverageMath {
+
+    /// Compute the unioned (de-overlapped) seconds covered by a sequence
+    /// of half-open intervals `[start, end)`. Inputs may be in any order;
+    /// degenerate intervals (`end <= start`) contribute zero. Overlapping
+    /// or touching intervals collapse before the seconds total is taken,
+    /// so a value greater than the sum of widths is impossible.
+    static func unionedSeconds(_ intervals: [(start: Double, end: Double)]) -> Double {
+        guard !intervals.isEmpty else { return 0 }
+        // Filter out degenerate pairs up front so the merge loop only has
+        // to deal with valid intervals. `isFinite` excludes both `NaN`
+        // (so the total never becomes NaN) AND ±Infinity (so the total
+        // never becomes Infinity from a single poisoned endpoint).
+        // Production data is real audio timestamps so non-finite values
+        // shouldn't arrive here, but the helper is reachable
+        // independently of the SQL filter, so make the contract explicit.
+        let valid = intervals.filter {
+            $0.start.isFinite && $0.end.isFinite && $0.end > $0.start
+        }
+        guard !valid.isEmpty else { return 0 }
+        let sorted = valid.sorted { lhs, rhs in
+            if lhs.start != rhs.start { return lhs.start < rhs.start }
+            return lhs.end < rhs.end
+        }
+        var total: Double = 0
+        var currentStart = sorted[0].start
+        var currentEnd = sorted[0].end
+        for i in 1..<sorted.count {
+            let interval = sorted[i]
+            if interval.start <= currentEnd {
+                // Overlap or touch — extend the current run if it grows.
+                currentEnd = max(currentEnd, interval.end)
+            } else {
+                // Disjoint — close the current run and start a new one.
+                total += currentEnd - currentStart
+                currentStart = interval.start
+                currentEnd = interval.end
+            }
+        }
+        total += currentEnd - currentStart
+        return total
+    }
+}
+
 struct PodcastProfile: Sendable {
     let podcastId: String
     let sponsorLexicon: String?
@@ -5225,51 +5340,248 @@ actor AnalysisStore {
         return results
     }
 
-    /// Bulk coverage aggregate for Activity's debug pipeline strip.
+    /// playhead-hygc.1.2: canonical pipeline-progress read model for
+    /// Activity rows and the dogfood diagnostics snapshot.
     ///
-    /// `fastTranscriptCoverageEndTime` is a scheduler high-water mark and can
-    /// lag (or lead) the rows that actually landed in `transcript_chunks`.
-    /// For display, the useful question is "how much fast transcript text is
-    /// present?" not "what was the last cursor write?". Return approximate
-    /// covered seconds by summing persisted fast-pass chunk durations per
-    /// asset. Callers clamp against episode duration.
-    func fetchFastTranscriptCoveredSecondsByAssetIds(_ assetIds: Set<String>) throws -> [String: Double] {
+    /// Reconciles per-asset coverage from the most trustworthy persisted
+    /// artifact at read time. Returns ``AnalysisCoverageSummary`` for
+    /// every requested assetId, including ids with no `analysis_assets`
+    /// row and no `transcript_chunks` rows. Those "missing" entries are
+    /// surfaced with all coverage fields `nil` and provenance
+    /// ``CoverageProvenance/unknown`` so callers don't need to
+    /// distinguish "asset row not present" from "asset present but no
+    /// coverage" — both render the same `--%` placeholder. Use
+    /// ``fetchAssetByEpisodeId`` / ``fetchLatestAssetByEpisodeIdMap`` for
+    /// existence checks.
+    ///
+    /// Coverage rules:
+    ///   - `fastTranscriptCoveredSec` is the **interval-unioned seconds** of
+    ///     fast-pass transcript chunks. Overlapping chunks count once;
+    ///     gaps are excluded. SQL cannot do interval union without an
+    ///     extension, so we fetch `(startTime, endTime)` pairs and union
+    ///     them in Swift. When no chunks exist we fall back to the asset
+    ///     watermark (`fastTranscriptCoverageEndTime`) — the only signal
+    ///     available pre-chunk-landing — and tag the value as
+    ///     ``CoverageProvenance/assetWatermark``.
+    ///   - `fastTranscriptCoverageEndSec` is the **high-water `MAX(endTime)`**
+    ///     of fast chunks (or the asset watermark when no chunks landed).
+    ///     This is the "how far into the audio has the runner reached?"
+    ///     answer that does not collapse on transcription gaps.
+    ///   - Final-pass coverage is the `MAX(endTime)` of `pass='final'`
+    ///     chunks, with the asset's `finalPassCoverageEndTime` watermark
+    ///     as a fallback. Final-pass coverage rarely has gaps in practice
+    ///     (the runner re-transcribes contiguous AdWindow ranges), so we
+    ///     do not bother computing an interval union for it.
+    ///   - Feature and confirmed-ad coverage come straight from the asset
+    ///     watermarks; no artifact tables outrank them today. Provenance
+    ///     stays ``CoverageProvenance/assetWatermark`` while populated and
+    ///     ``CoverageProvenance/unknown`` when nil.
+    ///
+    /// Empty input returns an empty dictionary without preparing a
+    /// statement; large inputs are chunked at 500 placeholders per
+    /// statement to stay well under SQLite's `SQLITE_MAX_VARIABLE_NUMBER`
+    /// (matches ``fetchAssetsByEpisodeIds`` / the sibling bulk fetchers).
+    func fetchCoverageSummariesByAssetIds(
+        _ assetIds: Set<String>
+    ) throws -> [String: AnalysisCoverageSummary] {
         guard !assetIds.isEmpty else { return [:] }
         let chunkSize = 500
-        var results: [String: Double] = [:]
-        results.reserveCapacity(assetIds.count)
 
+        // Stable order so chunk slicing and bind indices line up.
         let allIds = assetIds.sorted()
+
+        // ---- Pass 1: per-asset duration + watermark columns from
+        //              `analysis_assets`. `id` is UNIQUE so the WHERE
+        //              clause yields at most one row per requested id —
+        //              no tie-breaking needed.
+        struct AssetRow {
+            let id: String
+            let episodeDurationSec: Double?
+            let featureCoverageEndTime: Double?
+            let fastTranscriptCoverageEndTime: Double?
+            let confirmedAdCoverageEndTime: Double?
+            let finalPassCoverageEndTime: Double?
+        }
+        var assetRows: [String: AssetRow] = [:]
+        assetRows.reserveCapacity(allIds.count)
+
         var index = 0
         while index < allIds.count {
             let end = min(index + chunkSize, allIds.count)
             let slice = Array(allIds[index..<end])
             let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
             let sql = """
-                SELECT analysisAssetId,
-                       SUM(CASE
-                           WHEN endTime > startTime THEN endTime - startTime
-                           ELSE 0
-                       END) AS coveredSeconds
-                FROM transcript_chunks
-                WHERE pass = 'fast'
-                  AND analysisAssetId IN (\(placeholders))
-                GROUP BY analysisAssetId
+                SELECT id, episodeDurationSec,
+                       featureCoverageEndTime, fastTranscriptCoverageEndTime,
+                       confirmedAdCoverageEndTime, finalPassCoverageEndTime
+                FROM analysis_assets
+                WHERE id IN (\(placeholders))
                 """
             let stmt = try prepare(sql)
             for (i, id) in slice.enumerated() {
                 bind(stmt, Int32(i + 1), id)
             }
             while sqlite3_step(stmt) == SQLITE_ROW {
-                let assetId = text(stmt, 0)
-                guard sqlite3_column_type(stmt, 1) != SQLITE_NULL else { continue }
-                results[assetId] = sqlite3_column_double(stmt, 1)
+                let id = text(stmt, 0)
+                assetRows[id] = AssetRow(
+                    id: id,
+                    episodeDurationSec: optionalDouble(stmt, 1),
+                    featureCoverageEndTime: optionalDouble(stmt, 2),
+                    fastTranscriptCoverageEndTime: optionalDouble(stmt, 3),
+                    confirmedAdCoverageEndTime: optionalDouble(stmt, 4),
+                    finalPassCoverageEndTime: optionalDouble(stmt, 5)
+                )
             }
             sqlite3_finalize(stmt)
             index = end
         }
 
-        return results
+        // ---- Pass 2: fetch fast-pass chunk intervals so we can compute the
+        //              interval union AND the high-water max in Swift.
+        //              `AnalysisCoverageMath.unionedSeconds` does its own
+        //              sort over the collected intervals, so the SQL
+        //              `ORDER BY` is purely for deterministic output order
+        //              (helps debugging / explain plans), not for the merge
+        //              algorithm's correctness.
+        var fastIntervals: [String: [(start: Double, end: Double)]] = [:]
+        var fastMaxEnd: [String: Double] = [:]
+        // ---- Pass 3 (fold into one query): final-pass chunk MAX(endTime).
+        var finalMaxEnd: [String: Double] = [:]
+
+        index = 0
+        while index < allIds.count {
+            let end = min(index + chunkSize, allIds.count)
+            let slice = Array(allIds[index..<end])
+            let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
+
+            // Fast pass: interval ranges for union + max.
+            let fastSQL = """
+                SELECT analysisAssetId, startTime, endTime
+                FROM transcript_chunks
+                WHERE pass = 'fast'
+                  AND analysisAssetId IN (\(placeholders))
+                ORDER BY analysisAssetId, startTime, endTime
+                """
+            let fastStmt = try prepare(fastSQL)
+            for (i, id) in slice.enumerated() {
+                bind(fastStmt, Int32(i + 1), id)
+            }
+            while sqlite3_step(fastStmt) == SQLITE_ROW {
+                let assetId = text(fastStmt, 0)
+                let startTime = sqlite3_column_double(fastStmt, 1)
+                let endTime = sqlite3_column_double(fastStmt, 2)
+                // Skip degenerate / inverted rows so they don't poison
+                // either the union or the high-water max.
+                guard endTime > startTime else { continue }
+                fastIntervals[assetId, default: []].append((start: startTime, end: endTime))
+                if let prior = fastMaxEnd[assetId] {
+                    fastMaxEnd[assetId] = max(prior, endTime)
+                } else {
+                    fastMaxEnd[assetId] = endTime
+                }
+            }
+            sqlite3_finalize(fastStmt)
+
+            // Final pass: only `MAX(endTime)` is useful for display today.
+            let finalSQL = """
+                SELECT analysisAssetId, MAX(endTime) AS maxEnd
+                FROM transcript_chunks
+                WHERE pass = 'final'
+                  AND analysisAssetId IN (\(placeholders))
+                GROUP BY analysisAssetId
+                """
+            let finalStmt = try prepare(finalSQL)
+            for (i, id) in slice.enumerated() {
+                bind(finalStmt, Int32(i + 1), id)
+            }
+            while sqlite3_step(finalStmt) == SQLITE_ROW {
+                let assetId = text(finalStmt, 0)
+                guard sqlite3_column_type(finalStmt, 1) != SQLITE_NULL else { continue }
+                finalMaxEnd[assetId] = sqlite3_column_double(finalStmt, 1)
+            }
+            sqlite3_finalize(finalStmt)
+
+            index = end
+        }
+
+        // ---- Reduce: per-asset summary. Assets with neither an
+        //              `analysis_assets` row nor any chunks still surface a
+        //              summary if the caller asked for them — but with all
+        //              fields nil + provenance `.unknown` — so callers
+        //              don't need to distinguish "missing asset" from
+        //              "asset present but no coverage". (`fetchAssets...`
+        //              is the canonical way to check existence.)
+        var summaries: [String: AnalysisCoverageSummary] = [:]
+        summaries.reserveCapacity(allIds.count)
+        for id in allIds {
+            let assetRow = assetRows[id]
+            let chunkUnionedSec = AnalysisCoverageMath.unionedSeconds(
+                fastIntervals[id] ?? []
+            )
+            let chunkMaxEnd = fastMaxEnd[id]
+
+            // Fast covered seconds: prefer interval-unioned seconds when
+            // any chunk landed; otherwise fall back to the asset watermark.
+            let fastCoveredSec: Double?
+            let fastCoveredSource: AnalysisCoverageSummary.CoverageProvenance
+            if chunkMaxEnd != nil {
+                fastCoveredSec = chunkUnionedSec
+                fastCoveredSource = .fastTranscriptChunks
+            } else if let watermark = assetRow?.fastTranscriptCoverageEndTime {
+                fastCoveredSec = watermark
+                fastCoveredSource = .assetWatermark
+            } else {
+                fastCoveredSec = nil
+                fastCoveredSource = .unknown
+            }
+
+            // Fast high-water end: chunks first, watermark fallback.
+            let fastEndSec: Double?
+            let fastEndSource: AnalysisCoverageSummary.CoverageProvenance
+            if let chunkMaxEnd {
+                fastEndSec = chunkMaxEnd
+                fastEndSource = .fastTranscriptChunks
+            } else if let watermark = assetRow?.fastTranscriptCoverageEndTime {
+                fastEndSec = watermark
+                fastEndSource = .assetWatermark
+            } else {
+                fastEndSec = nil
+                fastEndSource = .unknown
+            }
+
+            // Final-pass: chunks first, watermark fallback.
+            let finalEndSec: Double?
+            let finalEndSource: AnalysisCoverageSummary.CoverageProvenance
+            if let chunkFinalMax = finalMaxEnd[id] {
+                finalEndSec = chunkFinalMax
+                finalEndSource = .finalPassChunks
+            } else if let watermark = assetRow?.finalPassCoverageEndTime {
+                finalEndSec = watermark
+                finalEndSource = .assetWatermark
+            } else {
+                finalEndSec = nil
+                finalEndSource = .unknown
+            }
+
+            let featureSec = assetRow?.featureCoverageEndTime
+            let confirmedAdSec = assetRow?.confirmedAdCoverageEndTime
+
+            summaries[id] = AnalysisCoverageSummary(
+                assetId: id,
+                episodeDurationSec: assetRow?.episodeDurationSec,
+                fastTranscriptCoveredSec: fastCoveredSec,
+                fastTranscriptCoveredSource: fastCoveredSource,
+                fastTranscriptCoverageEndSec: fastEndSec,
+                fastTranscriptCoverageEndSource: fastEndSource,
+                featureCoverageEndSec: featureSec,
+                featureCoverageEndSource: featureSec == nil ? .unknown : .assetWatermark,
+                confirmedAdCoverageEndSec: confirmedAdSec,
+                confirmedAdCoverageEndSource: confirmedAdSec == nil ? .unknown : .assetWatermark,
+                finalPassCoverageEndSec: finalEndSec,
+                finalPassCoverageEndSource: finalEndSource
+            )
+        }
+        return summaries
     }
 
     func searchTranscripts(query: String) throws -> [TranscriptChunk] {

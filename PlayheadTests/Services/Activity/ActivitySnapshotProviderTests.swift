@@ -632,10 +632,211 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(row.pipeline.analysisFraction == 0.25)
         #expect(row.pipeline.analysisPercent == "25%")
         #expect(row.pipeline.analysisSource == "feature_coverage")
+        // playhead-hygc.1.2: per-field provenance for the canonical
+        // coverage summary. Fast-pass chunk in the seed (end=200s) drives
+        // the high-water value, so its source must be `fast_transcript_chunks`.
+        // No final-pass chunk is inserted, so the final-pass high-water
+        // source falls through to `unknown` (NOT a synthetic "0%"). This
+        // pins the bead's "no caller falls back to a stale watermark
+        // when chunks are present" + "unknown stays unknown" rules.
+        #expect(row.pipeline.fastTranscriptCoverageEndSource == "fast_transcript_chunks")
+        #expect(row.pipeline.finalPassCoverageEndSource == "unknown")
         #expect(row.analysisAsset.analysisState == "queued")
         #expect(row.latestTerminalWorkJournal?.eventType == "failed")
         #expect(row.latestTerminalWorkJournal?.cause == "asr_failed")
         #expect(row.latestTerminalWorkJournal?.generationID == generationID.uuidString)
+    }
+
+    /// Bead playhead-hygc.1.2 (asset_004 contradiction): a stale
+    /// `fastTranscriptCoverageEndTime=90s` on the asset row, with a fast
+    /// chunk reaching 3960s, must surface chunk-derived coverage on the
+    /// dogfood diagnostics wire (NOT the watermark) and the row's
+    /// transcript fraction must reflect the chunk-derived value.
+    /// Mirrors `LiveActivitySnapshotProviderFractionTests`'s "fast
+    /// transcript chunks override stale transcript watermark" but at the
+    /// dogfood diagnostics wire layer.
+    @Test("dogfood diagnostics: stale watermark + fresh chunks -> chunk-derived coverage on the wire (playhead-hygc.1.2)")
+    func dogfoodDiagnosticsSurfacesChunkDerivedCoverageOverStaleWatermark() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: 90,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 4000
+            )
+        ])
+        try await fixture.store.insertTranscriptChunks([
+            transcriptChunk(assetId: fixture.assetIds[0], index: 0, start: 0, end: 3960)
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let snapshot = await provider.loadDogfoodDiagnosticsSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            episodeHashProvider: { _ in "hashed-episode" }
+        )
+
+        let row = try #require(snapshot.rows.first)
+        // Chunk-derived high-water (3960s/4000s = 0.99) — NOT 90s/4000s.
+        #expect(row.pipeline.transcriptFraction == 3960.0 / 4000.0)
+        #expect(row.pipeline.transcriptSource == "fast_transcript_chunks")
+        // The new provenance field on the wire must agree.
+        #expect(row.pipeline.fastTranscriptCoverageEndSource == "fast_transcript_chunks")
+        // No final-pass chunk inserted; provenance is `unknown` and the
+        // value stays nil (no synthetic 0%).
+        #expect(row.pipeline.finalPassCoverageEndSource == "unknown")
+        #expect(row.pipeline.finalPassCoverageEndSec == nil)
+    }
+
+    /// Bead playhead-hygc.1.2: when no transcript-coverage signal exists
+    /// at all (no chunks AND no asset watermark), the diagnostics row
+    /// must report `unknown` provenance and a NIL fraction — never a
+    /// synthetic 0%.
+    @Test("dogfood diagnostics: nothing known -> unknown provenance, nil fraction (playhead-hygc.1.2)")
+    func dogfoodDiagnosticsLeavesUnknownWhenNoSignals() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 1000
+            )
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let snapshot = await provider.loadDogfoodDiagnosticsSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            episodeHashProvider: { _ in "hashed-episode" }
+        )
+
+        let row = try #require(snapshot.rows.first)
+        // The bead's "no synthetic 0%" rule binds the FRACTION value: it
+        // must stay nil when nothing is known. The percent STRING is a
+        // pre-existing placeholder ("--%") used by the diagnostics
+        // surface to render a missing fraction, not a synthetic 0%.
+        #expect(row.pipeline.transcriptFraction == nil)
+        #expect(row.pipeline.fastTranscriptCoverageEndSource == "unknown")
+        #expect(row.pipeline.finalPassCoverageEndSource == "unknown")
+        #expect(row.pipeline.featureCoverageEndSec == nil)
+        #expect(row.pipeline.finalPassCoverageEndSec == nil)
+    }
+
+    /// Bead playhead-hygc.1.2: when no fast chunks landed but the asset
+    /// row still has a fast watermark, the dogfood `transcript_source`
+    /// wire string MUST be `"asset_watermark"` (the bead's allowlisted
+    /// vocabulary). A buggy impl that always returns `"unknown"` would
+    /// fail this test, and so would any drift back to the legacy
+    /// `"asset_fast_watermark"` token. Pins the wire vocabulary alongside
+    /// the per-field provenance enum's `asset_watermark` rawValue so the
+    /// row JSON never reports two different names for the same fact.
+    @Test("dogfood diagnostics: watermark-only fast coverage -> transcript_source is `asset_watermark` (playhead-hygc.1.2)")
+    func dogfoodDiagnosticsTranscriptSourceIsAssetWatermarkWhenChunksAbsent() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: 120,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 600
+            )
+        ])
+        // Intentionally NO transcript chunks: forces fallback to the
+        // asset's `fastTranscriptCoverageEndTime` watermark.
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let snapshot = await provider.loadDogfoodDiagnosticsSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            episodeHashProvider: { _ in "hashed-episode" }
+        )
+
+        let row = try #require(snapshot.rows.first)
+        // Both vocabulary fields must report the same canonical token.
+        #expect(row.pipeline.transcriptSource == "asset_watermark")
+        #expect(row.pipeline.fastTranscriptCoverageEndSource == "asset_watermark")
+        // Sanity: the value was reconciled from the watermark.
+        #expect(row.pipeline.transcriptFraction == 120.0 / 600.0)
+        #expect(row.pipeline.fastTranscriptWatermarkSec == 120)
+    }
+
+    /// Bead playhead-hygc.1.2 (acceptance criterion: final-pass coverage
+    /// appears in dogfood provenance): when final-pass chunks land, the
+    /// dogfood snapshot's `final_pass_coverage_end_source` field MUST
+    /// report the chunk provenance (`final_pass_chunks`), not `unknown`
+    /// and not the asset watermark token. Catches a wrong impl that
+    /// always returns `"unknown"` for final-pass provenance — the
+    /// existing tests in this suite only assert the `unknown` case at
+    /// the wire layer.
+    ///
+    /// `analysis_source` and `analysis_fraction` MUST agree on the same
+    /// row: `analysis_fraction` is computed from
+    /// `max(featureCoverageEndSec, confirmedAdCoverageEndSec)`, so
+    /// `analysis_source` may only name `feature_coverage`,
+    /// `confirmed_ad_coverage`, or `unknown` — never `final_pass_chunks`,
+    /// because final-pass seconds do not enter the fraction. Pre-fix R2
+    /// observed an inconsistency where a row could read
+    /// `analysis_source = "final_pass_chunks"` while the printed
+    /// `analysis_fraction` reflected only the feature watermark; this
+    /// test pins both fields together so the inconsistency cannot recur.
+    @Test("dogfood diagnostics: final-pass chunks present -> final_pass_coverage_end_source is `final_pass_chunks`; analysis_source / analysis_fraction stay consistent (playhead-hygc.1.2)")
+    func dogfoodDiagnosticsFinalPassSourceIsFinalPassChunks() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                featureCoverageEndTime: 100,
+                fastTranscriptCoverageEndTime: 200,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 600
+            )
+        ])
+        try await fixture.store.insertTranscriptChunks([
+            transcriptChunk(assetId: fixture.assetIds[0], index: 0, start: 0, end: 200),
+            // Final-pass chunk reaching 350s — beyond the feature
+            // watermark (100). Drives the final-pass provenance scalar
+            // to `final_pass_chunks` independently of the analysis-source
+            // wire string, which tracks the analysis-fraction's actual
+            // inputs (feature + confirmed-ad only).
+            transcriptChunk(assetId: fixture.assetIds[0], index: 1, start: 0, end: 350, pass: "final")
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let snapshot = await provider.loadDogfoodDiagnosticsSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            episodeHashProvider: { _ in "hashed-episode" }
+        )
+
+        let row = try #require(snapshot.rows.first)
+        // Per-field provenance for the final-pass scalar — distinct wire
+        // field, populated even though analysis_source does not name it.
+        #expect(row.pipeline.finalPassCoverageEndSource == "final_pass_chunks")
+        #expect(row.pipeline.finalPassCoverageEndSec == 350)
+        // analysis_source and analysis_fraction must agree on the same
+        // row. analysis_fraction is feature/duration = 100/600 ≈ 0.1667;
+        // analysis_source therefore names `feature_coverage` (the actual
+        // input to the fraction), NOT `final_pass_chunks`.
+        #expect(row.pipeline.analysisSource == "feature_coverage")
+        let analysisFraction = try #require(row.pipeline.analysisFraction)
+        #expect(abs(analysisFraction - 100.0 / 600.0) < 1e-9)
     }
 
     @Test("terminal asset and job states do not remain Up Next when coverage summary is stale")
