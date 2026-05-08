@@ -396,7 +396,21 @@ struct ChapterSignalAggregateMetricsTests {
         // Both shows should report .enabled as their delta-mode label.
         for (_, delta) in report.perShowLift {
             #expect(delta.mode == .enabled)
+            // At the bead scaffold, predictor is mode-independent so all
+            // detection deltas are exactly 0. Pin this so a future
+            // regression where mode-awareness leaks into the predictor
+            // without updating the limitations note is caught.
+            #expect(delta.deltaPrecision == 0)
+            #expect(delta.deltaRecall == 0)
+            #expect(delta.deltaF1 == 0)
+            #expect(delta.deltaTruePositiveSeconds == 0)
+            // Phase / cost deltas are non-zero (`.enabled` runs the
+            // phase, `.off` does not). Sign check, not exact value.
+            #expect(delta.deltaTotalFMCalls > 0)
         }
+        // showA has 2 episodes, showB has 1.
+        #expect(report.perShowLift["showA"]?.episodeCount == 2)
+        #expect(report.perShowLift["showB"]?.episodeCount == 1)
     }
 
     @Test("compute() per-show lift is deterministic across two identical runs")
@@ -489,6 +503,74 @@ struct ChapterSignalAggregateMetricsTests {
             "\"limitations\"",
         ] {
             #expect(text.contains(key), "wire format must carry \(key)")
+        }
+    }
+
+    @Test("ChapterSignalMode encodes as lowercase string in wire format")
+    func modeWireEncodingIsLowercaseString() throws {
+        // Pin the JSON encoding of `ChapterSignalMode` so a future patch
+        // that switches to a different raw representation (e.g. integer,
+        // PascalCase) is caught at the wire boundary. Downstream readers
+        // (CI dashboards) parse strings.
+        let trace = Self.makeTrace(
+            episodeId: "ep-mode-wire",
+            podcastId: "pod-mode-wire",
+            episodeDuration: 300,
+            adStart: 30,
+            adEnd: 60
+        )
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [trace],
+            runId: "mode-wire",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(report)
+        let text = String(decoding: data, as: UTF8.self)
+        // Each PerModeMetrics carries a `"mode":"..."` field. The three
+        // modes currently encode as lowercase strings via Swift's
+        // synthesized Codable for `enum ChapterSignalMode: String`. The
+        // encoder is `.sortedKeys` only (no `.prettyPrinted`), so there
+        // is no whitespace between the colon and the value.
+        #expect(text.contains("\"mode\":\"off\""), "baseline.mode must encode as lowercase \"off\"")
+        #expect(text.contains("\"mode\":\"shadow\""), "shadow.mode must encode as lowercase \"shadow\"")
+        #expect(text.contains("\"mode\":\"enabled\""), "enabled.mode must encode as lowercase \"enabled\"")
+    }
+
+    @Test("PerShowLiftDelta wire shape carries delta-prefixed field names")
+    func perShowLiftDeltaWireShape() throws {
+        let trace = Self.makeTrace(
+            episodeId: "ep-delta-wire",
+            podcastId: "pod-delta-wire",
+            episodeDuration: 300,
+            adStart: 30,
+            adEnd: 60
+        )
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [trace],
+            runId: "delta-wire",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(report)
+        let text = String(decoding: data, as: UTF8.self)
+        // Pin the delta-prefixed wire names so downstream tooling can
+        // distinguish per-show deltas from absolute PerModeMetrics.
+        for key in [
+            "\"deltaPrecision\"",
+            "\"deltaRecall\"",
+            "\"deltaF1\"",
+            "\"deltaTotalFMCalls\"",
+            "\"deltaPhaseLatencyP50Ms\"",
+            "\"deltaAbortRate\"",
+        ] {
+            #expect(text.contains(key), "perShowLift wire format must carry \(key)")
         }
     }
 

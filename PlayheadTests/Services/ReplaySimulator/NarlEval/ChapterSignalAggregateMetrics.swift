@@ -141,6 +141,75 @@ struct PerModeMetrics: Sendable, Codable, Equatable {
     }
 }
 
+// MARK: - Per-show lift delta
+
+/// Per-show **delta** between `.enabled` and `.off` for one show. Field
+/// names are explicitly delta-prefixed (`deltaPrecision`, `deltaRecall`,
+/// `deltaF1`, `deltaTotalFMCalls`, etc.) so a wire reader cannot mistake
+/// these numbers for absolute precision/recall/F1 — a footgun if we had
+/// reused `PerModeMetrics` (whose `precision`/`recall` fields denote
+/// proportions in `[0, 1]`).
+///
+/// The `mode` field carries `.enabled` (the higher arm of the diff) so a
+/// reader knows which side of the comparison the deltas represent.
+///
+/// Aggregate counts (`episodeCount`, `excludedEpisodeCount`) are NOT
+/// deltas — they're the absolute episode counts for the show under
+/// `.enabled` (which equal `.off` at the scaffold), reported so a reader
+/// can sanity-check that the show appears in both arms.
+struct PerShowLiftDelta: Sendable, Codable, Equatable {
+    /// Always `.enabled` — the higher arm of the diff.
+    let mode: ChapterSignalMode
+    /// Number of episodes under this show that contributed to detection
+    /// (i.e. were not excluded by `NarlGroundTruth`). Absolute, NOT a
+    /// delta (the same number on both arms by construction).
+    let episodeCount: Int
+    /// Number of episodes under this show that were excluded by
+    /// `NarlGroundTruth` (e.g. whole-asset vetoes). Absolute.
+    let excludedEpisodeCount: Int
+
+    // MARK: Detection deltas (`enabled - off`)
+    /// `enabled.precision - off.precision` for this show. Positive = lift.
+    let deltaPrecision: Double
+    /// `enabled.recall - off.recall` for this show. Positive = lift.
+    let deltaRecall: Double
+    /// `enabled.f1 - off.f1` for this show. Informational only — F1 is
+    /// not in the production bar.
+    let deltaF1: Double
+    /// `enabled.predictedAdSeconds - off.predictedAdSeconds` for this show.
+    let deltaPredictedAdSeconds: Double
+    /// `enabled.groundTruthAdSeconds - off.groundTruthAdSeconds`. Should
+    /// be 0 since ground truth is mode-independent — kept for shape
+    /// symmetry and as a tripwire if that contract ever drifts.
+    let deltaGroundTruthAdSeconds: Double
+    /// `enabled.truePositiveSeconds - off.truePositiveSeconds`.
+    let deltaTruePositiveSeconds: Double
+
+    // MARK: Phase / cost deltas (`enabled - off`)
+    /// `enabled.totalFMCalls - off.totalFMCalls`. Always non-negative
+    /// (`.off` always charges 0 FM calls).
+    let deltaTotalFMCalls: Int
+    /// `enabled.phaseLatencyP50Ms - off.phaseLatencyP50Ms`.
+    let deltaPhaseLatencyP50Ms: Double
+    /// `enabled.phaseLatencyP90Ms - off.phaseLatencyP90Ms`.
+    let deltaPhaseLatencyP90Ms: Double
+    /// `enabled.phaseLatencyP99Ms - off.phaseLatencyP99Ms`.
+    let deltaPhaseLatencyP99Ms: Double
+
+    // MARK: Abort deltas
+    /// `enabled.abortedByOperationalRate - off.abortedByOperationalRate`.
+    let deltaAbortedByOperationalRate: Int
+    /// `enabled.abortedByPathologicalRate - off.abortedByPathologicalRate`.
+    let deltaAbortedByPathologicalRate: Int
+    /// `enabled.skippedByCreatorChapters - off.skippedByCreatorChapters`.
+    let deltaSkippedByCreatorChapters: Int
+    /// `enabled.abortRate - off.abortRate`.
+    let deltaAbortRate: Double
+    /// `enabled.episodeReplayCount - off.episodeReplayCount`. Should be 0
+    /// since replay count is mode-independent — kept for shape symmetry.
+    let deltaEpisodeReplayCount: Int
+}
+
 // MARK: - Lift report
 
 /// Aggregate lift report comparing `.off` (baseline) vs `.shadow` vs
@@ -174,11 +243,18 @@ struct ChapterSignalLiftReport: Sendable, Codable, Equatable {
 
     /// Precision lift = `enabled.precision - baseline.precision`. Positive
     /// is good. Computed from the cross-corpus aggregate, NOT averaged
-    /// per-show (which would be a Simpson's-paradox trap).
+    /// per-show (which would be a Simpson's-paradox trap). One of the
+    /// two axes the production bar evaluates (see `barMet`).
     let liftPrecision: Double
     /// Recall lift = `enabled.recall - baseline.recall`. Positive is good.
+    /// The other production-bar axis.
     let liftRecall: Double
-    /// F1 lift = `enabled.f1 - baseline.f1`. Positive is good.
+    /// F1 lift = `enabled.f1 - baseline.f1`. **Informational only** —
+    /// `liftF1` is NOT in `barMet`. The bar evaluates precision and
+    /// recall independently because F1 can mask asymmetric regressions
+    /// (e.g. precision down 5pp + recall up 6pp could ship a small
+    /// positive F1 lift while regressing one of the two production
+    /// axes). Kept on the wire for human reviewers and dashboard plots.
     let liftF1: Double
 
     /// Multiplier on FM cost from baseline to enabled:
@@ -189,19 +265,17 @@ struct ChapterSignalLiftReport: Sendable, Codable, Equatable {
     /// over a zero-baseline"). Documented in `limitations`.
     let fmCostMultiplier: Double
 
-    /// Per-show-keyed lift, where the value is `enabled - baseline` for
-    /// that show. The dictionary is keyed by show name (as produced by
+    /// Per-show-keyed lift, where the value is `enabled - off` for that
+    /// show. The dictionary is keyed by show name (as produced by
     /// `NarlEvalHarnessTests.showName(for:)`). Each value is a
-    /// `PerModeMetrics` whose numeric fields are the **enabled minus
-    /// baseline** delta — so `precision`/`recall`/`f1` are the lift
-    /// numbers, and the cost fields are the cost-delta. The `mode` field
-    /// is `.enabled` (the higher arm of the comparison) so a reader
-    /// knows which side of the diff this is.
+    /// `PerShowLiftDelta` whose field names are explicitly delta-prefixed
+    /// (`deltaPrecision`/`deltaRecall`/`deltaF1`/etc.) so the wire format
+    /// cannot be misread as absolute proportions.
     ///
-    /// Encoded as `[String: PerModeMetrics]` for JSON readability; the
+    /// Encoded as `[String: PerShowLiftDelta]` for JSON readability; the
     /// stable iteration order at the call site is achieved by
     /// `JSONEncoder.OutputFormatting.sortedKeys`.
-    let perShowLift: [String: PerModeMetrics]
+    let perShowLift: [String: PerShowLiftDelta]
 
     /// `true` iff the gating bar is met:
     ///   - measurable lift (≥ `measurableLiftEpsilon`) on at least one of
@@ -423,23 +497,22 @@ enum ChapterSignalAggregateMetrics {
 
     /// Run the detection-side prediction for one trace under one mode.
     ///
-    /// Today the `mode` argument is unused — the predictor is mode-
-    /// independent at the bead scaffold. This is the SINGLE call site
-    /// where bead 14/16's consumer wiring will swap in a mode-aware
+    /// Today the `mode` argument is intentionally unused — the predictor
+    /// is mode-independent at the bead scaffold. This is the SINGLE call
+    /// site where bead 14/16's consumer wiring will swap in a mode-aware
     /// predictor (e.g. `NarlReplayPredictor.predict(trace:config:
     /// chapterPlan:)`). Keeping the dispatch in one helper means the
     /// aggregate is mode-correct the moment the predictor learns to
     /// read the plan, with no shape change to `PerModeMetrics`.
+    ///
+    /// The `_ mode` underscore on the parameter name suppresses the
+    /// unused-parameter warning without an inline `_ = mode` discard.
     static func predictUnderMode(
         trace: FrozenTrace,
-        mode: ChapterSignalMode,
+        mode _: ChapterSignalMode,
         config: MetadataActivationConfig
     ) -> NarlPredictionResult {
-        // Suppress unused-parameter warnings deliberately — `mode` is the
-        // forward-looking hook (see comment above). When bead 14/16
-        // ships, fan out through `mode.consumersReadChapterPlan` here.
-        _ = mode
-        return NarlReplayPredictor.predict(trace: trace, config: config)
+        NarlReplayPredictor.predict(trace: trace, config: config)
     }
 
     private static func predictDetection(
@@ -530,7 +603,7 @@ enum ChapterSignalAggregateMetrics {
         gateConfig: ChapterSignalGate.Config,
         predictorConfig: MetadataActivationConfig,
         showName: (FrozenTrace) -> String
-    ) -> [String: PerModeMetrics] {
+    ) -> [String: PerShowLiftDelta] {
         // Bucket traces by show. Sorted iteration order so adding a new
         // show doesn't reshuffle the dictionary insertion order on disk
         // (the JSON encoder's `.sortedKeys` already takes care of the
@@ -542,7 +615,7 @@ enum ChapterSignalAggregateMetrics {
             byShow[showName(trace), default: []].append(trace)
         }
 
-        var result: [String: PerModeMetrics] = [:]
+        var result: [String: PerShowLiftDelta] = [:]
         for show in byShow.keys.sorted() {
             guard let showTraces = byShow[show], !showTraces.isEmpty else { continue }
             let baselineGate = ChapterSignalGate.replay(traces: showTraces, mode: .off, config: gateConfig)
@@ -572,33 +645,32 @@ enum ChapterSignalAggregateMetrics {
         return result
     }
 
-    /// Build a `PerModeMetrics` whose numeric fields are
+    /// Build a `PerShowLiftDelta` whose numeric fields are
     /// `enabled - baseline`. The returned struct's `mode` is `.enabled`
-    /// (the higher arm of the comparison) so a reader of the JSON knows
-    /// which side of the diff this represents.
+    /// (the higher arm of the comparison).
     private static func makeDeltaMetrics(
         baseline: PerModeMetrics,
         enabled: PerModeMetrics
-    ) -> PerModeMetrics {
-        PerModeMetrics(
+    ) -> PerShowLiftDelta {
+        PerShowLiftDelta(
             mode: .enabled,
             episodeCount: enabled.episodeCount,
             excludedEpisodeCount: enabled.excludedEpisodeCount,
-            precision: enabled.precision - baseline.precision,
-            recall: enabled.recall - baseline.recall,
-            f1: enabled.f1 - baseline.f1,
-            predictedAdSeconds: enabled.predictedAdSeconds - baseline.predictedAdSeconds,
-            groundTruthAdSeconds: enabled.groundTruthAdSeconds - baseline.groundTruthAdSeconds,
-            truePositiveSeconds: enabled.truePositiveSeconds - baseline.truePositiveSeconds,
-            totalFMCalls: enabled.totalFMCalls - baseline.totalFMCalls,
-            phaseLatencyP50Ms: enabled.phaseLatencyP50Ms - baseline.phaseLatencyP50Ms,
-            phaseLatencyP90Ms: enabled.phaseLatencyP90Ms - baseline.phaseLatencyP90Ms,
-            phaseLatencyP99Ms: enabled.phaseLatencyP99Ms - baseline.phaseLatencyP99Ms,
-            abortedByOperationalRate: enabled.abortedByOperationalRate - baseline.abortedByOperationalRate,
-            abortedByPathologicalRate: enabled.abortedByPathologicalRate - baseline.abortedByPathologicalRate,
-            skippedByCreatorChapters: enabled.skippedByCreatorChapters - baseline.skippedByCreatorChapters,
-            abortRate: enabled.abortRate - baseline.abortRate,
-            episodeReplayCount: enabled.episodeReplayCount - baseline.episodeReplayCount
+            deltaPrecision: enabled.precision - baseline.precision,
+            deltaRecall: enabled.recall - baseline.recall,
+            deltaF1: enabled.f1 - baseline.f1,
+            deltaPredictedAdSeconds: enabled.predictedAdSeconds - baseline.predictedAdSeconds,
+            deltaGroundTruthAdSeconds: enabled.groundTruthAdSeconds - baseline.groundTruthAdSeconds,
+            deltaTruePositiveSeconds: enabled.truePositiveSeconds - baseline.truePositiveSeconds,
+            deltaTotalFMCalls: enabled.totalFMCalls - baseline.totalFMCalls,
+            deltaPhaseLatencyP50Ms: enabled.phaseLatencyP50Ms - baseline.phaseLatencyP50Ms,
+            deltaPhaseLatencyP90Ms: enabled.phaseLatencyP90Ms - baseline.phaseLatencyP90Ms,
+            deltaPhaseLatencyP99Ms: enabled.phaseLatencyP99Ms - baseline.phaseLatencyP99Ms,
+            deltaAbortedByOperationalRate: enabled.abortedByOperationalRate - baseline.abortedByOperationalRate,
+            deltaAbortedByPathologicalRate: enabled.abortedByPathologicalRate - baseline.abortedByPathologicalRate,
+            deltaSkippedByCreatorChapters: enabled.skippedByCreatorChapters - baseline.skippedByCreatorChapters,
+            deltaAbortRate: enabled.abortRate - baseline.abortRate,
+            deltaEpisodeReplayCount: enabled.episodeReplayCount - baseline.episodeReplayCount
         )
     }
 
