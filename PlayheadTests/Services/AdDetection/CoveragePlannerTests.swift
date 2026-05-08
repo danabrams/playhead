@@ -362,10 +362,16 @@ struct CoveragePlannerTests {
             ambiguousChapter(start: 0, end: 60),
             ambiguousChapter(start: 60, end: 180)
         ]
+        let baseline = planner.plan(for: matureStableContext())
         let plan = planner.plan(for: matureStableContext(
             chapterSignalMode: .enabled,
             chapterEvidence: chapters
         ))
+        // Byte-identical observable plan to baseline (policy / phases /
+        // sample rate / nil chapterInformedAudit).
+        #expect(plan.policy == baseline.policy)
+        #expect(plan.phases == baseline.phases)
+        #expect(plan.auditWindowSampleRate == baseline.auditWindowSampleRate)
         #expect(plan.chapterInformedAudit == nil)
         switch plan.chapterAuditDiagnostic {
         case .skipped(let reason, let count):
@@ -384,16 +390,88 @@ struct CoveragePlannerTests {
         let chapters = [
             adChapter(start: 60, end: 120, quality: 0.5)
         ]
+        let baseline = planner.plan(for: matureStableContext())
         let plan = planner.plan(for: matureStableContext(
             chapterSignalMode: .enabled,
             chapterEvidence: chapters
         ))
+        // Byte-identical observable plan to baseline (policy / phases /
+        // sample rate / nil chapterInformedAudit) — the
+        // chapter-informed code path leaves no trace below the
+        // confidence floor.
+        #expect(plan.policy == baseline.policy)
+        #expect(plan.phases == baseline.phases)
+        #expect(plan.auditWindowSampleRate == baseline.auditWindowSampleRate)
         #expect(plan.chapterInformedAudit == nil)
         switch plan.chapterAuditDiagnostic {
         case .skipped(let reason, _):
             #expect(reason == .lowPlanConfidence)
         default:
             Issue.record("Expected .skipped(lowPlanConfidence), got \(String(describing: plan.chapterAuditDiagnostic))")
+        }
+    }
+
+    @Test("chapter-informed: chapter with nil endTime takes the 60s nominal-duration fallback")
+    func testChapterInformedNilEndTimeFallback() throws {
+        let planner = CoveragePlanner()
+        // Ad chapter without an explicit endTime — the planner should
+        // still consider it (quality clears the floor) and synthesise
+        // a 60 s end time from `startTime + 60`.
+        let openEnded = ChapterEvidence(
+            startTime: 100,
+            endTime: nil,
+            title: "Sponsor break",
+            source: .pc20,
+            disposition: .adBreak,
+            qualityScore: 0.9
+        )
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: [openEnded]
+        ))
+        let informed = try #require(plan.chapterInformedAudit)
+        #expect(informed.includes.count == 1)
+        #expect(informed.includes.first?.startTime == 100)
+        #expect(informed.includes.first?.endTime == 160)
+    }
+
+    @Test("chapter-informed: corrupt time bounds and NaN qualityScore are dropped before the gates")
+    func testChapterInformedDefensiveFiltering() {
+        let planner = CoveragePlanner()
+        // None of these are usable: NaN start, end-before-start,
+        // non-finite end, NaN quality. Keep the gate honest by
+        // mixing in a single ambiguous chapter so `chapterEvidence`
+        // is non-empty but produces zero usable intervals.
+        let chapters: [ChapterEvidence] = [
+            ChapterEvidence(
+                startTime: .nan, endTime: 60, title: nil,
+                source: .pc20, disposition: .adBreak, qualityScore: 0.9
+            ),
+            ChapterEvidence(
+                startTime: 30, endTime: 30, title: nil,
+                source: .pc20, disposition: .adBreak, qualityScore: 0.9
+            ),
+            ChapterEvidence(
+                startTime: 30, endTime: .infinity, title: nil,
+                source: .pc20, disposition: .adBreak, qualityScore: 0.9
+            ),
+            ChapterEvidence(
+                startTime: 30, endTime: 60, title: nil,
+                source: .pc20, disposition: .adBreak, qualityScore: .nan
+            ),
+            ambiguousChapter(start: 100, end: 200)
+        ]
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: chapters
+        ))
+        #expect(plan.chapterInformedAudit == nil)
+        switch plan.chapterAuditDiagnostic {
+        case .skipped(let reason, let count):
+            #expect(reason == .noUsableChapters)
+            #expect(count == chapters.count)
+        default:
+            Issue.record("Expected .skipped(noUsableChapters), got \(String(describing: plan.chapterAuditDiagnostic))")
         }
     }
 

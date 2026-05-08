@@ -53,15 +53,23 @@ struct ChapterAuditInterval: Sendable, Equatable {
 /// planner does not know the ambient scan plan), so the consumer
 /// inspects `excludes` against its own coverage map.
 ///
-/// `replacementFraction` is the configured fraction of audit slots that
-/// chapter-informed selections may replace. Reported back so a downstream
-/// consumer or A/B harness can verify the planner honoured the configured
-/// value (this bead only EMITS the guidance — wiring into the narrower
-/// is a later bead).
+/// `replacementFraction` is the configured fraction of random audit
+/// slots that chapter-informed selections MAY replace. The planner
+/// EMITS the guidance + the budget; the audit-window narrower is the
+/// component that allocates actual slots. If `includes.count` exceeds
+/// `replacementFraction * total_audit_slots`, the consumer is expected
+/// to truncate; if fewer chapter-informed candidates exist than the
+/// budget would allow, the excess slots remain random. Wiring into the
+/// narrower (`TargetedWindowNarrower.auditSegments`) is a later bead.
 ///
 /// `evidenceCount` and `planConfidence` are the inputs the planner used
 /// to make the decision (recorded so audits can be reproduced from the
 /// emitted plan alone).
+///
+/// Order: `includes` and `excludes` preserve the iteration order of the
+/// input `chapterEvidence` array. Consumers MUST NOT rely on any other
+/// ordering; if a stable sort is needed downstream the consumer should
+/// sort defensively (e.g. by `startTime`).
 struct ChapterInformedAuditSelection: Sendable, Equatable {
     let includes: [ChapterAuditInterval]
     let excludes: [ChapterAuditInterval]
