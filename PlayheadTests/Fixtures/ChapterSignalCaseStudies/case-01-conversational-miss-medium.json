@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "case_id": "case-01-conversational-miss-medium",
+  "archetype": "conversational",
+  "category": "conversational_miss",
+  "expected_behavior": "A medium-length conversational episode (~50 min) with no creator-supplied chapters. Pre-au2v.1 (mode=.off): no chapter signal, the pipeline relies on transcript+feature coverage alone, and any in-episode ad pocket masked by conversational filler is missed. Post-au2v.1 (mode=.enabled): the chapter generation phase runs, emits one ChapterPlan with ~5 inferred boundary segments, and downstream consumers gain the structural prior they previously lacked.",
+  "synthesis_notes": "Modeled on the structural shape of a typical long-form interview show row from the dogfood diagnostics corpus (atom density ~0.5 atoms/sec, duration ~3000 s, no id3/pc20/rssInline chapters present). All identifiers are synthetic; transcript text is OMITTED entirely from the fixture (atoms carry empty text). No commercial-message names, episode title, or podcast title is captured.",
+  "trace": {
+    "episode_id_anon": "episode_anon_a1c01",
+    "podcast_id_archetype": "show_archetype_conversational",
+    "episode_duration_sec": 3000.0,
+    "atom_count": 250,
+    "atom_spacing_sec": 12.0
+  },
+  "gate_inputs": {
+    "creator_chapters_present": false,
+    "stub_chapter_count": null
+  },
+  "expected_before_off": {
+    "plan_generated_count": 0,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 0,
+    "aggregate_latency_ms": 0.0
+  },
+  "expected_after_enabled": {
+    "plan_generated_count": 1,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 5,
+    "aggregate_latency_ms": 130.0
+  }
+}

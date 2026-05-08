@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "case_id": "case-07-monologue-short-episode",
+  "archetype": "comedy",
+  "category": "monologue_short_edge",
+  "expected_behavior": "A short comedy monologue episode (~15 min) with low atom density. Falls into the default-stub lower band: atoms/50 = 1 → exactly 1 inferred chapter. Pins the gate's behaviour on monologue-style content where the chapter prior contributes minimal new structure but must not over-segment.",
+  "synthesis_notes": "Models a short stand-up / monologue digest. Synthetic shape, no transcript text or commercial-message attribution.",
+  "trace": {
+    "episode_id_anon": "episode_anon_a1c07",
+    "podcast_id_archetype": "show_archetype_comedy",
+    "episode_duration_sec": 900.0,
+    "atom_count": 60,
+    "atom_spacing_sec": 15.0
+  },
+  "gate_inputs": {
+    "creator_chapters_present": false,
+    "stub_chapter_count": null
+  },
+  "expected_before_off": {
+    "plan_generated_count": 0,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 0,
+    "aggregate_latency_ms": 0.0
+  },
+  "expected_after_enabled": {
+    "plan_generated_count": 1,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 1,
+    "aggregate_latency_ms": 30.0
+  }
+}

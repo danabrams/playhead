@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "case_id": "case-04-false-positive-removal-no-candidates",
+  "archetype": "narrative",
+  "category": "false_positive_removal",
+  "expected_behavior": "A narrative episode where the boundary detector legitimately finds no candidates (stub_chapter_count=0 — modelling the production chapter_phase_no_candidates event). Pre-au2v.1: nothing happens — plan absent. Post-au2v.1: the phase still ran (per-episode overhead is charged) but emitted NO plan, so consumers cannot read a fabricated plan and inject a false-positive structural prior. This is the false-positive-removal contract: when there's no signal, the gate must not invent one.",
+  "synthesis_notes": "Models a narrative monologue / produced narrative show whose audio shape doesn't yield clean chapter boundaries (low energy variance, sparse pause structure). The point is not the trace contents but the gate inputs: stub_chapter_count=0 represents the production no-candidates event class.",
+  "trace": {
+    "episode_id_anon": "episode_anon_a1c04",
+    "podcast_id_archetype": "show_archetype_narrative",
+    "episode_duration_sec": 1500.0,
+    "atom_count": 150,
+    "atom_spacing_sec": 10.0
+  },
+  "gate_inputs": {
+    "creator_chapters_present": false,
+    "stub_chapter_count": 0
+  },
+  "expected_before_off": {
+    "plan_generated_count": 0,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 0,
+    "aggregate_latency_ms": 0.0
+  },
+  "expected_after_enabled": {
+    "plan_generated_count": 0,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 0,
+    "aggregate_latency_ms": 5.0
+  }
+}

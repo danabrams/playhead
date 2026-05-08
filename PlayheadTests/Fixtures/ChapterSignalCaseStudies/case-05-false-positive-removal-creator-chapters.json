@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "case_id": "case-05-false-positive-removal-creator-chapters",
+  "archetype": "narrative",
+  "category": "false_positive_removal",
+  "expected_behavior": "A narrative episode that already ships id3/pc20/rssInline chapters from the creator. Pre-au2v.1: chapter signal absent (production behavior was the same — creator chapters are read by other code paths but the chapter generation phase didn't exist). Post-au2v.1: ChapterGenerationPhase short-circuits via creator-chapter precedence, charging zero FM cost and zero latency, and emitting NO inferred plan. This guards against the failure mode where an FM-inferred plan would override the creator's near-ground-truth labels.",
+  "synthesis_notes": "Models a produced narrative show that consistently ships chapter markers (e.g., the ID3 chapter standard widely used by produced series). Creator-chapter detection is a per-trace boolean today (the FrozenTrace v3 schema does not yet carry the field directly — bead 4 will add it).",
+  "trace": {
+    "episode_id_anon": "episode_anon_a1c05",
+    "podcast_id_archetype": "show_archetype_narrative",
+    "episode_duration_sec": 2400.0,
+    "atom_count": 300,
+    "atom_spacing_sec": 8.0
+  },
+  "gate_inputs": {
+    "creator_chapters_present": true,
+    "stub_chapter_count": null
+  },
+  "expected_before_off": {
+    "plan_generated_count": 0,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 0,
+    "aggregate_latency_ms": 0.0
+  },
+  "expected_after_enabled": {
+    "plan_generated_count": 0,
+    "skipped_by_creator_chapters": 1,
+    "total_fm_calls_for_chapter_labeling": 0,
+    "aggregate_latency_ms": 0.0
+  }
+}

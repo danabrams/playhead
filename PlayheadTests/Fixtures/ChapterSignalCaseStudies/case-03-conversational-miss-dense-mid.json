@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "case_id": "case-03-conversational-miss-dense-mid",
+  "archetype": "conversational",
+  "category": "conversational_miss",
+  "expected_behavior": "A mid-length conversational episode (~30 min) with dense transcript atoms and no creator-supplied chapters. Lands squarely in the default-stub mid-band: atoms/50 = 4 → 4 inferred chapters. Demonstrates the gate can produce a non-trivial plan on a typical conversational show without saturating the upper clamp.",
+  "synthesis_notes": "Synthetic. Atom density modeled on a fast-paced conversational show. No transcript text, no commercial-message attribution, no episode title.",
+  "trace": {
+    "episode_id_anon": "episode_anon_a1c03",
+    "podcast_id_archetype": "show_archetype_conversational",
+    "episode_duration_sec": 1800.0,
+    "atom_count": 200,
+    "atom_spacing_sec": 9.0
+  },
+  "gate_inputs": {
+    "creator_chapters_present": false,
+    "stub_chapter_count": null
+  },
+  "expected_before_off": {
+    "plan_generated_count": 0,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 0,
+    "aggregate_latency_ms": 0.0
+  },
+  "expected_after_enabled": {
+    "plan_generated_count": 1,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 4,
+    "aggregate_latency_ms": 105.0
+  }
+}
