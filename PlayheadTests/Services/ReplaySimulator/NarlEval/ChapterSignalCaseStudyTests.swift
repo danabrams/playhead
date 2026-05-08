@@ -475,6 +475,56 @@ struct ChapterSignalCaseStudyDirectoryTests {
         }
     }
 
+    @Test("Every case exercises observable lift: .off and .enabled differ on at least one counter")
+    func everyCaseExercisesObservableLift() throws {
+        // A case-study corpus that documents identical .off and .enabled
+        // counters for some case is a fixture that exercises no actual
+        // gate behaviour — the test would tautologically pass on that
+        // case under any gate implementation. Pin per-case lift here:
+        // for every case, at least one of the four documented counters
+        // (plan_generated_count, skipped_by_creator_chapters,
+        // total_fm_calls_for_chapter_labeling, aggregate_latency_ms) must
+        // differ between expected_before_off and expected_after_enabled.
+        // Cases 04/08 have latency-only lift (the gate ran but produced
+        // no plan); case 05 has skippedByCreatorChapters-only lift; the
+        // rest carry plan+FM+latency lift. Any future case that
+        // accidentally drops the lift will fail here loudly.
+        let cases = try CaseStudyPaths.loadAllCases().map(\.1)
+        for study in cases {
+            let before = study.expectedBeforeOff
+            let after = study.expectedAfterEnabled
+            let differs =
+                before.planGeneratedCount != after.planGeneratedCount
+                || before.skippedByCreatorChapters != after.skippedByCreatorChapters
+                || before.totalFMCallsForChapterLabeling != after.totalFMCallsForChapterLabeling
+                || before.aggregateLatencyMs != after.aggregateLatencyMs
+            #expect(differs,
+                    "[\(study.caseId)] expected_before_off and expected_after_enabled are identical — case exercises no observable gate lift.")
+        }
+    }
+
+    @Test("Every case has non-empty expected_behavior and synthesis_notes")
+    func everyCaseHasDocumentationStrings() throws {
+        // The fixtures pull double duty as the documentation surface for
+        // *why* each behaviour is pinned. A case shipping with empty
+        // `expected_behavior` or `synthesis_notes` strings is a
+        // documentation regression: future readers (humans and the
+        // replay-tooling diff harness) lose the context that explains
+        // what each case is meant to demonstrate. Both strings must be
+        // non-empty after trimming whitespace.
+        let cases = try CaseStudyPaths.loadAllCases().map(\.1)
+        for study in cases {
+            let behaviorTrimmed = study.expectedBehavior
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let notesTrimmed = study.synthesisNotes
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            #expect(!behaviorTrimmed.isEmpty,
+                    "[\(study.caseId)] expected_behavior must be non-empty.")
+            #expect(!notesTrimmed.isEmpty,
+                    "[\(study.caseId)] synthesis_notes must be non-empty.")
+        }
+    }
+
     @Test("Every case's expected counters are self-consistent")
     func expectedCountersSelfConsistent() throws {
         // Every well-formed case must have non-negative counter values
