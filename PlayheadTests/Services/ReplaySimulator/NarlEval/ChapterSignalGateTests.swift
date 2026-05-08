@@ -309,6 +309,34 @@ struct ChapterSignalGateTests {
                 "creatorChaptersPresent must be invoked once per unique non-.off mode after deduplication; observed \(creatorCalls.count) calls.")
     }
 
+    @Test("replay(trace:modes:) with all-.off duplicate modes still produces one structural-zero entry")
+    func modeComparisonDuplicateOffStillProducesEntry() {
+        // Edge case: deduplication must not erase `.off` from the
+        // result dictionary. `[.off, .off, .off]` → 1 entry, not 0.
+        // The fast-path inside `replay(traces:mode:)` short-circuits
+        // before invoking caller closures, so this test also pins
+        // that the closures stay un-invoked even with multiple `.off`
+        // entries (the fast path runs once after dedup).
+        let trace = Self.makeTrace(atomCount: 250)
+        let stubCalls = ClosureCallCounter()
+        let creatorCalls = ClosureCallCounter()
+        let cfg = ChapterSignalGate.Config(
+            stubChapterCount: { _ in stubCalls.increment(); return 5 },
+            creatorChaptersPresent: { _ in creatorCalls.increment(); return false }
+        )
+        let results = ChapterSignalGate.replay(
+            trace: trace,
+            modes: [.off, .off, .off],
+            config: cfg
+        )
+        #expect(results.count == 1)
+        #expect(results.keys.contains(.off))
+        #expect(stubCalls.count == 0,
+                "All-.off mode list must not invoke stubChapterCount; observed \(stubCalls.count) calls.")
+        #expect(creatorCalls.count == 0,
+                "All-.off mode list must not invoke creatorChaptersPresent; observed \(creatorCalls.count) calls.")
+    }
+
     @Test("replay(trace:modes:) with empty modes returns empty dictionary")
     func modeComparisonHelperEmptyModes() {
         let trace = Self.makeTrace()
