@@ -1,12 +1,17 @@
 // ChapterGenerationPhase.swift
-// playhead-au2v.1.10: Shell of the chapter-generation phase.
+// playhead-au2v.1.10: Shell of the chapter-generation phase
+// (admission, snapshot-race, cancellation, lifecycle diagnostics).
 // playhead-au2v.1.11: Creator-chapter precedence short-circuit added.
+// playhead-au2v.1.12: Parallelized per-candidate FM labeling capped at
+// `maxFMConcurrency`, plan-level assembler integration (op-rate gate +
+// high-unclear warning), and the `ChapterPlanReadyEvent` emission
+// contract (fired exactly once on a successful plan write, never on
+// any failure / abort path).
 //
-// This file is the *skeleton* that ties together the (future) boundary
-// detector (playhead-au2v.1.4 / .5) and the (future) chapter labeler
-// (playhead-au2v.1.7 / .8). The shell owns:
+// Phase contract (across both beads):
 //
-//   1. ChapterSignalMode gate (`.off` → no work, no diagnostic).
+//   1. ChapterSignalMode gate (`.off` → no work, no diagnostic, no ready
+//      event).
 //   2. Admission control (delegates to an injected
 //      `ChapterPhaseAdmissionPolicy`; matches the spirit of the
 //      `CapabilitySnapshot.canUseFoundationModels` gate used by
@@ -34,7 +39,9 @@
 //      explicit cancellation — both express "the input we built this
 //      plan against is no longer current"; the inline comment at the
 //      recheck-mismatch branch in `run()` explains why we collapse
-//      cancellation and recheck-mismatch onto the same wire event).
+//      cancellation and recheck-mismatch onto the same wire event.
+//      The `.raceAborted` Outcome lets in-process callers distinguish
+//      the two without parsing the OS log.
 //   5. Cooperative cancellation honoring task cancellation. We use
 //      `Task.isCancelled` checks at every yield point (rather than
 //      `try Task.checkCancellation()`) so the shell can collapse a
@@ -44,26 +51,40 @@
 //      Throws of `CancellationError` from the detector or labeler are
 //      ALSO honored (caught and routed through the same `preempt`
 //      helper) — the `FoundationModelClassifier` pattern of throwing
-//      cancellation is still respected at the seam.
-//   6. Cache write into `ChapterPlanCache` (bead .1) on success, with
-//      a `chapter_phase_completed` diagnostic.
+//      cancellation is still respected at the seam. The parallel
+//      labeling is wrapped in a TaskGroup whose `cancelAll()` fans the
+//      cancel out to every in-flight FM call; cancellation discards
+//      partial state — no plan write, no ready event.
+//   6. Per-candidate FM labeling, dispatched through a TaskGroup
+//      capped at `maxFMConcurrency` (see static constant). Per-call
+//      operational failures (non-cancellation throws) DO NOT abort the
+//      batch — the survivors flow into `ChapterPlanAssembler` which
+//      runs the (>30%) operational-unclear gate AND the (>50%)
+//      high-unclear warning. The op-rate gate produces an abort
+//      Outcome AND its own diagnostic event; no plan is written and
+//      no ready event fires.
+//   7. Cache write into `ChapterPlanCache` (bead .1) on a successful
+//      assembly, followed by the `chapter_phase_completed` diagnostic
+//      AND the `ChapterPlanReadyEvent` for in-process consumers (a
+//      coverage-plan refresh worker etc., wired in a later bead).
+//      When the assembler flags high-unclear, the warning event fires
+//      BEFORE `chapter_phase_completed` so support engineers see the
+//      reduced-confidence signal aligned with the run that produced
+//      it.
 //
 // Out of scope (later beads):
-//   * Real boundary detection (`.4` + `.5`), real FM labeling (`.7` +
-//     `.8`), creator-chapter short-circuit (`.11`), per-chapter
-//     parallelism (`.12`), wiring into `AdDetectionService`'s backfill
-//     path (`.13`), end-to-end integration tests (`.13`).
-//   * Per-call retry / op-vs-semantic failure classification — those
-//     emit `chapter_phase_label_failed`, which is the labeling
-//     service's responsibility (`.7` / `.8`).
+//   * Wiring into `AdDetectionService`'s backfill path (.13).
+//   * Consumers subscribing to `ChapterPlanReadyEvent` (the event is
+//     informational for now; bead 12 only guarantees the publisher
+//     contract).
 //
 // Logging discipline:
 //   * Every exit path EXCEPT the `.off` short-circuit emits exactly
 //     one phase-completion diagnostic (success or specific failure).
 //     "Phase-completion" here means terminal events:
 //     `.skippedAdmission`, `.skippedCreatorChapters`, `.noCandidates`,
-//     `.preempted`, `.completed`. There is never more than one of
-//     those per run.
+//     `.preempted`, `.operationalUnclearRateExceeded`, `.completed`.
+//     There is never more than one of those per run.
 //     Note that `transcriptUnavailable` exits early but DOES emit
 //     `.noCandidates` — we still want telemetry on "phase admitted
 //     but had no transcript" for dogfood mis-scheduling debugging.
@@ -74,9 +95,35 @@
 //     transcript unavailable) do NOT emit `.started` — those exits
 //     are "phase never truly began" and the bead .3 diagnostic
 //     schema agrees with that reading.
+//   * The `.highUnclearRate` event, when emitted, sits BETWEEN
+//     `.started` and `.completed` — it is a non-terminal warning, not
+//     a phase-outcome event.
 //   * `ChapterSignalMode.off` emits NO diagnostic at all — the
 //     feature is fully off, and we want zero surface area in shipped
 //     bundles when the flag is off.
+//
+// FM concurrency cap rationale:
+//   The bead spec says "capped at the existing FM concurrency limit
+//   (~2 on-device for FoundationModels)". The repo does NOT currently
+//   define an explicit project-wide constant — `FoundationModelClassifier`
+//   relies on Apple's per-`LanguageModelSession` serialization (a
+//   second concurrent request inside the same session surfaces as
+//   `.concurrentRequests`, which `ChapterLabelingService.classify`
+//   folds into a `.rateLimited` operational error). Other on-device
+//   FM consumers (`ShadowCaptureConfig.laneAMaxInFlight`) document the
+//   same constraint: "FoundationModels is serialized per-session on
+//   device, so concurrency above 1 offers little throughput gain
+//   while multiplying peak memory."
+//
+//   For the chapter generation phase we use a fresh
+//   `LanguageModelSession` per call (see `ChapterLabelingService.live`
+//   — bd-34e Fix B avoids per-call context-window bloat), so two
+//   sessions CAN run in parallel without tripping
+//   `.concurrentRequests`. Going above 2 burns peak memory + thermal
+//   budget for diminishing throughput. We cap at 2 here as the
+//   conservative default — `maxFMConcurrency` is `static`, so a
+//   future tuning experiment can adjust it in one place if the
+//   measured trade-off shifts.
 
 import Foundation
 import OSLog
@@ -104,40 +151,41 @@ protocol ChapterPhaseAdmissionPolicy: Sendable {
 
 /// Boundary-detection seam. Bead .4 + .5 provide the real
 /// implementation; this bead exercises the call site through a stub.
-///
-/// The seam returns `[ChapterBoundaryCandidate]` (a thin local struct
-/// owned by this shell) rather than `[ChapterEvidence]` so the shell
-/// stays decoupled from the labeler's output type — the labeler's job
-/// is to turn each candidate into a labeled `ChapterEvidence`.
 protocol ChapterBoundaryDetecting: Sendable {
     func detect() async throws -> [ChapterBoundaryCandidate]
 }
 
-/// Labeling seam. Bead .7 + .8 provide the real FM-backed
-/// implementation. The shell calls this serially per candidate;
-/// per-chapter parallelism is bead .12's job and stays intentionally
-/// out of scope here.
+/// Labeling seam. Bead .7 provides the real FM-backed implementation
+/// (`ChapterLabelingService`). The shell calls this once per
+/// candidate, in parallel under a TaskGroup capped at
+/// `maxFMConcurrency`.
 ///
-/// `nil` return is allowed: a candidate the labeler cannot classify
-/// is skipped silently from this shell's perspective. Real label
-/// failures (operational vs semantic) emit
-/// `chapter_phase_label_failed` from inside the labeling service —
-/// not from the shell — so callers control retry/failure vocabulary.
+/// Returns:
+///  * `LabelingResult` — every successful FM call (confident,
+///    semantic-unclear, or operationally-failed-with-known-vocabulary).
+///    The phase passes the result list to `ChapterPlanAssembler` so
+///    plan-level gates can fire.
+///  * `nil` — the labeler chose to silently skip this candidate (e.g.
+///    region too short to embed in the prompt). Skipped candidates
+///    contribute neither to the assembler's denominator nor to the
+///    plan; they are simply absent.
+///
+/// Throws:
+///  * `CancellationError` — propagated up so the TaskGroup tears down
+///    cleanly. The phase collapses this into `.preempted`.
+///  * Any other `Error` — treated as an operational failure for that
+///    one candidate. The phase synthesizes an operational
+///    `LabelingResult` so the assembler's op-rate gate can see it.
 protocol ChapterLabeling: Sendable {
     func label(
         candidate: ChapterBoundaryCandidate
-    ) async throws -> ChapterEvidence?
+    ) async throws -> LabelingResult?
 }
 
-/// Source of the "current transcript content hash". The shell calls
-/// this twice per run: once on entry (snapshot), once before the
-/// cache write (race re-check). `nil` indicates the transcript is
-/// not yet available; the shell treats `nil` on entry as
-/// `Outcome.transcriptUnavailable` (emits the bead .3 `.noCandidates`
-/// event, since that's the catch-all "ran but produced nothing"
-/// signal in the wire vocabulary) and `nil` on the re-check as a
-/// mismatch (`Outcome.raceAborted` with a `.preempted` event — the
-/// input went away under us).
+/// Source of the "current transcript content hash". Called twice per
+/// run: once on entry (snapshot), once before the cache write
+/// (race re-check). `nil` on entry → `.transcriptUnavailable`; `nil`
+/// or different hash on recheck → `.raceAborted`.
 protocol TranscriptHashProviding: Sendable {
     func currentTranscriptHash() async -> String?
 }
@@ -184,9 +232,7 @@ protocol CreatorChapterProviding: Sendable {
 /// later persistence bead) will route these into the diagnostics
 /// store; tests inject an in-memory recorder.
 ///
-/// Implementations must be safe to call from any task/actor context.
-/// The shell awaits each `record` so emit ordering matches phase
-/// progress; sinks are free to enqueue and persist asynchronously.
+/// Implementations must be safe to call from any task / actor context.
 protocol ChapterPhaseEventSink: Sendable {
     func record(_ event: ChapterPhaseEvent) async
 }
@@ -194,12 +240,6 @@ protocol ChapterPhaseEventSink: Sendable {
 /// Lightweight candidate record for a single boundary the detector
 /// proposes. Owned by the phase shell so detector and labeler can be
 /// developed against a stable contract.
-///
-/// The shell does not consume any field: `startTime` is the only
-/// field with semantic meaning to a labeler in the current contract,
-/// and even that is opaque to this file. `endTime` is `nil` for the
-/// last candidate (matches `ChapterEvidence.endTime`'s open-ended
-/// semantics).
 struct ChapterBoundaryCandidate: Sendable, Hashable, Equatable {
     let startTime: TimeInterval
     let endTime: TimeInterval?
@@ -217,10 +257,22 @@ struct ChapterBoundaryCandidate: Sendable, Hashable, Equatable {
 /// pipeline.
 ///
 /// Concurrency: the phase itself is *not* actor-isolated — it is a
-/// plain `struct` whose dependencies are all `Sendable`. Cache writes
-/// hop onto `ChapterPlanCache`'s actor automatically. Per-chapter
-/// parallelism is deferred to bead .12.
+/// plain `struct` whose dependencies are all `Sendable`. Per-candidate
+/// labeling is dispatched through a TaskGroup capped at
+/// `maxFMConcurrency`; cache writes hop onto `ChapterPlanCache`'s
+/// actor automatically.
 struct ChapterGenerationPhase: Sendable {
+
+    // MARK: - Tunables
+
+    /// Maximum number of FM labeling tasks the phase will run in
+    /// parallel. Documented at the top of the file: 2 reflects the
+    /// "FoundationModels serialized per-session" constraint plus the
+    /// memory / thermal trade-off from running multiple sessions.
+    /// `static` so a future tuning experiment can adjust the value in
+    /// one place; not parameterized on the init() because every
+    /// production caller wants the same value.
+    static let maxFMConcurrency: Int = 2
 
     // MARK: Dependencies
 
@@ -231,6 +283,8 @@ struct ChapterGenerationPhase: Sendable {
     private let transcriptHashProvider: TranscriptHashProviding
     private let cache: ChapterPlanCache
     private let eventSink: ChapterPhaseEventSink
+    private let planReadySink: ChapterPlanReadyEventSink
+    private let assembler: ChapterPlanAssembler
     private let clock: @Sendable () -> Date
     private let logger: Logger
 
@@ -244,6 +298,8 @@ struct ChapterGenerationPhase: Sendable {
         transcriptHashProvider: TranscriptHashProviding,
         cache: ChapterPlanCache,
         eventSink: ChapterPhaseEventSink,
+        planReadySink: ChapterPlanReadyEventSink = NoopChapterPlanReadyEventSink(),
+        assembler: ChapterPlanAssembler = ChapterPlanAssembler(),
         clock: @escaping @Sendable () -> Date = { Date() },
         logger: Logger = Logger(subsystem: "com.playhead", category: "ChapterGenerationPhase")
     ) {
@@ -254,6 +310,8 @@ struct ChapterGenerationPhase: Sendable {
         self.transcriptHashProvider = transcriptHashProvider
         self.cache = cache
         self.eventSink = eventSink
+        self.planReadySink = planReadySink
+        self.assembler = assembler
         self.clock = clock
         self.logger = logger
     }
@@ -278,25 +336,19 @@ struct ChapterGenerationPhase: Sendable {
         case transcriptUnavailable
         case raceAborted
         case preempted
+        /// Plan-level operational-unclear rate exceeded the assembler's
+        /// strict 30% threshold; no plan was written.
+        case operationalRateExceeded(rate: Double, threshold: Double)
         case cached(chapterCount: Int, planConfidence: Double)
     }
 
     /// Run the phase end-to-end.
-    ///
-    /// - Parameters:
-    ///   - mode: Tri-state gate from `AdDetectionConfig.chapterSignalMode`.
-    ///     `.off` causes an immediate, silent no-op.
-    ///   - episodeId: Raw episode identifier; hashed with `installID`
-    ///     before any diagnostic ships.
-    ///   - installID: Per-install salt for the episode-id hash. Same
-    ///     value used by `scheduler_events`.
-    /// - Returns: An `Outcome` describing the terminal exit path.
     func run(
         mode: ChapterSignalMode,
         episodeId: String,
         installID: UUID
     ) async -> Outcome {
-        // 1. Mode gate — `.off` is the *only* path that emits no
+        // 1. Mode gate — `.off` is the only path that emits no
         //    diagnostic. The feature is fully off; no surface area.
         guard mode.runsChapterGeneration else {
             return .modeOff
@@ -304,10 +356,8 @@ struct ChapterGenerationPhase: Sendable {
 
         let startedAtTimestamp = clock().timeIntervalSince1970
 
-        // 2. Admission. We check admission BEFORE the entry-hash
-        //    snapshot so a denied phase never even reads the
-        //    transcript cache — matches the "never burn FM cost on a
-        //    denied phase" intent.
+        // 2. Admission. Checked BEFORE the entry-hash snapshot so a
+        //    denied phase never even reads the transcript cache.
         let admission = await admissionPolicy.decide()
         if case .deny(let reason) = admission {
             await recordSkippedAdmission(
@@ -319,9 +369,6 @@ struct ChapterGenerationPhase: Sendable {
             return .admissionDenied(reason: reason)
         }
 
-        // Cancellation can fire at any await; honor it after every
-        // yield point. Each `preempt` call below collapses to
-        // `recordPreempted` + `return .preempted`.
         if Task.isCancelled {
             return await preempt(installID: installID, episodeId: episodeId)
         }
@@ -376,19 +423,11 @@ struct ChapterGenerationPhase: Sendable {
 
         // 4. Transcript snapshot capture. A `nil` here means the
         //    transcript pipeline has not produced anything to hash —
-        //    typically the phase was invoked too early (an
-        //    orchestrator scheduling bug, not the shell's fault).
-        //    We emit `.noCandidates` so dogfood telemetry can surface
-        //    mis-scheduled invocations (an "admitted, no transcript,
-        //    zero bytes cached" run should be visible) and we exit
-        //    with `Outcome.transcriptUnavailable` so in-process
-        //    callers can distinguish this from a real "ran, found
-        //    nothing" result.
+        //    typically the phase was invoked too early. Emit
+        //    `.noCandidates` (the catch-all "phase ran, produced
+        //    nothing" event) and exit with `.transcriptUnavailable`
+        //    so in-process callers can distinguish the two cases.
         guard let entryHash = await transcriptHashProvider.currentTranscriptHash() else {
-            // The bead .3 wire has no dedicated "transcript unavailable"
-            // event; `.noCandidates` is the catch-all for "phase ran,
-            // produced nothing" and the supplementary phase log
-            // (below) carries the distinction for engineers who need it.
             logger.notice(
                 "chapterphase.transcript_unavailable_at_entry — emitting no_candidates"
             )
@@ -401,7 +440,8 @@ struct ChapterGenerationPhase: Sendable {
         // AND we have a transcript snapshot to anchor the run. Emit
         // the single `.started` lifecycle event — the bead .3 schema
         // requires this be paired with exactly one terminal event
-        // (`.noCandidates` / `.preempted` / `.completed`) per run
+        // (`.noCandidates` / `.preempted` /
+        // `.operationalUnclearRateExceeded` / `.completed`) per run
         // from this point onward. The earlier short-circuit exits
         // (`.modeOff` / `.skippedAdmission` / `.skippedCreatorChapters`)
         // are themselves single-terminal-event paths that bypass
@@ -453,44 +493,41 @@ struct ChapterGenerationPhase: Sendable {
             return .noCandidates
         }
 
-        // 6. Serial labeling pass. Per-call parallelism is bead .12.
-        //    A `nil` from the labeler is silently dropped; a non-
-        //    cancellation throw is logged and skips that candidate
-        //    (the labeling service owns `chapter_phase_label_failed`
-        //    vocabulary, not the shell). A `CancellationError`
-        //    throw collapses the whole run into a preempt — we
-        //    discard partial state rather than persist a half-
-        //    labeled plan.
-        var labeled: [ChapterEvidence] = []
-        labeled.reserveCapacity(candidates.count)
-        var fmCallCount = 0
-        for candidate in candidates {
-            if Task.isCancelled {
-                return await preempt(installID: installID, episodeId: episodeId)
-            }
-            do {
-                let evidenceOrNil = try await labeler.label(candidate: candidate)
-                // Only count calls that returned (success or nil)
-                // — throws (cancellation or labeler failures) are
-                // tracked through their own paths and would muddle
-                // the "FM cost incurred for this completed plan"
-                // semantic of `completed.fm_call_count`.
-                fmCallCount += 1
-                if let evidence = evidenceOrNil {
-                    labeled.append(evidence)
-                }
-            } catch is CancellationError {
-                return await preempt(installID: installID, episodeId: episodeId)
-            } catch {
-                // Per-call failure: log and keep going. The labeling
-                // service is the proper emitter of
-                // `chapter_phase_label_failed`; the shell's job is
-                // to keep moving and avoid losing other chapters.
-                logger.error(
-                    "chapterphase.labeling_failed: \(error.localizedDescription, privacy: .public)"
-                )
-                continue
-            }
+        // 6. Parallel labeling pass.
+        //
+        //    A TaskGroup runs at most `maxFMConcurrency` FM calls in
+        //    parallel. Each task carries its candidate's input INDEX
+        //    so out-of-order completions can be reassembled into
+        //    start-time order before the assembler runs.
+        //
+        //    Per-call outcomes:
+        //      * `LabelingResult?` returned → the index slot for that
+        //        candidate is set to that result (or left `nil` for
+        //        skip-without-result).
+        //      * non-cancellation throw → synthesized into an
+        //        operational `LabelingResult` so the assembler's
+        //        op-rate gate can see it. The synthesis MIRRORS
+        //        `ChapterLabelingService.operationalResult(...)`:
+        //        `disposition = .ambiguous`, `qualityScore = 0`,
+        //        `failureMode = .operational`, `attempts = 1`.
+        //      * `CancellationError` → re-thrown out of the inner
+        //        task; the TaskGroup tears down via `cancelAll()` and
+        //        the phase returns `.preempted`. Partial state is
+        //        discarded.
+        let labelingOutcomes: [LabelingResult?]
+        do {
+            labelingOutcomes = try await runParallelLabeling(candidates: candidates)
+        } catch is CancellationError {
+            return await preempt(installID: installID, episodeId: episodeId)
+        } catch {
+            // No other error path is possible from runParallelLabeling
+            // (per-call non-cancellation throws are folded into
+            // operational results inside the group). Defense-in-depth
+            // logging in case a future change introduces a leak.
+            logger.error(
+                "chapterphase.parallel_labeling_unexpected_error: \(error.localizedDescription, privacy: .public)"
+            )
+            return await preempt(installID: installID, episodeId: episodeId)
         }
 
         if Task.isCancelled {
@@ -505,15 +542,14 @@ struct ChapterGenerationPhase: Sendable {
         //    type — both this case and explicit cancellation share
         //    the same actionable shape ("the input we computed
         //    against is no longer current; nothing was persisted").
+        //    The in-process Outcome is `.raceAborted` so callers can
+        //    still distinguish race-vs-cancellation without parsing
+        //    the OS log.
         let recheckHash = await transcriptHashProvider.currentTranscriptHash()
         guard let recheckHash, recheckHash == entryHash else {
             logger.notice(
                 "chapterphase.transcript_changed_during_run entry=\(entryHash, privacy: .public) recheck=\(recheckHash ?? "nil", privacy: .public)"
             )
-            // Same `.preempted` event as explicit cancellation, but
-            // the in-process Outcome is `.raceAborted` so callers can
-            // distinguish "the user cancelled us" from "the input
-            // changed under us" without parsing the OS log.
             await recordPreempted(
                 installID: installID,
                 episodeId: episodeId,
@@ -522,53 +558,245 @@ struct ChapterGenerationPhase: Sendable {
             return .raceAborted
         }
 
-        // 8. Build the plan and persist.
-        let planConfidence = ChapterPlan.computePlanConfidence(labeled)
-        let plan = ChapterPlan(
+        // 8. Compact the labeling outcomes (drop `nil` skip slots,
+        //    retain order) and run the plan-level assembler.
+        //
+        //    `.aborted` from the assembler → emit
+        //    `chapter_phase_operational_unclear_rate_exceeded`, NO
+        //    cache write, NO ready event. Returns
+        //    `.operationalRateExceeded(rate, threshold)` so the
+        //    caller can branch on the abort reason.
+        //
+        //    `.assembled` → write the plan, conditionally emit the
+        //    high-unclear warning, emit `.completed`, fire the
+        //    `ChapterPlanReadyEvent`.
+        //
+        //    The total FM-call count surfaced in the `.completed`
+        //    payload is the number of slots that produced a
+        //    LabelingResult (including operational synthesis) —
+        //    skipped (`nil`) slots are NOT counted, since "FM cost
+        //    incurred for this completed plan" is the metric the
+        //    payload field documents.
+        let labelingResults = labelingOutcomes.compactMap { $0 }
+        let fmCallCount = labelingResults.count
+
+        let assemblyResult = assembler.assemble(
+            results: labelingResults,
             episodeContentHash: entryHash,
-            chapters: labeled,
-            planConfidence: planConfidence,
-            generatedAt: clock(),
-            generationDiagnostics: ChapterPlanDiagnostics(
-                candidatesDetected: candidates.count,
-                candidatesKept: labeled.count
+            candidatesDetected: candidates.count,
+            candidatesKept: candidates.count,
+            generatedAt: clock()
+        )
+
+        switch assemblyResult {
+        case .aborted(let abortInfo):
+            await recordOperationalRateExceeded(
+                installID: installID,
+                episodeId: episodeId,
+                timestamp: clock().timeIntervalSince1970,
+                info: abortInfo
             )
-        )
-        // Cache write returns false on bad input; we still emit
-        // `completed` because the run produced a valid plan —
-        // persistence health is logged, not surfaced as a phase
-        // outcome here (the support engineer queries
-        // `chapterplan.cache.write_failed` for that signal).
-        _ = await cache.put(contentHash: entryHash, plan: plan)
+            return .operationalRateExceeded(
+                rate: abortInfo.operationalUnclearRate,
+                threshold: abortInfo.threshold
+            )
 
-        let completedAt = clock()
-        let latencyMs =
-            (completedAt.timeIntervalSince1970 - startedAtTimestamp) * 1_000.0
-        await recordCompleted(
-            installID: installID,
-            episodeId: episodeId,
-            timestamp: completedAt.timeIntervalSince1970,
-            chapterCount: labeled.count,
-            planConfidence: planConfidence,
-            fmCallCount: fmCallCount,
-            latencyMs: latencyMs
-        )
+        case .assembled(let plan, let warnings):
+            // Persist BEFORE emitting `.completed` and the ready
+            // event — both events advertise that the plan is
+            // observable in the cache.
+            _ = await cache.put(contentHash: entryHash, plan: plan)
 
-        return .cached(
-            chapterCount: labeled.count,
-            planConfidence: planConfidence
+            // High-unclear warning is non-terminal: it precedes
+            // `.completed` so support engineers see them in order.
+            if warnings.highUnclearRateExceeded {
+                await recordHighUnclearRate(
+                    installID: installID,
+                    episodeId: episodeId,
+                    timestamp: clock().timeIntervalSince1970,
+                    warnings: warnings
+                )
+            }
+
+            let completedAt = clock()
+            let latencyMs =
+                (completedAt.timeIntervalSince1970 - startedAtTimestamp) * 1_000.0
+            await recordCompleted(
+                installID: installID,
+                episodeId: episodeId,
+                timestamp: completedAt.timeIntervalSince1970,
+                chapterCount: plan.chapters.count,
+                planConfidence: plan.planConfidence,
+                fmCallCount: fmCallCount,
+                latencyMs: latencyMs
+            )
+
+            // Ready event fires AFTER `.completed` so subscribers
+            // observing both can rely on the diagnostic having
+            // landed first. Bead 12 contract: this is the ONLY path
+            // that emits `ChapterPlanReady`.
+            await planReadySink.record(
+                ChapterPlanReadyEvent(
+                    episodeContentHash: plan.episodeContentHash,
+                    planConfidence: plan.planConfidence,
+                    chapterCount: plan.chapters.count,
+                    generatedAt: plan.generatedAt
+                )
+            )
+
+            return .cached(
+                chapterCount: plan.chapters.count,
+                planConfidence: plan.planConfidence
+            )
+        }
+    }
+
+    // MARK: - Parallel labeling
+
+    /// Run the parallel labeling pass. Returns a same-length array of
+    /// optional `LabelingResult` aligned to the input candidate
+    /// order: `result[i]` corresponds to `candidates[i]`.
+    ///
+    /// `nil` slots are silent skips (labeler returned `nil`);
+    /// non-cancellation throws are folded into a synthesized
+    /// `.operational` `LabelingResult` so the assembler's op-rate gate
+    /// can see the failure.
+    ///
+    /// Throws `CancellationError` if the parent task was cancelled OR
+    /// any inner labeling call threw `CancellationError`. The
+    /// TaskGroup tears down with `cancelAll()` and partial state is
+    /// discarded by the caller (no plan write, no ready event). The
+    /// cancellation throw from a labeler is the documented signal
+    /// that "this run is being torn down" — collapsing it into an
+    /// operational result would let the assembler write a plan
+    /// against a cancelled run, which violates the bead-12 contract
+    /// "cancellation discards partial state".
+    private func runParallelLabeling(
+        candidates: [ChapterBoundaryCandidate]
+    ) async throws -> [LabelingResult?] {
+        let cap = max(1, Self.maxFMConcurrency)
+        let n = candidates.count
+
+        // The result array is filled by index so out-of-order task
+        // completion still produces a correctly-aligned slice.
+        var results: [LabelingResult?] = Array(repeating: nil, count: n)
+
+        try await withThrowingTaskGroup(
+            of: (Int, LabelingResult?).self
+        ) { group in
+            // Submit the first `cap` tasks, then submit a new one for
+            // every completion until the candidate queue drains. This
+            // is the standard "rate-limited TaskGroup" pattern (see
+            // Apple sample code; the equivalent of a semaphore-limited
+            // dispatcher with structured concurrency cancellation).
+            var nextIndex = 0
+            let initialBatch = Swift.min(cap, n)
+            for _ in 0..<initialBatch {
+                let i = nextIndex
+                nextIndex += 1
+                let candidate = candidates[i]
+                let labeler = self.labeler
+                group.addTask {
+                    try await Self.labelOnce(
+                        labeler: labeler,
+                        candidate: candidate,
+                        index: i
+                    )
+                }
+            }
+
+            do {
+                while let next = try await group.nextWithCancellationPropagation() {
+                    let (index, value) = next
+                    results[index] = value
+                    if Task.isCancelled {
+                        group.cancelAll()
+                        throw CancellationError()
+                    }
+                    if nextIndex < n {
+                        let i = nextIndex
+                        nextIndex += 1
+                        let candidate = candidates[i]
+                        let labeler = self.labeler
+                        group.addTask {
+                            try await Self.labelOnce(
+                                labeler: labeler,
+                                candidate: candidate,
+                                index: i
+                            )
+                        }
+                    }
+                }
+            } catch {
+                // Either a labeler threw `CancellationError` or the
+                // parent task was cancelled. Either way, fan the
+                // cancel out to the remaining in-flight tasks and
+                // surface the error so the caller can short-circuit
+                // to the `.preempted` outcome. We swallow the
+                // remaining task results (they're operational
+                // synthesizations and we're discarding partial state
+                // anyway).
+                group.cancelAll()
+                throw error
+            }
+        }
+
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+
+        return results
+    }
+
+    /// Run one labeling call. `CancellationError` is re-thrown so the
+    /// TaskGroup observes cancellation and the phase short-circuits
+    /// to `.preempted` (partial state is discarded by the caller).
+    /// Any other error is folded into an `.operational`
+    /// `LabelingResult` so the assembler's op-rate gate can see the
+    /// failure as a per-call operational issue rather than
+    /// terminating the whole batch.
+    private static func labelOnce(
+        labeler: ChapterLabeling,
+        candidate: ChapterBoundaryCandidate,
+        index: Int
+    ) async throws -> (Int, LabelingResult?) {
+        do {
+            let result = try await labeler.label(candidate: candidate)
+            return (index, result)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return (index, synthesizedOperationalResult(for: candidate))
+        }
+    }
+
+    /// Synthesize an `.operational` `LabelingResult` for a candidate
+    /// whose labeler call threw a non-cancellation error. Mirrors
+    /// `ChapterLabelingService.operationalResult(...)` so the
+    /// assembler sees the same shape for in-service vs. shell-
+    /// synthesized failures.
+    private static func synthesizedOperationalResult(
+        for candidate: ChapterBoundaryCandidate
+    ) -> LabelingResult {
+        let evidence = ChapterEvidence(
+            startTime: candidate.startTime,
+            endTime: candidate.endTime,
+            title: nil,
+            source: .inferred,
+            disposition: .ambiguous,
+            qualityScore: 0
+        )
+        return LabelingResult(
+            chapter: evidence,
+            labelDisposition: .unclear,
+            topicDescriptor: nil,
+            failureMode: .operational,
+            attempts: 1
         )
     }
 
     // MARK: - Cancellation / no-candidates collapse helpers
 
-    /// Records a `.preempted` event with a fresh timestamp and returns
-    /// the matching `.preempted` `Outcome`. Used by every site in
-    /// `run()` that observes cancellation — both explicit
-    /// `Task.isCancelled` checks AND `catch is CancellationError`
-    /// branches — so the timestamp/emit pattern lives in one place.
-    /// The recheck-mismatch branch does NOT use this helper because
-    /// its outcome is `.raceAborted`, not `.preempted`.
     private func preempt(
         installID: UUID,
         episodeId: String
@@ -581,10 +809,6 @@ struct ChapterGenerationPhase: Sendable {
         return .preempted
     }
 
-    /// Records a `.noCandidates` event with a fresh timestamp. The
-    /// caller still chooses the matching `Outcome` (either
-    /// `.noCandidates` or `.transcriptUnavailable`) — this helper
-    /// owns the diagnostic emit only.
     private func emitNoCandidates(
         installID: UUID,
         episodeId: String
@@ -728,6 +952,45 @@ struct ChapterGenerationPhase: Sendable {
         )
     }
 
+    private func recordOperationalRateExceeded(
+        installID: UUID,
+        episodeId: String,
+        timestamp: Double,
+        info: ChapterPlanAssembler.AbortInfo
+    ) async {
+        await eventSink.record(
+            .operationalUnclearRateExceeded(
+                installID: installID,
+                episodeId: episodeId,
+                timestamp: timestamp,
+                labeledCount: info.labeledCount,
+                operationalUnclearCount: info.operationalUnclearCount,
+                operationalUnclearRate: info.operationalUnclearRate,
+                threshold: info.threshold
+            )
+        )
+    }
+
+    private func recordHighUnclearRate(
+        installID: UUID,
+        episodeId: String,
+        timestamp: Double,
+        warnings: ChapterPlanAssembler.AssemblyWarnings
+    ) async {
+        await eventSink.record(
+            .highUnclearRate(
+                installID: installID,
+                episodeId: episodeId,
+                timestamp: timestamp,
+                labeledCount: warnings.labeledCount,
+                operationalUnclearCount: warnings.operationalUnclearCount,
+                semanticUnclearCount: warnings.semanticUnclearCount,
+                totalUnclearRate: warnings.totalUnclearRate,
+                threshold: warnings.threshold
+            )
+        )
+    }
+
     private func recordCompleted(
         installID: UUID,
         episodeId: String,
@@ -748,5 +1011,22 @@ struct ChapterGenerationPhase: Sendable {
                 latencyMs: latencyMs
             )
         )
+    }
+}
+
+// MARK: - TaskGroup cancellation propagation helper
+
+private extension ThrowingTaskGroup
+where ChildTaskResult: Sendable, Failure == any Error {
+    /// Wrapper around `next()` that re-throws on parent cancellation.
+    /// `next()` swallows cancellation in some Swift releases when a
+    /// child task has already produced a value — this guard ensures
+    /// we surface cancellation immediately at the loop boundary.
+    mutating func nextWithCancellationPropagation() async throws -> ChildTaskResult? {
+        if Task.isCancelled {
+            cancelAll()
+            throw CancellationError()
+        }
+        return try await self.next()
     }
 }

@@ -77,6 +77,11 @@ struct ChapterGenerationPhaseTests {
     /// concurrently and the invocation count is observable from the
     /// test body via `await`.
     private final class MockLabeler: ChapterLabeling, @unchecked Sendable {
+        /// `returnEvidence` keeps the bead .10 test ergonomics — the
+        /// closure shape did not include a `LabelingResult` envelope.
+        /// The bead .12 widening of `ChapterLabeling` to return
+        /// `LabelingResult?` is bridged here: a `ChapterEvidence` becomes
+        /// a confident-success result; `nil` stays `nil` (skip).
         enum Behavior: Sendable {
             case returnEvidence(template: @Sendable (ChapterBoundaryCandidate) -> ChapterEvidence?)
             case throwOnCall(Error)
@@ -98,11 +103,18 @@ struct ChapterGenerationPhaseTests {
 
         func label(
             candidate: ChapterBoundaryCandidate
-        ) async throws -> ChapterEvidence? {
+        ) async throws -> LabelingResult? {
             await counter.increment()
             switch behavior {
             case .returnEvidence(let template):
-                return template(candidate)
+                guard let evidence = template(candidate) else { return nil }
+                return LabelingResult(
+                    chapter: evidence,
+                    labelDisposition: .content,
+                    topicDescriptor: evidence.title,
+                    failureMode: nil,
+                    attempts: 1
+                )
             case .throwOnCall(let error):
                 throw error
             }
@@ -400,7 +412,7 @@ struct ChapterGenerationPhaseTests {
         #expect(events.count == 2)
         #expect(events.first?.eventType == .started)
         #expect(events.last?.eventType == .preempted)
-        #expect(await labeler.invocationCount == 2, "labeler runs serially over candidates before the recheck")
+        #expect(await labeler.invocationCount == 2, "labeler runs over all candidates (in parallel under the FM cap) before the recheck")
         // Plan must NOT be cached under either the entry or the recheck hash.
         let storedA = await cache.get(contentHash: "hash-A")
         let storedB = await cache.get(contentHash: "hash-B")
@@ -537,8 +549,15 @@ struct ChapterGenerationPhaseTests {
 
     // MARK: - Per-call labeler failures (non-cancellation)
 
-    @Test("labeler throws non-cancellation on every candidate → completed with empty plan and zero chapters")
+    @Test("labeler throws non-cancellation on every candidate → operational-rate abort, no cache write, no completed event")
     func labelerThrowsNonCancellationContinues() async {
+        // Bead .12 contract: per-call non-cancellation throws are
+        // synthesized into operational `LabelingResult`s and flow
+        // through `ChapterPlanAssembler`. With 2/2 = 100% operational
+        // (well above the 30% strict threshold) the plan is dropped
+        // and the phase returns `.operationalRateExceeded`. This is
+        // the documented L2 plan-level gate from bead 8 — the shell
+        // does not invent a different outcome.
         struct LabelError: Error {}
         let cache = Self.makeCache()
         let sink = MockEventSink()
@@ -558,32 +577,20 @@ struct ChapterGenerationPhaseTests {
             installID: UUID()
         )
 
-        // Two candidates, two failures, but the shell still completes
-        // (labeling-failure event vocab is the labeling service's job).
         #expect(await labeler.invocationCount == 2)
-        if case let .cached(chapterCount, _) = outcome {
-            #expect(chapterCount == 0)
+        if case let .operationalRateExceeded(rate, threshold) = outcome {
+            #expect(rate > threshold)
+            #expect(threshold == ChapterPlanAssembler.operationalUnclearRateThreshold)
         } else {
-            Issue.record("Expected .cached outcome, got \(outcome)")
+            Issue.record("Expected .operationalRateExceeded, got \(outcome)")
         }
         let events = await sink.snapshot()
-        #expect(events.count == 2)
         #expect(events.first?.eventType == .started)
-        #expect(events.last?.eventType == .completed)
-        // `fm_call_count` is "FM calls successfully serviced for this
-        // plan" — both labeler calls threw, so the count is 0 even
-        // though the labeler's invocation counter saw 2 calls. Pins
-        // the R1 increment-after-return contract.
-        if case let .completed(payload) = events.last?.payload {
-            #expect(payload.fmCallCount == 0)
-            #expect(payload.chapterCount == 0)
-        } else {
-            Issue.record("Expected completed payload")
-        }
-        // Cache write happened — the plan is empty but valid.
+        #expect(events.contains(where: { $0.eventType == .operationalUnclearRateExceeded }))
+        #expect(!events.contains(where: { $0.eventType == .completed }))
+        // No cache write on op-rate abort.
         let stored = await cache.get(contentHash: "hash-A")
-        #expect(stored != nil)
-        #expect(stored?.chapters.isEmpty == true)
+        #expect(stored == nil)
     }
 
     // MARK: - Successful path
