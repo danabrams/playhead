@@ -709,6 +709,24 @@ enum ChapterSignalAggregateMetrics {
         return Double(enabled) / Double(denominator)
     }
 
+    /// Evaluate whether the production gating bar is met.
+    ///
+    /// Bar predicate (all three must hold):
+    ///   1. **Measurable lift** on at least one axis:
+    ///      `liftPrecision >= measurableLiftEpsilon` OR
+    ///      `liftRecall >= measurableLiftEpsilon`.
+    ///   2. **No regression** on the other axis:
+    ///      `liftPrecision >= -measurableLiftEpsilon` AND
+    ///      `liftRecall >= -measurableLiftEpsilon`.
+    ///      (Equality at ±eps is treated as "tied," not regressed.)
+    ///   3. **Cost in bar**:
+    ///      `fmCostMultiplier <= maxFMCostMultiplier`.
+    ///
+    /// Note: clauses (1) and (2) interact non-trivially at the epsilon
+    /// boundary. A value in the open interval `(0, +eps)` (the "gray zone")
+    /// is NOT a measurable lift but IS "not regressed" — so a one-axis-
+    /// lifted + other-axis-in-gray-zone input passes (see
+    /// `evaluateBarGrayZoneOnOtherAxis` test).
     static func evaluateBar(
         liftPrecision: Double,
         liftRecall: Double,

@@ -903,6 +903,114 @@ struct ChapterSignalAggregateMetricsTests {
                 "empty perShowLift must encode as {} (object), not null")
     }
 
+    @Test("ground-truth ad seconds are mode-independent across baseline/shadow/enabled")
+    func groundTruthSecondsAreModeIndependent() {
+        // Pin the contract that `NarlGroundTruth.build(for:)` is called the
+        // same way for every mode — i.e. ground truth does not silently
+        // change between modes. Without this, a future patch that mistakenly
+        // routes ground-truth construction through the predictor (or makes
+        // it mode-aware) could ship inflated lift numbers because both the
+        // numerator (TP) and denominator (groundTruthAdSeconds) drift
+        // together. The PerShowLiftDelta.deltaGroundTruthAdSeconds doc says
+        // "Should be 0 since ground truth is mode-independent" — this test
+        // is the tripwire that doc references.
+        let traces: [FrozenTrace] = (0..<3).map { i in
+            let start = Double(60 + i * 10)
+            let end = Double(90 + i * 10)
+            return Self.makeTrace(
+                episodeId: "ep-gt-\(i)",
+                podcastId: "pod-gt",
+                episodeDuration: 600,
+                adStart: start,
+                adEnd: end
+            )
+        }
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: traces,
+            runId: "gt-invariant",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        #expect(report.baseline.groundTruthAdSeconds == report.shadow.groundTruthAdSeconds,
+                "ground truth must be mode-independent (baseline vs shadow)")
+        #expect(report.shadow.groundTruthAdSeconds == report.enabled.groundTruthAdSeconds,
+                "ground truth must be mode-independent (shadow vs enabled)")
+        // Per-show delta must be exactly 0 — pin the doc claim directly.
+        for (_, delta) in report.perShowLift {
+            #expect(delta.deltaGroundTruthAdSeconds == 0,
+                    "per-show ground-truth delta must be 0 (ground truth is mode-independent)")
+        }
+    }
+
+    @Test("per-show FM-call deltas sum to the cross-corpus FM-call delta")
+    func perShowFMCallDeltasSumToCrossCorpus() {
+        // Pin the no-Simpson's-paradox invariant: the per-show breakdown
+        // and the cross-corpus aggregate must agree on FM-call totals
+        // because FM-call counts are simple sums (no proportion math).
+        // Specifically: sum over shows of (enabled.FMCalls - off.FMCalls)
+        // for the show MUST equal the cross-corpus (enabled.FMCalls -
+        // baseline.FMCalls). If a future change buckets episodes
+        // differently between cross-corpus and per-show passes (e.g. one
+        // pass dedupes by episodeId, the other doesn't), this test is the
+        // canary.
+        let traces = [
+            Self.makeTrace(episodeId: "a1", podcastId: "showA", episodeDuration: 300, adStart: 30, adEnd: 60),
+            Self.makeTrace(episodeId: "a2", podcastId: "showA", episodeDuration: 300, adStart: 30, adEnd: 60),
+            Self.makeTrace(episodeId: "b1", podcastId: "showB", episodeDuration: 300, adStart: 30, adEnd: 60),
+            Self.makeTrace(episodeId: "b2", podcastId: "showB", episodeDuration: 300, adStart: 30, adEnd: 60),
+            Self.makeTrace(episodeId: "c1", podcastId: "showC", episodeDuration: 300, adStart: 30, adEnd: 60),
+        ]
+        let config = ChapterSignalGate.Config(stubChapterCount: { _ in 2 })
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: traces,
+            gateConfig: config,
+            runId: "sum-invariant",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        let crossCorpusDelta = report.enabled.totalFMCalls - report.baseline.totalFMCalls
+        let perShowSum = report.perShowLift.values.reduce(0) { $0 + $1.deltaTotalFMCalls }
+        #expect(perShowSum == crossCorpusDelta,
+                "sum of per-show deltaTotalFMCalls must equal cross-corpus FM-call delta (no Simpson's paradox on additive metrics)")
+    }
+
+    @Test("pretty-printed wire format still encodes mode as lowercase string")
+    func prettyPrintedModeWireEncodingMatchesCompact() throws {
+        // The persist() path uses [.sortedKeys, .prettyPrinted] while the
+        // round-trip and wire-shape tests probe with [.sortedKeys] only.
+        // Pretty-printing inserts whitespace around colons, so the literal
+        // "mode":"off" string from the compact tests would NOT match the
+        // pretty-printed bytes. Pin that the LOGICAL contract (mode value
+        // is the lowercase string) survives the pretty-print encoding —
+        // i.e. the persisted file readers see "off"/"shadow"/"enabled"
+        // regardless of which formatting flag the encoder uses.
+        let trace = Self.makeTrace(
+            episodeId: "ep-mode-pretty",
+            podcastId: "pod-mode-pretty",
+            episodeDuration: 300,
+            adStart: 30,
+            adEnd: 60
+        )
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [trace],
+            runId: "mode-pretty",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(report)
+        let text = String(decoding: data, as: UTF8.self)
+        // Pretty-printed format inserts " : " between key and value.
+        #expect(text.contains("\"mode\" : \"off\""),
+                "pretty-printed format must encode mode as lowercase \"off\"")
+        #expect(text.contains("\"mode\" : \"shadow\""),
+                "pretty-printed format must encode mode as lowercase \"shadow\"")
+        #expect(text.contains("\"mode\" : \"enabled\""),
+                "pretty-printed format must encode mode as lowercase \"enabled\"")
+    }
+
     @Test("schemaVersion encodes as `\"schemaVersion\":1` on the wire")
     func schemaVersionWireValue() throws {
         // Pin not just the field NAME (covered by wireShapeCarriesDocumentedFields)
