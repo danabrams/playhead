@@ -29,6 +29,7 @@
 // use, optional injection for tests, `migrate()` for hot-path eager
 // init from runtime.
 
+import CryptoKit
 import Foundation
 import OSLog
 
@@ -220,18 +221,29 @@ actor ChapterPlanCache {
         didEnsureDirectory = true
     }
 
-    /// Map a content-hash string to a stable on-disk file URL. The
-    /// hash is sanitized before being used as a path component so
-    /// callers cannot accidentally smuggle path separators (`/`),
-    /// parent-dir tokens (`..`), or hidden-file leaders (`.`) through
-    /// to the filesystem. We keep ASCII alphanumerics, `-`, and `_`;
-    /// every other byte is folded to `_`. Empty hashes after
-    /// sanitization fall back to `__empty__` so we never end up with
-    /// a dotfile or an unnamed file.
+    /// Map a content-hash string to a stable on-disk file URL.
+    ///
+    /// We never trust the input string as a path component directly:
+    /// callers could pass `..`, `/`, hidden-file leaders (`.`), or
+    /// non-ASCII bytes. Sanitization folds every char outside the
+    /// `[A-Za-z0-9_-]` allowlist to `_`, but a naive fold collides
+    /// keys whose only differences are non-allowed characters at the
+    /// same position (e.g. `"a/b"` and `"a_b"` both fold to `"a_b"`).
+    /// To guarantee distinct keys map to distinct files we always
+    /// append a short SHA256 disambiguation suffix derived from the
+    /// raw input, so the on-disk filename is `<safe>_<suffix>.json`.
+    /// This is purely defensive — content hashes in production are
+    /// already SHA-style hex strings — but it keeps the cache safe
+    /// against arbitrary callers and arbitrary future producers.
     private func fileURL(forContentHash contentHash: String) -> URL {
-        let safe = Self.sanitize(contentHash: contentHash)
+        let filename = Self.filename(forContentHash: contentHash)
         return resolveDirectoryLocked()
-            .appendingPathComponent("\(safe).json", isDirectory: false)
+            .appendingPathComponent(filename, isDirectory: false)
+    }
+
+    /// Internal so tests can pin the filename contract.
+    static func filename(forContentHash contentHash: String) -> String {
+        return "\(sanitize(contentHash: contentHash))_\(disambiguationSuffix(for: contentHash)).json"
     }
 
     /// Internal so tests can pin the sanitization contract.
@@ -243,5 +255,15 @@ actor ChapterPlanCache {
         }
         let result = String(mapped)
         return result.isEmpty ? "__empty__" : result
+    }
+
+    /// 12-char prefix of SHA256(contentHash), hex. 12 chars × 4 bits =
+    /// 48 bits → collision probability is ~1 in 2^24 even at hundreds
+    /// of thousands of cached plans, far below realistic episode counts
+    /// on any device. Internal for test pinning.
+    static func disambiguationSuffix(for contentHash: String) -> String {
+        let digest = SHA256.hash(data: Data(contentHash.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return String(hex.prefix(12))
     }
 }

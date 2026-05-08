@@ -137,8 +137,8 @@ struct ChapterPlanCacheTests {
         // expected file URL for "hash-garbled".
         await cache.migrate()
         let resolvedDir = await cache.directory
-        let safe = ChapterPlanCache.sanitize(contentHash: "hash-garbled")
-        let path = resolvedDir.appendingPathComponent("\(safe).json", isDirectory: false)
+        let filename = ChapterPlanCache.filename(forContentHash: "hash-garbled")
+        let path = resolvedDir.appendingPathComponent(filename, isDirectory: false)
         try Data("not valid json {{{".utf8).write(to: path)
 
         let fetched = await cache.get(contentHash: "hash-garbled")
@@ -233,7 +233,7 @@ struct ChapterPlanCacheTests {
         #expect(fetched?.episodeContentHash == "hash-shared")
     }
 
-    // MARK: sanitize() contract
+    // MARK: sanitize() / filename() contract
 
     @Test("sanitize folds unsafe path characters to underscore")
     func sanitizeReplacesUnsafeChars() {
@@ -252,5 +252,48 @@ struct ChapterPlanCacheTests {
     @Test("sanitize maps an empty hash to a stable placeholder")
     func sanitizeEmptyFallback() {
         #expect(ChapterPlanCache.sanitize(contentHash: "") == "__empty__")
+    }
+
+    @Test("filename has stable .json extension and embeds the disambiguation suffix")
+    func filenameShape() {
+        let name = ChapterPlanCache.filename(forContentHash: "abcXYZ-_")
+        #expect(name.hasSuffix(".json"))
+        // <safe>_<12-char-suffix>.json — the suffix comes after the
+        // last underscore before the extension.
+        let suffix = ChapterPlanCache.disambiguationSuffix(for: "abcXYZ-_")
+        #expect(suffix.count == 12)
+        #expect(name.contains("_\(suffix)."))
+    }
+
+    @Test("two hashes that fold to the same sanitized name still produce distinct filenames")
+    func filenameAvoidsSanitizationCollisions() async throws {
+        // "a/b" and "a_b" both sanitize to "a_b". Without a
+        // disambiguation suffix they would write to the same file.
+        let dir = Self.makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cache = ChapterPlanCache(directory: dir)
+
+        let planA = Self.makePlan(contentHash: "a/b")
+        let planB = Self.makePlan(contentHash: "a_b")
+
+        let storedA = await cache.put(contentHash: "a/b", plan: planA)
+        let storedB = await cache.put(contentHash: "a_b", plan: planB)
+        #expect(storedA == true)
+        #expect(storedB == true)
+
+        let fetchedA = await cache.get(contentHash: "a/b")
+        let fetchedB = await cache.get(contentHash: "a_b")
+        #expect(fetchedA?.episodeContentHash == "a/b")
+        #expect(fetchedB?.episodeContentHash == "a_b")
+        #expect(fetchedA != fetchedB)
+    }
+
+    @Test("disambiguation suffix is deterministic for a given input")
+    func disambiguationSuffixDeterministic() {
+        let s1 = ChapterPlanCache.disambiguationSuffix(for: "stable-input")
+        let s2 = ChapterPlanCache.disambiguationSuffix(for: "stable-input")
+        #expect(s1 == s2)
+        #expect(s1.count == 12)
+        #expect(s1.allSatisfy { $0.isHexDigit })
     }
 }
