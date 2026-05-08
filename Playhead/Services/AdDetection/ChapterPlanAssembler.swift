@@ -125,7 +125,15 @@ struct ChapterPlanAssembler: Sendable {
         let totalUnclearCount: Int
         /// `(operational + semantic) / total`. `0` when total is zero.
         let totalUnclearRate: Double
+        /// `true` when `totalUnclearRate > highUnclearRateWarningThreshold`
+        /// (strict `>`). When `true`, the caller emits the
+        /// `chapter_phase_high_unclear_rate` diagnostic; the plan is
+        /// still assembled and written either way.
         let highUnclearRateExceeded: Bool
+        /// The high-unclear-rate threshold used (always
+        /// `highUnclearRateWarningThreshold` at the time of the call).
+        /// Distinct from the operational-only abort threshold reported
+        /// in `AbortInfo.threshold`.
         let threshold: Double
     }
 
@@ -148,9 +156,9 @@ struct ChapterPlanAssembler: Sendable {
     ///     the assembled plan (operational rows are filtered out, but
     ///     the relative order of the surviving rows matches the input).
     ///   - episodeContentHash: Stable identity for the episode, used
-    ///     as the plan's cache key. Empty input does not assemble an
-    ///     abort, but the caller may still choose not to write an
-    ///     empty plan to cache.
+    ///     as the plan's cache key. Empty input is never aborted; an
+    ///     empty assembled plan is returned instead. The caller may
+    ///     still choose not to write an empty plan to cache.
     ///   - candidatesDetected: Total candidate boundaries the boundary
     ///     detector emitted before any cap was applied. Recorded in
     ///     the plan's `generationDiagnostics`.
