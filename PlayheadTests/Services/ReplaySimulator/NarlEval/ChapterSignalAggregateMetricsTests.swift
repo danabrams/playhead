@@ -295,11 +295,16 @@ struct ChapterSignalAggregateMetricsTests {
         let enabled = ChapterSignalAggregateMetrics.predictUnderMode(
             trace: trace, mode: .enabled, config: Self.defaultPredictorConfig
         )
-        // Pin equality on EVERY observable field of NarlPredictionResult,
-        // not just `windows`. A future patch that makes mode-aware
-        // prediction by manipulating `hasShadowCoverage` (or any other
-        // diagnostic field) without changing the windows would otherwise
-        // pass — and silently inflate FM-cost telemetry interpretation.
+        // Pin equality on EVERY observable field of NarlPredictionResult.
+        // The struct currently has 5 fields: config, windows,
+        // hasShadowCoverage, lexicalInjectionAdds, priorShiftAdds. R8
+        // claimed full coverage but only pinned 3 of 5; closing the gap
+        // here. A future patch that makes mode-aware prediction by
+        // manipulating ANY diagnostic field (e.g. lexical-injection or
+        // prior-shift counters) without changing windows would otherwise
+        // pass — and silently inflate FM-cost telemetry interpretation
+        // OR break downstream consumers that rely on those diagnostics
+        // being mode-independent at the scaffold.
         #expect(off.windows == shadow.windows)
         #expect(off.windows == enabled.windows)
         #expect(off.hasShadowCoverage == shadow.hasShadowCoverage,
@@ -309,6 +314,13 @@ struct ChapterSignalAggregateMetricsTests {
         // modes (since predictUnderMode threads it through identically).
         #expect(off.config == shadow.config)
         #expect(off.config == enabled.config)
+        // Diagnostic counters: must also be mode-independent at scaffold.
+        #expect(off.lexicalInjectionAdds == shadow.lexicalInjectionAdds,
+                "lexicalInjectionAdds must match across modes at the scaffold")
+        #expect(off.lexicalInjectionAdds == enabled.lexicalInjectionAdds)
+        #expect(off.priorShiftAdds == shadow.priorShiftAdds,
+                "priorShiftAdds must match across modes at the scaffold")
+        #expect(off.priorShiftAdds == enabled.priorShiftAdds)
     }
 
     // MARK: - Phase / cost telemetry
