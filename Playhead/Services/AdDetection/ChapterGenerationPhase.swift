@@ -242,15 +242,10 @@ struct ChapterGenerationPhase: Sendable {
         }
 
         // Cancellation can fire at any await; honor it after every
-        // yield point. Each helper folds into `recordPreempted` and
-        // returns `.preempted` on a cancellation throw.
+        // yield point. Each `preempt` call below collapses to
+        // `recordPreempted` + `return .preempted`.
         if Task.isCancelled {
-            await recordPreempted(
-                installID: installID,
-                episodeId: episodeId,
-                timestamp: clock().timeIntervalSince1970
-            )
-            return .preempted
+            return await preempt(installID: installID, episodeId: episodeId)
         }
 
         // 3. Transcript snapshot capture. A `nil` here means the
@@ -278,11 +273,7 @@ struct ChapterGenerationPhase: Sendable {
             // `Outcome` enum is for in-process callers that want to
             // branch on "why nothing was produced"; the wire-format
             // diagnostic stays in the bead .3 vocabulary.
-            await recordNoCandidates(
-                installID: installID,
-                episodeId: episodeId,
-                timestamp: clock().timeIntervalSince1970
-            )
+            await emitNoCandidates(installID: installID, episodeId: episodeId)
             return .transcriptUnavailable
         }
 
@@ -301,12 +292,7 @@ struct ChapterGenerationPhase: Sendable {
         )
 
         if Task.isCancelled {
-            await recordPreempted(
-                installID: installID,
-                episodeId: episodeId,
-                timestamp: clock().timeIntervalSince1970
-            )
-            return .preempted
+            return await preempt(installID: installID, episodeId: episodeId)
         }
 
         // 4. Boundary detection. The detector itself may throw
@@ -320,39 +306,21 @@ struct ChapterGenerationPhase: Sendable {
         do {
             candidates = try await boundaryDetector.detect()
         } catch is CancellationError {
-            await recordPreempted(
-                installID: installID,
-                episodeId: episodeId,
-                timestamp: clock().timeIntervalSince1970
-            )
-            return .preempted
+            return await preempt(installID: installID, episodeId: episodeId)
         } catch {
             logger.error(
                 "chapterphase.boundary_detection_failed: \(error.localizedDescription, privacy: .public)"
             )
-            await recordNoCandidates(
-                installID: installID,
-                episodeId: episodeId,
-                timestamp: clock().timeIntervalSince1970
-            )
+            await emitNoCandidates(installID: installID, episodeId: episodeId)
             return .noCandidates
         }
 
         if Task.isCancelled {
-            await recordPreempted(
-                installID: installID,
-                episodeId: episodeId,
-                timestamp: clock().timeIntervalSince1970
-            )
-            return .preempted
+            return await preempt(installID: installID, episodeId: episodeId)
         }
 
         guard !candidates.isEmpty else {
-            await recordNoCandidates(
-                installID: installID,
-                episodeId: episodeId,
-                timestamp: clock().timeIntervalSince1970
-            )
+            await emitNoCandidates(installID: installID, episodeId: episodeId)
             return .noCandidates
         }
 
@@ -366,12 +334,7 @@ struct ChapterGenerationPhase: Sendable {
         var fmCallCount = 0
         for candidate in candidates {
             if Task.isCancelled {
-                await recordPreempted(
-                    installID: installID,
-                    episodeId: episodeId,
-                    timestamp: clock().timeIntervalSince1970
-                )
-                return .preempted
+                return await preempt(installID: installID, episodeId: episodeId)
             }
             do {
                 let evidenceOrNil = try await labeler.label(candidate: candidate)
@@ -385,12 +348,7 @@ struct ChapterGenerationPhase: Sendable {
                     labeled.append(evidence)
                 }
             } catch is CancellationError {
-                await recordPreempted(
-                    installID: installID,
-                    episodeId: episodeId,
-                    timestamp: clock().timeIntervalSince1970
-                )
-                return .preempted
+                return await preempt(installID: installID, episodeId: episodeId)
             } catch {
                 // Per-call failure: log and keep going. The labeling
                 // service is the proper emitter of
@@ -404,12 +362,7 @@ struct ChapterGenerationPhase: Sendable {
         }
 
         if Task.isCancelled {
-            await recordPreempted(
-                installID: installID,
-                episodeId: episodeId,
-                timestamp: clock().timeIntervalSince1970
-            )
-            return .preempted
+            return await preempt(installID: installID, episodeId: episodeId)
         }
 
         // 6. Race re-check. We re-fetch the transcript hash and
@@ -425,6 +378,10 @@ struct ChapterGenerationPhase: Sendable {
             logger.notice(
                 "chapterphase.transcript_changed_during_run entry=\(entryHash, privacy: .public) recheck=\(recheckHash ?? "nil", privacy: .public)"
             )
+            // Same `.preempted` event as explicit cancellation, but
+            // the in-process Outcome is `.raceAborted` so callers can
+            // distinguish "the user cancelled us" from "the input
+            // changed under us" without parsing the OS log.
             await recordPreempted(
                 installID: installID,
                 episodeId: episodeId,
@@ -468,6 +425,41 @@ struct ChapterGenerationPhase: Sendable {
         return .cached(
             chapterCount: labeled.count,
             planConfidence: planConfidence
+        )
+    }
+
+    // MARK: - Cancellation / no-candidates collapse helpers
+
+    /// Records a `.preempted` event with a fresh timestamp and returns
+    /// the matching `Outcome`. Used by every cancellation and
+    /// cancellation-throw site in `run()` so the recordPreempted call
+    /// pattern lives in one place. The recheck-mismatch branch does
+    /// NOT use this helper because its outcome is `.raceAborted`, not
+    /// `.preempted`.
+    private func preempt(
+        installID: UUID,
+        episodeId: String
+    ) async -> Outcome {
+        await recordPreempted(
+            installID: installID,
+            episodeId: episodeId,
+            timestamp: clock().timeIntervalSince1970
+        )
+        return .preempted
+    }
+
+    /// Records a `.noCandidates` event with a fresh timestamp. The
+    /// caller still chooses the matching `Outcome` (either
+    /// `.noCandidates` or `.transcriptUnavailable`) — this helper
+    /// owns the diagnostic emit only.
+    private func emitNoCandidates(
+        installID: UUID,
+        episodeId: String
+    ) async {
+        await recordNoCandidates(
+            installID: installID,
+            episodeId: episodeId,
+            timestamp: clock().timeIntervalSince1970
         )
     }
 
