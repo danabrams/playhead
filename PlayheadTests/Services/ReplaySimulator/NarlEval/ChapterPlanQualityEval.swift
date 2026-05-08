@@ -308,7 +308,14 @@ struct ChapterPlanQualityEval: Sendable {
         }
         var pairs: [PairCandidate] = []
         for (gi, gStart) in goldenStarts.enumerated() {
+            // Skip non-finite goldens up-front for symmetry with
+            // `anyWithinTolerance` and to make the NaN-handling
+            // contract explicit (rather than relying on the implicit
+            // `NaN <= tolerance == false` semantics of the comparison
+            // below).
+            guard gStart.isFinite else { continue }
             for (ci, cStart) in candidateStarts.enumerated() {
+                guard cStart.isFinite else { continue }
                 let d = abs(gStart - cStart)
                 if d <= thresholds.boundaryToleranceSeconds {
                     pairs.append(PairCandidate(goldenIndex: gi, candidateIndex: ci, distance: d))
@@ -778,9 +785,13 @@ enum ChapterPlanGoldenSetLoader {
 
     /// Enumerate every `.json` file in the synthetic fixtures
     /// directory, sorted by filename for determinism.
+    ///
+    /// Returns labeled tuples (`url`, `set`) so call-sites can use
+    /// `.url`/`.set` rather than `$0.0`/`$0.1`. Positional destructuring
+    /// (`for (url, set) in ...`) continues to work.
     static func allSyntheticFixtures(
         _ filePath: String = #filePath
-    ) throws -> [(URL, GoldenChapterSet)] {
+    ) throws -> [(url: URL, set: GoldenChapterSet)] {
         let dir = syntheticDirectory(filePath)
         let entries = try FileManager.default.contentsOfDirectory(
             at: dir,
@@ -793,7 +804,7 @@ enum ChapterPlanGoldenSetLoader {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
             .map { url in
                 let data = try Data(contentsOf: url)
-                return (url, try decoder.decode(GoldenChapterSet.self, from: data))
+                return (url: url, set: try decoder.decode(GoldenChapterSet.self, from: data))
             }
     }
 }

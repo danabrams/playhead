@@ -374,6 +374,20 @@ struct ChapterPlanQualityEvalThresholdTests {
                 threshold: 0.0
             ) == .match
         )
+
+        // At threshold 0.0 with DISJOINT token sets: overlap = 0/N = 0,
+        // and 0 >= 0 → match. The contract is "threshold met"; a zero
+        // threshold is documented as degenerate ("any overlap, even
+        // zero, is a match"). Pin this so a future regression that
+        // adds `>` instead of `>=` somewhere in the matcher surfaces
+        // here rather than silently flipping the boundary.
+        #expect(
+            ChapterPlanQualityEval.topicLabelOutcome(
+                expected: "weather report",
+                observed: "music recommendations",
+                threshold: 0.0
+            ) == .match
+        )
     }
 
     /// Tolerance == 0 means "exact-match boundaries only". A
@@ -965,12 +979,12 @@ struct ChapterPlanQualityEvalCodableTests {
     }
 
     /// A wire-format JSON containing an unknown `ChapterDisposition`
-    /// raw value (e.g. a future enum case loaded by an older binary)
-    /// must throw `DecodingError.dataCorrupted` rather than silently
-    /// dropping the cell or producing `nil`. This pins the runtime
-    /// guard inside `DispositionConfusionWire.init(from:)`.
+    /// raw value in the INNER (observed) position must throw
+    /// `DecodingError.dataCorrupted` rather than silently dropping the
+    /// cell or producing `nil`. This pins the inner-key guard inside
+    /// `DispositionConfusionWire.init(from:)`.
     @Test
-    func report_decodingFailsOnUnknownDispositionRawValue() {
+    func report_decodingFailsOnUnknownInnerDispositionRawValue() {
         // A minimal JSON shaped like a `ChapterPlanQualityReport`,
         // with the confusion matrix containing one valid outer key
         // and a single bogus inner key. Every other field carries a
@@ -983,6 +997,31 @@ struct ChapterPlanQualityEvalCodableTests {
           "dispositionMatchedAgreed": 0,
           "dispositionMatchedPairs": 0,
           "perDispositionConfusion": { "content": { "future_unknown_case": 1 } },
+          "topicLabelMatches": { "matched": 0, "mismatched": 0, "notApplicable": 0 },
+          "perEpisode": {},
+          "thresholdsUsed": { "boundaryToleranceSeconds": 15.0, "topicOverlapMinimum": 0.5 }
+        }
+        """.data(using: .utf8)!
+
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(ChapterPlanQualityReport.self, from: json)
+        }
+    }
+
+    /// Symmetric guard: an unknown OUTER (expected) raw value must
+    /// also throw `DecodingError.dataCorrupted`. The wire format
+    /// validates both the outer and inner key paths — a regression
+    /// that only validates one direction would silently accept a
+    /// half-corrupt confusion matrix.
+    @Test
+    func report_decodingFailsOnUnknownOuterDispositionRawValue() {
+        let json = """
+        {
+          "boundaryRecall": { "matched": 0, "total": 0 },
+          "boundaryPrecision": { "matched": 0, "total": 0 },
+          "dispositionMatchedAgreed": 0,
+          "dispositionMatchedPairs": 0,
+          "perDispositionConfusion": { "future_unknown_outer_case": { "content": 1 } },
           "topicLabelMatches": { "matched": 0, "mismatched": 0, "notApplicable": 0 },
           "perEpisode": {},
           "thresholdsUsed": { "boundaryToleranceSeconds": 15.0, "topicOverlapMinimum": 0.5 }
@@ -1015,7 +1054,7 @@ struct ChapterPlanGoldenSetDirectoryTests {
     func requiredSyntheticFixturesPresent() throws {
         let fixtures = try ChapterPlanGoldenSetLoader.allSyntheticFixtures()
         let basenames = fixtures
-            .map { $0.0.deletingPathExtension().lastPathComponent }
+            .map { $0.url.deletingPathExtension().lastPathComponent }
         let required = [
             "synthetic-happy-path",
             "synthetic-partial-recall",
@@ -1028,16 +1067,21 @@ struct ChapterPlanGoldenSetDirectoryTests {
     }
 
     /// Episode ids must be unique and use the `synthetic-` prefix per
-    /// the bead's privacy constraint.
+    /// the bead's privacy constraint. Episode content hashes must also
+    /// be unique — two fixtures with identical hashes would silently
+    /// collide in `ChapterPlanCache`/`ChapterPlanQualityRunner` lookups.
     @Test
-    func episodeIdsAreUniqueAndSyntheticPrefixed() throws {
+    func episodeIdsAndContentHashesAreUniqueAndSyntheticPrefixed() throws {
         let fixtures = try ChapterPlanGoldenSetLoader.allSyntheticFixtures()
-        var seen = Set<String>()
+        var seenIds = Set<String>()
+        var seenHashes = Set<String>()
         for (url, set) in fixtures {
             #expect(set.episodeId.hasPrefix("synthetic-"), "Non-synthetic episodeId in \(url.lastPathComponent): \(set.episodeId)")
             #expect(set.episodeContentHash.hasPrefix("synthetic-"), "Non-synthetic contentHash in \(url.lastPathComponent): \(set.episodeContentHash)")
-            let inserted = seen.insert(set.episodeId).inserted
-            #expect(inserted, "Duplicate episodeId across synthetic fixtures: \(set.episodeId)")
+            let idInserted = seenIds.insert(set.episodeId).inserted
+            #expect(idInserted, "Duplicate episodeId across synthetic fixtures: \(set.episodeId)")
+            let hashInserted = seenHashes.insert(set.episodeContentHash).inserted
+            #expect(hashInserted, "Duplicate episodeContentHash across synthetic fixtures (would collide in cache lookups): \(set.episodeContentHash)")
         }
     }
 }
