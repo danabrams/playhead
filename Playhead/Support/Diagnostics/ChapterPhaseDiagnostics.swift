@@ -128,10 +128,12 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
     /// transcript text. Used to detect "did the input change under us"
     /// during race-protection in the `.10` shell.
     struct Started: Sendable, Hashable, Equatable, Codable {
-        /// Snake_case mode raw value (`heuristic_only`, `heuristic_plus_fm`,
-        /// …) — the actual vocabulary lands with the phase shell in
-        /// `playhead-au2v.1.10`. Free String today so this bead does not
-        /// invent the enum prematurely.
+        /// `ChapterSignalMode.rawValue` — currently one of `shadow` /
+        /// `enabled` (the `.off` mode never reaches `.started` because
+        /// the shell short-circuits at the mode gate). Encoded as
+        /// `String` rather than the enum so the wire format is stable
+        /// even if `ChapterSignalMode` grows new cases without
+        /// versioning the schema.
         let mode: String
         /// SHA-256 hex of the transcript chunks visible at phase entry.
         /// Same shape as `episode_id_hash` (64 lowercase hex chars).

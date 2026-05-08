@@ -400,7 +400,7 @@ struct ChapterGenerationPhaseTests {
         let cache = Self.makeCache()
         let sink = MockEventSink()
         let clock = MockClock()
-        let (phase, labeler) = Self.makePhase(
+        let (phase, _) = Self.makePhase(
             cache: cache, sink: sink, clock: clock.now
         )
 
@@ -420,16 +420,14 @@ struct ChapterGenerationPhaseTests {
         // The terminal event is always `.preempted`. Whether
         // `.started` was emitted first depends on whether
         // cancellation was observed before or after the entry-hash
-        // capture — both orderings are valid.
+        // capture — both orderings are valid. The labeler-was-not-
+        // invoked guarantee is enforced indirectly: the cache must
+        // not contain a partial write.
         #expect(events.last?.eventType == .preempted)
         #expect(events.count == 1 || events.count == 2)
         if events.count == 2 {
             #expect(events.first?.eventType == .started)
         }
-        // Allow either: labeler may or may not have run depending on
-        // when cancel was observed; the contract is that the cache
-        // never receives a partial write.
-        _ = labeler
         let stored = await cache.get(contentHash: "hash-A")
         #expect(stored == nil)
     }

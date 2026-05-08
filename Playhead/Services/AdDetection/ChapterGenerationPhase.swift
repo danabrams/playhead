@@ -273,6 +273,11 @@ struct ChapterGenerationPhase: Sendable {
             logger.notice(
                 "chapterphase.transcript_unavailable_at_entry — emitting no_candidates"
             )
+            // Outcome=.transcriptUnavailable but event=.noCandidates by
+            // design — see the bead .3 schema comment above. The richer
+            // `Outcome` enum is for in-process callers that want to
+            // branch on "why nothing was produced"; the wire-format
+            // diagnostic stays in the bead .3 vocabulary.
             await recordNoCandidates(
                 installID: installID,
                 episodeId: episodeId,
