@@ -517,6 +517,48 @@ struct FoundationModelClassifierSelectorThreadingTests {
         #expect(baseline == withNil)
     }
 
+    /// Cache-lookup edge case: a plan with confidence above threshold
+    /// but an EMPTY `chapters` list. Selector returns
+    /// `.noChapterForWindow` (NOT `.modeGated`); caller passes nil to
+    /// the builder; builder output is byte-identical to today's.
+    @Test("empty chapters in valid plan: noChapterForWindow + byte-identical builder output")
+    func emptyChaptersListNoChapterForWindowBuilderOutput() {
+        let emptyPlan = makePlan(chapters: [], confidence: 0.9)
+        let outcome = ChapterPromptContextSelector.select(
+            mode: .enabled,
+            plan: emptyPlan,
+            windowStart: 10,
+            windowEnd: 30
+        )
+        #expect(outcome == .noChapterForWindow)
+        let segments = [makeSegment(index: 0, text: "audio")]
+        let baseline = FoundationModelClassifier.buildPrompt(for: segments)
+        let withNil = FoundationModelClassifier.buildPrompt(
+            for: segments,
+            chapterContext: nil
+        )
+        #expect(baseline == withNil)
+    }
+
+    /// Boundary check: confidence just below the 0.30 minimum is
+    /// `.modeGated`. Use `0.29999` (representable as Double and
+    /// strictly less than 0.30) so the test is robust against any
+    /// future change to the minimum that drops below 0.30.
+    @Test("confidence strictly below 0.30 is modeGated (boundary)")
+    func confidenceStrictlyBelowMinimumIsModeGated() {
+        let plan = makePlan(
+            chapters: [makeChapter(start: 0, end: 60, title: "Intro", disposition: .content)],
+            confidence: ChapterPromptContext.minimumPlanConfidence - 0.0001
+        )
+        let outcome = ChapterPromptContextSelector.select(
+            mode: .enabled,
+            plan: plan,
+            windowStart: 10,
+            windowEnd: 30
+        )
+        #expect(outcome == .modeGated)
+    }
+
     @Test("plan confidence at threshold (0.30) injects chapter line into builder output")
     func planConfidenceAtThresholdInjects() {
         let plan = makePlan(

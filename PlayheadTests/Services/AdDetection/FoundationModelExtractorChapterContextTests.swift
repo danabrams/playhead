@@ -418,6 +418,34 @@ struct FoundationModelExtractorSelectorThreadingTests {
         #expect(baseline == withNil)
     }
 
+    /// Cache-lookup edge case: a plan with confidence above threshold
+    /// but an EMPTY `chapters` list. Selector returns
+    /// `.noChapterForWindow`; caller passes nil to the extractor;
+    /// extractor output is byte-identical to today's.
+    @Test("empty chapters in valid plan: noChapterForWindow + byte-identical extractor output")
+    func emptyChaptersListNoChapterForWindowExtractorOutput() {
+        let emptyPlan = makePlan(chapters: [], confidence: 0.9)
+        let outcome = ChapterPromptContextSelector.select(
+            mode: .enabled,
+            plan: emptyPlan,
+            windowStart: 10,
+            windowEnd: 30
+        )
+        #expect(outcome == .noChapterForWindow)
+        let baseline = FoundationModelExtractor.buildPrompt(
+            evidenceText: "evidence",
+            windowStartTime: 10.0,
+            windowEndTime: 30.0
+        )
+        let withNil = FoundationModelExtractor.buildPrompt(
+            evidenceText: "evidence",
+            windowStartTime: 10.0,
+            windowEndTime: 30.0,
+            chapterContext: nil
+        )
+        #expect(baseline == withNil)
+    }
+
     @Test("plan confidence at threshold (0.30) injects chapter line into extractor output")
     func planConfidenceAtThresholdInjects() {
         let plan = makePlan(
