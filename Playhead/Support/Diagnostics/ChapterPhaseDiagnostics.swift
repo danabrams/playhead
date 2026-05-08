@@ -72,7 +72,7 @@ enum ChapterPhaseEventType: String, Sendable, Hashable, Codable, CaseIterable {
     /// Payload records before/after counts.
     case capApplied = "chapter_phase_cap_applied"
 
-    /// Per-call FM labelling failure (op-vs-semantic flag), retried,
+    /// Per-call FM labeling failure (op-vs-semantic flag), retried,
     /// final outcome recorded.
     case labelFailed = "chapter_phase_label_failed"
 
@@ -206,9 +206,9 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         let operational: Bool
         /// Snake_case error code raw value (e.g. `fm_timeout`,
         /// `fm_decode_failure`). The exact vocabulary lands with the
-        /// labelling service in `playhead-au2v.1.7`.
+        /// labeling service in `playhead-au2v.1.7`.
         let errorCode: String
-        /// How many retries the labelling call burned before settling
+        /// How many retries the labeling call burned before settling
         /// on `finalOutcome`.
         let retryCount: Int
         /// Snake_case final outcome (`success`, `gave_up`,
