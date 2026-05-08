@@ -747,6 +747,156 @@ struct ChapterPlanAssemblerTests {
         #expect(ChapterPlanAssembler.operationalUnclearRateThreshold == 0.30)
         #expect(ChapterPlanAssembler.highUnclearRateWarningThreshold == 0.50)
     }
+
+    // MARK: - Boundary-rate cases called out by the bead spec
+
+    @Test("31% operational (just over the strict-`>` threshold) → ABORTS")
+    func thirtyOnePercentAborts() {
+        // Use 16 results so 5/16 = 31.25% is strictly > 30%. We avoid
+        // a tied-fraction trap (e.g., 31/100 = 0.31 vs. 30/97 = 0.309)
+        // by picking small denominators and pinning the comparison.
+        let confidentChapters = (0..<11).map { i in
+            Self.confident(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60),
+                confidence: 0.8
+            )
+        }
+        let opChapters = (11..<16).map { i in
+            Self.operationalFailure(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60)
+            )
+        }
+        let result = Self.assembler.assemble(
+            results: confidentChapters + opChapters,
+            episodeContentHash: Self.testHash,
+            candidatesDetected: 16,
+            candidatesKept: 16,
+            generatedAt: Self.fixedDate
+        )
+        switch result {
+        case .aborted(let info):
+            #expect(info.labeledCount == 16)
+            #expect(info.operationalUnclearCount == 5)
+            #expect(info.operationalUnclearRate > 0.30)
+            #expect(abs(info.operationalUnclearRate - (5.0 / 16.0)) < 1e-9)
+            #expect(info.threshold == ChapterPlanAssembler.operationalUnclearRateThreshold)
+        case .assembled:
+            Issue.record("31.25% (>30%) must abort; got assembled")
+        }
+    }
+
+    // MARK: - planConfidence math (bead-spec-pinned cases)
+
+    @Test("Spec case: (0.9, 600s) + (0.1, 60s) → planConfidence ≈ 0.8273")
+    func mixedQualityLargeWeightDelta() {
+        // (0.9 * 600 + 0.1 * 60) / 660 = (540 + 6) / 660 = 546 / 660 = 0.8272727
+        // Pins the bead-spec example numerically. The companion test
+        // `mixedQualityDurationWeighted` uses different durations
+        // (300s + 60s); both are valuable — this one matches the
+        // spec's exact illustration.
+        let results = [
+            Self.confident(start: 0, end: 600, confidence: 0.9),
+            Self.confident(start: 600, end: 660, confidence: 0.1),
+        ]
+        let result = Self.assembler.assemble(
+            results: results,
+            episodeContentHash: Self.testHash,
+            candidatesDetected: 2,
+            candidatesKept: 2,
+            generatedAt: Self.fixedDate
+        )
+        switch result {
+        case .assembled(let plan, _):
+            let expected = (0.9 * 600.0 + 0.1 * 60.0) / 660.0
+            #expect(abs(plan.planConfidence - expected) < 1e-6)
+            #expect(abs(plan.planConfidence - 0.8272727) < 1e-3)
+        case .aborted:
+            Issue.record("expected assembled")
+        }
+    }
+
+    @Test("All semantic-unclear chapters at confidence 0.1 (equal duration) → planConfidence ≈ 0.1")
+    func allSemanticUnclearLowConfidence() {
+        // Every chapter is a semantic .unclear with FM-reported
+        // confidence 0.1 (the FM said "I cannot tell" with low
+        // confidence). Operational rate is 0/N = 0% so we DO assemble.
+        // Plan confidence equals the uniform quality (0.1) — consumers
+        // weight by qualityScore and naturally distrust the plan.
+        let results = (0..<5).map { i in
+            Self.semanticUnclear(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60),
+                confidence: 0.1
+            )
+        }
+        let result = Self.assembler.assemble(
+            results: results,
+            episodeContentHash: Self.testHash,
+            candidatesDetected: 5,
+            candidatesKept: 5,
+            generatedAt: Self.fixedDate
+        )
+        switch result {
+        case .assembled(let plan, let warnings):
+            #expect(plan.chapters.count == 5)
+            #expect(abs(plan.planConfidence - 0.1) < 1e-6)
+            // 5/5 = 100% total unclear → high-warning trip.
+            #expect(warnings.highUnclearRateExceeded == true)
+            // Operational rate is zero so we did not abort.
+            #expect(plan.generationDiagnostics.operationalUnclearCount == 0)
+            #expect(plan.generationDiagnostics.semanticUnclearCount == 5)
+            // All chapters are .ambiguous (the mapped disposition for
+            // a semantic .unclear answer).
+            for chapter in plan.chapters {
+                #expect(chapter.disposition == .ambiguous)
+                #expect(abs(Double(chapter.qualityScore) - 0.1) < 1e-6)
+            }
+        case .aborted:
+            Issue.record("all-semantic with 0% operational must assemble")
+        }
+    }
+
+    // MARK: - Operational rate vs ordering
+
+    @Test("Operational unclears interleaved at every position are removed; plan order matches non-op input order")
+    func interleavedOperationalRemoval() {
+        // 12 chapters, operational at indexes 1, 4, 7 (3/12 = 25%, no
+        // abort). The resulting plan should be confident chapters from
+        // indexes 0, 2, 3, 5, 6, 8, 9, 10, 11 in that order.
+        var results: [LabelingResult] = []
+        for i in 0..<12 {
+            if i == 1 || i == 4 || i == 7 {
+                results.append(Self.operationalFailure(
+                    start: TimeInterval(i * 60),
+                    end: TimeInterval((i + 1) * 60)
+                ))
+            } else {
+                results.append(Self.confident(
+                    start: TimeInterval(i * 60),
+                    end: TimeInterval((i + 1) * 60),
+                    confidence: 0.8,
+                    title: "c\(i)"
+                ))
+            }
+        }
+        let result = Self.assembler.assemble(
+            results: results,
+            episodeContentHash: Self.testHash,
+            candidatesDetected: 12,
+            candidatesKept: 12,
+            generatedAt: Self.fixedDate
+        )
+        switch result {
+        case .assembled(let plan, _):
+            #expect(plan.chapters.count == 9)
+            let titles = plan.chapters.compactMap { $0.title }
+            #expect(titles == ["c0", "c2", "c3", "c5", "c6", "c8", "c9", "c10", "c11"])
+        case .aborted:
+            Issue.record("25% operational must not abort")
+        }
+    }
 }
 
 // MARK: - High-unclear-rate diagnostic event
