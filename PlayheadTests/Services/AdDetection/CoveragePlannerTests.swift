@@ -578,6 +578,22 @@ struct CoveragePlannerTests {
             timestamp: 1_700_000_000
         ))
         #expect(informedEvent.eventType == .coveragePlanChapterInformed)
+        #expect(informedEvent.timestamp == 1_700_000_000)
+        // Payload-shape assertion: the projection must wire the
+        // selection counts + planConfidence + replacementFraction
+        // through to the diagnostic event — a regression that swapped
+        // any of these fields would not be caught by the eventType
+        // check alone.
+        switch informedEvent.payload {
+        case .coveragePlanChapterInformed(let p):
+            let informed = try #require(informedPlan.chapterInformedAudit)
+            #expect(p.fractionReplaced == informed.replacementFraction)
+            #expect(p.adChapterIncludedCount == informed.includes.count)
+            #expect(p.contentChapterExcludedCount == informed.excludes.count)
+            #expect(p.planConfidence == informed.planConfidence)
+        default:
+            Issue.record("Expected coverage_plan_chapter_informed payload, got \(String(describing: informedEvent.payload))")
+        }
 
         // Skipped path
         let skippedPlan = planner.plan(for: matureStableContext(
@@ -591,6 +607,13 @@ struct CoveragePlannerTests {
             timestamp: 1_700_000_000
         ))
         #expect(skippedEvent.eventType == .coveragePlanChapterSkipped)
+        switch skippedEvent.payload {
+        case .coveragePlanChapterSkipped(let p):
+            #expect(p.reason == ChapterAuditSkipReason.modeDisabled.rawValue)
+            #expect(p.evidenceCount == 1)
+        default:
+            Issue.record("Expected coverage_plan_chapter_skipped payload, got \(String(describing: skippedEvent.payload))")
+        }
 
         // Non-targeted plan (cold start → fullCoverage) emits NO event.
         let coldPlan = planner.plan(for: makeCoveragePlannerContext(
@@ -599,6 +622,32 @@ struct CoveragePlannerTests {
         #expect(coldPlan.policy == .fullCoverage)
         #expect(CoveragePlanner.event(
             for: coldPlan,
+            installID: installID,
+            episodeId: "ep-test",
+            timestamp: 1_700_000_000
+        ) == nil)
+    }
+
+    @Test("periodicFullRescan plans never carry a chapter-audit diagnostic, even with evidence")
+    func testPeriodicFullRescanIgnoresChapterEvidence() {
+        let planner = CoveragePlanner(periodicFullRescanIntervalEpisodes: 10)
+        let chapters = [adChapter(start: 60, end: 180, quality: 0.9)]
+        let context = makeCoveragePlannerContext(
+            observedEpisodeCount: 8,
+            episodesSinceLastFullRescan: 10,
+            periodicFullRescanIntervalEpisodes: 10,
+            chapterSignalMode: .enabled,
+            chapterEvidence: chapters
+        )
+        let plan = planner.plan(for: context)
+        #expect(plan.policy == .periodicFullRescan)
+        #expect(plan.chapterInformedAudit == nil)
+        #expect(plan.chapterAuditDiagnostic == nil)
+        // Projection must also return nil — periodicFullRescan plans
+        // do not run audit selection.
+        let installID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+        #expect(CoveragePlanner.event(
+            for: plan,
             installID: installID,
             episodeId: "ep-test",
             timestamp: 1_700_000_000

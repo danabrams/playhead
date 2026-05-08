@@ -62,6 +62,13 @@ struct ChapterAuditInterval: Sendable, Equatable {
 /// budget would allow, the excess slots remain random. Wiring into the
 /// narrower (`TargetedWindowNarrower.auditSegments`) is a later bead.
 ///
+/// Semantics of the budget (clarification): `replacementFraction`
+/// budgets the ADDITIONS — chapter `includes` that may be promoted
+/// into the audit-slot set. `excludes` are SUBTRACTIONS (high-quality
+/// content regions the consumer should not audit unless a coverage-
+/// border condition forces it) and are NOT counted against the
+/// budget; they are a separate signal to the consumer.
+///
 /// `evidenceCount` and `planConfidence` are the inputs the planner used
 /// to make the decision (recorded so audits can be reproduced from the
 /// emitted plan alone).
@@ -197,7 +204,10 @@ struct CoveragePlan: Sendable, Equatable {
     ///
     /// Convert to a `ChapterPhaseEvent` via
     /// `CoveragePlanner.event(for:installID:episodeId:timestamp:)`
-    /// when the caller has the install/episode ids in hand.
+    /// when the caller has the install/episode ids in hand. The
+    /// projection helper is the only sanctioned emit path: the
+    /// planner is a `Sendable` value type and intentionally has no
+    /// access to install/episode ids.
     let chapterAuditDiagnostic: ChapterAuditDiagnostic?
 
     init(
