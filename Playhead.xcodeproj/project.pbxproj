@@ -337,6 +337,7 @@
 		59A99F7B77C3CEE72A48C33A /* SelfDescribingTitlesV15MigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9EE3B301A104F02BA1DE6C2 /* SelfDescribingTitlesV15MigrationTests.swift */; };
 		59D9CB9FC8F5483D734F5699 /* RegionProposalBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE85F2B16E01EDBE3FFF4D33 /* RegionProposalBuilder.swift */; };
 		59F98B0020A3E016CD9DA2AC /* TranscriptPeekViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE3A9F770BF0B8F996BBAC04 /* TranscriptPeekViewModel.swift */; };
+		5A11D7C58453407033C551AC /* ChapterSignalAggregateMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5648D0B74C1843D85974AA6 /* ChapterSignalAggregateMetrics.swift */; };
 		5A307CD26381D4312FF7A154 /* FirstSubscriptionOnboardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C279E797943D0F0E8D06F26 /* FirstSubscriptionOnboardingTests.swift */; };
 		5AD7C8361D6F07BFD5468476 /* TranscriptShadowGateLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B2E56E601D71138BCDB2012 /* TranscriptShadowGateLogger.swift */; };
 		5AE60CB808D69272B8998FBE /* TimeBoundaryResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8EA584D6F853AB631B7D7B8 /* TimeBoundaryResolver.swift */; };
@@ -522,6 +523,7 @@
 		90A79069EE1894915984189A /* LearningArtifactIngestor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E92E101CAB8C2A796F492CC /* LearningArtifactIngestor.swift */; };
 		90B5A4621CC0F68378C19785 /* AcousticBreakDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 244FFBBBA9AFD5B49BF1C2DB /* AcousticBreakDetector.swift */; };
 		9224173AE1EC444FC031507B /* FrozenTrace-8A9DFC82-CFCC-4488-A341-D7447664542F.json in Resources */ = {isa = PBXBuildFile; fileRef = 73B9B5A6EDC70430286AEB82 /* FrozenTrace-8A9DFC82-CFCC-4488-A341-D7447664542F.json */; };
+		9235FF2C7A7D6C55BE92618B /* ChapterSignalAggregateMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9E32DBF6FA9951E148BB764 /* ChapterSignalAggregateMetricsTests.swift */; };
 		92C793FF828E41813FC459A8 /* UserCorrectionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D78A9EF7EDA4C7E0B139580 /* UserCorrectionStoreTests.swift */; };
 		92CC1F60C7335B2ADCB4E543 /* FrozenTrace-DoaC-ep1.json in Resources */ = {isa = PBXBuildFile; fileRef = FE36D960D7560BE220C16EA0 /* FrozenTrace-DoaC-ep1.json */; };
 		931E13E70E563CF3E51F0387 /* EpisodeTraitSnapshotBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 754E90ED305776A364728DAC /* EpisodeTraitSnapshotBuilder.swift */; };
@@ -1532,6 +1534,7 @@
 		A4AE36EEE82730D125E8480F /* FinalPassCanonicalSpanV23MigrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalPassCanonicalSpanV23MigrationTests.swift; sourceTree = "<group>"; };
 		A544406C33209D95E5D5DF76 /* LongFormPlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongFormPlaybackTests.swift; sourceTree = "<group>"; };
 		A55D82EFCF71F9038C2B0CEE /* FinalPassThermalRecoveryObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalPassThermalRecoveryObserver.swift; sourceTree = "<group>"; };
+		A5648D0B74C1843D85974AA6 /* ChapterSignalAggregateMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterSignalAggregateMetrics.swift; sourceTree = "<group>"; };
 		A57EEA0C9B614E3E9AB469CD /* AcousticFingerprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcousticFingerprint.swift; sourceTree = "<group>"; };
 		A604BFCE5985A8C49DB9086A /* BatchNotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchNotificationService.swift; sourceTree = "<group>"; };
 		A655A67B1D4D28FA4BBAF415 /* AssetLifecycleLoggerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssetLifecycleLoggerTests.swift; sourceTree = "<group>"; };
@@ -1547,6 +1550,7 @@
 		A824ECB99B9EC001E4C6B29B /* BackgroundTaskRunLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundTaskRunLedger.swift; sourceTree = "<group>"; };
 		A88E08E234A7B69576A8649A /* FrozenTrace-DoaC-ep2.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "FrozenTrace-DoaC-ep2.json"; sourceTree = "<group>"; };
 		A9A77707822074B67EFD770B /* SkipOrchestratorPreloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkipOrchestratorPreloadTests.swift; sourceTree = "<group>"; };
+		A9E32DBF6FA9951E148BB764 /* ChapterSignalAggregateMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterSignalAggregateMetricsTests.swift; sourceTree = "<group>"; };
 		A9EE3B301A104F02BA1DE6C2 /* SelfDescribingTitlesV15MigrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfDescribingTitlesV15MigrationTests.swift; sourceTree = "<group>"; };
 		AA72B9A62B3F9B6ECD200BFE /* ClassifyBackfillTerminalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassifyBackfillTerminalTests.swift; sourceTree = "<group>"; };
 		AACB30863437C8FB459C4764 /* CapabilitySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapabilitySnapshot.swift; sourceTree = "<group>"; };
@@ -2326,6 +2330,8 @@
 		42E20656ABB6FBDCAB31952E /* NarlEval */ = {
 			isa = PBXGroup;
 			children = (
+				A5648D0B74C1843D85974AA6 /* ChapterSignalAggregateMetrics.swift */,
+				A9E32DBF6FA9951E148BB764 /* ChapterSignalAggregateMetricsTests.swift */,
 				A2F0DC07549344269BEEA973 /* ChapterSignalCaseStudyTests.swift */,
 				D46C4A5184F06E3AA42F015B /* ChapterSignalGate.swift */,
 				01C29A38FED8C673703C5BCC /* ChapterSignalGateTests.swift */,
@@ -4304,6 +4310,8 @@
 				3F6A36FC547C0E3AF73E0454 /* ChapterPlanCacheTests.swift in Sources */,
 				8DC353E9EDCC64E147BCD707 /* ChapterPlanTests.swift in Sources */,
 				D16B3A989DE1F42671DCA61D /* ChapterPromptContextTests.swift in Sources */,
+				5A11D7C58453407033C551AC /* ChapterSignalAggregateMetrics.swift in Sources */,
+				9235FF2C7A7D6C55BE92618B /* ChapterSignalAggregateMetricsTests.swift in Sources */,
 				6CAFF4F443F9DE22AA876E0C /* ChapterSignalCaseStudyTests.swift in Sources */,
 				21334B56EE2E23823EDD31F0 /* ChapterSignalGate.swift in Sources */,
 				220E2A34C0E84493D965C6CC /* ChapterSignalGateTests.swift in Sources */,
