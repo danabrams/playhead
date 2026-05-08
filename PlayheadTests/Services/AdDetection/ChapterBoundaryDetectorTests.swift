@@ -24,6 +24,16 @@
 //   - episode <5 min skips BOTH gates byte-for-byte
 //   - merge picks the neighbor with higher signal-overlap
 //   - synthetic t=0 boundary is always retained even after a tight cap
+//
+// Coverage (bead-6 gap fills, playhead-au2v.1.6):
+//   - music+speaker → single boundary at exactly 0.7 confidence (the
+//     missing rung in the weighted-sum ladder; 0.4 / 0.7 / 0.9 / 1.0)
+//   - 30-min episode with 10 synthetic candidates → cap=6 (no floor)
+//   - all-zero feature streams (all four populated, values zero) →
+//     only synthetic t=0
+//   - each individual signal stream omitted (with the others populated)
+//     processes without crash and emits expected boundaries from the
+//     remaining streams
 
 import Foundation
 import Testing
@@ -2116,5 +2126,304 @@ struct ChapterBoundaryDetectorDetectRefinedTests {
         #expect(detected == bareCount)
         #expect(episodeDur == dur)
         #expect(perSec > 1.0 / 90.0)
+    }
+}
+
+// MARK: - Bead-6 gap fills (playhead-au2v.1.6)
+
+/// Fills the missing rung in the weighted-sum ladder. Existing tests cover
+/// music alone (0.4) and three- and four-signal stacks (0.9, 1.0); this
+/// suite pins the two-signal music+speaker stack at exactly 0.7 and
+/// confirms the two co-timed signals collapse into a single boundary.
+@Suite("ChapterBoundaryDetector / combined signals / two-signal stacks")
+struct ChapterBoundaryDetectorTwoSignalStackTests {
+
+    @Test("co-timed music + speaker shift produces a single boundary with confidence 0.7")
+    func musicPlusSpeakerYields07() {
+        let detector = ChapterBoundaryDetector()
+        // Music onset at t=30 (delta 0.05 → 0.95 across the 28-30 / 30-32
+        // window boundary) co-located with a speaker shift from cluster 1
+        // → cluster 2 sustained ≥5s starting at t=30. No lexical hits, no
+        // long pauses.
+        let music = [
+            ChapterMusicWindow(startTime: 28, endTime: 30, musicProbability: 0.05),
+            ChapterMusicWindow(startTime: 30, endTime: 32, musicProbability: 0.95),
+        ]
+        let speakers = [
+            ChapterSpeakerWindow(startTime: 0, endTime: 30, clusterId: 1),
+            ChapterSpeakerWindow(startTime: 30, endTime: 40, clusterId: 2),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 600,
+            musicWindows: music,
+            speakerWindows: speakers
+        )
+        let result = detector.detect(features: snapshot)
+        // Synthetic t=0 + a single combined boundary at t=30. The two
+        // co-timed signals must NOT fragment into two adjacent
+        // boundaries — that would be a clustering bug.
+        #expect(result.count == 2,
+                "music + speaker at the same instant must produce ONE combined boundary, not two")
+        // Look up the boundary by timestamp (matches the pattern used
+        // throughout this file; resilient to ordering changes).
+        let combined = result.first { $0.startTime == 30.0 }
+        #expect(combined != nil, "expected a combined boundary at t=30")
+        // Confidence must be EXACTLY 0.4 (music) + 0.3 (speaker) = 0.7.
+        // Pin the value tightly; intermediate Float drift would surface
+        // as a non-trivial deviation.
+        #expect(abs((combined?.boundaryConfidence ?? 0) - 0.7) < 0.0001,
+                "music (0.4) + speaker (0.3) must sum to exactly 0.7")
+        let signals = Set(combined?.triggeringSignals ?? [])
+        #expect(signals == [.musicTransition, .speakerShift],
+                "boundary must carry exactly the two firing signals, no spurious extras")
+    }
+
+    @Test("co-timed music + speaker confidence is strictly greater than music-alone")
+    func musicPlusSpeakerExceedsMusicAlone() {
+        // Sanity rung: confirm ordering of the weighted-sum ladder by
+        // running music-alone and music+speaker through the same
+        // detector and comparing confidences. Catches a regression where
+        // the speaker contribution is silently dropped.
+        let detector = ChapterBoundaryDetector()
+        let musicOnly = ChapterFeatureSnapshot(
+            episodeDuration: 600,
+            musicWindows: [
+                ChapterMusicWindow(startTime: 28, endTime: 30, musicProbability: 0.05),
+                ChapterMusicWindow(startTime: 30, endTime: 32, musicProbability: 0.95),
+            ]
+        )
+        let musicPlusSpeaker = ChapterFeatureSnapshot(
+            episodeDuration: 600,
+            musicWindows: musicOnly.musicWindows,
+            speakerWindows: [
+                ChapterSpeakerWindow(startTime: 0, endTime: 30, clusterId: 1),
+                ChapterSpeakerWindow(startTime: 30, endTime: 40, clusterId: 2),
+            ]
+        )
+        let aloneAt30 = detector.detect(features: musicOnly).first { $0.startTime == 30.0 }
+        let pairAt30 = detector.detect(features: musicPlusSpeaker).first { $0.startTime == 30.0 }
+        #expect(aloneAt30 != nil)
+        #expect(pairAt30 != nil)
+        let aloneConf = aloneAt30?.boundaryConfidence ?? 0
+        let pairConf = pairAt30?.boundaryConfidence ?? 0
+        #expect(pairConf > aloneConf,
+                "music+speaker confidence must strictly exceed music-alone confidence")
+        #expect(abs(aloneConf - 0.4) < 0.0001,
+                "music-alone confidence must be exactly 0.4 (single-signal weight)")
+        #expect(abs(pairConf - 0.7) < 0.0001,
+                "music+speaker confidence must be exactly 0.7 (0.4 + 0.3)")
+    }
+}
+
+/// Direct unit coverage for the cap-and-merge gate at the 30-min episode
+/// rung. Existing tests cover 60-min × 20→12 (line ~1313) and 60-min
+/// floor cases (≥40min). The 30-min × 10→6 case (no floor, target = 6)
+/// is exercised end-to-end in a `detectRefined` integration test but
+/// not as a focused `applyDensityGates` unit. This suite pins the
+/// arithmetic on the synthetic-candidate path.
+@Suite("ChapterBoundaryDetector / density gates / cap-and-merge / 30-min target")
+struct ChapterBoundaryDetectorCapThirtyMinuteTests {
+
+    @Test("30-min episode with 10 synthetic candidates → cap to 6, no floor enforcement")
+    func thirtyMinuteCapsToSix() {
+        // 30-min episode: target = ceil(30/5) = 6. Floor of 8 does NOT
+        // apply (<40 min); the no-floor case uses a sentinel of 1, so
+        // cap = max(1, 6) = 6. Hand 10 non-zero candidates → 6
+        // retained, 4 dropped.
+        //
+        // Rate guard: total = 11 candidates / 1800s = 0.0061 < 1/90 ≈
+        // 0.0111 → pathological gate stays silent.
+        let dur: TimeInterval = 30 * 60
+        var cands: [ChapterCandidate] = [
+            ChapterCandidate(startTime: 0, boundaryConfidence: 1.0, triggeringSignals: [])
+        ]
+        // Place 10 non-zero candidates 150s apart so their times are
+        // unambiguous. Use descending confidences so we can verify
+        // top-N retention by confidence: highest 6 are the FIRST 6.
+        for index in 0..<10 {
+            cands.append(
+                ChapterCandidate(
+                    startTime: TimeInterval(150 + index * 150),
+                    boundaryConfidence: 0.99 - Float(index) * 0.05,
+                    triggeringSignals: [.musicTransition]
+                )
+            )
+        }
+        let result = ChapterBoundaryDetector.applyDensityGates(
+            candidates: cands,
+            episodeDuration: dur
+        )
+        guard case let .capApplied(detected, retained, _, mergeRecords) = result.outcome else {
+            Issue.record("expected capApplied outcome, got \(result.outcome)")
+            return
+        }
+        #expect(detected == 11, "11 total candidates fed in (10 non-zero + t=0)")
+        #expect(retained == 7, "cap=6 non-zero + t=0 = 7 retained")
+        #expect(result.candidates.count == 7)
+        // Survivors: t=0 plus the highest-confidence 6 (indices 0..5 →
+        // times 150, 300, 450, 600, 750, 900).
+        let times = result.candidates.map(\.startTime)
+        #expect(times.first == 0, "synthetic t=0 must remain at head")
+        #expect(times == times.sorted(), "survivors must be sorted by startTime ascending")
+        let nonZeroTimes = Array(times.dropFirst())
+        let expected: [TimeInterval] = [150, 300, 450, 600, 750, 900]
+        #expect(nonZeroTimes == expected,
+                "retained non-zero candidates must be the 6 highest-confidence (the first 6 we appended)")
+        // 4 dropped → 4 merge records, with times 1050, 1200, 1350, 1500.
+        #expect(mergeRecords.count == 4)
+        let dropped = mergeRecords.map(\.droppedStartTime).sorted()
+        let expectedDropped: [TimeInterval] = [1050, 1200, 1350, 1500]
+        #expect(dropped == expectedDropped)
+    }
+}
+
+/// Hermetic edge-case coverage that the existing edge suite does not
+/// exercise directly: all four feature streams populated with
+/// zero-valued samples, and individual streams omitted while the
+/// others are populated. The aim is to pin "no spurious boundaries" /
+/// "no crash" / "graceful skip" without overlapping the existing
+/// monologue and short-episode tests.
+@Suite("ChapterBoundaryDetector / edge cases / sparse + missing streams")
+struct ChapterBoundaryDetectorSparseInputTests {
+
+    @Test("all four streams populated with zero-valued samples emits only synthetic t=0")
+    func allZeroFeaturesProduceOnlyT0() {
+        // 60s episode populated with 30 windows on every stream. Music
+        // probability 0, pause probability 0, single speaker cluster
+        // (no shift), no lexical hits. Detector must emit ONLY the
+        // synthetic t=0 boundary — no signal contributions, no
+        // duration-end artifacts, no spurious clusters.
+        let detector = ChapterBoundaryDetector()
+        let dur: TimeInterval = 60
+        let music = BoundaryFixtures.musicTrack(count: 30, probability: 0.0)
+        let speakers = BoundaryFixtures.speakerTrack(count: 30, clusterId: 1)
+        let pauses = BoundaryFixtures.pauseTrack(count: 30, pauseProbability: 0.0)
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: dur,
+            musicWindows: music,
+            speakerWindows: speakers,
+            lexicalHits: [],
+            pauseWindows: pauses
+        )
+        let result = detector.detect(features: snapshot)
+        #expect(result.count == 1, "all-zero features must produce only the synthetic t=0 boundary")
+        #expect(result.first?.startTime == 0)
+        #expect(result.first?.triggeringSignals.isEmpty == true)
+        #expect(result.first?.boundaryConfidence == 1.0)
+    }
+
+    @Test("missing music stream: speaker shift in remaining streams still fires a boundary")
+    func missingMusicStreamGracefullySkipped() {
+        // No music windows. Speaker shift at t=30 sustained ≥5s. The
+        // detector must skip the music path without crashing and still
+        // emit the speaker-driven boundary.
+        let detector = ChapterBoundaryDetector()
+        let speakers = [
+            ChapterSpeakerWindow(startTime: 0, endTime: 30, clusterId: 1),
+            ChapterSpeakerWindow(startTime: 30, endTime: 40, clusterId: 2),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 600,
+            musicWindows: [],
+            speakerWindows: speakers
+        )
+        let result = detector.detect(features: snapshot)
+        let shift = result.first { $0.startTime == 30.0 }
+        #expect(shift != nil, "speaker shift must still fire when music stream is empty")
+        #expect(shift?.triggeringSignals == [.speakerShift])
+        #expect(abs((shift?.boundaryConfidence ?? 0) - 0.3) < 0.0001,
+                "speaker-alone confidence must equal speakerShiftWeight (0.3)")
+    }
+
+    @Test("missing speaker stream: music transition still fires a boundary")
+    func missingSpeakerStreamGracefullySkipped() {
+        // No speaker windows. Music onset at t=30. The speaker path
+        // must be skipped without affecting the music-driven boundary.
+        let detector = ChapterBoundaryDetector()
+        let music = [
+            ChapterMusicWindow(startTime: 28, endTime: 30, musicProbability: 0.05),
+            ChapterMusicWindow(startTime: 30, endTime: 32, musicProbability: 0.95),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 600,
+            musicWindows: music,
+            speakerWindows: []
+        )
+        let result = detector.detect(features: snapshot)
+        let onset = result.first { $0.startTime == 30.0 }
+        #expect(onset != nil, "music onset must still fire when speaker stream is empty")
+        #expect(onset?.triggeringSignals == [.musicTransition])
+        #expect(abs((onset?.boundaryConfidence ?? 0) - 0.4) < 0.0001,
+                "music-alone confidence must equal musicTransitionWeight (0.4)")
+    }
+
+    @Test("missing lexical hits: music + speaker boundary still emits at correct confidence")
+    func missingLexicalStreamGracefullySkipped() {
+        // No lexical hits. Music + speaker co-timed at t=30 → confidence
+        // 0.7. The lexical path must skip without affecting the
+        // weighted-sum.
+        let detector = ChapterBoundaryDetector()
+        let music = [
+            ChapterMusicWindow(startTime: 28, endTime: 30, musicProbability: 0.05),
+            ChapterMusicWindow(startTime: 30, endTime: 32, musicProbability: 0.95),
+        ]
+        let speakers = [
+            ChapterSpeakerWindow(startTime: 0, endTime: 30, clusterId: 1),
+            ChapterSpeakerWindow(startTime: 30, endTime: 40, clusterId: 2),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 600,
+            musicWindows: music,
+            speakerWindows: speakers,
+            lexicalHits: []
+        )
+        let result = detector.detect(features: snapshot)
+        let combined = result.first { $0.startTime == 30.0 }
+        #expect(combined != nil)
+        #expect(abs((combined?.boundaryConfidence ?? 0) - 0.7) < 0.0001,
+                "missing lexical hits must not perturb the music+speaker confidence")
+    }
+
+    @Test("missing pause stream: music + speaker boundary still emits at correct confidence")
+    func missingPauseStreamGracefullySkipped() {
+        // No pause windows. Music + speaker at t=30 → 0.7. The pause
+        // path must skip cleanly.
+        let detector = ChapterBoundaryDetector()
+        let music = [
+            ChapterMusicWindow(startTime: 28, endTime: 30, musicProbability: 0.05),
+            ChapterMusicWindow(startTime: 30, endTime: 32, musicProbability: 0.95),
+        ]
+        let speakers = [
+            ChapterSpeakerWindow(startTime: 0, endTime: 30, clusterId: 1),
+            ChapterSpeakerWindow(startTime: 30, endTime: 40, clusterId: 2),
+        ]
+        let snapshot = ChapterFeatureSnapshot(
+            episodeDuration: 600,
+            musicWindows: music,
+            speakerWindows: speakers,
+            pauseWindows: []
+        )
+        let result = detector.detect(features: snapshot)
+        let combined = result.first { $0.startTime == 30.0 }
+        #expect(combined != nil)
+        #expect(abs((combined?.boundaryConfidence ?? 0) - 0.7) < 0.0001,
+                "missing pause stream must not perturb the music+speaker confidence")
+    }
+
+    @Test("all signal streams omitted (only episode duration) emits only synthetic t=0")
+    func allStreamsOmittedEmitsOnlyT0() {
+        // No streams populated at all. The detector should produce just
+        // the synthetic t=0 boundary; no crash, no spurious candidates.
+        // (This is a tighter restatement of the existing
+        // `noSignalsButPositiveDurationEmitsT0` invariant — and is
+        // NOT redundant: that test reads `result.first?.startTime`,
+        // this one pins triggeringSignals and boundaryConfidence too.)
+        let detector = ChapterBoundaryDetector()
+        let snapshot = ChapterFeatureSnapshot(episodeDuration: 600)
+        let result = detector.detect(features: snapshot)
+        #expect(result.count == 1)
+        #expect(result.first?.startTime == 0)
+        #expect(result.first?.triggeringSignals.isEmpty == true)
+        #expect(result.first?.boundaryConfidence == 1.0)
     }
 }
