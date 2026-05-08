@@ -711,6 +711,7 @@ struct ChapterSignalAggregateMetricsTests {
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(report)
         let text = String(decoding: data, as: UTF8.self)
+        // Top-level ChapterSignalLiftReport fields.
         for key in [
             "\"schemaVersion\"",
             "\"runId\"",
@@ -728,6 +729,54 @@ struct ChapterSignalAggregateMetricsTests {
             "\"limitations\"",
         ] {
             #expect(text.contains(key), "wire format must carry \(key)")
+        }
+    }
+
+    @Test("PerModeMetrics wire shape carries all documented field names")
+    func perModeMetricsWireShape() throws {
+        // Pin the nested PerModeMetrics field names on the wire. The CI
+        // dashboard reads these; renaming any one (e.g. precision →
+        // accuracyP) is a breaking wire-shape change that must trigger a
+        // schemaVersion bump. Without this test, a rename would slip
+        // past the round-trip check (which is structural-shape-only via
+        // Codable's synthesized init).
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [],
+            runId: "per-mode-shape",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(report)
+        let text = String(decoding: data, as: UTF8.self)
+        // Every PerModeMetrics field, in declaration order on the
+        // struct, must appear at least once in the encoded payload.
+        // (Each field appears 3x — once per mode — but `contains` is
+        // sufficient.)
+        for key in [
+            "\"mode\"",
+            "\"episodeCount\"",
+            "\"excludedEpisodeCount\"",
+            "\"precision\"",
+            "\"recall\"",
+            "\"f1\"",
+            "\"predictedAdSeconds\"",
+            "\"groundTruthAdSeconds\"",
+            "\"truePositiveSeconds\"",
+            "\"totalFMCalls\"",
+            "\"phaseLatencyP50Ms\"",
+            "\"phaseLatencyP90Ms\"",
+            "\"phaseLatencyP99Ms\"",
+            "\"abortedByOperationalRate\"",
+            "\"abortedByPathologicalRate\"",
+            "\"skippedByCreatorChapters\"",
+            "\"abortRate\"",
+            "\"episodeReplayCount\"",
+        ] {
+            #expect(text.contains(key),
+                    "PerModeMetrics wire format must carry \(key) — renaming this field is a schemaVersion bump")
         }
     }
 
