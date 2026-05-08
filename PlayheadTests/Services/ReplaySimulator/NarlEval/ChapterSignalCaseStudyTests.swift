@@ -310,6 +310,8 @@ struct ChapterSignalCaseStudyTests {
         let shadow = ChapterSignalGate.replay(trace: trace, mode: .shadow, config: config)
         #expect(shadow.mode == .shadow,
                 "[\(study.caseId)] mode mismatch on .shadow result.")
+        #expect(shadow.episodesProcessed == 1,
+                "[\(study.caseId)] .shadow must process exactly the one input trace.")
         #expect(shadow.planGeneratedCount == enabled.planGeneratedCount,
                 "[\(study.caseId)] .shadow planGeneratedCount must equal .enabled.")
         #expect(shadow.skippedByCreatorChapters == enabled.skippedByCreatorChapters,
@@ -318,19 +320,27 @@ struct ChapterSignalCaseStudyTests {
                 "[\(study.caseId)] .shadow totalFMCallsForChapterLabeling must equal .enabled.")
         #expect(shadow.aggregateLatencyMs == enabled.aggregateLatencyMs,
                 "[\(study.caseId)] .shadow aggregateLatencyMs must equal .enabled.")
+        #expect(shadow.perEpisodeOutcomes.count == 1)
+        #expect(shadow.perEpisodeOutcomes[0].episodeId == study.trace.episodeIdAnon)
+        #expect(shadow.perEpisodeOutcomes[0].podcastId == study.trace.podcastIdArchetype)
 
         // Determinism: replaying the same case twice in each mode must
         // yield Equatable-equal results. This catches regressions that
         // would introduce non-determinism in the trace synthesis (e.g.,
         // a future change to `makeTrace` that accidentally read a
         // wall-clock value) before they corrupt the harness's
-        // byte-for-byte parity contract.
+        // byte-for-byte parity contract. Cover all three modes so a
+        // future regression that touches only one mode's dispatch path
+        // still surfaces here.
         let off2 = ChapterSignalGate.replay(trace: trace, mode: .off, config: config)
         let enabled2 = ChapterSignalGate.replay(trace: trace, mode: .enabled, config: config)
+        let shadow2 = ChapterSignalGate.replay(trace: trace, mode: .shadow, config: config)
         #expect(off == off2,
                 "[\(study.caseId)] .off result is non-deterministic across replays.")
         #expect(enabled == enabled2,
                 "[\(study.caseId)] .enabled result is non-deterministic across replays.")
+        #expect(shadow == shadow2,
+                "[\(study.caseId)] .shadow result is non-deterministic across replays.")
     }
 
     @Test("Per-case loader produced at least one case (parameterized suite is non-vacuous)")
