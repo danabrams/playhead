@@ -1028,6 +1028,35 @@ struct ChapterSignalAggregateMetricsTests {
                 "episodeCount + excludedEpisodeCount must reconstruct corpusSize")
     }
 
+    @Test("compute() emits the shadow-matches-baseline limitation when scaffold detection is mode-independent")
+    func shadowMatchesBaselineLimitationFires() {
+        // The compute() function emits a SECOND structural note —
+        // "Shadow detection metrics match baseline byte-for-byte" —
+        // when the bead-scaffold contract holds. This test pins that
+        // the note actually fires under today's mode-independent
+        // predictor. Without this, a future patch that reverses the
+        // emission condition (e.g. drops the `!` and emits only when
+        // shadow DIFFERS from baseline) would silently break the
+        // CI dashboard's expected limitation set.
+        let trace = Self.makeTrace(
+            episodeId: "ep-shadow-limit",
+            podcastId: "pod-shadow-limit",
+            episodeDuration: 600,
+            adStart: 60,
+            adEnd: 90
+        )
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: [trace],
+            runId: "shadow-match",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        #expect(report.limitations.contains(where: { $0.contains("byte-for-byte") }),
+                "the byte-for-byte shadow-match note must be present at the scaffold")
+        #expect(report.limitations.contains(where: { $0.contains("consumersReadChapterPlan") }),
+                "the byte-for-byte note must reference the consumersReadChapterPlan contract")
+    }
+
     @Test("extra limitations augment, not replace, the structural ones")
     func extraLimitationsAugmentNotReplace() {
         // Strengthen the existing extraLimitationsAppended test: pin the
