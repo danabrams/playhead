@@ -450,6 +450,67 @@ struct ChapterPhaseDiagnosticsTests {
         #expect(str.contains(pollutedHash))
     }
 
+    // MARK: - Privacy regression at the BUNDLE-FILE surface
+
+    /// Run the same polluted-id privacy regression but at the actual
+    /// production surface: build a `DiagnosticsBundleFile` through
+    /// `DiagnosticsBundleBuilder.buildDefault(...)` and encode through
+    /// `DiagnosticsExportService.encode(_:)` — exactly what
+    /// `DiagnosticsExportCoordinator` does at runtime. If any future
+    /// refactor accidentally widens a sibling field to carry raw episode
+    /// metadata, this test catches it BEFORE shipping.
+    @Test("Privacy regression at the bundle-file surface — no PII anywhere in the encoded diagnostics JSON")
+    func privacyRegressionAtBundleFileSurface() throws {
+        let title = "BUNDLE-LEVEL-PRIVATE-TITLE-divorce-special"
+        let advertiser = "BUNDLE-LEVEL-PRIVATE-ADVERTISER-AcmeAds"
+        let pollutedEpisodeId = "ep-\(title)-\(advertiser)"
+
+        let eligibility = AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: true,
+            capturedAt: Date(timeIntervalSince1970: Self.timestamp)
+        )
+        let chapterEvents: [ChapterPhaseEvent] = [
+            .completed(
+                installID: Self.installID, episodeId: pollutedEpisodeId,
+                timestamp: Self.timestamp,
+                chapterCount: 4, planConfidence: 0.7,
+                fmCallCount: 4, latencyMs: 800
+            ),
+            .labelFailed(
+                installID: Self.installID, episodeId: pollutedEpisodeId,
+                timestamp: Self.timestamp,
+                operational: false, errorCode: "fm_decode_failure",
+                retryCount: 0, finalOutcome: "gave_up"
+            )
+        ]
+        let bundle = DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0.0",
+            osVersion: "iOS 26.0",
+            deviceClass: .iPhone17Pro,
+            buildType: .release,
+            eligibility: eligibility,
+            workJournalEntries: [],
+            installID: Self.installID,
+            chapterPhaseEvents: chapterEvents
+        )
+        let file = DiagnosticsBundleFile(
+            generatedAt: Date(timeIntervalSince1970: Self.timestamp),
+            default: bundle,
+            optIn: nil
+        )
+        let data = try DiagnosticsExportService.encode(file)
+        let str = try #require(String(data: data, encoding: .utf8))
+
+        for token in [title, advertiser, pollutedEpisodeId] {
+            #expect(!str.contains(token),
+                    "PII token '\(token)' leaked into bundle-file JSON")
+        }
+    }
+
     // MARK: - Top-level array sibling to scheduler_events
 
     @Test("`chapter_phase_events` appears as a top-level array sibling of `scheduler_events` in the diagnostics JSON")

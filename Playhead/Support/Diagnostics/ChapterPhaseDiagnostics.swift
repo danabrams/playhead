@@ -102,6 +102,15 @@ enum ChapterPhaseEventType: String, Sendable, Hashable, Codable, CaseIterable {
 /// All payload structs MUST stay PII-free. Reviewers should reject any
 /// addition of `title`, `text`, `transcript`, `advertiser`, or any
 /// String value sourced from episode metadata.
+///
+/// Asymmetry note: `ChapterPhaseEventType` has 11 cases, this enum has 9.
+/// `noCandidates` and `preempted` are intentionally stateless — the
+/// emit-helper factories on `ChapterPhaseEvent` set `payload: nil` for
+/// those, and the encoded JSON omits the `payload` key entirely (see the
+/// "Golden — chapter_phase_preempted" / "…no_candidates" tests). Adding
+/// a payload to either event in a future bead is forwards-compatible:
+/// the wrapping `ChapterPhaseEvent.payload` field is already `Optional`,
+/// so older readers see the new key and ignore it.
 enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
 
     case started(Started)
