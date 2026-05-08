@@ -42,7 +42,7 @@ import Foundation
 
 enum ChapterSignalGate {
 
-    // MARK: Result types
+    // MARK: - Result types
 
     /// Per-episode outcome of one replay invocation. Carries enough state
     /// to drive case-study extraction (bead 20) without re-walking the
@@ -133,7 +133,7 @@ enum ChapterSignalGate {
         }
     }
 
-    // MARK: Config
+    // MARK: - Config
 
     /// Knobs for the deterministic replay model. All values are FROZEN
     /// for replay reproducibility: changing any of them is a wire-
@@ -190,7 +190,7 @@ enum ChapterSignalGate {
         static let `default` = Config()
     }
 
-    // MARK: Replay (single mode)
+    // MARK: - Replay (single mode)
 
     /// Replay a frozen trace under one `ChapterSignalMode`.
     ///
@@ -273,7 +273,7 @@ enum ChapterSignalGate {
         )
     }
 
-    // MARK: Replay (mode comparison)
+    // MARK: - Replay (mode comparison)
 
     /// Replay one trace across multiple modes; returns a dictionary
     /// keyed by mode. This is the primitive bead 19 builds aggregate
