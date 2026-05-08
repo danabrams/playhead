@@ -485,6 +485,64 @@ struct ChapterLabelingServiceOperationalFailureTests {
     }
 }
 
+// MARK: - label() — cancellation
+
+@Suite("ChapterLabelingService — cancellation")
+struct ChapterLabelingServiceCancellationTests {
+
+    /// Cancellation must short-circuit the retry loop instead of being
+    /// laundered into another operational retry. The service's contract
+    /// is that an externally-cancelled task returns ONE operational
+    /// result and stops calling the FM.
+    @Test("Externally-cancelled task does not retry past cancellation")
+    func cancellationStopsRetries() async {
+        let counter = CallCounter()
+        let script = OutcomeScript([
+            .error(CancellationError()),
+            .error(CancellationError())
+        ])
+        let service = makeService(counter: counter, script: script)
+
+        let task = Task {
+            await service.label(makeCandidate())
+        }
+        task.cancel()
+        let result = await task.value
+
+        #expect(result.failureMode == .operational)
+        #expect(result.labelDisposition == .unclear)
+        // The cancellation may be observed at any of: the
+        // `Task.isCancelled` gate at the top of the retry loop (no FM
+        // call), the FM-call closure (`CancellationError` thrown), or
+        // the backoff sleep. In every path we end before a second
+        // attempt completes successfully — counter must be at most 1.
+        #expect(counter.value <= 1)
+    }
+
+    /// A successful response from the FM call should still produce a
+    /// success even if cancellation arrives later in the same task —
+    /// the work was already done.
+    @Test("Cancellation after successful FM call still returns success")
+    func cancellationAfterSuccess() async {
+        let counter = CallCounter()
+        let script = OutcomeScript([
+            .label(makeLabel(.content, confidence: 0.85))
+        ])
+        let service = makeService(counter: counter, script: script)
+        let task = Task {
+            await service.label(makeCandidate())
+        }
+        let result = await task.value
+        // Even if the parent task is cancelled now, the result was
+        // already produced. Cancellation must not retroactively change
+        // a successful return.
+        task.cancel()
+        #expect(result.failureMode == nil)
+        #expect(result.labelDisposition == .content)
+        #expect(counter.value == 1)
+    }
+}
+
 // MARK: - label() — timeout
 
 @Suite("ChapterLabelingService — timeout")

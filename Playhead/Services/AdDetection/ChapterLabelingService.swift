@@ -212,6 +212,19 @@ struct ChapterLabelingService: Sendable {
         while attempts < Self.maxAttempts {
             attempts += 1
 
+            // Honor external cancellation between attempts. The FM
+            // call's child tasks fold `CancellationError` into a
+            // `.operational(...)` shape, so without this check the
+            // retry loop would keep going after the parent Task was
+            // cancelled.
+            if Task.isCancelled {
+                return Self.operationalResult(
+                    for: candidate,
+                    attempts: attempts,
+                    cause: "cancelled"
+                )
+            }
+
             // Per-attempt backoff (only meaningful before attempt 2+).
             if attempts > 1 {
                 let backoff = Self.backoffNanos(forRetryNumber: attempts - 1)
@@ -296,6 +309,11 @@ struct ChapterLabelingService: Sendable {
                 do {
                     let label = try await labelCall(prompt)
                     return .label(label)
+                } catch is CancellationError {
+                    // Re-throw so the outer task group surfaces
+                    // cancellation to the retry loop instead of
+                    // burying it inside `.operational(...)`.
+                    throw CancellationError()
                 } catch {
                     return .error(Self.classify(error))
                 }
@@ -308,11 +326,19 @@ struct ChapterLabelingService: Sendable {
                         for: .seconds(Self.perCallTimeoutSeconds)
                     )
                     return .timedOut
+                } catch is CancellationError {
+                    // Two cancellation sources: (a) the FM-call branch
+                    // won the race and the group is being torn down,
+                    // (b) the parent Task was cancelled externally.
+                    // In case (a), `group.next()` will already have
+                    // returned the FM result and our value is
+                    // discarded. In case (b), the FM call also gets
+                    // cancelled and re-throws `CancellationError`
+                    // (see above), so this branch never wins. Either
+                    // way, returning `.timedOut` is safe — the FM
+                    // branch dominates the race when both finish.
+                    return .timedOut
                 } catch {
-                    // Sleep was cancelled (the FM-call branch won the
-                    // race and the group is being torn down). Surface
-                    // a timeout-shaped sentinel that the consumer
-                    // discards.
                     return .timedOut
                 }
             }
