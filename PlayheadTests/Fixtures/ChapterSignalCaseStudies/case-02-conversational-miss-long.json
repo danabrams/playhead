@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "case_id": "case-02-conversational-miss-long",
+  "archetype": "conversational",
+  "category": "conversational_miss",
+  "expected_behavior": "A long conversational episode (~90 min) with no creator-supplied chapters. Same class as case-01 but longer-form: more atoms means the default stub clamp (atoms/50, max 12) saturates at the upper bound, exercising the higher-FM-cost branch of the labelling phase. Pre-au2v.1: chapter prior absent. Post-au2v.1: plan emitted with 12 inferred boundary segments.",
+  "synthesis_notes": "Atom density modeled on a long-form interview that consistently misses pipeline_coverage_limited classification on the diagnostic corpus (atoms/50 = 12 → upper clamp). Synthetic; no transcript text, no commercial-message attribution.",
+  "trace": {
+    "episode_id_anon": "episode_anon_a1c02",
+    "podcast_id_archetype": "show_archetype_conversational",
+    "episode_duration_sec": 5400.0,
+    "atom_count": 700,
+    "atom_spacing_sec": 7.7
+  },
+  "gate_inputs": {
+    "creator_chapters_present": false,
+    "stub_chapter_count": null
+  },
+  "expected_before_off": {
+    "plan_generated_count": 0,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 0,
+    "aggregate_latency_ms": 0.0
+  },
+  "expected_after_enabled": {
+    "plan_generated_count": 1,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 12,
+    "aggregate_latency_ms": 305.0
+  }
+}

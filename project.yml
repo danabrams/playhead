@@ -158,6 +158,10 @@ targets:
           # produce README.md" collision with Fixtures/NarlEval/2026-04-22/
           # (Xcode resource copy step doesn't preserve subdirectory paths).
           - "Fixtures/Dogfood/2026-05-06/**"
+          # playhead-au2v.1.20: case-study fixtures are read at runtime
+          # via #filePath through ChapterSignalCaseStudyTests. Excluding
+          # avoids a third README.md collision in the resource copy step.
+          - "Fixtures/ChapterSignalCaseStudies/**"
     dependencies:
       - target: Playhead
     settings:

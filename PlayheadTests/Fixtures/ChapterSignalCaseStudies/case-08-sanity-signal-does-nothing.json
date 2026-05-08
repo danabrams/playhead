@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "case_id": "case-08-sanity-signal-does-nothing",
+  "archetype": "news",
+  "category": "sanity_signal_inert",
+  "expected_behavior": "Sanity case: a trace where the gate correctly does nothing visible to consumers. The boundary detector is configured to return zero candidates (stub_chapter_count=0), so no plan is emitted in either mode — the gate ran (in .enabled it charges per-episode overhead) but did not fabricate signal. Pre-au2v.1 (.off) and post-au2v.1 (.enabled) are observationally indistinguishable to consumers (planGeneratedCount==0 in both, no FM cost in either, and the only divergence is the aggregate_latency_ms accounting for the boundary detector having run). This is the case the eval harness uses to confirm the gate is idempotent on traces that genuinely carry no chapter structure.",
+  "synthesis_notes": "Models a short news bulletin or audio chyron with no internal segmentation. The trace's atom shape is irrelevant; the gate input is what makes this the sanity case (stub_chapter_count=0 forces the no-candidates path). Synthetic; no transcript text or commercial-message attribution.",
+  "trace": {
+    "episode_id_anon": "episode_anon_a1c08",
+    "podcast_id_archetype": "show_archetype_news",
+    "episode_duration_sec": 300.0,
+    "atom_count": 25,
+    "atom_spacing_sec": 12.0
+  },
+  "gate_inputs": {
+    "creator_chapters_present": false,
+    "stub_chapter_count": 0
+  },
+  "expected_before_off": {
+    "plan_generated_count": 0,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 0,
+    "aggregate_latency_ms": 0.0
+  },
+  "expected_after_enabled": {
+    "plan_generated_count": 0,
+    "skipped_by_creator_chapters": 0,
+    "total_fm_calls_for_chapter_labeling": 0,
+    "aggregate_latency_ms": 5.0
+  }
+}
