@@ -157,9 +157,11 @@ struct ChapterPlanTests {
         #expect(abs(confidence - 0.5) < 1e-6)
     }
 
-    @Test("malformed (non-finite or non-positive duration) chapters are ignored")
+    @Test("malformed (non-positive duration) chapters are ignored")
     func confidenceSkipsMalformed() {
         // Chapter A: end <= start → ignored. Chapter B: well-formed.
+        // Non-finite end is covered separately in
+        // `confidenceSkipsNonFiniteEnd`.
         let badEnd = Self.makeChapter(start: 100, end: 100, quality: 0.0)
         let good = Self.makeChapter(start: 200, end: 400, quality: 0.7)
         let confidence = ChapterPlan.computePlanConfidence([badEnd, good])
@@ -210,5 +212,49 @@ struct ChapterPlanTests {
         let confidence = ChapterPlan.computePlanConfidence(chapters)
         #expect(confidence <= 1.0)
         #expect(confidence >= 0.0)
+    }
+
+    @Test("computePlanConfidence clamps a negative qualityScore to 0")
+    func confidenceClampsNegativeQuality() {
+        // Symmetric to the upper-bound clamp: a producer mis-emitting a
+        // negative score must not pull the aggregate below 0. We rely on
+        // the post-aggregate clamp because skipping negatives entirely
+        // would silently change duration weighting; clamping preserves
+        // weight intent while keeping the result a valid probability.
+        let chapters = [
+            Self.makeChapter(start: 0, end: 60, quality: -0.5),
+        ]
+        let confidence = ChapterPlan.computePlanConfidence(chapters)
+        #expect(confidence == 0.0)
+    }
+
+    @Test("non-finite startTime is skipped without poisoning confidence")
+    func confidenceSkipsNonFiniteStart() {
+        // A chapter with NaN/Inf startTime is unusable: we cannot trust
+        // its 60s open-ended fallback (anchored on start) or any real
+        // interval. Skip it and weight the remaining valid chapters
+        // normally.
+        let bad = Self.makeChapter(start: .nan, end: nil, quality: 0.9)
+        let good = Self.makeChapter(start: 0, end: 60, quality: 0.4)
+        let confidence = ChapterPlan.computePlanConfidence([bad, good])
+        #expect(confidence.isFinite)
+        #expect(abs(confidence - 0.4) < 1e-6)
+    }
+
+    @Test("empty chapter list round-trips through Codable")
+    func codableRoundTripEmptyChapters() throws {
+        // Boundary: a plan with zero chapters (e.g., chapter generation
+        // produced nothing) must still round-trip cleanly so the cache
+        // can persist a "no chapters detected" verdict.
+        let plan = ChapterPlan(
+            episodeContentHash: "empty-hash",
+            chapters: [],
+            planConfidence: 0.0,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let data = try JSONEncoder().encode(plan)
+        let decoded = try JSONDecoder().decode(ChapterPlan.self, from: data)
+        #expect(decoded == plan)
+        #expect(decoded.chapters.isEmpty)
     }
 }

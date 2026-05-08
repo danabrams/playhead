@@ -161,17 +161,22 @@ struct ChapterPlan: Sendable, Codable, Equatable {
 
     /// Effective duration of a chapter for confidence weighting.
     ///
-    /// Three cases:
-    /// 1. `endTime` is set and `> startTime` → use the real interval.
-    /// 2. `endTime` is nil → fall back to 60s nominal (matches
+    /// Cases:
+    /// 1. `startTime` is non-finite (NaN/Inf) → return 0 so the chapter
+    ///    is skipped. A corrupt start time means we cannot trust either
+    ///    the real interval or the 60s open-ended fallback — both lean
+    ///    on the start anchor as a sanity reference.
+    /// 2. `endTime` is set and `> startTime` → use the real interval.
+    /// 3. `endTime` is nil → fall back to 60s nominal (matches
     ///    `ChapterMetadataEvidenceBuilder`'s open-ended-chapter rule).
-    /// 3. `endTime` is set but `<= startTime` (malformed; producers
+    /// 4. `endTime` is set but `<= startTime` (malformed; producers
     ///    upstream should already filter these) → return 0 so the
     ///    chapter is skipped by the `duration > 0` guard in
     ///    `computePlanConfidence`. This avoids silently fabricating
     ///    a 60s nominal duration for a chapter the producer told us
     ///    was zero-or-negative length.
     private static func effectiveDuration(of chapter: ChapterEvidence) -> Double {
+        guard chapter.startTime.isFinite else { return 0.0 }
         guard let end = chapter.endTime else { return 60.0 }
         guard end.isFinite, end > chapter.startTime else { return 0.0 }
         return end - chapter.startTime
