@@ -78,6 +78,14 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     let analysisUnavailableReason: AnalysisUnavailableReason?
     let schedulerEvents: [SchedulerEvent]
     let workJournalTail: [WorkJournalRecord]
+    /// Chapter-phase diagnostic events (playhead-au2v.1.3). Sibling to
+    /// `scheduler_events` and bumped on its own schedule. Empty array
+    /// when no events have been emitted; we ALWAYS encode the key (even
+    /// when empty) so support engineer's grep cheat sheet can rely on
+    /// its presence in any v≥au2v.1.3 bundle. Older readers either
+    /// already accept unknown keys (`JSONDecoder` default) or used
+    /// `init(from:)` overloads that decode-if-present.
+    let chapterPhaseEvents: [ChapterPhaseEvent]
 
     enum CodingKeys: String, CodingKey {
         case appVersion = "app_version"
@@ -88,6 +96,56 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case analysisUnavailableReason = "analysis_unavailable_reason"
         case schedulerEvents = "scheduler_events"
         case workJournalTail = "work_journal_tail"
+        case chapterPhaseEvents = "chapter_phase_events"
+    }
+
+    init(
+        appVersion: String,
+        osVersion: String,
+        deviceClass: DeviceClass,
+        buildType: BuildType,
+        eligibilitySnapshot: AnalysisEligibility,
+        analysisUnavailableReason: AnalysisUnavailableReason?,
+        schedulerEvents: [SchedulerEvent],
+        workJournalTail: [WorkJournalRecord],
+        chapterPhaseEvents: [ChapterPhaseEvent] = []
+    ) {
+        self.appVersion = appVersion
+        self.osVersion = osVersion
+        self.deviceClass = deviceClass
+        self.buildType = buildType
+        self.eligibilitySnapshot = eligibilitySnapshot
+        self.analysisUnavailableReason = analysisUnavailableReason
+        self.schedulerEvents = schedulerEvents
+        self.workJournalTail = workJournalTail
+        self.chapterPhaseEvents = chapterPhaseEvents
+    }
+
+    /// Decode-time tolerance for older bundles that pre-date the
+    /// `chapter_phase_events` field: missing key decodes as `[]`.
+    /// Existing fixtures (`sample-default-bundle.json`) and any bundle
+    /// emitted before playhead-au2v.1.3 stay forward-compatible.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.appVersion = try container.decode(String.self, forKey: .appVersion)
+        self.osVersion = try container.decode(String.self, forKey: .osVersion)
+        self.deviceClass = try container.decode(DeviceClass.self, forKey: .deviceClass)
+        self.buildType = try container.decode(BuildType.self, forKey: .buildType)
+        self.eligibilitySnapshot = try container.decode(
+            AnalysisEligibility.self, forKey: .eligibilitySnapshot
+        )
+        self.analysisUnavailableReason = try container.decodeIfPresent(
+            AnalysisUnavailableReason.self, forKey: .analysisUnavailableReason
+        )
+        self.schedulerEvents = try container.decode(
+            [SchedulerEvent].self, forKey: .schedulerEvents
+        )
+        self.workJournalTail = try container.decode(
+            [WorkJournalRecord].self, forKey: .workJournalTail
+        )
+        self.chapterPhaseEvents = try container.decodeIfPresent(
+            [ChapterPhaseEvent].self, forKey: .chapterPhaseEvents
+        ) ?? []
     }
 
     /// Projected scheduler event derived from a `WorkJournalEntry` (per

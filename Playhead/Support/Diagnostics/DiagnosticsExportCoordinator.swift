@@ -40,6 +40,7 @@ final class DiagnosticsExportCoordinator {
     private let environment: DiagnosticsExportEnvironment
     private let presenter: DiagnosticsExportPresenter
     private let journalFetch: DiagnosticsJournalFetch
+    private let chapterPhaseEventsFetch: DiagnosticsChapterPhaseEventsFetch
     private let optInSink: DiagnosticsOptInSink
     private let optInEpisodes: [DiagnosticsEpisodeInput]
 
@@ -49,6 +50,11 @@ final class DiagnosticsExportCoordinator {
     ///   - environment: static build/eligibility/install inputs.
     ///   - presenter: UI adapter (UIKit composer or test fake).
     ///   - journalFetch: async fetch of the most-recent WorkJournal rows.
+    ///   - chapterPhaseEventsFetch: async fetch of the chapter-phase
+    ///     diagnostics events to embed in the bundle (playhead-au2v.1.3).
+    ///     Defaults to "no events"; the live emit call sites land in
+    ///     `playhead-au2v.1.10` and onwards, at which point the closure
+    ///     will source rows from a persistence-backed store.
     ///   - optInSink: adapter that mutates `Episode.diagnosticsOptIn`.
     ///   - optInEpisodes: per-episode inputs for the OptIn bundle. Only
     ///     entries with `diagnosticsOptIn == true` ship; the builder
@@ -58,12 +64,14 @@ final class DiagnosticsExportCoordinator {
         environment: DiagnosticsExportEnvironment,
         presenter: DiagnosticsExportPresenter,
         journalFetch: @escaping DiagnosticsJournalFetch,
+        chapterPhaseEventsFetch: @escaping DiagnosticsChapterPhaseEventsFetch = { [] },
         optInSink: DiagnosticsOptInSink,
         optInEpisodes: [DiagnosticsEpisodeInput] = []
     ) {
         self.environment = environment
         self.presenter = presenter
         self.journalFetch = journalFetch
+        self.chapterPhaseEventsFetch = chapterPhaseEventsFetch
         self.optInSink = optInSink
         self.optInEpisodes = optInEpisodes
     }
@@ -97,6 +105,7 @@ final class DiagnosticsExportCoordinator {
     /// to assert encoded JSON shape without driving the presenter.
     func buildAndEncode() async throws -> (data: Data, filename: String, subject: String) {
         let journal = try await journalFetch()
+        let chapterPhaseEvents = try await chapterPhaseEventsFetch()
 
         let defaultBundle = DiagnosticsBundleBuilder.buildDefault(
             appVersion: environment.appVersion,
@@ -105,7 +114,8 @@ final class DiagnosticsExportCoordinator {
             buildType: environment.buildType,
             eligibility: environment.eligibility,
             workJournalEntries: journal,
-            installID: environment.installID
+            installID: environment.installID,
+            chapterPhaseEvents: chapterPhaseEvents
         )
         let optInBundle = DiagnosticsBundleBuilder.buildOptIn(episodes: optInEpisodes)
 

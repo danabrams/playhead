@@ -230,7 +230,12 @@ struct DiagnosticsBundleShapeTests {
         "eligibility_snapshot",
         "analysis_unavailable_reason",
         "scheduler_events",
-        "work_journal_tail"
+        "work_journal_tail",
+        // playhead-au2v.1.3: chapter-phase events sibling array. Added
+        // to the allowed set so the shape audit (a) does not reject a
+        // bundle that legitimately carries chapter-phase events — both
+        // the empty-array and populated forms are permitted.
+        "chapter_phase_events"
     ]
 
     /// Substrings that — if present anywhere in the encoded JSON's

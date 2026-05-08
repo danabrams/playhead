@@ -3,6 +3,8 @@
 // per-episode opt-in inputs) into the support-safe diagnostics bundle.
 //
 // Scope: playhead-ghon (Phase 1.5 — support-safe diagnostics bundle classes).
+//        playhead-au2v.1.3 (chapter signal diagnostics events — additive
+//        `chapter_phase_events` parameter on `buildDefault`).
 //
 // Why a free `enum` of pure statics: the builder has no instance state
 // and the legal checklist demands deterministic, audit-able transforms.
@@ -110,7 +112,8 @@ enum DiagnosticsBundleBuilder {
         buildType: BuildType,
         eligibility: AnalysisEligibility,
         workJournalEntries: [WorkJournalEntry],
-        installID: UUID
+        installID: UUID,
+        chapterPhaseEvents: [ChapterPhaseEvent] = []
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -161,7 +164,8 @@ enum DiagnosticsBundleBuilder {
             eligibilitySnapshot: eligibility,
             analysisUnavailableReason: reason,
             schedulerEvents: schedulerEvents,
-            workJournalTail: Array(workJournalTail)
+            workJournalTail: Array(workJournalTail),
+            chapterPhaseEvents: chapterPhaseEvents
         )
     }
 
