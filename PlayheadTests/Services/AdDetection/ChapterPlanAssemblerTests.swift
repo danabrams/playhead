@@ -171,11 +171,17 @@ struct ChapterPlanAssemblerTests {
             generatedAt: Self.fixedDate
         )
         switch result {
-        case .assembled(let plan, _):
+        case .assembled(let plan, let warnings):
             #expect(plan.chapters.count == 1)
             #expect(plan.chapters[0].disposition == .ambiguous)
             #expect(abs(Double(plan.chapters[0].qualityScore) - 0.2) < 1e-6)
             #expect(plan.generationDiagnostics.semanticUnclearCount == 1)
+            // 1/1 = 100% total unclear (operational below 30%, but
+            // semantic alone pushes total over 50%). High-unclear
+            // warning MUST trip even though we did NOT abort.
+            #expect(warnings.highUnclearRateExceeded == true)
+            #expect(warnings.totalUnclearCount == 1)
+            #expect(abs(warnings.totalUnclearRate - 1.0) < 1e-6)
         case .aborted:
             Issue.record("expected assembled, got aborted")
         }
