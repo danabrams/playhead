@@ -1151,6 +1151,72 @@ struct ChapterSignalAggregateMetricsTests {
         #expect(cleanShowEntry?.mode == .enabled)
     }
 
+    @Test("compute() handles a corpus where every trace is excluded without dividing by zero")
+    func allTracesExcludedDoesNotDivideByZero() {
+        // Pin the all-excluded degenerate case. When every trace is
+        // whole-asset-vetoed, `included.count == 0` and the
+        // predictedSum/groundTruthSum/tpSum aggregates are all 0. The
+        // precision/recall guards (`predictedSum > 0`) must short-circuit
+        // to 0 (NOT NaN from a 0/0 division). Without this test, a future
+        // patch that mistakenly switches the guard to `>= 0` (which is
+        // always true) would silently produce NaN precision/recall on a
+        // fully-vetoed corpus.
+        //
+        // F1 must also be 0 in this case (precision + recall == 0 → 0
+        // path, NOT 0/0 → NaN). The phase aggregate must still be honest:
+        // episodeReplayCount counts vetoed traces because the gate replays
+        // them (telemetry is independent of detection-side exclusion).
+        let veto = FrozenTrace.FrozenCorrection(
+            source: "user.wholeAssetVeto",
+            scope: "exactSpan:asset-1:0:\(Int64.max)",
+            createdAt: 0,
+            correctionType: nil
+        )
+        let vetoedTraces: [FrozenTrace] = (0..<3).map { i in
+            FrozenTrace(
+                episodeId: "veto-\(i)",
+                podcastId: "pod-all-vetoed",
+                episodeDuration: 600,
+                traceVersion: FrozenTrace.currentTraceVersion,
+                capturedAt: Self.testClock,
+                featureWindows: [],
+                atoms: [],
+                evidenceCatalog: [],
+                corrections: [veto],
+                decisionEvents: [],
+                baselineReplaySpanDecisions: [],
+                holdoutDesignation: .training
+            )
+        }
+        let report = ChapterSignalAggregateMetrics.compute(
+            traces: vetoedTraces,
+            runId: "all-vetoed",
+            generatedAt: Self.testClock,
+            showName: Self.showNameByPodcastId
+        )
+        // Detection metrics: zero across the board, NOT NaN.
+        for mode in [report.baseline, report.shadow, report.enabled] {
+            #expect(mode.episodeCount == 0,
+                    "all traces excluded → episodeCount == 0 across every mode")
+            #expect(mode.excludedEpisodeCount == 3,
+                    "all 3 traces excluded → excludedEpisodeCount == 3 across every mode")
+            #expect(mode.precision == 0, "precision must be 0 on all-excluded (NOT NaN)")
+            #expect(mode.recall == 0, "recall must be 0 on all-excluded (NOT NaN)")
+            #expect(mode.f1 == 0, "f1 must be 0 on all-excluded (NOT NaN)")
+            #expect(!mode.precision.isNaN, "precision must not be NaN")
+            #expect(!mode.recall.isNaN, "recall must not be NaN")
+            #expect(!mode.f1.isNaN, "f1 must not be NaN")
+            // Phase replay still ran on every trace; vetoes are
+            // detection-side, not phase-side.
+            #expect(mode.episodeReplayCount == 3,
+                    "gate replays all traces regardless of exclusion (phase telemetry is honest)")
+        }
+        #expect(report.corpusSize == 3,
+                "corpusSize equals input length even when all traces are excluded")
+        #expect(report.barMet == false,
+                "all-excluded corpus must never satisfy the bar (zero lift)")
+    }
+
     @Test("corpusSize equals the input traces.count even when some are excluded")
     func corpusSizeIncludesExcludedTraces() {
         // The corpusSize field on the report is documented as "number of
