@@ -221,10 +221,15 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         }
     }
 
-    /// >30% of labelled chapters came back as operational-unclear; plan
+    /// >30% of labeled chapters came back as operational-unclear; plan
     /// dropped.
+    ///
+    /// Spelling: this codebase uses US English (`labeled`, never
+    /// `labelled`). Wire field is `labeled_count` so the support
+    /// engineer's grep cheat sheet stays consistent with the rest of
+    /// the diagnostics surface (e.g. `ClassifierCalibration`).
     struct OperationalUnclearRateExceeded: Sendable, Hashable, Equatable, Codable {
-        let labelledCount: Int
+        let labeledCount: Int
         let operationalUnclearCount: Int
         /// Fraction in [0, 1].
         let operationalUnclearRate: Double
@@ -232,7 +237,7 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
         let threshold: Double
 
         enum CodingKeys: String, CodingKey {
-            case labelledCount = "labelled_count"
+            case labeledCount = "labeled_count"
             case operationalUnclearCount = "operational_unclear_count"
             case operationalUnclearRate = "operational_unclear_rate"
             case threshold
@@ -550,7 +555,7 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
         installID: UUID,
         episodeId: String,
         timestamp: Double,
-        labelledCount: Int,
+        labeledCount: Int,
         operationalUnclearCount: Int,
         operationalUnclearRate: Double,
         threshold: Double
@@ -561,7 +566,7 @@ struct ChapterPhaseEvent: Sendable, Hashable, Equatable, Codable {
             episodeIdHash: EpisodeIdHasher.hash(installID: installID, episodeId: episodeId),
             payload: .operationalUnclearRateExceeded(
                 ChapterPhasePayload.OperationalUnclearRateExceeded(
-                    labelledCount: labelledCount,
+                    labeledCount: labeledCount,
                     operationalUnclearCount: operationalUnclearCount,
                     operationalUnclearRate: operationalUnclearRate,
                     threshold: threshold

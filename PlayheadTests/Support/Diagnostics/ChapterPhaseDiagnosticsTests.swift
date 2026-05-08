@@ -121,7 +121,7 @@ struct ChapterPhaseDiagnosticsTests {
             .operationalUnclearRateExceeded(
                 installID: Self.installID, episodeId: Self.rawEpisodeId,
                 timestamp: Self.timestamp,
-                labelledCount: 10, operationalUnclearCount: 4,
+                labeledCount: 10, operationalUnclearCount: 4,
                 operationalUnclearRate: 0.4, threshold: 0.3
             ),
             .completed(
@@ -275,12 +275,12 @@ struct ChapterPhaseDiagnosticsTests {
         let event = ChapterPhaseEvent.operationalUnclearRateExceeded(
             installID: Self.installID, episodeId: Self.rawEpisodeId,
             timestamp: Self.timestamp,
-            labelledCount: 10, operationalUnclearCount: 4,
+            labeledCount: 10, operationalUnclearCount: 4,
             operationalUnclearRate: 0.4, threshold: 0.3
         )
         let str = try #require(String(data: try encode(event), encoding: .utf8))
         let expected = """
-        {"episode_id_hash":"\(Self.expectedEpisodeIdHash)","event_type":"chapter_phase_operational_unclear_rate_exceeded","payload":{"operational_unclear_rate_exceeded":{"labelled_count":10,"operational_unclear_count":4,"operational_unclear_rate":0.4,"threshold":0.3}},"timestamp":1700000500}
+        {"episode_id_hash":"\(Self.expectedEpisodeIdHash)","event_type":"chapter_phase_operational_unclear_rate_exceeded","payload":{"operational_unclear_rate_exceeded":{"labeled_count":10,"operational_unclear_count":4,"operational_unclear_rate":0.4,"threshold":0.3}},"timestamp":1700000500}
         """
         #expect(str == expected)
         #expect(try decode(ChapterPhaseEvent.self, from: encode(event)) == event)
@@ -396,7 +396,7 @@ struct ChapterPhaseDiagnosticsTests {
             .operationalUnclearRateExceeded(
                 installID: Self.installID, episodeId: pollutedEpisodeId,
                 timestamp: Self.timestamp,
-                labelledCount: 5, operationalUnclearCount: 3,
+                labeledCount: 5, operationalUnclearCount: 3,
                 operationalUnclearRate: 0.6, threshold: 0.3
             ),
             .completed(
@@ -640,7 +640,7 @@ struct ChapterPhaseDiagnosticsTests {
                 return .operationalUnclearRateExceeded(
                     installID: Self.installID, episodeId: Self.rawEpisodeId,
                     timestamp: Self.timestamp,
-                    labelledCount: 8, operationalUnclearCount: 3,
+                    labeledCount: 8, operationalUnclearCount: 3,
                     operationalUnclearRate: 0.375, threshold: 0.3
                 )
             case .completed:
