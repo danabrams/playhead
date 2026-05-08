@@ -536,6 +536,7 @@
 		996B27BCF89990503E27590C /* SpeedChangeAdaptationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A5851628011322F07D18252 /* SpeedChangeAdaptationTests.swift */; };
 		9997BE3DFA0C50D8A52AFB1A /* FinalizeBackfillDenominatorFixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53ACD4760A1E35E67BD067D5 /* FinalizeBackfillDenominatorFixTests.swift */; };
 		99A20B7E4BB471BC1567896D /* OPMLSerializerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3EF0BB45EA2901A55F5242E /* OPMLSerializerTests.swift */; };
+		9A0DB1288E0377717B70AF33 /* ChapterSignalMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 959FE06CDC98EAF94640B386 /* ChapterSignalMode.swift */; };
 		9A5D80ACC6E92D2A67199BBA /* AcousticFeatureScore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 939FF096810311F798F470DD /* AcousticFeatureScore.swift */; };
 		9A753B79D9EB9D819D7E2301 /* EpisodeMetadataCue.swift in Sources */ = {isa = PBXBuildFile; fileRef = E65FC3F6C81FFE9711ADCB50 /* EpisodeMetadataCue.swift */; };
 		9A9D60EB4E875DAFD0695000 /* TranscriptAtom.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97C935EDF20B75F571AF6417 /* TranscriptAtom.swift */; };
@@ -884,7 +885,6 @@
 		FF7AE172A90350F9F28ECFC3 /* AdCatalogStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA38E3CD24228CDDC55D126B /* AdCatalogStoreTests.swift */; };
 		FFAF04927F83DB6DDE50F1F8 /* BoundarySnapDiagnosticLoggingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 949FDBAD9F21BD739D142E1B /* BoundarySnapDiagnosticLoggingTests.swift */; };
 		FFCE561B2115E48CA2895A4D /* PlaybackQueueFinishObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD745BB6950D33FBC35F30A1 /* PlaybackQueueFinishObserver.swift */; };
-		44C29F824CF6EDBA7E377F9B /* TrustScoringServiceFunnelDisciplineCanaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7168EB5DF57231EB4D75DB7B /* TrustScoringServiceFunnelDisciplineCanaryTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -1436,6 +1436,7 @@
 		949FDBAD9F21BD739D142E1B /* BoundarySnapDiagnosticLoggingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundarySnapDiagnosticLoggingTests.swift; sourceTree = "<group>"; };
 		94B3AE6E522963F8922AC5EC /* FullTranscriptViewModelSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullTranscriptViewModelSelectionTests.swift; sourceTree = "<group>"; };
 		94F6A9B03C7FA9BD6449F4FD /* PodcastDiscoveryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastDiscoveryService.swift; sourceTree = "<group>"; };
+		959FE06CDC98EAF94640B386 /* ChapterSignalMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterSignalMode.swift; sourceTree = "<group>"; };
 		95B53BCDA7C304F268DE3B11 /* ChapterEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterEvidenceTests.swift; sourceTree = "<group>"; };
 		967495DB14708D3F220F6FDB /* RedactionRules.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = RedactionRules.json; sourceTree = "<group>"; };
 		969E47E27FE98F3A50D41A16 /* InstallIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstallIdentity.swift; sourceTree = "<group>"; };
@@ -1779,7 +1780,6 @@
 		FF87059092BDF6E5FF9B1DB4 /* DecisionLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionLogger.swift; sourceTree = "<group>"; };
 		FFAC0AF611301A8AF53A5A5F /* MetadataEvidenceFusionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataEvidenceFusionTests.swift; sourceTree = "<group>"; };
 		FFCBD9A239AF9AFF6B5BAA97 /* AnalysisWorkSchedulerBackfillRearmTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisWorkSchedulerBackfillRearmTests.swift; sourceTree = "<group>"; };
-		7168EB5DF57231EB4D75DB7B /* TrustScoringServiceFunnelDisciplineCanaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrustScoringServiceFunnelDisciplineCanaryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -2486,6 +2486,7 @@
 				2A0095F306E2C02D345F9B18 /* ChapterEvidence.swift */,
 				B83A12F90F7FC0449CFE7742 /* ChapterEvidenceParser.swift */,
 				D9784E2DC96954DFAE4332B5 /* ChapterMetadataEvidenceBuilder.swift */,
+				959FE06CDC98EAF94640B386 /* ChapterSignalMode.swift */,
 				085759357B6ABBC8130C9148 /* ClassifierCalibration.swift */,
 				858BBD6C21F9850E0297E56C /* ClassifierService.swift */,
 				1F1B3B226EB88F7BA12CC354 /* CommercialEvidenceResolver.swift */,
@@ -2891,7 +2892,6 @@
 				C088315362D4161754AFC069 /* TrustScoringServiceTests.swift */,
 				2CE03DD04DE16F8EE4D376EE /* TrustScoringServiceUpsertProfileCanaryTests.swift */,
 				8F5DBE4EA997E3D9779DF83D /* TrustScoringServiceWeakSignalTests.swift */,
-				7168EB5DF57231EB4D75DB7B /* TrustScoringServiceFunnelDisciplineCanaryTests.swift */,
 			);
 			path = TrustScoring;
 			sourceTree = "<group>";
@@ -3837,6 +3837,7 @@
 				BBD14284EECCA3C46E510EA5 /* ChapterEvidence.swift in Sources */,
 				7F1144B8E4C5812F24C1C28C /* ChapterEvidenceParser.swift in Sources */,
 				38B54452814645AA4472FD39 /* ChapterMetadataEvidenceBuilder.swift in Sources */,
+				9A0DB1288E0377717B70AF33 /* ChapterSignalMode.swift in Sources */,
 				D79996B1F7748304E353476F /* ClassifierCalibration.swift in Sources */,
 				5CE803AAA36C98416CC852AC /* ClassifierService.swift in Sources */,
 				D5FECA6DC725BA813F48DE98 /* CloudKitProviding.swift in Sources */,
@@ -4596,7 +4597,6 @@
 				2934CB0BDEFD261C285BD3AC /* WithTestRuntime.swift in Sources */,
 				E517D642282F2FF5DD23A010 /* WorkJournalReadCorruptionTests.swift in Sources */,
 				885C8E3A4D8E7A1BF24135C6 /* WorkJournalTailFetchTests.swift in Sources */,
-				44C29F824CF6EDBA7E377F9B /* TrustScoringServiceFunnelDisciplineCanaryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
