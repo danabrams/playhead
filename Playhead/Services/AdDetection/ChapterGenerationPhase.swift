@@ -401,11 +401,11 @@ struct ChapterGenerationPhase: Sendable {
         // AND we have a transcript snapshot to anchor the run. Emit
         // the single `.started` lifecycle event — the bead .3 schema
         // requires this be paired with exactly one terminal event
-        // (`.skippedAdmission` / `.skippedCreatorChapters` /
-        // `.noCandidates` / `.preempted` / `.completed`) per run from
-        // this point onward. (The creator-chapter and admission-deny
-        // paths are themselves single-terminal-event paths that
-        // bypass `.started` entirely.)
+        // (`.noCandidates` / `.preempted` / `.completed`) per run
+        // from this point onward. The earlier short-circuit exits
+        // (`.modeOff` / `.skippedAdmission` / `.skippedCreatorChapters`)
+        // are themselves single-terminal-event paths that bypass
+        // `.started` entirely (the phase never truly began on those).
         //
         // Timestamp note: we stamp `.started` with `startedAtTimestamp`
         // captured BEFORE admission, not the wall-clock at this emit
