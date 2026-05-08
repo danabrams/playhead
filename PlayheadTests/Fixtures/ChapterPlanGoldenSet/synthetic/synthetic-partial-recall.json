@@ -1,0 +1,32 @@
+{
+  "episodeId": "synthetic-partial-recall",
+  "episodeContentHash": "synthetic-partial-recall-hash",
+  "notes": "Synthetic fixture: detector misses one ground-truth boundary. Expect recall < 1, precision = 1 (no false positives), dispositionAccuracy = 1.0 over matched pairs.",
+  "chapters": [
+    {
+      "startTimeSeconds": 0.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "intro segment"
+    },
+    {
+      "startTimeSeconds": 500.0,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": null
+    },
+    {
+      "startTimeSeconds": 620.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "first segment"
+    },
+    {
+      "startTimeSeconds": 1500.0,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": null
+    },
+    {
+      "startTimeSeconds": 1620.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "second segment"
+    }
+  ]
+}

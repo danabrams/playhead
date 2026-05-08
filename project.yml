@@ -162,6 +162,13 @@ targets:
           # via #filePath through ChapterSignalCaseStudyTests. Excluding
           # avoids a third README.md collision in the resource copy step.
           - "Fixtures/ChapterSignalCaseStudies/**"
+          # playhead-au2v.1.21: ChapterPlan golden-set fixtures are read
+          # at runtime via #filePath through ChapterPlanGoldenSetLoader.
+          # Same rationale as the case-study exclude above — keep the
+          # JSON out of the test bundle's resource-copy phase so dated
+          # / categorized golden subdirs (synthetic/, real-dogfood/)
+          # cannot collide on shared basenames in future expansions.
+          - "Fixtures/ChapterPlanGoldenSet/**"
     dependencies:
       - target: Playhead
     settings:
