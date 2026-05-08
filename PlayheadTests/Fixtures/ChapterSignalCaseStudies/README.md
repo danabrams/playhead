@@ -31,7 +31,7 @@ The Swift loader and per-case tests live at:
 | `case-08-sanity-signal-does-nothing.json` | sanity_signal_inert — gate runs but produces no consumer-visible effect |
 | `README.md` | this file |
 
-Total: 8 cases, covering the six required categories from the bead spec
+Total: 8 cases, covering the five required categories from the bead spec
 (≥3 conversational misses, ≥2 false-positive removals, ≥1 pre/post-roll
 edge, ≥1 monologue/short-episode edge, ≥1 sanity case where the signal
 correctly does nothing).
