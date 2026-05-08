@@ -127,6 +127,13 @@ struct ChapterGenerationPhaseParallelLabelingTests {
             var startedAtIndex: [Int] = []
             var finishedAtIndex: [Int] = []
 
+            /// Map a candidate to a stable per-test "slot index" using
+            /// only the floor of `startTime/60`. Tests that don't use
+            /// minute-aligned start times still work because we only
+            /// use this for ordering observation, not equality —
+            /// duplicate idx values would just mean the test isn't
+            /// using this labeler for ordering proofs (e.g. the
+            /// happy-path tests don't read `finishOrder`).
             func enter(_ idx: Int) {
                 inFlight += 1
                 invocations += 1
@@ -1072,6 +1079,85 @@ struct ChapterGenerationPhaseParallelLabelingTests {
         let readyEvents = await ready.snapshot()
         #expect(readyEvents.count == 1)
         #expect(readyEvents.first?.chapterCount == 3)
+    }
+
+    // MARK: - ChapterPlanReady NEVER fires on cache-write failure
+
+    /// The bead-12 contract on `ChapterPlanReady` is "ready event ⇒
+    /// observable plan in `ChapterPlanCache`". If the cache write
+    /// fails (key/plan-hash mismatch, disk full, directory creation
+    /// refused, encoder crash), the event MUST NOT fire. We exercise
+    /// this by handing the phase a cache that will refuse to persist
+    /// because we wire the plan-content-hash mismatch path
+    /// deterministically — `ChapterPlanCache.put` returns `false`
+    /// when the supplied `contentHash` differs from
+    /// `plan.episodeContentHash`. The assembler builds the plan from
+    /// `entryHash`, so we drive the failure by passing a hash queue
+    /// whose entry value differs from what the assembler observes
+    /// internally. Easier: subclass-style override is unavailable
+    /// because `ChapterPlanCache` is a `final actor`. So we instead
+    /// test against a directory we delete out from under the cache,
+    /// causing `ensureDirectoryExists` to fail at write time on most
+    /// filesystems. Both approaches require fresh fixture support;
+    /// we use the simpler "non-existent unwritable parent path"
+    /// approach.
+    @Test("ChapterPlanReady NEVER fires when ChapterPlanCache.put fails")
+    func readyEventNotFiredOnCachePutFailure() async {
+        // Construct a cache rooted at a path we know cannot be created
+        // (parent is a regular file, not a directory).
+        let parentFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cache-put-failure-\(UUID().uuidString).blocker")
+        // Drop a regular file at that path.
+        FileManager.default.createFile(atPath: parentFile.path, contents: Data("blocker".utf8))
+        // Now use a sub-path UNDER that file as the cache directory; the
+        // cache's `ensureDirectoryExists` will fail when it tries to
+        // create a directory whose parent is a file.
+        let unwritableDir = parentFile.appendingPathComponent("never-creatable")
+        let cache = ChapterPlanCache(directory: unwritableDir)
+        defer {
+            try? FileManager.default.removeItem(at: parentFile)
+        }
+
+        let sink = MockEventSink()
+        let ready = MockReadySink()
+        let clock = MockClock()
+        let candidates: [ChapterBoundaryCandidate] = [
+            ChapterBoundaryCandidate(startTime: 0, endTime: 60),
+            ChapterBoundaryCandidate(startTime: 60, endTime: 120),
+        ]
+        let labeler = ConcurrencyAwareLabeler(
+            behavior: { .success(Self.confidentResult(for: $0)) }
+        )
+        let phase = ChapterGenerationPhase(
+            admissionPolicy: MockAdmission(decision: .admit),
+            boundaryDetector: MockBoundaryDetector(candidates: candidates),
+            labeler: labeler,
+            transcriptHashProvider: MockTranscriptHashProvider(["hash-A", "hash-A"]),
+            cache: cache,
+            eventSink: sink,
+            planReadySink: ready,
+            clock: clock.now
+        )
+
+        let outcome = await phase.run(mode: .enabled, episodeId: "ep-1", installID: UUID())
+
+        // The persistence failure surfaces as `.preempted` (the
+        // existing "no plan landed" terminal event); the run did not
+        // produce a cached plan.
+        #expect(outcome == .preempted, "Expected .preempted on cache-put failure, got \(outcome)")
+
+        // Ready event MUST NOT fire — the contract is "ready ⇒ observable".
+        let readyEvents = await ready.snapshot()
+        #expect(readyEvents.isEmpty, "ChapterPlanReady must not fire on cache-put failure")
+
+        // No `.completed` diagnostic, since no plan was observably written.
+        let events = await sink.snapshot()
+        #expect(!events.contains(where: { $0.eventType == .completed }))
+        #expect(events.contains(where: { $0.eventType == .preempted }))
+
+        // And of course the cache contains nothing for that hash.
+        let stored = await cache.get(contentHash: "hash-A")
+        #expect(stored == nil)
     }
 
     // MARK: - fmCallCount payload contract on a clean run

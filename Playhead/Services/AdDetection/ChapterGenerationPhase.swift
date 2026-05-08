@@ -604,8 +604,28 @@ struct ChapterGenerationPhase: Sendable {
         case .assembled(let plan, let warnings):
             // Persist BEFORE emitting `.completed` and the ready
             // event — both events advertise that the plan is
-            // observable in the cache.
-            _ = await cache.put(contentHash: entryHash, plan: plan)
+            // observable in the cache. If the persistence layer
+            // fails (disk full, directory creation refused, encoder
+            // crash), the bead-12 contract says ChapterPlanReady
+            // MUST NOT fire (subscribers rely on "ready ⇒
+            // observable"). We still emit `.preempted` rather than
+            // `.completed` because the run did not produce an
+            // observable plan — preempted is the existing "no plan
+            // landed" terminal event and avoids inventing a new
+            // diagnostic for what is otherwise a rare disk-pressure
+            // failure.
+            let persisted = await cache.put(contentHash: entryHash, plan: plan)
+            guard persisted else {
+                logger.error(
+                    "chapterphase.cache_put_failed hash=\(entryHash, privacy: .public) chapters=\(plan.chapters.count, privacy: .public) — emitting preempted, suppressing ready event"
+                )
+                await recordPreempted(
+                    installID: installID,
+                    episodeId: episodeId,
+                    timestamp: clock().timeIntervalSince1970
+                )
+                return .preempted
+            }
 
             // High-unclear warning is non-terminal: it precedes
             // `.completed` so support engineers see them in order.
@@ -634,7 +654,8 @@ struct ChapterGenerationPhase: Sendable {
             // Ready event fires AFTER `.completed` so subscribers
             // observing both can rely on the diagnostic having
             // landed first. Bead 12 contract: this is the ONLY path
-            // that emits `ChapterPlanReady`.
+            // that emits `ChapterPlanReady`, and ONLY when the
+            // cache write succeeded above.
             await planReadySink.record(
                 ChapterPlanReadyEvent(
                     episodeContentHash: plan.episodeContentHash,
@@ -1018,10 +1039,17 @@ struct ChapterGenerationPhase: Sendable {
 
 private extension ThrowingTaskGroup
 where ChildTaskResult: Sendable, Failure == any Error {
-    /// Wrapper around `next()` that re-throws on parent cancellation.
-    /// `next()` swallows cancellation in some Swift releases when a
-    /// child task has already produced a value — this guard ensures
-    /// we surface cancellation immediately at the loop boundary.
+    /// Wrapper around `next()` that surfaces parent-task cancellation
+    /// at the loop boundary. Without this guard, if a child task has
+    /// ALREADY completed and is sitting on the group's internal queue
+    /// when the parent cancels, the surrounding `while let next =
+    /// try await group.next()` loop will read that completed value
+    /// without observing cancellation, then fall through to add a new
+    /// task — which goes against the bead-12 contract that
+    /// "cancellation discards partial state". We check
+    /// `Task.isCancelled` explicitly before each pull so the loop
+    /// short-circuits and the caller can throw `CancellationError`
+    /// from a single, well-marked site.
     mutating func nextWithCancellationPropagation() async throws -> ChildTaskResult? {
         if Task.isCancelled {
             cancelAll()
