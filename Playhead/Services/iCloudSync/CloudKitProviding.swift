@@ -10,7 +10,9 @@
 //
 // Production wiring uses `CKContainerCloudKitProvider`, which forwards
 // to a `CKContainer` private database. Tests wire `FakeCloudKitProvider`
-// (declared in the test target).
+// (declared in the test target) or `UnavailableCloudKitProvider` for
+// app-hosted XCTest launch, where CI may run the app without signing
+// entitlements.
 
 import CloudKit
 import Foundation
@@ -75,4 +77,31 @@ protocol CloudKitProviding: Sendable {
     /// the given record type changes server-side. Idempotent — calling
     /// twice with the same identifier is a no-op.
     func subscribeToChanges(recordType: String, subscriptionID: String) async throws
+}
+
+/// Provider used when the app process is launched under XCTest without
+/// CloudKit entitlements. Constructing `CKContainer` traps in that case,
+/// so the runtime needs a provider that represents "sync unavailable"
+/// without touching CloudKit's container APIs.
+struct UnavailableCloudKitProvider: CloudKitProviding {
+    func accountStatus() async -> CloudKitAccountStatus {
+        .restricted
+    }
+
+    @discardableResult
+    func save(_ record: CKRecord) async throws -> CKRecord {
+        throw CloudKitProviderError.accountUnavailable
+    }
+
+    func fetch(recordID: CKRecord.ID) async throws -> CKRecord? {
+        throw CloudKitProviderError.accountUnavailable
+    }
+
+    func fetchAll(recordType: String) async throws -> [CKRecord] {
+        throw CloudKitProviderError.accountUnavailable
+    }
+
+    func subscribeToChanges(recordType: String, subscriptionID: String) async throws {
+        throw CloudKitProviderError.accountUnavailable
+    }
 }

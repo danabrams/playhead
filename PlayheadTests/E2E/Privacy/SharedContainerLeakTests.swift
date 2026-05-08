@@ -75,6 +75,13 @@ struct SharedContainerLeakTests {
                 }
             }
         }
+        if status == errSecMissingEntitlement {
+            // CI runs app-hosted tests with CODE_SIGNING_ALLOWED=NO, so
+            // the simulator process has no keychain entitlement. That is
+            // still compatible with this contract: an unentitled process
+            // cannot persist transcript-bearing keychain items.
+            return
+        }
         if status != errSecSuccess && status != errSecItemNotFound {
             Issue.record("SecItemCopyMatching returned unexpected status \(status)")
         }

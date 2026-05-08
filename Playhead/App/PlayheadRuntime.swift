@@ -578,12 +578,20 @@ final class PlayheadRuntime {
 
         // playhead-5c1t: production iCloud sync wiring. The default
         // `CKContainerCloudKitProvider` reads the container identifier
-        // from `Playhead.entitlements`. Preview / test runtimes should
-        // construct the runtime via the dedicated init and inject a
-        // fake provider; here we wire production by default.
-        self.iCloudSyncCoordinator = ICloudSyncCoordinator(
-            provider: CKContainerCloudKitProvider()
-        )
+        // from `Playhead.entitlements`. App-hosted XCTest launches run
+        // the real app binary before tests connect; CI also builds that
+        // binary unsigned, so constructing `CKContainer` traps before
+        // any test-level fake can be installed. Under XCTest, represent
+        // sync as unavailable without touching CKContainer.
+        if Self.isRunningUnderXCTest {
+            self.iCloudSyncCoordinator = ICloudSyncCoordinator(
+                provider: UnavailableCloudKitProvider()
+            )
+        } else {
+            self.iCloudSyncCoordinator = ICloudSyncCoordinator(
+                provider: CKContainerCloudKitProvider()
+            )
+        }
 
         self.audioService = AnalysisAudioService()
 
@@ -2107,6 +2115,13 @@ final class PlayheadRuntime {
             await iCloudSyncCoordinator.start()
             await capabilitiesService.runSelfTest()
         }
+    }
+
+    private static var isRunningUnderXCTest: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return env["XCTestConfigurationFilePath"] != nil ||
+            env["XCTestSessionIdentifier"] != nil ||
+            NSClassFromString("XCTestCase") != nil
     }
 
     deinit {
