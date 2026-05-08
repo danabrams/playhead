@@ -1044,14 +1044,21 @@ struct BoundaryExtractionIntegrationTests {
         )
 
         // Build atoms that span the candidate's time range
-        let atoms = (0..<15).map { i in
-            makeAtom(
+        let atoms: [TranscriptAtom] = (0..<15).map { i -> TranscriptAtom in
+            let start = 10.0 + Double(i) * 2.0
+            let text: String
+            if i == 0 {
+                text = "This episode is brought to you by BetterHelp."
+            } else if i == 7 {
+                text = "Go to betterhelp.com slash podcast."
+            } else {
+                text = "Regular speech content here."
+            }
+            return makeAtom(
                 ordinal: i,
-                start: 10.0 + Double(i) * 2.0,
-                end: 10.0 + Double(i) * 2.0 + 1.8,
-                text: i == 0 ? "This episode is brought to you by BetterHelp." :
-                      i == 7 ? "Go to betterhelp.com slash podcast." :
-                      "Regular speech content here."
+                start: start,
+                end: start + 1.8,
+                text: text
             )
         }
 
