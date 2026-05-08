@@ -61,20 +61,34 @@ enum ChapterSignalMode: String, Codable, Sendable, CaseIterable, Equatable {
         try container.encode(rawValue)
     }
 
-    /// `true` iff `ChapterGenerationPhase` (playhead-au2v.1.10) should run.
-    /// Used at the phase entry guard in the chapter-signal shell.
+    /// `true` iff `ChapterGenerationPhase` (playhead-au2v.1.10, planned)
+    /// should run. Used at the phase entry guard in the chapter-signal
+    /// shell. Implemented as an exhaustive switch (rather than `self !=
+    /// .off`) so adding a new case is a compile error that forces the
+    /// author to choose the right semantics.
     var runsChapterGeneration: Bool {
-        self != .off
+        switch self {
+        case .off:
+            false
+        case .shadow, .enabled:
+            true
+        }
     }
 
     /// `true` iff downstream consumers should READ the chapter plan when
     /// making decisions. Used by:
-    ///   - CoveragePlanner audit-window selection (playhead-au2v.1.14)
+    ///   - CoveragePlanner audit-window selection (playhead-au2v.1.14, planned)
     ///   - FM prompt builders that inject chapter context
-    ///     (playhead-au2v.1.16)
+    ///     (playhead-au2v.1.16, planned)
     /// `.shadow` returns `false` here so detection behavior is identical
-    /// to `.off` while telemetry continues to flow.
+    /// to `.off` while telemetry continues to flow. Exhaustive switch for
+    /// the same defensive reason as `runsChapterGeneration`.
     var consumersReadChapterPlan: Bool {
-        self == .enabled
+        switch self {
+        case .off, .shadow:
+            false
+        case .enabled:
+            true
+        }
     }
 }

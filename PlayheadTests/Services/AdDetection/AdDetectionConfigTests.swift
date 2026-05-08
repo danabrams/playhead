@@ -170,11 +170,17 @@ struct AdDetectionConfigTests {
     @Test(".off and .shadow agree on consumer reads (detection-byte-equivalence invariant)")
     func offAndShadowAreConsumerByteEquivalent() {
         // Property: the chapter-plan consumer predicate must return the
-        // SAME value for .off and .shadow. Detection output is therefore
-        // byte-for-byte identical to today in both modes — only the
-        // generation phase / telemetry differs.
+        // SAME value for .off and .shadow, AND that value must be `false`.
+        // Detection output is therefore byte-for-byte identical to today
+        // in both modes — only the generation phase / telemetry differs.
+        // When beads .14 / .16 wire `consumersReadChapterPlan` into
+        // CoveragePlanner and FM-prompt builders, this invariant becomes
+        // the call-site contract: any consumer that reads the plan MUST
+        // gate on this predicate.
         #expect(ChapterSignalMode.off.consumersReadChapterPlan ==
                 ChapterSignalMode.shadow.consumersReadChapterPlan)
+        #expect(!ChapterSignalMode.off.consumersReadChapterPlan,
+                "Shared consumer-read value for .off and .shadow must be false; otherwise shadow would alter detection behavior.")
         // .enabled is the only mode that flips the consumer bit.
         #expect(ChapterSignalMode.enabled.consumersReadChapterPlan)
     }
