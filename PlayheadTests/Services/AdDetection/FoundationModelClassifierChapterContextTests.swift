@@ -791,4 +791,48 @@ struct FoundationModelClassifierBuildRefinementPromptParityTests {
         )
         #expect(!prompt.contains("Chapter context:"))
     }
+
+    /// Refinement with non-empty `promptEvidence`: the chapter line
+    /// lands BEFORE the `Evidence catalog:` block (and before the
+    /// transcript line-refs). This locks in the bead-16 placement
+    /// rule that chapter context goes at the very top of the
+    /// refinement prompt.
+    @Test("refinement: chapter line precedes Evidence catalog when evidence is present")
+    func refinementChapterLinePrecedesEvidenceCatalog() throws {
+        let ctx = ChapterPromptContext(
+            chapterIndex: 2,
+            totalChapters: 3,
+            dispositionToken: "adBreak",
+            previousDispositionToken: "content",
+            topicDescriptor: nil
+        )
+        let segment = makeSegment(index: 4, text: "ad copy here")
+        let evidence = PromptEvidenceEntry(
+            entry: EvidenceEntry(
+                evidenceRef: 0,
+                category: .brandSpan,
+                matchedText: "BetterHelp",
+                normalizedText: "betterhelp",
+                atomOrdinal: 0,
+                startTime: 12.0,
+                endTime: 13.0
+            ),
+            lineRef: 4
+        )
+        let prompt = FoundationModelClassifier.buildRefinementPrompt(
+            for: [segment],
+            promptEvidence: [evidence],
+            maximumSpans: 2,
+            chapterContext: ctx
+        )
+        #expect(prompt.hasPrefix("Chapter context: 2/3 adBreak. Prev: content."))
+        let chapterRange = try #require(prompt.range(of: "Chapter context:"))
+        let segmentRange = try #require(prompt.range(of: "L4>"))
+        let catalogRange = try #require(prompt.range(of: "Evidence catalog:"))
+        let returnRange = try #require(prompt.range(of: "Return up to 2 spans."))
+        #expect(chapterRange.lowerBound < segmentRange.lowerBound)
+        #expect(segmentRange.lowerBound < catalogRange.lowerBound)
+        #expect(catalogRange.lowerBound < returnRange.lowerBound)
+        #expect(prompt.contains("[E0] \"BetterHelp\""))
+    }
 }
