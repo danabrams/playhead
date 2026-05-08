@@ -720,3 +720,235 @@ struct ChapterLabelCodableTests {
         #expect(decoded.topicDescriptor == nil)
     }
 }
+
+// MARK: - label() — topic descriptor preservation
+
+/// Pin the topic-descriptor flow through `successResult` /
+/// `semanticResult`. Bead spec calls out:
+/// "FM returns nil/empty topicDescriptor → preserved as nil." The
+/// expected end state is `LabelingResult.topicDescriptor == nil` AND
+/// `LabelingResult.chapter.title == nil` — the two fields must agree
+/// so consumers (cache, evidence pipeline) cannot read a stale title
+/// when the descriptor is missing.
+@Suite("ChapterLabelingService — topic descriptor preservation")
+struct ChapterLabelingServiceTopicDescriptorTests {
+
+    @Test("nil topicDescriptor on a confident success → result.topicDescriptor and chapter.title are both nil")
+    func nilDescriptorPreserved() async {
+        let counter = CallCounter()
+        let script = OutcomeScript([
+            .label(makeLabel(.content, confidence: 0.7, topic: nil))
+        ])
+        let service = makeService(counter: counter, script: script)
+        let result = await service.label(makeCandidate())
+
+        #expect(result.failureMode == nil)
+        #expect(result.topicDescriptor == nil)
+        #expect(result.chapter.title == nil)
+    }
+
+    @Test("Whitespace-only topicDescriptor sanitizes to nil on both LabelingResult and chapter")
+    func whitespaceDescriptorSanitizesToNil() async {
+        let counter = CallCounter()
+        let script = OutcomeScript([
+            .label(makeLabel(.content, confidence: 0.6, topic: "   \n\t   "))
+        ])
+        let service = makeService(counter: counter, script: script)
+        let result = await service.label(makeCandidate())
+
+        #expect(result.failureMode == nil)
+        #expect(result.topicDescriptor == nil)
+        #expect(result.chapter.title == nil)
+    }
+
+    @Test("Empty-string topicDescriptor sanitizes to nil")
+    func emptyDescriptorSanitizesToNil() async {
+        let counter = CallCounter()
+        let script = OutcomeScript([
+            .label(makeLabel(.content, confidence: 0.6, topic: ""))
+        ])
+        let service = makeService(counter: counter, script: script)
+        let result = await service.label(makeCandidate())
+
+        #expect(result.failureMode == nil)
+        #expect(result.topicDescriptor == nil)
+        #expect(result.chapter.title == nil)
+    }
+
+    @Test("Topic descriptor longer than the cap is truncated for both result and chapter title")
+    func longDescriptorTruncated() async {
+        let cap = ChapterLabelingService.topicDescriptorCharacterCap
+        let huge = String(repeating: "x", count: cap + 50)
+        let counter = CallCounter()
+        let script = OutcomeScript([
+            .label(makeLabel(.content, confidence: 0.6, topic: huge))
+        ])
+        let service = makeService(counter: counter, script: script)
+        let result = await service.label(makeCandidate())
+
+        #expect(result.failureMode == nil)
+        #expect(result.topicDescriptor?.count == cap)
+        #expect(result.chapter.title?.count == cap)
+        // Pin the alignment: title and topicDescriptor share the same
+        // sanitized string so the two fields cannot diverge.
+        #expect(result.topicDescriptor == result.chapter.title)
+    }
+
+    @Test("Semantic .unclear with nil topicDescriptor preserves nil on both fields")
+    func semanticNilDescriptor() async {
+        let counter = CallCounter()
+        let script = OutcomeScript([
+            .label(makeLabel(.unclear, confidence: 0.3, topic: nil))
+        ])
+        let service = makeService(counter: counter, script: script)
+        let result = await service.label(makeCandidate())
+
+        #expect(result.failureMode == .semantic)
+        #expect(result.topicDescriptor == nil)
+        #expect(result.chapter.title == nil)
+    }
+}
+
+// MARK: - label() — confidence clamping contract
+
+/// The bead spec language "FM returns confidence outside [0,1] → clamp
+/// + .operational flag" is INTENTIONALLY softened in the production
+/// design (see `ChapterLabelingService.swift` header: "Out-of-range
+/// confidence values (NaN / Inf or outside [0, 1]) are clamped, not
+/// rejected. A clamped confidence still counts as a successful call.").
+/// These tests pin the production behavior so a future refactor that
+/// silently flips the contract would surface in CI.
+@Suite("ChapterLabelingService — confidence clamp contract")
+struct ChapterLabelingServiceClampContractTests {
+
+    @Test("Clamped HIGH confidence (1.42 → 1.0) does NOT raise operational flag")
+    func clampHighIsSuccess() async {
+        let counter = CallCounter()
+        let script = OutcomeScript([
+            .label(makeLabel(.content, confidence: 1.42))
+        ])
+        let service = makeService(counter: counter, script: script)
+        let result = await service.label(makeCandidate())
+
+        #expect(result.failureMode == nil, "clamping a high confidence is intentionally a success")
+        #expect(result.attempts == 1, "clamp does not trigger retry")
+        #expect(counter.value == 1)
+        #expect(result.chapter.qualityScore == 1.0)
+    }
+
+    @Test("Clamped LOW confidence (-0.3 → 0.0) does NOT raise operational flag")
+    func clampLowIsSuccess() async {
+        let counter = CallCounter()
+        let script = OutcomeScript([
+            .label(makeLabel(.content, confidence: -0.3))
+        ])
+        let service = makeService(counter: counter, script: script)
+        let result = await service.label(makeCandidate())
+
+        #expect(result.failureMode == nil)
+        #expect(result.attempts == 1)
+        #expect(counter.value == 1)
+        #expect(result.chapter.qualityScore == 0.0)
+    }
+
+    @Test("Non-finite confidence (Inf) collapses to 0 without raising operational flag")
+    func clampInfIsSuccess() async {
+        let counter = CallCounter()
+        let script = OutcomeScript([
+            .label(makeLabel(.content, confidence: .infinity))
+        ])
+        let service = makeService(counter: counter, script: script)
+        let result = await service.label(makeCandidate())
+
+        #expect(result.failureMode == nil)
+        #expect(result.chapter.qualityScore == 0.0)
+        #expect(counter.value == 1)
+    }
+}
+
+// MARK: - label() — token-budget guard end-to-end
+
+/// The prompt builder's region-text cap is a defense-in-depth guard
+/// against a runaway transcript blowing the FM's per-call token
+/// budget. `ChapterLabelingServicePromptTests.promptRespectsCharCap`
+/// covers the cap in isolation; this suite exercises the contract
+/// END-TO-END through `label(...)` with a mock that ASSERTS the
+/// observed prompt is within budget. If a future refactor accidentally
+/// removes the cap, these tests fail before any real device call.
+@Suite("ChapterLabelingService — token-budget guard")
+struct ChapterLabelingServiceTokenBudgetTests {
+
+    /// Loose upper bound on the entire prompt, including schema /
+    /// scaffold overhead. The prompt body is capped at
+    /// `regionTextCharacterCap`; the scaffold around it (chapter
+    /// header, "Region transcript:" prefix, etc.) adds ~250 chars.
+    /// Pinning a generous bound here surfaces a regression where the
+    /// cap is removed entirely without locking the exact scaffold
+    /// length, which is documentation-not-contract.
+    private static let promptUpperBoundChars = ChapterLabelingService.regionTextCharacterCap + 1024
+
+    @Test("Huge region text → labeler still succeeds; prompt observed by the FM stays within cap+scaffold")
+    func hugeRegionDoesNotTripFM() async {
+        let huge = String(repeating: "@", count: 50_000)
+        let counter = CallCounter()
+        // The mock asserts the prompt size before responding. If the
+        // cap is removed the assertion will fire and fail this test.
+        let observedPromptLength = ObservedLength()
+        let service = ChapterLabelingService(
+            labelCall: { prompt in
+                counter.increment()
+                observedPromptLength.set(prompt.count)
+                #expect(prompt.count <= Self.promptUpperBoundChars,
+                        "labeler must not let region text blow the per-call token budget")
+                return makeLabel(.content, confidence: 0.8)
+            }
+        )
+        let result = await service.label(makeCandidate(regionText: huge))
+        #expect(result.failureMode == nil)
+        #expect(counter.value == 1, "no retry should be needed")
+        #expect(observedPromptLength.value > 0)
+        // Sanity: the prompt MUST contain at most `regionTextCharacterCap`
+        // body characters from the runaway region (sentinel `@`).
+        // Because we cannot inspect the prompt directly here, rely on
+        // the upper-bound assertion above plus the prompt-shape suite
+        // for content-level pinning.
+    }
+
+    @Test("Mock that rejects oversized prompts is never tripped by the labeler")
+    func mockRejectsOversizeButLabelerNeverTrips() async {
+        let huge = String(repeating: "@", count: 100_000)
+        let counter = CallCounter()
+        // This mock ENFORCES the cap by throwing when the prompt is
+        // larger than the documented budget. A correctly capped
+        // labeler will never trip the throw.
+        let service = ChapterLabelingService(
+            labelCall: { prompt in
+                counter.increment()
+                if prompt.count > ChapterLabelingServiceTokenBudgetTests.promptUpperBoundChars {
+                    throw ChapterLabelingError.exceededContextWindow
+                }
+                return makeLabel(.content, confidence: 0.7)
+            }
+        )
+        let result = await service.label(makeCandidate(regionText: huge))
+        #expect(result.failureMode == nil, "labeler must not exceed prompt budget")
+        #expect(result.attempts == 1)
+        #expect(counter.value == 1)
+    }
+}
+
+/// Thread-safe length recorder used by the token-budget end-to-end
+/// test (the `labelCall` closure is `@Sendable`, so an `inout` /
+/// captured `var` won't fly).
+private final class ObservedLength: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value = 0
+    func set(_ v: Int) {
+        lock.lock(); defer { lock.unlock() }
+        _value = v
+    }
+    var value: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _value
+    }
+}
