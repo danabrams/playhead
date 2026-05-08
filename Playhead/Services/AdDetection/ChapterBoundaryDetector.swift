@@ -1220,8 +1220,12 @@ extension ChapterBoundaryDetector {
 
         // Single-sided cases: drop is before all retained → only
         // `next` exists. After all retained → only `prev` exists.
-        // Both nil is impossible because we asserted retained is
-        // non-empty above.
+        // (nil, nil) is logically unreachable because we asserted
+        // `retained` is non-empty above, and every retained candidate
+        // has either startTime ≤ drop.startTime (sets prev) or > (sets
+        // next and breaks). Swift requires exhaustive pattern matching
+        // on (Optional, Optional) so we collapse the two single-sided
+        // cases into one and treat (nil, nil) as a `nil` sentinel.
         switch (prev, next) {
         case (let p?, nil):
             return ChapterDensityMergeRecord(
@@ -1238,16 +1242,15 @@ extension ChapterBoundaryDetector {
         case (let p?, let n?):
             let prevSim = jaccardSimilarity(drop.triggeringSignals, p.triggeringSignals)
             let nextSim = jaccardSimilarity(drop.triggeringSignals, n.triggeringSignals)
-            let chosen = chooseNeighbor(
+            return chooseNeighbor(
                 drop: drop,
                 prev: p,
                 prevSim: prevSim,
                 next: n,
                 nextSim: nextSim
             )
-            return chosen
         case (nil, nil):
-            return nil
+            return nil // unreachable; see comment above
         }
     }
 
