@@ -3,14 +3,16 @@
 //
 // playhead-au2v.1.14: extended with chapter-evidence-informed audit
 // window selection. When chapter evidence is available and the chapter
-// signal mode is `.enabled`, the planner replaces a configurable fraction
-// (default 0.5) of the random audit slots with chapter-informed
-// selections (ad-disposition chapters force-included, high-quality
-// content-disposition chapters excluded). Evidence is supplied per-call
-// via `CoveragePlannerContext.chapterEvidence`, so the same code path
-// serves creator-supplied chapters (id3/pc20/rssInline) and inferred
-// chapters (the on-device chapter generation phase) — the
-// `qualityScore` carries the trust signal.
+// signal mode is `.enabled`, the planner EMITS chapter-informed audit
+// guidance — ad-disposition chapters that clear a quality floor are
+// recommended for inclusion, high-quality content-disposition chapters
+// are recommended for exclusion, ambiguous chapters are passed through.
+// The audit-window narrower (a later bead) consumes the guidance and
+// performs the actual slot allocation, capped by `replacementFraction`.
+// Evidence is supplied per-call via `CoveragePlannerContext.chapterEvidence`,
+// so the same code path serves creator-supplied chapters
+// (id3/pc20/rssInline) and inferred chapters (the on-device chapter
+// generation phase) — the `qualityScore` carries the trust signal.
 
 import Foundation
 
@@ -21,15 +23,24 @@ enum CoveragePolicy: String, Codable, Sendable, Hashable, CaseIterable {
 }
 
 /// Closed time interval (seconds, episode-relative) recommended by the
-/// planner as a target for an audit-window scan slot. Carries the
-/// originating chapter's `qualityScore` so downstream consumers can
-/// weight the recommendation if they wish.
+/// planner as either an audit-window target (`.adChapter`) or an
+/// audit-window opt-out (`.contentExcluded`). Carries the originating
+/// chapter's `qualityScore` so downstream consumers can weight the
+/// recommendation if they wish.
 ///
-/// `kind` describes why the interval was selected: `.adChapter` means an
-/// ad-disposition chapter that should ALWAYS be audited; `.contentExcluded`
-/// is recorded for telemetry symmetry only — excluded intervals are NOT
-/// returned in `ChapterInformedAuditSelection.includes` (their omission
-/// is the signal). Reserved for a future bead that wants the full picture.
+/// `kind` describes which list the interval lives on:
+///   - `.adChapter` — appears in `ChapterInformedAuditSelection.includes`;
+///     a high-quality ad-disposition chapter the planner recommends
+///     auditing.
+///   - `.contentExcluded` — appears in `ChapterInformedAuditSelection.excludes`;
+///     a high-quality content-disposition chapter the consumer should
+///     NOT audit unless a coverage-border condition forces it.
+///
+/// The kind tag is currently redundant with the parent list (every
+/// `includes` entry is `.adChapter`, every `excludes` entry is
+/// `.contentExcluded`). It is retained as a forward-compat hook —
+/// future beads may add entries (e.g. ambiguous chapters near a coverage
+/// boundary) where the parent list alone does not disambiguate.
 struct ChapterAuditInterval: Sendable, Equatable {
     enum Kind: String, Sendable, Hashable, Equatable {
         case adChapter

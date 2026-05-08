@@ -677,5 +677,34 @@ struct CoveragePlannerTests {
         #expect(low.adChapterMinQualityForAuditInclusion == 0.0)
         #expect(low.contentChapterMinQualityForExclusion == 0.0)
         #expect(low.minPlanConfidence == 0.0)
+
+        // In-range round-trip — guards against a regression where the
+        // clamp accidentally rounds in-range values to the bounds.
+        let inRange = CoveragePlanner(
+            replacementFraction: 0.7,
+            adChapterMinQualityForAuditInclusion: 0.55,
+            contentChapterMinQualityForExclusion: 0.65,
+            minPlanConfidence: 0.42
+        )
+        #expect(inRange.replacementFraction == 0.7)
+        #expect(inRange.adChapterMinQualityForAuditInclusion == 0.55)
+        #expect(inRange.contentChapterMinQualityForExclusion == 0.65)
+        #expect(inRange.minPlanConfidence == 0.42)
+    }
+
+    @Test("chapter-informed: custom replacementFraction propagates onto the emitted selection")
+    func testChapterInformedReplacementFractionPropagates() throws {
+        let planner = CoveragePlanner(replacementFraction: 0.3)
+        let chapters = [adChapter(start: 60, end: 180, quality: 0.9)]
+        let plan = planner.plan(for: matureStableContext(
+            chapterSignalMode: .enabled,
+            chapterEvidence: chapters
+        ))
+        let informed = try #require(plan.chapterInformedAudit)
+        #expect(informed.replacementFraction == 0.3)
+        // Defensive: must NOT be the static default after a custom
+        // override — guards a regression where the planner accidentally
+        // emits the type's default rather than the configured value.
+        #expect(informed.replacementFraction != CoveragePlanner.defaultReplacementFraction)
     }
 }

@@ -333,9 +333,13 @@ enum ChapterPhasePayload: Sendable, Hashable, Equatable, Codable {
     /// CoveragePlanner consumed chapter evidence to guide audit-window
     /// selection (playhead-au2v.1.14).
     struct CoveragePlanChapterInformed: Sendable, Hashable, Equatable, Codable {
-        /// Configured fraction of audit slots that may be replaced
+        /// Configured fraction of audit slots that MAY be replaced
         /// with chapter-informed selections (`replacementFraction`,
-        /// clamped to `[0, 1]`).
+        /// clamped to `[0, 1]`). Naming caveat: the wire field is
+        /// `fraction_replaced` for support-engineer grep stability,
+        /// but the semantic is "fraction the consumer is BUDGETED to
+        /// replace" — the planner only emits guidance, the
+        /// audit-window narrower performs the actual slot allocation.
         let fractionReplaced: Double
         /// Number of ad-disposition chapters that cleared the
         /// `adChapterMinQualityForAuditInclusion` floor and were
