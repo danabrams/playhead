@@ -846,7 +846,11 @@ struct CoveragePlannerTests {
         // floor by a sensible margin — assert the documented formula
         // numerically rather than the >= floor alone, otherwise a
         // regression that drifted the formula by 10% could still pass.
-        #expect(abs(informed.planConfidence - (498.0 / 740.0)) < 1e-9)
+        // Tolerance is 1e-6 to absorb the Float→Double rounding that
+        // occurs inside `computePlanConfidence` (qualityScore is Float
+        // and `Double(Float(0.6)) ≈ 0.6000000238`); 1e-6 is still
+        // ~5 orders of magnitude tighter than a 10% formula drift.
+        #expect(abs(informed.planConfidence - (498.0 / 740.0)) < 1e-6)
         #expect(informed.planConfidence > CoveragePlanner.defaultMinPlanConfidence)
     }
 
@@ -882,6 +886,10 @@ struct CoveragePlannerTests {
         ))
         let informed = try #require(plan.chapterInformedAudit)
         #expect(informed.replacementFraction == 1.0)
+        // Symmetric with the 0.0 sibling: the planner must NOT
+        // short-circuit when the fraction is at its upper bound; the
+        // selection still flows.
+        #expect(!informed.includes.isEmpty)
     }
 
     @Test("chapter-informed: planConfidence == minPlanConfidence is on the inclusive side of the gate (>= semantics)")
