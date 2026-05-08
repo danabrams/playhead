@@ -1,5 +1,6 @@
 // AdDetectionConfigTests.swift
-// Verifies the Phase 6 FM backfill configuration surfaces.
+// Verifies the Phase 6 FM backfill configuration surfaces and the
+// playhead-au2v.1.2 chapter-signal mode gate.
 
 import Foundation
 import Testing
@@ -137,6 +138,24 @@ struct AdDetectionConfigTests {
             let data = try JSONEncoder().encode(mode)
             let decoded = try JSONDecoder().decode(ChapterSignalMode.self, from: data)
             #expect(decoded == mode, "Round-trip failed for \(mode)")
+        }
+    }
+
+    @Test("ChapterSignalMode wire format is the lowercase enum case name")
+    func chapterSignalModeWireFormatIsStable() throws {
+        // Pin the JSON wire format explicitly. A change here is a config
+        // schema bump and must be done deliberately. Mirrors the implicit
+        // contract that `FMBackfillMode` ships under (rawValue == case name).
+        let expected: [(ChapterSignalMode, String)] = [
+            (.off, #""off""#),
+            (.shadow, #""shadow""#),
+            (.enabled, #""enabled""#),
+        ]
+        for (mode, expectedJSON) in expected {
+            let data = try JSONEncoder().encode(mode)
+            let actualJSON = String(decoding: data, as: UTF8.self)
+            #expect(actualJSON == expectedJSON,
+                    "Wire format for \(mode): expected \(expectedJSON), got \(actualJSON)")
         }
     }
 
