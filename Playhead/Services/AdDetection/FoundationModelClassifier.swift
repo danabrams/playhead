@@ -2794,7 +2794,8 @@ struct FoundationModelClassifier: Sendable {
 
     static func buildPrompt(
         for segments: [AdTranscriptSegment],
-        redactor: PromptRedactor = .noop
+        redactor: PromptRedactor = .noop,
+        chapterContext: ChapterPromptContext? = nil
     ) -> String {
         // bd-34e: when the preamble is disabled we drop ALL the wrapping
         // lines (prefix, injection preamble, line-ref instruction, fences),
@@ -2807,9 +2808,22 @@ struct FoundationModelClassifier: Sendable {
             lines.append(contentsOf: [
                 parts.prefix,
                 parts.preamble,
-                parts.lineRef,
-                transcriptOpenFence
+                parts.lineRef
             ])
+            // playhead-au2v.1.16: inject compact chapter context, if
+            // any, between the line-ref instruction and the transcript
+            // open fence. This places the context just above the model
+            // input it disambiguates without disturbing the
+            // bd-34e / playhead-994 jailbreak-defense fence pair.
+            // Empty / over-budget contexts return `nil` from
+            // `format(maxTokens:)` and are silently omitted; the
+            // caller is responsible for emitting the
+            // `chapter_prompt_dropped_budget` diagnostic in that case.
+            if let context = chapterContext,
+               let line = context.format() {
+                lines.append(line)
+            }
+            lines.append(transcriptOpenFence)
         }
         // bd-1en: redact each segment's visible text BEFORE escaping. The
         // line-ref number (`L<n>>`) is preserved so the FM's response
@@ -2826,11 +2840,12 @@ struct FoundationModelClassifier: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    private static func buildRefinementPrompt(
+    static func buildRefinementPrompt(
         for segments: [AdTranscriptSegment],
         promptEvidence: [PromptEvidenceEntry],
         maximumSpans: Int,
-        redactor: PromptRedactor = .noop
+        redactor: PromptRedactor = .noop,
+        chapterContext: ChapterPromptContext? = nil
     ) -> String {
         // playhead-cay: the preamble (prefix, injectionPreamble,
         // lineRefInstruction, "Transcript:", fences) has been removed.
@@ -2843,6 +2858,19 @@ struct FoundationModelClassifier: Sendable {
         // is therefore redundant and removing it further reduces the
         // hidden augmented input surface that triggers false positives.
         var lines: [String] = []
+        // playhead-au2v.1.16: chapter context lands at the very top of
+        // the refinement prompt, before the transcript line-refs and
+        // the optional Evidence catalog. The bead spec asks for "before
+        // the existing Evidence catalog block"; placing it before the
+        // transcript lines too is consistent with the coarse-pass
+        // placement and unambiguous for the model. Half-budget aware:
+        // the refinement budget is sized via `coarseBudgetDivisor=8`
+        // upstream, so the same `format(maxTokens:)` cap (~50 tokens)
+        // is appropriate here. Over-budget cases drop to nil and the
+        // caller emits the `chapter_prompt_dropped_budget` diagnostic.
+        if let context = chapterContext, let line = context.format() {
+            lines.append(line)
+        }
         // bd-1en: redaction is applied to the visible segment text only;
         // the L<n>> prefix is preserved so the runner's downstream
         // lineRef → segment mapping is intact.

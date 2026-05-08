@@ -163,6 +163,26 @@ struct ChapterPhaseDiagnosticsTests {
                 timestamp: Self.timestamp,
                 reason: "low_plan_confidence",
                 evidenceCount: 4
+            ),
+            .chapterPromptInjected(
+                installID: Self.installID, episodeId: Self.rawEpisodeId,
+                timestamp: Self.timestamp,
+                chapterIndex: 4,
+                totalChapters: 7,
+                disposition: "adBreak",
+                previousDisposition: "content",
+                topicIncluded: true
+            ),
+            .chapterPromptDroppedBudget(
+                installID: Self.installID, episodeId: Self.rawEpisodeId,
+                timestamp: Self.timestamp,
+                budgetTokens: 50,
+                abbreviatedFormTokens: 64
+            ),
+            .chapterPromptNoChapterForWindow(
+                installID: Self.installID, episodeId: Self.rawEpisodeId,
+                timestamp: Self.timestamp,
+                chapterCount: 5
             )
         ]
 
@@ -523,6 +543,30 @@ struct ChapterPhaseDiagnosticsTests {
                 timestamp: Self.timestamp,
                 reason: "no_usable_chapters",
                 evidenceCount: 3
+            ),
+            .chapterPromptInjected(
+                installID: Self.installID, episodeId: pollutedEpisodeId,
+                timestamp: Self.timestamp,
+                chapterIndex: 4,
+                totalChapters: 7,
+                // disposition is a fixed-vocabulary token (e.g. adBreak,
+                // content, ambiguous) — never populated from episode
+                // metadata. `topicIncluded` is a boolean so the descriptor
+                // itself never leaks.
+                disposition: "adBreak",
+                previousDisposition: "content",
+                topicIncluded: true
+            ),
+            .chapterPromptDroppedBudget(
+                installID: Self.installID, episodeId: pollutedEpisodeId,
+                timestamp: Self.timestamp,
+                budgetTokens: 50,
+                abbreviatedFormTokens: 64
+            ),
+            .chapterPromptNoChapterForWindow(
+                installID: Self.installID, episodeId: pollutedEpisodeId,
+                timestamp: Self.timestamp,
+                chapterCount: 5
             )
         ]
         #expect(events.count == ChapterPhaseEventType.allCases.count)
@@ -798,6 +842,29 @@ struct ChapterPhaseDiagnosticsTests {
                     timestamp: Self.timestamp,
                     reason: "mode_disabled",
                     evidenceCount: 0
+                )
+            case .chapterPromptInjected:
+                return .chapterPromptInjected(
+                    installID: Self.installID, episodeId: Self.rawEpisodeId,
+                    timestamp: Self.timestamp,
+                    chapterIndex: 4,
+                    totalChapters: 7,
+                    disposition: "adBreak",
+                    previousDisposition: "content",
+                    topicIncluded: true
+                )
+            case .chapterPromptDroppedBudget:
+                return .chapterPromptDroppedBudget(
+                    installID: Self.installID, episodeId: Self.rawEpisodeId,
+                    timestamp: Self.timestamp,
+                    budgetTokens: 50,
+                    abbreviatedFormTokens: 64
+                )
+            case .chapterPromptNoChapterForWindow:
+                return .chapterPromptNoChapterForWindow(
+                    installID: Self.installID, episodeId: Self.rawEpisodeId,
+                    timestamp: Self.timestamp,
+                    chapterCount: 5
                 )
             }
         }

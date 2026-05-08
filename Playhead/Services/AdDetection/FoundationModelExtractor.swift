@@ -107,17 +107,35 @@ struct FoundationModelExtractor: MetadataExtractor {
 
     /// Build the extraction prompt. Versioned via MetadataPromptVersion.
     /// Changes here require bumping MetadataPromptVersion.current.
-    private static func buildPrompt(
+    ///
+    /// playhead-au2v.1.16: an optional `chapterContext` argument lets
+    /// callers inject a compact chapter-context line just before the
+    /// `Transcript:` body of the prompt. Default `nil` preserves the
+    /// pre-bead-16 prompt verbatim, so existing callers and the
+    /// `MetadataPromptVersion` contract are unaffected for windows
+    /// where chapter context is unavailable, mode-gated, or
+    /// dropped by the per-call token-budget guard. The first
+    /// production caller that passes a non-nil context MUST bump
+    /// `MetadataPromptVersion.current` to invalidate previously-
+    /// extracted metadata that pre-dated the chapter-context input.
+    static func buildPrompt(
         evidenceText: String,
         windowStartTime: Double,
-        windowEndTime: Double
+        windowEndTime: Double,
+        chapterContext: ChapterPromptContext? = nil
     ) -> String {
-        """
+        let chapterLine: String
+        if let context = chapterContext, let line = context.format() {
+            chapterLine = "\n\(line)\n"
+        } else {
+            chapterLine = ""
+        }
+        return """
         You are analyzing a podcast transcript segment that has been flagged as \
         a potential advertisement. The segment spans from \
         \(String(format: "%.1f", windowStartTime))s to \
         \(String(format: "%.1f", windowEndTime))s.
-
+        \(chapterLine)
         Extract the advertiser name, product, and supporting evidence from \
         the transcript text below. Only extract information that is explicitly \
         stated in the text. If the advertiser or product cannot be clearly \
