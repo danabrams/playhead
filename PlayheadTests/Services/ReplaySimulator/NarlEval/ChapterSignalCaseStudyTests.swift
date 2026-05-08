@@ -137,9 +137,10 @@ fileprivate enum CaseStudyPaths {
     /// Resolve the directory of `ChapterSignalCaseStudies/` via `#filePath`.
     /// This file lives at
     /// `PlayheadTests/Services/ReplaySimulator/NarlEval/ChapterSignalCaseStudyTests.swift`,
-    /// so we ascend four directories to reach the repo root and then
-    /// descend into the fixtures path. We deliberately do NOT depend on
-    /// the test bundle's resource lookup — these fixtures are read at
+    /// so we ascend four path components — file → NarlEval → ReplaySimulator
+    /// → Services → PlayheadTests — and then descend into
+    /// `Fixtures/ChapterSignalCaseStudies/`. We deliberately do NOT depend
+    /// on the test bundle's resource lookup — these fixtures are read at
     /// runtime via `#filePath`, the same convention `FrozenTrace`
     /// fixtures and `DogfoodAnalysisHealthFixtureLoader` use.
     static func fixturesDir(_ filePath: String = #filePath) -> URL {
