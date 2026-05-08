@@ -2164,8 +2164,10 @@ struct ChapterBoundaryDetectorTwoSignalStackTests {
         // boundaries — that would be a clustering bug.
         #expect(result.count == 2,
                 "music + speaker at the same instant must produce ONE combined boundary, not two")
-        let combined = result.last
-        #expect(combined?.startTime == 30.0)
+        // Look up the boundary by timestamp (matches the pattern used
+        // throughout this file; resilient to ordering changes).
+        let combined = result.first { $0.startTime == 30.0 }
+        #expect(combined != nil, "expected a combined boundary at t=30")
         // Confidence must be EXACTLY 0.4 (music) + 0.3 (speaker) = 0.7.
         // Pin the value tightly; intermediate Float drift would surface
         // as a non-trivial deviation.
@@ -2225,8 +2227,9 @@ struct ChapterBoundaryDetectorCapThirtyMinuteTests {
     @Test("30-min episode with 10 synthetic candidates → cap to 6, no floor enforcement")
     func thirtyMinuteCapsToSix() {
         // 30-min episode: target = ceil(30/5) = 6. Floor of 8 does NOT
-        // apply (<40 min). Cap = max(1-floor, 6) = 6. Hand 10 non-zero
-        // candidates → 6 retained, 4 dropped.
+        // apply (<40 min); the no-floor case uses a sentinel of 1, so
+        // cap = max(1, 6) = 6. Hand 10 non-zero candidates → 6
+        // retained, 4 dropped.
         //
         // Rate guard: total = 11 candidates / 1800s = 0.0061 < 1/90 ≈
         // 0.0111 → pathological gate stays silent.
