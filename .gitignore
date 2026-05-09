@@ -41,6 +41,9 @@ build/
 Packages/
 Package.resolved
 
+# Local ASR models for playhead-l2f bootstrap. Large, regenerated/downloaded.
+models/ggml-*.bin
+
 # macOS
 .DS_Store
 
@@ -98,3 +101,7 @@ Package.resolved
 # annotator's machine and are verified via `audio_fingerprint`.
 TestFixtures/Corpus/Audio/*
 !TestFixtures/Corpus/Audio/.gitkeep
+TestFixtures/Corpus/Transcripts/*
+!TestFixtures/Corpus/Transcripts/.gitkeep
+TestFixtures/Corpus/Drafts/*
+!TestFixtures/Corpus/Drafts/.gitkeep

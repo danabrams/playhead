@@ -1,0 +1,2 @@
+# Placeholder for local whisper.cpp model binaries.
+# Model files such as ggml-base.en.bin are ignored by .gitignore.

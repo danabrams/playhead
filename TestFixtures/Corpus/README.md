@@ -14,6 +14,8 @@ TestFixtures/Corpus/
 ├── README.md              ← this file
 ├── Audio/                 ← episode audio files (.m4a, .mp3, …)
 │                            named `<episode_id>.<ext>`
+├── Transcripts/           ← local ASR transcript JSON, ignored by git
+├── Drafts/                ← generated draft annotations, ignored by git
 └── Annotations/           ← per-episode JSON annotations
     ├── _template.example.json
     ├── _template.example.md     ← field-by-field reference
@@ -37,7 +39,16 @@ Filenames in `Annotations/` that begin with `_` or end with
 
 For every episode:
 
-1. **Listen end to end.** Note ad start/end times to ±0.5 s precision.
+0. **Optional bootstrap.** Generate a local transcript and draft
+   annotation:
+   ```sh
+   swift scripts/l2f-local-transcribe.swift --model models/ggml-base.en.bin
+   swift scripts/l2f-draft-annotation.swift
+   ```
+   Drafts are written to `TestFixtures/Corpus/Drafts/` and are not
+   ground truth. Promote a draft only after human audio review.
+1. **Listen end to end or review the draft against audio.** Note ad
+   start/end times to ±0.5 s precision.
 2. **Mark ad windows.** For each, record advertiser, product, ad
    type, and transition type. Add free-form `confidence_notes`
    explaining why this confidence level was assigned (e.g. "Clear
@@ -142,5 +153,9 @@ annotations and this README are committed.
   manually or via a separate large-file mechanism. Ensure your
   copy of the audio matches the recorded `audio_fingerprint`
   before relying on a label.
+- **Transcripts** (`Transcripts/*.json`) — NOT committed. Generated
+  locally from audio and may contain copyrighted transcript text.
+- **Drafts** (`Drafts/*`) — NOT committed. Generated hints for a
+  human labeler, never ground truth by themselves.
 
 See `.gitignore` for the exact audio exclusion rules.

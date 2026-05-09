@@ -1,0 +1,19 @@
+{
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 42.0,
+      "text": "Welcome back to Example Show. Today we are talking with Maya about product design."
+    },
+    {
+      "start": 42.0,
+      "end": 88.0,
+      "text": "This episode is brought to you by Acme Notes. Use code PLAYHEAD for twenty percent off your first month."
+    },
+    {
+      "start": 88.0,
+      "end": 150.0,
+      "text": "Now back to the interview. Maya, tell me how the team handled the launch."
+    }
+  ]
+}

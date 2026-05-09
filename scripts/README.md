@@ -105,6 +105,55 @@ When the pool is empty (the current default) the script prints a notice
 explaining that rotation is blocked on licensing sign-off and exits 0
 without modifying the manifest. See `FIXTURES_LICENSING.md` for the policy.
 
+## `l2f-local-transcribe.swift`
+
+Runs local `whisper.cpp` against `TestFixtures/Corpus/Audio/` and writes
+timestamped transcript JSON to `TestFixtures/Corpus/Transcripts/`.
+
+```sh
+# Install the local ASR binary once.
+brew install whisper-cpp
+
+# Download a GGML model separately into ./models, then transcribe local corpus audio.
+mkdir -p models
+curl -L --fail --output models/ggml-base.en.bin \\
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+
+swift scripts/l2f-local-transcribe.swift --model models/ggml-base.en.bin
+
+# Use CPU fallback if Metal is unavailable or fails to allocate.
+swift scripts/l2f-local-transcribe.swift --model models/ggml-base.en.bin --no-gpu
+
+# Preview the exact commands without requiring a model file.
+swift scripts/l2f-local-transcribe.swift --dry-run --model models/ggml-base.en.bin
+```
+
+`whisper-cpp` supports `flac`, `mp3`, `ogg`, and `wav` directly. The script
+uses `ffmpeg` to convert corpus formats such as `m4a`, `mp4`, and `aac` to
+temporary 16 kHz mono WAV before transcription.
+
+## `l2f-draft-annotation.swift`
+
+Reads local timestamped transcripts and emits review-only L2F annotation
+drafts to `TestFixtures/Corpus/Drafts/`. It computes audio fingerprints,
+builds content windows as the complement of heuristic ad candidates, and
+writes a Markdown review sheet with the matched transcript segments.
+
+```sh
+swift scripts/l2f-draft-annotation.swift
+
+# Smoke-test the parser and heuristic without audio.
+swift scripts/l2f-draft-annotation.swift \\
+  --allow-missing-audio \\
+  --duration 150 \\
+  --transcript-dir scripts/fixtures \\
+  scripts/fixtures/l2f_transcript_sample.json
+```
+
+Drafts are not corpus truth. Promote a draft by checking audio boundaries to
+`+/-0.5s`, filling advertiser/product when identifiable, and copying the
+reviewed JSON into `TestFixtures/Corpus/Annotations/<episode_id>.json`.
+
 ## `rotation-pool.json` (not yet checked in)
 
 Candidate fixtures for rotation. Each candidate must satisfy the same
