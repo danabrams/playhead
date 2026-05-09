@@ -82,6 +82,14 @@ if swift scripts/l2f-draft-annotation.swift \
   exit 1
 fi
 
+if swift scripts/l2f-draft-annotation.swift \
+  --allow-missing-audio \
+  --draft-dir TestFixtures/Corpus/Annotations \
+  scripts/fixtures/l2f_zero_ad_sample.json >/dev/null 2>&1; then
+  echo "expected --draft-dir outside Drafts or tmp to fail" >&2
+  exit 1
+fi
+
 mkdir -p "$OUT/audio"
 touch "$OUT/audio/quote'id.m4a"
 cat > "$OUT/quoted-review-source.json" <<'JSON'

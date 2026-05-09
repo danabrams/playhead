@@ -244,7 +244,28 @@ let options = parseArgs(CommandLine.arguments)
 let transcriptDir = resolve(options.transcriptDir)
 let audioDir = resolve(options.audioDir)
 let draftDir = resolve(options.draftDir)
+guard isAllowedDraftOutputDir(draftDir) else {
+    fatal("--draft-dir must be TestFixtures/Corpus/Drafts or a system temporary directory")
+}
 try FileManager.default.createDirectory(at: draftDir, withIntermediateDirectories: true)
+
+func isAllowedDraftOutputDir(_ url: URL) -> Bool {
+    let standardized = url.standardizedFileURL.path
+    let corpusDrafts = repoRoot
+        .appendingPathComponent("TestFixtures/Corpus/Drafts")
+        .standardizedFileURL
+        .path
+    let temporaryRoots = [
+        URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).standardizedFileURL.path,
+        URL(fileURLWithPath: "/tmp", isDirectory: true).standardizedFileURL.path,
+    ]
+    if standardized == corpusDrafts || standardized.hasPrefix(corpusDrafts + "/") {
+        return true
+    }
+    return temporaryRoots.contains { root in
+        standardized == root || standardized.hasPrefix(root + "/")
+    }
+}
 
 func collectTranscripts() -> [URL] {
     if !options.inputs.isEmpty {
