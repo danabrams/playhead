@@ -130,6 +130,9 @@ func parseArgs(_ argv: [String]) -> Options {
         case "--episode-id":
             i += 1
             guard i < argv.count else { fatal("--episode-id requires a value") }
+            guard isSafeArtifactBasename(argv[i]) else {
+                fatal("--episode-id must be a simple filename-safe id without path separators")
+            }
             opts.episodeId = argv[i]
         case "--force":
             opts.force = true
@@ -190,6 +193,9 @@ func parseArgs(_ argv: [String]) -> Options {
             guard i < argv.count, !argv[i].isEmpty else {
                 fatal("--review-queue-name requires a non-empty value")
             }
+            guard isSafeArtifactBasename(i < argv.count ? argv[i] : "") else {
+                fatal("--review-queue-name must be a simple filename without path separators")
+            }
             opts.reviewQueueName = argv[i]
         case "-h", "--help":
             printUsage()
@@ -209,6 +215,14 @@ func parseArgs(_ argv: [String]) -> Options {
         opts.writeReviewQueue = true
     }
     return opts
+}
+
+func isSafeArtifactBasename(_ value: String) -> Bool {
+    !value.isEmpty
+        && !value.contains("/")
+        && !value.contains("\\")
+        && value != "."
+        && value != ".."
 }
 
 func fatal(_ message: String) -> Never {
@@ -1111,6 +1125,16 @@ func shellQuoted(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
+func safeArtifactBasename(_ value: String) -> String {
+    let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+    var result = ""
+    for scalar in value.unicodeScalars {
+        result.append(allowed.contains(scalar) ? Character(scalar) : "-")
+    }
+    let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: ".-_\n\t "))
+    return trimmed.isEmpty ? "episode" : trimmed
+}
+
 func reviewAudio(for episodeId: String) -> URL? {
     matchingAudio(for: episodeId)
 }
@@ -1127,7 +1151,8 @@ func reviewCommand(for candidate: ReviewQueueCandidate, audio: URL?) -> (playbac
           let end = candidate.end else {
         let sampleLength = min(candidate.duration ?? 120.0, max(60.0, options.reviewContextSeconds * 3.0))
         let audioPath = shellQuoted(audio.path)
-        let clipPath = shellQuoted(draftDir.appendingPathComponent("\(candidate.episodeId)-false-positive-trap-sample.review.m4a").path)
+        let episodeArtifact = safeArtifactBasename(candidate.episodeId)
+        let clipPath = shellQuoted(draftDir.appendingPathComponent("\(episodeArtifact)-false-positive-trap-sample.review.m4a").path)
         return (
             "ffplay -autoexit -nodisp -ss 0.0 -t \(formatSeconds(sampleLength)) \(audioPath)",
             "ffmpeg -y -ss 0.0 -t \(formatSeconds(sampleLength)) -i \(audioPath) -c copy \(clipPath)"
@@ -1137,7 +1162,8 @@ func reviewCommand(for candidate: ReviewQueueCandidate, audio: URL?) -> (playbac
     let contextEnd = min(candidate.duration ?? end + options.reviewContextSeconds, end + options.reviewContextSeconds)
     let length = max(0.1, contextEnd - contextStart)
     let audioPath = shellQuoted(audio.path)
-    let clipPath = shellQuoted(draftDir.appendingPathComponent("\(candidate.episodeId)-\(formatSeconds(start))-\(formatSeconds(end)).review.m4a").path)
+    let episodeArtifact = safeArtifactBasename(candidate.episodeId)
+    let clipPath = shellQuoted(draftDir.appendingPathComponent("\(episodeArtifact)-\(formatSeconds(start))-\(formatSeconds(end)).review.m4a").path)
     let playback = "ffplay -autoexit -nodisp -ss \(formatSeconds(contextStart)) -t \(formatSeconds(length)) \(audioPath)"
     let extraction = "ffmpeg -y -ss \(formatSeconds(contextStart)) -t \(formatSeconds(length)) -i \(audioPath) -c copy \(clipPath)"
     return (playback, extraction)

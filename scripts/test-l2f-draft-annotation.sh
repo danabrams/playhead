@@ -65,6 +65,55 @@ swift scripts/l2f-draft-annotation.swift \
 
 test "$(jq '.entries | length' "$OUT/mixed/review-queue.json")" = "3"
 
+if swift scripts/l2f-draft-annotation.swift \
+  --review-queue-only \
+  --review-queue-name '../outside' \
+  --draft-dir "$OUT/reject-name" >/dev/null 2>&1; then
+  echo "expected --review-queue-name with a path separator to fail" >&2
+  exit 1
+fi
+
+if swift scripts/l2f-draft-annotation.swift \
+  --allow-missing-audio \
+  --episode-id '../outside' \
+  --draft-dir "$OUT/reject-episode" \
+  scripts/fixtures/l2f_zero_ad_sample.json >/dev/null 2>&1; then
+  echo "expected --episode-id with a path separator to fail" >&2
+  exit 1
+fi
+
+mkdir -p "$OUT/audio"
+touch "$OUT/audio/quote'id.m4a"
+cat > "$OUT/quoted-review-source.json" <<'JSON'
+{
+  "episodes": [
+    {
+      "episode_id": "quote'id",
+      "codex_windows": [
+        {
+          "start_seconds": 12,
+          "end_seconds": 24,
+          "advertiser": "Quoted Co",
+          "product": "review safety",
+          "confidence_notes": "Synthetic quoting regression."
+        }
+      ]
+    }
+  ]
+}
+JSON
+
+swift scripts/l2f-draft-annotation.swift \
+  --review-queue-only \
+  --review-source "$OUT/quoted-review-source.json" \
+  --audio-dir "$OUT/audio" \
+  --draft-dir "$OUT/quoted" >/dev/null
+
+playback_command="$(jq -r '.entries[0].playback_command' "$OUT/quoted/review-queue.json")"
+[[ "$playback_command" == *"ffplay -autoexit -nodisp -ss 0.0 -t 44.0"* ]]
+[[ "$playback_command" == *"quote'\\''id.m4a"* ]]
+test "$(jq -r '.entries[0].extraction_command | contains("/quote-id-12.0-24.0.review.m4a")' "$OUT/quoted/review-queue.json")" = "true"
+
 CODEX_REVIEW_SOURCE="TestFixtures/Corpus/Drafts/codex-transcript-review.json"
 if [[ -f "$CODEX_REVIEW_SOURCE" ]]; then
   swift scripts/l2f-draft-annotation.swift \
