@@ -61,6 +61,13 @@ For every episode:
    The queue writes ignored `review-queue.json` and `review-queue.md`
    artifacts under `Drafts/`, with one checklist item per candidate pod
    and explicit false-positive-trap entries for zero-ad episodes.
+   For a touch-friendly review pass from another device on the same
+   network, run the local GUI server:
+   ```sh
+   python3 scripts/l2f-review-gui.py --host 0.0.0.0
+   ```
+   Open the printed LAN URL on the iPhone. The GUI saves decisions under
+   ignored `Drafts/` artifacts only.
 1. **Listen end to end or review the draft against audio.** Note ad
    start/end times to ±0.5 s precision.
 2. **Mark ad windows.** For each, record advertiser, product, ad

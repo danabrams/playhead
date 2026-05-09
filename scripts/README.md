@@ -175,6 +175,25 @@ boundaries to `+/-0.5s`, reject false positives and zero-ad traps, fill
 advertiser/product when identifiable, and only then copy the reviewed JSON
 into `TestFixtures/Corpus/Annotations/<episode_id>.json`.
 
+## `l2f-review-gui.py`
+
+Serves a local browser GUI for the `playhead-l2f.3` manual audio review pass.
+It reads the ignored review queue, serves local corpus audio with seeking, and
+saves review decisions back under `TestFixtures/Corpus/Drafts/`.
+
+```sh
+# From the Mac only.
+python3 scripts/l2f-review-gui.py
+
+# From an iPhone or another device on the same network.
+python3 scripts/l2f-review-gui.py --host 0.0.0.0
+```
+
+The script prints both the local URL and, when bound to `0.0.0.0`, a LAN URL
+you can open from the iPhone. Saved decisions go to
+`TestFixtures/Corpus/Drafts/l2f-audio-review.json`; the "Write episode review
+files" button also emits per-episode `*.audio-review.json` files in Drafts.
+
 ## `rotation-pool.json` (not yet checked in)
 
 Candidate fixtures for rotation. Each candidate must satisfy the same
