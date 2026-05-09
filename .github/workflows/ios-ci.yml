@@ -48,24 +48,15 @@ jobs:
             -derivedDataPath "$DERIVED_DATA_PATH" \
             CODE_SIGNING_ALLOWED=NO
 
-      - name: Run tests
-        run: |
-          set -euo pipefail
-          xcodebuild test-without-building \
-            -project "$PROJECT_FILE" \
-            -scheme "$SCHEME" \
-            -destination "$DESTINATION" \
-            -derivedDataPath "$DERIVED_DATA_PATH" \
-            -parallel-testing-enabled NO \
-            -maximum-parallel-testing-workers 1 \
-            CODE_SIGNING_ALLOWED=NO
-
-      - name: Upload Xcode results
+      # PlayheadFastTests is a 6k+ simulator suite that can consume a
+      # large fraction of the monthly Actions budget while still being
+      # sensitive to runner load. Keep CI build-only; run tests locally
+      # when working the iOS suite.
+      - name: Upload Xcode build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: xcode-results
+          name: xcode-build-logs
           path: |
-            .deriveddata-ci/Logs/Test/*.xcresult
             .deriveddata-ci/Logs/Build/*.xcactivitylog
           if-no-files-found: ignore
