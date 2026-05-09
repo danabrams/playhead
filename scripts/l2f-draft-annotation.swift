@@ -220,7 +220,13 @@ func parseSegment(_ item: Any) -> TranscriptSegment? {
 }
 
 func parseTranscript(_ url: URL, fallbackDuration: Double?) throws -> [TranscriptSegment] {
-    let data = try Data(contentsOf: url)
+    let rawData = try Data(contentsOf: url)
+    let data: Data
+    if String(data: rawData, encoding: .utf8) == nil {
+        data = Data(String(decoding: rawData, as: UTF8.self).utf8)
+    } else {
+        data = rawData
+    }
     let json = try JSONSerialization.jsonObject(with: data)
 
     if let array = json as? [Any] {

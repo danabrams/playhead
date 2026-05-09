@@ -159,6 +159,10 @@ func run(_ executable: String, _ args: [String], dryRun: Bool = false) throws ->
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [executable] + args
     }
+    if let devNull = FileHandle(forWritingAtPath: "/dev/null") {
+        process.standardOutput = devNull
+        process.standardError = devNull
+    }
     try process.run()
     process.waitUntilExit()
     return process.terminationStatus
@@ -227,6 +231,7 @@ for audio in audioFiles {
         "-l", options.language,
         "-oj",
         "-ojf",
+        "-np",
         "-of", outputBase.path,
     ]
     if let threads = options.threads {
