@@ -1,0 +1,24 @@
+{
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 20.0,
+      "text": "Welcome to the show. We will get to the interview in just a moment."
+    },
+    {
+      "start": 20.0,
+      "end": 55.0,
+      "text": "This episode is brought to you by Acme Notes, the dashboard for busy teams."
+    },
+    {
+      "start": 55.0,
+      "end": 90.0,
+      "text": "Our sponsor Beta Wireless gives listeners ten percent off when you use code PLAYHEAD."
+    },
+    {
+      "start": 90.0,
+      "end": 150.0,
+      "text": "Now back to the interview. Maya, tell me how the launch went."
+    }
+  ]
+}

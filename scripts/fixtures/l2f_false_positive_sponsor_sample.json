@@ -1,0 +1,29 @@
+{
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 35.0,
+      "text": "Today's segment covers a bill sponsored by two senators after years of committee work."
+    },
+    {
+      "start": 35.0,
+      "end": 60.0,
+      "text": "That bill is bipartisan and under consideration in the House of Representatives."
+    },
+    {
+      "start": 60.0,
+      "end": 80.0,
+      "text": "It has been sponsored by Republicans and Democrats."
+    },
+    {
+      "start": 80.0,
+      "end": 120.0,
+      "text": "The article says the foundation grant supported the study, but this is part of the news story."
+    },
+    {
+      "start": 120.0,
+      "end": 150.0,
+      "text": "Back to the interview, Maya explains why the policy language changed."
+    }
+  ]
+}

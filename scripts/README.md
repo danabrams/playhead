@@ -136,8 +136,9 @@ temporary 16 kHz mono WAV before transcription.
 
 Reads local timestamped transcripts and emits review-only L2F annotation
 drafts to `TestFixtures/Corpus/Drafts/`. It computes audio fingerprints,
-builds content windows as the complement of heuristic ad candidates, and
-writes a Markdown review sheet with the matched transcript segments.
+clusters transcript cue hits into pod-scale candidate ad windows, builds
+content windows as the complement of heuristic ad candidates, and writes a
+Markdown review sheet with the matched transcript segments.
 
 ```sh
 swift scripts/l2f-draft-annotation.swift
@@ -148,11 +149,31 @@ swift scripts/l2f-draft-annotation.swift \\
   --duration 150 \\
   --transcript-dir scripts/fixtures \\
   scripts/fixtures/l2f_transcript_sample.json
+
+# Exercise the synthetic edge fixtures: zero-ad, article-level sponsor-word
+# false positive, back-to-back ads, and a multi-CTA pod.
+bash scripts/test-l2f-draft-annotation.sh
+
+# Generate drafts plus a local audio review queue.
+swift scripts/l2f-draft-annotation.swift --write-review-queue
+
+# Build only the review queue from Codex's transcript review for the current
+# 15 local episodes. This writes review-queue.json/md under Drafts.
+swift scripts/l2f-draft-annotation.swift \\
+  --review-queue-only \\
+  --review-source TestFixtures/Corpus/Drafts/codex-transcript-review.json
 ```
 
-Drafts are not corpus truth. Promote a draft by checking audio boundaries to
-`+/-0.5s`, filling advertiser/product when identifiable, and copying the
-reviewed JSON into `TestFixtures/Corpus/Annotations/<episode_id>.json`.
+Useful tuning flags are `--merge-gap-seconds`, `--expand-before-seconds`,
+`--expand-after-seconds`, `--padding-seconds`, `--max-window-seconds`, and
+`--review-context-seconds`; run `swift scripts/l2f-draft-annotation.swift
+--help` for defaults.
+
+Drafts and review queues are not corpus truth. Promotion for
+`playhead-l2f.3`/`.4` remains gated on human local-audio review: check
+boundaries to `+/-0.5s`, reject false positives and zero-ad traps, fill
+advertiser/product when identifiable, and only then copy the reviewed JSON
+into `TestFixtures/Corpus/Annotations/<episode_id>.json`.
 
 ## `rotation-pool.json` (not yet checked in)
 

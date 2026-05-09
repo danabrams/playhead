@@ -43,10 +43,24 @@ For every episode:
    annotation:
    ```sh
    swift scripts/l2f-local-transcribe.swift --model models/ggml-base.en.bin
-   swift scripts/l2f-draft-annotation.swift
+   swift scripts/l2f-draft-annotation.swift --write-review-queue
    ```
    Drafts are written to `TestFixtures/Corpus/Drafts/` and are not
-   ground truth. Promote a draft only after human audio review.
+   ground truth. The draft generator clusters transcript cue hits into
+   pod-scale review candidates; tune with `--merge-gap-seconds`,
+   `--expand-before-seconds`, `--expand-after-seconds`,
+   `--padding-seconds`, and `--max-window-seconds`.
+   Promote a draft only after human audio review.
+   To build a review queue from Codex's transcript-only review for the
+   current 15 local episodes, run:
+   ```sh
+   swift scripts/l2f-draft-annotation.swift \
+     --review-queue-only \
+     --review-source TestFixtures/Corpus/Drafts/codex-transcript-review.json
+   ```
+   The queue writes ignored `review-queue.json` and `review-queue.md`
+   artifacts under `Drafts/`, with one checklist item per candidate pod
+   and explicit false-positive-trap entries for zero-ad episodes.
 1. **Listen end to end or review the draft against audio.** Note ad
    start/end times to ±0.5 s precision.
 2. **Mark ad windows.** For each, record advertiser, product, ad
@@ -77,6 +91,12 @@ For every episode:
    or by calling `CorpusAnnotationLoader().loadAll(verifyAudioFingerprints: true)`.
 8. **Second-pass review.** A second listener spot-checks every
    annotation before the corpus is treated as ground truth.
+
+`playhead-l2f.3` and `playhead-l2f.4` are intentionally manual gates.
+Transcript-derived drafts, Codex transcript review, and generated review
+queues can prioritize listening work, but they must not be promoted into
+`Annotations/` until a human has checked the local audio boundaries and
+false-positive traps.
 
 ## Worked example
 

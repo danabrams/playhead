@@ -1,0 +1,29 @@
+{
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 30.0,
+      "text": "The first half of the episode is about better meeting notes."
+    },
+    {
+      "start": 30.0,
+      "end": 65.0,
+      "text": "Today's sponsor Rorra makes a water filter for apartments and small offices."
+    },
+    {
+      "start": 65.0,
+      "end": 95.0,
+      "text": "Visit rorra.com/playhead to get started and learn more about shipping."
+    },
+    {
+      "start": 95.0,
+      "end": 125.0,
+      "text": "Use code PLAYHEAD for twenty percent off your first order for a limited time."
+    },
+    {
+      "start": 125.0,
+      "end": 180.0,
+      "text": "Now back to the main topic and our discussion of launch research."
+    }
+  ]
+}

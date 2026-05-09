@@ -1,0 +1,29 @@
+{
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 20.0,
+      "text": "Welcome to the show. We will start the interview after a short note."
+    },
+    {
+      "start": 20.0,
+      "end": 30.0,
+      "text": "This episode is sponsored by Alpha Notes."
+    },
+    {
+      "start": 70.0,
+      "end": 105.0,
+      "text": "Visit alpha.com/playhead for a discount and shipping details."
+    },
+    {
+      "start": 120.0,
+      "end": 130.0,
+      "text": "Our sponsor Beta Wireless has a limited time offer."
+    },
+    {
+      "start": 130.0,
+      "end": 180.0,
+      "text": "Now back to the interview and the product design discussion."
+    }
+  ]
+}

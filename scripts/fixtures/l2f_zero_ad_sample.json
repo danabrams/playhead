@@ -1,0 +1,19 @@
+{
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 45.0,
+      "text": "Welcome back to Example Show. Today we are talking with Maya about product design."
+    },
+    {
+      "start": 45.0,
+      "end": 105.0,
+      "text": "The team spent the week interviewing customers and reviewing launch feedback."
+    },
+    {
+      "start": 105.0,
+      "end": 150.0,
+      "text": "Next week we will continue the conversation with a deeper look at research habits."
+    }
+  ]
+}
