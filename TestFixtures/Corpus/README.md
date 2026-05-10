@@ -102,10 +102,14 @@ For every episode:
    audio bytes, probes the episode duration, validates reviewed ad metadata
    and timing, and writes explicit content windows as the complement of the
    verified ad windows. It refuses real promotion if any selected entry is
-   unreviewed, marked `unsure`, missing audio or duration, missing required ad
-   metadata, or has invalid/overlapping timing. Use
+   unreviewed, marked `unsure`, missing audio or duration, missing required
+   corpus metadata such as `show_name` or ad metadata, or has
+   invalid/overlapping timing. Use
    `--episode <episode_id>` for a reviewed subset and `--force` only when
    intentionally replacing an existing annotation.
+   No-ad annotations require an explicitly reviewed false-positive trap entry;
+   rejecting an ordinary candidate as `false_positive` is not enough to label
+   the whole episode ad-free.
 5. **Save local audio** at `Audio/<episode_id>.<ext>` so the recorded
    `audio_fingerprint` can be verified.
 6. **Variants.** When labeling a DAI variant, set `variant_of` to

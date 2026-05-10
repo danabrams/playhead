@@ -220,12 +220,16 @@ python3 scripts/l2f-promote-reviewed-corpus.py --promote
 ```
 
 Real promotion refuses to write annotations when any selected entry is
-unreviewed, marked `unsure`, missing ad metadata, missing local audio, has
-invalid or overlapping timing, or lacks a determinable episode duration. Use
-`--episode <episode_id>` to promote a reviewed subset and `--force` only when
-intentionally replacing an existing annotation. The promoter writes only
+unreviewed, marked `unsure`, missing required corpus metadata such as
+`show_name` or ad metadata, missing local audio, has invalid or overlapping
+timing, or lacks a determinable episode duration. Use `--episode <episode_id>`
+to promote a reviewed subset and `--force` only when intentionally replacing an
+existing annotation. The promoter writes only
 `TestFixtures/Corpus/Annotations/<episode_id>.json`; `Drafts/`, `Audio/`, and
 `Transcripts/` remain local/uncommitted artifacts.
+No-ad annotations require an explicitly reviewed false-positive trap entry;
+rejecting an ordinary candidate as `false_positive` does not by itself prove the
+whole episode is ad-free.
 
 Focused smoke tests:
 

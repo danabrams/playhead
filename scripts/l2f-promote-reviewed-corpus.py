@@ -104,6 +104,19 @@ def resolve_path(raw: str | Path, base: Path = REPO_ROOT) -> Path:
     return path.resolve()
 
 
+def resolve_local_then_repo(raw: str | Path, local_base: Path) -> Path:
+    path = Path(raw)
+    if path.is_absolute():
+        return path.resolve()
+    local = (local_base / path).resolve()
+    if local.exists():
+        return local
+    repo = (REPO_ROOT / path).resolve()
+    if repo.exists():
+        return repo
+    return local
+
+
 def load_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
         return default
@@ -111,13 +124,17 @@ def load_json(path: Path, default: Any = None) -> Any:
         return json.load(handle)
 
 
-def choose_queue_path(args: argparse.Namespace, review_payload: dict[str, Any] | None) -> Path:
+def choose_queue_path(
+    args: argparse.Namespace,
+    review_path: Path,
+    review_payload: dict[str, Any] | None,
+) -> Path:
     if args.queue:
         return resolve_path(args.queue)
     if review_payload:
         queue_path = review_payload.get("queue_path")
         if isinstance(queue_path, str) and queue_path.strip():
-            return resolve_path(queue_path)
+            return resolve_local_then_repo(queue_path, review_path.parent)
     for candidate in (
         CORPUS_DIR / "Drafts" / "review-queue.json",
         CORPUS_DIR / "Drafts" / "codex-review-queue.json",
@@ -148,7 +165,7 @@ def load_queue(path: Path) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for index, raw in enumerate(payload["entries"], start=1):
         if not isinstance(raw, dict):
-            continue
+            raise ValueError(f"{path} entries[{index - 1}] must be a JSON object")
         entry = dict(raw)
         episode_id = str(entry.get("episode_id") or "").strip()
         if not episode_id:
@@ -162,12 +179,16 @@ def load_queue(path: Path) -> list[dict[str, Any]]:
 def clean_string(value: Any) -> str | None:
     if value is None:
         return None
+    if not isinstance(value, str):
+        return None
     text = str(value).strip()
     return text or None
 
 
 def number(value: Any) -> float | None:
     if value is None:
+        return None
+    if isinstance(value, bool):
         return None
     try:
         result = float(value)
@@ -185,6 +206,10 @@ def safe_artifact_basename(value: str) -> bool:
         and "\\" not in value
         and value not in {".", ".."}
     )
+
+
+def is_false_positive_trap(entry: dict[str, Any]) -> bool:
+    return entry.get("false_positive_trap") is True
 
 
 def review_for(entry: dict[str, Any], reviews: dict[str, Any]) -> dict[str, Any]:
@@ -208,12 +233,17 @@ def group_by_episode(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, 
     return dict(sorted(grouped.items()))
 
 
-def find_audio(episode_id: str, entries: list[dict[str, Any]], audio_dir: Path) -> Path | None:
+def find_audio(
+    episode_id: str,
+    entries: list[dict[str, Any]],
+    audio_dir: Path,
+    queue_dir: Path,
+) -> Path | None:
     for entry in entries:
         raw = clean_string(entry.get("audio_path"))
         if not raw:
             continue
-        candidate = resolve_path(raw)
+        candidate = resolve_local_then_repo(raw, queue_dir)
         if candidate.is_file():
             return candidate
     if audio_dir.is_dir():
@@ -425,32 +455,34 @@ def analyze_episode(
     entries: list[dict[str, Any]],
     reviews: dict[str, Any],
     audio_dir: Path,
+    queue_dir: Path,
 ) -> EpisodeReport:
     report = EpisodeReport(episode_id=episode_id, entries=entries)
 
     if not safe_artifact_basename(episode_id):
         report.issues.append("unsafe_episode_id: episode_id cannot contain path separators")
 
-    audio_path = find_audio(episode_id, entries, audio_dir)
+    audio_path = find_audio(episode_id, entries, audio_dir, queue_dir)
     report.audio_path = audio_path
     if audio_path is None:
         report.issues.append("missing_audio: no local audio file found")
 
-    duration = duration_from_metadata(entries, reviews)
-    if duration is None and audio_path is not None:
-        duration = duration_from_audio(audio_path)
+    duration = duration_from_audio(audio_path) if audio_path is not None else None
+    if duration is None:
+        duration = duration_from_metadata(entries, reviews)
     report.duration_seconds = duration
     if duration is None:
         report.issues.append("missing_duration: unable to determine episode duration")
 
     show_name, inferred_show_name = show_name_for(episode_id, entries, reviews)
     if inferred_show_name:
-        report.warnings.append("show_name_inferred_from_episode_id")
+        report.issues.append("missing_show_name: no show_name found in review, queue, or draft")
     variant_of = variant_of_for(entries, reviews)
     if variant_of == episode_id:
         report.issues.append("invalid_variant: variant_of cannot equal episode_id")
 
     ad_windows: list[dict[str, Any]] = []
+    reviewed_no_ad_trap = False
     for entry in entries:
         review = review_for(entry, reviews)
         status = clean_string(review.get("status")) or "unreviewed"
@@ -464,10 +496,13 @@ def analyze_episode(
         if status not in FINAL_REVIEW_STATUSES:
             report.issues.append(f"invalid_status: {entry_id} has status {status}")
             continue
-        if status == "zero_ad_confirmed" and not bool(entry.get("false_positive_trap")):
+        is_trap = is_false_positive_trap(entry)
+        if status == "zero_ad_confirmed" and not is_trap:
             report.issues.append(f"invalid_zero_ad_confirmation: {entry_id} is not a trap entry")
             continue
         if status in {"false_positive", "zero_ad_confirmed"}:
+            if is_trap:
+                reviewed_no_ad_trap = True
             continue
 
         start = number(value_from(review, entry, "start_seconds", "start"))
@@ -513,6 +548,10 @@ def analyze_episode(
         )
 
     validate_ad_timing(report, ad_windows, duration)
+    if not report.issues and not ad_windows and not reviewed_no_ad_trap:
+        report.issues.append(
+            "invalid_no_ad_annotation: no-ad promotion requires a reviewed false_positive_trap entry"
+        )
 
     if report.issues or duration is None or audio_path is None:
         return report
@@ -545,7 +584,7 @@ def category_for(entry: dict[str, Any], reviews: dict[str, Any]) -> str:
         if category:
             return category
     status = clean_string(review.get("status")) or "unreviewed"
-    if bool(entry.get("false_positive_trap")):
+    if is_false_positive_trap(entry):
         return "edge_zero_or_false_positive_trap"
     if status == "false_positive":
         return "false_positive_rejected"
@@ -627,7 +666,7 @@ def main(argv: list[str]) -> int:
 
     try:
         review_payload, reviews, review_missing = load_review_file(review_path)
-        queue_path = choose_queue_path(args, review_payload)
+        queue_path = choose_queue_path(args, review_path, review_payload)
         entries = load_queue(queue_path)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -635,16 +674,29 @@ def main(argv: list[str]) -> int:
 
     selected = set(args.episode)
     if selected:
+        available = {entry["episode_id"] for entry in entries}
+        missing = sorted(selected - available)
+        if missing:
+            print(
+                "error: episode_not_found: "
+                + ", ".join(missing)
+                + f" not present in {queue_path}",
+                file=sys.stderr,
+            )
+            return 2
         entries = [entry for entry in entries if entry["episode_id"] in selected]
+    if not entries:
+        print(f"error: no review queue entries found in {queue_path}", file=sys.stderr)
+        return 2
     grouped = group_by_episode(entries)
     reports = [
-        analyze_episode(episode_id, episode_entries, reviews, audio_dir)
+        analyze_episode(episode_id, episode_entries, reviews, audio_dir, queue_path.parent)
         for episode_id, episode_entries in grouped.items()
     ]
 
     for report in reports:
         out = annotations_dir / f"{report.episode_id}.json"
-        if args.promote and out.exists() and not args.force:
+        if out.exists() and not args.force:
             report.issues.append("annotation_exists: pass --force to overwrite existing annotation")
             report.annotation = None
 
