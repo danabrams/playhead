@@ -172,8 +172,8 @@ Useful tuning flags are `--merge-gap-seconds`, `--expand-before-seconds`,
 Drafts and review queues are not corpus truth. Promotion for
 `playhead-l2f.3`/`.4` remains gated on human local-audio review: check
 boundaries to `+/-0.5s`, reject false positives and zero-ad traps, fill
-advertiser/product when identifiable, and only then copy the reviewed JSON
-into `TestFixtures/Corpus/Annotations/<episode_id>.json`.
+advertiser/product when identifiable, and only then promote with
+`l2f-promote-reviewed-corpus.py`.
 
 ## `l2f-review-gui.py`
 
@@ -193,6 +193,45 @@ The script prints both the local URL and, when bound to `0.0.0.0`, a LAN URL
 you can open from the iPhone. Saved decisions go to
 `TestFixtures/Corpus/Drafts/l2f-audio-review.json`; the "Write episode review
 files" button also emits per-episode `*.audio-review.json` files in Drafts.
+
+## `l2f-promote-reviewed-corpus.py`
+
+Reports review debt and promotes fully reviewed GUI decisions into committed
+corpus annotation JSON. The default mode is dry-run/report-only and is safe
+before the manual listening pass is complete:
+
+```sh
+python3 scripts/l2f-promote-reviewed-corpus.py
+```
+
+The command reads `TestFixtures/Corpus/Drafts/l2f-audio-review.json` and the
+`queue_path` saved by the GUI. If the review file does not exist yet, it can
+still report against an explicit queue:
+
+```sh
+python3 scripts/l2f-promote-reviewed-corpus.py \
+  --queue TestFixtures/Corpus/Drafts/codex-review-queue.json
+```
+
+After the iPhone GUI review is complete, run strict promotion:
+
+```sh
+python3 scripts/l2f-promote-reviewed-corpus.py --promote
+```
+
+Real promotion refuses to write annotations when any selected entry is
+unreviewed, marked `unsure`, missing ad metadata, missing local audio, has
+invalid or overlapping timing, or lacks a determinable episode duration. Use
+`--episode <episode_id>` to promote a reviewed subset and `--force` only when
+intentionally replacing an existing annotation. The promoter writes only
+`TestFixtures/Corpus/Annotations/<episode_id>.json`; `Drafts/`, `Audio/`, and
+`Transcripts/` remain local/uncommitted artifacts.
+
+Focused smoke tests:
+
+```sh
+bash scripts/test-l2f-promote-reviewed-corpus.sh
+```
 
 ## `rotation-pool.json` (not yet checked in)
 

@@ -68,6 +68,16 @@ For every episode:
    ```
    Open the printed LAN URL on the iPhone. The GUI saves decisions under
    ignored `Drafts/` artifacts only.
+   Before the listening pass is complete, check review debt and category
+   coverage without writing annotations:
+   ```sh
+   python3 scripts/l2f-promote-reviewed-corpus.py
+   ```
+   If the GUI review file does not exist yet, point report mode at the queue:
+   ```sh
+   python3 scripts/l2f-promote-reviewed-corpus.py \
+     --queue TestFixtures/Corpus/Drafts/codex-review-queue.json
+   ```
 1. **Listen end to end or review the draft against audio.** Note ad
    start/end times to ±0.5 s precision.
 2. **Mark ad windows.** For each, record advertiser, product, ad
@@ -83,14 +93,21 @@ For every episode:
    `180.0` and ad starts at `180.0`). The validator allows ~50 ms of
    floating-point slack but treats anything larger as a real
    gap/overlap that needs annotator attention.
-4. **Compute the audio fingerprint.** Run the helper:
-   ```swift
-   let fp = try CorpusAudioFingerprint.fingerprint(of: audioURL)
-   // → "sha256:<hex>"
+4. **Promote after review.** Once every selected entry has a final GUI
+   decision, run:
+   ```sh
+   python3 scripts/l2f-promote-reviewed-corpus.py --promote
    ```
-   Paste it into the JSON's `audio_fingerprint` field.
-5. **Save the JSON** to `Annotations/<episode_id>.json` and the
-   audio to `Audio/<episode_id>.<ext>`.
+   The promoter computes `audio_fingerprint` as `sha256:<hex>` from the local
+   audio bytes, probes the episode duration, validates reviewed ad metadata
+   and timing, and writes explicit content windows as the complement of the
+   verified ad windows. It refuses real promotion if any selected entry is
+   unreviewed, marked `unsure`, missing audio or duration, missing required ad
+   metadata, or has invalid/overlapping timing. Use
+   `--episode <episode_id>` for a reviewed subset and `--force` only when
+   intentionally replacing an existing annotation.
+5. **Save local audio** at `Audio/<episode_id>.<ext>` so the recorded
+   `audio_fingerprint` can be verified.
 6. **Variants.** When labeling a DAI variant, set `variant_of` to
    the parent `episode_id`. The variant gets its own JSON and audio
    file.
@@ -184,5 +201,9 @@ annotations and this README are committed.
   locally from audio and may contain copyrighted transcript text.
 - **Drafts** (`Drafts/*`) — NOT committed. Generated hints for a
   human labeler, never ground truth by themselves.
+
+The promotion tool follows the same storage policy: it only writes committed
+annotation JSON. GUI reviews, review queues, transcripts, and audio remain
+ignored local artifacts.
 
 See `.gitignore` for the exact audio exclusion rules.
