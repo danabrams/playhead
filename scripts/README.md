@@ -194,7 +194,9 @@ python3 scripts/l2f-review-gui.py --host 0.0.0.0
 The script prints both the local URL and, when bound to `0.0.0.0`, a LAN URL
 you can open from the iPhone. On narrow screens the audio panel and save
 actions stay reachable, with larger quick-decision buttons for the common
-manual review outcomes. Saved decisions go to
+manual review outcomes. The transcript panel loads the current entry's local
+ASR context; select text or tap transcript segments, then use "Use selection as
+ad" to fill the review boundaries before saving. Saved decisions go to
 `TestFixtures/Corpus/Drafts/l2f-audio-review.json`; the "Write episode review
 files" button also emits per-episode `*.audio-review.json` files in Drafts.
 

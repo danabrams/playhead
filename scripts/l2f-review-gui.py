@@ -36,9 +36,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CORPUS_DIR = REPO_ROOT / "TestFixtures" / "Corpus"
 DRAFTS_DIR = CORPUS_DIR / "Drafts"
 AUDIO_DIR = CORPUS_DIR / "Audio"
+TRANSCRIPT_DIR = CORPUS_DIR / "Transcripts"
 CODEX_REVIEW = DRAFTS_DIR / "codex-transcript-review.json"
 DEFAULT_REVIEW_FILE = DRAFTS_DIR / "l2f-audio-review.json"
 AUDIO_EXTENSIONS = {".m4a", ".mp3", ".mp4", ".aac", ".wav", ".flac"}
+TRANSCRIPT_CONTEXT_FALLBACK_SECONDS = 180.0
+TRANSCRIPT_CONTEXT_PADDING_SECONDS = 30.0
 
 
 HTML_PAGE = r"""<!doctype html>
@@ -352,6 +355,55 @@ HTML_PAGE = r"""<!doctype html>
       line-height: 1.45;
       white-space: pre-wrap;
     }
+    .panel-heading {
+      display: flex;
+      gap: 10px;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .transcript-text {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfbf8;
+      padding: 10px;
+      max-height: 360px;
+      overflow: auto;
+      line-height: 1.6;
+      font-size: 14px;
+      user-select: text;
+      -webkit-user-select: text;
+    }
+    .transcript-segment {
+      display: inline;
+      border-radius: 5px;
+      padding: 2px 3px;
+      cursor: pointer;
+    }
+    .transcript-segment:hover {
+      background: #e9f3f1;
+    }
+    .transcript-segment.active-range {
+      background: #dbeafe;
+      box-shadow: inset 0 -2px 0 #93c5fd;
+    }
+    .transcript-segment.selected-range {
+      background: #ccfbf1;
+      box-shadow: inset 0 -2px 0 var(--accent);
+    }
+    .transcript-time {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      margin-right: 4px;
+      white-space: nowrap;
+    }
+    .selection-state {
+      color: #0b514b;
+      font-size: 13px;
+      line-height: 1.4;
+      min-height: 18px;
+    }
     .footer-state {
       color: var(--muted);
       font-size: 12px;
@@ -395,6 +447,10 @@ HTML_PAGE = r"""<!doctype html>
       }
       .quick-actions {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .transcript-text {
+        max-height: 42vh;
+        font-size: 15px;
       }
       .audio-panel {
         position: sticky;
@@ -488,6 +544,21 @@ HTML_PAGE = r"""<!doctype html>
         <div class="candidate-notes" id="candidateNotes"></div>
       </section>
 
+      <section class="panel transcript-panel">
+        <div class="panel-heading">
+          <h2>Transcript</h2>
+          <div class="toolbar">
+            <button id="useTranscriptSelectionBtn" type="button">Use selection as ad</button>
+            <button id="playTranscriptSelectionBtn" type="button">Play selection</button>
+            <button id="clearTranscriptSelectionBtn" type="button">Clear</button>
+            <button id="loadTranscriptScopeBtn" type="button">Full transcript</button>
+          </div>
+        </div>
+        <div class="note" id="transcriptMeta"></div>
+        <div class="selection-state" id="transcriptSelectionState"></div>
+        <div class="transcript-text" id="transcriptText"></div>
+      </section>
+
       <section class="panel">
         <div class="quick-actions" aria-label="Quick decision shortcuts">
           <button type="button" data-quick-status="verified_ad">Verified Ad</button>
@@ -560,7 +631,17 @@ HTML_PAGE = r"""<!doctype html>
       reviews: {},
       selectedIndex: 0,
       filter: 'all',
-      search: ''
+      search: '',
+      transcript: {
+        entryId: null,
+        scope: 'context',
+        segments: [],
+        window: null,
+        selection: null,
+        anchorIndex: null,
+        loading: false,
+        error: null
+      }
     };
 
     const els = {
@@ -584,6 +665,13 @@ HTML_PAGE = r"""<!doctype html>
       detailSubtitle: document.getElementById('detailSubtitle'),
       audio: document.getElementById('audio'),
       candidateNotes: document.getElementById('candidateNotes'),
+      transcriptMeta: document.getElementById('transcriptMeta'),
+      transcriptSelectionState: document.getElementById('transcriptSelectionState'),
+      transcriptText: document.getElementById('transcriptText'),
+      useTranscriptSelectionBtn: document.getElementById('useTranscriptSelectionBtn'),
+      playTranscriptSelectionBtn: document.getElementById('playTranscriptSelectionBtn'),
+      clearTranscriptSelectionBtn: document.getElementById('clearTranscriptSelectionBtn'),
+      loadTranscriptScopeBtn: document.getElementById('loadTranscriptScopeBtn'),
       status: document.getElementById('status'),
       adType: document.getElementById('adType'),
       transitionType: document.getElementById('transitionType'),
@@ -617,7 +705,8 @@ HTML_PAGE = r"""<!doctype html>
         transition_type: review.transition_type ?? entry.transition_type ?? '',
         boundary_confidence: review.boundary_confidence ?? '',
         reviewer: review.reviewer ?? '',
-        notes: review.notes ?? ''
+        notes: review.notes ?? '',
+        transcript_selection: review.transcript_selection ?? null
       };
     }
 
@@ -652,6 +741,27 @@ HTML_PAGE = r"""<!doctype html>
       const number = Number(value);
       if (!Number.isFinite(number)) return 'n/a';
       return number.toFixed(1);
+    }
+
+    function numberValue(value) {
+      if (value === null || value === undefined || value === '') return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    }
+
+    function roundTenths(value) {
+      return Math.round(value * 10) / 10;
+    }
+
+    function rangesOverlap(aStart, aEnd, bStart, bEnd) {
+      return aStart < bEnd && bStart < aEnd;
+    }
+
+    function currentFieldRange() {
+      const start = numberValue(els.startSeconds.value);
+      const end = numberValue(els.endSeconds.value);
+      if (start === null || end === null || end <= start) return null;
+      return { start, end };
     }
 
     function categoryFor(entry) {
@@ -785,8 +895,189 @@ HTML_PAGE = r"""<!doctype html>
       }[status] || status;
     }
 
+    function resetTranscript(entryId, scope = 'context') {
+      state.transcript = {
+        entryId,
+        scope,
+        segments: [],
+        window: null,
+        selection: null,
+        anchorIndex: null,
+        loading: false,
+        error: null
+      };
+    }
+
+    async function loadTranscript(scope = 'context') {
+      const entry = currentEntry();
+      if (!entry) return;
+      const entryId = entry.id;
+      state.transcript = {
+        entryId,
+        scope,
+        segments: [],
+        window: null,
+        selection: mergedReview(entry).transcript_selection || null,
+        anchorIndex: null,
+        loading: true,
+        error: null
+      };
+      renderTranscript();
+      const url = `/api/transcript/${encodeURIComponent(entryId)}?scope=${encodeURIComponent(scope)}`;
+      try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(await response.text());
+        const payload = await response.json();
+        if (!currentEntry() || currentEntry().id !== entryId) return;
+        state.transcript = {
+          entryId,
+          scope: payload.scope || scope,
+          segments: payload.segments || [],
+          window: payload.window || null,
+          selection: mergedReview(entry).transcript_selection || null,
+          anchorIndex: null,
+          loading: false,
+          error: null
+        };
+      } catch (error) {
+        if (!currentEntry() || currentEntry().id !== entryId) return;
+        state.transcript = {
+          entryId,
+          scope,
+          segments: [],
+          window: null,
+          selection: null,
+          anchorIndex: null,
+          loading: false,
+          error: String(error)
+        };
+      }
+      renderTranscript();
+    }
+
+    function setTranscriptSelectionByIndexes(indexes) {
+      if (!indexes.length) return null;
+      const firstIndex = Math.min(...indexes);
+      const lastIndex = Math.max(...indexes);
+      const selected = state.transcript.segments.slice(firstIndex, lastIndex + 1);
+      const start = Math.min(...selected.map(segment => Number(segment.start_seconds)));
+      const end = Math.max(...selected.map(segment => Number(segment.end_seconds)));
+      const text = selected.map(segment => segment.text).join(' ').replace(/\s+/g, ' ').trim();
+      state.transcript.selection = {
+        start_seconds: roundTenths(start),
+        end_seconds: roundTenths(end),
+        text,
+        first_segment_index: selected[0].index,
+        last_segment_index: selected[selected.length - 1].index,
+        scope: state.transcript.scope
+      };
+      renderTranscript();
+      return state.transcript.selection;
+    }
+
+    function nativeTranscriptSelectionIndexes() {
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return [];
+      const range = selection.getRangeAt(0);
+      if (!els.transcriptText.contains(range.commonAncestorContainer)) return [];
+      return [...els.transcriptText.querySelectorAll('.transcript-segment')]
+        .filter(element => range.intersectsNode(element))
+        .map(element => Number(element.dataset.index))
+        .filter(Number.isFinite);
+    }
+
+    function captureNativeTranscriptSelection() {
+      const indexes = nativeTranscriptSelectionIndexes();
+      if (!indexes.length) return state.transcript.selection;
+      state.transcript.anchorIndex = Math.min(...indexes);
+      return setTranscriptSelectionByIndexes(indexes);
+    }
+
+    function chooseTranscriptSegment(index, event) {
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed) return;
+      if (state.transcript.anchorIndex === null || state.transcript.anchorIndex === undefined) {
+        state.transcript.anchorIndex = index;
+        setTranscriptSelectionByIndexes([index]);
+        return;
+      }
+      const first = Math.min(state.transcript.anchorIndex, index);
+      const last = Math.max(state.transcript.anchorIndex, index);
+      const indexes = [];
+      for (let current = first; current <= last; current += 1) indexes.push(current);
+      if (event && event.altKey) state.transcript.anchorIndex = index;
+      setTranscriptSelectionByIndexes(indexes);
+    }
+
+    function renderTranscript() {
+      const transcript = state.transcript;
+      const entry = currentEntry();
+      if (!entry || transcript.entryId !== entry.id) {
+        els.transcriptMeta.textContent = 'No entry selected';
+        els.transcriptSelectionState.textContent = '';
+        els.transcriptText.innerHTML = '';
+        return;
+      }
+      els.loadTranscriptScopeBtn.textContent = transcript.scope === 'full' ? 'Context transcript' : 'Full transcript';
+      if (transcript.loading) {
+        els.transcriptMeta.textContent = 'Loading transcript';
+        els.transcriptSelectionState.textContent = '';
+        els.transcriptText.innerHTML = '';
+        return;
+      }
+      if (transcript.error) {
+        els.transcriptMeta.textContent = 'Transcript unavailable';
+        els.transcriptSelectionState.textContent = transcript.error;
+        els.transcriptText.innerHTML = '';
+        return;
+      }
+      const windowText = transcript.window
+        ? `${formatSeconds(transcript.window.start_seconds)}-${formatSeconds(transcript.window.end_seconds)}`
+        : 'full';
+      els.transcriptMeta.textContent = `${transcript.scope} · ${transcript.segments.length} segments · ${windowText}`;
+      const selected = transcript.selection;
+      els.transcriptSelectionState.textContent = selected
+        ? `${formatSeconds(selected.start_seconds)}-${formatSeconds(selected.end_seconds)} selected`
+        : '';
+      els.transcriptText.innerHTML = '';
+      if (!transcript.segments.length) {
+        els.transcriptText.innerHTML = '<span class="note">No transcript segments in this range</span>';
+        return;
+      }
+      const activeRange = currentFieldRange();
+      transcript.segments.forEach((segment, index) => {
+        const element = document.createElement('span');
+        element.className = 'transcript-segment';
+        element.dataset.index = String(index);
+        element.dataset.start = String(segment.start_seconds);
+        element.dataset.end = String(segment.end_seconds);
+        element.tabIndex = 0;
+        if (activeRange && rangesOverlap(segment.start_seconds, segment.end_seconds, activeRange.start, activeRange.end)) {
+          element.classList.add('active-range');
+        }
+        if (selected && rangesOverlap(segment.start_seconds, segment.end_seconds, selected.start_seconds, selected.end_seconds)) {
+          element.classList.add('selected-range');
+        }
+        const time = document.createElement('span');
+        time.className = 'transcript-time';
+        time.textContent = formatSeconds(segment.start_seconds);
+        element.appendChild(time);
+        element.appendChild(document.createTextNode(segment.text));
+        element.addEventListener('click', event => chooseTranscriptSegment(index, event));
+        element.addEventListener('keydown', event => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            chooseTranscriptSegment(index, event);
+          }
+        });
+        els.transcriptText.appendChild(element);
+        els.transcriptText.appendChild(document.createTextNode(' '));
+      });
+    }
+
     function selectIndex(index) {
       state.selectedIndex = Math.max(0, Math.min(index, state.entries.length - 1));
+      resetTranscript(null);
       render();
     }
 
@@ -810,6 +1101,11 @@ HTML_PAGE = r"""<!doctype html>
       els.audio.src = entry.audio_url || '';
       els.audio.disabled = !entry.audio_url;
       els.saveState.textContent = entry.audio_available ? 'Audio ready' : 'No matching audio file found';
+      if (state.transcript.entryId !== entry.id) {
+        loadTranscript('context');
+      } else {
+        renderTranscript();
+      }
     }
 
     function render() {
@@ -828,6 +1124,10 @@ HTML_PAGE = r"""<!doctype html>
     }
 
     function collectReview() {
+      const entry = currentEntry();
+      const transcriptSelection = state.transcript.entryId === entry?.id && state.transcript.selection
+        ? state.transcript.selection
+        : (reviewFor(entry).transcript_selection || null);
       const numberOrNull = (value) => {
         if (value === '') return null;
         const number = Number(value);
@@ -843,7 +1143,8 @@ HTML_PAGE = r"""<!doctype html>
         transition_type: els.transitionType.value || null,
         boundary_confidence: els.boundaryConfidence.value || null,
         reviewer: els.reviewer.value.trim() || null,
-        notes: els.reviewNotes.value.trim() || null
+        notes: els.reviewNotes.value.trim() || null,
+        transcript_selection: transcriptSelection
       };
     }
 
@@ -894,6 +1195,44 @@ HTML_PAGE = r"""<!doctype html>
       const value = Number(els.audio.currentTime || 0).toFixed(1);
       if (which === 'start') els.startSeconds.value = value;
       if (which === 'end') els.endSeconds.value = value;
+      renderTranscript();
+    }
+
+    function appendReviewNote(note) {
+      const current = els.reviewNotes.value.trim();
+      if (current.includes(note)) return;
+      els.reviewNotes.value = current ? `${current}\n${note}` : note;
+    }
+
+    function applyTranscriptSelection() {
+      const selection = captureNativeTranscriptSelection();
+      if (!selection) {
+        els.saveState.textContent = 'Select transcript text first';
+        return;
+      }
+      els.startSeconds.value = formatSeconds(selection.start_seconds);
+      els.endSeconds.value = formatSeconds(selection.end_seconds);
+      els.status.value = 'verified_ad';
+      if (!els.boundaryConfidence.value) els.boundaryConfidence.value = 'medium';
+      const clippedText = selection.text.length > 180 ? `${selection.text.slice(0, 180)}...` : selection.text;
+      appendReviewNote(`Transcript mark ${formatSeconds(selection.start_seconds)}-${formatSeconds(selection.end_seconds)}: ${clippedText}`);
+      els.saveState.textContent = 'Transcript selection applied; save when ready';
+      renderTranscript();
+    }
+
+    function playTranscriptSelection() {
+      const selection = captureNativeTranscriptSelection();
+      if (!selection || !currentEntry()?.audio_url) return;
+      els.audio.currentTime = selection.start_seconds;
+      els.audio.play();
+    }
+
+    function clearTranscriptSelection() {
+      state.transcript.selection = null;
+      state.transcript.anchorIndex = null;
+      const selection = window.getSelection();
+      if (selection) selection.removeAllRanges();
+      renderTranscript();
     }
 
     function applyQuickStatus(status) {
@@ -931,6 +1270,12 @@ HTML_PAGE = r"""<!doctype html>
     document.getElementById('setEndBtn').onclick = () => setBoundary('end');
     document.getElementById('skipBackBtn').onclick = () => { els.audio.currentTime = Math.max(0, els.audio.currentTime - 5); };
     document.getElementById('skipForwardBtn').onclick = () => { els.audio.currentTime = els.audio.currentTime + 5; };
+    els.useTranscriptSelectionBtn.onclick = applyTranscriptSelection;
+    els.playTranscriptSelectionBtn.onclick = playTranscriptSelection;
+    els.clearTranscriptSelectionBtn.onclick = clearTranscriptSelection;
+    els.loadTranscriptScopeBtn.onclick = () => loadTranscript(state.transcript.scope === 'full' ? 'context' : 'full');
+    els.startSeconds.addEventListener('input', renderTranscript);
+    els.endSeconds.addEventListener('input', renderTranscript);
     document.getElementById('saveBtn').onclick = () => saveReview(false);
     document.getElementById('saveNextBtn').onclick = () => saveReview(true);
     document.getElementById('prevBtn').onclick = () => selectIndex(state.selectedIndex - 1);
@@ -1167,6 +1512,147 @@ def progress_summary(entries: list[dict[str, Any]], reviews: dict[str, Any]) -> 
     }
 
 
+def numeric_seconds(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def timestamp_seconds(value: Any) -> float | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip().replace(",", ".")
+    if not raw:
+        return None
+    pieces = raw.split(":")
+    try:
+        if len(pieces) == 3:
+            hours = float(pieces[0])
+            minutes = float(pieces[1])
+            seconds = float(pieces[2])
+            return hours * 3600 + minutes * 60 + seconds
+        if len(pieces) == 2:
+            minutes = float(pieces[0])
+            seconds = float(pieces[1])
+            return minutes * 60 + seconds
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def segment_time(raw: dict[str, Any], key: str) -> float | None:
+    direct = numeric_seconds(raw.get(key))
+    if direct is None:
+        direct = numeric_seconds(raw.get(f"{key}_seconds"))
+    if direct is not None:
+        return direct
+
+    offsets = raw.get("offsets")
+    if isinstance(offsets, dict):
+        offset = numeric_seconds(offsets.get("from" if key == "start" else "to"))
+        if offset is not None:
+            return offset / 1000.0
+
+    timestamps = raw.get("timestamps")
+    if isinstance(timestamps, dict):
+        return timestamp_seconds(timestamps.get("from" if key == "start" else "to"))
+    return None
+
+
+def transcript_path_for(episode_id: str) -> Path | None:
+    path = TRANSCRIPT_DIR / f"{episode_id}.json"
+    return path if path.exists() else None
+
+
+def parse_transcript_segments(path: Path) -> list[dict[str, Any]]:
+    payload = load_json(path)
+    raw_segments: Any
+    if isinstance(payload, dict):
+        raw_segments = payload.get("segments") or payload.get("transcription") or []
+    elif isinstance(payload, list):
+        raw_segments = payload
+    else:
+        raw_segments = []
+
+    segments: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_segments):
+        if not isinstance(raw, dict):
+            continue
+        text = raw.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        start = segment_time(raw, "start")
+        end = segment_time(raw, "end")
+        if start is None or end is None:
+            continue
+        if end < start:
+            continue
+        segments.append(
+            {
+                "index": index,
+                "start_seconds": round(start, 3),
+                "end_seconds": round(end, 3),
+                "text": text.strip(),
+            }
+        )
+    return segments
+
+
+def transcript_window(entry: dict[str, Any], full: bool) -> tuple[float | None, float | None]:
+    if full:
+        return None, None
+
+    context_start = numeric_seconds(entry.get("context_start_seconds"))
+    context_end = numeric_seconds(entry.get("context_end_seconds"))
+    if context_start is not None and context_end is not None and context_end > context_start:
+        return max(0.0, context_start), context_end
+
+    start = numeric_seconds(entry.get("start_seconds"))
+    end = numeric_seconds(entry.get("end_seconds"))
+    if start is not None and end is not None and end > start:
+        return max(0.0, start - TRANSCRIPT_CONTEXT_PADDING_SECONDS), end + TRANSCRIPT_CONTEXT_PADDING_SECONDS
+
+    return 0.0, TRANSCRIPT_CONTEXT_FALLBACK_SECONDS
+
+
+def transcript_payload_for(entry: dict[str, Any], full: bool) -> dict[str, Any]:
+    path = transcript_path_for(entry["episode_id"])
+    if path is None:
+        return {
+            "episode_id": entry["episode_id"],
+            "scope": "full" if full else "context",
+            "window": None,
+            "segments": [],
+            "missing": True,
+        }
+
+    segments = parse_transcript_segments(path)
+    start, end = transcript_window(entry, full)
+    if start is not None and end is not None:
+        filtered = [
+            segment
+            for segment in segments
+            if float(segment["start_seconds"]) < end and float(segment["end_seconds"]) > start
+        ]
+        window: dict[str, float] | None = {"start_seconds": round(start, 3), "end_seconds": round(end, 3)}
+    else:
+        filtered = segments
+        window = None
+
+    return {
+        "episode_id": entry["episode_id"],
+        "scope": "full" if full else "context",
+        "window": window,
+        "segments": filtered,
+        "missing": False,
+    }
+
+
 def best_lan_ip() -> str:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -1218,6 +1704,11 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/state":
             self.send_state()
             return
+        if parsed.path.startswith("/api/transcript/"):
+            entry_id = urllib.parse.unquote(parsed.path.removeprefix("/api/transcript/"))
+            query = urllib.parse.parse_qs(parsed.query)
+            self.send_transcript(entry_id, query)
+            return
         if parsed.path.startswith("/api/audio/"):
             entry_id = urllib.parse.unquote(parsed.path.removeprefix("/api/audio/"))
             self.send_audio(entry_id)
@@ -1266,6 +1757,14 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
                 "progress": progress_summary(self.entries, reviews),
             }
         )
+
+    def send_transcript(self, entry_id: str, query: dict[str, list[str]]) -> None:
+        entry = next((item for item in self.entries if item["id"] == entry_id), None)
+        if not entry:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        scope = (query.get("scope") or ["context"])[0]
+        self.send_json(transcript_payload_for(entry, full=scope == "full"))
 
     def save_review(self) -> None:
         try:
@@ -1328,7 +1827,10 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
         self.end_headers()
         with audio.open("rb") as handle:
             handle.seek(start)
-            shutil.copyfileobj(_LimitedReader(handle, end - start + 1), self.wfile)
+            try:
+                shutil.copyfileobj(_LimitedReader(handle, end - start + 1), self.wfile)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
 
 class _LimitedReader:
