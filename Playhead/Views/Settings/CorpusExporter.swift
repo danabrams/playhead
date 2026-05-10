@@ -258,6 +258,7 @@ enum CorpusExporter {
             "analysisState": asset.analysisState,
             "analysisVersion": asset.analysisVersion,
             "artifactClass": asset.artifactClass.rawValue,
+            "episodeDurationSec": asset.episodeDurationSec as Any? ?? NSNull(),
             "featureCoverageEndTime": asset.featureCoverageEndTime as Any? ?? NSNull(),
             "fastTranscriptCoverageEndTime": asset.fastTranscriptCoverageEndTime as Any? ?? NSNull(),
             "confirmedAdCoverageEndTime": asset.confirmedAdCoverageEndTime as Any? ?? NSNull(),

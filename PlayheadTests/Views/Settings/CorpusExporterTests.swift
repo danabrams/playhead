@@ -102,6 +102,7 @@ struct CorpusExporterTests {
         for key in [
             "weakFingerprint",
             "podcastId",
+            "episodeDurationSec",
             "featureCoverageEndTime",
             "fastTranscriptCoverageEndTime",
             "confirmedAdCoverageEndTime",
@@ -258,6 +259,63 @@ struct CorpusExporterTests {
         #expect(json["terminalReason"] as? String
                 == "full coverage: transcript 0.981, feature 0.992")
         #expect(json["analysisState"] as? String == "completeFull")
+    }
+
+    @Test("asset record carries episodeDurationSec for NARL lifecycle fallback")
+    func assetRecordEpisodeDurationPassthrough() throws {
+        let asset = AnalysisAsset(
+            id: "asset-duration",
+            episodeId: "ep-duration",
+            assetFingerprint: "fp-duration",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/duration.m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "completeFull",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 3576.5
+        )
+        let json = try decodeJSONObject(from: CorpusExporter.assetLine(asset))
+        #expect(json["episodeDurationSec"] as? Double == 3576.5)
+    }
+
+    @Test("export writes persisted episodeDurationSec on asset rows for NARL lifecycle fallback")
+    func exportWritesEpisodeDurationOnAssetRows() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-duration")
+        let asset = AnalysisAsset(
+            id: "asset-export-duration",
+            episodeId: "ep-export-duration",
+            assetFingerprint: "fp-export-duration",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/export-duration.m4a",
+            featureCoverageEndTime: 3575.0,
+            fastTranscriptCoverageEndTime: 3540.0,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "completeFull",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 3576.5,
+            terminalReason: "full coverage: transcript 0.990, feature 0.999"
+        )
+        try await store.insertAsset(asset)
+        try await store.updateAssetState(
+            id: asset.id,
+            state: asset.analysisState,
+            terminalReason: asset.terminalReason
+        )
+
+        let result = try await CorpusExporter.export(store: store, documentsURL: docs)
+
+        let records = try parseJSONL(at: result.fileURL)
+        let assetJSON = try #require(records.first { ($0["type"] as? String) == "asset" })
+        #expect(assetJSON["episodeDurationSec"] as? Double == 3576.5)
+        #expect(assetJSON["analysisState"] as? String == "completeFull")
+        #expect(assetJSON["terminalReason"] as? String == "full coverage: transcript 0.990, feature 0.999")
+        #expect(assetJSON["fastTranscriptCoverageEndTime"] as? Double == 3540.0)
+        #expect(assetJSON["featureCoverageEndTime"] as? Double == 3575.0)
     }
 
     // MARK: - Decision record (DecodedSpan)

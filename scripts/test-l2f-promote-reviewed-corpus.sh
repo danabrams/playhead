@@ -610,6 +610,52 @@ fi
 grep -q "invalid_no_ad_annotation:" "$OUT/non-trap-false-positive.out"
 test ! -e "$OUT/non-trap-false-positive-annotations/episode-non-trap-false-positive.json"
 
+cat > "$OUT/tiny-overshoot-queue.json" <<JSON
+{
+  "schema": "playhead-l2f-review-queue-v1",
+  "entries": [
+    {
+      "id": "episode-tiny-overshoot#1",
+      "episode_id": "episode-tiny-overshoot",
+      "candidate_index": 1,
+      "audio_path": "$OUT/audio/episode-short.wav",
+      "false_positive_trap": false
+    }
+  ]
+}
+JSON
+
+cat > "$OUT/tiny-overshoot-review.json" <<JSON
+{
+  "schema": "playhead-l2f-audio-review-v1",
+  "queue_path": "$OUT/tiny-overshoot-queue.json",
+  "reviews": {
+    "episode-tiny-overshoot#1": {
+      "status": "verified_ad",
+      "show_name": "Fixture Show",
+      "start_seconds": 45,
+      "end_seconds": 50.04,
+      "advertiser": "D",
+      "product": "D",
+      "ad_type": "host_read",
+      "transition_type": "explicit",
+      "notes": "Tiny endpoint drift should promote and clamp to duration."
+    }
+  }
+}
+JSON
+
+python3 scripts/l2f-promote-reviewed-corpus.py \
+  --promote \
+  --review-file "$OUT/tiny-overshoot-review.json" \
+  --annotations-dir "$OUT/tiny-overshoot-annotations" \
+  --audio-dir "$OUT/audio" >"$OUT/tiny-overshoot-promote.out"
+grep -q "clamped_timing:" "$OUT/tiny-overshoot-promote.out"
+jq -e '.duration_seconds == 50' "$OUT/tiny-overshoot-annotations/episode-tiny-overshoot.json" >/dev/null
+jq -e '.ad_windows[0].end_seconds == 50' "$OUT/tiny-overshoot-annotations/episode-tiny-overshoot.json" >/dev/null
+jq -e '.content_windows[0].end_seconds == 45' "$OUT/tiny-overshoot-annotations/episode-tiny-overshoot.json" >/dev/null
+jq -e '.content_windows | all(.end_seconds <= 50)' "$OUT/tiny-overshoot-annotations/episode-tiny-overshoot.json" >/dev/null
+
 cat > "$OUT/overlap-queue.json" <<JSON
 {
   "schema": "playhead-l2f-review-queue-v1",
@@ -688,12 +734,12 @@ cat > "$OUT/overlap-review.json" <<JSON
       "status": "verified_ad",
       "show_name": "Fixture Show",
       "start_seconds": 45,
-      "end_seconds": 55,
+      "end_seconds": 50.06,
       "advertiser": "D",
       "product": "D",
       "ad_type": "host_read",
       "transition_type": "explicit",
-      "notes": "Ends beyond audio duration."
+      "notes": "Ends just outside the endpoint tolerance."
     }
   }
 }

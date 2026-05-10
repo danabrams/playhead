@@ -38,6 +38,7 @@ VALID_AD_TYPES = {
 }
 VALID_TRANSITION_TYPES = {"explicit", "musical", "hard_cut", "blended"}
 FINAL_REVIEW_STATUSES = {"verified_ad", "false_positive", "zero_ad_confirmed"}
+BOUNDARY_TOLERANCE_SECONDS = 0.05
 
 
 @dataclass
@@ -415,6 +416,25 @@ def build_content_windows(duration: float, ad_windows: list[dict[str, Any]]) -> 
     return content
 
 
+def clamp_ad_windows_to_duration(
+    report: EpisodeReport,
+    duration: float,
+    ad_windows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    clamped: list[dict[str, Any]] = []
+    for index, ad in enumerate(ad_windows, start=1):
+        normalized = dict(ad)
+        end = float(normalized["end_seconds"])
+        if duration < end <= duration + BOUNDARY_TOLERANCE_SECONDS:
+            normalized["end_seconds"] = duration
+            report.warnings.append(
+                f"clamped_timing: ad {index} end {end} is within "
+                f"{BOUNDARY_TOLERANCE_SECONDS:.2f}s of duration {duration}"
+            )
+        clamped.append(normalized)
+    return clamped
+
+
 def content_note(index: int, ad_count: int) -> str:
     if index == 0:
         return "Pre-ad content - must NEVER be skipped"
@@ -438,7 +458,7 @@ def validate_ad_timing(
             report.issues.append(f"invalid_timing: ad {index + 1} start {start} is negative")
         if end <= start:
             report.issues.append(f"invalid_timing: ad {index + 1} end {end} <= start {start}")
-        if end > duration:
+        if end > duration + BOUNDARY_TOLERANCE_SECONDS:
             report.issues.append(
                 f"invalid_timing: ad {index + 1} end {end} exceeds duration {duration}"
             )
@@ -556,7 +576,11 @@ def analyze_episode(
     if report.issues or duration is None or audio_path is None:
         return report
 
-    sorted_ads = sorted(ad_windows, key=lambda item: item["start_seconds"])
+    sorted_ads = clamp_ad_windows_to_duration(
+        report,
+        duration,
+        sorted(ad_windows, key=lambda item: item["start_seconds"]),
+    )
     report.annotation = {
         "episode_id": episode_id,
         "show_name": show_name,

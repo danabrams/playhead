@@ -179,7 +179,9 @@ advertiser/product when identifiable, and only then promote with
 
 Serves a local browser GUI for the `playhead-l2f.3` manual audio review pass.
 It reads the ignored review queue, serves local corpus audio with seeking, and
-saves review decisions back under `TestFixtures/Corpus/Drafts/`.
+saves review decisions back under `TestFixtures/Corpus/Drafts/`. The first
+panel shows review progress by status, episode, category, audio availability,
+and the next open item.
 
 ```sh
 # From the Mac only.
@@ -190,7 +192,9 @@ python3 scripts/l2f-review-gui.py --host 0.0.0.0
 ```
 
 The script prints both the local URL and, when bound to `0.0.0.0`, a LAN URL
-you can open from the iPhone. Saved decisions go to
+you can open from the iPhone. On narrow screens the audio panel and save
+actions stay reachable, with larger quick-decision buttons for the common
+manual review outcomes. Saved decisions go to
 `TestFixtures/Corpus/Drafts/l2f-audio-review.json`; the "Write episode review
 files" button also emits per-episode `*.audio-review.json` files in Drafts.
 

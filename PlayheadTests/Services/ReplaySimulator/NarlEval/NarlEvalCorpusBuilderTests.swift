@@ -94,7 +94,10 @@ struct NarlEvalCorpusBuilderTests {
             let corrections = correctionsByAsset[asset.id] ?? []
             let decisionLog = decisionLogEntries[asset.id] ?? []
             let shadow = shadowEntries[asset.id] ?? []
-            let lifecycle = lifecycleSummaries[asset.id]
+            let lifecycle = Self.lifecycleSummary(
+                for: asset,
+                lifecycleSummaries: lifecycleSummaries
+            )
 
             let listenRewinds = listenRewindsByAsset[asset.id] ?? []
             let trace = Self.assembleTrace(
@@ -169,6 +172,56 @@ struct NarlEvalCorpusBuilderTests {
         /// captures (back-compat sentinel — see FrozenTrace's schema-
         /// history note).
         let buildCommitSHA: String
+        /// gtt9.8 lifecycle fallback from the live `corpus-export` asset
+        /// row. `asset-lifecycle-log.jsonl` remains the preferred source
+        /// because it can select the right terminal row, but post-gtt9.8
+        /// corpus exports also carry the current AnalysisStore snapshot.
+        let durationSec: Double?
+        let analysisState: String?
+        let terminalReason: String?
+        let fastTranscriptCoverageEndTime: Double?
+        let featureCoverageEndTime: Double?
+
+        init(
+            id: String,
+            episodeId: String,
+            podcastId: String?,
+            detectorVersion: String,
+            buildCommitSHA: String,
+            durationSec: Double? = nil,
+            analysisState: String? = nil,
+            terminalReason: String? = nil,
+            fastTranscriptCoverageEndTime: Double? = nil,
+            featureCoverageEndTime: Double? = nil
+        ) {
+            self.id = id
+            self.episodeId = episodeId
+            self.podcastId = podcastId
+            self.detectorVersion = detectorVersion
+            self.buildCommitSHA = buildCommitSHA
+            self.durationSec = durationSec
+            self.analysisState = analysisState
+            self.terminalReason = terminalReason
+            self.fastTranscriptCoverageEndTime = fastTranscriptCoverageEndTime
+            self.featureCoverageEndTime = featureCoverageEndTime
+        }
+
+        var exportedLifecycleSummary: BuilderLifecycleSummary? {
+            guard let analysisState,
+                  !analysisState.isEmpty
+            else {
+                return nil
+            }
+            return BuilderLifecycleSummary(
+                analysisAssetID: id,
+                durationSec: durationSec,
+                analysisState: analysisState,
+                terminalReason: terminalReason,
+                transcriptCoverageEndSec: fastTranscriptCoverageEndTime,
+                featureCoverageEndSec: featureCoverageEndTime,
+                timestamp: 0
+            )
+        }
     }
 
     struct BuilderDecision {
@@ -213,18 +266,18 @@ struct NarlEvalCorpusBuilderTests {
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         )
-        return contents.filter { $0.lastPathComponent.hasPrefix("corpus-export") }
+        return contents
+            .filter { $0.lastPathComponent.hasPrefix("corpus-export") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     static func parseAssets(from urls: [URL]) throws -> [BuilderAsset] {
-        var seen = Set<String>()
+        var indexByAssetID: [String: Int] = [:]
         var out: [BuilderAsset] = []
         for url in urls {
             try Self.forEachJSONL(url: url) { obj in
                 guard let t = obj["type"] as? String, t == "asset" else { return }
                 guard let id = obj["analysisAssetId"] as? String else { return }
-                if seen.contains(id) { return }
-                seen.insert(id)
                 let episodeId = (obj["episodeId"] as? String) ?? id
                 let podcastId = obj["podcastId"] as? String
                 // gtt9.21: capture-provenance keys land on each asset
@@ -236,16 +289,40 @@ struct NarlEvalCorpusBuilderTests {
                 // rather than two distinct nils.
                 let detectorVersion = (obj["detectorVersion"] as? String) ?? ""
                 let buildCommitSHA = (obj["buildCommitSHA"] as? String) ?? ""
-                out.append(BuilderAsset(
+                let durationSec = Self.doubleValue(obj["episodeDurationSec"])
+                let analysisState = obj["analysisState"] as? String
+                let terminalReason = obj["terminalReason"] as? String
+                let fastTranscriptCoverageEndTime = Self.doubleValue(
+                    obj["fastTranscriptCoverageEndTime"]
+                )
+                let featureCoverageEndTime = Self.doubleValue(
+                    obj["featureCoverageEndTime"]
+                )
+                let asset = BuilderAsset(
                     id: id,
                     episodeId: episodeId,
                     podcastId: podcastId,
                     detectorVersion: detectorVersion,
-                    buildCommitSHA: buildCommitSHA
-                ))
+                    buildCommitSHA: buildCommitSHA,
+                    durationSec: durationSec,
+                    analysisState: analysisState,
+                    terminalReason: terminalReason,
+                    fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime,
+                    featureCoverageEndTime: featureCoverageEndTime
+                )
+                if let index = indexByAssetID[id] {
+                    out[index] = asset
+                } else {
+                    indexByAssetID[id] = out.count
+                    out.append(asset)
+                }
             }
         }
         return out
+    }
+
+    static func doubleValue(_ value: Any?) -> Double? {
+        (value as? Double) ?? ((value as? NSNumber).map(\.doubleValue))
     }
 
     static func parseDecisionSpans(from urls: [URL]) throws -> [String: [BuilderDecision]] {
@@ -459,7 +536,7 @@ struct NarlEvalCorpusBuilderTests {
     ///   - timestamp             (used for latest-row fallback)
     struct BuilderLifecycleSummary: Equatable {
         let analysisAssetID: String
-        let durationSec: Double
+        let durationSec: Double?
         let analysisState: String
         let terminalReason: String?
         let transcriptCoverageEndSec: Double?
@@ -478,18 +555,12 @@ struct NarlEvalCorpusBuilderTests {
         try Self.forEachJSONL(url: url) { obj in
             guard let assetID = obj["analysisAssetID"] as? String,
                   !assetID.isEmpty else { return }
-            let duration = (obj["episodeDurationSec"] as? Double)
-                ?? ((obj["episodeDurationSec"] as? NSNumber).map(\.doubleValue))
-                ?? 0
+            let duration = Self.doubleValue(obj["episodeDurationSec"])
             let toState = (obj["toState"] as? String) ?? ""
             let terminalReason = obj["terminalReason"] as? String
-            let transcriptEnd = (obj["transcriptCoverageEndSec"] as? Double)
-                ?? ((obj["transcriptCoverageEndSec"] as? NSNumber).map(\.doubleValue))
-            let featureEnd = (obj["featureCoverageEndSec"] as? Double)
-                ?? ((obj["featureCoverageEndSec"] as? NSNumber).map(\.doubleValue))
-            let timestamp = (obj["timestamp"] as? Double)
-                ?? ((obj["timestamp"] as? NSNumber).map(\.doubleValue))
-                ?? 0
+            let transcriptEnd = Self.doubleValue(obj["transcriptCoverageEndSec"])
+            let featureEnd = Self.doubleValue(obj["featureCoverageEndSec"])
+            let timestamp = Self.doubleValue(obj["timestamp"]) ?? 0
 
             let candidate = BuilderLifecycleSummary(
                 analysisAssetID: assetID,
@@ -523,6 +594,13 @@ struct NarlEvalCorpusBuilderTests {
             }
         }
         return best
+    }
+
+    static func lifecycleSummary(
+        for asset: BuilderAsset,
+        lifecycleSummaries: [String: BuilderLifecycleSummary]
+    ) -> BuilderLifecycleSummary? {
+        lifecycleSummaries[asset.id] ?? asset.exportedLifecycleSummary
     }
 
     // MARK: - Assemble FrozenTrace

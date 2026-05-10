@@ -647,9 +647,10 @@ struct ReplaySpanDecision: Sendable, Codable, Equatable {
 ///     lifecycle telemetry — `durationSec`, `analysisState`,
 ///     `terminalReason`, `fastTranscriptCoverageEndTime`,
 ///     `featureCoverageEndTime` — sourced from `asset-lifecycle-log.jsonl`
-///     at capture time. Older fixtures (2026-04-22 / 2026-04-23) decode
-///     with all five fields nil. No schema-version bump: the shape is
-///     strictly additive and all fields are optional.
+///     or the live `corpus-export` asset row at capture time. Older fixtures
+///     (2026-04-22 / 2026-04-23) decode with all five fields nil. No schema-
+///     version bump: the shape is strictly additive and all fields are
+///     optional.
 ///   - `frozen-trace-v2` (gtt9.21 follow-up, 2026-04-24): adds capture
 ///     provenance — `detectorVersion` (mirror of
 ///     `AdDetectionConfig.detectorVersion` at session-start time) and

@@ -42,14 +42,27 @@ struct NarlEvalLifecycleLogTests {
 
     /// Write the sample JSONL to a temp file and return the URL.
     private static func materializeSample(_ body: String = sampleJSONL) throws -> URL {
+        try materializeJSONL(filename: "asset-lifecycle-log.jsonl", body: body)
+    }
+
+    private static func materializeJSONL(filename: String, body: String) throws -> URL {
+        let tempDir = try materializeJSONLDirectory(files: [(filename: filename, body: body)])
+        return tempDir.appendingPathComponent(filename)
+    }
+
+    private static func materializeJSONLDirectory(
+        files: [(filename: String, body: String)]
+    ) throws -> URL {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("narl-lifecycle-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
             at: tempDir, withIntermediateDirectories: true
         )
-        let url = tempDir.appendingPathComponent("asset-lifecycle-log.jsonl")
-        try body.data(using: .utf8)!.write(to: url)
-        return url
+        for file in files {
+            let url = tempDir.appendingPathComponent(file.filename)
+            try file.body.data(using: .utf8)!.write(to: url)
+        }
+        return tempDir
     }
 
     // MARK: - RED 1: lifecycle parser identifies terminal row per asset
@@ -65,7 +78,7 @@ struct NarlEvalLifecycleLogTests {
         let conan = try #require(summaries["71F0C2AE-7260-4D1E-B41A-BCFD5103A641"])
         #expect(conan.analysisState == "completeFull")
         #expect(conan.terminalReason == "full coverage: transcript 1.000, feature 1.000")
-        #expect(abs(conan.durationSec - 7037.834375) < 1e-6)
+        #expect(abs((conan.durationSec ?? 0) - 7037.834375) < 1e-6)
         #expect(abs((conan.transcriptCoverageEndSec ?? 0) - 7037.34) < 1e-6)
         #expect(abs((conan.featureCoverageEndSec ?? 0) - 7036) < 1e-6)
     }
@@ -83,9 +96,27 @@ struct NarlEvalLifecycleLogTests {
         let stalled = try #require(summaries["34C7E7CF-931F-49EE-B51B-49D3080F1FFB"])
         #expect(stalled.analysisState == "backfill")
         #expect(stalled.terminalReason == nil)
-        #expect(abs(stalled.durationSec - 900) < 1e-6)
+        #expect(abs((stalled.durationSec ?? 0) - 900) < 1e-6)
         #expect(abs((stalled.transcriptCoverageEndSec ?? 0) - 840) < 1e-6)
         #expect(abs((stalled.featureCoverageEndSec ?? 0) - 726) < 1e-6)
+    }
+
+    @Test("parseLifecycleLog keeps terminal row even when a later non-terminal row exists")
+    func parseLifecycleLogTerminalReasonWinsOverLaterNonTerminal() throws {
+        let url = try Self.materializeSample("""
+        {"analysisAssetID":"asset-terminal","episodeDurationSec":1200,"featureCoverageEndSec":1190,"schemaVersion":1,"sessionID":"S1","terminalReason":"full coverage: transcript 0.999, feature 0.992","timestamp":100,"toState":"completeFull","transcriptCoverageEndSec":1199}
+        {"analysisAssetID":"asset-terminal","episodeDurationSec":1200,"featureCoverageEndSec":100,"schemaVersion":1,"sessionID":"S1","timestamp":200,"toState":"backfill","transcriptCoverageEndSec":100}
+        """)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let summaries = try NarlEvalCorpusBuilderTests.parseLifecycleLog(from: url)
+
+        let selected = try #require(summaries["asset-terminal"])
+        #expect(selected.analysisState == "completeFull")
+        #expect(selected.terminalReason == "full coverage: transcript 0.999, feature 0.992")
+        #expect(selected.timestamp == 100)
+        #expect(selected.transcriptCoverageEndSec == 1199)
+        #expect(selected.featureCoverageEndSec == 1190)
     }
 
     // MARK: - RED 2: FrozenTrace back-compat decode
@@ -160,7 +191,191 @@ struct NarlEvalLifecycleLogTests {
         #expect(decoded.featureCoverageEndTime == 7036)
     }
 
-    // MARK: - RED 3: harness classifier honors analysisState == completeFull
+    // MARK: - RED 3: assembleTrace lifecycle wiring
+
+    @Test("assembleTrace writes lifecycle summary fields into FrozenTrace")
+    func assembleTraceWritesLifecycleSummaryFields() {
+        let asset = NarlEvalCorpusBuilderTests.BuilderAsset(
+            id: "asset-life",
+            episodeId: "ep-life",
+            podcastId: "pod-life",
+            detectorVersion: "",
+            buildCommitSHA: ""
+        )
+        let lifecycle = NarlEvalCorpusBuilderTests.BuilderLifecycleSummary(
+            analysisAssetID: "asset-life",
+            durationSec: 1800,
+            analysisState: "completeFull",
+            terminalReason: "full coverage: transcript 1.000, feature 1.000",
+            transcriptCoverageEndSec: 1798.5,
+            featureCoverageEndSec: 1800,
+            timestamp: 1776990328
+        )
+
+        let trace = NarlEvalCorpusBuilderTests.assembleTrace(
+            asset: asset,
+            decisions: [],
+            corrections: [],
+            decisionLog: [],
+            shadow: [],
+            lifecycle: lifecycle
+        )
+
+        #expect(trace.durationSec == 1800)
+        #expect(trace.analysisState == "completeFull")
+        #expect(trace.terminalReason == "full coverage: transcript 1.000, feature 1.000")
+        #expect(trace.fastTranscriptCoverageEndTime == 1798.5)
+        #expect(trace.featureCoverageEndTime == 1800)
+    }
+
+    @Test("corpus-export asset row lifecycle is used when lifecycle log is absent")
+    func corpusExportLifecycleFallbackWhenLogAbsent() throws {
+        let url = try Self.materializeJSONL(
+            filename: "corpus-export.lifecycle.jsonl",
+            body: """
+            {"type":"asset","schemaVersion":1,"analysisAssetId":"asset-live","episodeId":"ep-live","podcastId":"pod-live","assetFingerprint":"fp-live","sourceURL":"file:///tmp/live.m4a","analysisState":"completeFull","analysisVersion":1,"episodeDurationSec":3600.5,"terminalReason":"full coverage: transcript 0.999, feature 1.000","fastTranscriptCoverageEndTime":3599.0,"featureCoverageEndTime":3600.0}
+            """
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let asset = try #require(
+            try NarlEvalCorpusBuilderTests.parseAssets(from: [url]).first
+        )
+        let lifecycle = try #require(
+            NarlEvalCorpusBuilderTests.lifecycleSummary(
+                for: asset,
+                lifecycleSummaries: [:]
+            )
+        )
+        let trace = NarlEvalCorpusBuilderTests.assembleTrace(
+            asset: asset,
+            decisions: [],
+            corrections: [],
+            decisionLog: [],
+            shadow: [],
+            lifecycle: lifecycle
+        )
+
+        #expect(trace.durationSec == 3600.5)
+        #expect(trace.analysisState == "completeFull")
+        #expect(trace.terminalReason == "full coverage: transcript 0.999, feature 1.000")
+        #expect(trace.fastTranscriptCoverageEndTime == 3599.0)
+        #expect(trace.featureCoverageEndTime == 3600.0)
+    }
+
+    @Test("corpus-export fallback preserves partial lifecycle snapshot when duration is absent")
+    func corpusExportLifecycleFallbackPreservesPartialSnapshotWithoutDuration() throws {
+        let url = try Self.materializeJSONL(
+            filename: "corpus-export.partial-lifecycle.jsonl",
+            body: """
+            {"type":"asset","schemaVersion":1,"analysisAssetId":"asset-partial","episodeId":"ep-partial","podcastId":"pod-partial","assetFingerprint":"fp-partial","sourceURL":"file:///tmp/partial.m4a","analysisState":"completeFull","analysisVersion":1,"terminalReason":"full coverage: transcript 1.000, feature 1.000","fastTranscriptCoverageEndTime":3599.0,"featureCoverageEndTime":3600.0}
+            """
+        )
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let asset = try #require(
+            try NarlEvalCorpusBuilderTests.parseAssets(from: [url]).first
+        )
+        let lifecycle = try #require(
+            NarlEvalCorpusBuilderTests.lifecycleSummary(
+                for: asset,
+                lifecycleSummaries: [:]
+            )
+        )
+        let trace = NarlEvalCorpusBuilderTests.assembleTrace(
+            asset: asset,
+            decisions: [],
+            corrections: [],
+            decisionLog: [],
+            shadow: [],
+            lifecycle: lifecycle
+        )
+
+        #expect(trace.durationSec == nil)
+        #expect(trace.analysisState == "completeFull")
+        #expect(trace.terminalReason == "full coverage: transcript 1.000, feature 1.000")
+        #expect(trace.fastTranscriptCoverageEndTime == 3599.0)
+        #expect(trace.featureCoverageEndTime == 3600.0)
+    }
+
+    @Test("newest corpus-export asset snapshot wins when duplicate asset rows exist")
+    func newestCorpusExportAssetSnapshotWins() throws {
+        let dir = try Self.materializeJSONLDirectory(files: [
+            (
+                "corpus-export.2026-04-24T00-00-02.000Z.jsonl",
+                """
+                {"type":"asset","schemaVersion":1,"analysisAssetId":"asset-live","episodeId":"ep-live","podcastId":"pod-live","assetFingerprint":"fp-live","sourceURL":"file:///tmp/live.m4a","analysisState":"completeFull","analysisVersion":1,"episodeDurationSec":3600.5,"terminalReason":"full coverage: transcript 1.000, feature 1.000","fastTranscriptCoverageEndTime":3600.0,"featureCoverageEndTime":3600.0}
+                """
+            ),
+            (
+                "corpus-export.2026-04-24T00-00-01.000Z.jsonl",
+                """
+                {"type":"asset","schemaVersion":1,"analysisAssetId":"asset-live","episodeId":"ep-live","podcastId":"pod-live","assetFingerprint":"fp-live","sourceURL":"file:///tmp/live.m4a","analysisState":"backfill","analysisVersion":1,"episodeDurationSec":900.0,"fastTranscriptCoverageEndTime":840.0,"featureCoverageEndTime":726.0}
+                """
+            )
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let corpusExports = try NarlEvalCorpusBuilderTests.locateCorpusExports(in: dir)
+        #expect(corpusExports.map(\.lastPathComponent) == [
+            "corpus-export.2026-04-24T00-00-01.000Z.jsonl",
+            "corpus-export.2026-04-24T00-00-02.000Z.jsonl",
+        ])
+
+        let asset = try #require(
+            try NarlEvalCorpusBuilderTests.parseAssets(from: corpusExports).first
+        )
+        let lifecycle = try #require(
+            NarlEvalCorpusBuilderTests.lifecycleSummary(
+                for: asset,
+                lifecycleSummaries: [:]
+            )
+        )
+        #expect(lifecycle.durationSec == 3600.5)
+        #expect(lifecycle.analysisState == "completeFull")
+        #expect(lifecycle.terminalReason == "full coverage: transcript 1.000, feature 1.000")
+        #expect(lifecycle.transcriptCoverageEndSec == 3600.0)
+        #expect(lifecycle.featureCoverageEndSec == 3600.0)
+    }
+
+    @Test("asset-lifecycle-log summary wins over corpus-export asset fallback")
+    func lifecycleLogSummaryWinsOverExportFallback() throws {
+        let asset = NarlEvalCorpusBuilderTests.BuilderAsset(
+            id: "asset-live",
+            episodeId: "ep-live",
+            podcastId: "pod-live",
+            detectorVersion: "",
+            buildCommitSHA: "",
+            durationSec: 3600,
+            analysisState: "completeFull",
+            terminalReason: "full coverage: transcript 1.000, feature 1.000",
+            fastTranscriptCoverageEndTime: 3600,
+            featureCoverageEndTime: 3600
+        )
+        let logSummary = NarlEvalCorpusBuilderTests.BuilderLifecycleSummary(
+            analysisAssetID: "asset-live",
+            durationSec: 900,
+            analysisState: "backfill",
+            terminalReason: nil,
+            transcriptCoverageEndSec: 840,
+            featureCoverageEndSec: 726,
+            timestamp: 1776986555
+        )
+
+        let selected = try #require(
+            NarlEvalCorpusBuilderTests.lifecycleSummary(
+                for: asset,
+                lifecycleSummaries: ["asset-live": logSummary]
+            )
+        )
+        #expect(selected.analysisState == "backfill")
+        #expect(selected.durationSec == 900)
+        #expect(selected.terminalReason == nil)
+        #expect(selected.transcriptCoverageEndSec == 840)
+        #expect(selected.featureCoverageEndSec == 726)
+    }
+
+    // MARK: - RED 4: harness classifier honors analysisState == completeFull
 
     @Test("harness pipelineCoverage classifier suppresses flag on completeFull assets")
     func harnessClassifierSuppressesFlagOnCompleteFull() {

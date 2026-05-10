@@ -73,7 +73,7 @@ HTML_PAGE = r"""<!doctype html>
       font: inherit;
     }
     button {
-      min-height: 42px;
+      min-height: 44px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: #fff;
@@ -237,6 +237,9 @@ HTML_PAGE = r"""<!doctype html>
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 10px;
     }
+    .summary.compact {
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+    }
     .stat {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -252,6 +255,50 @@ HTML_PAGE = r"""<!doctype html>
     .stat span {
       color: var(--muted);
       font-size: 12px;
+    }
+    .dashboard {
+      display: grid;
+      gap: 12px;
+    }
+    .progress-columns {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .progress-group {
+      display: grid;
+      gap: 7px;
+      min-width: 0;
+    }
+    .progress-group h3 {
+      font-size: 13px;
+      margin: 0;
+      color: var(--muted);
+    }
+    .progress-list {
+      display: grid;
+      gap: 6px;
+      max-height: 184px;
+      overflow: auto;
+    }
+    .progress-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      border-top: 1px solid #ecede7;
+      padding-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .progress-row b {
+      color: var(--ink);
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+      font-weight: 650;
     }
     audio {
       width: 100%;
@@ -283,6 +330,15 @@ HTML_PAGE = r"""<!doctype html>
       flex-wrap: wrap;
       align-items: center;
     }
+    .quick-actions {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .quick-actions button {
+      min-height: 48px;
+      font-weight: 650;
+    }
     .note {
       color: var(--muted);
       font-size: 13px;
@@ -313,14 +369,52 @@ HTML_PAGE = r"""<!doctype html>
       main {
         padding: 12px;
       }
-      .summary,
       .row,
       .row.three,
       .row.four {
         grid-template-columns: 1fr;
       }
+      .summary,
+      .summary.compact {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .progress-columns {
+        grid-template-columns: 1fr;
+      }
       .filters {
         grid-template-columns: 1fr;
+      }
+      button,
+      input,
+      select,
+      textarea {
+        font-size: 16px;
+      }
+      button {
+        min-height: 50px;
+      }
+      .quick-actions {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .audio-panel {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.08);
+      }
+      .action-toolbar {
+        position: sticky;
+        bottom: 0;
+        z-index: 11;
+        background: var(--panel);
+        border-top: 1px solid var(--line);
+        padding: 10px 0 0;
+        margin: 0 -12px;
+        padding-left: 12px;
+        padding-right: 12px;
+      }
+      .action-toolbar button {
+        flex: 1 1 calc(50% - 8px);
       }
       .panel {
         padding: 12px;
@@ -361,9 +455,26 @@ HTML_PAGE = r"""<!doctype html>
           <div class="stat"><b id="statAds">0</b><span>Verified ads</span></div>
           <div class="stat"><b id="statOpen">0</b><span>Open</span></div>
         </div>
+        <div class="dashboard">
+          <div class="summary compact" id="statusSummary"></div>
+          <div class="toolbar">
+            <button id="nextOpenBtn" type="button">Next open</button>
+            <span class="note" id="nextOpenText"></span>
+          </div>
+          <div class="progress-columns">
+            <div class="progress-group">
+              <h3>Episode Progress</h3>
+              <div class="progress-list" id="episodeProgress"></div>
+            </div>
+            <div class="progress-group">
+              <h3>Category Progress</h3>
+              <div class="progress-list" id="categoryProgress"></div>
+            </div>
+          </div>
+        </div>
       </section>
 
-      <section class="panel" id="detailPanel">
+      <section class="panel audio-panel" id="detailPanel">
         <h2 id="detailTitle">Select an entry</h2>
         <div class="note" id="detailSubtitle"></div>
         <audio id="audio" preload="metadata" controls></audio>
@@ -378,6 +489,12 @@ HTML_PAGE = r"""<!doctype html>
       </section>
 
       <section class="panel">
+        <div class="quick-actions" aria-label="Quick decision shortcuts">
+          <button type="button" data-quick-status="verified_ad">Verified Ad</button>
+          <button type="button" data-quick-status="false_positive">False Positive</button>
+          <button type="button" data-quick-status="zero_ad_confirmed">Zero-Ad</button>
+          <button type="button" data-quick-status="unsure">Unsure</button>
+        </div>
         <div class="row three">
           <label><span>Decision</span>
             <select id="status">
@@ -426,7 +543,7 @@ HTML_PAGE = r"""<!doctype html>
           <label><span>Reviewer</span><input id="reviewer" type="text" placeholder="Optional"></label>
         </div>
         <label><span>Review notes</span><textarea id="reviewNotes"></textarea></label>
-        <div class="toolbar">
+        <div class="toolbar action-toolbar">
           <button class="primary" id="saveBtn">Save</button>
           <button class="secondary" id="saveNextBtn">Save and next</button>
           <button id="prevBtn">Previous</button>
@@ -455,6 +572,11 @@ HTML_PAGE = r"""<!doctype html>
       statDone: document.getElementById('statDone'),
       statAds: document.getElementById('statAds'),
       statOpen: document.getElementById('statOpen'),
+      statusSummary: document.getElementById('statusSummary'),
+      episodeProgress: document.getElementById('episodeProgress'),
+      categoryProgress: document.getElementById('categoryProgress'),
+      nextOpenBtn: document.getElementById('nextOpenBtn'),
+      nextOpenText: document.getElementById('nextOpenText'),
       entryList: document.getElementById('entryList'),
       searchInput: document.getElementById('searchInput'),
       statusFilter: document.getElementById('statusFilter'),
@@ -532,18 +654,105 @@ HTML_PAGE = r"""<!doctype html>
       return number.toFixed(1);
     }
 
-    function renderProgress() {
+    function categoryFor(entry) {
+      return entry.category || entry.corpus_category || entry.ad_type || (entry.false_positive_trap ? 'zero_or_false_positive_trap' : 'unknown');
+    }
+
+    function progressData() {
+      const statuses = ['unreviewed', 'verified_ad', 'false_positive', 'zero_ad_confirmed', 'unsure'];
+      const byStatus = Object.fromEntries(statuses.map(status => [status, 0]));
+      const episodes = new Map();
+      const categories = new Map();
+      let missingAudio = 0;
+      for (const entry of state.entries) {
+        const status = reviewFor(entry).status || 'unreviewed';
+        byStatus[status] = (byStatus[status] || 0) + 1;
+        if (!entry.audio_available) missingAudio += 1;
+
+        const episode = episodes.get(entry.episode_id) || { name: entry.episode_id, total: 0, done: 0, ads: 0 };
+        episode.total += 1;
+        if (status !== 'unreviewed') episode.done += 1;
+        if (status === 'verified_ad') episode.ads += 1;
+        episodes.set(entry.episode_id, episode);
+
+        const categoryName = categoryFor(entry);
+        const category = categories.get(categoryName) || { name: categoryName, total: 0, done: 0, ads: 0 };
+        category.total += 1;
+        if (status !== 'unreviewed') category.done += 1;
+        if (status === 'verified_ad') category.ads += 1;
+        categories.set(categoryName, category);
+      }
       const total = state.entries.length;
-      const done = state.entries.filter(e => (reviewFor(e).status || 'unreviewed') !== 'unreviewed').length;
-      const ads = state.entries.filter(e => reviewFor(e).status === 'verified_ad').length;
-      const open = Math.max(0, total - done);
-      const pct = total ? Math.round((done / total) * 100) : 0;
-      els.progressBar.style.width = `${pct}%`;
-      els.progressText.textContent = `${done} / ${total} reviewed (${pct}%)`;
-      els.statTotal.textContent = total;
-      els.statDone.textContent = done;
-      els.statAds.textContent = ads;
-      els.statOpen.textContent = open;
+      const done = total - (byStatus.unreviewed || 0);
+      return {
+        total,
+        done,
+        open: byStatus.unreviewed || 0,
+        ads: byStatus.verified_ad || 0,
+        missingAudio,
+        percent: total ? Math.round((done / total) * 100) : 0,
+        byStatus,
+        episodes: [...episodes.values()].sort((a, b) => (b.total - b.done) - (a.total - a.done) || a.name.localeCompare(b.name)),
+        categories: [...categories.values()].sort((a, b) => (b.total - b.done) - (a.total - a.done) || a.name.localeCompare(b.name))
+      };
+    }
+
+    function renderProgressList(container, rows) {
+      container.innerHTML = '';
+      if (!rows.length) {
+        container.innerHTML = '<div class="note">No entries</div>';
+        return;
+      }
+      for (const row of rows) {
+        const pct = row.total ? Math.round((row.done / row.total) * 100) : 0;
+        const item = document.createElement('div');
+        item.className = 'progress-row';
+        item.innerHTML = `
+          <div>
+            <b>${htmlEscape(row.name)}</b>
+            <div class="progress" aria-label="${htmlEscape(row.name)} progress"><div style="width:${pct}%"></div></div>
+          </div>
+          <span>${row.done}/${row.total}</span>
+        `;
+        container.appendChild(item);
+      }
+    }
+
+    function nextOpenIndex(start = state.selectedIndex + 1) {
+      if (!state.entries.length) return null;
+      for (let offset = 0; offset < state.entries.length; offset += 1) {
+        const index = (start + offset) % state.entries.length;
+        const status = reviewFor(state.entries[index]).status || 'unreviewed';
+        if (status === 'unreviewed') return index;
+      }
+      return null;
+    }
+
+    function renderProgress() {
+      const progress = progressData();
+      els.progressBar.style.width = `${progress.percent}%`;
+      els.progressText.textContent = `${progress.done} / ${progress.total} reviewed (${progress.percent}%)`;
+      els.statTotal.textContent = progress.total;
+      els.statDone.textContent = progress.done;
+      els.statAds.textContent = progress.ads;
+      els.statOpen.textContent = progress.open;
+      const statusRows = [
+        ['verified_ad', 'Ads'],
+        ['false_positive', 'False'],
+        ['zero_ad_confirmed', 'Zero'],
+        ['unsure', 'Unsure'],
+        ['unreviewed', 'Open'],
+        ['missing_audio', 'No Audio']
+      ];
+      els.statusSummary.innerHTML = statusRows.map(([key, label]) => {
+        const value = key === 'missing_audio' ? progress.missingAudio : (progress.byStatus[key] || 0);
+        return `<div class="stat"><b>${value}</b><span>${label}</span></div>`;
+      }).join('');
+      renderProgressList(els.episodeProgress, progress.episodes);
+      renderProgressList(els.categoryProgress, progress.categories);
+      const next = nextOpenIndex(state.selectedIndex + 1);
+      els.nextOpenText.textContent = next === null ? 'All entries reviewed' : `${state.entries[next].episode_id} #${state.entries[next].candidate_index}`;
+      els.nextOpenBtn.disabled = next === null;
     }
 
     function renderList() {
@@ -655,7 +864,10 @@ HTML_PAGE = r"""<!doctype html>
       const payload = await response.json();
       state.reviews = payload.reviews || state.reviews;
       els.saveState.textContent = 'Saved';
-      if (moveNext) selectIndex(state.selectedIndex + 1);
+      if (moveNext) {
+        const next = nextOpenIndex(state.selectedIndex + 1);
+        selectIndex(next ?? state.selectedIndex + 1);
+      }
       else render();
     }
 
@@ -682,6 +894,14 @@ HTML_PAGE = r"""<!doctype html>
       const value = Number(els.audio.currentTime || 0).toFixed(1);
       if (which === 'start') els.startSeconds.value = value;
       if (which === 'end') els.endSeconds.value = value;
+    }
+
+    function applyQuickStatus(status) {
+      els.status.value = status;
+      if (status === 'verified_ad' && !els.boundaryConfidence.value) {
+        els.boundaryConfidence.value = 'medium';
+      }
+      els.saveState.textContent = `Marked ${labelForStatus(status)}; save when ready`;
     }
 
     async function loadState() {
@@ -716,6 +936,13 @@ HTML_PAGE = r"""<!doctype html>
     document.getElementById('prevBtn').onclick = () => selectIndex(state.selectedIndex - 1);
     document.getElementById('nextBtn').onclick = () => selectIndex(state.selectedIndex + 1);
     document.getElementById('exportBtn').onclick = exportReviews;
+    els.nextOpenBtn.onclick = () => {
+      const next = nextOpenIndex(state.selectedIndex + 1);
+      if (next !== null) selectIndex(next);
+    };
+    for (const button of document.querySelectorAll('[data-quick-status]')) {
+      button.addEventListener('click', () => applyQuickStatus(button.dataset.quickStatus));
+    }
 
     loadState();
   </script>
@@ -857,6 +1084,89 @@ def grouped_episode_reviews(entries: list[dict[str, Any]], reviews: dict[str, An
     return grouped
 
 
+def entry_category(entry: dict[str, Any]) -> str:
+    for key in ("category", "corpus_category", "ad_type"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if entry.get("false_positive_trap") is True:
+        return "zero_or_false_positive_trap"
+    return "unknown"
+
+
+def review_status(entry: dict[str, Any], reviews: dict[str, Any]) -> str:
+    review = reviews.get(entry["id"])
+    if isinstance(review, dict):
+        status = review.get("status")
+        if isinstance(status, str) and status.strip():
+            return status.strip()
+    return "unreviewed"
+
+
+def progress_summary(entries: list[dict[str, Any]], reviews: dict[str, Any]) -> dict[str, Any]:
+    by_status: dict[str, int] = {
+        "unreviewed": 0,
+        "verified_ad": 0,
+        "false_positive": 0,
+        "zero_ad_confirmed": 0,
+        "unsure": 0,
+    }
+    by_episode: dict[str, dict[str, Any]] = {}
+    by_category: dict[str, dict[str, Any]] = {}
+    missing_audio = 0
+    next_open: dict[str, Any] | None = None
+
+    for entry in entries:
+        status = review_status(entry, reviews)
+        by_status[status] = by_status.get(status, 0) + 1
+        if not entry.get("audio_available"):
+            missing_audio += 1
+        if status == "unreviewed" and next_open is None:
+            next_open = {
+                "id": entry["id"],
+                "episode_id": entry["episode_id"],
+                "candidate_index": entry.get("candidate_index"),
+            }
+
+        episode = by_episode.setdefault(
+            entry["episode_id"],
+            {"name": entry["episode_id"], "total": 0, "done": 0, "ads": 0},
+        )
+        category_name = entry_category(entry)
+        category = by_category.setdefault(
+            category_name,
+            {"name": category_name, "total": 0, "done": 0, "ads": 0},
+        )
+        for bucket in (episode, category):
+            bucket["total"] += 1
+            if status != "unreviewed":
+                bucket["done"] += 1
+            if status == "verified_ad":
+                bucket["ads"] += 1
+
+    total = len(entries)
+    done = total - by_status.get("unreviewed", 0)
+
+    def sorted_rows(rows: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            rows.values(),
+            key=lambda item: (-(item["total"] - item["done"]), item["name"]),
+        )
+
+    return {
+        "total": total,
+        "done": done,
+        "open": by_status.get("unreviewed", 0),
+        "ads": by_status.get("verified_ad", 0),
+        "missing_audio": missing_audio,
+        "percent": round((done / total) * 100) if total else 0,
+        "by_status": by_status,
+        "episodes": sorted_rows(by_episode),
+        "categories": sorted_rows(by_category),
+        "next_open": next_open,
+    }
+
+
 def best_lan_ip() -> str:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -953,6 +1263,7 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
                 "review_path": str(self.config.review_path.relative_to(REPO_ROOT)),
                 "entries": self.entries,
                 "reviews": reviews,
+                "progress": progress_summary(self.entries, reviews),
             }
         )
 
