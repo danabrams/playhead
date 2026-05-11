@@ -610,6 +610,66 @@ fi
 grep -q "invalid_no_ad_annotation:" "$OUT/non-trap-false-positive.out"
 test ! -e "$OUT/non-trap-false-positive-annotations/episode-non-trap-false-positive.json"
 
+cat > "$OUT/manual-missed-queue.json" <<JSON
+{
+  "schema": "playhead-l2f-review-queue-v1",
+  "entries": [
+    {
+      "id": "episode-zero#1",
+      "episode_id": "episode-zero",
+      "candidate_index": 1,
+      "audio_path": "$OUT/audio/episode-zero.wav",
+      "false_positive_trap": false
+    }
+  ]
+}
+JSON
+
+cat > "$OUT/manual-missed-review.json" <<JSON
+{
+  "schema": "playhead-l2f-audio-review-v1",
+  "queue_path": "$OUT/manual-missed-queue.json",
+  "manual_entries": [
+    {
+      "id": "manual:episode-zero#1",
+      "episode_id": "episode-zero",
+      "candidate_index": "M1",
+      "manual_index": 1,
+      "manual_entry": true,
+      "source": "manual_missed_ad",
+      "audio_path": "$OUT/audio/episode-zero.wav",
+      "false_positive_trap": false
+    }
+  ],
+  "reviews": {
+    "episode-zero#1": {
+      "status": "false_positive",
+      "notes": "Original queue candidate was not an ad."
+    },
+    "manual:episode-zero#1": {
+      "status": "verified_ad",
+      "show_name": "Fixture Show",
+      "start_seconds": 20,
+      "end_seconds": 30,
+      "advertiser": "ManualCo",
+      "product": "Missed Ad",
+      "ad_type": "host_read",
+      "transition_type": "explicit",
+      "notes": "Missed ad added manually."
+    }
+  }
+}
+JSON
+
+python3 scripts/l2f-promote-reviewed-corpus.py \
+  --promote \
+  --review-file "$OUT/manual-missed-review.json" \
+  --annotations-dir "$OUT/manual-missed-annotations" \
+  --audio-dir "$OUT/audio" >"$OUT/manual-missed-promote.out"
+jq -e '.ad_windows | length == 1' "$OUT/manual-missed-annotations/episode-zero.json" >/dev/null
+jq -e '.ad_windows[0].start_seconds == 20' "$OUT/manual-missed-annotations/episode-zero.json" >/dev/null
+jq -e '.ad_windows[0].advertiser == "ManualCo"' "$OUT/manual-missed-annotations/episode-zero.json" >/dev/null
+
 cat > "$OUT/tiny-overshoot-queue.json" <<JSON
 {
   "schema": "playhead-l2f-review-queue-v1",

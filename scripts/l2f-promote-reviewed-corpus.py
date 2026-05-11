@@ -177,6 +177,32 @@ def load_queue(path: Path) -> list[dict[str, Any]]:
     return entries
 
 
+def load_manual_entries(review_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not review_payload:
+        return []
+    raw_entries = review_payload.get("manual_entries")
+    if raw_entries is None:
+        return []
+    if not isinstance(raw_entries, list):
+        raise ValueError("review file manual_entries must be an array")
+    entries: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_entries, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"review file manual_entries[{index - 1}] must be a JSON object")
+        entry = dict(raw)
+        episode_id = str(entry.get("episode_id") or "").strip()
+        if not episode_id:
+            raise ValueError(f"review file manual_entries[{index - 1}] missing episode_id")
+        entry["episode_id"] = episode_id
+        entry["manual_entry"] = True
+        entry["false_positive_trap"] = False
+        entry.setdefault("source", "manual_missed_ad")
+        entry["id"] = str(entry.get("id") or f"manual:{episode_id}#{index}")
+        entry.setdefault("candidate_index", f"M{index}")
+        entries.append(entry)
+    return entries
+
+
 def clean_string(value: Any) -> str | None:
     if value is None:
         return None
@@ -692,6 +718,7 @@ def main(argv: list[str]) -> int:
         review_payload, reviews, review_missing = load_review_file(review_path)
         queue_path = choose_queue_path(args, review_path, review_payload)
         entries = load_queue(queue_path)
+        entries.extend(load_manual_entries(review_payload))
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

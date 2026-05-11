@@ -617,6 +617,7 @@ HTML_PAGE = r"""<!doctype html>
         <div class="toolbar action-toolbar">
           <button class="primary" id="saveBtn">Save</button>
           <button class="secondary" id="saveNextBtn">Save and next</button>
+          <button class="secondary" id="addMissedAdBtn">Add missed ad</button>
           <button id="prevBtn">Previous</button>
           <button id="nextBtn">Next</button>
           <button id="exportBtn">Write episode review files</button>
@@ -765,7 +766,8 @@ HTML_PAGE = r"""<!doctype html>
     }
 
     function categoryFor(entry) {
-      return entry.category || entry.corpus_category || entry.ad_type || (entry.false_positive_trap ? 'zero_or_false_positive_trap' : 'unknown');
+      const review = reviewFor(entry);
+      return review.category || review.corpus_category || review.ad_type || entry.category || entry.corpus_category || entry.ad_type || (entry.false_positive_trap ? 'zero_or_false_positive_trap' : 'unknown');
     }
 
     function progressData() {
@@ -878,8 +880,9 @@ HTML_PAGE = r"""<!doctype html>
           <div class="entry-title">
             <span>${htmlEscape(entry.episode_id)} #${entry.candidate_index}</span>
             <span class="chip ${statusClass(status, entry.false_positive_trap)}">${labelForStatus(status)}</span>
+            ${entry.manual_entry ? '<span class="chip ok">manual</span>' : ''}
           </div>
-          <div class="entry-sub">${entry.false_positive_trap ? 'false-positive trap' : `${formatSeconds(entry.start_seconds)}-${formatSeconds(entry.end_seconds)}`} · ${htmlEscape(entry.advertiser_guess || 'review needed')}</div>
+          <div class="entry-sub">${entry.manual_entry ? 'missed ad' : entry.false_positive_trap ? 'false-positive trap' : `${formatSeconds(entry.start_seconds)}-${formatSeconds(entry.end_seconds)}`} · ${htmlEscape(review.advertiser || entry.advertiser_guess || 'review needed')}</div>
         `;
         els.entryList.appendChild(row);
       }
@@ -1081,6 +1084,11 @@ HTML_PAGE = r"""<!doctype html>
       render();
     }
 
+    function selectEntryId(entryId) {
+      const index = state.entries.findIndex(entry => entry.id === entryId);
+      if (index >= 0) selectIndex(index);
+    }
+
     function renderDetail() {
       const entry = currentEntry();
       if (!entry) return;
@@ -1170,6 +1178,54 @@ HTML_PAGE = r"""<!doctype html>
         selectIndex(next ?? state.selectedIndex + 1);
       }
       else render();
+    }
+
+    async function addMissedAd() {
+      const source = currentEntry();
+      if (!source) return;
+      const selection = captureNativeTranscriptSelection();
+      const review = collectReview();
+      const fieldRange = currentFieldRange();
+      const sourceStart = numberValue(source.start_seconds);
+      const sourceEnd = numberValue(source.end_seconds);
+      const fieldDiffersFromSource = fieldRange && (
+        sourceStart === null ||
+        sourceEnd === null ||
+        Math.abs(fieldRange.start - sourceStart) > 0.05 ||
+        Math.abs(fieldRange.end - sourceEnd) > 0.05
+      );
+      if (selection) {
+        review.start_seconds = selection.start_seconds;
+        review.end_seconds = selection.end_seconds;
+        review.transcript_selection = selection;
+      } else if (fieldDiffersFromSource) {
+        review.start_seconds = roundTenths(fieldRange.start);
+        review.end_seconds = roundTenths(fieldRange.end);
+      } else if (Number.isFinite(els.audio.currentTime) && els.audio.currentTime > 0) {
+        review.start_seconds = roundTenths(els.audio.currentTime);
+        review.end_seconds = roundTenths(els.audio.currentTime + 30);
+      } else {
+        review.start_seconds = null;
+        review.end_seconds = null;
+        review.transcript_selection = null;
+      }
+      review.status = 'verified_ad';
+      if (!review.boundary_confidence) review.boundary_confidence = 'medium';
+      els.saveState.textContent = 'Adding missed ad';
+      const response = await fetch('/api/manual-entry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_entry_id: source.id, review })
+      });
+      if (!response.ok) {
+        els.saveState.textContent = `Add failed: ${await response.text()}`;
+        return;
+      }
+      const payload = await response.json();
+      state.entries = payload.entries || state.entries;
+      state.reviews = payload.reviews || state.reviews;
+      els.saveState.textContent = 'Missed ad added; finish fields and save';
+      selectEntryId(payload.new_entry_id);
     }
 
     async function exportReviews() {
@@ -1278,6 +1334,7 @@ HTML_PAGE = r"""<!doctype html>
     els.endSeconds.addEventListener('input', renderTranscript);
     document.getElementById('saveBtn').onclick = () => saveReview(false);
     document.getElementById('saveNextBtn').onclick = () => saveReview(true);
+    document.getElementById('addMissedAdBtn').onclick = addMissedAd;
     document.getElementById('prevBtn').onclick = () => selectIndex(state.selectedIndex - 1);
     document.getElementById('nextBtn').onclick = () => selectIndex(state.selectedIndex + 1);
     document.getElementById('exportBtn').onclick = exportReviews;
@@ -1310,6 +1367,11 @@ def load_json(path: Path, default: Any = None) -> Any:
         return default
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def load_transcript_json(path: Path) -> Any:
+    data = path.read_bytes()
+    return json.loads(data.decode("utf-8", errors="replace"))
 
 
 def write_json_atomic(path: Path, value: Any) -> None:
@@ -1379,6 +1441,26 @@ def ensure_drafts_path(path: Path) -> None:
         raise ValueError(f"{resolved} is not under {drafts}")
 
 
+def decorate_entry(raw: dict[str, Any], fallback_index: int) -> dict[str, Any]:
+    entry = dict(raw)
+    entry_id = str(
+        entry.get("id")
+        or f"{entry.get('episode_id', 'episode')}#{entry.get('candidate_index', fallback_index)}"
+    )
+    episode_id = str(entry.get("episode_id") or entry_id.split("#")[0])
+    audio = find_audio(episode_id)
+    entry["id"] = entry_id
+    entry["episode_id"] = episode_id
+    entry["audio_available"] = audio is not None
+    entry["audio_url"] = f"/api/audio/{urllib.parse.quote(entry_id, safe='')}" if audio else None
+    return entry
+
+
+def load_review_payload(review_path: Path) -> dict[str, Any]:
+    payload = load_json(review_path, default={})
+    return payload if isinstance(payload, dict) else {}
+
+
 def load_queue_entries(queue_path: Path) -> list[dict[str, Any]]:
     queue = load_json(queue_path)
     if not isinstance(queue, dict) or not isinstance(queue.get("entries"), list):
@@ -1387,34 +1469,69 @@ def load_queue_entries(queue_path: Path) -> list[dict[str, Any]]:
     for raw in queue["entries"]:
         if not isinstance(raw, dict):
             continue
-        entry = dict(raw)
-        entry_id = str(entry.get("id") or f"{entry.get('episode_id', 'episode')}#{entry.get('candidate_index', len(entries) + 1)}")
-        episode_id = str(entry.get("episode_id") or entry_id.split("#")[0])
-        audio = find_audio(episode_id)
-        entry["id"] = entry_id
-        entry["episode_id"] = episode_id
-        entry["audio_available"] = audio is not None
-        entry["audio_url"] = f"/api/audio/{urllib.parse.quote(entry_id, safe='')}" if audio else None
-        entries.append(entry)
+        entries.append(decorate_entry(raw, len(entries) + 1))
     return entries
 
 
+def load_manual_entries(review_path: Path) -> list[dict[str, Any]]:
+    payload = load_review_payload(review_path)
+    raw_entries = payload.get("manual_entries")
+    if not isinstance(raw_entries, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for raw in raw_entries:
+        if not isinstance(raw, dict):
+            continue
+        entry = dict(raw)
+        entry["manual_entry"] = True
+        entry["false_positive_trap"] = False
+        entry.setdefault("source", "manual_missed_ad")
+        entry.setdefault("candidate_index", f"M{len(entries) + 1}")
+        entries.append(decorate_entry(entry, len(entries) + 1))
+    return entries
+
+
+def load_all_entries(queue_path: Path, review_path: Path) -> list[dict[str, Any]]:
+    return load_queue_entries(queue_path) + load_manual_entries(review_path)
+
+
 def load_reviews(review_path: Path) -> dict[str, Any]:
-    payload = load_json(review_path, default={})
-    if not isinstance(payload, dict):
+    payload = load_review_payload(review_path)
+    if not payload:
         return {}
     reviews = payload.get("reviews")
     return reviews if isinstance(reviews, dict) else {}
 
 
+def persisted_manual_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ignored = {"audio_available", "audio_url"}
+    return [
+        {key: value for key, value in entry.items() if key not in ignored}
+        for entry in entries
+        if entry.get("manual_entry") is True
+    ]
+
+
 def save_reviews(review_path: Path, queue_path: Path, reviews: dict[str, Any]) -> dict[str, Any]:
-    payload = {
-        "schema": "playhead-l2f-audio-review-v1",
-        "queue_path": str(queue_path.relative_to(REPO_ROOT)) if queue_path.is_relative_to(REPO_ROOT) else str(queue_path),
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "human_audio_verification_required": True,
-        "reviews": reviews,
-    }
+    payload = load_review_payload(review_path)
+    payload["schema"] = "playhead-l2f-audio-review-v1"
+    payload["queue_path"] = str(queue_path.relative_to(REPO_ROOT)) if queue_path.is_relative_to(REPO_ROOT) else str(queue_path)
+    payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["human_audio_verification_required"] = True
+    payload["reviews"] = reviews
+    payload.setdefault("manual_entries", [])
+    write_json_atomic(review_path, payload)
+    return payload
+
+
+def save_manual_entries(
+    review_path: Path,
+    queue_path: Path,
+    entries: list[dict[str, Any]],
+    reviews: dict[str, Any],
+) -> dict[str, Any]:
+    payload = save_reviews(review_path, queue_path, reviews)
+    payload["manual_entries"] = persisted_manual_entries(entries)
     write_json_atomic(review_path, payload)
     return payload
 
@@ -1523,6 +1640,12 @@ def numeric_seconds(value: Any) -> float | None:
     return None
 
 
+def clean_review_status(value: Any) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "unreviewed"
+
+
 def timestamp_seconds(value: Any) -> float | None:
     if not isinstance(value, str):
         return None
@@ -1570,7 +1693,7 @@ def transcript_path_for(episode_id: str) -> Path | None:
 
 
 def parse_transcript_segments(path: Path) -> list[dict[str, Any]]:
-    payload = load_json(path)
+    payload = load_transcript_json(path)
     raw_segments: Any
     if isinstance(payload, dict):
         raw_segments = payload.get("segments") or payload.get("transcription") or []
@@ -1653,6 +1776,70 @@ def transcript_payload_for(entry: dict[str, Any], full: bool) -> dict[str, Any]:
     }
 
 
+def next_manual_index(entries: list[dict[str, Any]], episode_id: str) -> int:
+    indexes: list[int] = []
+    for entry in entries:
+        if entry.get("episode_id") != episode_id or entry.get("manual_entry") is not True:
+            continue
+        value = entry.get("manual_index")
+        if isinstance(value, int):
+            indexes.append(value)
+            continue
+        if isinstance(value, str) and value.isdigit():
+            indexes.append(int(value))
+    return (max(indexes) if indexes else 0) + 1
+
+
+def manual_context(value: Any, fallback: Any, delta: float) -> float | None:
+    seconds = numeric_seconds(value)
+    if seconds is None:
+        seconds = numeric_seconds(fallback)
+    if seconds is None:
+        return None
+    return max(0.0, round(seconds + delta, 1))
+
+
+def build_manual_entry(
+    source: dict[str, Any],
+    review: dict[str, Any],
+    manual_index: int,
+) -> dict[str, Any]:
+    episode_id = source["episode_id"]
+    start = numeric_seconds(review.get("start_seconds"))
+    end = numeric_seconds(review.get("end_seconds"))
+    entry_id = f"manual:{episode_id}#{manual_index}"
+    entry = {
+        "id": entry_id,
+        "episode_id": episode_id,
+        "candidate_index": f"M{manual_index}",
+        "manual_index": manual_index,
+        "manual_entry": True,
+        "start_seconds": round(start, 1) if start is not None else None,
+        "end_seconds": round(end, 1) if end is not None else None,
+        "context_start_seconds": manual_context(start, source.get("context_start_seconds"), -20.0),
+        "context_end_seconds": manual_context(end, source.get("context_end_seconds"), 20.0),
+        "context_padding_seconds": 20,
+        "advertiser_guess": review.get("advertiser"),
+        "product_guess": review.get("product"),
+        "ad_type": review.get("ad_type"),
+        "transition_type": review.get("transition_type"),
+        "false_positive_trap": False,
+        "source": "manual_missed_ad",
+        "audio_path": source.get("audio_path"),
+        "playback_command": source.get("playback_command"),
+        "extraction_command": source.get("extraction_command"),
+        "checklist": [
+            "listen_with_pre_post_context",
+            "mark_false_positive_or_verified_ad",
+            "adjust_start_end_to_plus_minus_0_5s",
+            "fill_advertiser_and_product",
+            "write_boundary_confidence_notes",
+        ],
+        "notes": "Missed ad added manually in the review GUI.",
+    }
+    return decorate_entry(entry, manual_index)
+
+
 def best_lan_ip() -> str:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -1720,6 +1907,9 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/review":
             self.save_review()
             return
+        if parsed.path == "/api/manual-entry":
+            self.add_manual_entry()
+            return
         if parsed.path == "/api/export":
             self.export_episode_reviews()
             return
@@ -1780,6 +1970,39 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
             reviews[entry_id] = review
             save_reviews(self.config.review_path, self.config.queue_path, reviews)
             self.send_json({"ok": True, "reviews": reviews})
+        except Exception as exc:
+            self.send_error(HTTPStatus.BAD_REQUEST, explain=html.escape(str(exc)))
+
+    def add_manual_entry(self) -> None:
+        try:
+            body = self.read_json_body()
+            source_entry_id = str(body["source_entry_id"])
+            source = next((item for item in self.entries if item["id"] == source_entry_id), None)
+            if not source:
+                raise ValueError(f"unknown source entry id: {source_entry_id}")
+            review = body.get("review", {})
+            if not isinstance(review, dict):
+                raise ValueError("review must be an object")
+            review["status"] = clean_review_status(review.get("status"))
+            if review["status"] in {"unreviewed", "false_positive", "zero_ad_confirmed"}:
+                review["status"] = "verified_ad"
+            review["reviewed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            review.setdefault("notes", None)
+            manual_index = next_manual_index(self.entries, source["episode_id"])
+            entry = build_manual_entry(source, review, manual_index)
+            self.entries.append(entry)
+            reviews = load_reviews(self.config.review_path)
+            reviews[entry["id"]] = review
+            save_manual_entries(self.config.review_path, self.config.queue_path, self.entries, reviews)
+            self.send_json(
+                {
+                    "ok": True,
+                    "new_entry_id": entry["id"],
+                    "entries": self.entries,
+                    "reviews": reviews,
+                    "progress": progress_summary(self.entries, reviews),
+                }
+            )
         except Exception as exc:
             self.send_error(HTTPStatus.BAD_REQUEST, explain=html.escape(str(exc)))
 
@@ -1851,7 +2074,7 @@ class _LimitedReader:
 class L2FReviewServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], config: AppConfig) -> None:
         self.config = config
-        self.entries = load_queue_entries(config.queue_path)
+        self.entries = load_all_entries(config.queue_path, config.review_path)
         super().__init__(address, L2FReviewHandler)
 
 
