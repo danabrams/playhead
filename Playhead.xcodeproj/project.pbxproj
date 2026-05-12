@@ -915,6 +915,10 @@
 		FF7AE172A90350F9F28ECFC3 /* AdCatalogStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA38E3CD24228CDDC55D126B /* AdCatalogStoreTests.swift */; };
 		FFAF04927F83DB6DDE50F1F8 /* BoundarySnapDiagnosticLoggingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 949FDBAD9F21BD739D142E1B /* BoundarySnapDiagnosticLoggingTests.swift */; };
 		FFCE561B2115E48CA2895A4D /* PlaybackQueueFinishObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD745BB6950D33FBC35F30A1 /* PlaybackQueueFinishObserver.swift */; };
+		91049B28A73114C8E478901E /* ApprovedCohortRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05934551751B99C27C254744 /* ApprovedCohortRegistry.swift */; };
+		8603CF941B53E00FFCF17416 /* ReplayHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15797142477EFA3223A86DE /* ReplayHarness.swift */; };
+		301DA4E19011435A8F655686 /* ApprovedCohortRegistryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D979CD6FAE3316BF819030D /* ApprovedCohortRegistryTests.swift */; };
+		71DAA6EAB0511951BF0FD61A /* ReplayHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B99A1E659426FA295EFC318 /* ReplayHarnessTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -1840,6 +1844,10 @@
 		FF87059092BDF6E5FF9B1DB4 /* DecisionLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionLogger.swift; sourceTree = "<group>"; };
 		FFAC0AF611301A8AF53A5A5F /* MetadataEvidenceFusionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataEvidenceFusionTests.swift; sourceTree = "<group>"; };
 		FFCBD9A239AF9AFF6B5BAA97 /* AnalysisWorkSchedulerBackfillRearmTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisWorkSchedulerBackfillRearmTests.swift; sourceTree = "<group>"; };
+		05934551751B99C27C254744 /* ApprovedCohortRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovedCohortRegistry.swift; sourceTree = "<group>"; };
+		F15797142477EFA3223A86DE /* ReplayHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayHarness.swift; sourceTree = "<group>"; };
+		7D979CD6FAE3316BF819030D /* ApprovedCohortRegistryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovedCohortRegistryTests.swift; sourceTree = "<group>"; };
+		5B99A1E659426FA295EFC318 /* ReplayHarnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayHarnessTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -2660,6 +2668,8 @@
 				FCD9CB87B7979F94E587C2D5 /* UserCorrectionStore.swift */,
 				FDEDBF5C4CEA7549826213FD /* AcousticFeatures */,
 				37AA9F308816B6EB9389A5C3 /* RepeatedAdCache */,
+				05934551751B99C27C254744 /* ApprovedCohortRegistry.swift */,
+				F15797142477EFA3223A86DE /* ReplayHarness.swift */,
 			);
 			path = AdDetection;
 			sourceTree = "<group>";
@@ -3272,6 +3282,8 @@
 				1D78A9EF7EDA4C7E0B139580 /* UserCorrectionStoreTests.swift */,
 				6115BAA4AC302097A84A4495 /* AcousticFeatures */,
 				6A4E0745269E6B76786B167A /* RepeatedAdCache */,
+				7D979CD6FAE3316BF819030D /* ApprovedCohortRegistryTests.swift */,
+				5B99A1E659426FA295EFC318 /* ReplayHarnessTests.swift */,
 			);
 			path = AdDetection;
 			sourceTree = "<group>";
@@ -4178,6 +4190,8 @@
 				8EF6DEABE12727DEE137E015 /* UserCorrectionStore.swift in Sources */,
 				8C85B1755C31377DC3B7EF6D /* UserDefaultsNewEpisodeLedger.swift in Sources */,
 				1E96C274F4B8282CC3B8374B /* UserPreferences.swift in Sources */,
+				91049B28A73114C8E478901E /* ApprovedCohortRegistry.swift in Sources */,
+				8603CF941B53E00FFCF17416 /* ReplayHarness.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -4717,6 +4731,8 @@
 				2934CB0BDEFD261C285BD3AC /* WithTestRuntime.swift in Sources */,
 				E517D642282F2FF5DD23A010 /* WorkJournalReadCorruptionTests.swift in Sources */,
 				885C8E3A4D8E7A1BF24135C6 /* WorkJournalTailFetchTests.swift in Sources */,
+				301DA4E19011435A8F655686 /* ApprovedCohortRegistryTests.swift in Sources */,
+				71DAA6EAB0511951BF0FD61A /* ReplayHarnessTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
