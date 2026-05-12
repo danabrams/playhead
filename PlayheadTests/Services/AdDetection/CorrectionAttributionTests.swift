@@ -61,6 +61,18 @@ final class CorrectionAttributionTests: XCTestCase {
         XCTAssertEqual(result, .lexical)
     }
 
+    func testInferCausalSourceIgnoresObservabilityRows() {
+        let entries: [EvidenceLedgerEntry] = [
+            EvidenceLedgerEntry(source: .audit, weight: 1.0, detail: .classifier(score: 1.0)),
+            EvidenceLedgerEntry(source: .operational, weight: 1.0, detail: .classifier(score: 1.0)),
+            EvidenceLedgerEntry(source: .lexical, weight: 0.1, detail: .lexical(matchedCategories: ["url"])),
+        ]
+
+        let result = CausalInference.inferCausalSource(provenance: [], ledgerEntries: entries)
+
+        XCTAssertEqual(result, .lexical)
+    }
+
     // MARK: - inferCausalSource: FM > 0.3 of total
 
     func testInferCausalSourceFMAboveThreshold() {

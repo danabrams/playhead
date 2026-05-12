@@ -110,6 +110,26 @@ struct ApprovedCohortRegistryTests {
         #expect(registry.decision(osBuild: "26.4", scanCohort: cohort) == nil)
     }
 
+    @Test("Mode transition sequence preserves fail-closed rollout behavior")
+    func modeTransitionSequence() {
+        var registry = ApprovedCohortRegistry()
+        let cohort = Self.cohort(promptHash: "prompt-transition")
+
+        #expect(registry.effectiveMode(osBuild: "26.4", scanCohort: cohort, requestedMode: .full) == .shadow)
+
+        registry.approve(osBuild: "26.4", scanCohort: cohort, mode: .rescoreOnly)
+        #expect(registry.effectiveMode(osBuild: "26.4", scanCohort: cohort, requestedMode: .full) == .rescoreOnly)
+
+        registry.approve(osBuild: "26.4", scanCohort: cohort, mode: .full)
+        #expect(registry.effectiveMode(osBuild: "26.4", scanCohort: cohort, requestedMode: .full) == .full)
+
+        registry.markKnownBad(osBuild: "26.4", scanCohort: cohort, reason: "replay regression")
+        #expect(registry.effectiveMode(osBuild: "26.4", scanCohort: cohort, requestedMode: .full) == .off)
+
+        registry.remove(osBuild: "26.4", scanCohort: cohort)
+        #expect(registry.effectiveMode(osBuild: "26.4", scanCohort: cohort, requestedMode: .full) == .shadow)
+    }
+
     @Test("OS build and canonical cohort identity are independent approval dimensions")
     func osBuildAndCohortIdentityArePartOfKey() {
         var registry = ApprovedCohortRegistry()

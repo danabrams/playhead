@@ -183,6 +183,18 @@ struct OrthogonalUpdateRuleTests {
         )
         #expect(result == .blockedSameFamily)
     }
+
+    @Test("observability-only sources cannot update trust")
+    func observabilityOnlySourcesCannotUpdateTrust() {
+        let result = OrthogonalUpdateRule.validate(
+            sourceToUpdate: .fm,
+            corroboratingSource: .audit,
+            sourceEpisodeId: "ep-1",
+            corroboratingEpisodeId: "ep-2"
+        )
+
+        #expect(result == .blockedObservabilityOnly)
+    }
 }
 
 @Suite("SourceTrustProfile")
@@ -313,6 +325,14 @@ struct SourceTrustProfileTests {
         let fmSame = profile.effectiveTrust(for: .fm, confidence: 0.7)
         let acousticSame = profile.effectiveTrust(for: .acoustic, confidence: 0.7)
         #expect(fmSame > acousticSame)
+    }
+
+    @Test("observability-only sources have zero effective trust")
+    func observabilityOnlySourcesHaveZeroEffectiveTrust() {
+        let profile = SourceTrustProfile()
+
+        #expect(profile.effectiveTrust(for: .audit, confidence: 1.0) == 0)
+        #expect(profile.effectiveTrust(for: .operational, confidence: 1.0) == 0)
     }
 
     @Test("every EvidenceSourceType has a default prior")

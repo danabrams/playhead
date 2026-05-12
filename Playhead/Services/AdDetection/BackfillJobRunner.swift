@@ -347,6 +347,7 @@ actor BackfillJobRunner {
         let now = clock().timeIntervalSince1970
 
         var enqueuedJobs: [BackfillJob] = []
+        var resumedJobIds = Set<String>()
         for (offset, phase) in plan.phases.enumerated() {
             // R4-Fix6: include `inputs.transcriptVersion` in the jobId so a
             // transcript regeneration produces a fresh row instead of
@@ -400,6 +401,7 @@ actor BackfillJobRunner {
                 }
                 await admissionController.enqueue(existing)
                 enqueuedJobs.append(existing)
+                resumedJobIds.insert(existing.jobId)
                 continue
             }
 
@@ -478,6 +480,42 @@ actor BackfillJobRunner {
                             reason: reason.rawValue
                         )
                         deferred.append(candidate.jobId)
+                        let randomAudit: RandomAuditPersistenceResult
+                        if candidate.phase == .scanRandomAuditWindows {
+                            randomAudit = await recordUnrunRandomAuditEvents(
+                                job: candidate,
+                                plan: plan,
+                                inputs: inputs,
+                                runMode: candidate.coveragePolicy == .targetedWithAudit ? .targeted : .shadow
+                            )
+                            evidenceEventIds.append(contentsOf: randomAudit.persistedEventIds)
+                        } else {
+                            randomAudit = RandomAuditPersistenceResult(
+                                eligibleCandidateCount: 0,
+                                persistedEventIds: []
+                            )
+                        }
+                        var counters = operationalCounters(
+                            jobCounters: OperationalMetrics.Counters(),
+                            plannerContext: inputs.plannerContext,
+                            resumeAttempted: resumedJobIds.contains(candidate.jobId),
+                            resumeSucceeded: false,
+                            thermalDeferred: reason == .thermalThrottled
+                        )
+                        counters.admissionDecisionCount = 1
+                        counters.randomAuditCandidateCount = randomAudit.eligibleCandidateCount
+                        counters.randomAuditSelectedCount = randomAudit.persistedEventIds.count
+                        counters.persistedEvidenceEventCount = randomAudit.persistedEventIds.count
+                        if let metricsEventId = await recordOperationalMetricsEvent(
+                            job: candidate,
+                            inputs: inputs,
+                            audioSegments: [],
+                            wallStart: now,
+                            wallEnd: now,
+                            counters: counters
+                        ) {
+                            evidenceEventIds.append(metricsEventId)
+                        }
                     } catch let error as AnalysisStoreError {
                         if case .invalidStateTransition = error {
                             logger.warning(
@@ -494,6 +532,9 @@ actor BackfillJobRunner {
 
             guard let job = decision.job else { break }
             admitted.append(job.jobId)
+            let jobWallStart = clock().timeIntervalSince1970
+            var jobMetricsAudioSegments: [AdTranscriptSegment] = []
+            var jobMetricsCounters = OperationalMetrics.Counters()
 
             do {
                 // C-2: split lifecycle API. `markBackfillJobRunning` preserves
@@ -530,6 +571,10 @@ actor BackfillJobRunner {
                     )
                     try await store.insertSemanticScanResult(sentinel)
                     scanResultIds.append(sentinel.id)
+                    let h13JobCounters = OperationalMetrics.Counters(
+                        persistedScanResultCount: 1
+                    )
+                    jobMetricsCounters = h13JobCounters
                     try await store.markBackfillJobComplete(
                         jobId: job.jobId,
                         progressCursor: BackfillProgressCursor(
@@ -537,13 +582,32 @@ actor BackfillJobRunner {
                             lastProcessedUpperBoundSec: nil
                         )
                     )
+                    let counters = operationalCounters(
+                        jobCounters: h13JobCounters,
+                        plannerContext: inputs.plannerContext,
+                        resumeAttempted: resumedJobIds.contains(job.jobId),
+                        resumeSucceeded: true,
+                        thermalDeferred: false
+                    )
+                    if let metricsEventId = await recordOperationalMetricsEvent(
+                        job: job,
+                        inputs: inputs,
+                        audioSegments: [],
+                        wallStart: jobWallStart,
+                        wallEnd: clock().timeIntervalSince1970,
+                        counters: counters
+                    ) {
+                        evidenceEventIds.append(metricsEventId)
+                    }
                     await admissionController.finish(jobId: job.jobId)
                     continue
                 }
-                let (resultIds, eventIds, detectedAdLineRefs, jobWindows) = try await runJob(job, inputs: jobInputs)
+                jobMetricsAudioSegments = jobInputs.segments
+                let (resultIds, eventIds, detectedAdLineRefs, jobWindows, jobCounters) = try await runJob(job, inputs: jobInputs)
                 scanResultIds.append(contentsOf: resultIds)
                 evidenceEventIds.append(contentsOf: eventIds)
                 fmRefinementWindows.append(contentsOf: jobWindows)
+                jobMetricsCounters = jobCounters
                 if job.phase == .fullEpisodeScan {
                     fullRescanDetectedAdLineRefs.formUnion(detectedAdLineRefs)
                 }
@@ -555,6 +619,23 @@ actor BackfillJobRunner {
                         lastProcessedUpperBoundSec: jobInputs.segments.last?.endTime
                     )
                 )
+                let counters = operationalCounters(
+                    jobCounters: jobCounters,
+                    plannerContext: inputs.plannerContext,
+                    resumeAttempted: resumedJobIds.contains(job.jobId),
+                    resumeSucceeded: true,
+                    thermalDeferred: false
+                )
+                if let metricsEventId = await recordOperationalMetricsEvent(
+                    job: job,
+                    inputs: jobInputs,
+                    audioSegments: jobInputs.segments,
+                    wallStart: jobWallStart,
+                    wallEnd: clock().timeIntervalSince1970,
+                    counters: counters
+                ) {
+                    evidenceEventIds.append(metricsEventId)
+                }
             } catch is CancellationError {
                 // H-2: don't let a store error swallow the CancellationError.
                 // The caller's Task contract requires the CancellationError
@@ -585,6 +666,19 @@ actor BackfillJobRunner {
                 // shim, would double-bump `retryCount`. Log and continue.
                 if case .invalidStateTransition = storeError {
                     logger.warning("FM job already in terminal state, skipping: \(job.jobId, privacy: .public)")
+                    if Self.hasOperationalWork(jobMetricsCounters) {
+                        if let metricsEventId = await recordFailedOperationalMetricsEvent(
+                            job: job,
+                            inputs: inputs,
+                            audioSegments: jobMetricsAudioSegments,
+                            wallStart: jobWallStart,
+                            jobCounters: jobMetricsCounters,
+                            plannerContext: inputs.plannerContext,
+                            resumeAttempted: resumedJobIds.contains(job.jobId)
+                        ) {
+                            evidenceEventIds.append(metricsEventId)
+                        }
+                    }
                     await admissionController.finish(jobId: job.jobId)
                     continue
                 }
@@ -628,6 +722,17 @@ actor BackfillJobRunner {
                 logger.error(
                     "FM backfill job \(job.jobId, privacy: .public) failed: case=\(caseName, privacy: .public) detail=\(String(describing: storeError), privacy: .public) permanent=\(Self.isPermanent(storeError), privacy: .public)"
                 )
+                if let metricsEventId = await recordFailedOperationalMetricsEvent(
+                    job: job,
+                    inputs: inputs,
+                    audioSegments: jobMetricsAudioSegments,
+                    wallStart: jobWallStart,
+                    jobCounters: jobMetricsCounters,
+                    plannerContext: inputs.plannerContext,
+                    resumeAttempted: resumedJobIds.contains(job.jobId)
+                ) {
+                    evidenceEventIds.append(metricsEventId)
+                }
             } catch {
                 // C-2: markBackfillJobFailed writes deferReason so operators
                 // can diagnose the failure without scraping logs. The prior
@@ -654,6 +759,17 @@ actor BackfillJobRunner {
                 logger.error(
                     "FM backfill job \(job.jobId, privacy: .public) failed: case=untyped detail=\(String(describing: error), privacy: .public)"
                 )
+                if let metricsEventId = await recordFailedOperationalMetricsEvent(
+                    job: job,
+                    inputs: inputs,
+                    audioSegments: jobMetricsAudioSegments,
+                    wallStart: jobWallStart,
+                    jobCounters: jobMetricsCounters,
+                    plannerContext: inputs.plannerContext,
+                    resumeAttempted: resumedJobIds.contains(job.jobId)
+                ) {
+                    evidenceEventIds.append(metricsEventId)
+                }
             }
 
             await admissionController.finish(jobId: job.jobId)
@@ -803,6 +919,130 @@ actor BackfillJobRunner {
         )
     }
 
+    private func operationalCounters(
+        jobCounters: OperationalMetrics.Counters,
+        plannerContext: CoveragePlannerContext,
+        resumeAttempted: Bool,
+        resumeSucceeded: Bool,
+        thermalDeferred: Bool
+    ) -> OperationalMetrics.Counters {
+        var counters = jobCounters
+        counters.episodeCount = 1
+        counters.admissionDecisionCount = 1
+        counters.cohortDriftEvaluationCount = 1
+        counters.cohortDriftSignalCount = Self.hasCohortDriftSignal(plannerContext) ? 1 : 0
+        counters.resumeAttemptCount = resumeAttempted ? 1 : 0
+        counters.resumeSuccessCount = (resumeAttempted && resumeSucceeded) ? 1 : 0
+        counters.thermalDeferralCount = thermalDeferred ? 1 : 0
+        return counters
+    }
+
+    private static func hasCohortDriftSignal(_ context: CoveragePlannerContext) -> Bool {
+        context.isFirstEpisodeAfterCohortInvalidation ||
+        context.recallDegrading ||
+        context.sponsorDriftDetected ||
+        context.auditMissDetected
+    }
+
+    private static func hasOperationalWork(_ counters: OperationalMetrics.Counters) -> Bool {
+        counters.fmPassCount > 0 ||
+        counters.fmWindowCount > 0 ||
+        counters.persistedScanResultCount > 0 ||
+        counters.persistedEvidenceEventCount > 0 ||
+        counters.randomAuditCandidateCount > 0 ||
+        counters.randomAuditSelectedCount > 0
+    }
+
+    private func recordFailedOperationalMetricsEvent(
+        job: BackfillJob,
+        inputs: AssetInputs,
+        audioSegments: [AdTranscriptSegment],
+        wallStart: Double,
+        jobCounters: OperationalMetrics.Counters,
+        plannerContext: CoveragePlannerContext,
+        resumeAttempted: Bool
+    ) async -> String? {
+        let counters = operationalCounters(
+            jobCounters: jobCounters,
+            plannerContext: plannerContext,
+            resumeAttempted: resumeAttempted,
+            resumeSucceeded: false,
+            thermalDeferred: false
+        )
+        return await recordOperationalMetricsEvent(
+            job: job,
+            inputs: inputs,
+            audioSegments: audioSegments,
+            wallStart: wallStart,
+            wallEnd: clock().timeIntervalSince1970,
+            counters: counters
+        )
+    }
+
+    @discardableResult
+    private func recordOperationalMetricsEvent(
+        job: BackfillJob,
+        inputs: AssetInputs,
+        audioSegments: [AdTranscriptSegment],
+        wallStart: Double,
+        wallEnd: Double,
+        counters: OperationalMetrics.Counters
+    ) async -> String? {
+        let metrics = OperationalMetrics(
+            jobId: job.jobId,
+            analysisAssetId: inputs.analysisAssetId,
+            jobPhase: job.phase.rawValue,
+            scanCohortJSON: scanCohortJSON,
+            wallTimeSeconds: wallEnd - wallStart,
+            audioDurationSeconds: Self.audioDurationSeconds(for: audioSegments),
+            counters: counters
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let evidenceJSON = (try? encoder.encode(metrics))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let atomOrdinals = "[]"
+        let eventId = Self.makeEvidenceEventId(
+            assetId: inputs.analysisAssetId,
+            transcriptVersion: inputs.transcriptVersion,
+            eventType: OperationalMetrics.eventType,
+            sourceType: .operational,
+            atomOrdinals: atomOrdinals,
+            evidenceJSON: evidenceJSON,
+            scanCohortJSON: scanCohortJSON
+        )
+        do {
+            return try await store.insertEvidenceEvent(
+                EvidenceEvent(
+                    id: eventId,
+                    analysisAssetId: inputs.analysisAssetId,
+                    eventType: OperationalMetrics.eventType,
+                    sourceType: .operational,
+                    atomOrdinals: atomOrdinals,
+                    evidenceJSON: evidenceJSON,
+                    scanCohortJSON: scanCohortJSON,
+                    createdAt: wallEnd,
+                    runMode: job.coveragePolicy == .targetedWithAudit ? .targeted : .shadow,
+                    jobPhase: job.phase.rawValue
+                ),
+                transcriptVersion: inputs.transcriptVersion
+            )
+        } catch {
+            logger.warning(
+                "Failed to record operational metrics for FM job \(job.jobId, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    private static func audioDurationSeconds(for segments: [AdTranscriptSegment]) -> Double {
+        segments.reduce(0) { total, segment in
+            let duration = segment.endTime - segment.startTime
+            guard duration.isFinite, duration > 0 else { return total }
+            return total + duration
+        }
+    }
+
     // MARK: - Per-Job Execution
 
     /// Runs the FM coarse pass and (when warranted) the refinement pass for a
@@ -815,11 +1055,13 @@ actor BackfillJobRunner {
         scanResultIds: [String],
         evidenceEventIds: [String],
         detectedAdLineRefs: Set<Int>,
-        fmRefinementWindows: [FMRefinementWindowOutput]
+        fmRefinementWindows: [FMRefinementWindowOutput],
+        counters: OperationalMetrics.Counters
     ) {
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
         var detectedAdLineRefs = Set<Int>()
+        var counters = OperationalMetrics.Counters()
         // playhead-xba follow-up: in-memory mirror of every
         // `FMRefinementWindowOutput` emitted by this job, including
         // outward-expansion windows. Surfaced up through `RunResult` for
@@ -886,7 +1128,8 @@ actor BackfillJobRunner {
             )
             try await store.insertSemanticScanResult(sentinel)
             scanResultIds.append(sentinel.id)
-            return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows)
+            counters.persistedScanResultCount += 1
+            return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows, counters)
         }
 
         // bd-1en Phase 1: dispatch sensitive windows (pharma /
@@ -914,6 +1157,11 @@ actor BackfillJobRunner {
         permissiveRefusalCount += coarse.permissiveFailureCounts.refusal
         permissiveDecodingFailureCount += coarse.permissiveFailureCounts.decodingFailure
         permissiveContextOverflowCount += coarse.permissiveFailureCounts.contextOverflow
+        counters.recordFMOutput(
+            latencyMillis: coarse.latencyMillis,
+            prewarmHit: coarse.prewarmHit,
+            windowCount: coarse.windows.count + coarse.failedWindowStatuses.count
+        )
 
         // skeptical-review-cycle-5 L-Y1: refresh the lease right after
         // the coarse FM call returns. This is the highest-yield
@@ -943,6 +1191,7 @@ actor BackfillJobRunner {
             )
             try await store.insertSemanticScanResult(result)
             scanResultIds.append(result.id)
+            counters.persistedScanResultCount += 1
             if window.screening.disposition == .containsAd {
                 if let support = window.screening.support?.supportLineRefs, !support.isEmpty {
                     detectedAdLineRefs.formUnion(support)
@@ -951,6 +1200,18 @@ actor BackfillJobRunner {
                 }
             }
         }
+
+        let randomAudit = await recordRandomAuditEvents(
+            coarseWindows: coarse.windows,
+            inputs: inputs,
+            jobId: job.jobId,
+            jobPhase: job.phase,
+            runMode: runMode
+        )
+        evidenceEventIds.append(contentsOf: randomAudit.persistedEventIds)
+        counters.randomAuditCandidateCount += randomAudit.eligibleCandidateCount
+        counters.randomAuditSelectedCount += randomAudit.persistedEventIds.count
+        counters.persistedEvidenceEventCount += randomAudit.persistedEventIds.count
 
         if !coarse.failedWindowStatuses.isEmpty || !coarse.windows.isEmpty {
             let coarsePlans = try await classifier.planPassA(segments: inputs.segments)
@@ -974,6 +1235,7 @@ actor BackfillJobRunner {
                         ) {
                     try await store.insertSemanticScanResult(failureResult)
                     scanResultIds.append(failureResult.id)
+                    counters.persistedScanResultCount += 1
                 }
             }
 
@@ -990,6 +1252,7 @@ actor BackfillJobRunner {
                        ) {
                 try await store.insertSemanticScanResult(failureResult)
                 scanResultIds.append(failureResult.id)
+                counters.persistedScanResultCount += 1
             }
         } else if coarse.status != .success,
                   let failureResult = makeFailureScanResult(
@@ -1004,6 +1267,7 @@ actor BackfillJobRunner {
                   ) {
             try await store.insertSemanticScanResult(failureResult)
             scanResultIds.append(failureResult.id)
+            counters.persistedScanResultCount += 1
         }
 
         if coarse.status == .success && !coarse.windows.isEmpty {
@@ -1032,6 +1296,11 @@ actor BackfillJobRunner {
                 permissiveDecodingFailureCount += refinement.permissiveFailureCounts.decodingFailure
                 permissiveContextOverflowCount += refinement.permissiveFailureCounts.contextOverflow
                 asymmetricWindowCount += refinement.asymmetricWindowCount
+                counters.recordFMOutput(
+                    latencyMillis: refinement.latencyMillis,
+                    prewarmHit: refinement.prewarmHit,
+                    windowCount: refinement.windows.count + refinement.failedWindowStatuses.count
+                )
 
                 // playhead-xba follow-up: surface the raw base refinement
                 // windows to the caller so the Phase 4 shadow phase can
@@ -1075,6 +1344,8 @@ actor BackfillJobRunner {
                     )
                     scanResultIds.append(result.id)
                     evidenceEventIds.append(contentsOf: persistedEventIds)
+                    counters.persistedScanResultCount += 1
+                    counters.persistedEvidenceEventCount += persistedEventIds.count
                 }
 
                 if !refinement.failedWindowStatuses.isEmpty || !refinement.windows.isEmpty {
@@ -1092,6 +1363,7 @@ actor BackfillJobRunner {
                         ) {
                             try await store.insertSemanticScanResult(failureResult)
                             scanResultIds.append(failureResult.id)
+                            counters.persistedScanResultCount += 1
                         }
                     }
 
@@ -1108,6 +1380,7 @@ actor BackfillJobRunner {
                        ) {
                         try await store.insertSemanticScanResult(failureResult)
                         scanResultIds.append(failureResult.id)
+                        counters.persistedScanResultCount += 1
                     }
                 } else if refinement.status != .success {
                     let attemptedLineRefs = Set(zoomPlans.flatMap(\.lineRefs))
@@ -1124,6 +1397,7 @@ actor BackfillJobRunner {
                     ) {
                         try await store.insertSemanticScanResult(failureResult)
                         scanResultIds.append(failureResult.id)
+                        counters.persistedScanResultCount += 1
                     }
                 }
 
@@ -1154,6 +1428,7 @@ actor BackfillJobRunner {
                     scanResultIds.append(contentsOf: expansionResults.scanResultIds)
                     evidenceEventIds.append(contentsOf: expansionResults.evidenceEventIds)
                     fmRefinementWindows.append(contentsOf: expansionResults.fmRefinementWindows)
+                    counters.add(expansionResults.counters)
                 }
             }
         }
@@ -1192,12 +1467,13 @@ actor BackfillJobRunner {
             )
             try await store.insertSemanticScanResult(sentinel)
             scanResultIds.append(sentinel.id)
+            counters.persistedScanResultCount += 1
             logger.error(
                 "FM backfill job \(job.jobId, privacy: .public) reached completion with zero persisted rows — sentinel written. coarse.windows=\(coarse.windows.count, privacy: .public) coarse.failedWindows=\(coarse.failedWindowStatuses.count, privacy: .public) coarse.status=\(coarse.status.rawValue, privacy: .public)"
             )
         }
 
-        return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows)
+        return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows, counters)
     }
 
     // MARK: - Bug 11 sentinel row builder
@@ -1313,6 +1589,7 @@ actor BackfillJobRunner {
     private struct ExpansionResults {
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
+        var counters = OperationalMetrics.Counters()
         // playhead-xba follow-up: the merged refinement windows emitted
         // by the outward-expansion loop. Surfaced up to `runJob` alongside
         // the persistence ids so Phase 4 FM clustering can see the final
@@ -1491,6 +1768,11 @@ actor BackfillJobRunner {
                     zoomPlans: [plan],
                     inputs: inputs
                 )
+                results.counters.recordFMOutput(
+                    latencyMillis: expansionRefinement.latencyMillis,
+                    prewarmHit: expansionRefinement.prewarmHit,
+                    windowCount: expansionRefinement.windows.count + expansionRefinement.failedWindowStatuses.count
+                )
 
                 // If the FM blew up on the expansion call we surface a
                 // failure row but stop expanding cleanly — we keep the
@@ -1507,6 +1789,7 @@ actor BackfillJobRunner {
                     ) {
                         try await store.insertSemanticScanResult(failureResult)
                         results.scanResultIds.append(failureResult.id)
+                        results.counters.persistedScanResultCount += 1
                     }
                     break
                 }
@@ -1573,6 +1856,8 @@ actor BackfillJobRunner {
                 )
                 results.scanResultIds.append(mergedScanResult.id)
                 results.evidenceEventIds.append(contentsOf: persistedEventIds)
+                results.counters.persistedScanResultCount += 1
+                results.counters.persistedEvidenceEventCount += persistedEventIds.count
                 // playhead-xba follow-up: record the expanded window so
                 // Phase 4 FM clustering sees the final boundary.
                 results.fmRefinementWindows.append(mergedWindowOutput)
@@ -2440,6 +2725,13 @@ actor BackfillJobRunner {
         return .good
     }
 
+    nonisolated private static func atomOrdinalsJSON(first: Int, last: Int) -> String {
+        let lower = min(first, last)
+        let upper = max(first, last)
+        return (try? JSONEncoder().encode(Array(lower...upper)))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+    }
+
     private func makeEvidenceEvents(
         windowOutput: FMRefinementWindowOutput,
         inputs: AssetInputs,
@@ -2526,6 +2818,184 @@ actor BackfillJobRunner {
             )
         }
         return events
+    }
+
+    private struct RandomAuditPersistenceResult {
+        let eligibleCandidateCount: Int
+        let persistedEventIds: [String]
+    }
+
+    private func recordUnrunRandomAuditEvents(
+        job: BackfillJob,
+        plan: CoveragePlan,
+        inputs: AssetInputs,
+        runMode: SemanticScanPhase
+    ) async -> RandomAuditPersistenceResult {
+        guard job.phase == .scanRandomAuditWindows else {
+            return RandomAuditPersistenceResult(
+                eligibleCandidateCount: 0,
+                persistedEventIds: []
+            )
+        }
+        let narrowing = TargetedWindowNarrower.narrow(
+            phase: .scanRandomAuditWindows,
+            inputs: TargetedWindowNarrower.Inputs(
+                analysisAssetId: inputs.analysisAssetId,
+                podcastId: inputs.podcastId,
+                transcriptVersion: inputs.transcriptVersion,
+                segments: inputs.segments,
+                evidenceCatalog: inputs.evidenceCatalog,
+                auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate,
+                episodesSinceLastFullRescan: inputs.plannerContext.episodesSinceLastFullRescan,
+                acousticBreaks: inputs.acousticBreaks
+            )
+        )
+        guard let segments = narrowing.narrowedSegments, !segments.isEmpty else {
+            return RandomAuditPersistenceResult(
+                eligibleCandidateCount: 0,
+                persistedEventIds: []
+            )
+        }
+        let candidates = segments.map { segment in
+            RandomNegativeAuditSampler.Candidate(
+                stableId: [
+                    job.jobId,
+                    "unrun",
+                    "\(segment.segmentIndex)",
+                ].joined(separator: "|"),
+                firstAtomOrdinal: segment.firstAtomOrdinal,
+                lastAtomOrdinal: segment.lastAtomOrdinal,
+                fmDisposition: nil,
+                wasFlagged: false
+            )
+        }
+        return await persistRandomAuditEvents(
+            candidates: candidates,
+            inputs: inputs,
+            jobId: job.jobId,
+            jobPhase: job.phase,
+            runMode: runMode
+        )
+    }
+
+    private func recordRandomAuditEvents(
+        coarseWindows: [FMCoarseWindowOutput],
+        inputs: AssetInputs,
+        jobId: String,
+        jobPhase: BackfillJobPhase,
+        runMode: SemanticScanPhase
+    ) async -> RandomAuditPersistenceResult {
+        guard jobPhase == .scanRandomAuditWindows else {
+            return RandomAuditPersistenceResult(
+                eligibleCandidateCount: 0,
+                persistedEventIds: []
+            )
+        }
+
+        let segmentByIndex = Dictionary(
+            inputs.segments.map { ($0.segmentIndex, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let candidates = coarseWindows.compactMap { window -> RandomNegativeAuditSampler.Candidate? in
+            let segments = window.lineRefs.compactMap { segmentByIndex[$0] }
+            guard let first = segments.map(\.firstAtomOrdinal).min(),
+                  let last = segments.map(\.lastAtomOrdinal).max() else {
+                return nil
+            }
+            return RandomNegativeAuditSampler.Candidate(
+                stableId: [
+                    jobId,
+                    "passA",
+                    "\(window.windowIndex)",
+                    window.lineRefs.map(String.init).joined(separator: ","),
+                ].joined(separator: "|"),
+                firstAtomOrdinal: first,
+                lastAtomOrdinal: last,
+                fmDisposition: window.screening.disposition.rawValue,
+                wasFlagged: window.screening.disposition == .containsAd
+            )
+        }
+        return await persistRandomAuditEvents(
+            candidates: candidates,
+            inputs: inputs,
+            jobId: jobId,
+            jobPhase: jobPhase,
+            runMode: runMode
+        )
+    }
+
+    private func persistRandomAuditEvents(
+        candidates: [RandomNegativeAuditSampler.Candidate],
+        inputs: AssetInputs,
+        jobId: String,
+        jobPhase: BackfillJobPhase,
+        runMode: SemanticScanPhase
+    ) async -> RandomAuditPersistenceResult {
+        // `scanRandomAuditWindows` has already been narrowed to the
+        // configured audit sample. Persist every eligible negative row here;
+        // applying the sample rate again would double-sample the phase.
+        let eligible = candidates
+            .filter { RandomNegativeAuditSampler.isEligibleForNegativeAudit($0) }
+            .sorted { lhs, rhs in
+                if lhs.firstAtomOrdinal == rhs.firstAtomOrdinal {
+                    return lhs.lastAtomOrdinal < rhs.lastAtomOrdinal
+                }
+                return lhs.firstAtomOrdinal < rhs.firstAtomOrdinal
+            }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var persistedIds: [String] = []
+        for candidate in eligible {
+            let payload = RandomNegativeAuditSampler.payload(
+                for: candidate,
+                jobId: jobId,
+                jobPhase: jobPhase.rawValue
+            )
+            let evidenceJSON = (try? encoder.encode(payload))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            let atomOrdinals = Self.atomOrdinalsJSON(
+                first: candidate.firstAtomOrdinal,
+                last: candidate.lastAtomOrdinal
+            )
+            let eventId = Self.makeEvidenceEventId(
+                assetId: inputs.analysisAssetId,
+                transcriptVersion: inputs.transcriptVersion,
+                eventType: "randomAudit",
+                sourceType: .audit,
+                atomOrdinals: atomOrdinals,
+                evidenceJSON: evidenceJSON,
+                scanCohortJSON: scanCohortJSON
+            )
+            do {
+                if let persisted = try await store.insertEvidenceEvent(
+                    EvidenceEvent(
+                        id: eventId,
+                        analysisAssetId: inputs.analysisAssetId,
+                        eventType: "randomAudit",
+                        sourceType: .audit,
+                        atomOrdinals: atomOrdinals,
+                        evidenceJSON: evidenceJSON,
+                        scanCohortJSON: scanCohortJSON,
+                        createdAt: clock().timeIntervalSince1970,
+                        runMode: runMode,
+                        jobPhase: jobPhase.rawValue
+                    ),
+                    transcriptVersion: inputs.transcriptVersion
+                ) {
+                    persistedIds.append(persisted)
+                }
+            } catch {
+                logger.warning(
+                    "Failed to record random audit event for FM job \(jobId, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
+            }
+        }
+
+        return RandomAuditPersistenceResult(
+            eligibleCandidateCount: eligible.count,
+            persistedEventIds: persistedIds
+        )
     }
 
     private func encodeSupport(_ support: CoarseSupportSchema?) -> String {

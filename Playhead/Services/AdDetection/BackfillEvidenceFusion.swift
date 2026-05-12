@@ -458,7 +458,7 @@ struct DecisionMapper: Sendable {
         // Each entry's weight is transformed through the source-specific calibrator
         // from the calibration profile. v0 (identity) produces identical results
         // to the uncalibrated path; v1 reshapes per-source contributions.
-        let calibratedSum = ledger.reduce(0.0) { sum, entry in
+        let calibratedSum = scoringLedger.reduce(0.0) { sum, entry in
             let sourceCalibrator = calibrationProfile.calibrator(for: entry.source)
             return sum + sourceCalibrator.calibrate(entry.weight)
         }
@@ -508,6 +508,10 @@ struct DecisionMapper: Sendable {
     }
 
     // MARK: - Private
+
+    private var scoringLedger: [EvidenceLedgerEntry] {
+        ledger.filter { !$0.source.isObservabilityOnly }
+    }
 
     /// Calibration from proposalConfidence to skipConfidence via the active profile.
     /// v0 profile: identity mapping (direct pass-through). Future profiles apply
@@ -568,7 +572,7 @@ struct DecisionMapper: Sendable {
         }
         guard !hasFMAnchor else { return .standard }
 
-        let hasStrongClassifier = ledger.contains { entry in
+        let hasStrongClassifier = scoringLedger.contains { entry in
             if case .classifier(let score) = entry.detail, score >= 0.70 {
                 return true
             }
@@ -576,7 +580,7 @@ struct DecisionMapper: Sendable {
         }
         guard hasStrongClassifier else { return .standard }
 
-        let hasBreakAlignment = ledger.contains { entry in
+        let hasBreakAlignment = scoringLedger.contains { entry in
             entry.source == .breakAlignment
         }
         guard hasBreakAlignment else { return .standard }
@@ -624,7 +628,7 @@ struct DecisionMapper: Sendable {
     /// pre-z3ch "no FM provenance → eligible" semantics for any ledger
     /// that contains at least one in-audio signal.
     private func metadataCorroborationGate() -> SkipEligibilityGate {
-        let hasMetadata = ledger.contains { $0.source == .metadata }
+        let hasMetadata = scoringLedger.contains { $0.source == .metadata }
         guard hasMetadata else {
             // No metadata contribution at all — preserve pre-z3ch behavior.
             return .eligible
@@ -642,7 +646,7 @@ struct DecisionMapper: Sendable {
         let inAudioCorroboratingSources: Set<EvidenceSourceType> = [
             .lexical, .acoustic, .musicBed, .catalog, .fingerprint, .fm, .breakAlignment
         ]
-        let hasInAudioCorroboration = ledger.contains { entry in
+        let hasInAudioCorroboration = scoringLedger.contains { entry in
             if inAudioCorroboratingSources.contains(entry.source) {
                 return true
             }
@@ -673,7 +677,7 @@ struct DecisionMapper: Sendable {
         // `buildLedger()` is excluded so the gate cannot be satisfied by
         // a single FM signal alone. Sister gate `metadataCorroborationGate`
         // applies the same filter — keep them in sync.
-        let corroboratingSources = Set(ledger.compactMap { entry -> EvidenceSourceType? in
+        let corroboratingSources = Set(scoringLedger.compactMap { entry -> EvidenceSourceType? in
             if entry.source == .classifier, entry.weight == 0 { return nil }
             return entry.source
         })
@@ -700,7 +704,7 @@ struct DecisionMapper: Sendable {
         // is the boundary-alignment entry would silently regress to
         // `.blockedByEvidenceQuorum` where it previously cleared.
         let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .catalog, .acoustic, .musicBed, .fingerprint, .breakAlignment]
-        let hasExternalCorroboration = ledger.contains { entry in
+        let hasExternalCorroboration = scoringLedger.contains { entry in
             if nonClassifierExternal.contains(entry.source) {
                 return true
             }

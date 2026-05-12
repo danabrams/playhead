@@ -490,7 +490,8 @@ struct BackfillJobRunnerTests {
         #expect(failure.windowFirstAtomOrdinal == 0)
         #expect(failure.windowLastAtomOrdinal == 2)
         let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
-        #expect(evidence.isEmpty)
+        #expect(evidence.filter { !$0.sourceType.isObservabilityOnly }.isEmpty)
+        #expect(evidence.filter { $0.eventType == OperationalMetrics.eventType }.count == 1)
     }
 
     @available(iOS 26.0, *)
@@ -709,11 +710,12 @@ struct BackfillJobRunnerTests {
         // C-1 fix this failed because the runner emitted comma-joined ordinals
         // like "1,2,3" which AnalysisStore.validateAtomOrdinalsJSON rejected.
         let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
-        #expect(!evidence.isEmpty, "refinement pass must persist evidence_events rows")
+        let refinementEvidence = evidence.filter { $0.eventType == "fm.spanRefinement" }
+        #expect(!refinementEvidence.isEmpty, "refinement pass must persist evidence_events rows")
         #expect(result.evidenceEventIds.count == evidence.count)
         #expect(Set(result.evidenceEventIds) == Set(evidence.map(\.id)))
         // Every persisted row's atomOrdinals must be a JSON array parseable as [Int].
-        for event in evidence {
+        for event in refinementEvidence {
             let data = Data(event.atomOrdinals.utf8)
             let parsed = try JSONDecoder().decode([Int].self, from: data)
             #expect(!parsed.isEmpty)
@@ -968,7 +970,11 @@ struct BackfillJobRunnerTests {
         #expect(failure.status == .refusal)
         #expect(failure.disposition == .abstain)
         let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
-        #expect(evidence.isEmpty, "no refinement evidence should be written for a refused prompt")
+        #expect(
+            evidence.filter { $0.eventType == "fm.spanRefinement" }.isEmpty,
+            "no refinement evidence should be written for a refused prompt"
+        )
+        #expect(evidence.filter { $0.eventType == OperationalMetrics.eventType }.count == 1)
     }
 
     @Test("refinement writes scan row and evidence events atomically")
@@ -1119,6 +1125,18 @@ struct BackfillJobRunnerTests {
         #expect(row.status == .failed)
         #expect(row.deferReason != nil)
         #expect(row.deferReason?.contains("synthetic classifier failure") == true)
+
+        let events = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
+        let metricEvent = try #require(events.first { $0.eventType == OperationalMetrics.eventType })
+        #expect(result.evidenceEventIds.contains(metricEvent.id))
+        let metrics = try JSONDecoder().decode(
+            OperationalMetrics.self,
+            from: Data(metricEvent.evidenceJSON.utf8)
+        )
+        #expect(metrics.jobId == jobId)
+        #expect(metrics.counters.admissionDecisionCount == 1)
+        #expect(metrics.counters.resumeSuccessCount == 0)
+        #expect(metrics.counters.thermalDeferralCount == 0)
     }
 
     @Test("C-B: runs do not re-admit jobs that have exhausted the retry budget")
@@ -1958,8 +1976,10 @@ struct BackfillJobRunnerTests {
         )
         #expect(passB.count >= 1, "passB scan row must persist; pre-fix this was 0")
         let evidence = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
-        #expect(evidence.count == 2, "distinct same-range evidence rows must both persist")
-        #expect(result.evidenceEventIds.count == 2)
+        let refinementEvidence = evidence.filter { $0.eventType == "fm.spanRefinement" }
+        #expect(refinementEvidence.count == 2, "distinct same-range evidence rows must both persist")
+        #expect(evidence.filter { $0.eventType == OperationalMetrics.eventType }.count == 1)
+        #expect(Set(refinementEvidence.map(\.id)).isSubset(of: Set(result.evidenceEventIds)))
         #expect(Set(result.evidenceEventIds) == Set(evidence.map(\.id)))
     }
 

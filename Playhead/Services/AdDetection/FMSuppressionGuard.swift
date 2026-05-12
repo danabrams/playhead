@@ -78,6 +78,7 @@ struct FMSuppressionGuard: Sendable {
             LexicalPatternCategory.sponsor.rawValue,
         ]
         for entry in ledger {
+            guard !entry.source.isObservabilityOnly else { continue }
             switch entry.detail {
             case .lexical(let matchedCategories):
                 if matchedCategories.contains(where: { strongLexicalCategories.contains($0) }) {
@@ -204,6 +205,10 @@ struct FMSuppressionApplicator: Sendable {
         var hasStrongProposal = false
 
         for entry in ledger {
+            if entry.source.isObservabilityOnly {
+                suppressedLedger.append(entry)
+                continue
+            }
             if isStrongEvidence(entry) {
                 // Strong evidence is NEVER suppressed.
                 suppressedLedger.append(entry)
@@ -263,7 +268,7 @@ struct FMSuppressionApplicator: Sendable {
             return false
         case .fingerprint:
             return true
-        case .classifier, .lexical, .acoustic, .musicBed, .breakAlignment, .catalog, .fusedScore, .metadata:
+        case .classifier, .lexical, .acoustic, .musicBed, .breakAlignment, .catalog, .fusedScore, .metadata, .audit, .operational:
             // playhead-z3ch: metadata is a coarse pre-seed prior, not strong
             // evidence. It must yield to FM noAds suppression like the other
             // soft signals. musicBed is the 2026-04-23 acoustic peer — same

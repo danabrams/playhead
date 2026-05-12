@@ -215,6 +215,24 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// `queryFailed("Unknown evidence source type 'breakAlignment'")`); acceptable
     /// for an additive enum and matches existing behavior for `.musicBed` etc.
     case breakAlignment
+    /// Phase 11 random negative-audit marker. These rows are persisted in
+    /// `evidence_events` for miss-rate estimation, but they are not positive
+    /// FM evidence for training or fusion.
+    case audit
+    /// Phase 11 operational-health payloads for FM backfill jobs/runs.
+    /// These rows use an empty atom ordinal array and are excluded from
+    /// model-training evidence preparation.
+    case operational
+
+    var isObservabilityOnly: Bool {
+        switch self {
+        case .audit, .operational:
+            return true
+        case .fm, .lexical, .acoustic, .catalog, .classifier, .fingerprint,
+             .fusedScore, .metadata, .musicBed, .breakAlignment:
+            return false
+        }
+    }
 }
 
 struct EvidenceEvent: Sendable, Equatable {

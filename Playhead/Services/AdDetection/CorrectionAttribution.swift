@@ -106,11 +106,12 @@ enum CausalInference {
         provenance: [AnchorRef],
         ledgerEntries: [EvidenceLedgerEntry]
     ) -> CausalSource {
-        // If we have ledger entries, use weight-based inference.
-        if !ledgerEntries.isEmpty {
+        let scoringLedger = ledgerEntries.filter { !$0.source.isObservabilityOnly }
+        // If we have scoring ledger entries, use weight-based inference.
+        if !scoringLedger.isEmpty {
             // Accumulate total weight per source type.
             var weightBySource: [EvidenceSourceType: Double] = [:]
-            for entry in ledgerEntries {
+            for entry in scoringLedger {
                 weightBySource[entry.source, default: 0] += entry.weight
             }
 
@@ -164,6 +165,8 @@ enum CausalInference {
         case .fingerprint: return .fingerprint
         case .fusedScore:  return .foundationModel  // fused aggregate ≈ FM pipeline
         case .metadata:    return .lexical  // playhead-z3ch: metadata cues are lexical-family pre-seeds
+        case .audit:       return .foundationModel  // Phase 11 audit metadata, not a skip signal
+        case .operational: return .foundationModel  // Phase 11 operational metadata, not a skip signal
         }
     }
 

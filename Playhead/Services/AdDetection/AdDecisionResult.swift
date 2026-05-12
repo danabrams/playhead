@@ -132,8 +132,9 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
         skipThreshold: Double
     ) -> DecisionExplanation {
         // Aggregate weights per source type
+        let scoringLedger = ledger.filter { !$0.source.isObservabilityOnly }
         var weightBySource: [EvidenceSourceType: Double] = [:]
-        for entry in ledger {
+        for entry in scoringLedger {
             weightBySource[entry.source, default: 0.0] += entry.weight
         }
 
@@ -184,6 +185,7 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
         case .musicBed: return config.acousticCap  // Shares the acoustic family's weight budget.
         case .breakAlignment: return config.breakAlignmentCap  // playhead-fqc8: independent budget from the RMS-drop family.
         case .fusedScore: return 1.0  // Fused score is post-aggregation; no per-source cap applies.
+        case .audit, .operational: return 0.0  // Phase 11 observability rows are not fusion inputs.
         }
     }
 }

@@ -16,6 +16,12 @@ targets:
     platform: iOS
     sources:
       - path: Playhead
+        excludes:
+          # Local diagnostic exports may be left in the workspace for
+          # investigation, but they are not app resources and must not be
+          # swept into the Xcode project by regeneration.
+          - "playhead-diagnostics-*.json"
+          - "playhead-dogfood-diagnostics-*.json"
     resources:
       - path: Playhead/Resources
     settings:

@@ -164,6 +164,30 @@ final class DecisionExplanationBuilderTests: XCTestCase {
         XCTAssertTrue(explanation.actionRationale.skipEligible)
     }
 
+    func testObservabilityRowsAreExcludedFromEvidenceBreakdown() {
+        let ledger = [
+            EvidenceLedgerEntry(source: .classifier, weight: 0.24, detail: .classifier(score: 0.80)),
+            EvidenceLedgerEntry(source: .audit, weight: 1.0, detail: .classifier(score: 1.0)),
+            EvidenceLedgerEntry(source: .operational, weight: 1.0, detail: .classifier(score: 1.0)),
+        ]
+        let decision = DecisionResult(
+            proposalConfidence: 0.24,
+            skipConfidence: 0.24,
+            eligibilityGate: .eligible
+        )
+
+        let explanation = DecisionExplanation.build(
+            ledger: ledger,
+            decision: decision,
+            policyAction: .logOnly,
+            config: FusionWeightConfig(),
+            skipThreshold: 0.65
+        )
+
+        XCTAssertEqual(explanation.evidenceBreakdown.map(\.source), ["classifier"])
+        XCTAssertEqual(explanation.contributingFamilies, ["classifier"])
+    }
+
     func testStrongAuthority() {
         let ledger = [
             EvidenceLedgerEntry(source: .classifier, weight: 0.24, detail: .classifier(score: 0.80)),

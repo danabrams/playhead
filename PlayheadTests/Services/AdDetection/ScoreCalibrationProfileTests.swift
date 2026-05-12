@@ -217,7 +217,13 @@ struct ScoreCalibrationProfileTests {
         //   - .metadata (playhead-z3ch): metadata cues are pre-clamped at fusion
         //     ingress to a hard 0.15 cap; calibration would distort the cap, so
         //     identity is intentional.
-        for source in EvidenceSourceType.allCases where source != .fusedScore && source != .metadata {
+        //   - .audit / .operational: Phase 11 observability rows, not scoring
+        //     signals.
+        for source in EvidenceSourceType.allCases where
+            source != .fusedScore &&
+            source != .metadata &&
+            source != .audit &&
+            source != .operational {
             let cal = profile.calibrator(for: source)
             let testValues = [0.1, 0.3, 0.5, 0.7, 0.9]
             let hasNonIdentity = testValues.contains { abs(cal.calibrate($0) - $0) > 1e-6 }
@@ -337,5 +343,33 @@ struct CalibratedFusionTests {
         let expectedV1 = ScoreCalibrationProfile.v1.calibrator(for: .fm).calibrate(0.35)
         #expect(abs(v1Result.proposalConfidence - expectedV1) < 1e-10)
         #expect(expectedV1 != 0.35, "v1 FM calibrator must transform 0.35 to a different value")
+    }
+
+    @Test("observability sources do not contribute scoring weight or quorum")
+    func observabilitySourcesDoNotContributeScoringWeightOrQuorum() {
+        let span = DecodedSpan(
+            id: DecodedSpan.makeId(assetId: "asset-1", firstAtomOrdinal: 100, lastAtomOrdinal: 200),
+            assetId: "asset-1",
+            firstAtomOrdinal: 100,
+            lastAtomOrdinal: 200,
+            startTime: 10,
+            endTime: 40,
+            anchorProvenance: [.fmConsensus(regionId: "fm-region", consensusStrength: 1.0)]
+        )
+        let ledger: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.40, detail: .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "v1")),
+            .init(source: .audit, weight: 1.0, detail: .classifier(score: 1.0)),
+            .init(source: .operational, weight: 1.0, detail: .classifier(score: 1.0)),
+        ]
+
+        let result = DecisionMapper(
+            span: span,
+            ledger: ledger,
+            config: FusionWeightConfig(),
+            calibrationProfile: .v0
+        ).map()
+
+        #expect(abs(result.proposalConfidence - 0.40) < 1e-10)
+        #expect(result.eligibilityGate == .blockedByEvidenceQuorum)
     }
 }

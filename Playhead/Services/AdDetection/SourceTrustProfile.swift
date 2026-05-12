@@ -86,6 +86,8 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
     case model
     /// External reference signals: fingerprint matching, catalog lookup.
     case reference
+    /// Non-training, non-scoring rows kept only for observability/audit logs.
+    case observability
 
     /// Map an evidence source type to its family.
     static func `for`(_ source: EvidenceSourceType) -> SourceEvidenceFamily {
@@ -105,6 +107,10 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
             return .acoustic
         case .fm:
             return .model
+        case .audit, .operational:
+            // Phase 11 audit/operational rows are persisted alongside
+            // evidence for observability, not as fusion/trust signals.
+            return .observability
         case .fingerprint, .catalog:
             return .reference
         case .fusedScore:
@@ -137,6 +143,8 @@ enum OrthogonalUpdateRule {
         case blockedSameFamily
         /// Blocked: corroborating observation is from the same episode.
         case blockedSameEpisode
+        /// Blocked: audit/operational rows are not trust-update signals.
+        case blockedObservabilityOnly
     }
 
     /// Validate whether a corroboration event satisfies the orthogonal rule.
@@ -153,6 +161,11 @@ enum OrthogonalUpdateRule {
         sourceEpisodeId: String,
         corroboratingEpisodeId: String
     ) -> ValidationResult {
+        guard !sourceToUpdate.isObservabilityOnly,
+              !corroboratingSource.isObservabilityOnly else {
+            return .blockedObservabilityOnly
+        }
+
         // Same-family check takes priority: even if episodes differ,
         // same-family corroboration is never valid.
         let sourceFamily = SourceEvidenceFamily.for(sourceToUpdate)
@@ -247,6 +260,8 @@ struct SourceTrustProfile: Sendable, Equatable {
         // Mirror its acoustic-family peer prior (Beta(5,5) → 0.50)
         // until replay-corpus evidence is available to update it.
         .breakAlignment: BetaPosterior(alpha: 5, beta: 5), // 0.50 — boundary alignment
+        .audit:          BetaPosterior(alpha: 1, beta: 1),  // 0.50 — observability-only
+        .operational:    BetaPosterior(alpha: 1, beta: 1),  // 0.50 — observability-only
     ]
 
     // MARK: - Query
@@ -262,6 +277,7 @@ struct SourceTrustProfile: Sendable, Equatable {
     /// layer's signal quality estimate). Low-observation sources are
     /// already dampened by the Beta prior pulling their mean toward 0.5.
     func effectiveTrust(for source: EvidenceSourceType, confidence: Double) -> Double {
+        guard !source.isObservabilityOnly else { return 0 }
         let p = posterior(for: source)
         return p.effectiveTrust(confidence: confidence)
     }

@@ -158,6 +158,7 @@ struct ScoreCalibrationProfile: Sendable {
         case .musicBed: return acousticCalibrator  // Share the acoustic calibrator until we have music-bed-specific replay-corpus data.
         case .breakAlignment: return acousticCalibrator  // playhead-fqc8: share acoustic calibrator until we have break-alignment-specific replay-corpus data.
         case .fusedScore: return .identity
+        case .audit, .operational: return .identity
         }
     }
 

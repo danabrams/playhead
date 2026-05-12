@@ -89,7 +89,8 @@ struct TrainingExampleMaterializerTests {
         sourceType: EvidenceSourceType,
         firstOrdinal: Int,
         lastOrdinal: Int,
-        certainty: Double = 0.0
+        certainty: Double = 0.0,
+        eventType: String = "scan"
     ) throws -> EvidenceEvent {
         let ordinals = Array(firstOrdinal...lastOrdinal)
         let json = String(
@@ -102,7 +103,7 @@ struct TrainingExampleMaterializerTests {
         return EvidenceEvent(
             id: id,
             analysisAssetId: assetId,
-            eventType: "scan",
+            eventType: eventType,
             sourceType: sourceType,
             atomOrdinals: json,
             evidenceJSON: payload,
@@ -212,6 +213,51 @@ struct TrainingExampleMaterializerTests {
 
         let loaded = try await store.loadTrainingExamples(forAsset: assetId)
         #expect(loaded.count == 3)
+    }
+
+    @Test("Phase 11 observability evidence is excluded from training examples")
+    func observabilityEvidenceExcludedFromTrainingExamples() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-observability", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .noAds
+        ))
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(
+                id: "ev-random-audit",
+                sourceType: .audit,
+                firstOrdinal: 0,
+                lastOrdinal: 10,
+                certainty: 1.0,
+                eventType: "randomAudit"
+            ),
+            transcriptVersion: transcriptVersion
+        )
+        _ = try await store.insertEvidenceEvent(
+            evidenceEvent(
+                id: "ev-operational",
+                sourceType: .operational,
+                firstOrdinal: 0,
+                lastOrdinal: 10,
+                certainty: 1.0,
+                eventType: OperationalMetrics.eventType
+            ),
+            transcriptVersion: transcriptVersion
+        )
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId,
+            store: store,
+            now: 1_700_000_100
+        )
+
+        let row = try #require(try await store.loadTrainingExamples(forAsset: assetId).first)
+        #expect(row.evidenceSources.isEmpty)
+        #expect(row.fmCertainty == 0)
+        #expect(row.bucket == .negative)
     }
 
     @Test("all four buckets are reachable from a realistic fixture")

@@ -415,6 +415,41 @@ struct FMSuppressionApplicatorTests {
         #expect(result.downweightedCount == 1)
     }
 
+    @Test("Observability-only entries are preserved and not counted as scoring suppression")
+    func observabilityOnlyEntriesAreIgnoredBySuppression() {
+        let ledger = [
+            EvidenceLedgerEntry(source: .audit, weight: 1.0, detail: .classifier(score: 1.0)),
+            EvidenceLedgerEntry(source: .operational, weight: 1.0, detail: .classifier(score: 1.0)),
+            EvidenceLedgerEntry(source: .classifier, weight: 0.20, detail: .classifier(score: 0.6)),
+        ]
+        let applicator = FMSuppressionApplicator(suppressionFactor: 0.3)
+        let result = applicator.apply(guardResult: .triggered, ledger: ledger)
+
+        #expect(result.downweightedCount == 1)
+        #expect(result.suppressedLedger[0].weight == 1.0)
+        #expect(result.suppressedLedger[1].weight == 1.0)
+        #expect(abs(result.suppressedLedger[2].weight - 0.20 * 0.3) < 0.001)
+    }
+
+    @Test("Observability-only details do not block suppression guard evaluation")
+    func observabilityOnlyDetailsDoNotBlockSuppressionGuard() {
+        let ledger = [
+            EvidenceLedgerEntry(source: .audit, weight: 1.0, detail: .catalog(entryCount: 1)),
+            EvidenceLedgerEntry(source: .operational, weight: 1.0, detail: .lexical(matchedCategories: ["urlCTA"])),
+            EvidenceLedgerEntry(source: .classifier, weight: 0.20, detail: .classifier(score: 0.6)),
+        ]
+        let guardResult = FMSuppressionGuard(
+            overlappingFMResults: [
+                FMSuppressionWindow(disposition: .noAds, band: .moderate),
+                FMSuppressionWindow(disposition: .noAds, band: .strong),
+            ],
+            ledger: ledger,
+            anchorProvenance: []
+        ).evaluate()
+
+        #expect(guardResult.isTriggered)
+    }
+
     // MARK: - cappedToMarkOnly behavior
 
     @Test("cappedToMarkOnly is true when no strong proposal survives suppression")

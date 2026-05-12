@@ -74,6 +74,7 @@ struct TrainingExampleMaterializer: Sendable {
         // Pre-decode evidence ordinal arrays once (cheap to do up front
         // and avoids re-parsing per scan-row in the inner loop).
         let prepared: [PreparedEvidence] = evidenceEvents.compactMap { ev in
+            guard Self.isTrainingSignalEvidence(ev) else { return nil }
             guard let data = ev.atomOrdinals.data(using: .utf8),
                   let ordinals = try? JSONDecoder().decode([Int].self, from: data),
                   let firstOrdinal = ordinals.min(),
@@ -327,6 +328,10 @@ struct TrainingExampleMaterializer: Sendable {
         let firstOrdinal: Int
         let lastOrdinal: Int
         let certainty: Double
+    }
+
+    private static func isTrainingSignalEvidence(_ event: EvidenceEvent) -> Bool {
+        !event.sourceType.isObservabilityOnly
     }
 
     /// Closed-interval overlap on atom-ordinal ranges.
