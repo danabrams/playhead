@@ -126,6 +126,38 @@ queues can prioritize listening work, but they must not be promoted into
 `Annotations/` until a human has checked the local audio boundaries and
 false-positive traps.
 
+## Current promoted slice
+
+The first promoted audio-reviewed slice was committed on 2026-05-11 from the
+ignored GUI review file `TestFixtures/Corpus/Drafts/l2f-audio-review.json`.
+It covers all 15 selected local review episodes and 33 final review decisions:
+
+- 24 verified ad windows promoted into annotation JSON.
+- 4 reviewed false-positive-trap episodes promoted as no-ad annotation files:
+  `99pi-2026-05-05-enshittification`,
+  `ghost-machine-2024-06-28-episode-7-we-will-catch-you`,
+  `hard-fork-2026-05-08-can-the-u-s-rein-in-prediction-markets-joanna-stern-on-her-year-of-a-i-experimen`,
+  and `radiolab-2026-05-08-the-bad-show`.
+- 5 ordinary false-positive candidates rejected; these produced 3 skipped
+  episodes and intentionally did not create no-ad annotations:
+  `conan-2026-05-04-zach-galifianakis-returns-again`,
+  `conan-2026-05-07-peeping-cooper`, and
+  `daily-2026-05-09-a-personal-finance-star-on-what-millennials-need-from-their-boomer-parents`.
+- 12 annotation JSON files are committed under `Annotations/`, with 24
+  `ad_windows` and 28 explicit `content_windows`.
+
+Promoter category coverage for this slice:
+
+| Category | Total reviewed entries | Verified ad entries |
+| --- | ---: | ---: |
+| `host_read` | 7 | 7 |
+| `dynamic_insertion` | 8 | 8 |
+| `blended_host_read` | 3 | 3 |
+| `produced_segment` | 5 | 5 |
+| `promo` | 1 | 1 |
+| `edge_zero_or_false_positive_trap` | 4 | 0 |
+| `false_positive_rejected` | 5 | 0 |
+
 ## Worked example
 
 Imagine a 10-minute episode of "Example Pod" with one mid-roll
