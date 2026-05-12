@@ -1,0 +1,53 @@
+{
+  "episode_id": "night-vale-2026-05-01-287-hey-does-anyone-hear-that-sound-behind-the-sky",
+  "show_name": "Night Vale 2026 05 01 287 Hey Does Anyone Hear That Sound Behind The Sky",
+  "duration_seconds": 1866.448922,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 107.0,
+      "advertiser": "Night Vale Presents",
+      "product": "live shows and network shows",
+      "ad_type": "promo",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Opening network/show promo before host-read ad pod."
+    },
+    {
+      "start_seconds": 108.7,
+      "end_seconds": 240.2,
+      "advertiser": "Shopify / Progressive",
+      "product": "commerce platform and insurance",
+      "ad_type": "host_read",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Back-to-back pre-roll sponsor reads; episode content begins after both."
+    },
+    {
+      "start_seconds": 1293.3,
+      "end_seconds": 1462.7,
+      "advertiser": "Saily / Incogni",
+      "product": "eSIM and data-removal services",
+      "ad_type": "host_read",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Back-to-back mid-roll sponsor reads before episode content resumes."
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 107.0,
+      "end_seconds": 108.7,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 240.2,
+      "end_seconds": 1293.3,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1462.7,
+      "end_seconds": 1866.448922,
+      "notes": "Post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:452103dd0805d73a306eb7cd4bc540404e17baa3895c5cfe6732c3b35b55e67a"
+}

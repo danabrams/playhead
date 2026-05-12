@@ -189,7 +189,7 @@ python3 scripts/l2f-promote-reviewed-corpus.py \
   --audio-dir "$OUT/audio" >"$OUT/existing-annotation-dry-run.out"
 grep -q "BLOCKED episode-two-ads" "$OUT/existing-annotation-dry-run.out"
 grep -q "annotation_exists:" "$OUT/existing-annotation-dry-run.out"
-grep -q "ready_episodes=0 blocked_episodes=1" "$OUT/existing-annotation-dry-run.out"
+grep -q "ready_episodes=0 skipped_episodes=0 blocked_episodes=1" "$OUT/existing-annotation-dry-run.out"
 
 if python3 scripts/l2f-promote-reviewed-corpus.py \
   --promote \
@@ -559,15 +559,13 @@ cat > "$OUT/string-false-trap-review.json" <<JSON
 }
 JSON
 
-if python3 scripts/l2f-promote-reviewed-corpus.py \
+python3 scripts/l2f-promote-reviewed-corpus.py \
   --promote \
   --review-file "$OUT/string-false-trap-review.json" \
   --annotations-dir "$OUT/string-false-trap-annotations" \
-  --audio-dir "$OUT/audio" >"$OUT/string-false-trap.out" 2>"$OUT/string-false-trap.err"; then
-  echo "expected string false_positive_trap flag to fail no-ad promotion" >&2
-  exit 1
-fi
-grep -q "invalid_no_ad_annotation:" "$OUT/string-false-trap.out"
+  --audio-dir "$OUT/audio" >"$OUT/string-false-trap.out" 2>"$OUT/string-false-trap.err"
+grep -q "SKIPPED episode-string-false-trap" "$OUT/string-false-trap.out"
+grep -q "false_positive_only:" "$OUT/string-false-trap.out"
 test ! -e "$OUT/string-false-trap-annotations/episode-string-false-trap.json"
 
 cat > "$OUT/non-trap-false-positive-queue.json" <<JSON
@@ -599,16 +597,84 @@ cat > "$OUT/non-trap-false-positive-review.json" <<JSON
 }
 JSON
 
-if python3 scripts/l2f-promote-reviewed-corpus.py \
+python3 scripts/l2f-promote-reviewed-corpus.py \
   --promote \
   --review-file "$OUT/non-trap-false-positive-review.json" \
   --annotations-dir "$OUT/non-trap-false-positive-annotations" \
-  --audio-dir "$OUT/audio" >"$OUT/non-trap-false-positive.out" 2>"$OUT/non-trap-false-positive.err"; then
-  echo "expected non-trap false-positive-only promotion to fail" >&2
-  exit 1
-fi
-grep -q "invalid_no_ad_annotation:" "$OUT/non-trap-false-positive.out"
+  --audio-dir "$OUT/audio" >"$OUT/non-trap-false-positive.out" 2>"$OUT/non-trap-false-positive.err"
+grep -q "SKIPPED episode-non-trap-false-positive" "$OUT/non-trap-false-positive.out"
+grep -q "false_positive_only:" "$OUT/non-trap-false-positive.out"
 test ! -e "$OUT/non-trap-false-positive-annotations/episode-non-trap-false-positive.json"
+
+cat > "$OUT/mixed-skipped-ready-queue.json" <<JSON
+{
+  "schema": "playhead-l2f-review-queue-v1",
+  "entries": [
+    {
+      "id": "episode-non-trap-missing-audio-false-positive#1",
+      "episode_id": "episode-non-trap-missing-audio-false-positive",
+      "candidate_index": 1,
+      "audio_path": "$OUT/audio/does-not-exist.wav",
+      "false_positive_trap": false
+    },
+    {
+      "id": "episode-two-ads#1",
+      "episode_id": "episode-two-ads",
+      "candidate_index": 1,
+      "duration_seconds": 50,
+      "start_seconds": 10,
+      "end_seconds": 20,
+      "ad_type": "host_read",
+      "transition_type": "explicit",
+      "advertiser_guess": "Acme",
+      "product_guess": "Widgets",
+      "audio_path": "$OUT/audio/episode-two-ads.wav",
+      "false_positive_trap": false
+    }
+  ]
+}
+JSON
+
+cat > "$OUT/mixed-skipped-ready-review.json" <<JSON
+{
+  "schema": "playhead-l2f-audio-review-v1",
+  "queue_path": "$OUT/mixed-skipped-ready-queue.json",
+  "reviews": {
+    "episode-non-trap-missing-audio-false-positive#1": {
+      "status": "false_positive",
+      "notes": "A rejected ordinary candidate should be skipped even if annotation metadata is unavailable."
+    },
+    "episode-two-ads#1": {
+      "status": "verified_ad",
+      "show_name": "Fixture Show",
+      "start_seconds": 10,
+      "end_seconds": 20,
+      "advertiser": "Acme",
+      "product": "Widgets",
+      "ad_type": "host_read",
+      "transition_type": "explicit",
+      "notes": "Ready episode must still promote."
+    }
+  }
+}
+JSON
+
+mkdir -p "$OUT/mixed-skipped-ready-annotations"
+printf '{"stale": true}\n' \
+  >"$OUT/mixed-skipped-ready-annotations/episode-non-trap-missing-audio-false-positive.json"
+
+python3 scripts/l2f-promote-reviewed-corpus.py \
+  --promote \
+  --review-file "$OUT/mixed-skipped-ready-review.json" \
+  --annotations-dir "$OUT/mixed-skipped-ready-annotations" \
+  --audio-dir "$OUT/audio" >"$OUT/mixed-skipped-ready.out" 2>"$OUT/mixed-skipped-ready.err"
+grep -q "SKIPPED episode-non-trap-missing-audio-false-positive" "$OUT/mixed-skipped-ready.out"
+test "$(grep -c "missing_audio:" "$OUT/mixed-skipped-ready.out")" = "0"
+test "$(grep -c "annotation_exists:" "$OUT/mixed-skipped-ready.out")" = "0"
+grep -q "READY episode-two-ads" "$OUT/mixed-skipped-ready.out"
+test "$(jq -r '.stale' "$OUT/mixed-skipped-ready-annotations/episode-non-trap-missing-audio-false-positive.json")" = "true"
+test -e "$OUT/mixed-skipped-ready-annotations/episode-two-ads.json"
+jq -e '.ad_windows | length == 1' "$OUT/mixed-skipped-ready-annotations/episode-two-ads.json" >/dev/null
 
 cat > "$OUT/manual-missed-queue.json" <<JSON
 {

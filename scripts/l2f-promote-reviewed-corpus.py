@@ -48,6 +48,8 @@ class EpisodeReport:
     issues: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     annotation: dict[str, Any] | None = None
+    skipped: bool = False
+    skip_reason: str | None = None
     audio_path: Path | None = None
     duration_seconds: float | None = None
 
@@ -508,6 +510,18 @@ def analyze_episode(
     if not safe_artifact_basename(episode_id):
         report.issues.append("unsafe_episode_id: episode_id cannot contain path separators")
 
+    if not report.issues and all(
+        clean_string(review_for(entry, reviews).get("status")) == "false_positive"
+        and not is_false_positive_trap(entry)
+        for entry in entries
+    ):
+        report.skipped = True
+        report.skip_reason = (
+            "false_positive_only: rejected ordinary candidates do not create "
+            "whole-episode no-ad annotations"
+        )
+        return report
+
     audio_path = find_audio(episode_id, entries, audio_dir, queue_dir)
     report.audio_path = audio_path
     if audio_path is None:
@@ -684,13 +698,20 @@ def print_report(
 
     print("\nepisode_readiness:")
     for report in reports:
-        state = "READY" if report.ready else "BLOCKED"
+        if report.ready:
+            state = "READY"
+        elif report.skipped:
+            state = "SKIPPED"
+        else:
+            state = "BLOCKED"
         ad_count = len(report.annotation["ad_windows"]) if report.annotation else 0
         duration = f"{report.duration_seconds:.3f}" if report.duration_seconds else "unknown"
         print(
             f"  {state} {report.episode_id}: entries={len(report.entries)} "
             f"ads={ad_count} duration={duration}"
         )
+        if report.skip_reason:
+            print(f"    skipped: {report.skip_reason}")
         for warning in report.warnings:
             print(f"    warning: {warning}")
         for issue in report.issues:
@@ -747,14 +768,14 @@ def main(argv: list[str]) -> int:
 
     for report in reports:
         out = annotations_dir / f"{report.episode_id}.json"
-        if out.exists() and not args.force:
+        if report.annotation is not None and out.exists() and not args.force:
             report.issues.append("annotation_exists: pass --force to overwrite existing annotation")
             report.annotation = None
 
     print_report(review_path, review_missing, queue_path, entries, reports, reviews)
     sys.stdout.flush()
 
-    blocked = [report for report in reports if not report.ready]
+    blocked = [report for report in reports if report.issues]
     if args.promote:
         if blocked:
             print(
@@ -765,7 +786,8 @@ def main(argv: list[str]) -> int:
         written: list[Path] = []
         try:
             for report in reports:
-                assert report.annotation is not None
+                if report.annotation is None:
+                    continue
                 out = annotations_dir / f"{report.episode_id}.json"
                 write_annotation(out, report.annotation, args.force)
                 written.append(out)
@@ -777,7 +799,11 @@ def main(argv: list[str]) -> int:
             print(f"  {path}")
     else:
         ready = sum(1 for report in reports if report.ready)
-        print(f"\ndry_run: no annotations written; ready_episodes={ready} blocked_episodes={len(blocked)}")
+        skipped = sum(1 for report in reports if report.skipped)
+        print(
+            f"\ndry_run: no annotations written; ready_episodes={ready} "
+            f"skipped_episodes={skipped} blocked_episodes={len(blocked)}"
+        )
     return 0
 
 

@@ -1,0 +1,58 @@
+{
+  "episode_id": "huberman-2026-05-07-essentials-compulsive-behaviors-deep-brain-stimulation-dr-casey-halpern",
+  "show_name": "Huberman 2026 05 07 Essentials Compulsive Behaviors Deep Brain Stimulation Dr Casey Halpern",
+  "duration_seconds": 2271.947756,
+  "ad_windows": [
+    {
+      "start_seconds": 612.0,
+      "end_seconds": 709.4,
+      "advertiser": "Function",
+      "product": "health testing membership",
+      "ad_type": "host_read",
+      "transition_type": "explicit",
+      "confidence_notes": "Explicit quick-break sponsor read."
+    },
+    {
+      "start_seconds": 1108.6,
+      "end_seconds": 1187.0,
+      "advertiser": "AG1",
+      "product": "nutrition supplement",
+      "ad_type": "blended_host_read",
+      "transition_type": "blended",
+      "confidence_notes": "Sponsor read starts from host personal-use framing and returns directly to interview content."
+    },
+    {
+      "start_seconds": 1651.2,
+      "end_seconds": 1726.6,
+      "advertiser": "Rorra",
+      "product": "water filter",
+      "ad_type": "blended_host_read",
+      "transition_type": "blended",
+      "confidence_notes": "Host-read product segment leading into URL CTA."
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 612.0,
+      "notes": "Pre-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 709.4,
+      "end_seconds": 1108.6,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1187.0,
+      "end_seconds": 1651.2,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1726.6,
+      "end_seconds": 2271.947756,
+      "notes": "Post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:dd0d1415f521d1dedc14a965129463c7b4a7f321360f4c1e22b3a20091638666"
+}

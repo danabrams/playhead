@@ -1,0 +1,67 @@
+{
+  "episode_id": "unexplained-2026-05-01-season-09-episode-20-over-the-hills-and-far-away",
+  "show_name": "Unexplained 2026 05 01 Season 09 Episode 20 Over The Hills And Far Away",
+  "duration_seconds": 2487.405714,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 185.2,
+      "advertiser": "iHeart / Amyloid / IBM / Kesimpta / Vital Farms / CrimeCon",
+      "product": "network intro, health, enterprise AI, prescription drug, eggs, event promo",
+      "ad_type": "dynamic_insertion",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Pre-roll chain of inserted ads/promos before episode content."
+    },
+    {
+      "start_seconds": 687.4,
+      "end_seconds": 914.1,
+      "advertiser": "Amyloid / Pets Best / Hero Bread / Reynolds Kitchens",
+      "product": "health info, pet insurance, food products, prep paper",
+      "ad_type": "dynamic_insertion",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Mid-roll inserted ad pod; content resumes after Reynolds ad."
+    },
+    {
+      "start_seconds": 1472.0,
+      "end_seconds": 1665.3,
+      "advertiser": "Amyloid / Pets Best / Hero Bread / Reynolds Kitchens",
+      "product": "health info, pet insurance, food products, prep paper",
+      "ad_type": "dynamic_insertion",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Second mid-roll inserted ad pod before story content resumes."
+    },
+    {
+      "start_seconds": 2319.8,
+      "end_seconds": 2487.4,
+      "advertiser": "Amyloid / Gilead / Prime Video / Reynolds Kitchens",
+      "product": "health info, PrEP education, video streaming, prep paper",
+      "ad_type": "dynamic_insertion",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Post-roll inserted ad pod after show outro/music."
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 185.2,
+      "end_seconds": 687.4,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 914.1,
+      "end_seconds": 1472.0,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1665.3,
+      "end_seconds": 2319.8,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2487.4,
+      "end_seconds": 2487.405714,
+      "notes": "Post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:91ed45f2e4a628f3f7298062e0dd8e828363d88081e7280514d75e816ee8e286"
+}

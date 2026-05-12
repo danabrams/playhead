@@ -1,0 +1,39 @@
+{
+  "episode_id": "doac-2026-05-08-most-replayed-moment-this-is-the-best-exercise-protocol-for-women",
+  "show_name": "Doac 2026 05 08 Most Replayed Moment This Is The Best Exercise Protocol For Women",
+  "duration_seconds": 1951.373061,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 75.2,
+      "advertiser": "Lufthansa",
+      "product": "Allegris Business Class",
+      "ad_type": "host_read",
+      "transition_type": "explicit",
+      "confidence_notes": "Opening sponsor read before content."
+    },
+    {
+      "start_seconds": 1868.5,
+      "end_seconds": 1947.0,
+      "advertiser": "Lufthansa",
+      "product": "Allegris Business Class",
+      "ad_type": "host_read",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Closing sponsor read after episode excerpt."
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 75.2,
+      "end_seconds": 1868.5,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1947.0,
+      "end_seconds": 1951.373061,
+      "notes": "Post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:bc40dee7c50880b6ef400569cd40fb8f19b0171e221251040ab9fdd72862d477"
+}

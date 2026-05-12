@@ -1,0 +1,15 @@
+{
+  "episode_id": "radiolab-2026-05-08-the-bad-show",
+  "show_name": "Radiolab 2026 05 08 The Bad Show",
+  "duration_seconds": 3998.955063,
+  "ad_windows": [],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 3998.955063,
+      "notes": "Reviewed no-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:789889c352de1e3006fb876381ee5bca82b6096059929990aa143349d0574148"
+}

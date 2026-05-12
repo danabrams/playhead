@@ -1,0 +1,15 @@
+{
+  "episode_id": "99pi-2026-05-05-enshittification",
+  "show_name": "99pi 2026 05 05 Enshittification",
+  "duration_seconds": 2104.973067,
+  "ad_windows": [],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 2104.973067,
+      "notes": "Reviewed no-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:18349b985b9f4d2aa5336d5ce1cafed9abfeaec5703406367dbdd63937b7d325"
+}

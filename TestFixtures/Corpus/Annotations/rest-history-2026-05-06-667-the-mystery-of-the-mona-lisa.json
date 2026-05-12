@@ -1,0 +1,39 @@
+{
+  "episode_id": "rest-history-2026-05-06-667-the-mystery-of-the-mona-lisa",
+  "show_name": "Rest History 2026 05 06 667 The Mystery Of The Mona Lisa",
+  "duration_seconds": 4349.466067,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 169.1,
+      "advertiser": "Lloyds / Mint Mobile / Apple Card",
+      "product": "banking, wireless service, credit card",
+      "ad_type": "produced_segment",
+      "transition_type": "explicit",
+      "confidence_notes": "Opening ad pod; transcript segment at the end blends ad disclaimer into content, so audio review should refine the exact boundary."
+    },
+    {
+      "start_seconds": 2542.2,
+      "end_seconds": 2671.1,
+      "advertiser": "Mint Mobile / Tremfya / Carvana",
+      "product": "wireless service, prescription drug, car selling",
+      "ad_type": "produced_segment",
+      "transition_type": "explicit",
+      "confidence_notes": "Mid-roll break ad pod between explicit break and return."
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 169.1,
+      "end_seconds": 2542.2,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2671.1,
+      "end_seconds": 4349.466067,
+      "notes": "Post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:cf354d8cd96b64c067c7d0b23e1b9ebfb02a820b8edced3dc2c219bdcf515978"
+}

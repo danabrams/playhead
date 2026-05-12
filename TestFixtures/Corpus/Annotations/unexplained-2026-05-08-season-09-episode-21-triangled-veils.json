@@ -1,0 +1,62 @@
+{
+  "episode_id": "unexplained-2026-05-08-season-09-episode-21-triangled-veils",
+  "show_name": "Unexplained 2026 05 08 Season 09 Episode 21 Triangled Veils",
+  "duration_seconds": 2566.687347,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 171.3,
+      "advertiser": "iHeart / IBM / Kesimpta / UnitedHealthcare / Vital Farms / CrimeCon",
+      "product": "network intro, enterprise AI, prescription drug, health care, eggs, event promo",
+      "ad_type": "dynamic_insertion",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Pre-roll inserted ad/promo chain before episode content."
+    },
+    {
+      "start_seconds": 789.8,
+      "end_seconds": 955.2,
+      "advertiser": "Pets Best / Hero Bread / Reynolds Kitchens / HomeSense",
+      "product": "pet insurance, food products, prep paper, retail",
+      "ad_type": "dynamic_insertion",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Mid-roll inserted ad pod before story content resumes."
+    },
+    {
+      "start_seconds": 1516.7,
+      "end_seconds": 1677.7,
+      "advertiser": "Pets Best / Hero Bread / Reynolds Kitchens / HomeSense",
+      "product": "pet insurance, food products, prep paper, retail",
+      "ad_type": "dynamic_insertion",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Second mid-roll inserted ad pod before story content resumes."
+    },
+    {
+      "start_seconds": 2389.7,
+      "end_seconds": 2566.687347,
+      "advertiser": "Gilead / Prime Video / Reynolds Kitchens / HomeSense / iHeart",
+      "product": "PrEP education, video streaming, prep paper, retail, network outro",
+      "ad_type": "dynamic_insertion",
+      "transition_type": "hard_cut",
+      "confidence_notes": "Post-roll inserted ad chain after show outro/music."
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 171.3,
+      "end_seconds": 789.8,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 955.2,
+      "end_seconds": 1516.7,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1677.7,
+      "end_seconds": 2389.7,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:16f974feb751f783a8f96be92cda6931ca95f119f70cf233f95104bb3ef7c21d"
+}

@@ -1,0 +1,39 @@
+{
+  "episode_id": "doac-2026-05-07-ww3-expert-this-could-trigger-global-starvation",
+  "show_name": "Doac 2026 05 07 Ww3 Expert This Could Trigger Global Starvation",
+  "duration_seconds": 8023.640816,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 75.2,
+      "advertiser": "Lufthansa",
+      "product": "Allegris Business Class",
+      "ad_type": "host_read",
+      "transition_type": "explicit",
+      "confidence_notes": "Opening sponsor read before interview content."
+    },
+    {
+      "start_seconds": 4044.3,
+      "end_seconds": 4103.4,
+      "advertiser": "shopify",
+      "product": "Shopify",
+      "ad_type": "blended_host_read",
+      "transition_type": "blended",
+      "confidence_notes": "Host-read sponsor segment inserted mid-interview; transcript resumes interview immediately after CTA."
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 75.2,
+      "end_seconds": 4044.3,
+      "notes": "Inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 4103.4,
+      "end_seconds": 8023.640816,
+      "notes": "Post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:b876aeb67e76d4e9c4b387fa191e163e19318db211b8a31025b7607904ddb4cd"
+}
