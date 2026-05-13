@@ -6,15 +6,18 @@
 // confidence into stable ad spans with calibrated probability scores.
 //
 // Two implementations:
-//   1. RuleBasedClassifier — heuristic combination of feature + lexical signals.
-//      Ships as the default until a trained CoreML model is available.
-//   2. (Future) CoreMLClassifier — sequence model consuming the same inputs.
+//   1. CoreMLSequenceClassifier — production default that uses a bundled
+//      CoreML model when present and falls back to RuleBasedClassifier.
+//   2. RuleBasedClassifier — deterministic heuristic combination of feature
+//      + lexical signals, used as the no-model/error fallback.
 //
-// CoreML model interface (when trained):
-//   Input:  [CandidateFeatureVector] — one per feature window in the region
-//           Each vector: rms, spectralFlux, musicProbability, pauseProbability,
-//                        speakerClusterId (one-hot), lexicalConfidence,
-//                        categoryFlags (5 bools), positionInEpisode (0..1)
+// CoreML model interface:
+//   Input:  MLMultiArray of CandidateFeatureVector rows, capped at the
+//           classifier's maximum sequence length and padded/truncated by the
+//           CoreML predictor when the bundled model declares a fixed shape.
+//           Each 24-value row includes acoustic window features, lexical
+//           confidence/hit/category signals, normalized timing, per-show slot
+//           prior/trust, sponsor hit, relative window start, and sequence index.
 //   Output: adProbability (Float), boundaryStartAdjust (Float),
 //           boundaryEndAdjust (Float)
 //   The model should be a small GRU or 1-D conv (~200 KB) exportable via
@@ -283,11 +286,11 @@ enum RegionScoring {
 
 // MARK: - ClassifierService Protocol
 
-/// Protocol for ad region classifiers. Both the rule-based heuristic
-/// and the future CoreML model implement this interface.
+/// Protocol for ad region classifiers. Both the CoreML-capable classifier and
+/// the rule-based fallback implement this interface.
 protocol ClassifierService: Sendable {
-    /// Classify a batch of candidate regions. Returns results sorted by
-    /// start time. Implementations must complete within the hot-path
+    /// Classify a batch of candidate regions. Returns results in the same
+    /// order as the input array. Implementations must complete within the hot-path
     /// budget (< 100 ms per candidate).
     func classify(inputs: [ClassifierInput], priors: ShowPriors) -> [ClassifierResult]
 
@@ -298,8 +301,8 @@ protocol ClassifierService: Sendable {
 // MARK: - RuleBasedClassifier
 
 /// Heuristic classifier that combines acoustic features and lexical signals
-/// to produce calibrated ad probabilities. Serves as the production default
-/// until a trained CoreML model replaces it.
+/// to produce calibrated ad probabilities. Serves as the deterministic fallback
+/// when a bundled CoreML model is unavailable or prediction fails.
 ///
 /// Scoring pipeline:
 ///   1. Compute per-signal scores across the candidate's feature windows.

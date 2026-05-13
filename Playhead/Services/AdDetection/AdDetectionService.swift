@@ -646,7 +646,7 @@ actor AdDetectionService {
 
     init(
         store: AnalysisStore,
-        classifier: ClassifierService = RuleBasedClassifier(),
+        classifier: ClassifierService = CoreMLSequenceClassifier(),
         metadataExtractor: MetadataExtractor,
         config: AdDetectionConfig = .default,
         podcastProfile: PodcastProfile? = nil,
