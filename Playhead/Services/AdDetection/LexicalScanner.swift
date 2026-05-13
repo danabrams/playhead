@@ -317,9 +317,11 @@ struct LexicalScanner: Sendable {
             }
         }
 
-        // Scan compiled sponsor knowledge patterns (boosted weight) over
-        // normalized text. These come from active SponsorKnowledgeStore
-        // entries and coexist with the per-show showSponsorPatterns above.
+        // Scan compiled sponsor knowledge patterns over normalized text.
+        // Local patterns come from active SponsorKnowledgeStore entries and
+        // keep the historical boosted weight. Shared artifact patterns are
+        // candidate-only until locally confirmed, so they intentionally do not
+        // receive high-weight single-hit bypass authority.
         // Deduplicate: track NSRange locations already matched by
         // showSponsorPatterns so knowledge-store hits at the same character
         // offset are skipped. Uses integer range locations instead of
@@ -335,31 +337,68 @@ struct LexicalScanner: Sendable {
                 let microsecondKey = Int(hit.startTime * 1_000_000)
                 matchedSponsorLocations.insert(microsecondKey)
             }
-            for pattern in lexicon.patterns {
-                let matches = pattern.matches(in: normalizedText, range: normalizedRange)
-                for match in matches {
-                    let matchedText = normalizedNS.substring(with: match.range)
-                    let (startTime, endTime) = interpolateTiming(
-                        matchRange: match.range,
-                        textLength: normalizedNS.length,
-                        chunkStart: chunk.startTime,
-                        chunkEnd: chunk.endTime
-                    )
-                    let microsecondKey = Int(startTime * 1_000_000)
-                    guard !matchedSponsorLocations.contains(microsecondKey) else { continue }
-                    matchedSponsorLocations.insert(microsecondKey)
-                    hits.append(LexicalHit(
-                        category: .sponsor,
-                        matchedText: matchedText,
-                        startTime: startTime,
-                        endTime: endTime,
-                        weight: 1.5 // Boosted: known sponsor from knowledge store
-                    ))
-                }
-            }
+            appendCompiledSponsorHits(
+                patterns: lexicon.localPatterns,
+                weight: 1.5,
+                normalizedText: normalizedText,
+                normalizedNS: normalizedNS,
+                normalizedRange: normalizedRange,
+                chunk: chunk,
+                matchedSponsorLocations: &matchedSponsorLocations,
+                hits: &hits
+            )
+            appendCompiledSponsorHits(
+                patterns: lexicon.sharedCandidatePatterns,
+                // Shared public facts may surface candidate regions, but
+                // they must not count as strong lexical safety evidence for
+                // auto-skip before local confirmation.
+                category: .transitionMarker,
+                weight: 0.8,
+                normalizedText: normalizedText,
+                normalizedNS: normalizedNS,
+                normalizedRange: normalizedRange,
+                chunk: chunk,
+                matchedSponsorLocations: &matchedSponsorLocations,
+                hits: &hits
+            )
         }
 
         return hits
+    }
+
+    private func appendCompiledSponsorHits(
+        patterns: [NSRegularExpression],
+        category: LexicalPatternCategory = .sponsor,
+        weight: Double,
+        normalizedText: String,
+        normalizedNS: NSString,
+        normalizedRange: NSRange,
+        chunk: TranscriptChunk,
+        matchedSponsorLocations: inout Set<Int>,
+        hits: inout [LexicalHit]
+    ) {
+        for pattern in patterns {
+            let matches = pattern.matches(in: normalizedText, range: normalizedRange)
+            for match in matches {
+                let matchedText = normalizedNS.substring(with: match.range)
+                let (startTime, endTime) = interpolateTiming(
+                    matchRange: match.range,
+                    textLength: normalizedNS.length,
+                    chunkStart: chunk.startTime,
+                    chunkEnd: chunk.endTime
+                )
+                let microsecondKey = Int(startTime * 1_000_000)
+                guard !matchedSponsorLocations.contains(microsecondKey) else { continue }
+                matchedSponsorLocations.insert(microsecondKey)
+                hits.append(LexicalHit(
+                    category: category,
+                    matchedText: matchedText,
+                    startTime: startTime,
+                    endTime: endTime,
+                    weight: weight
+                ))
+            }
+        }
     }
 
     /// Re-scan only alternative-transcription and low-confidence text within a
