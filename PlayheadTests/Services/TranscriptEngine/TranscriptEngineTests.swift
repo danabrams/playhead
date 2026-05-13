@@ -136,16 +136,17 @@ private func makeSegment(
     startTime: TimeInterval = 0,
     endTime: TimeInterval = 0.5,
     passType: TranscriptPassType = .fast,
-    speakerId: Int? = nil
+    speakerId: Int? = nil,
+    avgConfidence: Float = 0.95
 ) -> TranscriptSegment {
-    let word = TranscriptWord(text: text, startTime: startTime, endTime: endTime, confidence: 0.95)
+    let word = TranscriptWord(text: text, startTime: startTime, endTime: endTime, confidence: avgConfidence)
     return TranscriptSegment(
         id: id,
         words: [word],
         text: text,
         startTime: startTime,
         endTime: endTime,
-        avgConfidence: 0.95,
+        avgConfidence: avgConfidence,
         passType: passType,
         speakerId: speakerId
     )
@@ -935,9 +936,9 @@ struct TranscriptEngineSpeakerIdTests {
 
         let recognizer = MockSpeechRecognizer()
         recognizer.transcribeResult = [
-            makeSegment(id: 0, text: "host intro", startTime: 0, endTime: 5, speakerId: 1),
-            makeSegment(id: 1, text: "guest answer", startTime: 5, endTime: 10, speakerId: 2),
-            makeSegment(id: 2, text: "guest continues", startTime: 10, endTime: 15, speakerId: 2),
+            makeSegment(id: 0, text: "host intro", startTime: 0, endTime: 5, speakerId: 1, avgConfidence: 0.93),
+            makeSegment(id: 1, text: "guest answer", startTime: 5, endTime: 10, speakerId: 2, avgConfidence: 0.72),
+            makeSegment(id: 2, text: "guest continues", startTime: 10, endTime: 15, speakerId: 2, avgConfidence: 0.84),
         ]
         let speech = SpeechService(recognizer: recognizer)
         try await speech.loadFastModel()
@@ -970,8 +971,16 @@ struct TranscriptEngineSpeakerIdTests {
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-speakers")
         #expect(chunks.count == 3)
         #expect(chunks.map { $0.speakerId ?? -1 } == [1, 2, 2])
+        #expect(chunks.compactMap(\.avgConfidence).count == 3)
+        #expect(abs((chunks[0].avgConfidence ?? 0) - 0.93) < 0.001)
+        #expect(abs((chunks[1].avgConfidence ?? 0) - 0.72) < 0.001)
+        #expect(abs((chunks[2].avgConfidence ?? 0) - 0.84) < 0.001)
         #expect(eventChunks.count == 3)
         #expect(eventChunks.map { $0.speakerId ?? -1 } == [1, 2, 2])
+        #expect(eventChunks.compactMap(\.avgConfidence).count == 3)
+        #expect(abs((eventChunks[0].avgConfidence ?? 0) - 0.93) < 0.001)
+        #expect(abs((eventChunks[1].avgConfidence ?? 0) - 0.72) < 0.001)
+        #expect(abs((eventChunks[2].avgConfidence ?? 0) - 0.84) < 0.001)
 
         let snapshot = EpisodeTraitSnapshotBuilder.build(
             featureWindows: [],
@@ -982,6 +991,7 @@ struct TranscriptEngineSpeakerIdTests {
         )
         #expect(snapshot.speakerTurnRate > 0)
         #expect(abs(snapshot.singleSpeakerDominance - Float(2.0 / 3.0)) < 0.001)
+        #expect(abs(snapshot.transcriptReliability - 0.83) < 0.001)
     }
 
     @Test("missing recognizer speakerId remains nil in chunks and events", .timeLimit(.minutes(1)))
@@ -1028,14 +1038,14 @@ struct TranscriptEngineSpeakerIdTests {
         #expect(eventChunks.allSatisfy { $0.speakerId == nil })
     }
 
-    @Test("duplicate fingerprint can upgrade missing speakerId and re-emit chunk", .timeLimit(.minutes(1)))
-    func duplicateFingerprintUpgradesMissingSpeakerId() async throws {
+    @Test("duplicate fingerprint can upgrade missing speakerId and avgConfidence and re-emit chunk", .timeLimit(.minutes(1)))
+    func duplicateFingerprintUpgradesMissingSpeakerIdAndAvgConfidence() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeTranscriptAsset(id: "asset-speaker-upgrade", episodeId: "ep-speaker-upgrade"))
 
         let recognizer = MockSpeechRecognizer()
         recognizer.transcribeResult = [
-            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5)
+            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, avgConfidence: .nan)
         ]
         let speech = SpeechService(recognizer: recognizer)
         try await speech.loadFastModel()
@@ -1055,7 +1065,7 @@ struct TranscriptEngineSpeakerIdTests {
         }
 
         recognizer.transcribeResult = [
-            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 4)
+            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 4, avgConfidence: 0.82)
         ]
 
         let secondEvents = await engine.events()
@@ -1084,19 +1094,21 @@ struct TranscriptEngineSpeakerIdTests {
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-speaker-upgrade")
         #expect(chunks.count == 1)
         #expect(chunks[0].speakerId == 4)
+        #expect(abs((chunks[0].avgConfidence ?? 0) - 0.82) < 0.001)
         #expect(upgradedEventChunks.count == 1)
         #expect(upgradedEventChunks[0].speakerId == 4)
+        #expect(abs((upgradedEventChunks[0].avgConfidence ?? 0) - 0.82) < 0.001)
     }
 
-    @Test("duplicate fingerprint fills speakerId on every matching missing row", .timeLimit(.minutes(1)))
-    func duplicateFingerprintFillsSpeakerIdAcrossMatchingRows() async throws {
+    @Test("duplicate fingerprint fills missing speakerId and avgConfidence across matching rows", .timeLimit(.minutes(1)))
+    func duplicateFingerprintFillsSpeakerIdAndAvgConfidenceAcrossMatchingRows() async throws {
         let assetId = "asset-speaker-duplicate-rows"
         let store = try await makeTestStore()
         try await store.insertAsset(makeTranscriptAsset(id: assetId, episodeId: "ep-speaker-duplicate-rows"))
 
         let recognizer = MockSpeechRecognizer()
         recognizer.transcribeResult = [
-            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 7)
+            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 7, avgConfidence: 0.61)
         ]
         let speech = SpeechService(recognizer: recognizer)
         try await speech.loadFastModel()
@@ -1130,9 +1142,13 @@ struct TranscriptEngineSpeakerIdTests {
             transcriptVersion: original.transcriptVersion,
             atomOrdinal: original.atomOrdinal,
             weakAnchorMetadata: original.weakAnchorMetadata,
-            speakerId: nil
+            speakerId: nil,
+            avgConfidence: nil
         ))
 
+        recognizer.transcribeResult = [
+            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 7, avgConfidence: 0.77)
+        ]
         let secondEvents = await engine.events()
         await engine.startTranscription(
             shards: [makeShard(id: 0, startTime: 0, duration: 30)],
@@ -1150,6 +1166,8 @@ struct TranscriptEngineSpeakerIdTests {
             .filter { $0.segmentFingerprint == original.segmentFingerprint }
         #expect(matchingChunks.count == 2)
         #expect(matchingChunks.allSatisfy { $0.speakerId == 7 })
+        #expect(abs((matchingChunks[0].avgConfidence ?? 0) - 0.61) < 0.001)
+        #expect(abs((matchingChunks[1].avgConfidence ?? 0) - 0.77) < 0.001)
     }
 }
 

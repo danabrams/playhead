@@ -17,7 +17,8 @@ private func makeChunk(
     endTime: Double = 5,
     text: String = "hello world",
     pass: String = "final",
-    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
+    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil,
+    avgConfidence: Float? = nil
 ) -> TranscriptChunk {
     TranscriptChunk(
         id: id,
@@ -32,7 +33,8 @@ private func makeChunk(
         modelVersion: "speech-v1",
         transcriptVersion: nil,
         atomOrdinal: nil,
-        weakAnchorMetadata: weakAnchorMetadata
+        weakAnchorMetadata: weakAnchorMetadata,
+        avgConfidence: avgConfidence
     )
 }
 
@@ -1005,7 +1007,8 @@ struct TranscriptChunkMigrationTests {
                         confidence: 0.21
                     )
                 ]
-            )
+            ),
+            avgConfidence: 0.83
         )
         try await store.insertTranscriptChunk(chunk)
 
@@ -1017,6 +1020,46 @@ struct TranscriptChunkMigrationTests {
         #expect(fetched[0].weakAnchorMetadata?.minimumConfidence == 0.21)
         #expect(fetched[0].weakAnchorMetadata?.alternativeTexts == ["sponsored by betterhelp"])
         #expect(fetched[0].weakAnchorMetadata?.lowConfidencePhrases.first?.text == "better help")
+        #expect(fetched[0].avgConfidence == 0.83)
+    }
+
+    @Test("avgConfidence clamps finite values and drops non-finite values on round-trip")
+    func avgConfidenceDefensiveRoundTrip() async throws {
+        let store = try await makeTestStore()
+
+        let asset = AnalysisAsset(
+            id: "asset-confidence", episodeId: "ep-confidence",
+            assetFingerprint: "fp-confidence", weakFingerprint: nil,
+            sourceURL: "file:///confidence.m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "running", analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+        try await store.insertAsset(asset)
+
+        try await store.insertTranscriptChunk(makeChunk(
+            id: "chunk-negative-confidence",
+            assetId: "asset-confidence",
+            chunkIndex: 0,
+            avgConfidence: -0.4
+        ))
+        try await store.insertTranscriptChunk(makeChunk(
+            id: "chunk-high-confidence",
+            assetId: "asset-confidence",
+            chunkIndex: 1,
+            avgConfidence: 1.4
+        ))
+        try await store.insertTranscriptChunk(makeChunk(
+            id: "chunk-nan-confidence",
+            assetId: "asset-confidence",
+            chunkIndex: 2,
+            avgConfidence: .nan
+        ))
+
+        let fetched = try await store.fetchTranscriptChunks(assetId: "asset-confidence")
+        #expect(fetched.map(\.avgConfidence) == [0.0, 1.0, nil])
     }
 
     @Test("ALTER TABLE migration backfills legacy transcript chunks")
@@ -1075,6 +1118,7 @@ struct TranscriptChunkMigrationTests {
             #expect(fetched[0].transcriptVersion == fetched[1].transcriptVersion)
             #expect(fetched[0].transcriptVersion?.isEmpty == false)
             #expect(fetched.allSatisfy { $0.weakAnchorMetadata == nil })
+            #expect(fetched.allSatisfy { $0.avgConfidence == nil })
 
             // New row with non-nil values should round-trip
             let newChunk = TranscriptChunk(
@@ -1090,7 +1134,8 @@ struct TranscriptChunkMigrationTests {
                     minimumConfidence: 0.44,
                     alternativeTexts: ["visit betterhelp dot com"],
                     lowConfidencePhrases: []
-                )
+                ),
+                avgConfidence: 0.73
             )
             try await store.insertTranscriptChunk(newChunk)
 
@@ -1100,6 +1145,7 @@ struct TranscriptChunkMigrationTests {
             #expect(newRow.transcriptVersion == "version-hash")
             #expect(newRow.atomOrdinal == 7)
             #expect(newRow.weakAnchorMetadata?.alternativeTexts == ["visit betterhelp dot com"])
+            #expect(newRow.avgConfidence == 0.73)
         }
     }
 
@@ -1132,7 +1178,8 @@ struct TranscriptChunkMigrationTests {
                 pass: "fast", modelVersion: "v1",
                 transcriptVersion: nil,
                 atomOrdinal: nil,
-                weakAnchorMetadata: nil
+                weakAnchorMetadata: nil,
+                avgConfidence: nil
             )
             try await store.insertTranscriptChunk(chunk)
         }
@@ -1145,5 +1192,6 @@ struct TranscriptChunkMigrationTests {
         #expect(fetched[0].transcriptVersion == nil)
         #expect(fetched[0].atomOrdinal == nil)
         #expect(fetched[0].weakAnchorMetadata == nil)
+        #expect(fetched[0].avgConfidence == nil)
     }
 }

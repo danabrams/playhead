@@ -290,6 +290,7 @@ struct TranscriptChunk: Sendable {
     let atomOrdinal: Int?            // nil for fast-pass chunks
     let weakAnchorMetadata: TranscriptWeakAnchorMetadata?
     let speakerId: Int?              // B7: validated speaker label, nil when unavailable
+    let avgConfidence: Float?        // ASR average confidence, nil on legacy/unavailable rows
 
     init(
         id: String,
@@ -305,7 +306,8 @@ struct TranscriptChunk: Sendable {
         transcriptVersion: String?,
         atomOrdinal: Int?,
         weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil,
-        speakerId: Int? = nil
+        speakerId: Int? = nil,
+        avgConfidence: Float? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -321,6 +323,12 @@ struct TranscriptChunk: Sendable {
         self.atomOrdinal = atomOrdinal
         self.weakAnchorMetadata = weakAnchorMetadata
         self.speakerId = speakerId
+        self.avgConfidence = Self.sanitizedAvgConfidence(avgConfidence)
+    }
+
+    static func sanitizedAvgConfidence(_ value: Float?) -> Float? {
+        guard let value, value.isFinite else { return nil }
+        return min(max(value, 0), 1)
     }
 }
 
@@ -1539,6 +1547,10 @@ actor AnalysisStore {
             // (renumbered from v24 at integration time — bd-hygc.1.4 took
             // v24 and bd-hygc.1.5 took v25).
             try migrateShadowFMResponsesSummaryV26IfNeeded()
+            // playhead-snat: ASR average confidence on transcript chunks.
+            // Runs after the model/policy/feature-schema column appends so
+            // fresh and upgraded `SELECT *` column ordering stays identical.
+            try addTranscriptChunkAvgConfidenceColumnIfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1802,6 +1814,9 @@ actor AnalysisStore {
         // migration into the ladder seam. Helper is fully idempotent
         // and gated by `tableExists("shadow_fm_responses")`.
         try migrateShadowFMResponsesSummaryV26IfNeeded()
+        // playhead-snat: mirror transcript chunk ASR confidence into the
+        // ladder seam after the existing appended version columns.
+        try addTranscriptChunkAvgConfidenceColumnIfNeeded()
     }
     #endif
 
@@ -4103,6 +4118,22 @@ actor AnalysisStore {
         }
     }
 
+    // MARK: - Transcript chunk ASR confidence (playhead-snat)
+    //
+    // Adds `avgConfidence REAL` to `transcript_chunks`. It intentionally
+    // runs after `addModelPolicyFeatureSchemaVersionColumnsIfNeeded` so
+    // both fresh DBs and upgraded v26 DBs see the same `SELECT *` order:
+    // original transcript columns, model/policy/feature-schema sentinels,
+    // then `avgConfidence`.
+    private func addTranscriptChunkAvgConfidenceColumnIfNeeded() throws {
+        guard try tableExists("transcript_chunks") else { return }
+        try addColumnIfNeeded(
+            table: "transcript_chunks",
+            column: "avgConfidence",
+            definition: "REAL"
+        )
+    }
+
     // MARK: - Repeated-ad cache (playhead-43ed, schema v21)
     //
     // These methods are the persistence-layer surface used by the
@@ -5961,8 +5992,8 @@ actor AnalysisStore {
             INSERT INTO transcript_chunks
             (id, analysisAssetId, segmentFingerprint, chunkIndex, startTime, endTime,
              text, normalizedText, pass, modelVersion, transcriptVersion, atomOrdinal,
-             weakAnchorMetadataJSON, speakerId)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             weakAnchorMetadataJSON, speakerId, avgConfidence)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -5980,6 +6011,7 @@ actor AnalysisStore {
         bind(stmt, 12, chunk.atomOrdinal)
         bind(stmt, 13, try encodeJSONString(chunk.weakAnchorMetadata))
         bind(stmt, 14, chunk.speakerId)
+        bind(stmt, 15, chunk.avgConfidence.map(Double.init))
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -6097,6 +6129,29 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, speakerId)
+        bind(stmt, 2, analysisAssetId)
+        bind(stmt, 3, segmentFingerprint)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    @discardableResult
+    func updateTranscriptChunkAvgConfidenceIfMissing(
+        analysisAssetId: String,
+        segmentFingerprint: String,
+        avgConfidence: Float?
+    ) throws -> Bool {
+        guard let sanitized = TranscriptChunk.sanitizedAvgConfidence(avgConfidence) else {
+            return false
+        }
+        let sql = """
+            UPDATE transcript_chunks
+            SET avgConfidence = ?
+            WHERE analysisAssetId = ? AND segmentFingerprint = ? AND avgConfidence IS NULL
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Double(sanitized))
         bind(stmt, 2, analysisAssetId)
         bind(stmt, 3, segmentFingerprint)
         try step(stmt, expecting: SQLITE_DONE)
@@ -6439,7 +6494,14 @@ actor AnalysisStore {
     }
 
     private func readTranscriptChunk(_ stmt: OpaquePointer?) -> TranscriptChunk {
-        TranscriptChunk(
+        let avgConfidence: Float?
+        if sqlite3_column_count(stmt) > 17 {
+            avgConfidence = optionalDouble(stmt, 17).map(Float.init)
+        } else {
+            avgConfidence = nil
+        }
+
+        return TranscriptChunk(
             id: text(stmt, 0),
             analysisAssetId: text(stmt, 1),
             segmentFingerprint: text(stmt, 2),
@@ -6456,7 +6518,8 @@ actor AnalysisStore {
                 TranscriptWeakAnchorMetadata.self,
                 from: optionalText(stmt, 12)
             ),
-            speakerId: optionalInt(stmt, 13)
+            speakerId: optionalInt(stmt, 13),
+            avgConfidence: avgConfidence
         )
     }
 

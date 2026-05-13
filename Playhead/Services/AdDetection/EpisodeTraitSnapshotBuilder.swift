@@ -71,8 +71,7 @@ enum EpisodeTraitSnapshotBuilder {
         )
         // TODO(playhead-iv4l): real volatility signal — currently 1 - structureRegularity is post-EMA redundant
         let insertionVolatility = 1.0 - structureRegularity
-        // TODO(playhead-snat): wire from real ASR confidence — currently a constant placeholder
-        let transcriptReliability: Float = 0.7
+        let transcriptReliability = deriveTranscriptReliability(chunks: chunks)
 
         return EpisodeTraitSnapshot(
             musicDensity: musicDensity,
@@ -217,6 +216,18 @@ enum EpisodeTraitSnapshotBuilder {
 
         let recurring = advertisers.filter { lexicon.contains($0) }.count
         return Float(recurring) / Float(advertisers.count)
+    }
+
+    /// Mean ASR average confidence across transcript chunks. Legacy rows
+    /// without confidence keep the prior 0.7 fallback; malformed non-finite
+    /// values are ignored so one poisoned row cannot taint the snapshot.
+    static func deriveTranscriptReliability(chunks: [TranscriptChunk]) -> Float {
+        let confidences = chunks.compactMap {
+            TranscriptChunk.sanitizedAvgConfidence($0.avgConfidence)
+        }
+        guard !confidences.isEmpty else { return 0.7 }
+        let sum = confidences.reduce(Float(0), +)
+        return sum / Float(confidences.count)
     }
 
     // MARK: - Helpers

@@ -441,10 +441,11 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(chunks.count == 1)
         #expect(chunks[0].pass == TranscriptPassType.final_.rawValue)
         #expect(chunks[0].speakerId == 42)
+        #expect(chunks[0].avgConfidence == 0.9)
     }
 
-    @Test("final-pass duplicate segment fills missing speakerId")
-    func testFinalPassDuplicateFillsMissingSpeakerId() async throws {
+    @Test("final-pass duplicate segment fills missing speakerId and avgConfidence")
+    func testFinalPassDuplicateFillsMissingSpeakerIdAndAvgConfidence() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         try await store.insertAdWindow(
@@ -489,10 +490,11 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(chunks.count == 1)
         #expect(chunks[0].id == "existing-final")
         #expect(chunks[0].speakerId == 42)
+        #expect(chunks[0].avgConfidence == 0.9)
     }
 
-    @Test("final-pass duplicate segment fills missing speakerId across duplicate rows")
-    func testFinalPassDuplicateFillsMissingSpeakerIdAcrossDuplicateRows() async throws {
+    @Test("final-pass duplicate segment fills missing speakerId and avgConfidence across duplicate rows")
+    func testFinalPassDuplicateFillsMissingSpeakerIdAndAvgConfidenceAcrossDuplicateRows() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         try await store.insertAdWindow(
@@ -516,7 +518,8 @@ struct FinalPassRetranscriptionRunnerTests {
             modelVersion: "test-final-v1",
             transcriptVersion: nil,
             atomOrdinal: nil,
-            speakerId: 42
+            speakerId: 42,
+            avgConfidence: 0.61
         ))
         try await store.insertTranscriptChunk(TranscriptChunk(
             id: "existing-final-missing-speaker",
@@ -531,7 +534,8 @@ struct FinalPassRetranscriptionRunnerTests {
             modelVersion: "test-final-v1",
             transcriptVersion: nil,
             atomOrdinal: nil,
-            speakerId: nil
+            speakerId: nil,
+            avgConfidence: nil
         ))
 
         let audio = StubAnalysisAudioProvider()
@@ -553,6 +557,8 @@ struct FinalPassRetranscriptionRunnerTests {
             .filter { $0.segmentFingerprint == fingerprint }
         #expect(chunks.count == 2)
         #expect(chunks.allSatisfy { $0.speakerId == 42 })
+        #expect(abs((chunks[0].avgConfidence ?? 0) - 0.61) < 0.001)
+        #expect(abs((chunks[1].avgConfidence ?? 0) - 0.9) < 0.001)
     }
 
     @Test("watermark advances to max retranscribed window endTime")

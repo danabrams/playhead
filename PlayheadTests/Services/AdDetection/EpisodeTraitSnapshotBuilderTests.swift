@@ -314,7 +314,6 @@ struct EpisodeTraitSnapshotBuilderTests {
 
     @Test("transcriptReliability defaults to 0.7 when no chunks observed")
     func transcriptReliabilityDefault() {
-        // Conservative neutral default until a richer signal is wired.
         let snap = EpisodeTraitSnapshotBuilder.build(
             featureWindows: [],
             chunks: [],
@@ -325,16 +324,60 @@ struct EpisodeTraitSnapshotBuilderTests {
         #expect(snap.transcriptReliability == 0.7)
     }
 
-    @Test("transcriptReliability is the 0.7 placeholder regardless of inputs")
-    func transcriptReliabilityIsPlaceholderConstant() {
-        // Locks in M4 placeholder; remove this assertion once playhead-snat lands.
-        // The producer currently hard-codes `transcriptReliability: Float = 0.7`,
-        // so any combination of inputs must surface the same constant. When
-        // playhead-snat replaces the placeholder with a real ASR-confidence
-        // signal, this test should be deleted (not weakened to a tolerance).
+    @Test("transcriptReliability defaults to 0.7 when chunks have no ASR confidence")
+    func transcriptReliabilityMissingConfidenceFallback() {
         let chunks: [TranscriptChunk] = [
-            makeChunk(start: 0, end: 10, speakerId: 1),
-            makeChunk(start: 10, end: 20, speakerId: 2)
+            makeChunk(start: 0, end: 10, speakerId: 1, avgConfidence: nil),
+            makeChunk(start: 10, end: 20, speakerId: 2, avgConfidence: nil)
+        ]
+        let snap = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: [],
+            chunks: chunks,
+            confirmedAdWindows: [],
+            existingProfile: nil,
+            episodeDuration: 600
+        )
+        #expect(snap.transcriptReliability == 0.7)
+    }
+
+    @Test("transcriptReliability follows high ASR chunk confidence")
+    func transcriptReliabilityHighConfidence() {
+        let chunks: [TranscriptChunk] = [
+            makeChunk(start: 0, end: 10, speakerId: 1, avgConfidence: 0.94),
+            makeChunk(start: 10, end: 20, speakerId: 2, avgConfidence: 0.96)
+        ]
+        let snap = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: [],
+            chunks: chunks,
+            confirmedAdWindows: [],
+            existingProfile: nil,
+            episodeDuration: 600
+        )
+        #expect(abs(snap.transcriptReliability - 0.95) < 0.001)
+    }
+
+    @Test("transcriptReliability follows low ASR chunk confidence")
+    func transcriptReliabilityLowConfidence() {
+        let chunks: [TranscriptChunk] = [
+            makeChunk(start: 0, end: 10, speakerId: nil, avgConfidence: 0.2),
+            makeChunk(start: 10, end: 20, speakerId: nil, avgConfidence: 0.3)
+        ]
+        let snap = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: [],
+            chunks: chunks,
+            confirmedAdWindows: [],
+            existingProfile: nil,
+            episodeDuration: 600
+        )
+        #expect(abs(snap.transcriptReliability - 0.25) < 0.001)
+    }
+
+    @Test("transcriptReliability averages mixed ASR confidences and ignores missing legacy values")
+    func transcriptReliabilityMixedConfidenceIgnoresMissing() {
+        let chunks: [TranscriptChunk] = [
+            makeChunk(start: 0, end: 10, speakerId: 1, avgConfidence: 0.9),
+            makeChunk(start: 10, end: 20, speakerId: 2, avgConfidence: nil),
+            makeChunk(start: 20, end: 30, speakerId: 1, avgConfidence: 0.3)
         ]
         let snap = EpisodeTraitSnapshotBuilder.build(
             featureWindows: [makeFeatureWindow(musicProbability: 0.42)],
@@ -343,7 +386,25 @@ struct EpisodeTraitSnapshotBuilderTests {
             existingProfile: makeProfile(sponsorLexicon: "acme"),
             episodeDuration: 600
         )
-        #expect(snap.transcriptReliability == 0.7)
+        #expect(abs(snap.transcriptReliability - 0.6) < 0.001)
+        #expect(abs(snap.speakerTurnRate - 0.2) < 0.001)
+    }
+
+    @Test("transcriptReliability clamps finite confidence and ignores non-finite confidence")
+    func transcriptReliabilityDefensivelyHandlesInvalidConfidence() {
+        let chunks: [TranscriptChunk] = [
+            makeChunk(start: 0, end: 10, speakerId: nil, avgConfidence: -0.5),
+            makeChunk(start: 10, end: 20, speakerId: nil, avgConfidence: 1.5),
+            makeChunk(start: 20, end: 30, speakerId: nil, avgConfidence: .nan)
+        ]
+        let snap = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: [],
+            chunks: chunks,
+            confirmedAdWindows: [],
+            existingProfile: nil,
+            episodeDuration: 600
+        )
+        #expect(abs(snap.transcriptReliability - 0.5) < 0.001)
     }
 
     // MARK: - End-to-end: producer feeds EMA merge into ShowTraitProfile.updated
@@ -444,7 +505,8 @@ struct EpisodeTraitSnapshotBuilderTests {
     private func makeChunk(
         start: Double,
         end: Double,
-        speakerId: Int?
+        speakerId: Int?,
+        avgConfidence: Float? = nil
     ) -> TranscriptChunk {
         TranscriptChunk(
             id: "chunk-\(start)-\(end)",
@@ -460,7 +522,8 @@ struct EpisodeTraitSnapshotBuilderTests {
             transcriptVersion: "tv1",
             atomOrdinal: 0,
             weakAnchorMetadata: nil,
-            speakerId: speakerId
+            speakerId: speakerId,
+            avgConfidence: avgConfidence
         )
     }
 

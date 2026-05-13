@@ -738,6 +738,7 @@ actor TranscriptEngineService {
                 )
                 var didUpdate = false
                 var upgradedSpeakerId = existingChunk.speakerId
+                var upgradedAvgConfidence = existingChunk.avgConfidence
                 if mergedMetadata != existingChunk.weakAnchorMetadata {
                     didUpdate = try await store.updateTranscriptChunkWeakAnchorMetadata(
                         analysisAssetId: analysisAssetId,
@@ -756,6 +757,17 @@ actor TranscriptEngineService {
                         upgradedSpeakerId = existingChunk.speakerId ?? speakerId
                     }
                 }
+                let didUpdateConfidence = try await store.updateTranscriptChunkAvgConfidenceIfMissing(
+                    analysisAssetId: analysisAssetId,
+                    segmentFingerprint: fingerprint,
+                    avgConfidence: segment.avgConfidence
+                )
+                if didUpdateConfidence {
+                    didUpdate = true
+                    if existingChunk.avgConfidence == nil {
+                        upgradedAvgConfidence = TranscriptChunk.sanitizedAvgConfidence(segment.avgConfidence)
+                    }
+                }
                 if didUpdate {
                     emittedChunks.append(
                         TranscriptChunk(
@@ -772,7 +784,8 @@ actor TranscriptEngineService {
                             transcriptVersion: existingChunk.transcriptVersion,
                             atomOrdinal: existingChunk.atomOrdinal,
                             weakAnchorMetadata: mergedMetadata,
-                            speakerId: upgradedSpeakerId
+                            speakerId: upgradedSpeakerId,
+                            avgConfidence: upgradedAvgConfidence
                         )
                     )
                 } else {
@@ -795,7 +808,8 @@ actor TranscriptEngineService {
                 transcriptVersion: nil,
                 atomOrdinal: nil,
                 weakAnchorMetadata: segment.weakAnchorMetadata,
-                speakerId: segment.speakerId
+                speakerId: segment.speakerId,
+                avgConfidence: segment.avgConfidence
             )
             chunksToInsert.append(chunk)
             emittedChunks.append(chunk)
