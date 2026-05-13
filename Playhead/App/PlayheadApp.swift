@@ -198,7 +198,25 @@ struct PlayheadApp: App {
                             let descriptor = FetchDescriptor<Episode>(
                                 predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
                             )
-                            return (try? context.fetch(descriptor).first)?.feedMetadata
+                            guard let episode = try? context.fetch(descriptor).first,
+                                  let feedMetadata = episode.feedMetadata else {
+                                return nil
+                            }
+                            var recentMetadata = episode.podcast?.episodes.compactMap(\.feedMetadata)
+                                ?? []
+                            if !recentMetadata.contains(feedMetadata) {
+                                recentMetadata.append(feedMetadata)
+                            }
+                            let podcastId = episode.podcast?.feedURL.absoluteString ?? episodeId
+                            let showOwnedDomains = EpisodeMetadataSnapshot.showOwnedDomains(
+                                feedURL: episode.podcast?.feedURL,
+                                recentMetadata: recentMetadata,
+                                podcastId: podcastId
+                            )
+                            return EpisodeMetadataSnapshot(
+                                feedMetadata: feedMetadata,
+                                showOwnedDomains: showOwnedDomains
+                            )
                         }
                     )
                     await runtime.adDetectionService.setEpisodeMetadataProvider(provider)

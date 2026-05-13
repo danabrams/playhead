@@ -55,6 +55,30 @@ struct LexicalScannerConfig: Sendable {
     )
 }
 
+private struct MetadataLexiconScanKey: Hashable {
+    let sourceValue: String
+    let category: LexicalPatternCategory
+    let isNegativePattern: Bool
+}
+
+private extension Array where Element == MetadataLexiconEntry {
+    func uniquedForLexicalScanning() -> [MetadataLexiconEntry] {
+        var seen = Set<MetadataLexiconScanKey>()
+        var result: [MetadataLexiconEntry] = []
+        result.reserveCapacity(count)
+        for entry in self {
+            let key = MetadataLexiconScanKey(
+                sourceValue: entry.sourceValue.lowercased(),
+                category: entry.category,
+                isNegativePattern: entry.isNegativePattern
+            )
+            guard seen.insert(key).inserted else { continue }
+            result.append(entry)
+        }
+        return result
+    }
+}
+
 // MARK: - Pattern categories
 
 /// Categories of lexical patterns that indicate ad content.
@@ -80,6 +104,30 @@ struct LexicalHit: Sendable {
     let endTime: Double
     /// Weight of this pattern category for confidence scoring.
     let weight: Double
+    /// True when the hit came from episode metadata rather than transcript-
+    /// native lexical patterns. Metadata hits can supplement an in-audio
+    /// signal, but metadata-only groups are not promoted to candidates.
+    let isMetadataOrigin: Bool
+    /// True when this hit is a negative metadata pattern.
+    let isNegativePattern: Bool
+
+    init(
+        category: LexicalPatternCategory,
+        matchedText: String,
+        startTime: Double,
+        endTime: Double,
+        weight: Double,
+        isMetadataOrigin: Bool = false,
+        isNegativePattern: Bool = false
+    ) {
+        self.category = category
+        self.matchedText = matchedText
+        self.startTime = startTime
+        self.endTime = endTime
+        self.weight = weight
+        self.isMetadataOrigin = isMetadataOrigin
+        self.isNegativePattern = isNegativePattern
+    }
 }
 
 // MARK: - Candidate ad region
@@ -188,12 +236,13 @@ struct LexicalScanner: Sendable {
     /// - Returns: Candidate ad regions sorted by start time.
     func scan(
         chunks: [TranscriptChunk],
-        analysisAssetId: String
+        analysisAssetId: String,
+        metadataEntries: [MetadataLexiconEntry] = []
     ) -> [LexicalCandidate] {
         // 1. Collect all hits across chunks.
         var allHits: [LexicalHit] = []
         for chunk in chunks {
-            let hits = scanChunk(chunk)
+            let hits = scanChunk(chunk, metadataEntries: metadataEntries)
             allHits.append(contentsOf: hits)
         }
 
@@ -224,7 +273,10 @@ struct LexicalScanner: Sendable {
     /// `chunk.text` (the raw ASR output) instead. See
     /// `TranscriptEngineService.normalizeText` for the canonical
     /// normalization rules.
-    func scanChunk(_ chunk: TranscriptChunk) -> [LexicalHit] {
+    func scanChunk(
+        _ chunk: TranscriptChunk,
+        metadataEntries: [MetadataLexiconEntry] = []
+    ) -> [LexicalHit] {
         var normalizedText = chunk.normalizedText
         if normalizedText.isEmpty {
             // Fall back to raw text if normalizedText is not yet populated.
@@ -363,7 +415,50 @@ struct LexicalScanner: Sendable {
             )
         }
 
+        appendMetadataLexiconHits(
+            entries: metadataEntries,
+            normalizedText: normalizedText,
+            normalizedNS: normalizedNS,
+            normalizedRange: normalizedRange,
+            chunk: chunk,
+            hits: &hits
+        )
+
         return hits
+    }
+
+    private func appendMetadataLexiconHits(
+        entries: [MetadataLexiconEntry],
+        normalizedText: String,
+        normalizedNS: NSString,
+        normalizedRange: NSRange,
+        chunk: TranscriptChunk,
+        hits: inout [LexicalHit]
+    ) {
+        guard !entries.isEmpty else { return }
+
+        let uniqueEntries = entries.uniquedForLexicalScanning()
+        for entry in uniqueEntries {
+            let matches = entry.pattern.matches(in: normalizedText, range: normalizedRange)
+            for match in matches {
+                let matchedText = normalizedNS.substring(with: match.range)
+                let (startTime, endTime) = interpolateTiming(
+                    matchRange: match.range,
+                    textLength: normalizedNS.length,
+                    chunkStart: chunk.startTime,
+                    chunkEnd: chunk.endTime
+                )
+                hits.append(LexicalHit(
+                    category: entry.category,
+                    matchedText: matchedText,
+                    startTime: startTime,
+                    endTime: endTime,
+                    weight: entry.weight,
+                    isMetadataOrigin: entry.isMetadataOrigin,
+                    isNegativePattern: entry.isNegativePattern
+                ))
+            }
+        }
     }
 
     private func appendCompiledSponsorHits(
@@ -702,7 +797,9 @@ struct LexicalScanner: Sendable {
         _ hits: [LexicalHit],
         analysisAssetId: String
     ) -> [LexicalCandidate] {
-        guard let first = hits.first else { return [] }
+        let promotionStream = hits.filter { !$0.isNegativePattern }
+        let negativeHits = hits.filter(\.isNegativePattern)
+        guard let first = promotionStream.first else { return [] }
 
         var candidates: [LexicalCandidate] = []
 
@@ -711,7 +808,7 @@ struct LexicalScanner: Sendable {
         var groupEnd = first.endTime
         var groupHits: [LexicalHit] = [first]
 
-        for hit in hits.dropFirst() {
+        for hit in promotionStream.dropFirst() {
             if hit.startTime <= groupEnd + config.mergeGapThreshold {
                 // Extend the current group.
                 groupEnd = max(groupEnd, hit.endTime)
@@ -719,7 +816,12 @@ struct LexicalScanner: Sendable {
             } else {
                 // Emit the current group if it meets the threshold.
                 if let candidate = buildCandidate(
-                    from: groupHits,
+                    from: scoringHits(
+                        promotionHits: groupHits,
+                        negativeHits: negativeHits,
+                        groupStart: groupStart,
+                        groupEnd: groupEnd
+                    ),
                     startTime: groupStart,
                     endTime: groupEnd,
                     analysisAssetId: analysisAssetId
@@ -736,7 +838,12 @@ struct LexicalScanner: Sendable {
 
         // Emit the final group.
         if let candidate = buildCandidate(
-            from: groupHits,
+            from: scoringHits(
+                promotionHits: groupHits,
+                negativeHits: negativeHits,
+                groupStart: groupStart,
+                groupEnd: groupEnd
+            ),
             startTime: groupStart,
             endTime: groupEnd,
             analysisAssetId: analysisAssetId
@@ -747,6 +854,19 @@ struct LexicalScanner: Sendable {
         return candidates
     }
 
+    private func scoringHits(
+        promotionHits: [LexicalHit],
+        negativeHits: [LexicalHit],
+        groupStart: Double,
+        groupEnd: Double
+    ) -> [LexicalHit] {
+        let nearbyNegativeHits = negativeHits.filter { hit in
+            hit.startTime <= groupEnd + config.mergeGapThreshold &&
+            hit.endTime >= groupStart - config.mergeGapThreshold
+        }
+        return promotionHits + nearbyNegativeHits
+    }
+
     /// Build a LexicalCandidate from a group of merged hits.
     /// Returns nil if the group doesn't meet the minimum hit count.
     private func buildCandidate(
@@ -755,18 +875,26 @@ struct LexicalScanner: Sendable {
         endTime: Double,
         analysisAssetId: String
     ) -> LexicalCandidate? {
+        guard hits.contains(where: { !$0.isMetadataOrigin }) else {
+            return nil
+        }
+
+        // Negative metadata evidence is a score reducer, not promotion evidence.
+        let promotionHits = hits.filter { !$0.isNegativePattern }
+        let promotionHitCount = promotionHits.count
+
         // A merge group normally needs `minHitsForCandidate` hits to emit,
         // but a single sufficiently strong hit (e.g. a sponsor disclosure,
         // promo code, or literal-TLD URL) bypasses that threshold.
         let hasHighWeightHit = hits.contains { hit in
-            hit.weight >= config.highWeightBypassThreshold
+            !hit.isMetadataOrigin && hit.weight >= config.highWeightBypassThreshold
         }
-        if hits.count < config.minHitsForCandidate && !hasHighWeightHit {
+        if promotionHitCount < config.minHitsForCandidate && !hasHighWeightHit {
             return nil
         }
 
-        let categories = Set(hits.map(\.category))
-        let totalWeight = hits.reduce(0.0) { $0 + $1.weight }
+        let categories = Set(promotionHits.map(\.category))
+        let totalWeight = max(0.0, hits.reduce(0.0) { $0 + $1.weight })
 
         // Confidence: sigmoid-like scaling based on total weight.
         // 2 hits at weight 1.0 each gives ~0.50; 5+ hits saturates near 0.9.
@@ -774,8 +902,8 @@ struct LexicalScanner: Sendable {
         let confidence = min(rawConfidence, 0.95)
 
         // Pick the most significant hit as evidence (highest weight).
-        let bestHit = hits.max { $0.weight < $1.weight }
-        let evidenceText = bestHit?.matchedText ?? hits[0].matchedText
+        let bestHit = promotionHits.max { $0.weight < $1.weight }
+        let evidenceText = bestHit?.matchedText ?? promotionHits[0].matchedText
         let evidenceStartTime = bestHit?.startTime ?? startTime
 
         return LexicalCandidate(
@@ -784,7 +912,7 @@ struct LexicalScanner: Sendable {
             startTime: startTime,
             endTime: endTime,
             confidence: confidence,
-            hitCount: hits.count,
+            hitCount: promotionHitCount,
             categories: categories,
             evidenceText: evidenceText,
             evidenceStartTime: evidenceStartTime,

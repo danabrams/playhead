@@ -1,7 +1,8 @@
 // NarlReplayPredictor.swift
 // playhead-narl.1: Produces predicted ad-windows for a FrozenTrace under a
 // given MetadataActivationConfig. Used by the eval harness to compare
-// `.default` and `.allEnabled` outputs against ground truth.
+// frozen baseline, `.allEnabled`, and per-gate isolation outputs against
+// ground truth.
 //
 // Design decisions (see docs/plans/2026-04-21-narl-eval-harness-design.md §A.1):
 //
@@ -21,13 +22,15 @@
 //       sigmoid midpoint moves from config.classifierBaselineMidpoint to
 //       config.classifierShiftedMidpoint. Windows with
 //       fusedSkipConfidence in (shiftedMidpoint, baselineMidpoint] flip
-//       from "not an ad" under `.default` to "ad" under `.allEnabled`.
+//       from "not an ad" under the baseline to "ad" under a config with
+//       classifier prior shift enabled.
 //
 //   (b) Lexical-injection effect
 //       (MetadataLexiconInjector.inject → downstream ledger boost):
 //       When `lexicalInjectionEnabled` is on AND
-//       classificationTrust >= config.lexicalInjectionMinTrust AND the
-//       window has metadata evidence present at capture time
+//       classificationTrust > 0 AND classificationTrust >=
+//       config.lexicalInjectionMinTrust AND the window has metadata evidence
+//       present at capture time
 //       (`hasMetadataEvidence == true`), the window receives a calibrated
 //       boost proportional to `config.lexicalInjectionDiscount`. Any such
 //       window whose post-boost confidence crosses the effective midpoint
@@ -36,7 +39,7 @@
 //       the net effect rather than the per-token match count because
 //       corpus-export does not persist token-level hit records per window.
 //
-//   (c) `.default` predictions come from `windowScores` where
+//   (c) Baseline predictions come from `windowScores` where
 //       `isAdUnderDefault == true`. When the capture omitted
 //       `windowScores` entirely (v1 fixtures), we fall back to
 //       `trace.baselineReplaySpanDecisions.filter { $0.isAd }`.
@@ -50,9 +53,9 @@
 //       stashes the deltas on the trace as evidence entries with
 //       `source="shadow:<variant>"`.
 //
-// This predictor's acceptance criteria per the harness are (a) both configs
-// produce predictions without throwing and (b) artifacts are written. Metric
-// regressions surface in the report for human judgment.
+// This predictor's acceptance criteria per the harness are (a) every replay
+// config produces predictions without throwing and (b) artifacts are written.
+// Metric regressions surface in the report for human judgment.
 
 import Foundation
 @testable import Playhead
@@ -69,8 +72,7 @@ struct NarlPredictionResult: Sendable {
     /// `fmSchedulingEnabled` code path. Always false in Phase 1 pre-narl.2.
     let hasShadowCoverage: Bool
     /// Diagnostic: number of windows added or promoted by the lexical
-    /// injection branch (i.e. windows that flipped under `.allEnabled` and
-    /// would not have flipped under `.default`).
+    /// injection branch.
     let lexicalInjectionAdds: Int
     /// Diagnostic: number of windows added or promoted by the prior shift
     /// branch (windows that flipped solely because the midpoint moved).
@@ -108,9 +110,10 @@ enum NarlReplayPredictor {
         let lexicalInjectionMinTrust = Double(config.lexicalInjectionMinTrust)
         let lexicalInjectionDiscount = config.lexicalInjectionDiscount
 
-        // `.default` positive set. Prefer windowScores when available (v2
-        // fixtures) since it's the authoritative post-gate bit from capture
-        // time; fall back to baseline replay span decisions (v1 fixtures).
+        // Captured baseline positive set. Prefer windowScores when available
+        // (v2 fixtures) since `isAdUnderDefault` is the authoritative
+        // post-gate bit from capture time; fall back to baseline replay span
+        // decisions (v1 fixtures).
         let basePositive: [NarlTimeRange]
         if !trace.windowScores.isEmpty {
             basePositive = trace.windowScores
@@ -122,8 +125,8 @@ enum NarlReplayPredictor {
                 .map { NarlTimeRange(start: $0.startTime, end: $0.endTime) }
         }
 
-        // Gate-closed short circuit: `.default` (and any config with
-        // counterfactualGateOpen == false) returns the baseline positives
+        // Gate-closed short circuit: any config with
+        // counterfactualGateOpen == false returns the baseline positives
         // unchanged. This mirrors `MetadataActivationConfig.isLexicalInjectionActive`
         // and its siblings.
         let gateOpen = config.counterfactualGateOpen
@@ -181,7 +184,7 @@ enum NarlReplayPredictor {
                 // without re-running the injector's text-matching path).
                 //
                 // Trust gate matches production `MetadataLexiconInjector`:
-                // entries are emitted only when
+                // entries are emitted only when `metadataTrust > 0` and
                 // `metadataTrust >= config.lexicalInjectionMinTrust`.
                 let effectiveMidpoint: Double = {
                     // When prior-shift is off, the classifier still uses the
@@ -195,6 +198,7 @@ enum NarlReplayPredictor {
                 let lexicalInjectionQualifies =
                     config.lexicalInjectionEnabled &&
                     w.hasMetadataEvidence &&
+                    w.classificationTrust > 0 &&
                     w.classificationTrust >= lexicalInjectionMinTrust &&
                     (w.fusedSkipConfidence + lexicalInjectionDiscount) >= effectiveMidpoint &&
                     w.fusedSkipConfidence < effectiveMidpoint

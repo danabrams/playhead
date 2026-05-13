@@ -11,10 +11,10 @@ import Testing
 @Suite("MetadataActivationConfig — Gating")
 struct MetadataActivationConfigTests {
 
-    @Test("Default config has all consumption points disabled")
-    func defaultDisabled() {
+    @Test("Default config activates lexical injection only")
+    func defaultActivatesLexicalOnly() {
         let config = MetadataActivationConfig.default
-        #expect(!config.isLexicalInjectionActive)
+        #expect(config.isLexicalInjectionActive)
         #expect(!config.isClassifierPriorShiftActive)
         #expect(!config.isFMSchedulingActive)
     }
@@ -89,7 +89,7 @@ struct MetadataActivationConfigTests {
         #expect(config.classifierBaselineMidpoint == 0.37)
     }
 
-    // MARK: - playhead-sqhj activation default pin
+    // MARK: - playhead-sqhj / playhead-narl activation default pins
     //
     // The 2026-04-24 spike under gtt9.4 documented that
     // `counterfactualGateOpen=false` was a master kill on every NARL
@@ -99,42 +99,145 @@ struct MetadataActivationConfigTests {
     // property, so closing the master made all the per-gate tuning
     // inert regardless of how it was set.
     //
-    // The fix in playhead-sqhj is to flip the master open by default
-    // while leaving every per-gate flag off. That way:
-    //   - net production activation behaviour is unchanged today (the
-    //     per-gate flags are still false, so `is*Active` still returns
-    //     false everywhere);
-    //   - downstream gate-tuning beads in the gtt9 epic can flip a
-    //     single per-gate flag and immediately see effects, instead of
-    //     having to ALSO remember to flip the master.
+    // The fix in playhead-sqhj flipped the master open by default so
+    // downstream gate-tuning beads could flip a single per-gate flag and
+    // immediately see effects. playhead-narl consumes that path for the
+    // first graduated production activation: lexical injection only.
     //
-    // These two pins lock that posture in place. Future changes to the
-    // default must edit them deliberately so the activation default
-    // doesn't drift back to a master-killed state by accident.
+    // These pins lock that posture in place. Future changes to the default
+    // must edit them deliberately so activation does not drift back to a
+    // master-killed state or accidentally enable the gates that the corpus
+    // did not justify.
 
-    @Test("Default master gate is OPEN (playhead-sqhj)")
+    @Test("Default master gate is OPEN (playhead-sqhj/playhead-narl)")
     func defaultMasterGateOpen() {
         #expect(MetadataActivationConfig.default.counterfactualGateOpen == true,
                 "Master `counterfactualGateOpen` must default to true so per-gate tuning can take effect; flipping this back to false silently kills every NARL activation knob.")
     }
 
-    @Test("Default per-gate flags remain OFF (playhead-sqhj)")
-    func defaultPerGateFlagsOff() {
-        // Net production behaviour is unchanged after sqhj: each
-        // `is*Active` is still false because the per-gate flags are
-        // still false. Pin all three so any change to a per-gate flag
-        // is intentional.
+    @Test("Default per-gate flags enable only lexical injection (playhead-narl)")
+    func defaultPerGateFlagsEnableOnlyLexicalInjection() {
         let config = MetadataActivationConfig.default
-        #expect(config.lexicalInjectionEnabled == false,
-                "lexicalInjectionEnabled must stay off in .default; flip in a dedicated bead with corpus delta")
+        #expect(config.lexicalInjectionEnabled == true,
+                "lexicalInjectionEnabled is the only per-gate default enabled by the playhead-narl corpus decision")
         #expect(config.classifierPriorShiftEnabled == false,
-                "classifierPriorShiftEnabled must stay off in .default; flip in a dedicated bead with corpus delta")
+                "classifierPriorShiftEnabled must stay off until a dedicated corpus decision proves no FP regression")
         #expect(config.fmSchedulingEnabled == false,
-                "fmSchedulingEnabled must stay off in .default; flip in a dedicated bead with corpus delta")
-        // Sanity: net activation is still inert.
+                "fmSchedulingEnabled must stay off until shadow coverage justifies production scheduling")
+        #expect(config.isLexicalInjectionActive)
+        #expect(!config.isClassifierPriorShiftActive)
+        #expect(!config.isFMSchedulingActive)
+    }
+
+    @Test("Counterfactual replay baseline keeps all metadata gates off")
+    func counterfactualBaselineKeepsAllMetadataGatesOff() {
+        let config = MetadataActivationConfig.counterfactualBaseline
+        #expect(config.counterfactualGateOpen == true,
+                "Replay baseline keeps the master open so per-gate deltas stay attributable")
+        #expect(config.lexicalInjectionEnabled == false)
+        #expect(config.classifierPriorShiftEnabled == false)
+        #expect(config.fmSchedulingEnabled == false)
         #expect(!config.isLexicalInjectionActive)
         #expect(!config.isClassifierPriorShiftActive)
         #expect(!config.isFMSchedulingActive)
+    }
+
+    @Test("Backfill lexical injection and fusion share one prior snapshot")
+    func backfillLexicalInjectionAndFusionShareOnePriorSnapshot() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Playhead/Services/AdDetection/AdDetectionService.swift"),
+            encoding: .utf8
+        )
+        let resolveNeedle = "let resolvedEpisodePriors = await resolveEpisodePriors()"
+        let injectionNeedle = "let metadataLexiconEntries = metadataLexiconEntries("
+        guard let resolveRange = source.range(of: resolveNeedle),
+              let injectionRange = source.range(of: injectionNeedle) else {
+            Issue.record("Expected runBackfill prior-snapshot and lexical-injection call sites")
+            return
+        }
+
+        #expect(resolveRange.lowerBound < injectionRange.lowerBound,
+                "runBackfill must snapshot priors before lexical injection so metadata trust cannot drift before fusion")
+        #expect(source.range(of: resolveNeedle, range: resolveRange.upperBound..<source.endIndex) == nil,
+                "runBackfill should not resolve episode priors a second time after lexical injection")
+    }
+
+    @Test("Hot path metadata lexicon skips prior resolution when cues are empty")
+    func hotPathMetadataLexiconSkipsPriorResolutionWhenCuesAreEmpty() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Playhead/Services/AdDetection/AdDetectionService.swift"),
+            encoding: .utf8
+        )
+        let asyncHelperNeedle = """
+            private func metadataLexiconEntries(
+                from cues: [EpisodeMetadataCue]
+            ) async -> [MetadataLexiconEntry] {
+        """
+        let syncHelperNeedle = """
+            private func metadataLexiconEntries(
+                from cues: [EpisodeMetadataCue],
+        """
+        guard let helperStart = source.range(of: asyncHelperNeedle)?.upperBound,
+              let helperEnd = source.range(of: syncHelperNeedle, range: helperStart..<source.endIndex)?.lowerBound else {
+            Issue.record("Expected async and sync metadataLexiconEntries helpers")
+            return
+        }
+
+        let helperBody = source[helperStart..<helperEnd]
+        guard let emptyGuardRange = helperBody.range(of: "guard !cues.isEmpty else { return [] }"),
+              let resolveRange = helperBody.range(of: "let priors = await resolveEpisodePriors()") else {
+            Issue.record("Expected empty-cue guard and prior-resolution call in async metadataLexiconEntries helper")
+            return
+        }
+
+        #expect(emptyGuardRange.lowerBound < resolveRange.lowerBound,
+                "hot-path metadata lexicon injection must return before resolving priors when there are no cues")
+    }
+
+    @Test("Ownership snapshot includes recurring show-notes domains")
+    func ownershipSnapshotIncludesRecurringShowNotesDomains() throws {
+        let recentMetadata = [
+            FeedDescriptionMetadata(
+                feedDescription: "More at https://mypodcast.com/one.",
+                feedSummary: nil,
+                sourceHashes: .init(descriptionHash: 1, summaryHash: nil)
+            ),
+            FeedDescriptionMetadata(
+                feedDescription: "Extras at https://mypodcast.com/two.",
+                feedSummary: nil,
+                sourceHashes: .init(descriptionHash: 2, summaryHash: nil)
+            ),
+            FeedDescriptionMetadata(
+                feedDescription: "Links at https://mypodcast.com/three.",
+                feedSummary: nil,
+                sourceHashes: .init(descriptionHash: 3, summaryHash: nil)
+            ),
+            FeedDescriptionMetadata(
+                feedDescription: "Sponsor offer at https://betterhelp.com/play.",
+                feedSummary: nil,
+                sourceHashes: .init(descriptionHash: 4, summaryHash: nil)
+            ),
+        ]
+
+        let domains = EpisodeMetadataSnapshot.showOwnedDomains(
+            feedURL: try #require(URL(string: "https://feeds.example.com/rss")),
+            recentMetadata: recentMetadata,
+            podcastId: "podcast-ownership-test"
+        )
+
+        #expect(domains.contains("mypodcast.com"))
+        #expect(domains.contains("example.com"))
+        #expect(!domains.contains("betterhelp.com"))
     }
 }
 
@@ -154,7 +257,7 @@ struct MetadataLexiconInjectorTests {
 
     @Test("Disabled config produces no entries even with valid cues")
     func disabledConfig() {
-        let injector = MetadataLexiconInjector(config: .default)
+        let injector = MetadataLexiconInjector(config: .counterfactualBaseline)
         let cues = [
             EpisodeMetadataCue(
                 cueType: .externalDomain,
@@ -167,6 +270,27 @@ struct MetadataLexiconInjectorTests {
         ]
         let entries = injector.inject(cues: cues, metadataTrust: 0.5)
         #expect(entries.isEmpty)
+    }
+
+    @Test("Default config injects lexical metadata entries (playhead-narl)")
+    func defaultConfigInjectsEntries() {
+        let injector = MetadataLexiconInjector(config: .default)
+        let cues = [
+            EpisodeMetadataCue(
+                cueType: .externalDomain,
+                normalizedValue: "betterhelp.com",
+                sourceField: .description,
+                confidence: 0.8,
+                canonicalSponsorId: nil,
+                canonicalOwnerId: nil
+            ),
+        ]
+
+        let entries = injector.inject(cues: cues, metadataTrust: 0.5)
+
+        #expect(entries.count == 1)
+        #expect(entries[0].isMetadataOrigin)
+        #expect(!entries[0].isNegativePattern)
     }
 
     @Test("External domain cue produces URL CTA entry with correct weight")
@@ -419,9 +543,6 @@ struct MetadataLexiconTwoHitRuleTests {
 
     @Test("Metadata-only hit group is not promoted to candidate")
     func metadataOnlyGroupNotPromoted() {
-        // Simulate the 2-hit rule: a group where ALL hits have isMetadataOrigin
-        // should not be promoted. This is enforced by the flag, not by the injector
-        // itself, but we verify the flag is set correctly.
         let injector = MetadataLexiconInjector(config: .allEnabled)
         let cues = [
             EpisodeMetadataCue(
@@ -442,10 +563,319 @@ struct MetadataLexiconTwoHitRuleTests {
             ),
         ]
         let entries = injector.inject(cues: cues, metadataTrust: 0.5)
+        let chunk = makeMetadataActivationChunk(
+            text: "betterhelp com betterhelp",
+            normalizedText: "betterhelp com betterhelp"
+        )
+        let candidates = LexicalScanner().scan(
+            chunks: [chunk],
+            analysisAssetId: "asset-metadata-only",
+            metadataEntries: entries
+        )
 
-        // All entries must be marked as metadata origin
-        let allMetadata = entries.allSatisfy { $0.isMetadataOrigin }
-        #expect(allMetadata, "All injected entries must have isMetadataOrigin=true for 2-hit rule enforcement")
+        #expect(entries.count == 2)
+        #expect(entries.allSatisfy { $0.isMetadataOrigin })
+        #expect(candidates.isEmpty)
+    }
+
+    @Test("Metadata hit supplements one in-audio lexical hit")
+    func metadataSupplementsTranscriptHit() {
+        let injector = MetadataLexiconInjector(config: .default)
+        let cues = [
+            EpisodeMetadataCue(
+                cueType: .externalDomain,
+                normalizedValue: "acme.com",
+                sourceField: .description,
+                confidence: 0.8,
+                canonicalSponsorId: nil,
+                canonicalOwnerId: nil
+            ),
+        ]
+        let entries = injector.inject(cues: cues, metadataTrust: 0.5)
+        let chunk = makeMetadataActivationChunk(
+            text: "Visit acme com.",
+            normalizedText: "visit acme com"
+        )
+        let scanner = LexicalScanner()
+
+        let baseline = scanner.scan(
+            chunks: [chunk],
+            analysisAssetId: "asset-baseline"
+        )
+        let withMetadata = scanner.scan(
+            chunks: [chunk],
+            analysisAssetId: "asset-with-metadata",
+            metadataEntries: entries
+        )
+
+        #expect(baseline.isEmpty,
+                "the built-in 'visit <domain> com' hit alone stays below the two-hit threshold")
+        #expect(withMetadata.count == 1)
+        #expect(withMetadata[0].hitCount == 2)
+    }
+
+    @Test("Duplicate metadata entries from description and summary count once")
+    func duplicateMetadataEntriesCountOnce() throws {
+        let injector = MetadataLexiconInjector(config: .default)
+        let cues = [
+            EpisodeMetadataCue(
+                cueType: .externalDomain,
+                normalizedValue: "acme.com",
+                sourceField: .description,
+                confidence: 0.8,
+                canonicalSponsorId: nil,
+                canonicalOwnerId: nil
+            ),
+            EpisodeMetadataCue(
+                cueType: .externalDomain,
+                normalizedValue: "acme.com",
+                sourceField: .summary,
+                confidence: 0.8,
+                canonicalSponsorId: nil,
+                canonicalOwnerId: nil
+            ),
+        ]
+        let entries = injector.inject(cues: cues, metadataTrust: 0.5)
+        let chunk = makeMetadataActivationChunk(
+            text: "Visit acme com.",
+            normalizedText: "visit acme com"
+        )
+
+        let candidates = LexicalScanner().scan(
+            chunks: [chunk],
+            analysisAssetId: "asset-duplicate-metadata",
+            metadataEntries: entries
+        )
+
+        let candidate = try #require(candidates.first)
+        #expect(entries.count == 2)
+        #expect(candidate.hitCount == 2,
+                "one transcript hit plus one unique metadata supplement should not count duplicate feed fields twice")
+    }
+
+    @Test("Negative metadata hit does not promote a one-hit transcript group")
+    func negativeMetadataHitDoesNotPromoteTranscriptHit() {
+        let injector = MetadataLexiconInjector(config: .default)
+        let cues = [
+            EpisodeMetadataCue(
+                cueType: .showOwnedDomain,
+                normalizedValue: "mypodcast.com",
+                sourceField: .description,
+                confidence: 0.95,
+                canonicalSponsorId: nil,
+                canonicalOwnerId: nil
+            ),
+        ]
+        let entries = injector.inject(cues: cues, metadataTrust: 0.5)
+        let chunk = makeMetadataActivationChunk(
+            text: "Visit mypodcast com.",
+            normalizedText: "visit mypodcast com"
+        )
+
+        let candidates = LexicalScanner().scan(
+            chunks: [chunk],
+            analysisAssetId: "asset-negative-metadata",
+            metadataEntries: entries
+        )
+
+        #expect(entries.count == 1)
+        #expect(entries[0].isNegativePattern)
+        #expect(candidates.isEmpty,
+                "negative metadata reduces score but must not count as promotion evidence")
+    }
+
+    @Test("Negative metadata does not bridge separate positive hit groups")
+    func negativeMetadataDoesNotBridgeSeparatePositiveHitGroups() {
+        let injector = MetadataLexiconInjector(config: .default)
+        let cues = [
+            EpisodeMetadataCue(
+                cueType: .showOwnedDomain,
+                normalizedValue: "mypodcast.com",
+                sourceField: .description,
+                confidence: 0.95,
+                canonicalSponsorId: nil,
+                canonicalOwnerId: nil
+            ),
+        ]
+        let entries = injector.inject(cues: cues, metadataTrust: 1.0)
+        let chunks = [
+            makeMetadataActivationChunk(
+                text: "Visit acme com.",
+                normalizedText: "visit acme com",
+                analysisAssetId: "asset-negative-bridge",
+                startTime: 0,
+                endTime: 1
+            ),
+            makeMetadataActivationChunk(
+                text: "mypodcast com",
+                normalizedText: "mypodcast com",
+                analysisAssetId: "asset-negative-bridge",
+                startTime: 25,
+                endTime: 26
+            ),
+            makeMetadataActivationChunk(
+                text: "free trial",
+                normalizedText: "free trial",
+                analysisAssetId: "asset-negative-bridge",
+                startTime: 55,
+                endTime: 56
+            ),
+        ]
+
+        let candidates = LexicalScanner().scan(
+            chunks: chunks,
+            analysisAssetId: "asset-negative-bridge",
+            metadataEntries: entries
+        )
+
+        #expect(candidates.isEmpty,
+                "negative metadata may reduce nearby candidate score, but must not merge otherwise separate positive one-hit groups")
+    }
+
+    @Test("Negative metadata reduces confidence without inflating candidate evidence")
+    func negativeMetadataReducesConfidenceWithoutInflatingEvidence() throws {
+        let injector = MetadataLexiconInjector(config: .default)
+        let cues = [
+            EpisodeMetadataCue(
+                cueType: .showOwnedDomain,
+                normalizedValue: "mypodcast.com",
+                sourceField: .description,
+                confidence: 0.95,
+                canonicalSponsorId: nil,
+                canonicalOwnerId: nil
+            ),
+        ]
+        let entries = injector.inject(cues: cues, metadataTrust: 1.0)
+        let chunk = makeMetadataActivationChunk(
+            text: "Visit acme com for a free trial. mypodcast com mypodcast com mypodcast com.",
+            normalizedText: "visit acme com for a free trial mypodcast com mypodcast com mypodcast com"
+        )
+        let scanner = LexicalScanner()
+
+        let baseline = scanner.scan(
+            chunks: [chunk],
+            analysisAssetId: "asset-negative-baseline"
+        )
+        let withNegativeMetadata = scanner.scan(
+            chunks: [chunk],
+            analysisAssetId: "asset-negative-scored",
+            metadataEntries: entries
+        )
+
+        let baselineCandidate = try #require(baseline.first)
+        let negativeCandidate = try #require(withNegativeMetadata.first)
+        #expect(baselineCandidate.hitCount == 2)
+        #expect(negativeCandidate.hitCount == 2,
+                "negative metadata should not inflate candidate hit count")
+        #expect(negativeCandidate.confidence >= 0)
+        #expect(negativeCandidate.confidence < baselineCandidate.confidence,
+                "negative metadata should reduce confidence when the candidate is otherwise justified")
+    }
+
+    @Test("Production hot-path candidates consume default lexical metadata")
+    func productionHotPathConsumesDefaultLexicalMetadata() async throws {
+        let store = try await makeTestStore()
+        let provider = StaticEpisodeMetadataProvider(metadata: FeedDescriptionMetadata(
+            feedDescription: "This episode is supported by Acme. Visit acme.com for details.",
+            feedSummary: nil,
+            sourceHashes: .init(descriptionHash: 1, summaryHash: 0)
+        ))
+        let service = AdDetectionService(
+            store: store,
+            metadataExtractor: FallbackExtractor(),
+            episodeMetadataProvider: provider
+        )
+        let chunks = [
+            makeMetadataActivationChunk(
+                text: "Visit acme com.",
+                normalizedText: "visit acme com",
+                analysisAssetId: "asset-hotpath-metadata"
+            ),
+        ]
+
+        let candidates = try await service.hotPathCandidatesForTesting(
+            from: chunks,
+            analysisAssetId: "asset-hotpath-metadata"
+        )
+
+        #expect(candidates.count == 1,
+                "production hot-path scanning should use lexical metadata from the episode provider")
+        #expect(candidates[0].hitCount == 2)
+    }
+
+    @Test("Production hot-path treats show-owned metadata domains as negative")
+    func productionHotPathTreatsShowOwnedDomainsAsNegative() async throws {
+        let store = try await makeTestStore()
+        let provider = StaticEpisodeMetadataProvider(
+            metadata: FeedDescriptionMetadata(
+                feedDescription: "Find links and extras at https://mypodcast.com/episode.",
+                feedSummary: nil,
+                sourceHashes: .init(descriptionHash: 1, summaryHash: 0)
+            ),
+            showOwnedDomains: ["mypodcast.com"]
+        )
+        let service = AdDetectionService(
+            store: store,
+            metadataExtractor: FallbackExtractor(),
+            episodeMetadataProvider: provider
+        )
+        let chunks = [
+            makeMetadataActivationChunk(
+                text: "Visit mypodcast com.",
+                normalizedText: "visit mypodcast com",
+                analysisAssetId: "asset-hotpath-show-owned"
+            ),
+        ]
+
+        let candidates = try await service.hotPathCandidatesForTesting(
+            from: chunks,
+            analysisAssetId: "asset-hotpath-show-owned"
+        )
+
+        #expect(candidates.isEmpty,
+                "show-owned metadata domains must not promote a transcript mention")
+    }
+}
+
+private func makeMetadataActivationChunk(
+    text: String,
+    normalizedText: String,
+    analysisAssetId: String = "asset",
+    startTime: Double = 10,
+    endTime: Double = 20
+) -> TranscriptChunk {
+    TranscriptChunk(
+        id: UUID().uuidString,
+        analysisAssetId: analysisAssetId,
+        segmentFingerprint: UUID().uuidString,
+        chunkIndex: 0,
+        startTime: startTime,
+        endTime: endTime,
+        text: text,
+        normalizedText: normalizedText,
+        pass: "fast",
+        modelVersion: "metadata-activation-test",
+        transcriptVersion: nil,
+        atomOrdinal: nil
+    )
+}
+
+private struct StaticEpisodeMetadataProvider: EpisodeMetadataProvider {
+    let metadata: FeedDescriptionMetadata?
+    var showOwnedDomains: Set<String> = []
+    var networkOwnedDomains: Set<String> = []
+
+    func metadata(for analysisAssetId: String) async -> FeedDescriptionMetadata? {
+        metadata
+    }
+
+    func metadataSnapshot(for analysisAssetId: String) async -> EpisodeMetadataSnapshot? {
+        guard let metadata else { return nil }
+        return EpisodeMetadataSnapshot(
+            feedMetadata: metadata,
+            showOwnedDomains: showOwnedDomains,
+            networkOwnedDomains: networkOwnedDomains
+        )
     }
 }
 
@@ -454,8 +884,8 @@ struct MetadataLexiconTwoHitRuleTests {
 @Suite("MetadataPriorShift — Sigmoid Midpoint")
 struct MetadataPriorShiftTests {
 
-    @Test("Baseline midpoint returned when gate is closed")
-    func gateClosed() {
+    @Test("Baseline midpoint returned when prior-shift flag is disabled")
+    func priorShiftDisabled() {
         let shift = MetadataPriorShift(config: .default)
         let mid = shift.effectiveMidpoint(metadataTrust: 0.5)
         #expect(mid == 0.37)
@@ -482,8 +912,8 @@ struct MetadataPriorShiftTests {
         #expect(mid == 0.345)
     }
 
-    @Test("isShiftActive returns false when gate is closed")
-    func shiftActiveGateClosed() {
+    @Test("isShiftActive returns false when prior-shift flag is disabled")
+    func shiftActivePriorShiftDisabled() {
         let shift = MetadataPriorShift(config: .default)
         #expect(!shift.isShiftActive(metadataTrust: 0.5))
     }

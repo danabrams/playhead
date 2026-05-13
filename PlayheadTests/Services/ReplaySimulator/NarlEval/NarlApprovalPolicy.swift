@@ -201,9 +201,10 @@ enum NarlApprovalPolicyEvaluator {
         report: NarlEvalReport,
         policy: NarlApprovalPolicy = .default
     ) -> [NarlRecommendation] {
-        // Group entries by episodeId. Each episode can have up to two entries
-        // (default + allEnabled); excluded episodes still have two (both with
-        // isExcluded=true).
+        // Group entries by episodeId. The harness may include per-gate
+        // isolation rows, but approval still compares the frozen "default"
+        // baseline against "allEnabled"; excluded episodes carry entries for
+        // every emitted replay config.
         var byEpisode: [String: [NarlReportEpisodeEntry]] = [:]
         for e in report.episodes {
             byEpisode[e.episodeId, default: []].append(e)

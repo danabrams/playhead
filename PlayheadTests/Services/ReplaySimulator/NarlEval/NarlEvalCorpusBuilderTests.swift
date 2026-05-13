@@ -64,11 +64,22 @@ struct NarlEvalCorpusBuilderTests {
         // resolves to [] for affected assets.
         let listenRewindsByAsset = try Self.parseListenRewinds(from: corpusExportURLs)
 
-        // decision-log.jsonl (per-window decisions, optional).
+        // decision-log.jsonl (per-window decisions). Required for baseline
+        // fixture builds so the frozen `default` replay row can be proven
+        // metadata-inactive or legacy pre-activation.
         let decisionLogURL = documentsDir.appendingPathComponent("decision-log.jsonl")
-        let decisionLogEntries = fm.fileExists(atPath: decisionLogURL.path)
+        let decisionLogExists = fm.fileExists(atPath: decisionLogURL.path)
+        let decisionLogEntries = decisionLogExists
             ? try Self.parseDecisionLog(from: decisionLogURL)
             : [:]
+        if let contaminationReason = Self.counterfactualBaselineContaminationReason(
+            decisionLogExists: decisionLogExists,
+            expectedAssetIds: Set(assets.map(\.id)),
+            decisionLogsByAsset: decisionLogEntries
+        ) {
+            Issue.record(Comment(rawValue: contaminationReason))
+            return
+        }
 
         // shadow-decisions.jsonl (narl.2, optional). Parsed via schema-tolerant
         // reader so narl.1 ships without a hard binding.
@@ -404,12 +415,31 @@ struct NarlEvalCorpusBuilderTests {
         let classificationTrust: Double
     }
 
+    struct BuilderActivationConfigSnapshot {
+        let lexicalInjectionEnabled: Bool
+        let classifierPriorShiftEnabled: Bool
+        let fmSchedulingEnabled: Bool
+        let counterfactualGateOpen: Bool
+
+        var hasActiveMetadataGate: Bool {
+            counterfactualGateOpen && (
+                lexicalInjectionEnabled ||
+                    classifierPriorShiftEnabled ||
+                    fmSchedulingEnabled
+            )
+        }
+    }
+
     struct BuilderDecisionLogEntry {
         let assetId: String
         let windowStart: Double
         let windowEnd: Double
         let evidence: [BuilderDecisionLogEvidence]
         let fusedConfidence: Double
+        /// Snapshot of production activation config at capture time. Missing
+        /// on pre-activation decision logs, where `.default` was the frozen
+        /// no-metadata baseline.
+        let activationConfig: BuilderActivationConfigSnapshot?
         /// Production `finalDecision.action` string (e.g. "autoSkipEligible",
         /// "markOnly", "suppressed"). Used to derive `isAdUnderDefault` on
         /// the FrozenWindowScore without needing a separate flag.
@@ -450,6 +480,7 @@ struct NarlEvalCorpusBuilderTests {
                 ($0["skipConfidence"] as? Double)
                     ?? (($0["skipConfidence"] as? NSNumber).map(\.doubleValue))
             } ?? 0
+            let activationConfig = parseActivationConfig(obj["activationConfig"] as? [String: Any])
             let finalAction = (obj["finalDecision"] as? [String: Any])?["action"] as? String ?? ""
             byAsset[assetId, default: []].append(BuilderDecisionLogEntry(
                 assetId: assetId,
@@ -457,10 +488,90 @@ struct NarlEvalCorpusBuilderTests {
                 windowEnd: end,
                 evidence: ev,
                 fusedConfidence: fused,
+                activationConfig: activationConfig,
                 finalAction: finalAction
             ))
         }
         return byAsset
+    }
+
+    private static func parseActivationConfig(
+        _ obj: [String: Any]?
+    ) -> BuilderActivationConfigSnapshot? {
+        guard let obj else { return nil }
+        return BuilderActivationConfigSnapshot(
+            lexicalInjectionEnabled: boolValue(obj["lexicalInjectionEnabled"]) ?? false,
+            classifierPriorShiftEnabled: boolValue(obj["classifierPriorShiftEnabled"]) ?? false,
+            fmSchedulingEnabled: boolValue(obj["fmSchedulingEnabled"]) ?? false,
+            counterfactualGateOpen: boolValue(obj["counterfactualGateOpen"]) ?? false
+        )
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool? {
+        if let bool = value as? Bool { return bool }
+        if let number = value as? NSNumber { return number.boolValue }
+        return nil
+    }
+
+    static func counterfactualBaselineContaminationReason(
+        decisionLogExists: Bool,
+        expectedAssetIds: Set<String> = [],
+        decisionLogsByAsset: [String: [BuilderDecisionLogEntry]]
+    ) -> String? {
+        guard decisionLogExists else {
+            return """
+            Refusing to build NARL FrozenTrace fixtures: decision-log.jsonl \
+            is missing. The replay row named "default" must remain a frozen \
+            no-metadata counterfactual baseline, which requires a decision \
+            log that proves the capture was metadata-inactive or legacy \
+            pre-activation.
+            """
+        }
+
+        let missingAssetIds = expectedAssetIds.subtracting(decisionLogsByAsset.keys)
+        if let missingAssetId = missingAssetIds.sorted().first {
+            return """
+            Refusing to build NARL FrozenTrace for asset \(missingAssetId): \
+            decision-log.jsonl has no rows for an exported corpus asset. \
+            The replay row named "default" must remain a frozen no-metadata \
+            counterfactual baseline; recapture a complete decision log \
+            before generating new fixtures.
+            """
+        }
+
+        return counterfactualBaselineContaminationReason(
+            decisionLogsByAsset: decisionLogsByAsset
+        )
+    }
+
+    static func counterfactualBaselineContaminationReason(
+        decisionLogsByAsset: [String: [BuilderDecisionLogEntry]]
+    ) -> String? {
+        for assetId in decisionLogsByAsset.keys.sorted() {
+            if let reason = counterfactualBaselineContaminationReason(
+                decisionLog: decisionLogsByAsset[assetId] ?? []
+            ) {
+                return reason
+            }
+        }
+        return nil
+    }
+
+    static func counterfactualBaselineContaminationReason(
+        decisionLog: [BuilderDecisionLogEntry]
+    ) -> String? {
+        guard let contaminated = decisionLog.first(where: {
+            $0.activationConfig?.hasActiveMetadataGate == true
+        }) else {
+            return nil
+        }
+        return """
+        Refusing to build NARL FrozenTrace for asset \(contaminated.assetId): \
+        decision-log was captured with a metadata activation gate enabled. \
+        The replay row named "default" must remain a frozen no-metadata \
+        counterfactual baseline; recapture with an explicit baseline export \
+        before generating new fixtures.
+        """
     }
 
     // MARK: - Shadow log parsing (schema-tolerant)
@@ -1073,6 +1184,138 @@ struct NarlEvalCorpusBuilderIsAdUnderDefaultTests {
         return action.contains("autoskip")
             || action.contains("markonly")
             || action.contains("skip") && !action.contains("suppress")
+    }
+}
+
+// MARK: - Counterfactual baseline capture guard
+
+@Suite("NarlEvalCorpusBuilder counterfactual baseline guard")
+struct NarlEvalCorpusBuilderCounterfactualBaselineGuardTests {
+
+    @Test("Missing decision log is rejected before fixture generation")
+    func missingDecisionLogIsRejected() {
+        let reason = NarlEvalCorpusBuilderTests.counterfactualBaselineContaminationReason(
+            decisionLogExists: false,
+            decisionLogsByAsset: [:]
+        )
+
+        #expect(reason?.contains("decision-log.jsonl") == true)
+        #expect(reason?.contains("default") == true)
+        #expect(reason?.contains("no-metadata counterfactual baseline") == true)
+    }
+
+    @Test("Partial decision log coverage is rejected before fixture generation")
+    func partialDecisionLogCoverageIsRejected() {
+        let entry = makeDecisionLogEntry(
+            activationConfig: .init(
+                lexicalInjectionEnabled: false,
+                classifierPriorShiftEnabled: false,
+                fmSchedulingEnabled: false,
+                counterfactualGateOpen: true
+            )
+        )
+
+        let reason = NarlEvalCorpusBuilderTests.counterfactualBaselineContaminationReason(
+            decisionLogExists: true,
+            expectedAssetIds: ["asset-counterfactual-guard", "asset-missing-log"],
+            decisionLogsByAsset: ["asset-counterfactual-guard": [entry]]
+        )
+
+        #expect(reason?.contains("asset-missing-log") == true)
+        #expect(reason?.contains("no rows for an exported corpus asset") == true)
+        #expect(reason?.contains("default") == true)
+    }
+
+    @Test("Metadata-active decision logs are rejected before fixture generation")
+    func metadataActiveDecisionLogsAreRejected() {
+        let entry = makeDecisionLogEntry(
+            activationConfig: .init(
+                lexicalInjectionEnabled: true,
+                classifierPriorShiftEnabled: false,
+                fmSchedulingEnabled: false,
+                counterfactualGateOpen: true
+            )
+        )
+
+        let reason = NarlEvalCorpusBuilderTests.counterfactualBaselineContaminationReason(
+            decisionLog: [entry]
+        )
+
+        #expect(reason?.contains("metadata activation gate enabled") == true)
+        #expect(reason?.contains("default") == true)
+    }
+
+    @Test("Any contaminated asset rejects the whole fixture build input")
+    func anyContaminatedAssetRejectsWholeFixtureBuildInput() {
+        let cleanEntry = makeDecisionLogEntry(
+            activationConfig: .init(
+                lexicalInjectionEnabled: false,
+                classifierPriorShiftEnabled: false,
+                fmSchedulingEnabled: false,
+                counterfactualGateOpen: true
+            )
+        )
+        let contaminatedEntry = makeDecisionLogEntry(
+            activationConfig: .init(
+                lexicalInjectionEnabled: true,
+                classifierPriorShiftEnabled: false,
+                fmSchedulingEnabled: false,
+                counterfactualGateOpen: true
+            )
+        )
+
+        let reason = NarlEvalCorpusBuilderTests.counterfactualBaselineContaminationReason(
+            decisionLogsByAsset: [
+                "asset-clean": [cleanEntry],
+                "asset-contaminated": [contaminatedEntry],
+            ]
+        )
+
+        #expect(reason?.contains("metadata activation gate enabled") == true)
+        #expect(reason?.contains("asset-counterfactual-guard") == true)
+    }
+
+    @Test("Frozen no-metadata decision logs are accepted")
+    func frozenNoMetadataDecisionLogsAreAccepted() {
+        let entry = makeDecisionLogEntry(
+            activationConfig: .init(
+                lexicalInjectionEnabled: false,
+                classifierPriorShiftEnabled: false,
+                fmSchedulingEnabled: false,
+                counterfactualGateOpen: true
+            )
+        )
+
+        let reason = NarlEvalCorpusBuilderTests.counterfactualBaselineContaminationReason(
+            decisionLog: [entry]
+        )
+
+        #expect(reason == nil)
+    }
+
+    @Test("Legacy decision logs without activation snapshots are accepted")
+    func legacyDecisionLogsWithoutActivationSnapshotsAreAccepted() {
+        let entry = makeDecisionLogEntry(activationConfig: nil)
+
+        let reason = NarlEvalCorpusBuilderTests.counterfactualBaselineContaminationReason(
+            decisionLog: [entry]
+        )
+
+        #expect(reason == nil)
+    }
+
+    private func makeDecisionLogEntry(
+        activationConfig: NarlEvalCorpusBuilderTests.BuilderActivationConfigSnapshot?
+    ) -> NarlEvalCorpusBuilderTests.BuilderDecisionLogEntry {
+        NarlEvalCorpusBuilderTests.BuilderDecisionLogEntry(
+            assetId: "asset-counterfactual-guard",
+            windowStart: 0,
+            windowEnd: 30,
+            evidence: [],
+            fusedConfidence: 0,
+            activationConfig: activationConfig,
+            finalAction: ""
+        )
     }
 }
 

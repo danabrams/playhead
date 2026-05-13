@@ -18,7 +18,9 @@ enum NarlEvalReportSchema {
 /// A (show, config) rollup with all metric families.
 struct NarlReportRollup: Sendable, Codable {
     let show: String
-    let config: String  // "default" | "allEnabled"
+    /// Replay config row name, such as "default", "allEnabled", or a
+    /// per-gate isolation variant.
+    let config: String
     let episodeCount: Int
     let excludedEpisodeCount: Int
     let windowMetrics: [NarlWindowMetricsAtThreshold]
@@ -530,7 +532,8 @@ enum NarlTerminalReasonBucket: String, Sendable, Codable, CaseIterable {
 struct NarlReportTerminalReasonRollup: Sendable, Codable, Equatable {
     /// The canonical bucket key.
     let bucket: NarlTerminalReasonBucket
-    /// `"default"` | `"allEnabled"` — one rollup row per bucket × config.
+    /// Replay config row name. The harness emits one rollup row per
+    /// non-empty bucket x replay config.
     let config: String
     /// Number of non-excluded episode entries in this bucket.
     let episodeCount: Int
@@ -911,14 +914,14 @@ enum NarlEvalRenderer {
 
         // gtt9.21: capture provenance — list every distinct
         // (detectorVersion, buildCommitSHA) pair across the corpus
-        // along with how many episodes each pair contributed. Mixed-
-        // binary corpora are common (a real-data eval can pull from
-        // a fleet that's mid-rollout); without this section a per-show
-        // F1 swing has no way to be attributed to a specific binary.
-        // Per-episode columns elsewhere can stratify further if a
-        // single show's metrics are split across multiple SHAs.
-        let provenanceCounts = report.episodes.reduce(
-            into: [String: Int]()
+        // along with how many distinct episodes each pair contributed.
+        // Mixed-binary corpora are common (a real-data eval can pull
+        // from a fleet that's mid-rollout); without this section a
+        // per-show F1 swing has no way to be attributed to a specific
+        // binary. Per-episode columns elsewhere can stratify further if
+        // a single show's metrics are split across multiple SHAs.
+        let provenanceEpisodes = report.episodes.reduce(
+            into: [String: Set<String>]()
         ) { acc, episode in
             // Empty-string sentinels (pre-gtt9.21 fixtures) collapse
             // to the explicit "(absent)" label so they're not
@@ -926,8 +929,9 @@ enum NarlEvalRenderer {
             // markdown table.
             let dv = episode.detectorVersion.isEmpty ? "(absent)" : episode.detectorVersion
             let sha = episode.buildCommitSHA.isEmpty ? "(absent)" : episode.buildCommitSHA
-            acc["\(dv)|\(sha)", default: 0] += 1
+            acc["\(dv)|\(sha)", default: []].insert(episode.episodeId)
         }
+        let provenanceCounts = provenanceEpisodes.mapValues(\.count)
         out += "## Capture provenance\n\n"
         if provenanceCounts.isEmpty {
             // No episodes ⇒ no provenance to render. Print the section
@@ -968,9 +972,9 @@ enum NarlEvalRenderer {
         out += "\n"
 
         // Split into metric table (non-excluded) and a deduped excluded list.
-        // Each episode appears once per config in `report.episodes`, so without
-        // deduping, an excluded episode would show up twice in the summary
-        // with identical zeros (LOW-4).
+        // Each episode appears once per replay config in `report.episodes`, so
+        // without deduping, an excluded episode would show up repeatedly in the
+        // summary with identical zeros (LOW-4).
         //
         // playhead-jif5: the per-episode metric table still renders every
         // entry where `isExcluded == false` — pipeline-coverage-limited

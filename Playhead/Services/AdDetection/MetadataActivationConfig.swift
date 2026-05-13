@@ -2,8 +2,10 @@
 // ef2.4.7: Configuration gates for metadata activation in the ad detection pipeline.
 //
 // Each consumption point (lexical injection, classifier prior shift, FM scheduling)
-// is independently gated and configurable. All three are off by default; the
-// counterfactual evaluator controls activation via feature flags.
+// is independently gated and configurable. Production enables only the
+// counterfactual-approved lexical injection gate by default; classifier prior
+// shift and FM scheduling remain gated off until their evidence clears the same
+// bar.
 
 import Foundation
 
@@ -71,23 +73,43 @@ struct MetadataActivationConfig: Sendable, Equatable {
 
     // MARK: - Defaults
 
-    /// Production default: master `counterfactualGateOpen` is open, but
-    /// every per-gate flag below it remains off. The master gate is the
-    /// `(gateOpen && enabled)` short-circuit that the `is*Active`
-    /// computed properties use; with the gate closed, NO per-gate flag
-    /// can ever take effect regardless of how it's tuned.
+    /// Production default: the master `counterfactualGateOpen` is open and
+    /// only lexical injection is enabled. Classifier prior shift and FM
+    /// scheduling stay off.
     ///
     /// playhead-sqhj (2026-04-26 follow-up to gtt9.4): the spike found
     /// that `counterfactualGateOpen=false` was a master kill on every
     /// NARL metadata-activation knob. Flipping the master open allows
     /// downstream gate-tuning beads (priorShift band, lexical
     /// injection trust floor, FM seeded-region scheduling) to actually
-    /// land effects on the corpus. The per-gate flags below remain
-    /// off — flipping the master is a behaviour change ONLY for callers
-    /// that already enable a per-gate flag (today: tests using
-    /// `.allEnabled` and the DEBUG override path). Production behaviour
-    /// is unchanged until a future bead also flips a per-gate flag.
+    /// land effects on the corpus.
+    ///
+    /// playhead-narl (2026-05-13): FrozenTrace v3 counterfactual evidence
+    /// justifies the smallest graduated activation: lexical injection only.
+    /// `lexicalOnly` matched the ALL-corpus Sec-F1 lift of `allEnabled` while
+    /// keeping prior shift and FM scheduling isolated off. Prior shift was
+    /// metric-neutral and FM scheduling remains shadow-evidence-gated, so both
+    /// stay disabled in production default.
     static let `default` = MetadataActivationConfig(
+        lexicalInjectionEnabled: true,
+        lexicalInjectionMinTrust: 0.0,
+        lexicalInjectionDiscount: 0.75,
+        classifierPriorShiftEnabled: false,
+        classifierPriorShiftMinTrust: 0.08,
+        classifierShiftedMidpoint: 0.345,
+        classifierBaselineMidpoint: 0.37,
+        fmSchedulingEnabled: false,
+        fmSchedulingMinTrust: 0.0,
+        counterfactualGateOpen: true
+    )
+
+    /// Frozen no-metadata baseline for NARL counterfactual replay.
+    ///
+    /// This is intentionally separate from production `.default`: once a gate
+    /// graduates into production, replay reports still need a stable baseline
+    /// row so `default` vs. `allEnabled` evidence remains reproducible from
+    /// the current repo.
+    static let counterfactualBaseline = MetadataActivationConfig(
         lexicalInjectionEnabled: false,
         lexicalInjectionMinTrust: 0.0,
         lexicalInjectionDiscount: 0.75,

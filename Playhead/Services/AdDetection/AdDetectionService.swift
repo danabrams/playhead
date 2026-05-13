@@ -1772,11 +1772,26 @@ actor AdDetectionService {
             )
         }
 
+        let (metadataCues, assetChapterEvidence) = await loadEpisodeMetadataSignals(
+            analysisAssetId: analysisAssetId
+        )
+
+        // playhead-084j / playhead-narl: resolve the 4-level prior hierarchy
+        // once per episode before the first metadata consumption point. Lexical
+        // injection and the later fusion loop must share the same snapshot so
+        // concurrent profile updates cannot change metadata trust mid-run.
+        let resolvedEpisodePriors = await resolveEpisodePriors()
+        let metadataLexiconEntries = metadataLexiconEntries(
+            from: metadataCues,
+            metadataTrust: resolvedEpisodePriors.metadataTrust
+        )
+
         // ── Step 4: Lexical scan + RuleBasedClassifier ───────────────────────
 
         let lexicalCandidates = scanner.scan(
             chunks: chunks,
-            analysisAssetId: analysisAssetId
+            analysisAssetId: analysisAssetId,
+            metadataEntries: metadataLexiconEntries
         )
 
         logger.info("Backfill: \(lexicalCandidates.count) lexical candidates from \(chunks.count) final chunks")
@@ -1988,26 +2003,15 @@ actor AdDetectionService {
         // transcriptQuality is the same for every span (derived from the full atom array),
         // so compute it once outside the loop rather than redundantly per span.
         let transcriptQuality = estimateTranscriptQuality(atoms: atomEvidence)
-        // playhead-z3ch: pre-compute metadata cues once per asset. The lookup
-        // is feed-level (description + summary) so it has no per-span variance;
-        // fanning out the same cues across every span keeps the corroboration
-        // gate honest while sharing the extraction cost.
+        // playhead-z3ch: metadata cues were pre-computed before lexical scan so
+        // playhead-narl lexical injection and the later fusion ledger consume
+        // the same feed-level snapshot. The lookup is feed-level (description
+        // + summary) so it has no per-span variance; fanning out the same cues
+        // across every span keeps the corroboration gate honest while sharing
+        // the extraction cost.
         // playhead-gtt9.22: also pull cached `chapterEvidence` from the
         // metadata provider so the chapter ledger builder can fuse
         // publisher-supplied chapter markers into the metadata channel.
-        let metadataCues: [EpisodeMetadataCue]
-        let assetChapterEvidence: [ChapterEvidence]
-        if let feedMetadata = await episodeMetadataProvider.metadata(for: analysisAssetId) {
-            let extractor = MetadataCueExtractor()
-            metadataCues = extractor.extractCues(
-                description: feedMetadata.feedDescription,
-                summary: feedMetadata.feedSummary
-            )
-            assetChapterEvidence = feedMetadata.chapterEvidence ?? []
-        } else {
-            metadataCues = []
-            assetChapterEvidence = []
-        }
         let metadataEvidenceBuilder = FeedDescriptionEvidenceBuilder()
         let chapterEvidenceBuilder = ChapterMetadataEvidenceBuilder()
         var fusionWindows: [AdWindow] = []
@@ -2085,11 +2089,11 @@ actor AdDetectionService {
         let assetCohortJSON = (try? JSONEncoder().encode(assetDecisionCohort))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
 
-        // playhead-084j: resolve the 4-level prior hierarchy ONCE per episode.
+        // playhead-084j: reuse the 4-level prior hierarchy resolved once per episode.
         // Up to this bead, `DurationPrior.standard` was hard-coded inside the
         // per-span fusion loop, so every show ran with the global default
         // typicalAdDuration of 30...90s. As of playhead-spxs all four tiers —
-        // global + network + trait + show-local — are resolved here and fed
+        // global + network + trait + show-local — are resolved once and fed
         // into `DurationPrior(resolvedPriors:)`. See the audit block on
         // `resolveEpisodePriors(...)` for the current per-tier source-of-truth
         // and which axes each tier is load-bearing on.
@@ -2106,7 +2110,6 @@ actor AdDetectionService {
         // (a few blends, well under a millisecond) is genuinely
         // negligible; the shape is locked by the wire-up tests so the
         // consistency invariant can't regress silently.
-        let resolvedEpisodePriors = await resolveEpisodePriors()
         let episodeDurationPrior = DurationPrior(resolvedPriors: resolvedEpisodePriors)
 
         // playhead-fqc8: detect acoustic breaks once for the whole asset
@@ -3973,6 +3976,10 @@ actor AdDetectionService {
             }
             return lhs.endTime < rhs.endTime
         }
+        let (metadataCues, _) = await loadEpisodeMetadataSignals(
+            analysisAssetId: analysisAssetId
+        )
+        let metadataEntries = await metadataLexiconEntries(from: metadataCues)
 
         let hypothesisCandidates = try await hypothesisCandidates(
             from: orderedChunks,
@@ -3980,7 +3987,8 @@ actor AdDetectionService {
         )
         let lexicalCandidates = scanner.scan(
             chunks: orderedChunks,
-            analysisAssetId: analysisAssetId
+            analysisAssetId: analysisAssetId,
+            metadataEntries: metadataEntries
         )
 
         if !hypothesisCandidates.isEmpty {
@@ -4005,6 +4013,65 @@ actor AdDetectionService {
         }
         return lexicalCandidates
     }
+
+    private func loadEpisodeMetadataSignals(
+        analysisAssetId: String
+    ) async -> (cues: [EpisodeMetadataCue], chapterEvidence: [ChapterEvidence]) {
+        guard let snapshot = await episodeMetadataProvider.metadataSnapshot(
+            for: analysisAssetId
+        ) else {
+            return ([], [])
+        }
+
+        let feedMetadata = snapshot.feedMetadata
+        let extractor = MetadataCueExtractor(
+            showOwnedDomains: snapshot.showOwnedDomains,
+            networkOwnedDomains: snapshot.networkOwnedDomains
+        )
+        let cues = extractor.extractCues(
+            description: feedMetadata.feedDescription,
+            summary: feedMetadata.feedSummary
+        )
+        return (cues, feedMetadata.chapterEvidence ?? [])
+    }
+
+    private func metadataLexiconEntries(
+        from cues: [EpisodeMetadataCue]
+    ) async -> [MetadataLexiconEntry] {
+        guard !cues.isEmpty else { return [] }
+        let priors = await resolveEpisodePriors()
+        return metadataLexiconEntries(
+            from: cues,
+            metadataTrust: priors.metadataTrust
+        )
+    }
+
+    private func metadataLexiconEntries(
+        from cues: [EpisodeMetadataCue],
+        metadataTrust: Float
+    ) -> [MetadataLexiconEntry] {
+        guard !cues.isEmpty else { return [] }
+        let activationConfig = MetadataActivationConfig.resolved()
+        guard activationConfig.isLexicalInjectionActive else { return [] }
+
+        let injector = MetadataLexiconInjector(config: activationConfig)
+        return injector.inject(
+            cues: cues,
+            metadataTrust: metadataTrust
+        )
+    }
+
+    #if DEBUG
+    func hotPathCandidatesForTesting(
+        from chunks: [TranscriptChunk],
+        analysisAssetId: String
+    ) async throws -> [LexicalCandidate] {
+        try await hotPathCandidates(
+            from: chunks,
+            analysisAssetId: analysisAssetId
+        )
+    }
+    #endif
 
     private func chunkHasReplaySignal(_ chunk: TranscriptChunk) -> Bool {
         replaySignalProfile(for: chunk).hasSignal

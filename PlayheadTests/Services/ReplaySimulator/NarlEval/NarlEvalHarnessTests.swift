@@ -1,12 +1,12 @@
 // NarlEvalHarnessTests.swift
 // playhead-narl.1: The eval runner. Swift Testing suite that runs under
 // PlayheadFastTests. For each FrozenTrace fixture in
-// PlayheadTests/Fixtures/NarlEval/ it replays predictions under both
-// `.default` and `.allEnabled` configs, computes window-level + second-level
-// metrics, and writes a timestamped report.
+// PlayheadTests/Fixtures/NarlEval/ it replays predictions under the frozen
+// no-metadata baseline, `.allEnabled`, and per-gate isolation configs,
+// computes window-level + second-level metrics, and writes a timestamped report.
 //
 // Asserts only:
-//   (a) both configs run to completion without throwing, and
+//   (a) every replay config runs to completion without throwing, and
 //   (b) report artifacts are written to .eval-out/narl/<timestamp>/.
 //
 // Metric regressions do NOT fail the build — they surface in the report for
@@ -33,6 +33,153 @@ struct NarlEvalHarnessTests {
     /// `fixturesRootURL()` at runtime so the code is portable across
     /// derived-data layouts.
     static let fixturesRelpath = "PlayheadTests/Fixtures/NarlEval"
+
+    /// Replay configs emitted into report rows. The row named "default" is a
+    /// frozen no-metadata counterfactual baseline, not today's production
+    /// `MetadataActivationConfig.default`, because production defaults can
+    /// graduate gates over time while the approval methodology still needs a
+    /// stable before/after comparison.
+    static let replayConfigs: [(name: String, config: MetadataActivationConfig)] = [
+        ("default", .counterfactualBaseline),
+        ("allEnabled", .allEnabled),
+        ("lexicalOnly", MetadataActivationConfig(
+            lexicalInjectionEnabled: true,
+            lexicalInjectionMinTrust: 0.0,
+            lexicalInjectionDiscount: 0.75,
+            classifierPriorShiftEnabled: false,
+            classifierPriorShiftMinTrust: 0.08,
+            classifierShiftedMidpoint: MetadataActivationConfig.counterfactualBaseline.classifierShiftedMidpoint,
+            classifierBaselineMidpoint: MetadataActivationConfig.counterfactualBaseline.classifierBaselineMidpoint,
+            fmSchedulingEnabled: false,
+            fmSchedulingMinTrust: 0.0,
+            counterfactualGateOpen: true
+        )),
+        ("priorShiftOnly", MetadataActivationConfig(
+            lexicalInjectionEnabled: false,
+            lexicalInjectionMinTrust: 0.0,
+            lexicalInjectionDiscount: 0.75,
+            classifierPriorShiftEnabled: true,
+            classifierPriorShiftMinTrust: 0.08,
+            classifierShiftedMidpoint: MetadataActivationConfig.counterfactualBaseline.classifierShiftedMidpoint,
+            classifierBaselineMidpoint: MetadataActivationConfig.counterfactualBaseline.classifierBaselineMidpoint,
+            fmSchedulingEnabled: false,
+            fmSchedulingMinTrust: 0.0,
+            counterfactualGateOpen: true
+        )),
+        ("fmSchedulingOnly", MetadataActivationConfig(
+            lexicalInjectionEnabled: false,
+            lexicalInjectionMinTrust: 0.0,
+            lexicalInjectionDiscount: 0.75,
+            classifierPriorShiftEnabled: false,
+            classifierPriorShiftMinTrust: 0.08,
+            classifierShiftedMidpoint: MetadataActivationConfig.counterfactualBaseline.classifierShiftedMidpoint,
+            classifierBaselineMidpoint: MetadataActivationConfig.counterfactualBaseline.classifierBaselineMidpoint,
+            fmSchedulingEnabled: true,
+            fmSchedulingMinTrust: 0.0,
+            counterfactualGateOpen: true
+        )),
+    ]
+
+    @Test("Harness default report row remains the frozen counterfactual baseline")
+    func defaultReportRowUsesCounterfactualBaseline() {
+        guard let config = Self.replayConfigs.first(where: { $0.name == "default" })?.config else {
+            Issue.record("Expected replay config named default")
+            return
+        }
+        #expect(config == .counterfactualBaseline)
+        #expect(config != .default,
+                "The replay default row must not drift when production .default graduates a gate")
+        #expect(!config.isLexicalInjectionActive)
+        #expect(!config.isClassifierPriorShiftActive)
+        #expect(!config.isFMSchedulingActive)
+    }
+
+    @Test("Harness replay configs pin default, allEnabled, and per-gate isolation rows")
+    func replayConfigsPinExpectedRows() {
+        #expect(Self.replayConfigs.map(\.name) == [
+            "default",
+            "allEnabled",
+            "lexicalOnly",
+            "priorShiftOnly",
+            "fmSchedulingOnly",
+        ])
+
+        for (name, config) in Self.replayConfigs {
+            switch name {
+            case "default":
+                #expect(config == .counterfactualBaseline)
+            case "allEnabled":
+                #expect(config == .allEnabled)
+            case "lexicalOnly":
+                #expect(config == .default,
+                        "The approved lexicalOnly replay row must match today's production default")
+                #expect(config.isLexicalInjectionActive)
+                #expect(!config.isClassifierPriorShiftActive)
+                #expect(!config.isFMSchedulingActive)
+            case "priorShiftOnly":
+                #expect(!config.isLexicalInjectionActive)
+                #expect(config.isClassifierPriorShiftActive)
+                #expect(!config.isFMSchedulingActive)
+            case "fmSchedulingOnly":
+                #expect(!config.isLexicalInjectionActive)
+                #expect(!config.isClassifierPriorShiftActive)
+                #expect(config.isFMSchedulingActive)
+            default:
+                Issue.record("Unexpected replay config \(name)")
+            }
+        }
+    }
+
+    @Test("Replay lexical injection requires positive metadata trust")
+    func replayLexicalInjectionRequiresPositiveMetadataTrust() {
+        let trace = Self.makeTrace(
+            evidence: [],
+            windowScores: [
+                FrozenTrace.FrozenWindowScore(
+                    windowStart: 30,
+                    windowEnd: 60,
+                    fusedSkipConfidence: 0.30,
+                    classificationTrust: 0,
+                    hasMetadataEvidence: true,
+                    isAdUnderDefault: false
+                ),
+            ]
+        )
+
+        let prediction = NarlReplayPredictor.predict(
+            trace: trace,
+            config: .default
+        )
+
+        #expect(prediction.windows.isEmpty)
+        #expect(prediction.lexicalInjectionAdds == 0,
+                "Replay must mirror MetadataLexiconInjector's metadataTrust > 0 guard")
+    }
+
+    @Test("Replay lexical injection flips metadata-backed trusted windows")
+    func replayLexicalInjectionFlipsTrustedMetadataWindows() {
+        let trace = Self.makeTrace(
+            evidence: [],
+            windowScores: [
+                FrozenTrace.FrozenWindowScore(
+                    windowStart: 30,
+                    windowEnd: 60,
+                    fusedSkipConfidence: 0.30,
+                    classificationTrust: 0.1,
+                    hasMetadataEvidence: true,
+                    isAdUnderDefault: false
+                ),
+            ]
+        )
+
+        let prediction = NarlReplayPredictor.predict(
+            trace: trace,
+            config: .default
+        )
+
+        #expect(prediction.windows == [NarlTimeRange(start: 30, end: 60)])
+        #expect(prediction.lexicalInjectionAdds == 1)
+    }
 
     @Test("hasShadowCoverage flips when trace carries shadow: evidence entries")
     func hasShadowCoverageDetectsShadowEvidence() {
@@ -65,7 +212,8 @@ struct NarlEvalHarnessTests {
 
     /// Minimal FrozenTrace factory for unit-level helper tests.
     private static func makeTrace(
-        evidence: [FrozenTrace.FrozenEvidenceEntry]
+        evidence: [FrozenTrace.FrozenEvidenceEntry],
+        windowScores: [FrozenTrace.FrozenWindowScore] = []
     ) -> FrozenTrace {
         FrozenTrace(
             episodeId: "ep-test",
@@ -79,7 +227,8 @@ struct NarlEvalHarnessTests {
             corrections: [],
             decisionEvents: [],
             baselineReplaySpanDecisions: [],
-            holdoutDesignation: .training
+            holdoutDesignation: .training,
+            windowScores: windowScores
         )
     }
 
@@ -269,7 +418,7 @@ struct NarlEvalHarnessTests {
                 "unknown identifier must degrade to raw podcastId, not a known show")
     }
 
-    @Test("Harness runs both configs and writes a report")
+    @Test("Harness runs every replay config and writes a report")
     func runHarness() throws {
         let (report, outputDir) = try Self.runHarnessCollectingReport()
 
@@ -286,6 +435,86 @@ struct NarlEvalHarnessTests {
         #expect(FileManager.default.fileExists(atPath: trendURL.path),
                 "trend.jsonl should exist at \(trendURL.path)")
         _ = report
+    }
+
+    @Test("Report provenance counts distinct episodes, not replay config rows")
+    func reportProvenanceCountsDistinctEpisodes() {
+        let metric = NarlSecondLevelMetrics(
+            truePositiveSeconds: 0,
+            falsePositiveSeconds: 0,
+            falseNegativeSeconds: 0,
+            precision: 0,
+            recall: 0,
+            f1: 0
+        )
+        let episodes = [
+            NarlReportEpisodeEntry(
+                episodeId: "ep-1",
+                podcastId: "podcast",
+                show: "Show",
+                config: "default",
+                isExcluded: false,
+                exclusionReason: nil,
+                groundTruthWindowCount: 0,
+                predictedWindowCount: 0,
+                windowMetrics: [],
+                secondLevel: metric,
+                lexicalInjectionAdds: 0,
+                priorShiftAdds: 0,
+                hasShadowCoverage: false,
+                detectorVersion: "detectorA",
+                buildCommitSHA: "abc123"
+            ),
+            NarlReportEpisodeEntry(
+                episodeId: "ep-1",
+                podcastId: "podcast",
+                show: "Show",
+                config: "lexicalOnly",
+                isExcluded: false,
+                exclusionReason: nil,
+                groundTruthWindowCount: 0,
+                predictedWindowCount: 0,
+                windowMetrics: [],
+                secondLevel: metric,
+                lexicalInjectionAdds: 0,
+                priorShiftAdds: 0,
+                hasShadowCoverage: false,
+                detectorVersion: "detectorA",
+                buildCommitSHA: "abc123"
+            ),
+            NarlReportEpisodeEntry(
+                episodeId: "ep-2",
+                podcastId: "podcast",
+                show: "Show",
+                config: "default",
+                isExcluded: false,
+                exclusionReason: nil,
+                groundTruthWindowCount: 0,
+                predictedWindowCount: 0,
+                windowMetrics: [],
+                secondLevel: metric,
+                lexicalInjectionAdds: 0,
+                priorShiftAdds: 0,
+                hasShadowCoverage: false,
+                detectorVersion: "detectorA",
+                buildCommitSHA: "abc123"
+            ),
+        ]
+        let report = NarlEvalReport(
+            schemaVersion: NarlEvalReportSchema.version,
+            generatedAt: Date(timeIntervalSince1970: 0),
+            runId: "provenance-test",
+            iouThresholds: [0.3, 0.5, 0.7],
+            rollups: [],
+            episodes: episodes,
+            notes: []
+        )
+
+        let markdown = NarlEvalRenderer.renderMarkdown(report)
+
+        #expect(markdown.contains("| detectorA | abc123 | 2 |"),
+                "Provenance should count distinct episodes; replay config rows must not inflate the episode count")
+        #expect(!markdown.contains("| detectorA | abc123 | 3 |"))
     }
 
     @Test("harness threads coverageMetrics + fnDecomposition into the report")
@@ -602,40 +831,42 @@ struct NarlEvalHarnessTests {
         }
     }
 
-    @Test("playhead-q45f.3: harness q45fCarryforward is identical across .default and .allEnabled configs")
+    @Test("playhead-q45f.3: harness q45fCarryforward is identical across replay configs")
     func harnessQ45fCarryforwardIsConfigIndependent() throws {
         // Cycle-4 invariant: q45fCarryforward depends only on a trace's
         // `listenRewindEvents` and the fixed counterfactual seed
         // (`Q45fReplayGate.State.freshDefault`). It does NOT depend on
         // the eval config (which controls correction layers + scoring
-        // gates, none of which feed the gate). For any given `show`, the
-        // per-podcastId carryforward array under config "default" must
-        // equal the array under config "allEnabled" — anything else
-        // means a future refactor accidentally coupled the gate to
-        // config-driven state, the kind of silent regression that would
-        // skew a sweep eval.
+        // gates, none of which feed the gate). For any given `show`, every
+        // per-gate isolation row must carry the same per-podcastId
+        // carryforward array as the frozen "default" baseline — anything
+        // else means a future refactor accidentally coupled the gate to
+        // config-driven state, the kind of silent regression that would skew
+        // a sweep eval.
         let (report, _) = try Self.runHarnessCollectingReport()
         guard !report.rollups.isEmpty else { return }
 
-        // Bucket by show; within each show, look up the two configs and
+        // Bucket by show; within each show, look up all replay configs and
         // assert their carryforward arrays are equal.
         let byShow = Dictionary(grouping: report.rollups, by: \.show)
+        let expectedConfigNames = Set(Self.replayConfigs.map(\.name))
         var asserted = 0
         for (show, rollups) in byShow where show != "ALL" {
             let defaultRollup = rollups.first { $0.config == "default" }
-            let allEnabledRollup = rollups.first { $0.config == "allEnabled" }
-            // Only the (show, default, allEnabled) triple is meaningful;
-            // shows with only one config get skipped (defensive — the
-            // harness always emits both, but this avoids a brittle assert).
-            guard let d = defaultRollup, let a = allEnabledRollup else { continue }
-            #expect(d.q45fCarryforward == a.q45fCarryforward,
-                    "q45fCarryforward must be config-independent for show=\(show); got \(d.q45fCarryforward.count) vs \(a.q45fCarryforward.count) (or differing per-podcastId rollups)")
-            asserted += 1
+            let configNames = Set(rollups.map(\.config))
+            #expect(configNames == expectedConfigNames,
+                    "show=\(show) should emit exactly the pinned replay config rows")
+            guard let d = defaultRollup else { continue }
+            for rollup in rollups where rollup.config != "default" {
+                #expect(d.q45fCarryforward == rollup.q45fCarryforward,
+                        "q45fCarryforward must be config-independent for show=\(show), config=\(rollup.config)")
+                asserted += 1
+            }
         }
-        // Sanity: at least one show must have produced both configs;
+        // Sanity: at least one show must have produced comparable config rows;
         // otherwise the test passed vacuously.
         #expect(asserted >= 1,
-                "At least one show must have both default + allEnabled rollups for the invariant to mean anything")
+                "At least one show must have default + non-default rollups for the invariant to mean anything")
     }
 
     @Test("playhead-q45f.3: harness carryforward helper splits multi-podcastId shows")
@@ -836,51 +1067,7 @@ struct NarlEvalHarnessTests {
             // would have demoted on their own?" without re-running the
             // gate.
             let q45fCounterfactual = NarlQ45fCounterfactual.compute(trace: trace)
-            let lexicalOnly = MetadataActivationConfig(
-                lexicalInjectionEnabled: true,
-                lexicalInjectionMinTrust: 0.0,
-                lexicalInjectionDiscount: 0.75,
-                classifierPriorShiftEnabled: false,
-                classifierPriorShiftMinTrust: 0.08,
-                classifierShiftedMidpoint: 0.345,
-                classifierBaselineMidpoint: 0.37,
-                fmSchedulingEnabled: false,
-                fmSchedulingMinTrust: 0.0,
-                counterfactualGateOpen: true
-            )
-            let priorShiftOnly = MetadataActivationConfig(
-                lexicalInjectionEnabled: false,
-                lexicalInjectionMinTrust: 0.0,
-                lexicalInjectionDiscount: 0.75,
-                classifierPriorShiftEnabled: true,
-                classifierPriorShiftMinTrust: 0.08,
-                classifierShiftedMidpoint: 0.345,
-                classifierBaselineMidpoint: 0.37,
-                fmSchedulingEnabled: false,
-                fmSchedulingMinTrust: 0.0,
-                counterfactualGateOpen: true
-            )
-            let fmSchedulingOnly = MetadataActivationConfig(
-                lexicalInjectionEnabled: false,
-                lexicalInjectionMinTrust: 0.0,
-                lexicalInjectionDiscount: 0.75,
-                classifierPriorShiftEnabled: false,
-                classifierPriorShiftMinTrust: 0.08,
-                classifierShiftedMidpoint: 0.345,
-                classifierBaselineMidpoint: 0.37,
-                fmSchedulingEnabled: true,
-                fmSchedulingMinTrust: 0.0,
-                counterfactualGateOpen: true
-            )
-            let configs: [(name: String, config: MetadataActivationConfig)] = [
-                ("default", .default),
-                ("allEnabled", .allEnabled),
-                ("lexicalOnly", lexicalOnly),
-                ("priorShiftOnly", priorShiftOnly),
-                ("fmSchedulingOnly", fmSchedulingOnly),
-            ]
-
-            for (configName, configValue) in configs {
+            for (configName, configValue) in Self.replayConfigs {
                 let pred = NarlReplayPredictor.predict(
                     trace: trace,
                     config: configValue,

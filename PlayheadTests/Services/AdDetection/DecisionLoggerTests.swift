@@ -64,10 +64,12 @@ struct DecisionLogEntryCodableTests {
         #expect(snap.classifierPriorShiftMinTrust == 0.08)
 
         let defSnap = DecisionLogEntry.ActivationConfigSnapshot(.default)
-        // playhead-sqhj: master gate is open in `.default`; per-gate
-        // flags remain off so net activation behaviour is unchanged.
+        // playhead-narl: master gate is open in `.default`; lexical
+        // injection is the only production-active per-gate flag.
         #expect(defSnap.counterfactualGateOpen == true)
-        #expect(defSnap.lexicalInjectionEnabled == false)
+        #expect(defSnap.lexicalInjectionEnabled == true)
+        #expect(defSnap.classifierPriorShiftEnabled == false)
+        #expect(defSnap.fmSchedulingEnabled == false)
     }
 
     @Test("LedgerEntry round-trips every EvidenceLedgerDetail variant")
@@ -423,8 +425,8 @@ struct DecisionLoggerPipelineTests {
         let service = makeService(store: analysisStore)
         await service.setDecisionLogger(spy)
 
-        // Default resolution: master gate is open (playhead-sqhj),
-        // per-gate flags off — net activation unchanged.
+        // Default resolution: lexical injection is now the only active
+        // production metadata gate (playhead-narl).
         try await service.runBackfill(
             chunks: makeAdChunks(assetId: assetId),
             analysisAssetId: assetId,
@@ -439,6 +441,9 @@ struct DecisionLoggerPipelineTests {
         }
         #expect(first.activationConfig.counterfactualGateOpen == true,
                 "Without override, snapshot must report default (master gate open per sqhj).")
+        #expect(first.activationConfig.lexicalInjectionEnabled == true)
+        #expect(first.activationConfig.classifierPriorShiftEnabled == false)
+        #expect(first.activationConfig.fmSchedulingEnabled == false)
     }
 
     @Test("runHotPath emits a DecisionLogEntry for every classifier result")

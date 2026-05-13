@@ -208,9 +208,9 @@ struct AnalysisSummary: Codable, Sendable, Equatable {
 
 // MARK: - FeedDescriptionMetadata
 
-/// Shadow-mode metadata from RSS description/summary fields.
-/// Normalized text + source hashes for rebuild detection.
-/// These fields are persisted but do not influence any live decisions.
+/// Metadata from RSS description/summary fields.
+/// Normalized text + source hashes for rebuild detection. Live consumers
+/// decide whether to use each signal through `MetadataActivationConfig`.
 struct FeedDescriptionMetadata: Codable, Sendable, Equatable {
     /// RSS `<description>` — HTML stripped, entities decoded, truncated.
     var feedDescription: String?

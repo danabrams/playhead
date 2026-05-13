@@ -28,7 +28,7 @@ struct MetadataActivationOverrideTests {
         withCleanOverride {
             let resolved = MetadataActivationConfig.resolved()
             #expect(resolved == .default)
-            #expect(!resolved.isLexicalInjectionActive)
+            #expect(resolved.isLexicalInjectionActive)
             #expect(!resolved.isClassifierPriorShiftActive)
             #expect(!resolved.isFMSchedulingActive)
         }

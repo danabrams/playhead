@@ -8,8 +8,8 @@
 // 4. Regex-based cue detection (disclosures, promo codes, sponsor aliases)
 // 5. Domain classification (show-owned, network-owned, external)
 //
-// Shadow mode only — results are returned/logged but don't influence
-// any live ad detection scoring.
+// Extraction is side-effect-free; downstream consumers decide whether
+// to activate each metadata signal through MetadataActivationConfig.
 
 import Foundation
 import OSLog
