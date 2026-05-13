@@ -186,6 +186,8 @@ struct TranscriptSegment: Sendable, Equatable {
     let avgConfidence: Float
     /// Which model pass produced this segment.
     let passType: TranscriptPassType
+    /// ASR-derived diarization speaker label, when the recognizer supplies one.
+    let speakerId: Int?
     /// Alternative-transcription and weak-anchor recovery metadata.
     let weakAnchorMetadata: TranscriptWeakAnchorMetadata?
 
@@ -197,7 +199,8 @@ struct TranscriptSegment: Sendable, Equatable {
         endTime: TimeInterval,
         avgConfidence: Float,
         passType: TranscriptPassType,
-        weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
+        weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil,
+        speakerId: Int? = nil
     ) {
         self.id = id
         self.words = words
@@ -206,6 +209,7 @@ struct TranscriptSegment: Sendable, Equatable {
         self.endTime = endTime
         self.avgConfidence = avgConfidence
         self.passType = passType
+        self.speakerId = speakerId
         self.weakAnchorMetadata = weakAnchorMetadata
     }
 }
@@ -228,6 +232,7 @@ struct RecognitionSnapshot: Sendable {
     let startTime: TimeInterval
     let endTime: TimeInterval
     let weakAnchorMetadata: TranscriptWeakAnchorMetadata?
+    let speakerId: Int?
 
     init(
         isFinal: Bool,
@@ -235,7 +240,8 @@ struct RecognitionSnapshot: Sendable {
         words: [TranscriptWord],
         startTime: TimeInterval,
         endTime: TimeInterval,
-        weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
+        weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil,
+        speakerId: Int? = nil
     ) {
         self.isFinal = isFinal
         self.text = text
@@ -243,6 +249,7 @@ struct RecognitionSnapshot: Sendable {
         self.startTime = startTime
         self.endTime = endTime
         self.weakAnchorMetadata = weakAnchorMetadata
+        self.speakerId = speakerId
     }
 }
 
@@ -466,7 +473,8 @@ actor SpeechService {
                 endTime: seg.endTime,
                 avgConfidence: seg.avgConfidence,
                 passType: passType,
-                weakAnchorMetadata: seg.weakAnchorMetadata
+                weakAnchorMetadata: seg.weakAnchorMetadata,
+                speakerId: seg.speakerId
             )
         }
 
@@ -1067,7 +1075,8 @@ enum AppleSpeechResultMapper {
                 endTime: segment.endTime + delta,
                 avgConfidence: segment.avgConfidence,
                 passType: segment.passType,
-                weakAnchorMetadata: segment.weakAnchorMetadata?.offsettingTimes(by: delta)
+                weakAnchorMetadata: segment.weakAnchorMetadata?.offsettingTimes(by: delta),
+                speakerId: segment.speakerId
             )
         }
     }
@@ -1245,7 +1254,8 @@ enum AppleSpeechResultMapper {
             endTime: snapshot.endTime,
             avgConfidence: avgConf,
             passType: .fast, // SpeechService.transcribe re-tags pass type at the shard level
-            weakAnchorMetadata: snapshot.weakAnchorMetadata
+            weakAnchorMetadata: snapshot.weakAnchorMetadata,
+            speakerId: snapshot.speakerId
         )
         nextId += 1
         return segment

@@ -818,15 +818,24 @@ actor FinalPassRetranscriptionRunner {
                     modelVersion: modelVersion,
                     transcriptVersion: nil,
                     atomOrdinal: nil,
-                    weakAnchorMetadata: segment.weakAnchorMetadata
+                    weakAnchorMetadata: segment.weakAnchorMetadata,
+                    speakerId: segment.speakerId
                 )
                 // Skip insert if a row with the same fingerprint exists
-                // (idempotent re-run guard).
-                let exists = (try? await store.hasTranscriptChunk(
+                // (idempotent re-run guard), but still let a later ASR
+                // result fill diarization that an earlier run lacked.
+                if (try? await store.fetchTranscriptChunk(
                     analysisAssetId: input.analysisAssetId,
                     segmentFingerprint: chunk.segmentFingerprint
-                )) ?? false
-                if !exists {
+                )) != nil {
+                    if let speakerId = segment.speakerId {
+                        _ = try await store.updateTranscriptChunkSpeakerIdIfMissing(
+                            analysisAssetId: input.analysisAssetId,
+                            segmentFingerprint: chunk.segmentFingerprint,
+                            speakerId: speakerId
+                        )
+                    }
+                } else {
                     newChunks.append(chunk)
                     nextChunkIndex += 1
                 }

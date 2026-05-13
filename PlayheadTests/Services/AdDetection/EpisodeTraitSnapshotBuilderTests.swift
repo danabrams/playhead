@@ -164,17 +164,9 @@ struct EpisodeTraitSnapshotBuilderTests {
 
     @Test("no-speakerId fall-through returns both neutral defaults atomically")
     func noSpeakerIdFallThroughReturnsBothNeutrals() {
-        // Cycle-3 missing-test #4: when chunks carry NO speakerId at all
-        // (today's reality before diarization lands — TODO playhead-wmy6),
-        // the producer's `deriveSpeakerSignals` falls through to a single
-        // hard-coded `(0, 0.5)` return tuple. This test pins BOTH neutral
-        // defaults in a single assertion so a future refactor that splits
-        // the return values across paths (or mixes neutral with computed)
-        // can't pass the existing single-field tests while silently
-        // breaking the fall-through invariant. When real diarization is
-        // wired and chunks always carry a speakerId, this fall-through
-        // path becomes unreachable and the test should be deleted (not
-        // weakened).
+        // Recognizers that do not supply diarization still produce chunks
+        // with nil speakerId. The producer must keep both speaker axes on
+        // their neutral defaults in that compatibility path.
         let chunks: [TranscriptChunk] = [
             makeChunk(start: 0, end: 10, speakerId: nil),
             makeChunk(start: 10, end: 20, speakerId: nil),

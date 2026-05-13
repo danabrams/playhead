@@ -116,7 +116,7 @@ enum EpisodeTraitSnapshotBuilder {
     ) -> (turnsPerMinute: Float, dominantFraction: Float) {
         let speakerIds = chunks.compactMap(\.speakerId)
         guard !speakerIds.isEmpty else {
-            // TODO(playhead-wmy6): diarization not yet wired; 0.5 sentinel will become real fraction once speakerId populates
+            // Recognizers that do not provide diarization keep the neutral fallback.
             return (0, 0.5)
         }
 

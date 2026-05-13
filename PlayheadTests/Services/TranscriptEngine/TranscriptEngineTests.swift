@@ -130,16 +130,24 @@ private final class ConcurrentProbeSpeechRecognizer: SpeechRecognizer, @unchecke
 
 // MARK: - Helpers
 
-private func makeSegment(id: Int = 0, passType: TranscriptPassType = .fast) -> TranscriptSegment {
-    let word = TranscriptWord(text: "hello", startTime: 0, endTime: 0.5, confidence: 0.95)
+private func makeSegment(
+    id: Int = 0,
+    text: String = "hello",
+    startTime: TimeInterval = 0,
+    endTime: TimeInterval = 0.5,
+    passType: TranscriptPassType = .fast,
+    speakerId: Int? = nil
+) -> TranscriptSegment {
+    let word = TranscriptWord(text: text, startTime: startTime, endTime: endTime, confidence: 0.95)
     return TranscriptSegment(
         id: id,
         words: [word],
-        text: "hello",
-        startTime: 0,
-        endTime: 0.5,
+        text: text,
+        startTime: startTime,
+        endTime: endTime,
         avgConfidence: 0.95,
-        passType: passType
+        passType: passType,
+        speakerId: speakerId
     )
 }
 
@@ -339,6 +347,20 @@ struct SpeechServiceTranscriptionTests {
         #expect(segments[0].passType == .final_)
     }
 
+    @Test("Transcribe preserves recognizer speakerId while retagging pass type")
+    func transcribePreservesSpeakerId() async throws {
+        let mock = MockSpeechRecognizer()
+        mock.transcribeResult = [makeSegment(passType: .fast, speakerId: 12)]
+        let service = SpeechService(recognizer: mock)
+        try await service.loadFinalModel()
+
+        let segments = try await service.transcribe(shard: makeShard())
+
+        #expect(segments.count == 1)
+        #expect(segments[0].passType == .final_)
+        #expect(segments[0].speakerId == 12)
+    }
+
     @Test("Concurrent transcribe calls are serialized across await points")
     func concurrentTranscribesStaySerialized() async throws {
         let recognizer = ConcurrentProbeSpeechRecognizer()
@@ -458,8 +480,16 @@ struct TranscriptTypeTests {
         let seg1 = makeSegment(id: 0, passType: .fast)
         let seg2 = makeSegment(id: 0, passType: .fast)
         let seg3 = makeSegment(id: 1, passType: .final_)
+        let seg4 = makeSegment(id: 0, passType: .fast, speakerId: 2)
         #expect(seg1 == seg2)
         #expect(seg1 != seg3)
+        #expect(seg1 != seg4)
+    }
+
+    @Test("TranscriptSegment speakerId defaults to nil and can be set")
+    func segmentSpeakerId() {
+        #expect(makeSegment().speakerId == nil)
+        #expect(makeSegment(speakerId: 7).speakerId == 7)
     }
 
     @Test("TranscriptPassType raw values")
@@ -895,6 +925,234 @@ struct TranscriptEngineAssetSwitchingTests {
     }
 }
 
+@Suite("TranscriptEngineService – Speaker IDs")
+struct TranscriptEngineSpeakerIdTests {
+
+    @Test("recognizer speakerIds persist into chunks, events, and trait signals", .timeLimit(.minutes(1)))
+    func speakerIdsPersistIntoChunksEventsAndTraits() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-speakers", episodeId: "ep-speakers"))
+
+        let recognizer = MockSpeechRecognizer()
+        recognizer.transcribeResult = [
+            makeSegment(id: 0, text: "host intro", startTime: 0, endTime: 5, speakerId: 1),
+            makeSegment(id: 1, text: "guest answer", startTime: 5, endTime: 10, speakerId: 2),
+            makeSegment(id: 2, text: "guest continues", startTime: 10, endTime: 15, speakerId: 2),
+        ]
+        let speech = SpeechService(recognizer: recognizer)
+        try await speech.loadFastModel()
+
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-speakers",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-speakers")
+
+        var eventChunks: [TranscriptChunk] = []
+        for await event in events {
+            switch event {
+            case .chunksPersisted(let assetId, let chunks) where assetId == "asset-speakers":
+                eventChunks.append(contentsOf: chunks)
+            case .completed(let assetId) where assetId == "asset-speakers":
+                break
+            default:
+                continue
+            }
+            if case .completed(let assetId) = event, assetId == "asset-speakers" {
+                break
+            }
+        }
+
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-speakers")
+        #expect(chunks.count == 3)
+        #expect(chunks.map { $0.speakerId ?? -1 } == [1, 2, 2])
+        #expect(eventChunks.count == 3)
+        #expect(eventChunks.map { $0.speakerId ?? -1 } == [1, 2, 2])
+
+        let snapshot = EpisodeTraitSnapshotBuilder.build(
+            featureWindows: [],
+            chunks: chunks,
+            confirmedAdWindows: [],
+            existingProfile: nil,
+            episodeDuration: 60
+        )
+        #expect(snapshot.speakerTurnRate > 0)
+        #expect(abs(snapshot.singleSpeakerDominance - Float(2.0 / 3.0)) < 0.001)
+    }
+
+    @Test("missing recognizer speakerId remains nil in chunks and events", .timeLimit(.minutes(1)))
+    func nilSpeakerIdRemainsCompatible() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-no-speaker", episodeId: "ep-no-speaker"))
+
+        let recognizer = MockSpeechRecognizer()
+        recognizer.transcribeResult = [
+            makeSegment(id: 0, text: "plain transcript", startTime: 0, endTime: 5)
+        ]
+        let speech = SpeechService(recognizer: recognizer)
+        try await speech.loadFastModel()
+
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-no-speaker",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-no-speaker")
+
+        var eventChunks: [TranscriptChunk] = []
+        for await event in events {
+            switch event {
+            case .chunksPersisted(let assetId, let chunks) where assetId == "asset-no-speaker":
+                eventChunks.append(contentsOf: chunks)
+            case .completed(let assetId) where assetId == "asset-no-speaker":
+                break
+            default:
+                continue
+            }
+            if case .completed(let assetId) = event, assetId == "asset-no-speaker" {
+                break
+            }
+        }
+
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-no-speaker")
+        #expect(chunks.count == 1)
+        #expect(chunks.allSatisfy { $0.speakerId == nil })
+        #expect(eventChunks.count == 1)
+        #expect(eventChunks.allSatisfy { $0.speakerId == nil })
+    }
+
+    @Test("duplicate fingerprint can upgrade missing speakerId and re-emit chunk", .timeLimit(.minutes(1)))
+    func duplicateFingerprintUpgradesMissingSpeakerId() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-speaker-upgrade", episodeId: "ep-speaker-upgrade"))
+
+        let recognizer = MockSpeechRecognizer()
+        recognizer.transcribeResult = [
+            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5)
+        ]
+        let speech = SpeechService(recognizer: recognizer)
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+
+        let firstEvents = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-speaker-upgrade",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-speaker-upgrade")
+        for await event in firstEvents {
+            if case .completed(let assetId) = event, assetId == "asset-speaker-upgrade" {
+                break
+            }
+        }
+
+        recognizer.transcribeResult = [
+            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 4)
+        ]
+
+        let secondEvents = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: "asset-speaker-upgrade",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-speaker-upgrade")
+
+        var upgradedEventChunks: [TranscriptChunk] = []
+        for await event in secondEvents {
+            switch event {
+            case .chunksPersisted(let assetId, let chunks) where assetId == "asset-speaker-upgrade":
+                upgradedEventChunks.append(contentsOf: chunks)
+            case .completed(let assetId) where assetId == "asset-speaker-upgrade":
+                break
+            default:
+                continue
+            }
+            if case .completed(let assetId) = event, assetId == "asset-speaker-upgrade" {
+                break
+            }
+        }
+
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-speaker-upgrade")
+        #expect(chunks.count == 1)
+        #expect(chunks[0].speakerId == 4)
+        #expect(upgradedEventChunks.count == 1)
+        #expect(upgradedEventChunks[0].speakerId == 4)
+    }
+
+    @Test("duplicate fingerprint fills speakerId on every matching missing row", .timeLimit(.minutes(1)))
+    func duplicateFingerprintFillsSpeakerIdAcrossMatchingRows() async throws {
+        let assetId = "asset-speaker-duplicate-rows"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeTranscriptAsset(id: assetId, episodeId: "ep-speaker-duplicate-rows"))
+
+        let recognizer = MockSpeechRecognizer()
+        recognizer.transcribeResult = [
+            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 7)
+        ]
+        let speech = SpeechService(recognizer: recognizer)
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+
+        let firstEvents = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: assetId,
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: assetId)
+        for await event in firstEvents {
+            if case .completed(let completedAssetId) = event, completedAssetId == assetId {
+                break
+            }
+        }
+
+        let original = try #require((try await store.fetchTranscriptChunks(assetId: assetId)).first)
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "duplicate-missing-speaker",
+            analysisAssetId: original.analysisAssetId,
+            segmentFingerprint: original.segmentFingerprint,
+            chunkIndex: original.chunkIndex + 1,
+            startTime: original.startTime,
+            endTime: original.endTime,
+            text: original.text,
+            normalizedText: original.normalizedText,
+            pass: original.pass,
+            modelVersion: original.modelVersion,
+            transcriptVersion: original.transcriptVersion,
+            atomOrdinal: original.atomOrdinal,
+            weakAnchorMetadata: original.weakAnchorMetadata,
+            speakerId: nil
+        ))
+
+        let secondEvents = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, startTime: 0, duration: 30)],
+            analysisAssetId: assetId,
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: assetId)
+        for await event in secondEvents {
+            if case .completed(let completedAssetId) = event, completedAssetId == assetId {
+                break
+            }
+        }
+
+        let matchingChunks = try await store.fetchTranscriptChunks(assetId: assetId)
+            .filter { $0.segmentFingerprint == original.segmentFingerprint }
+        #expect(matchingChunks.count == 2)
+        #expect(matchingChunks.allSatisfy { $0.speakerId == 7 })
+    }
+}
+
 // MARK: - Partial Result Promotion Tests (playhead-4ck)
 
 /// Helper: creates an AsyncThrowingStream from an array of RecognitionSnapshots.
@@ -915,7 +1173,8 @@ private func makeSnapshot(
     startTime: TimeInterval = 0,
     endTime: TimeInterval = 1,
     confidence: Float = 0.9,
-    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil
+    weakAnchorMetadata: TranscriptWeakAnchorMetadata? = nil,
+    speakerId: Int? = nil
 ) -> RecognitionSnapshot {
     let words = text.isEmpty ? [] : [
         TranscriptWord(text: text, startTime: startTime, endTime: endTime, confidence: confidence)
@@ -926,7 +1185,8 @@ private func makeSnapshot(
         words: words,
         startTime: startTime,
         endTime: endTime,
-        weakAnchorMetadata: weakAnchorMetadata
+        weakAnchorMetadata: weakAnchorMetadata,
+        speakerId: speakerId
     )
 }
 
@@ -1407,6 +1667,23 @@ struct CollectSegmentsPartialPromotionTests {
         #expect(segments.count == 1)
         #expect(segments[0].weakAnchorMetadata == metadata)
     }
+
+    @Test("speakerId survives snapshot promotion into transcript segments")
+    func speakerIdSurvivesSnapshotPromotion() async throws {
+        let stream = snapshotStream([
+            makeSnapshot(
+                isFinal: true,
+                text: "host read",
+                startTime: 0,
+                endTime: 1,
+                speakerId: 5
+            )
+        ])
+
+        let segments = try await AppleSpeechResultMapper.collectSegmentsFromSnapshots(stream)
+        #expect(segments.count == 1)
+        #expect(segments[0].speakerId == 5)
+    }
 }
 
 @Suite("AppleSpeechResultMapper – shard offset translation")
@@ -1438,7 +1715,8 @@ struct AppleSpeechResultMapperOffsetTests {
             endTime: 0.6,
             avgConfidence: 0.625,
             passType: .fast,
-            weakAnchorMetadata: metadata
+            weakAnchorMetadata: metadata,
+            speakerId: 3
         )
 
         let offset = AppleSpeechResultMapper.offsetSegments([segment], by: 30.0)
@@ -1448,6 +1726,7 @@ struct AppleSpeechResultMapperOffsetTests {
         #expect(shifted.id == 7)
         #expect(shifted.text == "visit betterhelp")
         #expect(shifted.passType == .fast)
+        #expect(shifted.speakerId == 3)
         #expect(abs(shifted.avgConfidence - 0.625) < 0.000_001)
         #expect(abs(shifted.startTime - 30.0) < 0.000_001)
         #expect(abs(shifted.endTime - 30.6) < 0.000_001)
@@ -1476,7 +1755,8 @@ struct AppleSpeechResultMapperOffsetTests {
             startTime: 1.0,
             endTime: 1.5,
             avgConfidence: 0.9,
-            passType: .final_
+            passType: .final_,
+            speakerId: 9
         )
         let offset = AppleSpeechResultMapper.offsetSegments([segment], by: 0)
 
@@ -1773,7 +2053,8 @@ struct TranscriptEngineWeakAnchorMetadataTests {
                 endTime: 0.5,
                 avgConfidence: 0.22,
                 passType: .fast,
-                weakAnchorMetadata: initialMetadata
+                weakAnchorMetadata: initialMetadata,
+                speakerId: 7
             )
         ]
 
@@ -1805,7 +2086,8 @@ struct TranscriptEngineWeakAnchorMetadataTests {
                 endTime: 0.5,
                 avgConfidence: 0.19,
                 passType: .fast,
-                weakAnchorMetadata: upgradedMetadata
+                weakAnchorMetadata: upgradedMetadata,
+                speakerId: 9
             )
         ]
 
@@ -1836,9 +2118,11 @@ struct TranscriptEngineWeakAnchorMetadataTests {
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-weak-upgrade")
         #expect(chunks.count == 1)
         #expect(chunks[0].weakAnchorMetadata == upgradedMetadata)
+        #expect(chunks[0].speakerId == 7)
         #expect(upgradedEventChunks.count == 1)
         #expect(upgradedEventChunks[0].id == chunks[0].id)
         #expect(upgradedEventChunks[0].weakAnchorMetadata == upgradedMetadata)
+        #expect(upgradedEventChunks[0].speakerId == 7)
     }
 
     @Test("duplicate fingerprints do not replace richer weak-anchor metadata with poorer payloads")

@@ -6064,16 +6064,39 @@ actor AnalysisStore {
     func updateTranscriptChunkWeakAnchorMetadata(
         analysisAssetId: String,
         segmentFingerprint: String,
-        weakAnchorMetadata: TranscriptWeakAnchorMetadata?
+        weakAnchorMetadata: TranscriptWeakAnchorMetadata?,
+        speakerIdIfMissing: Int? = nil
     ) throws -> Bool {
         let sql = """
             UPDATE transcript_chunks
-            SET weakAnchorMetadataJSON = ?
+            SET weakAnchorMetadataJSON = ?,
+                speakerId = COALESCE(speakerId, ?)
             WHERE analysisAssetId = ? AND segmentFingerprint = ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, try encodeJSONString(weakAnchorMetadata))
+        bind(stmt, 2, speakerIdIfMissing)
+        bind(stmt, 3, analysisAssetId)
+        bind(stmt, 4, segmentFingerprint)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    @discardableResult
+    func updateTranscriptChunkSpeakerIdIfMissing(
+        analysisAssetId: String,
+        segmentFingerprint: String,
+        speakerId: Int
+    ) throws -> Bool {
+        let sql = """
+            UPDATE transcript_chunks
+            SET speakerId = ?
+            WHERE analysisAssetId = ? AND segmentFingerprint = ? AND speakerId IS NULL
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, speakerId)
         bind(stmt, 2, analysisAssetId)
         bind(stmt, 3, segmentFingerprint)
         try step(stmt, expecting: SQLITE_DONE)

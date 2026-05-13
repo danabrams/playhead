@@ -21,9 +21,14 @@ import Testing
 /// exercise the "partial chunks landed on mid-window defer" branch).
 private final class CountingShardRecognizer: SpeechRecognizer, @unchecked Sendable {
     private let lock = OSAllocatedUnfairLock(initialState: State())
+    private let speakerId: Int?
     private struct State {
         var loaded = false
         var transcribeCount = 0
+    }
+
+    init(speakerId: Int? = nil) {
+        self.speakerId = speakerId
     }
 
     var transcribeCount: Int {
@@ -60,7 +65,8 @@ private final class CountingShardRecognizer: SpeechRecognizer, @unchecked Sendab
                 startTime: shard.startTime,
                 endTime: shard.startTime + shard.duration,
                 avgConfidence: 0.9,
-                passType: .final_
+                passType: .final_,
+                speakerId: speakerId
             )
         ]
     }
@@ -405,6 +411,148 @@ struct FinalPassRetranscriptionRunnerTests {
         // The job row should be persisted as `complete`.
         let job = try await store.fetchFinalPassJob(byId: "fpj-asset-fp-w1")
         #expect(job?.status == .complete)
+    }
+
+    @Test("final-pass retranscription preserves recognizer speakerId in chunks")
+    func testFinalPassPersistsSpeakerId() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 30, samples: [])
+        ]
+        let recognizer = CountingShardRecognizer(speakerId: 42)
+        let box = SnapshotBox(makeSnapshot())
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: box,
+            recognizer: recognizer,
+            audioProvider: audio
+        )
+
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.reTranscribedWindowIds == ["w1"])
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
+        #expect(chunks.count == 1)
+        #expect(chunks[0].pass == TranscriptPassType.final_.rawValue)
+        #expect(chunks[0].speakerId == 42)
+    }
+
+    @Test("final-pass duplicate segment fills missing speakerId")
+    func testFinalPassDuplicateFillsMissingSpeakerId() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "existing-final",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: FinalPassRetranscriptionRunner.computeFinalPassFingerprint(
+                text: "shard-0",
+                startTime: 0,
+                endTime: 10
+            ),
+            chunkIndex: 0,
+            startTime: 0,
+            endTime: 10,
+            text: "shard-0",
+            normalizedText: "shard-0",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "test-final-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 10, samples: [])
+        ]
+        let recognizer = CountingShardRecognizer(speakerId: 42)
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: recognizer,
+            audioProvider: audio
+        )
+
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.reTranscribedWindowIds == ["w1"])
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
+        #expect(chunks.count == 1)
+        #expect(chunks[0].id == "existing-final")
+        #expect(chunks[0].speakerId == 42)
+    }
+
+    @Test("final-pass duplicate segment fills missing speakerId across duplicate rows")
+    func testFinalPassDuplicateFillsMissingSpeakerIdAcrossDuplicateRows() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        let fingerprint = FinalPassRetranscriptionRunner.computeFinalPassFingerprint(
+            text: "shard-0",
+            startTime: 0,
+            endTime: 10
+        )
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "existing-final-speaker",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: fingerprint,
+            chunkIndex: 0,
+            startTime: 0,
+            endTime: 10,
+            text: "shard-0",
+            normalizedText: "shard-0",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "test-final-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: 42
+        ))
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "existing-final-missing-speaker",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: fingerprint,
+            chunkIndex: 1,
+            startTime: 0,
+            endTime: 10,
+            text: "shard-0",
+            normalizedText: "shard-0",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "test-final-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 10, samples: [])
+        ]
+        let recognizer = CountingShardRecognizer(speakerId: 42)
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: recognizer,
+            audioProvider: audio
+        )
+
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.reTranscribedWindowIds == ["w1"])
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
+            .filter { $0.segmentFingerprint == fingerprint }
+        #expect(chunks.count == 2)
+        #expect(chunks.allSatisfy { $0.speakerId == 42 })
     }
 
     @Test("watermark advances to max retranscribed window endTime")

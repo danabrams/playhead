@@ -725,9 +725,9 @@ actor TranscriptEngineService {
                 endTime: segment.endTime
             )
 
-            // Dedup: preserve the existing row, but let later passes upgrade
-            // weak-anchor metadata when the same text/timing arrives with
-            // richer recovery text.
+            // Dedup: preserve the existing row, but let later passes fill
+            // missing speaker labels and upgrade weak-anchor metadata when the
+            // same text/timing arrives with richer recovery text.
             if let existingChunk = try await store.fetchTranscriptChunk(
                 analysisAssetId: analysisAssetId,
                 segmentFingerprint: fingerprint
@@ -736,31 +736,45 @@ actor TranscriptEngineService {
                     existing: existingChunk.weakAnchorMetadata,
                     candidate: segment.weakAnchorMetadata
                 )
+                var didUpdate = false
+                var upgradedSpeakerId = existingChunk.speakerId
                 if mergedMetadata != existingChunk.weakAnchorMetadata {
-                    let didUpdate = try await store.updateTranscriptChunkWeakAnchorMetadata(
+                    didUpdate = try await store.updateTranscriptChunkWeakAnchorMetadata(
                         analysisAssetId: analysisAssetId,
                         segmentFingerprint: fingerprint,
-                        weakAnchorMetadata: mergedMetadata
+                        weakAnchorMetadata: mergedMetadata,
+                        speakerIdIfMissing: segment.speakerId
+                    )
+                    upgradedSpeakerId = existingChunk.speakerId ?? segment.speakerId
+                } else if let speakerId = segment.speakerId {
+                    didUpdate = try await store.updateTranscriptChunkSpeakerIdIfMissing(
+                        analysisAssetId: analysisAssetId,
+                        segmentFingerprint: fingerprint,
+                        speakerId: speakerId
                     )
                     if didUpdate {
-                        emittedChunks.append(
-                            TranscriptChunk(
-                                id: existingChunk.id,
-                                analysisAssetId: existingChunk.analysisAssetId,
-                                segmentFingerprint: existingChunk.segmentFingerprint,
-                                chunkIndex: existingChunk.chunkIndex,
-                                startTime: existingChunk.startTime,
-                                endTime: existingChunk.endTime,
-                                text: existingChunk.text,
-                                normalizedText: existingChunk.normalizedText,
-                                pass: existingChunk.pass,
-                                modelVersion: existingChunk.modelVersion,
-                                transcriptVersion: existingChunk.transcriptVersion,
-                                atomOrdinal: existingChunk.atomOrdinal,
-                                weakAnchorMetadata: mergedMetadata
-                            )
-                        )
+                        upgradedSpeakerId = existingChunk.speakerId ?? speakerId
                     }
+                }
+                if didUpdate {
+                    emittedChunks.append(
+                        TranscriptChunk(
+                            id: existingChunk.id,
+                            analysisAssetId: existingChunk.analysisAssetId,
+                            segmentFingerprint: existingChunk.segmentFingerprint,
+                            chunkIndex: existingChunk.chunkIndex,
+                            startTime: existingChunk.startTime,
+                            endTime: existingChunk.endTime,
+                            text: existingChunk.text,
+                            normalizedText: existingChunk.normalizedText,
+                            pass: existingChunk.pass,
+                            modelVersion: existingChunk.modelVersion,
+                            transcriptVersion: existingChunk.transcriptVersion,
+                            atomOrdinal: existingChunk.atomOrdinal,
+                            weakAnchorMetadata: mergedMetadata,
+                            speakerId: upgradedSpeakerId
+                        )
+                    )
                 } else {
                     logger.debug("Skipping duplicate segment: \(fingerprint.prefix(8))")
                 }
@@ -780,7 +794,8 @@ actor TranscriptEngineService {
                 modelVersion: config.modelVersion,
                 transcriptVersion: nil,
                 atomOrdinal: nil,
-                weakAnchorMetadata: segment.weakAnchorMetadata
+                weakAnchorMetadata: segment.weakAnchorMetadata,
+                speakerId: segment.speakerId
             )
             chunksToInsert.append(chunk)
             emittedChunks.append(chunk)
