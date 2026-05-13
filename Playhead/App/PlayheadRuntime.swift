@@ -942,6 +942,20 @@ final class PlayheadRuntime {
             }
         )
 
+        // Cycle 1 H2: bootstrap the approved-cohort registry by explicitly
+        // approving the current production cohort at `.full`. This activates
+        // the gate (preserving today's behavior on the live cohort) while
+        // forcing any future prompt/schema/scan-plan/normalization/locale/
+        // appBuild change to collapse to `.shadow` until explicitly re-approved
+        // — exactly the protection the registry was designed to provide.
+        let bootstrapCohort = ScanCohort.production()
+        var bootstrapRegistry = ApprovedCohortRegistry()
+        bootstrapRegistry.approve(
+            osBuild: bootstrapCohort.osBuild,
+            scanCohort: bootstrapCohort,
+            mode: .full
+        )
+
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
             metadataExtractor: FallbackExtractor(),
@@ -973,7 +987,27 @@ final class PlayheadRuntime {
             // playhead-43ed (B3): per-show RepeatedAdCache. Lookup runs
             // before the classifier in the hot path; store runs after a
             // backfill verdict gates to autoSkipEligible.
-            repeatedAdCache: repeatedAdCache
+            repeatedAdCache: repeatedAdCache,
+            // Cycle 2 C1: pass the bootstrapped registry into the service.
+            // The cycle-1 edit constructed `bootstrapRegistry` but failed to
+            // wire it in here, leaving the H2 fix as dead code. Without
+            // this argument the service falls back to the nil-registry
+            // legacy path (`effectiveFMBackfillMode` returns
+            // `config.fmBackfillMode` verbatim), defeating the entire
+            // cohort-approval contract.
+            approvedCohortRegistry: bootstrapRegistry,
+            // Cycle 4 C1: thread the bootstrap cohort through verbatim so
+            // the service's `runtimeCohort` IS the registered cohort, not
+            // a second independent snapshot. The cycle-3 H3 fix made the
+            // service capture-once, but defaulted the provider to
+            // `{ ScanCohort.production() }` which re-reads
+            // Locale.current at service-init time. If
+            // `NSCurrentLocaleDidChange` fires between line 951 and this
+            // point, the registry key diverges from the runtime key and
+            // the H2 gate silently demotes to `.shadow` — exactly the
+            // bug H3-c3 claimed to eliminate. Injecting the literal
+            // bootstrap cohort closes the loop.
+            scanCohortProvider: { bootstrapCohort }
         )
         self.downloadManager = DownloadManager()
 

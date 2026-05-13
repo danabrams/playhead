@@ -6,8 +6,57 @@
 import CoreMedia
 import Foundation
 import Testing
+import XCTest
 
 @testable import Playhead
+
+// MARK: - Cycle 3 H4: TranscriptPeekView duplicate-signal regression rail
+//
+// XCTest source canary. The cycle-2 M2 fix removed an unconditional
+// `recordFalseSkipSignal` call from `TranscriptPeekView.submitNotAdChunks`
+// because `SkipOrchestrator.revertByTimeRange` now records the (weak or
+// full) trust signal itself — see SkipOrchestrator.swift M2 routing.
+// Without a regression rail, a future diff could re-add the duplicate call
+// silently, restoring the 2x penalty on managed reverts and the 0.05+0.10
+// asymmetry on suggest-only reverts. The orchestrator-level tests in this
+// file pin the routing CONTRACT; this canary pins the SOURCE-LEVEL
+// invariant on the view's veto handler.
+//
+// XCTest (not Swift Testing) so the canary is filterable from the test
+// plan — see project memory `xctestplan_swift_testing_limitation`.
+final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
+
+    func testSubmitNotAdChunksDoesNotRecordTrustSignalDirectly() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Views/NowPlaying/TranscriptPeekView.swift"
+        )
+        guard let funcRange = source.range(of: "func submitNotAdChunks(") else {
+            XCTFail("Could not locate `func submitNotAdChunks(` in TranscriptPeekView.swift")
+            return
+        }
+        guard let openBrace = source[funcRange.upperBound...].firstIndex(of: "{") else {
+            XCTFail("Could not locate `{` after `func submitNotAdChunks(`")
+            return
+        }
+        let body = SwiftSourceInspector.bracedBody(in: source, startingAt: openBrace)
+        let stripped = SwiftSourceInspector.strippingComments(body)
+        XCTAssertFalse(
+            stripped.contains("recordFalseSkipSignal"),
+            """
+            TranscriptPeekView.submitNotAdChunks must NOT call \
+            recordFalseSkipSignal directly. SkipOrchestrator.revertByTimeRange \
+            is the single source of trust signaling for revert gestures so \
+            the cycle-1 M2 weak/strong routing applies correctly. Re-adding \
+            this call would double-count the trust penalty (managed: 2x; \
+            suggest-only: 0.05+0.10 asymmetry).
+            """
+        )
+        XCTAssertFalse(
+            stripped.contains("recordWeakFalseSkipSignal"),
+            "submitNotAdChunks must not call recordWeakFalseSkipSignal directly either; see canary above."
+        )
+    }
+}
 
 @Suite("SkipOrchestrator Revert - Time Range and Banner Paths")
 struct SkipOrchestratorRevertTests {
@@ -737,21 +786,19 @@ struct SkipOrchestratorRevertTests {
         }
     }
 
-    // R7 (hygc.1.8): the markOnly-only revert path went through R5/R6
-    // without pinning the trust-signal magnitude. R6's docstring noted
-    // that `recordFalseSkipSignal` (full magnitude, default 0.10) fires
-    // even when ONLY the suggest-tier loop matched, deferring weak/strong
-    // routing to a future calibration round. Without a magnitude pin a
-    // future diff could quietly flip the routing to
-    // `recordWeakFalseSkipSignal` (0.05) — silently rebalancing trust
-    // pressure across the dogfood corpus. This test pins the current
-    // contract: a suggest-tier-only revert decrements `skipTrustScore`
-    // by exactly `falseSignalPenalty` (the SAME magnitude as a
-    // managed-window revert). If a follow-up bead intentionally splits
-    // strong/weak routing, the new behavior should land in this test
-    // first so the change is explicit.
-    @Test("revertByTimeRange against ONLY a markOnly window decrements trust by full falseSignalPenalty")
-    func revertByTimeRangeMarkOnlyDecrementsTrustByFullPenalty() async throws {
+    // Cycle 1 M2: the strong/weak routing split the R7 docstring deferred
+    // has now landed in `SkipOrchestrator.revertByTimeRange`. The behavior
+    // is now: a revert that touches ONLY the suggest-tier (markOnly) loop
+    // — i.e. no managed auto-skip window was vetoed — routes through
+    // `recordWeakFalseSkipSignal` (`weakFalseSignalPenalty`), reflecting
+    // that no playback was ever altered. A managed-window revert (with
+    // or without a co-occurring suggest revert) still uses the full
+    // `falseSignalPenalty`. This test pins the suggest-only path at the
+    // weak magnitude; the parallel test below pins the managed path at
+    // the full magnitude. Any future re-merge of the two paths must
+    // update both tests in the same diff.
+    @Test("revertByTimeRange against ONLY a markOnly window decrements trust by weakFalseSignalPenalty")
+    func revertByTimeRangeMarkOnlyDecrementsTrustByWeakPenalty() async throws {
         // Inline trust-service construction so we can read skipTrustScore
         // back from the SAME store the service mutates. The default
         // `makeSkipTestTrustService` helper allocates an internal store
@@ -828,9 +875,10 @@ struct SkipOrchestratorRevertTests {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
 
-        let expectedTrust = initialTrust - trustConfig.falseSignalPenalty
+        // Cycle 1 M2: suggest-only revert now uses the WEAK penalty.
+        let expectedTrust = initialTrust - trustConfig.weakFalseSignalPenalty
         #expect(abs((profile?.skipTrustScore ?? -1) - expectedTrust) < 1e-6,
-                "suggest-tier-only revert must decrement trust by falseSignalPenalty (\(trustConfig.falseSignalPenalty)); got skipTrustScore=\(profile?.skipTrustScore ?? -1) expected=\(expectedTrust)")
+                "suggest-tier-only revert must decrement trust by weakFalseSignalPenalty (\(trustConfig.weakFalseSignalPenalty)); got skipTrustScore=\(profile?.skipTrustScore ?? -1) expected=\(expectedTrust)")
         #expect(profile?.recentFalseSkipSignals == 1,
                 "exactly one false-skip signal must be recorded for one veto gesture")
     }
@@ -913,7 +961,105 @@ struct SkipOrchestratorRevertTests {
 
         let expectedTrust = initialTrust - trustConfig.falseSignalPenalty
         #expect(abs((profile?.skipTrustScore ?? -1) - expectedTrust) < 1e-6,
-                "managed-window-only revert must decrement trust by the SAME falseSignalPenalty (\(trustConfig.falseSignalPenalty)) as the suggest-tier path; got skipTrustScore=\(profile?.skipTrustScore ?? -1) expected=\(expectedTrust)")
+                "managed-window-only revert must decrement trust by the full falseSignalPenalty (\(trustConfig.falseSignalPenalty)); got skipTrustScore=\(profile?.skipTrustScore ?? -1) expected=\(expectedTrust)")
+        #expect(profile?.recentFalseSkipSignals == 1,
+                "exactly one false-skip signal must be recorded for one veto gesture")
+    }
+
+    // Cycle 2 M3: mixed-revert pin. R9 covers managed-only; the cycle-1
+    // M2 split routes suggest-only to the weak penalty. The mixed case
+    // — a single gesture overlapping BOTH a managed AdWindow AND a
+    // markOnly AdWindow — must still take the full penalty (a managed
+    // auto-skip was vetoed, regardless of whether a suggest banner was
+    // ALSO touched in the same gesture). Without this pin, a future
+    // re-order of the two loops in `revertByTimeRange` could
+    // accidentally invert the `revertedManagedAny` flag and silently
+    // demote mixed reverts to the weak penalty — escaping both the
+    // suggest-only (R7) and managed-only (R9) pins.
+    @Test("revertByTimeRange against BOTH a managed AND a suggest window decrements trust by full falseSignalPenalty")
+    func revertByTimeRangeMixedDecrementsTrustByFullPenalty() async throws {
+        let trustStore = try await makeTestStore()
+        let initialTrust: Double = 0.90
+        try await trustStore.upsertProfile(
+            PodcastProfile(
+                podcastId: "podcast-1",
+                sponsorLexicon: nil,
+                normalizedAdSlotPriors: nil,
+                repeatedCTAFragments: nil,
+                jingleFingerprints: nil,
+                implicitFalsePositiveCount: 0,
+                skipTrustScore: initialTrust,
+                observationCount: 10,
+                mode: "auto",
+                recentFalseSkipSignals: 0
+            )
+        )
+        let trustConfig = TrustScoringConfig.default
+        let trustService = TrustScoringService(store: trustStore, config: trustConfig)
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let managed = makeSkipTestAdWindow(
+            id: "ad-mixed-managed",
+            assetId: "asset-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.75,
+            decisionState: AdDecisionState.candidate.rawValue
+        )
+        let markOnly = AdWindow(
+            id: "ad-mixed-suggest",
+            analysisAssetId: "asset-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.55,
+            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "test-1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: 60,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+        )
+        try await store.insertAdWindow(managed)
+        try await store.insertAdWindow(markOnly)
+        await orchestrator.receiveAdWindows([managed, markOnly])
+
+        // Sanity: managed enters the auto-skip dict, suggest enters the
+        // suggest dict. The veto gesture below overlaps both.
+        #expect(await orchestrator.activeWindowIDs().contains("ad-mixed-managed"))
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-mixed-suggest"))
+
+        await orchestrator.revertByTimeRange(start: 70, end: 110, podcastId: "podcast-1")
+
+        var profile: PodcastProfile?
+        for _ in 0..<20 {
+            profile = try await trustStore.fetchProfile(podcastId: "podcast-1")
+            if let p = profile, p.recentFalseSkipSignals == 1 { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        // Mixed revert must take the FULL penalty (managed was vetoed).
+        let expectedTrust = initialTrust - trustConfig.falseSignalPenalty
+        #expect(abs((profile?.skipTrustScore ?? -1) - expectedTrust) < 1e-6,
+                "mixed revert (managed + suggest co-occurring) must decrement by full falseSignalPenalty (\(trustConfig.falseSignalPenalty)), NOT weakFalseSignalPenalty (\(trustConfig.weakFalseSignalPenalty)); got skipTrustScore=\(profile?.skipTrustScore ?? -1) expected=\(expectedTrust)")
         #expect(profile?.recentFalseSkipSignals == 1,
                 "exactly one false-skip signal must be recorded for one veto gesture")
     }

@@ -1243,6 +1243,20 @@ actor AnalysisStore {
             // Ordering: transcript_chunks Phase 1 runs before the V*IfNeeded ladder because no later migration touches `transcript_chunks` or `transcript_chunks_fts`, so its FTS rebuild cannot be undone downstream; the backfill only depends on columns `createTables()` has already (re)asserted.
             try migrateTranscriptChunksPhase1()
             try writeInitialSchemaVersionIfNeeded()
+            // Cycle 1 M5: leave a fault-level forensic trail when this binary
+            // opens a database stamped at a newer schema than it knows how to
+            // migrate. The V*IfNeeded ladder short-circuits per migration
+            // (`guard schemaVersion < N`), so a downgrade silently continues
+            // with whatever columns happen to overlap — only the support log
+            // distinguishes "v22 store under v26 binary" from "v22 store under
+            // v22 binary". Continue running rather than blocking; the worst
+            // case is the same as today, just visible.
+            let observedSchemaVersion = (try? schemaVersion()) ?? nil
+            if let observed = observedSchemaVersion, observed > Self.currentSchemaVersion {
+                logger.fault(
+                    "AnalysisStore opened a newer schema than this binary supports: observed=\(observed, privacy: .public) expected<=\(Self.currentSchemaVersion, privacy: .public). Behavior may diverge from a freshly-migrated store; downgrade is not officially supported."
+                )
+            }
             try migrateEvidenceEventsNaturalKeyV2IfNeeded()
             try migrateEvidenceEventsTranscriptVersionV3IfNeeded()
             try migrateAnalysisSessionsShadowRetryV4IfNeeded()

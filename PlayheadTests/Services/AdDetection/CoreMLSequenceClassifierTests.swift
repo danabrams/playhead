@@ -18,6 +18,33 @@ struct CoreMLSequenceClassifierTests {
         assertSameClassification(actual, expected)
     }
 
+    // Cycle 1 H1: production-shape regression rail. The default initializer
+    // passes `CoreMLLayer2SequencePredictor.bundled()` for `predictor` —
+    // i.e. the exact closure production builds run. When no
+    // `Layer2SequenceClassifier.mlmodelc` is bundled (the current state of
+    // the repo), `bundled()` returns nil and the classifier silently
+    // delegates to RuleBased. The other fallback test stubs `predictor: nil`
+    // directly, which does NOT exercise this bundle-lookup path; a typo or
+    // resource-build-phase regression that broke bundle loading would
+    // produce identical observable behavior but be invisible to that test.
+    // This test pins the production path: default-init must match
+    // RuleBased when no model artifact is shipped. If a future bundle
+    // includes a real `.mlmodelc`, this test will fail — the appropriate
+    // response is to remove this test and replace it with one that pins
+    // the model-backed contract.
+    @Test("Default-init in a no-model bundle matches RuleBasedClassifier exactly")
+    func defaultInitMatchesRuleBasedFallback() {
+        let input = makeInput()
+        let priors = ShowPriors.empty
+        let classifier = CoreMLSequenceClassifier()
+        let fallback = RuleBasedClassifier()
+
+        let actual = classifier.classify(input: input, priors: priors)
+        let expected = fallback.classify(input: input, priors: priors)
+
+        assertSameClassification(actual, expected)
+    }
+
     @Test("Prediction failure falls back to RuleBasedClassifier behavior")
     func predictionFailureFallsBackToRuleBasedClassifier() {
         let input = makeInput()

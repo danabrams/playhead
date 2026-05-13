@@ -105,3 +105,10 @@ TestFixtures/Corpus/Transcripts/*
 !TestFixtures/Corpus/Transcripts/.gitkeep
 TestFixtures/Corpus/Drafts/*
 !TestFixtures/Corpus/Drafts/.gitkeep
+
+# Cycle 1 M6: dogfood diagnostics dumps. Already excluded from the Xcode
+# project build via `project.yml`, but were not gitignored — a future
+# `git add .` from any worktree would have committed them. Hash-only
+# contents (no transcript text), but housekeeping debt.
+playhead-diagnostics-*.json
+playhead-dogfood-diagnostics-*.json

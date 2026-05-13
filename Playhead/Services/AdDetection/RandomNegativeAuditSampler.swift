@@ -177,6 +177,15 @@ enum RandomNegativeAuditSampler {
 
     private static func sampleCount(eligibleCount: Int, sampleRate: Double) -> Int {
         let requested = Int((Double(eligibleCount) * sampleRate).rounded())
+        // Cycle 1 M3: the `max(1, ...)` floor is intentional — any device
+        // with eligible candidates should produce at least one audit row so
+        // the random-audit channel has signal. The trade-off: for pools
+        // small enough that `floor(eligibleCount * maximumSampleRate) == 0`
+        // (eligibleCount in 2..6 at the 0.15 ceiling), the effective sample
+        // rate exceeds the nominal 10–15% range. Operational dashboards
+        // that aggregate per-cohort rates should bucket eligibleCount and
+        // report tiny-pool rates separately; the SLI threshold lives in
+        // `OperationalMetrics`'s reporting path, not here.
         let minimum = max(1, Int(ceil(Double(eligibleCount) * minimumSampleRate)))
         let maximum = max(minimum, Int(floor(Double(eligibleCount) * maximumSampleRate)))
         return min(eligibleCount, max(minimum, min(maximum, requested)))

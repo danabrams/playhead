@@ -1059,7 +1059,24 @@ actor BackgroundProcessingService {
                 // INSERT and leave a stale `running` row.
                 if let self {
                     await startRunTask.value
-                    await self.runLedger.finishRun(
+                    // Cycle 2 M1: emit a forensic info-level log when
+                    // `finishRun` does not advance the row, regardless of
+                    // cause. The ledger protocol returns `false` for TWO
+                    // distinct conditions: (a) the row was never inserted
+                    // (recordRunStart raised — typically disk-full /
+                    // SQLITE_BUSY / OOM during the detached INSERT) and
+                    // (b) the row is already at a terminal outcome
+                    // (idempotent no-op when the work task finished cleanly
+                    // before iOS fired expiration). The cycle-1 warning
+                    // attributed both to (a), producing false-positive
+                    // disk-full alerts on every clean race-loser
+                    // expiration. We downgrade to `.info` and reword so the
+                    // forensic value (you can grep for the runId and see
+                    // when this happened) is preserved without polluting
+                    // the warning channel. A future ledger method that
+                    // exposes per-run outcome would let us split these
+                    // cases — tracked as a follow-up.
+                    let advanced = await self.runLedger.finishRun(
                         runId: runId,
                         update: BackgroundTaskRunOutcomeUpdate(
                             outcome: .expired,
@@ -1067,6 +1084,11 @@ actor BackgroundProcessingService {
                             expiration: true
                         )
                     )
+                    if !advanced {
+                        self.logger.info(
+                            "Backfill expiration: ledger row not advanced for runId=\(runId, privacy: .public) — either recordRunStart's INSERT lost, OR the work task wrote a terminal outcome before expiration fired. Probe the ledger to distinguish."
+                        )
+                    }
                 }
                 await self?.handleExpiredProcessingTask(task)
             }

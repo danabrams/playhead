@@ -53,6 +53,14 @@ struct CoreMLSequenceClassifier: ClassifierService {
         self.predictor = predictor
         self.fallback = fallback
         self.probabilityCalibrator = probabilityCalibrator
+        // Cycle 1 H1: leave a one-line forensic trail when no model is bundled
+        // so dogfood / support can grep a single log to confirm the runtime
+        // path. Without this, a misnamed `.mlmodelc` resource or accidental
+        // bundle exclusion is invisible until a score-distribution shift is
+        // noticed downstream.
+        if predictor == nil {
+            logger.info("Layer 2 sequence model not bundled — using RuleBasedClassifier fallback for all classifications.")
+        }
     }
 
     func classify(inputs: [ClassifierInput], priors: ShowPriors) -> [ClassifierResult] {
@@ -491,10 +499,15 @@ final class CoreMLLayer2SequencePredictor: @unchecked Sendable, Layer2SequencePr
         case .int64:
             return Double(value.int64Value)
         case .multiArray:
-            guard let first = value.multiArrayValue?[0] else {
+            // Cycle 1 M4: guard against zero-length arrays before subscripting.
+            // `MLMultiArray.subscript(_:)` raises an NSException on out-of-bounds
+            // access — that exception cannot be caught by Swift's `try` / `do`,
+            // so the `do { try predictor.predict(...) }` wrapper above would
+            // not save us. Treat empty multiArrays the same as a missing output.
+            guard let array = value.multiArrayValue, array.count > 0 else {
                 throw Layer2SequenceModelError.missingOutput(name)
             }
-            return first.doubleValue
+            return array[0].doubleValue
         case .dictionary:
             let dict = value.dictionaryValue
             for key in ["ad", "true", "1"] {

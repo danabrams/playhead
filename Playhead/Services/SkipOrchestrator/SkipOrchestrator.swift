@@ -1021,6 +1021,11 @@ actor SkipOrchestrator {
     /// honor user vetoes the same way the auto-skip surface does.
     func revertByTimeRange(start: Double, end: Double, podcastId: String?) async {
         var revertedAny = false
+        // Cycle 1 M2: track whether the gesture actually vetoed a managed
+        // auto-skip window vs. only a suggest-tier banner. The R6 comment
+        // below explicitly called out routing as the right fix when
+        // calibration showed over-penalization; we're applying that fix.
+        var revertedManagedAny = false
         // playhead-zskc: one user gesture produces one correction event — not
         // N events per overlapping window. Capture the analysisAssetId of any
         // reverted window (across BOTH the managed-window loop and the
@@ -1045,6 +1050,7 @@ actor SkipOrchestrator {
             managed.cueActive = false
             windows[id] = managed
             revertedAny = true
+            revertedManagedAny = true
             if assetIdForVeto == nil {
                 assetIdForVeto = managed.adWindow.analysisAssetId
             }
@@ -1131,22 +1137,23 @@ actor SkipOrchestrator {
 
             // Signal trust engine once per user correction, not per window.
             //
-            // playhead-hygc.1.8 (R6 documentation): this fires whenever
-            // `revertedAny == true`, which now includes the case where
-            // ONLY the suggest-tier (markOnly) loop matched (no managed
-            // window was ever auto-skipped). We deliberately use the full
-            // `recordFalseSkipSignal` magnitude here, not
-            // `recordWeakFalseSkipSignal`: the algorithm thought the span
-            // was ad-like enough to surface a banner, and the user
-            // explicitly disagreed — that's a strong negative signal for
-            // the show's trust profile, regardless of whether the
-            // playback surface was a skip cue or a suggest banner. If
-            // calibration evidence later shows this over-penalizes
-            // markOnly-only reverts, the correct fix is to track which
-            // loop produced the signal and route to weak/strong
-            // separately — not to suppress the signal entirely.
+            // Cycle 1 M2 (was playhead-hygc.1.8 R6): route by which surface
+            // the user actually vetoed. A managed auto-skip revert is a
+            // strong negative signal (the algorithm pre-committed and was
+            // wrong) — use full-magnitude `recordFalseSkipSignal`. A revert
+            // that touched ONLY the suggest-tier (markOnly) loop is a
+            // weaker disagreement: the algorithm offered a banner and the
+            // user said no, but no playback was ever altered. Use
+            // `recordWeakFalseSkipSignal` so suggest-only reverts don't
+            // skew trust scores at the same rate as auto-skip vetoes
+            // (especially for new podcasts where the trust score is most
+            // sensitive to early signal noise).
             if let podcastId, let trustService {
-                await trustService.recordFalseSkipSignal(podcastId: podcastId)
+                if revertedManagedAny {
+                    await trustService.recordFalseSkipSignal(podcastId: podcastId)
+                } else {
+                    await trustService.recordWeakFalseSkipSignal(podcastId: podcastId)
+                }
             }
             evaluateAndPush()
         }

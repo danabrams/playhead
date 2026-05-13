@@ -690,4 +690,114 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
             )
         }
     }
+
+    /// Cycle 4 H1: pin the cohort-registry wire-up at the
+    /// `AdDetectionService(...)` construction site in `PlayheadRuntime`.
+    /// Cycle 1 introduced the registry, cycle 2 caught that the bootstrap
+    /// was constructed but never passed (C1), cycle 4 caught that the
+    /// service captured its own `ScanCohort.production()` snapshot
+    /// independent of the bootstrap (C1-c4). Without a source canary, the
+    /// next refactor that reformats this argument list could drop either
+    /// `approvedCohortRegistry:` or `scanCohortProvider:` and the 6
+    /// in-process gating tests would still pass (they construct the
+    /// service themselves), silently regressing the gate to dead code.
+    func testCohortRegistryWiringIsPinned() throws {
+        let raw = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+
+        // Cycle 5 M1 / Cycle 6 L-1: strip comments AND string literals
+        // before paren-walking. The inline depth tracker treats every
+        // `(` and `)` as a real token, so a future comment OR string
+        // literal containing an unmatched paren (a smiley, a wordy
+        // multi-line note, an arg passed as a literal "format: (x)")
+        // would push the depth counter past the AdDetectionService
+        // call's true close-paren and silently expand `body` to cover
+        // the rest of the file. Other `AdDetectionService(`-like
+        // patterns later in the file could then satisfy the assertions
+        // even when this construction lost its arguments. The shared
+        // `strippingCommentsAndStrings` helper blanks string contents
+        // while preserving length so source-range arithmetic stays
+        // valid, and removes comments outright.
+        let source = SwiftSourceInspector.strippingCommentsAndStrings(raw)
+
+        guard let serviceCall = source.range(of: "self.adDetectionService = AdDetectionService(") else {
+            XCTFail(
+                "Could not locate `self.adDetectionService = AdDetectionService(` in PlayheadRuntime.swift — " +
+                "either the wiring moved or the canary anchor needs updating."
+            )
+            return
+        }
+
+        // Walk forward from the open-paren (already consumed by the match)
+        // to the balanced close-paren so we audit only the arguments to
+        // THIS AdDetectionService construction, not any later code.
+        var depth = 1
+        var cursor = serviceCall.upperBound
+        while cursor < source.endIndex {
+            switch source[cursor] {
+            case "(": depth += 1
+            case ")":
+                depth -= 1
+                if depth == 0 {
+                    break
+                }
+            default: break
+            }
+            if depth == 0 { break }
+            cursor = source.index(after: cursor)
+        }
+        let body = String(source[serviceCall.upperBound..<cursor])
+
+        // Cycle 5 M2: pin the VALUE side, not just the keyword. The
+        // cycle-4 canary only asserted `approvedCohortRegistry:` appeared
+        // anywhere in the body — but the substring `approvedCohortRegistry:
+        // nil` would compile, defeat the gate (the service's
+        // `effectiveFMBackfillMode` early-returns `config.fmBackfillMode`
+        // verbatim when the registry is nil), and still pass the canary.
+        // Asserting on the literal `bootstrapRegistry` argument value
+        // closes that hole.
+        XCTAssertTrue(
+            body.contains("approvedCohortRegistry: bootstrapRegistry"),
+            """
+            `PlayheadRuntime` must pass `approvedCohortRegistry: bootstrapRegistry` \
+            to the `AdDetectionService(...)` constructor. Either the argument was \
+            removed, or it was rewired to `nil` / a different registry value. The \
+            cohort-rollout gate (cycle 1 H2) is dead code without the literal \
+            `bootstrapRegistry` here — the 6 `AdDetectionServiceCohortGatingTests` \
+            cannot catch this regression because they construct the service \
+            directly with their own registries. See cycle 2 C1.
+            """
+        )
+
+        XCTAssertTrue(
+            body.contains("scanCohortProvider:"),
+            """
+            `PlayheadRuntime` constructs `AdDetectionService(...)` without a \
+            `scanCohortProvider:` argument. The default provider re-reads \
+            `ScanCohort.production()` at service-init time, which can differ from \
+            the bootstrap-time cohort if `Locale.current` changes between line 951 \
+            (bootstrap registration) and the service construction (microseconds \
+            later but vulnerable to `NSCurrentLocaleDidChange`). Without injecting \
+            the bootstrap cohort verbatim, the registry key the service queries \
+            diverges from the registered key, silently demoting FM to `.shadow`. \
+            See cycle 4 C1-c4.
+            """
+        )
+
+        // Also verify the bootstrap cohort is what's threaded — guard
+        // against a future "fix" that injects `{ ScanCohort.production() }`
+        // explicitly, which would compile cleanly but reintroduce the
+        // dual-snapshot drift.
+        XCTAssertTrue(
+            body.contains("bootstrapCohort"),
+            """
+            `scanCohortProvider:` must inject the bootstrap cohort (`bootstrapCohort`) \
+            so the runtime cohort captured in `AdDetectionService.runtimeCohort` \
+            equals the cohort registered in `bootstrapRegistry`. A provider that \
+            re-evaluates `ScanCohort.production()` defeats the purpose of \
+            cohort-capture-once (cycle 3 H3-c3 / cycle 4 C1-c4).
+            """
+        )
+    }
 }

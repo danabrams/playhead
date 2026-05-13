@@ -917,3 +917,141 @@ struct FusionEligibilityGatePersistenceTests {
         )
     }
 }
+
+// MARK: - Cycle 2 H1: cohort-registry gating end-to-end
+
+/// Cycle 2 H1: pin the H2 cohort-registry wire-up. The cycle-1 implementation
+/// added `approvedCohortRegistry` + `scanCohortProvider` parameters and an
+/// `effectiveFMBackfillMode` property, but no test asserted that the wiring
+/// actually intersects the configured FM mode with the registry decision —
+/// which is how the cycle-2 reviewer noticed PlayheadRuntime had forgotten to
+/// pass the registry argument at all. These tests use the DEBUG-only
+/// `effectiveFMBackfillModeForTesting()` accessor to assert the four
+/// registry decisions (unknown, approved-full, approved-degraded, knownBad)
+/// resolve correctly without standing up the full backfill pipeline.
+@Suite("AdDetectionService cohort-registry gating")
+struct AdDetectionServiceCohortGatingTests {
+
+    private static let testCohort = ScanCohort(
+        promptLabel: "test",
+        promptHash: "prompt-cycle-2-h1",
+        schemaHash: "schema",
+        scanPlanHash: "plan",
+        normalizationHash: "norm",
+        osBuild: "26.4",
+        locale: "en_US",
+        appBuild: "test-100"
+    )
+
+    @Test("nil registry = legacy passthrough returns config.fmBackfillMode verbatim")
+    func nilRegistryReturnsConfiguredMode() async throws {
+        let store = try await makeTestStore()
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            approvedCohortRegistry: nil,
+            scanCohortProvider: { Self.testCohort }
+        )
+
+        #expect(await service.effectiveFMBackfillModeForTesting() == .full)
+    }
+
+    @Test("Empty registry collapses an unknown cohort to .shadow even when full is requested")
+    func emptyRegistryCollapsesUnknownCohort() async throws {
+        let store = try await makeTestStore()
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            approvedCohortRegistry: ApprovedCohortRegistry(),
+            scanCohortProvider: { Self.testCohort }
+        )
+
+        #expect(await service.effectiveFMBackfillModeForTesting() == .shadow)
+    }
+
+    @Test("Registry approving the current cohort at .full preserves the configured mode")
+    func approvedCohortAtFullPreservesMode() async throws {
+        let store = try await makeTestStore()
+        var registry = ApprovedCohortRegistry()
+        registry.approve(
+            osBuild: Self.testCohort.osBuild,
+            scanCohort: Self.testCohort,
+            mode: .full
+        )
+
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            approvedCohortRegistry: registry,
+            scanCohortProvider: { Self.testCohort }
+        )
+
+        #expect(await service.effectiveFMBackfillModeForTesting() == .full)
+    }
+
+    @Test("Registry approving at .rescoreOnly intersects with .full to .rescoreOnly")
+    func degradedApprovedCohortIntersectsToDegraded() async throws {
+        let store = try await makeTestStore()
+        var registry = ApprovedCohortRegistry()
+        registry.approve(
+            osBuild: Self.testCohort.osBuild,
+            scanCohort: Self.testCohort,
+            mode: .rescoreOnly
+        )
+
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            approvedCohortRegistry: registry,
+            scanCohortProvider: { Self.testCohort }
+        )
+
+        #expect(await service.effectiveFMBackfillModeForTesting() == .rescoreOnly)
+    }
+
+    @Test("Registry marking the current cohort knownBad forces .off")
+    func knownBadCohortForcesOff() async throws {
+        let store = try await makeTestStore()
+        var registry = ApprovedCohortRegistry()
+        registry.markKnownBad(
+            osBuild: Self.testCohort.osBuild,
+            scanCohort: Self.testCohort,
+            reason: "regression"
+        )
+
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            approvedCohortRegistry: registry,
+            scanCohortProvider: { Self.testCohort }
+        )
+
+        #expect(await service.effectiveFMBackfillModeForTesting() == .off)
+    }
+
+    @Test("OS build mismatch between approved cohort and runtime cohort collapses to .shadow")
+    func osBuildMismatchCollapses() async throws {
+        let store = try await makeTestStore()
+        var registry = ApprovedCohortRegistry()
+        registry.approve(
+            osBuild: "26.5", // approved for a different OS build
+            scanCohort: Self.testCohort,
+            mode: .full
+        )
+
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            approvedCohortRegistry: registry,
+            scanCohortProvider: { Self.testCohort } // returns osBuild "26.4"
+        )
+
+        #expect(await service.effectiveFMBackfillModeForTesting() == .shadow)
+    }
+}

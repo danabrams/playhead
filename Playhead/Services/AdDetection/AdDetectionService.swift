@@ -642,6 +642,31 @@ actor AdDetectionService {
     /// injected closure verbatim.
     private let chapterPhaseInstallIDProvider: @Sendable () -> UUID
 
+    /// Cycle 1 H2: rollout gate that intersects `config.fmBackfillMode` with
+    /// per-cohort approvals before any FM execution or fusion-time consumption.
+    /// `nil` = legacy behavior (the requested mode is used verbatim). When
+    /// non-nil, `effectiveFMBackfillMode` consults the registry against the
+    /// stored `runtimeCohort` captured at init.
+    ///
+    /// Value semantics are load-bearing: the struct is captured by value at
+    /// init time, so subsequent mutations to a registry held elsewhere do NOT
+    /// propagate into this service. If a future refactor wraps the registry
+    /// in a class/actor for shared mutation, every service holding a copy
+    /// will diverge — and the cohort-rollout contract becomes untestable.
+    private let approvedCohortRegistry: ApprovedCohortRegistry?
+    /// Cycle 3 H3: the `ScanCohort` captured ONCE at init via the supplied
+    /// `scanCohortProvider`. Production uses `ScanCohort.production()` which
+    /// reads `Locale.current.identifier` and other process-mutable values —
+    /// re-reading on every `effectiveFMBackfillMode` access (the cycle-2
+    /// design) was vulnerable to region/calendar locale flips between the
+    /// bootstrap-time approval at PlayheadRuntime init and a later runtime
+    /// query. iOS does NOT relaunch on region-only changes, so the registry
+    /// key would silently miss its approval. Capturing once locks the cohort
+    /// to the same value the bootstrap registry was keyed against, and as a
+    /// side benefit eliminates the per-access JSON encode in
+    /// `CohortKey.canonicalIdentity`.
+    private let runtimeCohort: ScanCohort
+
     // MARK: - Init
 
     init(
@@ -663,7 +688,9 @@ actor AdDetectionService {
         repeatedAdCache: RepeatedAdCacheService? = nil,
         chapterGenerationPhaseFactory: (@Sendable () -> ChapterGenerationPhase)? = nil,
         chapterPlanCache: ChapterPlanCache? = nil,
-        chapterPhaseInstallIDProvider: @escaping @Sendable () -> UUID = { UUID() }
+        chapterPhaseInstallIDProvider: @escaping @Sendable () -> UUID = { UUID() },
+        approvedCohortRegistry: ApprovedCohortRegistry? = nil,
+        scanCohortProvider: @escaping @Sendable () -> ScanCohort = { ScanCohort.production() }
     ) {
         self.store = store
         self.classifier = classifier
@@ -693,6 +720,27 @@ actor AdDetectionService {
         self.chapterGenerationPhaseFactory = chapterGenerationPhaseFactory
         self.chapterPlanCache = chapterPlanCache
         self.chapterPhaseInstallIDProvider = chapterPhaseInstallIDProvider
+        self.approvedCohortRegistry = approvedCohortRegistry
+        // Cycle 3 H3: capture the cohort exactly once at init. See
+        // `runtimeCohort`'s docstring for the rationale (region-only locale
+        // flips during process lifetime previously caused silent FM demotion).
+        self.runtimeCohort = scanCohortProvider()
+    }
+
+    /// Cycle 1 H2 / Cycle 3 H3: effective FM mode after intersecting
+    /// `config.fmBackfillMode` with the approved-cohort registry decision
+    /// for the cohort captured at init. When no registry is wired, returns
+    /// `config.fmBackfillMode` verbatim — preserving legacy behavior for
+    /// tests and any caller that hasn't opted into cohort gating.
+    private var effectiveFMBackfillMode: FMBackfillMode {
+        guard let registry = approvedCohortRegistry else {
+            return config.fmBackfillMode
+        }
+        return registry.effectiveMode(
+            osBuild: runtimeCohort.osBuild,
+            scanCohort: runtimeCohort,
+            requestedMode: config.fmBackfillMode
+        )
     }
 
     #if DEBUG
@@ -705,6 +753,20 @@ actor AdDetectionService {
     /// site, not at some parallel factory.
     func backfillJobRunnerFactoryForTesting() -> (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)? {
         backfillJobRunnerFactory
+    }
+
+    /// Cycle 2 H1: DEBUG accessor for the cohort-intersected FM mode.
+    /// Production callers (four `effectiveFMBackfillMode` reads at the
+    /// runBackfill admission gate, the FM ledger-entry builder, the fusion
+    /// constructor, and the shadow-phase resolver — the shadow path
+    /// captures once into `resolvedMode` and re-uses for the runner factory)
+    /// resolve the mode internally; tests use this to assert that an
+    /// injected `approvedCohortRegistry` + `scanCohortProvider` combination
+    /// resolves to the expected effective mode without standing up the
+    /// full backfill pipeline. Without this accessor the cycle-1 H2
+    /// wire-up was untested end-to-end (the cycle-2 reviewer's H1 gap).
+    func effectiveFMBackfillModeForTesting() -> FMBackfillMode {
+        effectiveFMBackfillMode
     }
     #endif
 
@@ -1735,7 +1797,9 @@ actor AdDetectionService {
         // they never block the fusion path.
 
         var fmRefinementWindows: [FMRefinementWindowOutput] = []
-        if config.fmBackfillMode != .off {
+        // Cycle 1 H2: gate on effective mode so a known-bad cohort short-circuits
+        // before any FM input graph is built.
+        if effectiveFMBackfillMode != .off {
             if podcastId.isEmpty {
                 logger.info("Backfill: skipping FM scan phase — missing podcastId for asset \(analysisAssetId)")
             } else {
@@ -2782,10 +2846,12 @@ actor AdDetectionService {
         )
 
         // FM entries: positive-only, mode-gated, from persisted scan results.
+        // Cycle 1 H2: use the effective (registry-intersected) mode so a
+        // demoted cohort does not fold FM evidence into the ledger.
         let fmEntries = buildFMLedgerEntries(
             span: span,
             scanResults: semanticScanResults,
-            mode: config.fmBackfillMode,
+            mode: effectiveFMBackfillMode,
             fusionConfig: fusionConfig
         )
 
@@ -2882,7 +2948,9 @@ actor AdDetectionService {
             catalogEntries: catalogLedgerEntries,
             metadataEntries: metadataEntries,
             breakAlignmentEntries: breakAlignmentEntries,
-            mode: config.fmBackfillMode,
+            // Cycle 1 H2: effective mode so fusion's `contributesToExistingCandidateLedger`
+            // gate honors the registry's decision for this cohort.
+            mode: effectiveFMBackfillMode,
             config: fusionConfig
         )
         return fusion.buildLedger()
@@ -3476,7 +3544,11 @@ actor AdDetectionService {
         podcastId: String,
         sessionIdOverride: String? = nil
     ) async -> ShadowFMPhaseResult {
-        guard config.fmBackfillMode != .off else { return .skipped }
+        // Cycle 1 H2: gate on effective mode so a known-bad cohort skips
+        // the entire shadow phase rather than handing the runner a mode
+        // that would have been demoted to .off downstream anyway.
+        let resolvedMode = effectiveFMBackfillMode
+        guard resolvedMode != .off else { return .skipped }
 
         guard let factory = backfillJobRunnerFactory else {
             logger.warning("Shadow FM phase skipped: no runner factory injected — FM evidence will be absent. Check PlayheadRuntime wiring.")
@@ -3528,7 +3600,9 @@ actor AdDetectionService {
             return wrap(.requeued)
         }
 
-        let runner = factory(store, config.fmBackfillMode)
+        // Cycle 1 H2: pass the effective mode so the runner persists scan
+        // results stamped with the cohort-approved capability set.
+        let runner = factory(store, resolvedMode)
         let (atoms, version) = TranscriptAtomizer.atomize(
             chunks: chunks,
             analysisAssetId: analysisAssetId,

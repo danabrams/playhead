@@ -621,7 +621,6 @@ private extension TranscriptPeekView {
             anchorProvenance: []
         )
 
-        let trustSvc = trustService
         let pid = podcastId
         let revertCallback = onRevertAdWindows
         let store = correctionStore
@@ -639,13 +638,18 @@ private extension TranscriptPeekView {
             )
 
             // Revert overlapping ad windows via the orchestrator callback.
+            // Cycle 2 M2: the orchestrator's `revertByTimeRange` now records
+            // the trust signal itself (weak for suggest-tier-only reverts,
+            // full for managed reverts) — see SkipOrchestrator.swift's M2
+            // routing. Previously this site fired an unconditional
+            // full-magnitude signal AFTER the callback, double-counting the
+            // penalty (2x for managed reverts) and making the M2 weak/strong
+            // split asymmetric (0.05 + 0.10 = 0.15 instead of 0.05 for a
+            // suggest-only veto). Removed the duplicate call here so the
+            // orchestrator is the single source of truth for trust signaling
+            // from this surface.
             if let revertCallback {
                 await revertCallback(syntheticSpan)
-            }
-
-            // Feed false-positive (false skip) signal to TrustService.
-            if let pid, let trustSvc {
-                await trustSvc.recordFalseSkipSignal(podcastId: pid)
             }
         }
     }
