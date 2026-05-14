@@ -337,6 +337,66 @@ struct AdaptiveDeviceProfileEstimatorTests {
         #expect(state.persistedScaleFactor == 1.0)
     }
 
+    @Test("R13: Divergence revert preserves the prior schemaVersion (no silent downgrade)")
+    func testDivergenceRevertPreservesSchemaVersion() {
+        // Simulate a row that was inserted under a HIGHER schemaVersion
+        // than this binary's `currentSchemaVersion` — the situation that
+        // would arise on a downgrade-then-upgrade flow, or any future
+        // migration where the math layer runs against a forward-shape
+        // row. Without the R13 fix, the divergence-revert branch would
+        // forcibly stamp `currentSchemaVersion` onto the in-memory
+        // snapshot returned to the caller — even though
+        // `LearnedDeviceProfile.apply(_:)` correctly refuses to write
+        // the changed version back to storage, the snapshot/row mismatch
+        // confuses any downstream consumer (diagnostics bundle, debug
+        // dumps) that compares them.
+        let tuning = AdaptiveDeviceProfileTuning(
+            ewmaAlpha: 0.2,
+            minSamplesForActivation: 30,
+            clampBandLower: 0.5,
+            clampBandUpper: 2.0,
+            notchStep: 0.1,
+            notchWindowSeconds: 0,
+            divergenceObservationThreshold: 3
+        )
+        let futureSchemaVersion = AdaptiveDeviceProfileState.currentSchemaVersion + 5
+        var state = AdaptiveDeviceProfileState(
+            deviceClassRawValue: DeviceClass.iPhone17Pro.rawValue,
+            seedGrantWindowSeconds: 45,
+            welfordMean: 45,
+            welfordM2: 0,
+            sampleCount: 30,
+            ewmaSeconds: 45,
+            persistedScaleFactor: 1.0,
+            lastNotchChangeAt: nil,
+            consecutiveClampedObservations: 0,
+            lastRevertReason: nil,
+            createdAt: Self.referenceDate,
+            updatedAt: Self.referenceDate,
+            schemaVersion: futureSchemaVersion
+        )
+        #expect(state.isActivated(tuning: tuning))
+
+        // Drive 5 saturating observations until the revert fires.
+        var saw = false
+        var t = Self.referenceDate.addingTimeInterval(3600)
+        for _ in 0..<5 {
+            let obs = GrantWindowObservation(grantWindowSeconds: 1000, observedAt: t)
+            let (next, result) = AdaptiveDeviceProfileEstimator.apply(
+                observation: obs, to: state, tuning: tuning
+            )
+            state = next
+            if result.didRevertToSeed {
+                saw = true
+                break
+            }
+            t = t.addingTimeInterval(60)
+        }
+        #expect(saw, "divergence revert must fire under the same conditions as the prior test")
+        #expect(state.schemaVersion == futureSchemaVersion,
+                "revert must preserve the prior schemaVersion; got \(state.schemaVersion) vs expected \(futureSchemaVersion)")
+    }
+
     @Test("Interior observations reset the divergence counter")
     func testDivergenceCounterResetsOnInteriorObservation() {
         // α=1.0 makes the EWMA equal the latest observation with no

@@ -438,4 +438,63 @@ struct AdaptiveDeviceProfileWriteSeamTests {
                     "expected helper invocation within the \(tag) arm body")
         }
     }
+
+    // MARK: - (5) Production wiring canary (R13)
+    //
+    // R12 was clean across 11 axes but missed the most fundamental
+    // wiring axis: the production scheduler permanently held the
+    // `NoOpLearnedDeviceProfileProvider` default because
+    // `PlayheadRuntime.init` never installs the SwiftData-backed store
+    // and `PlayheadApp.task` never called a setter. With that gap, every
+    // `recordObservation` was discarded by the No-Op, every
+    // `resolvedDeviceProfile` returned the seed verbatim, and the
+    // `LearnedDeviceProfile` SwiftData table never accumulated a row
+    // even when `PreAnalysisConfig.useAdaptiveDeviceProfile == true` —
+    // the bead's "Adaptive estimator runs in production, gated by the
+    // flag" acceptance criterion was silently unmet.
+    //
+    // R13 wired the setter (`AnalysisWorkScheduler.setLearnedDeviceProfileProvider`),
+    // a runtime helper (`PlayheadRuntime.attachLearnedDeviceProfileStore`),
+    // and a call site in `PlayheadApp.swift`. This canary pins those
+    // three edges so a future refactor that drops any one of them
+    // regresses on the source-grep audit even if every behavioural test
+    // still passes (none of them currently exercise the production
+    // wiring end-to-end; the unit tests inject a stub provider directly).
+
+    @Test("R13 production wiring canary: PlayheadRuntime defines attachLearnedDeviceProfileStore and PlayheadApp invokes it")
+    func sourceCanaryR13ProductionWiring() throws {
+        // (a) AnalysisWorkScheduler exposes the setter the runtime calls.
+        let schedulerURL = Self.repoRoot.appendingPathComponent(
+            "Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift"
+        )
+        let schedulerSource = try String(contentsOf: schedulerURL, encoding: .utf8)
+        #expect(schedulerSource.contains("func setLearnedDeviceProfileProvider("),
+                "AnalysisWorkScheduler must expose setLearnedDeviceProfileProvider(...) so the production runtime can swap in the SwiftData-backed store")
+
+        // (b) PlayheadRuntime defines the attach helper that builds the
+        // SwiftData-backed store and calls the scheduler setter.
+        let runtimeURL = Self.repoRoot.appendingPathComponent(
+            "Playhead/App/PlayheadRuntime.swift"
+        )
+        let runtimeSource = try String(contentsOf: runtimeURL, encoding: .utf8)
+        #expect(runtimeSource.contains("func attachLearnedDeviceProfileStore("),
+                "PlayheadRuntime must define attachLearnedDeviceProfileStore(modelContainer:) so the launch-path wiring has a single seam to call")
+        // The helper body must construct the SwiftData-backed store and
+        // forward it to the scheduler setter. Spot-check both symbols
+        // appear in the runtime file.
+        #expect(runtimeSource.contains("SwiftDataLearnedDeviceProfileStore("),
+                "PlayheadRuntime.attachLearnedDeviceProfileStore must construct the SwiftData-backed store; a future refactor that drops this line silently restores the No-Op default")
+        #expect(runtimeSource.contains("setLearnedDeviceProfileProvider("),
+                "PlayheadRuntime.attachLearnedDeviceProfileStore must invoke the scheduler setter; without this call the new store is constructed but never installed")
+
+        // (c) PlayheadApp invokes the helper from its `.task` block
+        // (where `modelContainer` is in scope) — the production call
+        // site that closes the wiring loop.
+        let appURL = Self.repoRoot.appendingPathComponent(
+            "Playhead/App/PlayheadApp.swift"
+        )
+        let appSource = try String(contentsOf: appURL, encoding: .utf8)
+        #expect(appSource.contains("attachLearnedDeviceProfileStore("),
+                "PlayheadApp must call runtime.attachLearnedDeviceProfileStore(modelContainer:) so the production scheduler actually receives the SwiftData store; without this call the LearnedDeviceProfile table stays empty even with the feature flag ON")
+    }
 }

@@ -312,6 +312,27 @@ struct PlayheadApp: App {
                     BackgroundFeedRefreshService.attachSharedService(feedRefreshService)
                     feedRefreshService.start()
 
+                    // playhead-beh3 (R13): install the SwiftData-backed
+                    // `LearnedDeviceProfile` store onto the scheduler so the
+                    // adaptive Welford+EWMA estimator actually persists state
+                    // in production. The scheduler is constructed in
+                    // `PlayheadRuntime.init` BEFORE `modelContainer` exists,
+                    // so it boots with a `NoOpLearnedDeviceProfileProvider`
+                    // and gets the real store wired here — mirrors the same
+                    // setter-after-init pattern as
+                    // `BackgroundFeedRefreshService.attachSharedService(...)`
+                    // immediately above. Without this call the
+                    // `useAdaptiveDeviceProfile` flag has NO effect: every
+                    // `recordObservation` is discarded by the No-Op provider
+                    // and the `LearnedDeviceProfile` table never accumulates
+                    // a row. Idempotent and `@MainActor`-safe (the store is
+                    // constructed inside the runtime helper so the non-
+                    // Sendable `ModelContext` never crosses an isolation
+                    // boundary).
+                    await runtime.attachLearnedDeviceProfileStore(
+                        modelContainer: modelContainer
+                    )
+
                     // playhead-05i: wire the playback queue + auto-advance.
                     // The play handler resolves a `canonicalEpisodeKey`
                     // back to a SwiftData `Episode` row and asks the

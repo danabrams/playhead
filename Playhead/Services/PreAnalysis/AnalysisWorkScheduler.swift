@@ -509,7 +509,20 @@ actor AnalysisWorkScheduler {
     /// (`PreAnalysisConfig.useAdaptiveDeviceProfile`) gates whether the
     /// scheduler even queries the provider at the call site, so a flag-
     /// off run never touches the estimator state.
-    private let learnedDeviceProfileProvider: any LearnedDeviceProfileProviding
+    ///
+    /// R13 fix: switched from `let` to `var` so the production runtime
+    /// can install a `SwiftDataLearnedDeviceProfileStore` AFTER
+    /// `AnalysisWorkScheduler.init` (init runs synchronously before the
+    /// `ModelContainer` is available — see `PlayheadRuntime.init` notes).
+    /// Without the setter the production scheduler permanently held the
+    /// No-Op provider and the `useAdaptiveDeviceProfile` flag had no
+    /// effect: `recordObservation` was dropped, `resolvedDeviceProfile`
+    /// returned the seed verbatim, and the SwiftData
+    /// `LearnedDeviceProfile` table stayed empty even with the flag ON
+    /// — the bead's "Adaptive estimator runs in production, gated by the
+    /// flag" acceptance criterion was silently unmet. Mutation is safe
+    /// because the field lives on an `actor` so reads + writes serialize.
+    private var learnedDeviceProfileProvider: any LearnedDeviceProfileProviding
 
     private var shouldCancelCurrentJob = false
     /// Set to `true` by the lease-renewal task when its CAS finds no
@@ -1830,6 +1843,25 @@ actor AnalysisWorkScheduler {
     /// to detach. Idempotent — re-installing replaces the prior handler.
     func setShadowLaneTickHandler(_ handler: (any ShadowLaneTickHandler)?) {
         self.shadowLaneTickHandler = handler
+    }
+
+    /// playhead-beh3 (R13): install the adaptive-estimator provider once
+    /// the SwiftData `ModelContainer` is available. The scheduler is
+    /// constructed in `PlayheadRuntime.init` BEFORE the container exists
+    /// (init is synchronous; the container is built by `PlayheadApp.task`
+    /// and threaded back in via setters), so without this seam the
+    /// production scheduler permanently holds the
+    /// `NoOpLearnedDeviceProfileProvider` default — every
+    /// `recordObservation` is dropped, `resolvedDeviceProfile` returns
+    /// the seed verbatim, and the `LearnedDeviceProfile` table never
+    /// fills even with `useAdaptiveDeviceProfile = true`.
+    ///
+    /// Mirrors `setWorkJournalRecorder` / `setLanePreemptionHandler`:
+    /// idempotent (re-installing replaces the prior provider), call-once
+    /// in production (from `PlayheadRuntime.attachLearnedDeviceProfileStore`),
+    /// no-op in preview runtimes that never reach that wiring step.
+    func setLearnedDeviceProfileProvider(_ provider: any LearnedDeviceProfileProviding) {
+        self.learnedDeviceProfileProvider = provider
     }
 
     /// Start the scheduler loop. Call after reconciliation is complete.

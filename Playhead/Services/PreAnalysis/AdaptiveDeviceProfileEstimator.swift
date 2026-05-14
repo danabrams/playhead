@@ -543,10 +543,24 @@ enum AdaptiveDeviceProfileEstimator {
             // 30 samples re-bootstrap a healthy EWMA. We intentionally
             // preserve `seedGrantWindowSeconds` and `createdAt` —
             // those are the row's identity, not its math.
+            //
+            // R13: also preserve the prior `schemaVersion` rather than
+            // defaulting to `currentSchemaVersion`. The persisted row's
+            // schemaVersion stamps the shape it was inserted under; the
+            // in-memory revert path must not silently downgrade that
+            // stamp when (in a future migration) a row exists on a
+            // higher schema than this binary's `currentSchemaVersion`.
+            // `LearnedDeviceProfile.apply(_:)` already refuses to update
+            // schemaVersion on the SwiftData row, so a wrong value in
+            // the in-memory snapshot would create a confusing
+            // snapshot/row mismatch in the diagnostics bundle even
+            // though storage stays consistent. Cheap fix; keeps the
+            // identity-vs-math separation honest.
             let preserved = AdaptiveDeviceProfileState(
                 deviceClassRawValue: next.deviceClassRawValue,
                 seedGrantWindowSeconds: next.seedGrantWindowSeconds,
-                createdAt: next.createdAt
+                createdAt: next.createdAt,
+                schemaVersion: next.schemaVersion
             )
             var reverted = preserved
             reverted.updatedAt = obs.observedAt
