@@ -212,4 +212,45 @@ struct ShowCapabilityBudgetModulatorTests {
         // floor.
         #expect(ShowCapabilityBudgetModulator.minBudgetFloorRatio >= 0.5)
     }
+
+    // MARK: - AdDetectionService init-seed contract
+
+    @Test("AdDetectionService seeds lastCapabilityBudgetAdjustment to the .unknown baseline at init")
+    func adDetectionServiceInitSeedsUnknownBaseline() async throws {
+        // h6a6 R4 review fix (probe 5): the
+        // `lastCapabilityBudgetAdjustmentForTesting()` accessor was
+        // documented as a test seam but had NO test exercising it. The
+        // accessor's contract: BEFORE the first `runBackfill` (and on
+        // every flag-OFF run thereafter) the value is the
+        // `.unknown`-yielded baseline so a consumer that reads it
+        // pre-backfill never sees a non-unity multiplier. Pin that
+        // contract here so a refactor cannot silently change the seed
+        // without breaking CI.
+        let store = try await makeTestStore()
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "detection-v1",
+                fmBackfillMode: .off
+            )
+        )
+
+        let adjustment = await service.lastCapabilityBudgetAdjustmentForTesting()
+        #expect(adjustment.kind == .unknown,
+                "Pre-backfill seed must be .unknown (no profile observed yet)")
+        #expect(adjustment.analysisBudgetMultiplier == 1.0,
+                ".unknown profile must yield the no-modulation multiplier")
+        #expect(adjustment.detectorBiases.isEmpty,
+                ".unknown profile must yield an empty bias map (every detector at 1.0)")
+        for detector in ShowCapabilityDetector.allCases {
+            #expect(adjustment.bias(for: detector) == 1.0,
+                    "Bias for \(detector) must default to 1.0 on the .unknown baseline")
+        }
+    }
 }

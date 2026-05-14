@@ -8,12 +8,15 @@
 // `runBackfill` (right after the per-show music-bed snapshot is
 // resolved, BEFORE any per-span scoring) and stamped on
 // `AdDetectionService.lastCapabilityBudgetAdjustment` (test-observable
-// via `lastCapabilityBudgetAdjustmentForTesting()`). The per-episode
-// capability-profile WRITE path runs separately at the END of
-// `runBackfill` (after all spans are persisted) and feeds the
-// observation counters back into the store; the budget adjustment
-// stamped here is derived from the PRE-write snapshot the read path
-// fetched. Neither output has a production CONSUMER as of this bead:
+// via `lastCapabilityBudgetAdjustmentForTesting()` — exercised by
+// `ShowCapabilityBudgetModulatorTests
+// .adDetectionServiceInitSeedsUnknownBaseline` for the init seed).
+// The per-episode capability-profile WRITE path runs separately at
+// the END of `runBackfill` (after all spans are persisted) and feeds
+// the observation counters back into the store; the budget
+// adjustment stamped here is derived from the PRE-write snapshot the
+// read path fetched. Neither output has a production CONSUMER as of
+// this bead:
 //   * The multiplier is emitted in a single `[h6a6]` log line —
 //     no `runBackfill` consumer multiplies its per-episode budget by
 //     it. The "≥ 15% compute reduction" acceptance is enforced as a
@@ -26,6 +29,20 @@
 //     is a follow-on bead. The map's shape and per-profile defaults
 //     are pinned by the unit tests so the consumer bead lands against
 //     a stable contract.
+//
+// h6a6 R4 doc audit: "follow-on bead" above is intentionally
+// unnamed — no successor bead has been filed yet at the time of
+// landing. The placeholder is a hand-off note so the next reviewer
+// or implementer knows the value-typed contracts here are LIVE
+// (tested in CI) but DORMANT (no runtime consumer). Filing the
+// consumer bead is tracked under the parent Phase-3 epic
+// (playhead-2k4l); when that bead lands it should both
+//   * wire the multiplier into `runBackfill`'s per-episode budget
+//     (routing through `applyAdjustment(...)` so the always-on
+//     minimum floor stays enforced), and
+//   * wire the detector-bias map into `BackfillEvidenceFusion` or
+//     the equivalent per-detector weight site so the bias band
+//     pinned in `biasClampedToBand` actually steers scoring.
 //
 // Two outputs:
 //   1. `analysisBudgetMultiplier` — a scalar in

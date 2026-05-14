@@ -910,10 +910,20 @@ actor AdDetectionService {
     /// capability-budget adjustment resolved in `runBackfill`. Flag-
     /// OFF runs leave this at the `.unknown`-yielded baseline
     /// (multiplier 1.0, empty bias map) — the no-modulation no-op
-    /// contract. The accessor exists so the budget-modulation
-    /// behavioral contract ("modulator applied when flag on,
-    /// pass-through when flag off") can be asserted directly,
-    /// independent of the downstream consumer wiring.
+    /// contract. Pre-backfill (before the first `runBackfill` ever
+    /// runs) the value is also the `.unknown` baseline, pinned by
+    /// the init-seed on `lastCapabilityBudgetAdjustment` (line 541).
+    ///
+    /// h6a6 R4: the init-seed half of the contract is asserted by
+    /// `ShowCapabilityBudgetModulatorTests
+    /// .adDetectionServiceInitSeedsUnknownBaseline`. The full
+    /// flag-on / runBackfill-driven behavioral contract ("modulator
+    /// applied when flag on + profile observed; pass-through when
+    /// flag off") will be asserted via this seam by the follow-on
+    /// consumer bead that wires the multiplier into the per-episode
+    /// budget — at which point a runBackfill-driven test on a
+    /// synthetic `ShowCapabilityProfileResolving` can assert both
+    /// the stamp and its consumption in one fixture.
     func lastCapabilityBudgetAdjustmentForTesting() -> ShowCapabilityBudgetAdjustment {
         lastCapabilityBudgetAdjustment
     }
