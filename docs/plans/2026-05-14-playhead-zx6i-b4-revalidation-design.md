@@ -318,7 +318,7 @@ the `.onAppear` hydration. Slug already exists in
 | `PipelineVersions.current()` returns a different triple under DEBUG vs RELEASE (e.g. dev override) and triggers spurious revalidation. | All three sources are static `let`s today; if a future override is added it must be opt-in and stamped to a parallel key. (Out of scope for this bead.) |
 | Per-asset UserDefaults growth (one row per asset, never pruned). | Stamp value is ~120 bytes; 10k episodes = 1.2 MB. Acceptable. Pruning hook can be added later if an issue. |
 | Race between the short-circuit reading `loadCompletedVersions` and a concurrent stamp from another in-flight run on the same asset. | `AnalysisJobRunner.run` is single-shot per asset (already enforced by the analysis-jobs lease); concurrent runs against the same asset don't occur in production. UserDefaults reads/writes are atomic. |
-| Flag-OFF callers writing the stamp would couple OFF behavior to the new code. | Stamp is gated on `preAnalysisConfig.b4RevalidationFromFeaturesEnabled` at the call site. Flag OFF → no stamp, no read, full backward compatibility. |
+| Flag-OFF callers writing the stamp would couple OFF behavior to the new code. | Stamp is gated on a LIVE `PreAnalysisConfig.load().b4RevalidationFromFeaturesEnabled` read at the call site (NOT on the init-time `preAnalysisConfig` snapshot, which is used only by the 2hpn `scopedMusicBedGeneralization` consumer at line 2123). Flag OFF → no stamp, no read, full backward compatibility. The live read is required for producer/consumer parity — see §3.4 and §3.5.1; R10 doc audit corrected an earlier "preAnalysisConfig" wording here that contradicted the live-read invariant documented in §3.4 / §3.5.1. |
 
 ## 7. Implementation Order
 
