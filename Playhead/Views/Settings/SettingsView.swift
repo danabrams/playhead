@@ -203,6 +203,19 @@ struct SettingsView: View {
                     // from the persisted value so the toggle reflects
                     // ground truth, matching the 24cm pattern.
                     featureFlagValues["2hpn"] = pre.scopedMusicBedGeneralization
+                    // playhead-zx6i: B4 revalidation-from-features
+                    // flag — wired to `PreAnalysisConfig`. Initialize
+                    // from the persisted value so the toggle reflects
+                    // ground truth. Unlike 2hpn / xr3t (snapshot at
+                    // consumer-init), the zx6i flag has an INSTANT
+                    // rollback contract: both the runner's
+                    // `b4RevalidationEnabledProvider` and the
+                    // stamp-write gate in
+                    // `AdDetectionService.runBackfill` re-read
+                    // `PreAnalysisConfig.load()` on every call, so a
+                    // toggle flip takes effect on the next analysis
+                    // run, not next app launch.
+                    featureFlagValues["zx6i"] = pre.b4RevalidationFromFeaturesEnabled
                 }
                 .task {
                     await viewModel.computeStorageSizes()
@@ -1521,9 +1534,10 @@ private extension SettingsView {
             //   row using `SettingsL274Copy.perShowCapabilityProfileLabel`
             //   when the producer API lands.
 
-            // Feature-flag toggles. `24cm`, `xr3t`, and `2hpn` are wired to
-            // real storage; `zx6i` and `43ed` remain placeholder shims
-            // until their beads close. The `2hpn` toggle persists to
+            // Feature-flag toggles. `24cm`, `xr3t`, `2hpn`, and `zx6i`
+            // are wired to real storage; only `43ed` remains a
+            // placeholder shim until its bead closes. The `2hpn` toggle
+            // persists to
             // `PreAnalysisConfig.scopedMusicBedGeneralization`; the new
             // value takes effect on the next `AdDetectionService` init
             // (next app launch) — `AdDetectionService` caches the config
@@ -1589,6 +1603,31 @@ private extension SettingsView {
                                 // corrected.)
                                 var config = PreAnalysisConfig.load()
                                 config.scopedMusicBedGeneralization = newValue
+                                config.save()
+                            } else if slug == "zx6i" {
+                                // playhead-zx6i: persist the B4
+                                // revalidation-from-features flag to
+                                // `PreAnalysisConfig`. Rollback is
+                                // INSTANT, not next-launch: the
+                                // runner's default
+                                // `b4RevalidationEnabledProvider` and
+                                // the stamp-write gate in
+                                // `AdDetectionService.runBackfill`
+                                // BOTH re-read
+                                // `PreAnalysisConfig.load()` on every
+                                // call. This intentionally diverges
+                                // from 2hpn / xr3t (snapshot at
+                                // consumer-init) — the short-circuit
+                                // gates a perf optimization with
+                                // `false_ready_rate` risk, so
+                                // minimizing blast-radius on flag-OFF
+                                // matters more than caching the read.
+                                // R1 doc audit fix: prior comment
+                                // documented a "next-launch" contract
+                                // that didn't match the wired
+                                // closures.
+                                var config = PreAnalysisConfig.load()
+                                config.b4RevalidationFromFeaturesEnabled = newValue
                                 config.save()
                             }
                         }

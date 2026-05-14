@@ -306,6 +306,21 @@ protocol AdDetectionProviding: Sendable {
         episodeDuration: Double,
         sessionId: String?
     ) async throws
+
+    /// playhead-zx6i — B4 fast revalidation entry point. Re-runs only
+    /// the classifier + fusion + boundary stages against the persisted
+    /// `TranscriptChunk` rows for `analysisAssetId`, without re-running
+    /// ASR / decode / feature extraction. Called by `AnalysisJobRunner`
+    /// when the `b4_revalidation_from_features_enabled` flag is ON and
+    /// the `RevalidationStateStore` reports a pipeline-version bump for
+    /// this asset. Throws when persisted chunks cannot be fetched — the
+    /// runner falls back to the full-analysis path in that case.
+    func revalidateFromFeatures(
+        analysisAssetId: String,
+        podcastId: String,
+        episodeDuration: Double,
+        sessionId: String?
+    ) async throws
 }
 
 extension AdDetectionProviding {
@@ -319,6 +334,21 @@ extension AdDetectionProviding {
     ) async throws {
         try await runBackfill(
             chunks: chunks,
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId,
+            episodeDuration: episodeDuration,
+            sessionId: nil
+        )
+    }
+
+    /// playhead-zx6i convenience overload for the sessionId-less call
+    /// sites (mirrors the `runBackfill` overload above).
+    func revalidateFromFeatures(
+        analysisAssetId: String,
+        podcastId: String,
+        episodeDuration: Double
+    ) async throws {
+        try await revalidateFromFeatures(
             analysisAssetId: analysisAssetId,
             podcastId: podcastId,
             episodeDuration: episodeDuration,
@@ -2728,6 +2758,83 @@ actor AdDetectionService {
                 "[2hpn] show=\(podcastId, privacy: .public) confirmed=\(updated.isConfirmed) confirmationCount=\(updated.confirmationCount) missCount=\(updated.consecutiveMissCount) storedHashes=\(updated.confirmedJingleHashes.count)"
             )
         }
+
+        // playhead-zx6i — Success stamp for the B4 revalidation
+        // short-circuit. ONLY runs when the flag is ON; flag-OFF
+        // behavior is byte-identical to pre-zx6i (no UserDefaults
+        // write, no allocation). The stamp records that this asset's
+        // persisted `AdWindow` / classifier / feature rows are
+        // up-to-date with the current `PipelineVersions` triple. On
+        // the next `AnalysisJobRunner.run` for this asset, if the
+        // current triple still matches, the runner takes the existing
+        // skip-hot-path / skip-backfill no-op branches; if the triple
+        // has bumped, the runner takes the revalidation short-circuit
+        // (skipping decode / features / ASR) and routes through
+        // `revalidateFromFeatures`. Stamped only here — at the end of
+        // a successful `runBackfill`, after every stage wrote — so a
+        // failure that returns/throws earlier leaves the prior stamp
+        // (or absent state) intact and the next run will redo the
+        // work rather than incorrectly trust an aborted run.
+        //
+        // R1 doc audit fix: re-load the flag LIVE here instead of
+        // reading the init-time `preAnalysisConfig` snapshot.
+        // `AnalysisJobRunner` reads its flag live on every `run(_:)`
+        // (see `b4RevalidationEnabledProvider`'s doc comment), so the
+        // producer (this stamp write) and the consumer (the short-
+        // circuit) must agree on the live value. Otherwise a
+        // mid-session flag-ON would unlock the consumer but leave the
+        // producer's cached `false` in place, so no stamp would ever
+        // be written and the feature would silently never activate
+        // until the next app launch. The other `preAnalysisConfig`
+        // consumers (2hpn `scopedMusicBedGeneralization` at line 2123)
+        // keep their snapshot-at-init semantics — only the zx6i flag
+        // routes through the live read here.
+        if PreAnalysisConfig.load().b4RevalidationFromFeaturesEnabled {
+            RevalidationStateStore.recordCompleted(
+                versions: PipelineVersions.current(),
+                forAsset: analysisAssetId
+            )
+        }
+    }
+
+    /// playhead-zx6i — B4 fast revalidation entry point.
+    ///
+    /// Fetches the persisted `TranscriptChunk` rows for `analysisAssetId`
+    /// and delegates to `runBackfill`, which already (a) accepts chunks
+    /// as a parameter rather than re-running ASR, and (b) fetches its
+    /// own `FeatureWindow` rows from the store internally. The
+    /// short-circuit therefore comes from the CALLER (the
+    /// `AnalysisJobRunner.run` branch that skips stages 1–3); this
+    /// method's job is to provide a clean named entry point so the
+    /// stub-based unit tests can assert "the runner took the
+    /// revalidation path, not the full-analysis path" without grovelling
+    /// through `runBackfill` call-site internals.
+    ///
+    /// If persisted chunks are empty the call returns without doing
+    /// any classifier work — the caller's gate already checked for
+    /// non-empty chunks, but defense-in-depth here keeps a
+    /// chunk-races-deletion path from triggering a no-op classifier
+    /// sweep. The `runBackfill` body's own `guard !chunks.isEmpty` is
+    /// the structural fallback.
+    func revalidateFromFeatures(
+        analysisAssetId: String,
+        podcastId: String,
+        episodeDuration: Double,
+        sessionId: String? = nil
+    ) async throws {
+        let chunks = try await store.fetchTranscriptChunks(assetId: analysisAssetId)
+        guard !chunks.isEmpty else {
+            logger.info("Revalidation: skipping — no persisted chunks for asset \(analysisAssetId)")
+            return
+        }
+        logger.info("Revalidation: re-running classifier+fusion+boundary over \(chunks.count) persisted chunks for asset \(analysisAssetId)")
+        try await runBackfill(
+            chunks: chunks,
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId,
+            episodeDuration: episodeDuration,
+            sessionId: sessionId
+        )
     }
 
     // MARK: - ChapterGenerationPhase wire-up (playhead-au2v.1.13)

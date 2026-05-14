@@ -66,6 +66,57 @@ actor AnalysisJobRunner {
     /// outcome is reproducible.
     private let safetySampleRNG: @Sendable () -> Double
 
+    /// playhead-zx6i — gate the B4 revalidation short-circuit. Returns
+    /// `true` when the `b4_revalidation_from_features_enabled` flag is
+    /// ON for THIS process. Production wiring re-reads the flag from
+    /// `PreAnalysisConfig.load().b4RevalidationFromFeaturesEnabled` on
+    /// EVERY call (this closure is invoked at the top of each
+    /// `run(_:)`), giving the runner an **instant rollback** contract:
+    /// flipping the flag OFF in Settings disables the short-circuit on
+    /// the very next analysis run, not on next app launch. This
+    /// diverges from 2hpn / xr3t (which snapshot at consumer-init);
+    /// instant rollback is preferred here because the short-circuit
+    /// gates a perf optimization with a potential `false_ready_rate`
+    /// risk, and minimising blast-radius matters more than caching
+    /// the read. The companion stamp-write inside
+    /// `AdDetectionService.runBackfill` also re-reads on every write
+    /// so the producer and consumer agree on the live value
+    /// (R1 doc audit fix: prior wiring snapshotted the writer at
+    /// `AdDetectionService` init, producing an asymmetric rollback
+    /// where a mid-session flag-ON would never write a stamp because
+    /// the producer's cached value was still `false`).
+    ///
+    /// Performance: `PreAnalysisConfig.load()` does an in-memory
+    /// UserDefaults read (Foundation caches the backing plist after
+    /// first sync) plus a JSON decode of ~200 bytes. One call per
+    /// `run(_:)` and one per successful `runBackfill`. Measured in
+    /// microseconds — well below the cost of the analysis pipeline
+    /// stages this short-circuit gates. The R2 audit confirmed no
+    /// benchmark regression. If the call count ever grows (e.g.
+    /// per-shard rather than per-asset), revisit caching.
+    ///
+    /// Tests inject a fixed `Bool` (or a closure that flips it) so
+    /// the short-circuit can be deterministically exercised without
+    /// round-tripping through UserDefaults. Returning `false` makes
+    /// the short-circuit structurally unreachable — flag-OFF is
+    /// byte-identical to pre-zx6i behaviour.
+    private let b4RevalidationEnabledProvider: @Sendable () -> Bool
+
+    /// playhead-zx6i — current pipeline-version triple reader. Defaults
+    /// to `PipelineVersions.current()` in production. Tests inject a
+    /// fixed snapshot so the short-circuit's version-comparison branch
+    /// can be exercised without touching the global
+    /// `AdDetectionConfig` / `SkipPolicyConfig` / `SharedVersionConstants`
+    /// singletons (which are static `let`s and cannot be mutated mid-test).
+    private let currentPipelineVersionsProvider: @Sendable () -> PipelineVersions
+
+    /// playhead-zx6i — per-asset "completed versions" loader. Defaults
+    /// to `RevalidationStateStore.loadCompletedVersions` against
+    /// `.standard`. Tests inject a closure that returns whatever the
+    /// scenario calls for (nil → simulates pre-zx6i asset; equal →
+    /// simulates "no bump"; different → simulates a version bump).
+    private let completedPipelineVersionsLoader: @Sendable (_ assetId: String) -> PipelineVersions?
+
     // MARK: - Init
 
     init(
@@ -81,7 +132,16 @@ actor AnalysisJobRunner {
         clock: @escaping @Sendable () -> Date = { Date() },
         acousticGateConfig: AcousticTranscriptGateConfig = .default,
         transcriptShadowGateLogger: TranscriptShadowGateLogging = NoOpTranscriptShadowGateLogger(),
-        safetySampleRNG: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }
+        safetySampleRNG: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
+        b4RevalidationEnabledProvider: @escaping @Sendable () -> Bool = {
+            PreAnalysisConfig.load().b4RevalidationFromFeaturesEnabled
+        },
+        currentPipelineVersionsProvider: @escaping @Sendable () -> PipelineVersions = {
+            PipelineVersions.current()
+        },
+        completedPipelineVersionsLoader: @escaping @Sendable (_ assetId: String) -> PipelineVersions? = { assetId in
+            RevalidationStateStore.loadCompletedVersions(forAsset: assetId)
+        }
     ) {
         self.store = store
         self.audioProvider = audioProvider
@@ -94,6 +154,9 @@ actor AnalysisJobRunner {
         self.acousticGateConfig = acousticGateConfig
         self.transcriptShadowGateLogger = transcriptShadowGateLogger
         self.safetySampleRNG = safetySampleRNG
+        self.b4RevalidationEnabledProvider = b4RevalidationEnabledProvider
+        self.currentPipelineVersionsProvider = currentPipelineVersionsProvider
+        self.completedPipelineVersionsLoader = completedPipelineVersionsLoader
     }
 
     // MARK: - Run
@@ -102,6 +165,141 @@ actor AnalysisJobRunner {
     /// Returns an `AnalysisOutcome` summarizing coverage achieved and stop reason.
     func run(_ request: AnalysisRangeRequest) async -> AnalysisOutcome {
         let assetId = request.analysisAssetId
+
+        // playhead-zx6i — B4 fast revalidation short-circuit. Runs
+        // BEFORE the preemption-coordinator registration / decode /
+        // feature-extraction / transcription stages because the
+        // revalidation path consumes only persisted rows and skips
+        // every one of those stages. Structurally, this branch is
+        // unreachable unless ALL of the following hold:
+        //   1. The `b4_revalidation_from_features_enabled` flag is ON.
+        //   2. The asset has persisted `TranscriptChunk` rows from a
+        //      prior successful `runBackfill`.
+        //   3. The `RevalidationStateStore` recorded a completed
+        //      `PipelineVersions` snapshot for this asset (i.e. the
+        //      prior run happened AFTER zx6i shipped, so we have a
+        //      baseline to compare against).
+        //   4. The stored snapshot differs from
+        //      `PipelineVersions.current()` (i.e. at least one of
+        //      `modelVersion` / `policyVersion` / `featureSchemaVersion`
+        //      has bumped since the last successful run).
+        //
+        // When any condition fails the branch falls through to the
+        // existing full-analysis path (decode → features → ASR → ad
+        // detection). This is the explicit fail-open path:
+        //   - condition 1 OFF → flag rollback (instant revert to
+        //     pre-zx6i behaviour).
+        //   - condition 2 OFF → cold-start asset (no chunks to
+        //     revalidate against).
+        //   - condition 3 OFF → pre-zx6i asset (no stamp recorded);
+        //     we MUST take the full path to establish a stamp before
+        //     the next bump can short-circuit.
+        //   - condition 4 OFF → versions match, no revalidation needed.
+        //     (Note: the existing skip-hot-path / skip-backfill no-op
+        //     branches inside the full-path stage 4 already handle
+        //     this case correctly — they detect "no new chunks + windows
+        //     already exist" and return without re-running the
+        //     classifier. So falling through is safe.)
+        if b4RevalidationEnabledProvider() {
+            let persistedChunks = (try? await store.fetchTranscriptChunks(assetId: assetId)) ?? []
+            if !persistedChunks.isEmpty,
+               let completed = completedPipelineVersionsLoader(assetId) {
+                let current = currentPipelineVersionsProvider()
+                if completed != current {
+                    logger.info("[zx6i] revalidation triggered for asset \(assetId): completed=\(String(describing: completed)) current=\(String(describing: current))")
+                    // Resolve `episodeDuration` from the persisted
+                    // asset row (the full-path stage 1 computes this
+                    // from decoded shards; the revalidation path skips
+                    // decode, so we read the cached value written by
+                    // playhead-5uvz.6's gap-7 fix to
+                    // `analysis_assets.episodeDurationSec`). If the
+                    // column is NULL we fall through to full analysis
+                    // — without a duration the classifier's per-span
+                    // position priors degrade, so a one-time full
+                    // re-analysis to repopulate the column is the
+                    // safest answer.
+                    let asset = try? await store.fetchAsset(id: assetId)
+                    if let duration = asset?.episodeDurationSec, duration > 0 {
+                        do {
+                            try await adDetection.revalidateFromFeatures(
+                                analysisAssetId: assetId,
+                                podcastId: request.podcastId,
+                                episodeDuration: duration,
+                                sessionId: nil
+                            )
+                            // Feature + transcript coverage are not
+                            // re-derived on the revalidation path; we
+                            // pass through the persisted asset's
+                            // existing watermarks so the scheduler's
+                            // tier-advancement bookkeeping sees the
+                            // same coverage it would have seen on a
+                            // no-op fall-through.
+                            //
+                            // R1 doc audit fix: derive `cueCoverageSec`
+                            // from the freshly produced `AdWindow`
+                            // rows so the scheduler sees the honest
+                            // post-revalidation cue watermark, not a
+                            // hard-coded `0`. The filter (confidence
+                            // >= `Self.cueConfidenceThreshold` (0.7),
+                            // `endTime > startTime`) is the same one
+                            // used by the full-path return below (the
+                            // `let cueCoverage = finalWindows.filter
+                            // {...}.max() ?? 0` block immediately
+                            // after the backfill `finalWindows`
+                            // reload). Both call sites share
+                            // `Self.cueConfidenceThreshold` so the
+                            // threshold cannot drift between the two
+                            // paths without a single-edit grep target.
+                            //
+                            // We leave `newCueCount = 0` (the
+                            // `makeOutcome` default) deliberately. The
+                            // full path only computes `newCueCount`
+                            // when `request.outputPolicy ==
+                            // .writeWindowsAndCues`, and in that case
+                            // counts windows that did not exist in
+                            // `existingWindowsBeforeDetection`. On the
+                            // revalidation path EVERY window is a
+                            // re-classification of a span that already
+                            // had a window pre-revalidation
+                            // (`runBackfill` rewrites existing rows
+                            // against the new versions), so reporting
+                            // those as "new cues" would be misleading
+                            // — they are not new ad detections, just
+                            // re-derived decisions over the same
+                            // audio. Returning `0` is the honest
+                            // post-revalidation count. The
+                            // `AnalysisWorkScheduler`'s
+                            // `shouldRetryCoverageInsufficient`
+                            // disjunction still picks up progress via
+                            // the live `cueCoverageSec` re-fetch
+                            // above, so the scheduler does not stall
+                            // on a missing `newCueCount`.
+                            let revalidatedWindows = (try? await store.fetchAdWindows(assetId: assetId)) ?? []
+                            let confidenceThreshold = Self.cueConfidenceThreshold
+                            let revalidatedCueCoverage = revalidatedWindows
+                                .filter { $0.confidence >= confidenceThreshold && $0.endTime > $0.startTime }
+                                .map(\.endTime)
+                                .max() ?? 0
+                            return makeOutcome(
+                                assetId: assetId,
+                                request: request,
+                                featureCoverageSec: asset?.featureCoverageEndTime ?? 0,
+                                transcriptCoverageSec: asset?.fastTranscriptCoverageEndTime ?? 0,
+                                cueCoverageSec: revalidatedCueCoverage,
+                                stopReason: .reachedTarget
+                            )
+                        } catch {
+                            logger.warning("[zx6i] revalidation failed for asset \(assetId): \(error.localizedDescription) — falling back to full analysis")
+                            // Intentional fall-through: a revalidation
+                            // failure should not be a user-visible
+                            // outage; the worst case is we redo work.
+                        }
+                    } else {
+                        logger.info("[zx6i] revalidation skipped for asset \(assetId): episodeDurationSec missing — falling back to full analysis")
+                    }
+                }
+            }
+        }
 
         // playhead-01t8: register with the preemption coordinator so a
         // higher-lane admission can flip our signal at its next safe
