@@ -2423,8 +2423,7 @@ actor AnalysisWorkScheduler {
         if config.useAdaptiveDeviceProfile {
             deviceProfile = await learnedDeviceProfileProvider.resolvedDeviceProfile(
                 seed: seedDeviceProfile,
-                deviceClass: deviceClass,
-                observedAt: clock()
+                deviceClass: deviceClass
             )
         } else {
             deviceProfile = seedDeviceProfile
@@ -2618,6 +2617,13 @@ actor AnalysisWorkScheduler {
         // `recoverOrphans` (the journal-aware cold-launch reaper)
         // degrades to the same blind sweep AnalysisJobReconciler runs.
         let now = clock().timeIntervalSince1970
+        // playhead-beh3 (R2): capture the lease-acquired wall-clock for
+        // the adaptive estimator write seam. Equal to `now` but kept as
+        // a separate binding so the success outcome arms below can
+        // compute `grantWindowSeconds = clock().timeIntervalSince1970 -
+        // leaseAcquiredAt` without re-reading the local that the lease-
+        // expiry math mutates conceptually.
+        let leaseAcquiredAt = now
         let leaseExpiry = now + Self.leaseExpirySeconds
         let leaseAcquired: Bool
         do {
@@ -3071,6 +3077,17 @@ actor AnalysisWorkScheduler {
                     // own `acquired` row will land when the scheduler
                     // claims it on a future iteration.
                     await emitJournalFinalized(episodeId: job.episodeId)
+                    // playhead-beh3 (R2): record the grant-window
+                    // outcome for the adaptive estimator. Tier advance
+                    // = the slice ran end-to-end under our lease and
+                    // produced the next-tier paused row, so the
+                    // wall-clock interval since lease acquisition is a
+                    // genuine grant-window observation. Flag-gated
+                    // inside the helper — flag-off path never reaches
+                    // the provider.
+                    await recordGrantWindowObservationIfEnabled(
+                        leaseAcquiredAt: leaseAcquiredAt
+                    )
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Tier advancement: \(job.desiredCoverageSec)s -> \(nextCoverage)s for episode \(job.episodeId)")
                 } else {
@@ -3088,6 +3105,13 @@ actor AnalysisWorkScheduler {
                     // will not requeue. Emit `.finalized` to seal
                     // the journal trail.
                     await emitJournalFinalized(episodeId: job.episodeId)
+                    // playhead-beh3 (R2): record the grant-window
+                    // outcome. All tiers done = the episode reached
+                    // its highest coverage target under our lease;
+                    // same accounting as the tier-advance arm above.
+                    await recordGrantWindowObservationIfEnabled(
+                        leaseAcquiredAt: leaseAcquiredAt
+                    )
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Job \(job.jobId) complete (all tiers done)")
                 }
@@ -3117,6 +3141,17 @@ actor AnalysisWorkScheduler {
                     // terminal-success classification (orphan recovery
                     // treats `.finalized` as "nothing to resume").
                     await emitJournalFinalized(episodeId: job.episodeId)
+                    // playhead-beh3 (R2): record the grant-window
+                    // outcome. `coverageInsufficient.noProgress` is a
+                    // graceful give-up that terminates `state="complete"`
+                    // — the runner held the lease for the full grant
+                    // window and processed every shard it could, the
+                    // tier just couldn't reach the target. This is a
+                    // valid grant-window observation: the slice ran
+                    // end-to-end under our scheduler.
+                    await recordGrantWindowObservationIfEnabled(
+                        leaseAcquiredAt: leaseAcquiredAt
+                    )
                     logger.info("Job \(job.jobId) marked complete after no-progress pass (coverage insufficient)")
                 } else {
                     // playhead-5uvz.3: predict the post-increment value
@@ -3148,6 +3183,14 @@ actor AnalysisWorkScheduler {
                         // graceful give-up, not a runner failure, so
                         // `.finalized` is the correct lifecycle event.
                         await emitJournalFinalized(episodeId: job.episodeId)
+                        // playhead-beh3 (R2): record the grant-window
+                        // outcome. Max-attempts give-up terminates
+                        // `state="complete"` after the runner exhausted
+                        // retries; identical lease-end-to-end accounting
+                        // to the noProgress arm above.
+                        await recordGrantWindowObservationIfEnabled(
+                            leaseAcquiredAt: leaseAcquiredAt
+                        )
                         logger.info("Job \(job.jobId) marked complete after max attempts (coverage insufficient)")
                     } else {
                         // Backoff before next attempt: without a
@@ -3759,6 +3802,90 @@ actor AnalysisWorkScheduler {
             episodeId: episodeId,
             cause: cause,
             metadataJSON: metadataJSON
+        )
+    }
+
+    // MARK: - playhead-beh3 adaptive estimator write seam
+
+    /// playhead-beh3 (Phase 3 deliverable 5, R2): record one grant-window
+    /// observation against the adaptive estimator. Invoked from every
+    /// success outcome arm in `processJob` (`tierAdvance`, `allTiersDone`,
+    /// `coverageInsufficient.{noProgress,maxAttempts}`) — those are the
+    /// arms where the runner held the lease end-to-end and the resulting
+    /// wall-clock interval is a faithful "grant-window slice completion"
+    /// duration the spec asks the estimator to learn from.
+    ///
+    /// Flag gating: the method is the SINGLE production write site for
+    /// the estimator. It returns immediately when
+    /// `config.useAdaptiveDeviceProfile == false`, so a flag-off run
+    /// never touches the SwiftData row, never invokes the provider, and
+    /// never mutates estimator state — that is the byte-identical
+    /// rollback contract from the bead spec, mechanically enforced here
+    /// rather than at every call site.
+    ///
+    /// `lostOwnership` mirror: the success arms commit BEFORE the
+    /// `lostOwnership` short-circuit higher up (the renewer cannot flip
+    /// the flag across an atomic `commitOutcomeArm` await), but we
+    /// re-check anyway so a future refactor that moves the call site
+    /// later in `processJob` cannot accidentally fire after the lease
+    /// was reclaimed by orphan recovery.
+    ///
+    /// Non-positive guard: the estimator's `apply(...)` already drops
+    /// observations whose `grantWindowSeconds <= 0` (the never-zero
+    /// floor invariant). We compute the duration off `clock()` here, so
+    /// in practice the duration is always strictly positive — the math
+    /// layer's guard is defense-in-depth, not the primary check.
+    ///
+    /// Device-class resolution: detect inside the helper (one call to
+    /// the pure `DeviceClass.detect()` mapping) rather than capturing
+    /// at lease-acquisition time. The earlier draft hopped to
+    /// `capabilitiesService.currentSnapshot.deviceClass` between lease
+    /// acquisition and the lease-renewal task arming — that suspension
+    /// point sometimes serialized poorly with the run-loop's mailbox
+    /// under real-time tests, leaving `pollUntil`-style waits stuck.
+    /// `DeviceClass.detect()` is a pure `utsname.machine` lookup; the
+    /// vanishing mid-run device-class-rotation concern is moot at the
+    /// resolution this estimator works at.
+    ///
+    /// Internal (rather than `private`) visibility so the R2 write-seam
+    /// tests can drive the helper directly. The success outcome arms in
+    /// `processJob` cannot be reached cleanly under stub inputs (see
+    /// the `AnalysisWorkSchedulerJournalEmissionTests` file header for
+    /// the full reasoning), so a unit test that synthesizes a lease-
+    /// acquired timestamp and calls this method is the cheapest way to
+    /// pin the flag-gating contract. The method is still called only
+    /// from the success arms in production.
+    func recordGrantWindowObservationIfEnabled(
+        leaseAcquiredAt: TimeInterval
+    ) async {
+        // Single flag check, single early return — the entire estimator
+        // surface is bypassed when the feature is OFF.
+        guard config.useAdaptiveDeviceProfile else { return }
+        // Mirror the journal helpers: if we no longer own the lease,
+        // the slice work didn't terminate under our scheduler's
+        // observation. Recording would attribute the new owner's
+        // outcome to our estimator state.
+        guard !lostOwnership else { return }
+
+        let nowDate = clock()
+        let grantWindowSeconds = nowDate.timeIntervalSince1970 - leaseAcquiredAt
+        // Drop non-positive durations defensively: a clock-skew event
+        // (NTP step backward, simulated-clock test that didn't advance)
+        // would otherwise produce a meaningless observation. The
+        // estimator's math layer also drops these, but filtering here
+        // means we don't even build the value type for the no-op case.
+        guard grantWindowSeconds > 0 else { return }
+
+        let deviceClass = DeviceClass.detect()
+        let seed = DeviceClassProfile.fallback(for: deviceClass)
+        let observation = GrantWindowObservation(
+            grantWindowSeconds: grantWindowSeconds,
+            observedAt: nowDate
+        )
+        _ = await learnedDeviceProfileProvider.recordObservation(
+            observation,
+            deviceClass: deviceClass,
+            seed: seed
         )
     }
 

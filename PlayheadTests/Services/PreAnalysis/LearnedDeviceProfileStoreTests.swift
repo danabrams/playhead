@@ -143,8 +143,7 @@ struct LearnedDeviceProfileStoreTests {
 
         let resolved = await store.resolvedDeviceProfile(
             seed: seed,
-            deviceClass: .iPhone17Pro,
-            observedAt: Self.referenceDate
+            deviceClass: .iPhone17Pro
         )
 
         // Byte-identical: same DeviceClassProfile value, no row inserted.
@@ -179,8 +178,7 @@ struct LearnedDeviceProfileStoreTests {
 
         let resolved = await store.resolvedDeviceProfile(
             seed: seed,
-            deviceClass: .iPhone17Pro,
-            observedAt: Self.referenceDate.addingTimeInterval(30 * 60)
+            deviceClass: .iPhone17Pro
         )
         #expect(resolved == seed, "below activation floor, output must equal seed")
     }
@@ -213,8 +211,7 @@ struct LearnedDeviceProfileStoreTests {
 
         let resolved = await store.resolvedDeviceProfile(
             seed: seed,
-            deviceClass: .iPhone17Pro,
-            observedAt: Self.referenceDate.addingTimeInterval(60 * 60)
+            deviceClass: .iPhone17Pro
         )
         #expect(
             resolved.grantWindowMedianSeconds > seed.grantWindowMedianSeconds,

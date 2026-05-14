@@ -26,10 +26,11 @@ import SwiftData
 // MARK: - Protocol seam
 
 /// Consumer-facing seam for adaptive device-profile resolution. The
-/// scheduler calls `resolvedDeviceProfile(seed:deviceClass:observedAt:)`
-/// and gets back the adjusted profile (or the seed verbatim when the
-/// estimator has not yet activated). The `recordObservation(...)`
-/// surface is separate so a future caller can record without resolving.
+/// scheduler calls `resolvedDeviceProfile(seed:deviceClass:)` on every
+/// admission pass and gets back the adjusted profile (or the seed
+/// verbatim when the estimator has not yet activated). The
+/// `recordObservation(...)` surface is separate so the slice-completion
+/// site can record without ever entering the read path.
 ///
 /// `Sendable` so the scheduler actor can hold an `any LearnedDeviceProfileProviding`
 /// without further isolation.
@@ -40,12 +41,14 @@ protocol LearnedDeviceProfileProviding: Sendable {
     /// factor (or returning the seed verbatim when the estimator is
     /// not activated).
     ///
-    /// `observedAt` is threaded so tests can drive the rate limiter
-    /// from a synthetic clock; production callers pass `Date()`.
+    /// Read-only: this surface never mutates estimator state, so no
+    /// clock input is required. The rate-limited state mutation lives
+    /// in `recordObservation(_:deviceClass:seed:)` where the
+    /// `GrantWindowObservation.observedAt` drives the notch rate
+    /// limiter from the caller's clock.
     func resolvedDeviceProfile(
         seed: DeviceClassProfile,
-        deviceClass: DeviceClass,
-        observedAt: Date
+        deviceClass: DeviceClass
     ) async -> DeviceClassProfile
 
     /// Record one grant-window observation for the supplied device
@@ -79,8 +82,7 @@ struct NoOpLearnedDeviceProfileProvider: LearnedDeviceProfileProviding {
 
     func resolvedDeviceProfile(
         seed: DeviceClassProfile,
-        deviceClass: DeviceClass,
-        observedAt: Date
+        deviceClass: DeviceClass
     ) async -> DeviceClassProfile {
         seed
     }
@@ -153,8 +155,7 @@ final class SwiftDataLearnedDeviceProfileStore: LearnedDeviceProfileProviding {
 
     func resolvedDeviceProfile(
         seed: DeviceClassProfile,
-        deviceClass: DeviceClass,
-        observedAt: Date
+        deviceClass: DeviceClass
     ) async -> DeviceClassProfile {
         // Read path: never provision a row, never mutate state. We
         // either find an existing row and apply its scale factor, or

@@ -50,8 +50,7 @@ struct AdaptiveDeviceProfileFlagOffTests {
 
         func resolvedDeviceProfile(
             seed: DeviceClassProfile,
-            deviceClass: DeviceClass,
-            observedAt: Date
+            deviceClass: DeviceClass
         ) async -> DeviceClassProfile {
             resolveCount += 1
             lastResolvedDeviceClass = deviceClass
@@ -137,13 +136,11 @@ struct AdaptiveDeviceProfileFlagOffTests {
     @Test("NoOpLearnedDeviceProfileProvider.resolvedDeviceProfile returns the seed verbatim across every DeviceClass case")
     func noOpReturnsSeedVerbatim() async {
         let provider = NoOpLearnedDeviceProfileProvider()
-        let now = Date()
         for deviceClass in DeviceClass.allCases {
             let seed = DeviceClassProfile.fallback(for: deviceClass)
             let resolved = await provider.resolvedDeviceProfile(
                 seed: seed,
-                deviceClass: deviceClass,
-                observedAt: now
+                deviceClass: deviceClass
             )
             #expect(resolved == seed,
                     "no-op provider must echo the seed for \(deviceClass.rawValue)")
