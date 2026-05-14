@@ -275,6 +275,35 @@ struct ShowCapabilityProfileEvaluatorTests {
                 "All four ratio predicates at their exact thresholds: chapter-rich must win by priority order")
     }
 
+    @Test("music-bed-reliable wins when every ratio predicate ALSO fires at boundary AND musicBed is confirmed")
+    func priorityAllRatiosAtBoundaryWithMusicBedPicksMusicBed() {
+        // h6a6 R6 review gap (companion to
+        // `priorityAllRatiosAtBoundaryPicksChapter`): R5 pinned the
+        // all-ratios-at-boundary case with musicBed=false (chapter
+        // wins by ratio-tier priority). The complementary case where
+        // the SAME four ratios fire at boundary AND musicBed=true was
+        // not pinned. `priorityMusicBedOverChapter` covers musicBed=true
+        // only with chapter at 100% — it does NOT exercise the boundary
+        // crossing where chapter's predicate FIRES at exactly 80%.
+        // A regression that moves the `musicBedConfirmed` short-circuit
+        // BELOW the ratio predicates would silently flip music-bed-
+        // confirmed shows with chapter coverage at exactly 80% from
+        // `.musicBedReliable` to `.chapterRich`. Pin the boundary case
+        // here so CI catches the reorder.
+        let kind = ShowCapabilityProfileEvaluator.classify(
+            showIdentifier: "show",
+            completedEpisodeCount: 10,
+            chapterMatchedEpisodeCount: 8, // 8/10 = 80%, chapter-rich boundary
+            hostVoicedEpisodeCount: 7,     // 7/10 = 70%, host-read-only boundary
+            sponsorDeclaredEpisodeCount: 5, // 5/10 = 50%, sponsor-declared boundary
+            dynamicInsertionEpisodeCount: 5, // 5/10 = 50%, dynamic-insertion boundary
+            musicBedConfirmed: true,
+            sliGate: Self.openGate
+        )
+        #expect(kind == .musicBedReliable,
+                "musicBed-confirmed must win over chapter even when chapter is at its boundary")
+    }
+
     @Test("sponsor-declared wins over dynamic-insertion-heavy when both fire at the 50% boundary")
     func prioritySponsorOverDynamic() {
         // h6a6 R1 review gap: both predicates share a 50% threshold;
