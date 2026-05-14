@@ -131,16 +131,27 @@ struct FusionWeightConfig: Sendable {
         self.metadataCap = metadataCap
         self.musicBedCap = musicBedCap
 
-        // playhead-2hpn R4: enforce the musicBedCap >=
+        // playhead-2hpn R4 (+R5): enforce the musicBedCap >=
         // musicBedConfirmedJingleWeight invariant at construction time, not
         // only inside the default-init test. Catches any non-default
-        // initializer (e.g. a tuning helper) that would set `musicBedCap`
-        // below the boost weight and silently truncate it. Debug-only so
-        // the production binary pays no runtime cost; the inline-doc
-        // coupling comment + the
-        // `musicBedCapAccommodatesBoostWeight` test continue to enforce
-        // it for the default path.
-        assert(
+        // initializer (e.g. a tuning helper or A/B harness) that would set
+        // `musicBedCap` below the boost weight and silently truncate it
+        // (the exact R2 bug class).
+        //
+        // R5 (adversarial probe #1): upgraded from `assert` to `precondition`
+        // so the invariant is enforced in RELEASE builds too. The whole
+        // point of the carve-out is to keep the 0.10 → 0.25 boost from
+        // silently truncating in production; an A/B tuning helper that
+        // ships a misconfigured cap on a TestFlight build would, under the
+        // debug-only `assert`, defeat the bead with zero observable
+        // signal. The cost of a single Double comparison at config-init
+        // time is negligible (FusionWeightConfig is constructed a handful
+        // of times per backfill), and the rest of this codebase uses
+        // `precondition` for analogous config-invariant checks
+        // (`RepeatedAdCacheConfig.init`, `ScoreCalibrationProfile.init`,
+        // …). Consistency + always-on enforcement together justify the
+        // upgrade.
+        precondition(
             musicBedCap >= MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight,
             "FusionWeightConfig.musicBedCap (\(musicBedCap)) must be >= MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight (\(MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight)) or the scoped-music-bed jingle boost is silently truncated inside buildLedger. Raise musicBedCap to match if you change the boost weight."
         )

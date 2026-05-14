@@ -61,8 +61,11 @@ enum MusicBedLedgerEvaluator {
     /// truncated by `BackfillEvidenceFusion.buildLedger()` (the bug
     /// fixed in R2). If you raise this constant, you MUST also raise
     /// `FusionWeightConfig.musicBedCap` to match. The invariant is
-    /// asserted at runtime by
-    /// `MusicBedLedgerEvaluatorJingleBoostTests.musicBedCapAccommodatesBoostWeight`.
+    /// enforced at runtime by:
+    ///   * the `precondition` in `FusionWeightConfig.init` (R4→R5,
+    ///     always-on in both debug and release), and
+    ///   * `MusicBedLedgerEvaluatorJingleBoostTests.musicBedCapAccommodatesBoostWeight`
+    ///     for the default-init path.
     static let musicBedConfirmedJingleWeight: Double = 0.25
 
     /// Result of evaluating a span. Exposed for test assertions; the
