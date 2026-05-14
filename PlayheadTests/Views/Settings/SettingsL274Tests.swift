@@ -156,6 +156,25 @@ struct SettingsL274CopyTests {
         #expect(SettingsL274Copy.perShowCapabilityProfileLabel == "Per-show capability profile")
     }
 
+    @Test func showCapabilityProfileKindDisplayLabels() {
+        // h6a6 R7 review gap: `ShowCapabilityProfileKind.displayLabel`
+        // strings are rendered verbatim by `SettingsView
+        // .capabilityProfileRow(_:)`. The model's doc comment
+        // (`ShowCapabilityProfile.swift` `displayLabel`) explicitly
+        // claims these are "test-pinned in `SettingsL274CopyTests`",
+        // but no test actually pinned them before this round. A
+        // regression renaming any of the six user-visible labels
+        // (e.g. "Chapter-rich" → "Chapter rich") would silently flip
+        // Settings copy. Pinning verbatim so a copy edit forces an
+        // intentional test update.
+        #expect(ShowCapabilityProfileKind.unknown.displayLabel == "Unknown")
+        #expect(ShowCapabilityProfileKind.chapterRich.displayLabel == "Chapter-rich")
+        #expect(ShowCapabilityProfileKind.hostReadOnly.displayLabel == "Host-read only")
+        #expect(ShowCapabilityProfileKind.musicBedReliable.displayLabel == "Music-bed reliable")
+        #expect(ShowCapabilityProfileKind.sponsorDeclared.displayLabel == "Sponsor-declared")
+        #expect(ShowCapabilityProfileKind.dynamicInsertionHeavy.displayLabel == "Dynamic-insertion heavy")
+    }
+
     @Test func featureFlagsLabel() {
         #expect(SettingsL274Copy.featureFlagsLabel == "Feature flags (rollback)")
     }
