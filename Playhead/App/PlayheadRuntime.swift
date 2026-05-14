@@ -821,12 +821,19 @@ final class PlayheadRuntime {
         // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
         // adDetectionService so it can be injected for step-17 forwarding.
         // The orchestrator is otherwise wired identically to before this change.
+        //
+        // playhead-xr3t: production wires the inventory sanity filter
+        // explicitly so the bead's spec default ON ships in real
+        // builds. The `SkipOrchestrator` initializer default is a
+        // disabled no-op so tests that don't supply context don't
+        // silently lose spans — production opts in here.
         self.skipOrchestrator = SkipOrchestrator(
             store: analysisStore,
             trustService: trustService,
             correctionStore: correctionStore,
             invariantLogger: surfaceStatusLogger,
-            episodeIdHasher: surfaceStatusHasher
+            episodeIdHasher: surfaceStatusHasher,
+            inventoryFilter: .production()
         )
 
         // playhead-epii: structure-aware silence compression. Construct
@@ -2861,6 +2868,50 @@ final class PlayheadRuntime {
             await trustService.setUserOverride(podcastId: podcastId, mode: mode)
         }
         await orchestrator.setActiveSkipMode(mode)
+    }
+
+    // MARK: - Adaptive device-profile estimator wiring (playhead-beh3 R13)
+
+    /// Install the SwiftData-backed `LearnedDeviceProfileProviding`
+    /// implementation onto the `AnalysisWorkScheduler` so the adaptive
+    /// Welford+EWMA estimator actually persists state in production.
+    ///
+    /// Why this lives here and not in `PlayheadRuntime.init`: the
+    /// scheduler is constructed synchronously in the runtime initializer
+    /// (see the launch-path inventory comment at the top of init),
+    /// BEFORE `PlayheadApp` builds the `ModelContainer`. The scheduler
+    /// therefore boots with a `NoOpLearnedDeviceProfileProvider` and
+    /// gets the real, SwiftData-backed provider installed via
+    /// `setLearnedDeviceProfileProvider(...)` once the container is
+    /// available — same setter-after-init pattern as
+    /// `BackgroundFeedRefreshService.attachSharedService`.
+    ///
+    /// Without this method (the playhead-beh3 R13 fix), the production
+    /// scheduler permanently holds the No-Op provider: every
+    /// `recordObservation` is discarded, every `resolvedDeviceProfile`
+    /// returns the seed verbatim, the `LearnedDeviceProfile` SwiftData
+    /// table never accumulates a row even with
+    /// `PreAnalysisConfig.useAdaptiveDeviceProfile == true`, and the
+    /// bead's "Adaptive estimator runs in production, gated by the flag"
+    /// acceptance criterion is silently unmet.
+    ///
+    /// Idempotent: re-invocation replaces the prior provider. Safe to
+    /// call from any `@MainActor`-isolated context that has the
+    /// `ModelContainer` in scope (the closure body constructs the store
+    /// inline so the non-`Sendable` `ModelContext` never crosses an
+    /// isolation boundary).
+    ///
+    /// Preview-runtime safety: `isPreviewRuntime == true` runtimes skip
+    /// the deferred-init Task that wires production services. Callers
+    /// that pass a preview runtime through this method still get the
+    /// store wired — the scheduler's flag-off short-circuit
+    /// (`config.useAdaptiveDeviceProfile == false`) keeps behaviour
+    /// byte-identical to today.
+    @MainActor
+    func attachLearnedDeviceProfileStore(modelContainer: ModelContainer) async {
+        let context = modelContainer.mainContext
+        let store = SwiftDataLearnedDeviceProfileStore(context: context)
+        await analysisWorkScheduler.setLearnedDeviceProfileProvider(store)
     }
 
     // MARK: - Activity screen wiring (playhead-quh7)

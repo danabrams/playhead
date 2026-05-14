@@ -272,6 +272,77 @@ final class DecisionExplanationBuilderTests: XCTestCase {
         XCTAssertEqual(explanation.evidenceBreakdown.count, 6)
         XCTAssertEqual(explanation.contributingFamilies.count, 6)
     }
+
+    func testMusicBedCapReportedDistinctFromAcousticCap() {
+        // playhead-2hpn R3: the cap surfaced in DecisionExplanation for a
+        // `.musicBed` entry must be `musicBedCap` (0.25), NOT
+        // `acousticCap` (0.20). Otherwise diagnostics traces would
+        // under-report the source's actual headroom and a future
+        // operator inspecting the JSON would conclude the boost was
+        // truncated when it wasn't (or, worse, confirm a stale
+        // mis-conclusion that the two caps still share). This test
+        // also serves as the contract surface for R3 adversarial #3.
+        //
+        // playhead-2hpn R4: extended to also positively assert the
+        // negative case — `.acoustic` must STILL report `acousticCap`
+        // (not `musicBedCap`). Otherwise a future fat-finger swap of
+        // `case .acoustic: return config.musicBedCap` in
+        // `DecisionExplanation.capForSource` would pass the single
+        // positive assertion above. R4 adversarial probe #3.
+        let ledger = [
+            EvidenceLedgerEntry(
+                source: .musicBed,
+                weight: MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight,
+                detail: .musicBed(presenceFraction: 0.8, foregroundCount: 0)
+            ),
+            EvidenceLedgerEntry(
+                source: .acoustic,
+                weight: 0.10,
+                detail: .acoustic(breakStrength: 0.5)
+            )
+        ]
+        let decision = DecisionResult(
+            proposalConfidence: 0.35,
+            skipConfidence: 0.35,
+            eligibilityGate: .eligible
+        )
+        let config = FusionWeightConfig()
+        let explanation = DecisionExplanation.build(
+            ledger: ledger,
+            decision: decision,
+            policyAction: .logOnly,
+            config: config,
+            skipThreshold: 0.65
+        )
+        let musicBedRow = explanation.evidenceBreakdown.first { $0.source == "musicBed" }
+        XCTAssertNotNil(musicBedRow, "musicBed source must appear in evidence breakdown")
+        XCTAssertEqual(
+            musicBedRow?.capApplied,
+            config.musicBedCap,
+            "capApplied must be musicBedCap (\(config.musicBedCap)) for .musicBed entries"
+        )
+        XCTAssertNotEqual(
+            musicBedRow?.capApplied,
+            config.acousticCap,
+            "capApplied for .musicBed must NOT be acousticCap (would be the pre-R2 silent-truncation bug)"
+        )
+
+        // Negative-case symmetry: .acoustic must STILL report acousticCap,
+        // never musicBedCap. Locks the cap-routing table against a
+        // future regression that swaps the two cases.
+        let acousticRow = explanation.evidenceBreakdown.first { $0.source == "acoustic" }
+        XCTAssertNotNil(acousticRow, "acoustic source must appear in evidence breakdown")
+        XCTAssertEqual(
+            acousticRow?.capApplied,
+            config.acousticCap,
+            "capApplied must remain acousticCap (\(config.acousticCap)) for .acoustic entries"
+        )
+        XCTAssertNotEqual(
+            acousticRow?.capApplied,
+            config.musicBedCap,
+            "capApplied for .acoustic must NOT be musicBedCap (would mean the two caps got swapped)"
+        )
+    }
 }
 
 // MARK: - DecisionEvent explanationJSON Field

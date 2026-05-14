@@ -53,11 +53,22 @@ struct ActivityView: View {
     /// on that.
     let inputProvider: @MainActor () async -> [ActivityEpisodeInput]
 
+    /// playhead-3bv.4: when non-nil, every section filters down to rows
+    /// matching this episode id. The sheet-presentation entry point from
+    /// `NowPlayingView.PlayerStatusLineRow` sets this so the user lands
+    /// on the Activity affordances scoped to the episode they're
+    /// listening to. When the focused episode has no matching row in any
+    /// section the view falls back to the unfiltered four-section
+    /// layout — better than presenting an empty sheet.
+    let focusedEpisodeId: String?
+
     init(
         inputProvider: @escaping @MainActor () async -> [ActivityEpisodeInput] = { [] },
-        persistQueueOrder: @escaping @MainActor ([(episodeId: String, queuePosition: Int)]) -> Void = { _ in }
+        persistQueueOrder: @escaping @MainActor ([(episodeId: String, queuePosition: Int)]) -> Void = { _ in },
+        focusedEpisodeId: String? = nil
     ) {
         self.inputProvider = inputProvider
+        self.focusedEpisodeId = focusedEpisodeId
         _viewModel = State(
             initialValue: ActivityViewModel(persistQueueOrder: persistQueueOrder)
         )
@@ -128,6 +139,48 @@ struct ActivityView: View {
         showSkeleton = false
     }
 
+    /// playhead-3bv.4: derive the effective snapshot the sections render.
+    /// When `focusedEpisodeId` is nil OR no row in any section matches it
+    /// we surface the full snapshot unchanged. Only when the focused
+    /// episode is actively represented in at least one section do we
+    /// collapse the snapshot down to just those rows — a sheet that
+    /// shows the user only their own episode + nothing else.
+    fileprivate var effectiveSnapshot: ActivitySnapshot {
+        ActivityView.applyFocus(
+            snapshot: viewModel.snapshot,
+            focusedEpisodeId: focusedEpisodeId
+        )
+    }
+
+    /// playhead-3bv.4: pure projection of the focused-episode filter used
+    /// by `effectiveSnapshot`. Exposed at file scope (and `internal` for
+    /// the test target) so unit tests can pin the contract without
+    /// driving a SwiftUI hierarchy. Behavior:
+    ///   * `focusedEpisodeId == nil` → returns the input snapshot.
+    ///   * Focus matches at least one row across any section → returns a
+    ///     filtered snapshot containing only matching rows in each section.
+    ///   * Focus matches zero rows → falls back to the input snapshot
+    ///     (better than an empty sheet).
+    static func applyFocus(
+        snapshot: ActivitySnapshot,
+        focusedEpisodeId: String?
+    ) -> ActivitySnapshot {
+        guard let focusedEpisodeId else { return snapshot }
+        let filteredNow = snapshot.now.filter { $0.episodeId == focusedEpisodeId }
+        let filteredUpNext = snapshot.upNext.filter { $0.episodeId == focusedEpisodeId }
+        let filteredPaused = snapshot.paused.filter { $0.episodeId == focusedEpisodeId }
+        let filteredFinished = snapshot.recentlyFinished.filter { $0.episodeId == focusedEpisodeId }
+        let anyMatch = !(filteredNow.isEmpty && filteredUpNext.isEmpty
+            && filteredPaused.isEmpty && filteredFinished.isEmpty)
+        guard anyMatch else { return snapshot }
+        return ActivitySnapshot(
+            now: filteredNow,
+            upNext: filteredUpNext,
+            paused: filteredPaused,
+            recentlyFinished: filteredFinished
+        )
+    }
+
     /// Spawn a delayed flip into the skeleton state. The timer races
     /// the first `inputProvider()` call: if inputs arrive first the
     /// flip is a no-op (`refresh()` clears `showSkeleton`); if the
@@ -170,7 +223,7 @@ private extension ActivityView {
 
     var nowSection: some View {
         Section {
-            if viewModel.snapshot.now.isEmpty {
+            if effectiveSnapshot.now.isEmpty {
                 Text("Nothing running — pull down to refresh")
                     .font(AppTypography.body)
                     .foregroundStyle(AppColors.textSecondary)
@@ -178,7 +231,7 @@ private extension ActivityView {
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
             } else {
-                ForEach(viewModel.snapshot.now) { row in
+                ForEach(effectiveSnapshot.now) { row in
                     NowRowView(row: row)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
@@ -191,7 +244,7 @@ private extension ActivityView {
 
     var upNextSection: some View {
         Section {
-            if viewModel.snapshot.upNext.isEmpty {
+            if effectiveSnapshot.upNext.isEmpty {
                 Text("Nothing queued")
                     .font(AppTypography.body)
                     .foregroundStyle(AppColors.textSecondary)
@@ -199,7 +252,7 @@ private extension ActivityView {
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
             } else {
-                ForEach(viewModel.snapshot.upNext) { row in
+                ForEach(effectiveSnapshot.upNext) { row in
                     UpNextRowView(row: row)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
@@ -211,9 +264,18 @@ private extension ActivityView {
                 // No EditButton — modern iOS supports the long-press
                 // drag affordance in plain List rows without an
                 // explicit edit-mode toggle.
-                .onMove { source, destination in
-                    viewModel.moveUpNext(from: source, to: destination)
-                }
+                //
+                // playhead-3bv.4: reorder is disabled when the view is
+                // focused on a single episode — there's nothing to
+                // reorder in a one-row section, and routing a
+                // single-row move back through `moveUpNext` against
+                // the unfiltered snapshot's indices would mis-index.
+                .onMove(perform: focusedEpisodeId == nil
+                    ? { source, destination in
+                        viewModel.moveUpNext(from: source, to: destination)
+                    }
+                    : nil
+                )
             }
         } header: {
             sectionHeader("Up Next")
@@ -222,9 +284,9 @@ private extension ActivityView {
 
     @ViewBuilder
     var pausedSection: some View {
-        if !viewModel.snapshot.paused.isEmpty {
+        if !effectiveSnapshot.paused.isEmpty {
             Section {
-                ForEach(viewModel.snapshot.paused) { row in
+                ForEach(effectiveSnapshot.paused) { row in
                     PausedRowView(row: row)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
@@ -237,9 +299,9 @@ private extension ActivityView {
 
     @ViewBuilder
     var recentlyFinishedSection: some View {
-        if !viewModel.snapshot.recentlyFinished.isEmpty {
+        if !effectiveSnapshot.recentlyFinished.isEmpty {
             Section {
-                ForEach(viewModel.snapshot.recentlyFinished) { row in
+                ForEach(effectiveSnapshot.recentlyFinished) { row in
                     RecentlyFinishedRowView(row: row)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)

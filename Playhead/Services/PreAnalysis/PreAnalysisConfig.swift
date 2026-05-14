@@ -24,6 +24,16 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// until the flag is flipped per-beta-cohort.
     var useDualBackgroundSessions: Bool = false
 
+    /// playhead-beh3 feature flag: when `true`, the scheduler consults
+    /// the adaptive Welford+EWMA estimator (`LearnedDeviceProfile`
+    /// table) instead of the Phase-1 static seed table when computing
+    /// slice / grant-window values. Defaults to `false` so production
+    /// stays byte-identical to today until the flag is flipped per-
+    /// beta-cohort. The flag-off path bypasses the estimator entirely
+    /// (no fetch, no record) so any persistence bug in the new code
+    /// path cannot affect production until the flag is on.
+    var useAdaptiveDeviceProfile: Bool = false
+
     /// playhead-44h1: nominal shard duration (seconds) used by the Live
     /// Activity ETA formula to estimate `totalShardsEstimate =
     /// ceil(episode.durationSec / nominalShardDurationSec)`. This is an
@@ -55,6 +65,55 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// the scheduler queue.
     var seekRelatchThresholdSeconds: TimeInterval = 30
 
+    /// playhead-2hpn feature flag: when `true`, the ad-detection
+    /// pipeline reads/writes `ShowMusicBedProfile` rows and applies the
+    /// per-show recurring-jingle boost to the `.musicBed` fusion entry.
+    /// Default `false` so production keeps the byte-identical pre-2hpn
+    /// behavior until the flag is flipped per-beta-cohort. The flag is
+    /// scoped to BOTH the read path (profile lookup at fusion time) and
+    /// the write path (profile mutation at the end of `runBackfill`);
+    /// when off, neither path runs.
+    var scopedMusicBedGeneralization: Bool = false
+
+    /// playhead-zx6i feature flag: when `true`, the `AnalysisJobRunner`
+    /// consults the per-asset `RevalidationStateStore` at the top of
+    /// `run(_:)`. If the stored `PipelineVersions` snapshot differs
+    /// from `PipelineVersions.current()` AND the asset has persisted
+    /// `TranscriptChunk` rows, the runner short-circuits stages 1–3
+    /// (decode, feature extraction, transcription) and delegates to
+    /// `AdDetectionService.revalidateFromFeatures(...)`, which re-runs
+    /// only classifier + fusion + boundary against the persisted
+    /// rows. The success-stamp at the end of `runBackfill` is ALSO
+    /// gated on this flag — when off, no stamp is written and the
+    /// short-circuit is structurally unreachable. Default `false` so
+    /// production behavior is byte-identical to pre-zx6i until the
+    /// flag is flipped per-beta-cohort. Rollback latency for the zx6i
+    /// flag is **instant** (next analysis run), not next-launch:
+    /// `AnalysisJobRunner`'s default `b4RevalidationEnabledProvider`
+    /// and `AdDetectionService.runBackfill`'s stamp-write gate BOTH
+    /// re-read `PreAnalysisConfig.load()` on every call instead of
+    /// snapshotting at init. This intentionally diverges from
+    /// 2hpn `scopedMusicBedGeneralization` (snapshot-at-init via
+    /// `preAnalysisConfig`), because the zx6i short-circuit gates a
+    /// perf optimization with `false_ready_rate` risk, and minimizing
+    /// blast-radius on flag-OFF matters more than caching the read.
+    var b4RevalidationFromFeaturesEnabled: Bool = false
+
+    /// playhead-h6a6 feature flag: when `true`, the ad-detection
+    /// pipeline observes a `ShowCapabilityProfile` per show (after
+    /// activation floor of ≥ 5 analysis-completed episodes AND
+    /// Phase-2 SLIs within defended bounds per playhead-d99) and
+    /// applies a per-show analysis-budget modulator. When `false`
+    /// (the default), the observation path and the modulation path
+    /// are both byte-identical no-ops — no profile row writes, no
+    /// budget multiplier reads. The flag has the same "next
+    /// `AdDetectionService` init takes effect" rollback contract as
+    /// `2hpn` and `xr3t` (the service caches the config snapshot at
+    /// init time). Settings → Diagnostics exposes the OBSERVED
+    /// profile read-only; there is no user-facing setter for the
+    /// profile kind itself.
+    var showCapabilityProfilesEnabled: Bool = false
+
     static let analysisVersion: Int = 1
 
     private static let key = "PreAnalysisConfig"
@@ -68,7 +127,11 @@ struct PreAnalysisConfig: Codable, Sendable {
         nominalShardDurationSec: Double = 20,
         unplayedCandidateWindowSeconds: TimeInterval = 20 * 60,
         resumedCandidateWindowSeconds: TimeInterval = 15 * 60,
-        seekRelatchThresholdSeconds: TimeInterval = 30
+        seekRelatchThresholdSeconds: TimeInterval = 30,
+        scopedMusicBedGeneralization: Bool = false,
+        useAdaptiveDeviceProfile: Bool = false,
+        b4RevalidationFromFeaturesEnabled: Bool = false,
+        showCapabilityProfilesEnabled: Bool = false
     ) {
         self.isEnabled = isEnabled
         self.defaultT0DepthSeconds = defaultT0DepthSeconds
@@ -79,6 +142,10 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.unplayedCandidateWindowSeconds = unplayedCandidateWindowSeconds
         self.resumedCandidateWindowSeconds = resumedCandidateWindowSeconds
         self.seekRelatchThresholdSeconds = seekRelatchThresholdSeconds
+        self.scopedMusicBedGeneralization = scopedMusicBedGeneralization
+        self.useAdaptiveDeviceProfile = useAdaptiveDeviceProfile
+        self.b4RevalidationFromFeaturesEnabled = b4RevalidationFromFeaturesEnabled
+        self.showCapabilityProfilesEnabled = showCapabilityProfilesEnabled
     }
 
     // Custom decoder so configs persisted before 24cm (which lack the
@@ -99,6 +166,25 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.unplayedCandidateWindowSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .unplayedCandidateWindowSeconds) ?? (20 * 60)
         self.resumedCandidateWindowSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .resumedCandidateWindowSeconds) ?? (15 * 60)
         self.seekRelatchThresholdSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .seekRelatchThresholdSeconds) ?? 30
+        // playhead-2hpn: configs persisted before this bead omit the
+        // key; default to `false` so the scoped-music-bed feature stays
+        // OFF on upgrade (rollback-friendly default).
+        self.scopedMusicBedGeneralization = try container.decodeIfPresent(Bool.self, forKey: .scopedMusicBedGeneralization) ?? false
+        // playhead-beh3: configs persisted before this bead omit the
+        // adaptive-estimator flag; default to `false` so the legacy
+        // static-seed path stays in force until the flag is flipped.
+        self.useAdaptiveDeviceProfile = try container.decodeIfPresent(Bool.self, forKey: .useAdaptiveDeviceProfile) ?? false
+        // playhead-zx6i: configs persisted before this bead omit the
+        // key; default to `false` so B4 revalidation stays OFF on
+        // upgrade and the AnalysisJobRunner short-circuit is
+        // structurally unreachable until the flag is explicitly
+        // flipped via Settings.
+        self.b4RevalidationFromFeaturesEnabled = try container.decodeIfPresent(Bool.self, forKey: .b4RevalidationFromFeaturesEnabled) ?? false
+        // playhead-h6a6: configs persisted before this bead omit the
+        // capability-profiles flag; default to `false` so the
+        // observation + modulation paths stay OFF on upgrade
+        // (rollback-friendly default; identical to 2hpn rationale).
+        self.showCapabilityProfilesEnabled = try container.decodeIfPresent(Bool.self, forKey: .showCapabilityProfilesEnabled) ?? false
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -111,6 +197,10 @@ struct PreAnalysisConfig: Codable, Sendable {
         case unplayedCandidateWindowSeconds
         case resumedCandidateWindowSeconds
         case seekRelatchThresholdSeconds
+        case scopedMusicBedGeneralization
+        case useAdaptiveDeviceProfile
+        case b4RevalidationFromFeaturesEnabled
+        case showCapabilityProfilesEnabled
     }
 
     static func load() -> PreAnalysisConfig {

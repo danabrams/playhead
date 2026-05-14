@@ -126,6 +126,43 @@ struct PlayheadApp: App {
                     // routing. Safe to call repeatedly.
                     DownloadManager.registerAppDelegate(appDelegate)
                     DownloadManager.registerShared(runtime.downloadManager)
+
+                    // playhead-beh3 (R14): attach the SwiftData-backed
+                    // adaptive-estimator store as early as possible in
+                    // `.task`. The R13 attach call previously sat near the
+                    // bottom of `.task`, AFTER an
+                    // `await runtime.adDetectionService.setEpisodeMetadataProvider(...)`
+                    // suspension point. The scheduler's run loop is
+                    // started from `PlayheadRuntime.init`'s deferred
+                    // bootstrap Task, which can interleave with this
+                    // `.task` body at every suspension point. If a
+                    // grant-window completed during the gap between
+                    // scheduler start and attach, the resulting
+                    // `recordObservation` would hit the
+                    // `NoOpLearnedDeviceProfileProvider` default and the
+                    // SwiftData row never accrues — the same class of
+                    // silent-drop bug R13 fixed, just narrower in
+                    // wall-clock width. Moving the attach above every
+                    // `await` in `.task` minimises that window to the
+                    // microseconds between scheduler-Task dispatch and
+                    // first SwiftUI `.task` tick. Background-launch
+                    // BGTask wakes (where `.task` may run minimally or
+                    // not at all before iOS releases the launch budget)
+                    // remain a narrow residual race — fully closing that
+                    // would require a non-isolated shared-holder pattern
+                    // (mirror of `BackgroundFeedRefreshService.attachSharedService`)
+                    // which is out of scope for R14; the
+                    // `useAdaptiveDeviceProfile` flag defaults to OFF so
+                    // production stays unaffected until the flag is
+                    // flipped, at which point the existing diagnostic
+                    // bundle path (which reads from a fresh
+                    // `SwiftDataLearnedDeviceProfileStore` directly off
+                    // the ModelContainer) still surfaces every persisted
+                    // row regardless of attach timing.
+                    await runtime.attachLearnedDeviceProfileStore(
+                        modelContainer: modelContainer
+                    )
+
                     runtime.setPlaybackPositionPersistenceHandler { trigger in
                         await Self.persistPlaybackPosition(
                             runtime: runtime,
@@ -221,6 +258,82 @@ struct PlayheadApp: App {
                     )
                     await runtime.adDetectionService.setEpisodeMetadataProvider(provider)
 
+                    // playhead-2hpn: install the SwiftData-backed
+                    // `ShowMusicBedProfileStore` on the AdDetectionService
+                    // so the scoped-music-bed-generalization read path can
+                    // resolve per-show snapshots, and the post-backfill
+                    // write path can persist this episode's intro/outro
+                    // jingle hashes. Wiring lives here (not in
+                    // `PlayheadRuntime.init`) because `ModelContainer` is
+                    // owned by the App-scope environment — same rationale
+                    // as `SwiftDataNewEpisodeAnnouncer` below. The flag
+                    // (`PreAnalysisConfig.scopedMusicBedGeneralization`)
+                    // remains the OFF/ON switch; the store is wired
+                    // unconditionally so that once the flag is effective,
+                    // each backfill resolves the latest persisted profile
+                    // (the snapshot lookup runs once per `runBackfill`
+                    // invocation — no per-init caching). NOTE: the FLAG
+                    // value itself is cached on `AdDetectionService` at
+                    // init time (see the `preAnalysisConfig` doc), so a
+                    // user-driven flip via Settings takes effect on the
+                    // NEXT `AdDetectionService` construction (next app
+                    // launch) — NOT instantly. R13 adversarial doc audit
+                    // fix: the prior "flipping the flag at runtime
+                    // immediately picks up the persisted profile state"
+                    // wording conflated two things — store wiring (eager
+                    // here) vs flag-cache rollback latency (next launch).
+                    // The contract here matches `xr3t` (R11), not `24cm`.
+                    let showMusicBedProfileStore = ShowMusicBedProfileStore(
+                        modelContainer: modelContainer
+                    )
+                    await runtime.adDetectionService.setShowMusicBedProfileStore(
+                        showMusicBedProfileStore
+                    )
+
+                    // playhead-h6a6: install the SwiftData-backed
+                    // `ShowCapabilityProfileStore` on the
+                    // AdDetectionService so the capability-profile
+                    // read path can resolve the per-show observed
+                    // kind, and the post-backfill write path can
+                    // advance the per-show counters. Wiring follows
+                    // the same pattern as the music-bed store above:
+                    // the store is installed unconditionally so that
+                    // once the `showCapabilityProfilesEnabled` flag
+                    // is effective at next `AdDetectionService`
+                    // init, each backfill resolves the latest
+                    // persisted profile. The flag itself is cached
+                    // at init time per the `preAnalysisConfig` doc —
+                    // a user-driven flip in Settings takes effect on
+                    // the next app launch, identical to the 2hpn /
+                    // xr3t rollback contract.
+                    //
+                    // The SLI gate (Phase-2 SLIs per playhead-d99)
+                    // is wired with a conservative default
+                    // (`{ _ in false }`) on `AdDetectionService`. A
+                    // future bead lands the live cohort-aware gate
+                    // here by calling
+                    // `runtime.adDetectionService
+                    // .setCapabilityProfileSLIGate(_:)` with a closure
+                    // that reads playhead-d99's SLI ledger; until
+                    // then the floor stays un-met and the profile
+                    // stays `.unknown`, which keeps the budget
+                    // modulator at its no-op baseline. This is the
+                    // desired behavior — observation should not run
+                    // ahead of the SLI ledger's confidence. h6a6 R5
+                    // discoverability fix: previously this comment
+                    // described the future hook abstractly ("future
+                    // bead lands the live cohort-aware gate here")
+                    // without naming the setter; future implementers
+                    // grepping for "SLI gate" or
+                    // "setCapabilityProfileSLIGate" now find this
+                    // call site directly.
+                    let showCapabilityProfileStore = ShowCapabilityProfileStore(
+                        modelContainer: modelContainer
+                    )
+                    await runtime.adDetectionService.setShowCapabilityProfileStore(
+                        showCapabilityProfileStore
+                    )
+
                     // playhead-5c1t: cold-start hop for iCloud sync.
                     // Once the ModelContainer is available we ask the
                     // coordinator for the server-side subscription set
@@ -311,6 +424,19 @@ struct PlayheadApp: App {
                     )
                     BackgroundFeedRefreshService.attachSharedService(feedRefreshService)
                     feedRefreshService.start()
+
+                    // playhead-beh3 (R14): the SwiftData-backed
+                    // `LearnedDeviceProfile` store is now attached at the
+                    // very top of `.task` (see the R14 comment block near
+                    // line 129) to minimise the race window between the
+                    // scheduler runLoop starting (from
+                    // `PlayheadRuntime.init`'s deferred bootstrap Task)
+                    // and the production provider being installed. The
+                    // R13 attach call previously lived here and ran AFTER
+                    // multiple `await` suspension points — observations
+                    // completing inside that window would silently hit
+                    // `NoOpLearnedDeviceProfileProvider`. The earlier
+                    // attach site is idempotent and `@MainActor`-safe.
 
                     // playhead-05i: wire the playback queue + auto-advance.
                     // The play handler resolves a `canonicalEpisodeKey`

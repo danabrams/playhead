@@ -165,6 +165,26 @@ typealias DiagnosticsJournalFetch = @Sendable () async throws -> [WorkJournalEnt
 /// the default `{ [] }` closure and tests supply a canned list directly.
 typealias DiagnosticsChapterPhaseEventsFetch = @Sendable () async throws -> [ChapterPhaseEvent]
 
+/// playhead-2hpn: async fetch closure for every show that has a
+/// recurring-jingle music-bed profile. Mirrors the existing fetch
+/// closure pattern so the coordinator stays decoupled from SwiftData;
+/// the live wiring sources rows from `ShowMusicBedProfileStore`. Until
+/// any consumer wires it in, the production wiring uses the default
+/// `{ [] }` closure (the diagnostics bundle then simply emits an empty
+/// `music_bed_profiles` array).
+typealias DiagnosticsMusicBedProfilesFetch = @Sendable () async -> [ShowMusicBedProfileSnapshot]
+
+/// playhead-beh3 — async fetch closure for the adaptive Welford+EWMA
+/// estimator's per-device-class state. Mirrors
+/// `DiagnosticsChapterPhaseEventsFetch` so the coordinator stays
+/// decoupled from SwiftData. Production wires this to
+/// `SwiftDataLearnedDeviceProfileStore.snapshot()` (mapped through
+/// `LearnedDeviceProfileDiagnosticRecord.from(snapshot:)`); when the
+/// adaptive feature flag is OFF the production wiring returns an
+/// empty array so the diagnostics bundle still carries the (empty)
+/// `learned_device_profiles` key for grep stability.
+typealias DiagnosticsLearnedDeviceProfilesFetch = @Sendable () async throws -> [LearnedDeviceProfileDiagnosticRecord]
+
 /// Seam for flipping `Episode.diagnosticsOptIn = false` on the rows
 /// that actually shipped in the bundle. Abstracted so the coordinator
 /// remains pure-logic and the SwiftData/ModelContext dependency lives in

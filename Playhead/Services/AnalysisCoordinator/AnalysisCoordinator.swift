@@ -1884,6 +1884,18 @@ actor AnalysisCoordinator {
             // BEFORE pushing windows so the orchestrator's `emitBannerItem`
             // path can slice catalog entries for any newly-banneredwindow.
             await pushEvidenceCatalog(chunks: persistedChunks, assetId: assetId)
+            // playhead-xr3t: refresh the inventory-sanity-filter's
+            // episode-duration context before any new spans are
+            // evaluated. Chapters are pushed by AdDetectionService
+            // during `runBackfill` (the only place feed metadata is
+            // already loaded); the hot path does not refetch — it's
+            // safe for chapter context to land later because the
+            // filter degrades to "head-edge + duration only" when
+            // chapters are empty.
+            await skipOrchestrator.setEpisodeDuration(
+                currentEpisodeDuration(),
+                analysisAssetId: assetId
+            )
             await skipOrchestrator.receiveAdWindows(windows)
         } catch {
             logger.error("Hot-path ad detection failed for asset \(assetId): \(error.localizedDescription)")
@@ -2015,6 +2027,16 @@ actor AnalysisCoordinator {
             // set (final pass) so backfill-emitted banners get the same
             // overlap-sliced evidence as hot-path-emitted banners.
             await pushEvidenceCatalog(chunks: allChunks, assetId: assetId)
+            // playhead-xr3t: refresh duration context. Declared
+            // chapters are pushed by AdDetectionService.runBackfill
+            // (which has just completed above); we forward the
+            // resolved episode duration here so the orchestrator's
+            // inventory filter has the same denominator
+            // AnalysisCoordinator used for `runBackfill`.
+            await skipOrchestrator.setEpisodeDuration(
+                resolvedEpisodeDuration,
+                analysisAssetId: assetId
+            )
             await skipOrchestrator.receiveAdWindows(updatedWindows)
         }
 

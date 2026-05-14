@@ -81,6 +81,17 @@ struct SettingsView: View {
     /// playhead-l274: scheduler-event tail (up to 50 entries) for the
     /// Diagnostics group. Loaded lazily on section appearance.
     @State private var schedulerEvents: [WorkJournalEntry] = []
+    /// playhead-h6a6: read-only snapshots of every persisted
+    /// `ShowCapabilityProfile`. Loaded lazily on Diagnostics
+    /// appearance from the same `ModelContainer` the runtime uses
+    /// for backfill writes. Display-only — there is NO setter
+    /// exposed in the UI for the observed profile kind. The view
+    /// renders one row per persisted profile, OR an empty-state
+    /// caption when no rows have been observed yet. (The capability-
+    /// profile feature flag is gated separately on the
+    /// `AdDetectionService` side; the diagnostic row reflects
+    /// whatever has been persisted by the runtime so far.)
+    @State private var capabilityProfileSnapshots: [ShowCapabilityProfileSnapshot] = []
     /// Focused Phase 1.5 dogfood export. Unlike Xcode's full-container
     /// download, this emits one small support-safe JSON archive containing
     /// only surface-status JSONL logs.
@@ -188,13 +199,44 @@ struct SettingsView: View {
                     // and applied live via `DownloadManager`), so
                     // initialize its toggle value from the persisted
                     // config rather than the `FeatureFlagPlaceholders`
-                    // default. The other four slugs remain placeholder
-                    // shims until their beads land.
-                    featureFlagValues["24cm"] = PreAnalysisConfig.load().useDualBackgroundSessions
+                    // default. The remaining placeholder slugs (zx6i,
+                    // 43ed) stay shims until their beads land.
+                    let pre = PreAnalysisConfig.load()
+                    featureFlagValues["24cm"] = pre.useDualBackgroundSessions
+                    // playhead-xr3t: the xr3t flag is wired to real
+                    // storage (LightweightInventoryChecksSettings) and
+                    // defaults ON per spec. Initialize from the
+                    // persisted value so the Diagnostics toggle
+                    // reflects ground truth on every appearance.
+                    featureFlagValues["xr3t"] = LightweightInventoryChecksSettings.load().enabled
+                    // playhead-2hpn: scoped-music-bed-generalization
+                    // flag — wired to `PreAnalysisConfig`. Initialize
+                    // from the persisted value so the toggle reflects
+                    // ground truth, matching the 24cm pattern.
+                    featureFlagValues["2hpn"] = pre.scopedMusicBedGeneralization
+                    // playhead-zx6i: B4 revalidation-from-features
+                    // flag — wired to `PreAnalysisConfig`. Initialize
+                    // from the persisted value so the toggle reflects
+                    // ground truth. Unlike 2hpn / xr3t (snapshot at
+                    // consumer-init), the zx6i flag has an INSTANT
+                    // rollback contract: both the runner's
+                    // `b4RevalidationEnabledProvider` and the
+                    // stamp-write gate in
+                    // `AdDetectionService.runBackfill` re-read
+                    // `PreAnalysisConfig.load()` on every call, so a
+                    // toggle flip takes effect on the next analysis
+                    // run, not next app launch.
+                    featureFlagValues["zx6i"] = pre.b4RevalidationFromFeaturesEnabled
                 }
                 .task {
                     await viewModel.computeStorageSizes()
                     await refreshSchedulerEvents()
+                    // playhead-h6a6: hydrate the read-only
+                    // per-show capability profile rows. No setter
+                    // is exposed at the call site (or anywhere else
+                    // in this view) — the row is a strictly
+                    // observed-value display.
+                    await refreshCapabilityProfileSnapshots()
                     // playhead-j2u: hydrate the Models section's
                     // status-only readout from the live evaluator. The
                     // call is non-blocking by contract.
@@ -259,6 +301,31 @@ struct SettingsView: View {
         } catch {
             schedulerEvents = []
         }
+    }
+
+    /// playhead-h6a6: refresh the per-show capability profile
+    /// snapshots for the Diagnostics group. Reads through the same
+    /// `ShowCapabilityProfileStore` the runtime writes through, so
+    /// the displayed value is always the live persisted state.
+    /// An empty array (no persisted profiles at all) renders the
+    /// `SettingsL274Copy.perShowCapabilityProfileEmptyCaption` ("Unknown —
+    /// no observations yet.") caption at the DisclosureGroup call site;
+    /// non-empty arrays render one row per persisted
+    /// profile via `capabilityProfileRow(...)`, including rows whose
+    /// kind is still `.unknown` (floor-not-met or SLIs-out-of-bounds
+    /// intermediate state). h6a6 R5 doc-vs-code audit: the prior
+    /// "Empty results are rendered as an 'Unknown' caption row"
+    /// phrasing conflated "no persisted profiles" with "no observed
+    /// (non-`.unknown`) profiles" — only the FORMER triggers the
+    /// caption today. There is NO writer exposed at this read site;
+    /// the row is strictly an observed-value display per the bead's
+    /// "OBSERVED, never user-set" contract.
+    @MainActor
+    private func refreshCapabilityProfileSnapshots() async {
+        let store = ShowCapabilityProfileStore(
+            modelContainer: modelContext.container
+        )
+        capabilityProfileSnapshots = await store.allSnapshots()
     }
 
 }
@@ -1498,23 +1565,63 @@ private extension SettingsView {
             }
             .listRowBackground(AppColors.surface)
 
-            // Per-show capability profile (h6a6 is OPEN — hide when no data)
-            // No producer API exists yet; the row stays hidden. When h6a6
-            // lands, add the provider call here and render the row using
-            // `SettingsL274Copy.perShowCapabilityProfileLabel` as the
-            // row label (already test-pinned in `SettingsL274CopyTests`
-            // so the copy is locked-in for the future landing).
-            // (Explicit no-op keeps the scope discipline visible.)
-            // TODO(bd playhead-h6a6): render per-show capability profile
-            //   row using `SettingsL274Copy.perShowCapabilityProfileLabel`
-            //   when the producer API lands.
+            // playhead-h6a6: per-show capability profile read-only
+            // display. The row(s) render one entry per persisted
+            // `ShowCapabilityProfile` (the store provisions a row
+            // for every show whose backfill ran while the flag was
+            // on, regardless of whether its kind has yet transitioned
+            // off `.unknown`). Empty state — i.e. zero persisted
+            // profiles — surfaces a single caption sourced from
+            // `SettingsL274Copy.perShowCapabilityProfileEmptyCaption`
+            // (verbatim: "Unknown — no observations yet.") so a copy
+            // edit forces an intentional test update in
+            // `SettingsL274CopyTests.perShowCapabilityProfileEmptyCaption`
+            // rather than silently flipping the user-visible string.
+            // h6a6 R5 doc-vs-code audit: the prior
+            // comment claimed `.unknown` rows are filtered out; the
+            // `ForEach` below does NOT filter, so rows with kind
+            // `.unknown` (the floor-not-met / SLIs-out-of-bounds
+            // intermediate state) are visible. The diagnostic intent
+            // is "what has the runtime persisted so far?", which
+            // includes pre-observation rows; filtering would hide
+            // the activation-progress observable from dogfood.
+            //
+            // Spec compliance:
+            //   * READ-ONLY — there is no setter (no Toggle, Picker,
+            //     binding) on the profile field. Bead requires
+            //     "OBSERVED, never user-set"; an audit grep for
+            //     `ShowCapabilityProfile` under `Views/Settings/`
+            //     turns up only `Text(...)` reads.
+            //   * Label is pinned to
+            //     `SettingsL274Copy.perShowCapabilityProfileLabel`,
+            //     verbatim per the l274 spec.
+            DisclosureGroup(SettingsL274Copy.perShowCapabilityProfileLabel) {
+                if capabilityProfileSnapshots.isEmpty {
+                    Text(SettingsL274Copy.perShowCapabilityProfileEmptyCaption)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.textTertiary)
+                } else {
+                    ForEach(capabilityProfileSnapshots, id: \.showIdentifier) { snap in
+                        capabilityProfileRow(snap)
+                    }
+                }
+            }
+            .listRowBackground(AppColors.surface)
 
-            // Feature-flag toggles. `24cm` is wired to real storage
-            // (`PreAnalysisConfig.useDualBackgroundSessions`) and applied
-            // to the live `DownloadManager` on change. The other four
-            // slugs are placeholder shims that persist to in-memory state
-            // only — their real storage lands with their respective beads
-            // (xr3t, zx6i, 2hpn, 43ed). All default OFF per spec.
+            // Feature-flag toggles. `24cm`, `xr3t`, `2hpn`, and `zx6i`
+            // are wired to real storage; only `43ed` remains a
+            // placeholder shim until its bead closes. The `2hpn` toggle
+            // persists to
+            // `PreAnalysisConfig.scopedMusicBedGeneralization`; the new
+            // value takes effect on the next `AdDetectionService` init
+            // (next app launch) — `AdDetectionService` caches the config
+            // snapshot at init time per its doc comment. This matches
+            // `xr3t`'s next-consumer-init rollback latency. (`24cm` is
+            // ALSO `PreAnalysisConfig`-backed, but additionally applies
+            // live via `DownloadManager.setUseDualBackgroundSessions(_:)`,
+            // so its effective rollback is instant — not the same
+            // contract as `2hpn`. R11 adversarial doc audit fix.) All
+            // default OFF per spec.
             DisclosureGroup(SettingsL274Copy.featureFlagsLabel) {
                 ForEach(FeatureFlagPlaceholders.orderedSlugs, id: \.self) { slug in
                     Toggle(isOn: Binding(
@@ -1528,6 +1635,74 @@ private extension SettingsView {
                                 Task { @MainActor in
                                     await DownloadManager.shared?.setUseDualBackgroundSessions(newValue)
                                 }
+                            } else if slug == "xr3t" {
+                                // playhead-xr3t: persist the rollback
+                                // toggle. The new value takes effect on
+                                // the next `SkipOrchestrator` init —
+                                // the filter is read at construction
+                                // time, not re-read per-evaluation. A
+                                // mid-episode flip therefore changes
+                                // behaviour on the next play-started
+                                // event rather than instantly. This is
+                                // the same "next-consumer-init" contract
+                                // that `2hpn` follows. (`24cm` is ALSO
+                                // `PreAnalysisConfig`-backed but
+                                // additionally applies live via
+                                // `DownloadManager.setUseDualBackgroundSessions(_:)`,
+                                // so its effective rollback is instant
+                                // — NOT the same contract as `xr3t`.
+                                // R12 doc audit: previously this comment
+                                // claimed parity with 24cm, which is
+                                // false for the same reason R11 fixed
+                                // the 2hpn block above.)
+                                LightweightInventoryChecksSettings(enabled: newValue).save()
+                            } else if slug == "2hpn" {
+                                // playhead-2hpn: persist the
+                                // scoped-music-bed-generalization flag
+                                // to `PreAnalysisConfig`. The new value
+                                // takes effect on the next
+                                // `AdDetectionService` init (next app
+                                // launch) — the service caches the
+                                // config snapshot at init time per its
+                                // doc comment. Same "next-consumer-init"
+                                // rollback contract as `xr3t`. (NOT the
+                                // same as `24cm`: 24cm additionally
+                                // applies live via
+                                // `DownloadManager.setUseDualBackgroundSessions(_:)`,
+                                // so its rollback is instant. R12 doc
+                                // audit: the prior "Same … contract as
+                                // 24cm/xr3t" was wrong — only the xr3t
+                                // half held. See the upper doc block on
+                                // this DisclosureGroup, which R11 already
+                                // corrected.)
+                                var config = PreAnalysisConfig.load()
+                                config.scopedMusicBedGeneralization = newValue
+                                config.save()
+                            } else if slug == "zx6i" {
+                                // playhead-zx6i: persist the B4
+                                // revalidation-from-features flag to
+                                // `PreAnalysisConfig`. Rollback is
+                                // INSTANT, not next-launch: the
+                                // runner's default
+                                // `b4RevalidationEnabledProvider` and
+                                // the stamp-write gate in
+                                // `AdDetectionService.runBackfill`
+                                // BOTH re-read
+                                // `PreAnalysisConfig.load()` on every
+                                // call. This intentionally diverges
+                                // from 2hpn / xr3t (snapshot at
+                                // consumer-init) — the short-circuit
+                                // gates a perf optimization with
+                                // `false_ready_rate` risk, so
+                                // minimizing blast-radius on flag-OFF
+                                // matters more than caching the read.
+                                // R1 doc audit fix: prior comment
+                                // documented a "next-launch" contract
+                                // that didn't match the wired
+                                // closures.
+                                var config = PreAnalysisConfig.load()
+                                config.b4RevalidationFromFeaturesEnabled = newValue
+                                config.save()
                             }
                         }
                     )) {
@@ -1664,6 +1839,49 @@ private extension SettingsView {
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
                 .truncationMode(.middle)
+        }
+        .listRowBackground(AppColors.surface)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// playhead-h6a6: read-only row rendering a single observed
+    /// capability profile snapshot. NO interactive controls — the
+    /// row body is exclusively `Text(...)`. Showing the count of
+    /// completed episodes alongside the kind gives the user a
+    /// reason-to-believe ("Observed after 5 episodes") without
+    /// surfacing any binding.
+    ///
+    /// h6a6 R9 review fix: the caption used to be assembled with an
+    /// inline interpolated literal (`"\(...) · \(...) episodes"`)
+    /// that mixed dynamic data with two user-visible copy fragments
+    /// (the middle-dot separator and the " episodes" suffix). That
+    /// inline literal violated the `SettingsL274.swift` file-header
+    /// rule against inline copy in the SwiftUI body — the same
+    /// invariant R8 enforced on the empty-state caption. R9 routes
+    /// the caption through
+    /// `SettingsL274Copy.perShowCapabilityProfileRowCaption(...)` so
+    /// the separator and singular/plural noun suffix are pinned by
+    /// tests. The helper also fixes a latent grammar regression
+    /// (the prior literal would render "… · 1 episodes" for the
+    /// first-record case the persistence tests exercise).
+    @ViewBuilder
+    func capabilityProfileRow(_ snap: ShowCapabilityProfileSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(snap.kind.displayLabel)
+                .font(AppTypography.body)
+                .foregroundStyle(AppColors.textPrimary)
+            // Show the truncated show identifier as a caption so
+            // the user can map the row to a subscription without
+            // exposing the full feed URL. Truncation matches the
+            // scheduler-event row's hash-prefix pattern.
+            Text(
+                SettingsL274Copy.perShowCapabilityProfileRowCaption(
+                    showIdentifier: snap.showIdentifier,
+                    completedEpisodeCount: snap.completedEpisodeCount
+                )
+            )
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
         }
         .listRowBackground(AppColors.surface)
         .accessibilityElement(children: .combine)

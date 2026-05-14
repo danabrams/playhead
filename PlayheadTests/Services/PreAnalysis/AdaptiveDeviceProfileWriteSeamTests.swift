@@ -1,0 +1,717 @@
+// AdaptiveDeviceProfileWriteSeamTests.swift
+// playhead-beh3 (Phase 3 deliverable 5, R2) — write-seam contract tests
+// for `AnalysisWorkScheduler.recordGrantWindowObservationIfEnabled(...)`.
+//
+// R1 closed the static-shape + persistence gaps but left ONE explicit
+// residual: the scheduler READ the estimator via `resolvedDeviceProfile`
+// yet no production code path called `recordObservation`. This file
+// pins the R2 wire-up at the helper that the four success outcome arms
+// in `processJob` (`tierAdvance`, `allTiersDone`,
+// `coverageInsufficient.{noProgress,maxAttempts}`) now funnel through.
+//
+// The success arms themselves are not driven through `processJob` in
+// stub form (see `AnalysisWorkSchedulerJournalEmissionTests.swift`
+// header for the reasoning — the success path needs the full
+// decode/feature/transcript/ad-detection/cue pipeline end-to-end). We
+// instead exercise the helper directly, which is the same method the
+// success arms call; the call-graph from arm → helper is preserved by
+// the static `recordGrantWindowObservationIfEnabled(...)` references
+// in `processJob`.
+//
+// Coverage:
+//   (1) Flag OFF: helper makes zero `recordObservation` calls. The
+//       provider is never touched. Proves the byte-identical rollback
+//       contract at the write seam, mirroring the read-path proof in
+//       `AdaptiveDeviceProfileFlagOffTests`.
+//   (2) Flag ON: helper makes exactly one `recordObservation` call per
+//       invocation, threading the device class + a positive grant-
+//       window duration through to the provider.
+//   (3) Flag ON, clock-skew defense: a non-positive duration (clock
+//       moved backward, simulated zero elapsed) drops the observation
+//       at the helper rather than reaching the estimator.
+//   (4) Static call-site discoverability: the four success arms in
+//       `processJob` must reference `recordGrantWindowObservationIfEnabled`
+//       so a future refactor that drops the wire-up regresses the
+//       source-grep audit. (Compile-time guarantee — see assertion.)
+
+import Foundation
+import Testing
+
+@testable import Playhead
+
+@Suite("AdaptiveDeviceProfile write seam (playhead-beh3 R2)")
+struct AdaptiveDeviceProfileWriteSeamTests {
+
+    // MARK: - Recording provider
+
+    /// `LearnedDeviceProfileProviding` stub that captures every
+    /// `recordObservation` call so the test can assert exact wire-up
+    /// shape: count, device class, observation duration. `resolvedDeviceProfile`
+    /// is unused in this suite; the read-path tests live in
+    /// `AdaptiveDeviceProfileFlagOffTests`.
+    actor RecordingProvider: LearnedDeviceProfileProviding {
+        struct Recorded: Sendable, Equatable {
+            let deviceClass: DeviceClass
+            let grantWindowSeconds: Double
+        }
+        private(set) var recorded: [Recorded] = []
+        private(set) var resolveCount: Int = 0
+
+        func resolvedDeviceProfile(
+            seed: DeviceClassProfile,
+            deviceClass: DeviceClass
+        ) async -> DeviceClassProfile {
+            resolveCount += 1
+            return seed
+        }
+
+        @discardableResult
+        func recordObservation(
+            _ observation: GrantWindowObservation,
+            deviceClass: DeviceClass,
+            seed: DeviceClassProfile
+        ) async -> AdaptiveDeviceProfileApplyResult {
+            recorded.append(
+                Recorded(
+                    deviceClass: deviceClass,
+                    grantWindowSeconds: observation.grantWindowSeconds
+                )
+            )
+            return AdaptiveDeviceProfileApplyResult(
+                persistedScaleFactorChanged: false,
+                didRevertToSeed: false,
+                blockedByNotchRateLimit: false,
+                clampSaturatedThisObservation: false
+            )
+        }
+
+        func snapshot() async -> [AdaptiveDeviceProfileState] {
+            []
+        }
+    }
+
+    // MARK: - Plentiful storage snapshotter
+
+    private struct PlentifulSnapshotter: StorageBudgetSnapshotting {
+        func canAdmit(_ cls: ArtifactClass, bytes: Int64) async -> Bool { true }
+        func remainingBytes(_ cls: ArtifactClass) async -> Int64 {
+            5_000_000_000
+        }
+    }
+
+    // MARK: - Scheduler factory
+
+    /// Build a scheduler bound to a deterministic clock + injected
+    /// provider so the test can synthesize a lease-acquired timestamp
+    /// at a known offset and assert the resulting observation's
+    /// duration matches.
+    @MainActor
+    private func makeScheduler(
+        store: AnalysisStore,
+        config: PreAnalysisConfig,
+        provider: any LearnedDeviceProfileProviding,
+        clock: @escaping @Sendable () -> Date
+    ) -> AnalysisWorkScheduler {
+        let capabilities = StubCapabilitiesProvider(
+            snapshot: makeCapabilitySnapshot(
+                thermalState: .nominal,
+                isLowPowerMode: false,
+                isCharging: true
+            )
+        )
+        let battery = StubBatteryProvider()
+        battery.level = 0.9
+        battery.charging = true
+
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: StubAnalysisAudioProvider(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: StubAdDetectionProvider()
+        )
+        return AnalysisWorkScheduler(
+            store: store,
+            jobRunner: runner,
+            capabilitiesService: capabilities,
+            downloadManager: StubDownloadProvider(),
+            batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider(),
+            storageBudgetSnapshotter: PlentifulSnapshotter(),
+            config: config,
+            clock: clock,
+            learnedDeviceProfileProvider: provider
+        )
+    }
+
+    // MARK: - (1) Flag OFF: zero writes
+
+    @Test("Flag OFF: recordGrantWindowObservationIfEnabled performs zero recordObservation calls")
+    @MainActor
+    func flagOffMakesZeroRecordCalls() async throws {
+        let store = try await makeTestStore()
+        let recorder = RecordingProvider()
+        var config = PreAnalysisConfig()
+        config.useAdaptiveDeviceProfile = false
+
+        let leaseAcquiredAt: TimeInterval = 1_700_000_000  // any fixed epoch
+        // Clock advances by 60s so the helper's positive-duration guard
+        // would NOT short-circuit if we accidentally entered it.
+        let clock: @Sendable () -> Date = {
+            Date(timeIntervalSince1970: leaseAcquiredAt + 60)
+        }
+        let scheduler = makeScheduler(
+            store: store, config: config, provider: recorder, clock: clock
+        )
+
+        // Drive the helper multiple times to amplify any leak.
+        for _ in 0..<5 {
+            await scheduler.recordGrantWindowObservationIfEnabled(
+                leaseAcquiredAt: leaseAcquiredAt
+            )
+        }
+
+        let recorded = await recorder.recorded
+        #expect(recorded.isEmpty,
+                "flag OFF must not record any observations; recorded=\(recorded.count)")
+        let resolveCount = await recorder.resolveCount
+        #expect(resolveCount == 0,
+                "helper must not consult `resolvedDeviceProfile` either (called \(resolveCount))")
+    }
+
+    // MARK: - (2) Flag ON: one record per invocation, correct shape
+
+    @Test("Flag ON: recordGrantWindowObservationIfEnabled records exactly one observation with the detected device class + computed duration")
+    @MainActor
+    func flagOnRecordsOneObservation() async throws {
+        let store = try await makeTestStore()
+        let recorder = RecordingProvider()
+        var config = PreAnalysisConfig()
+        config.useAdaptiveDeviceProfile = true
+
+        let leaseAcquiredAt: TimeInterval = 1_700_000_000
+        let elapsed: TimeInterval = 47  // arbitrary positive duration
+        let clock: @Sendable () -> Date = {
+            Date(timeIntervalSince1970: leaseAcquiredAt + elapsed)
+        }
+        let scheduler = makeScheduler(
+            store: store, config: config, provider: recorder, clock: clock
+        )
+
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: leaseAcquiredAt
+        )
+
+        let recorded = await recorder.recorded
+        #expect(recorded.count == 1,
+                "flag ON must record exactly one observation per invocation; got \(recorded.count)")
+        guard let first = recorded.first else {
+            Issue.record("missing recorded observation under flag ON")
+            return
+        }
+        // The helper detects device class from `utsname.machine`. In the
+        // simulator that maps to a stable bucket; we don't pin the
+        // specific case (simulator host can vary) — only that one of the
+        // declared `DeviceClass` cases is reported back.
+        #expect(DeviceClass.allCases.contains(first.deviceClass),
+                "detected device class must be a declared DeviceClass case; got \(first.deviceClass)")
+        // Allow a vanishing rounding tolerance; the helper uses
+        // `timeIntervalSince1970` arithmetic so the value is exact for
+        // a fixed-clock test, but the comparison is in Doubles so a
+        // strict `==` is still safe here.
+        #expect(abs(first.grantWindowSeconds - elapsed) < 1e-9,
+                "observed duration must equal `clock - leaseAcquiredAt`; got \(first.grantWindowSeconds)")
+    }
+
+    @Test("Flag ON: three invocations produce three observations all bucketed to the detected device class")
+    @MainActor
+    func flagOnMultipleInvocations() async throws {
+        let store = try await makeTestStore()
+        let recorder = RecordingProvider()
+        var config = PreAnalysisConfig()
+        config.useAdaptiveDeviceProfile = true
+
+        let leaseAcquiredAt: TimeInterval = 1_700_000_000
+        let clock: @Sendable () -> Date = {
+            Date(timeIntervalSince1970: leaseAcquiredAt + 30)
+        }
+        let scheduler = makeScheduler(
+            store: store, config: config, provider: recorder, clock: clock
+        )
+
+        for _ in 0..<3 {
+            await scheduler.recordGrantWindowObservationIfEnabled(
+                leaseAcquiredAt: leaseAcquiredAt
+            )
+        }
+
+        let recorded = await recorder.recorded
+        #expect(recorded.count == 3)
+        // All three observations share the same detected device class —
+        // `DeviceClass.detect()` is a pure mapping over `utsname.machine`
+        // so a single run reports a single class across all calls.
+        let classes = Set(recorded.map(\.deviceClass))
+        #expect(classes.count == 1,
+                "all observations in one run must share one device class; got \(classes)")
+    }
+
+    // MARK: - (3) Flag ON, non-positive duration is dropped at the helper
+
+    @Test("Flag ON, zero elapsed: helper drops the observation (clock-skew defense)")
+    @MainActor
+    func flagOnZeroDurationIsDropped() async throws {
+        let store = try await makeTestStore()
+        let recorder = RecordingProvider()
+        var config = PreAnalysisConfig()
+        config.useAdaptiveDeviceProfile = true
+
+        let leaseAcquiredAt: TimeInterval = 1_700_000_000
+        // Clock equals leaseAcquiredAt → elapsed = 0.
+        let clock: @Sendable () -> Date = {
+            Date(timeIntervalSince1970: leaseAcquiredAt)
+        }
+        let scheduler = makeScheduler(
+            store: store, config: config, provider: recorder, clock: clock
+        )
+
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: leaseAcquiredAt
+        )
+
+        let recorded = await recorder.recorded
+        #expect(recorded.isEmpty,
+                "non-positive elapsed must be dropped before reaching the provider")
+    }
+
+    @Test("Flag ON, negative elapsed (clock stepped backward): helper drops the observation")
+    @MainActor
+    func flagOnNegativeDurationIsDropped() async throws {
+        let store = try await makeTestStore()
+        let recorder = RecordingProvider()
+        var config = PreAnalysisConfig()
+        config.useAdaptiveDeviceProfile = true
+
+        let leaseAcquiredAt: TimeInterval = 1_700_000_000
+        // Clock stepped 5 s BEFORE lease acquisition → elapsed < 0.
+        let clock: @Sendable () -> Date = {
+            Date(timeIntervalSince1970: leaseAcquiredAt - 5)
+        }
+        let scheduler = makeScheduler(
+            store: store, config: config, provider: recorder, clock: clock
+        )
+
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: leaseAcquiredAt
+        )
+
+        let recorded = await recorder.recorded
+        #expect(recorded.isEmpty,
+                "negative elapsed (NTP step back) must be dropped at the helper")
+    }
+
+    @Test("Flag ON, non-finite leaseAcquiredAt: helper drops the observation at the source guard")
+    @MainActor
+    func flagOnNonFiniteLeaseAcquiredAtIsDropped() async throws {
+        // R6 defense-in-depth: if `leaseAcquiredAt` carries a non-
+        // finite Double (corrupt timer / pathological caller), the
+        // subtraction `clock.timeIntervalSince1970 - leaseAcquiredAt`
+        // can produce NaN or ±Inf. The math layer drops both (R5
+        // tightened entry guard to `isFinite && > 0`), but the source
+        // guard mirrors that invariant so the value type is never
+        // even constructed for the no-op case. Without the source
+        // `isFinite` check, the prior `> 0` was true for `+Inf` and
+        // would have built a `GrantWindowObservation` with an
+        // infinite duration before the math layer dropped it.
+        let store = try await makeTestStore()
+        let recorder = RecordingProvider()
+        var config = PreAnalysisConfig()
+        config.useAdaptiveDeviceProfile = true
+
+        // Clock returns a healthy finite date; the corruption is
+        // entirely in the `leaseAcquiredAt` Double we pass in.
+        let clock: @Sendable () -> Date = {
+            Date(timeIntervalSince1970: 1_700_000_000)
+        }
+        let scheduler = makeScheduler(
+            store: store, config: config, provider: recorder, clock: clock
+        )
+
+        // NaN leaseAcquiredAt → grantWindowSeconds = NaN.
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: .nan
+        )
+        // -Infinity leaseAcquiredAt → grantWindowSeconds = +Infinity.
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: -.infinity
+        )
+
+        let recorded = await recorder.recorded
+        #expect(recorded.isEmpty,
+                "non-finite leaseAcquiredAt must be dropped at the source guard; recorded=\(recorded.count)")
+    }
+
+    // MARK: - (4) Static call-site canary
+    //
+    // R3: the file header (section (4)) promises a "compile-time
+    // guarantee" that the four success outcome arms in
+    // `AnalysisWorkScheduler.processJob` reference
+    // `recordGrantWindowObservationIfEnabled`. R2 wired the call sites
+    // and added unit tests that drive the helper directly, but never
+    // pinned the arm→helper edge. Without this canary a future refactor
+    // could silently drop one of the four `await` lines and every
+    // unit test would still pass.
+    //
+    // The canary scans `AnalysisWorkScheduler.swift` (the source file
+    // owning `processJob`) and asserts:
+    //   * the helper is defined exactly once, and
+    //   * the four success outcome arms each have at least one
+    //     call-site reference to it, demonstrated by a >=5 reference
+    //     count (4 success arms + 1 definition = 5 minimum).
+    //
+    // We use the same source-canary pattern established by
+    // `DebugDiagnosticsHatchSourceCanaryTests`. The test is in this
+    // file (rather than a parallel canary file) because the contract
+    // it pins is the same one this file documents.
+
+    private static let repoRoot: URL = {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // .../PreAnalysis/
+            .deletingLastPathComponent() // .../Services/
+            .deletingLastPathComponent() // .../PlayheadTests/
+            .deletingLastPathComponent() // .../<repo root>/
+    }()
+
+    @Test("Source canary: AnalysisWorkScheduler.processJob references recordGrantWindowObservationIfEnabled from all four success arms")
+    func sourceCanaryAllFourSuccessArmsReferenceHelper() throws {
+        let url = Self.repoRoot.appendingPathComponent(
+            "Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift"
+        )
+        let source = try String(contentsOf: url, encoding: .utf8)
+
+        // The helper definition must be present exactly once. Look for
+        // the `func recordGrantWindowObservationIfEnabled(` signature.
+        let definitionToken = "func recordGrantWindowObservationIfEnabled("
+        let definitionCount = source.components(separatedBy: definitionToken).count - 1
+        #expect(definitionCount == 1,
+                "expected exactly one helper definition, got \(definitionCount)")
+
+        // Total occurrences of the symbol = 1 definition + N call sites.
+        // The R2 wiring places one `await` reference in each of the four
+        // success arms (`tierAdvance`, `allTiersDone`,
+        // `coverageInsufficient.noProgress`, `coverageInsufficient.maxAttempts`).
+        // Counting raw symbol references is more refactor-robust than
+        // requiring a specific surrounding shape: a future refactor that
+        // routes the helper through a wrapper would still register on
+        // this canary as long as the call edges remain.
+        let totalReferences = source.components(separatedBy: "recordGrantWindowObservationIfEnabled").count - 1
+        #expect(totalReferences >= 5,
+                "expected ≥5 references (1 definition + 4 success-arm call sites); got \(totalReferences)")
+
+        // Spot-check each success arm by name — the call must appear
+        // inside the same source file as those arm labels. We assert the
+        // arm tag string is present (`"tierAdvance"` etc. — these are
+        // the `commitOutcomeArm` labels the production code passes to
+        // the journal), and that at least one helper reference follows
+        // within a generous window of source characters.
+        let armTags = [
+            "\"tierAdvance\"",
+            "\"allTiersDone\"",
+            "\"coverageInsufficient.noProgress\"",
+            "\"coverageInsufficient.maxAttempts\"",
+        ]
+        for tag in armTags {
+            guard let tagRange = source.range(of: tag) else {
+                Issue.record("success arm tag \(tag) missing from AnalysisWorkScheduler.swift")
+                continue
+            }
+            // The helper invocation appears within the success branch
+            // of each arm. The arms are short (the helper call sits ≤
+            // 30 lines after the tag in every case), so a 4_000-char
+            // window comfortably covers each one without crossing into
+            // the next arm.
+            let windowEnd = source.index(tagRange.upperBound,
+                                         offsetBy: 4_000,
+                                         limitedBy: source.endIndex) ?? source.endIndex
+            let window = source[tagRange.upperBound..<windowEnd]
+            #expect(window.contains("recordGrantWindowObservationIfEnabled("),
+                    "expected helper invocation within the \(tag) arm body")
+        }
+    }
+
+    // MARK: - (5) Production wiring canary (R13)
+    //
+    // R12 was clean across 11 axes but missed the most fundamental
+    // wiring axis: the production scheduler permanently held the
+    // `NoOpLearnedDeviceProfileProvider` default because
+    // `PlayheadRuntime.init` never installs the SwiftData-backed store
+    // and `PlayheadApp.task` never called a setter. With that gap, every
+    // `recordObservation` was discarded by the No-Op, every
+    // `resolvedDeviceProfile` returned the seed verbatim, and the
+    // `LearnedDeviceProfile` SwiftData table never accumulated a row
+    // even when `PreAnalysisConfig.useAdaptiveDeviceProfile == true` —
+    // the bead's "Adaptive estimator runs in production, gated by the
+    // flag" acceptance criterion was silently unmet.
+    //
+    // R13 wired the setter (`AnalysisWorkScheduler.setLearnedDeviceProfileProvider`),
+    // a runtime helper (`PlayheadRuntime.attachLearnedDeviceProfileStore`),
+    // and a call site in `PlayheadApp.swift`. This canary pins those
+    // three edges so a future refactor that drops any one of them
+    // regresses on the source-grep audit even if every behavioural test
+    // still passes (none of them currently exercise the production
+    // wiring end-to-end; the unit tests inject a stub provider directly).
+
+    @Test("R13 production wiring canary: PlayheadRuntime defines attachLearnedDeviceProfileStore and PlayheadApp invokes it")
+    func sourceCanaryR13ProductionWiring() throws {
+        // (a) AnalysisWorkScheduler exposes the setter the runtime calls.
+        let schedulerURL = Self.repoRoot.appendingPathComponent(
+            "Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift"
+        )
+        let schedulerSource = try String(contentsOf: schedulerURL, encoding: .utf8)
+        #expect(schedulerSource.contains("func setLearnedDeviceProfileProvider("),
+                "AnalysisWorkScheduler must expose setLearnedDeviceProfileProvider(...) so the production runtime can swap in the SwiftData-backed store")
+
+        // (b) PlayheadRuntime defines the attach helper that builds the
+        // SwiftData-backed store and calls the scheduler setter.
+        let runtimeURL = Self.repoRoot.appendingPathComponent(
+            "Playhead/App/PlayheadRuntime.swift"
+        )
+        let runtimeSource = try String(contentsOf: runtimeURL, encoding: .utf8)
+        #expect(runtimeSource.contains("func attachLearnedDeviceProfileStore("),
+                "PlayheadRuntime must define attachLearnedDeviceProfileStore(modelContainer:) so the launch-path wiring has a single seam to call")
+        // The helper body must construct the SwiftData-backed store and
+        // forward it to the scheduler setter. Spot-check both symbols
+        // appear in the runtime file.
+        #expect(runtimeSource.contains("SwiftDataLearnedDeviceProfileStore("),
+                "PlayheadRuntime.attachLearnedDeviceProfileStore must construct the SwiftData-backed store; a future refactor that drops this line silently restores the No-Op default")
+        #expect(runtimeSource.contains("setLearnedDeviceProfileProvider("),
+                "PlayheadRuntime.attachLearnedDeviceProfileStore must invoke the scheduler setter; without this call the new store is constructed but never installed")
+
+        // (c) PlayheadApp invokes the helper from its `.task` block
+        // (where `modelContainer` is in scope) — the production call
+        // site that closes the wiring loop.
+        let appURL = Self.repoRoot.appendingPathComponent(
+            "Playhead/App/PlayheadApp.swift"
+        )
+        let appSource = try String(contentsOf: appURL, encoding: .utf8)
+        #expect(appSource.contains("attachLearnedDeviceProfileStore("),
+                "PlayheadApp must call runtime.attachLearnedDeviceProfileStore(modelContainer:) so the production scheduler actually receives the SwiftData store; without this call the LearnedDeviceProfile table stays empty even with the feature flag ON")
+    }
+
+    // MARK: - (6) Setter-swap behaviour (R14)
+    //
+    // R13 added the source-grep canary above; this test covers the
+    // missing BEHAVIOURAL leg. The scheduler is constructed with the
+    // default `NoOpLearnedDeviceProfileProvider`, then the production
+    // `setLearnedDeviceProfileProvider(...)` setter swaps in a recording
+    // provider. A subsequent flag-ON
+    // `recordGrantWindowObservationIfEnabled(...)` MUST land on the new
+    // provider — proving the setter actually mutates the field the
+    // helper reads, not a snapshot captured at init time. If a future
+    // refactor accidentally restores the `let` declaration (or stores
+    // the provider in a closure captured at init), this test fails
+    // even though the R13 grep canary still passes.
+
+    @Test("R14 setter swap: setLearnedDeviceProfileProvider routes subsequent recordObservation to the new provider")
+    @MainActor
+    func r14SetterSwapRoutesSubsequentObservations() async throws {
+        let store = try await makeTestStore()
+        let recorder = RecordingProvider()
+        var config = PreAnalysisConfig()
+        config.useAdaptiveDeviceProfile = true
+
+        let leaseAcquiredAt: TimeInterval = 1_700_000_000
+        let elapsed: TimeInterval = 31
+        let clock: @Sendable () -> Date = {
+            Date(timeIntervalSince1970: leaseAcquiredAt + elapsed)
+        }
+
+        // Construct scheduler WITHOUT a provider argument — exactly
+        // what PlayheadRuntime.init does in production. The scheduler
+        // boots holding `NoOpLearnedDeviceProfileProvider`.
+        let capabilities = StubCapabilitiesProvider(
+            snapshot: makeCapabilitySnapshot(
+                thermalState: .nominal,
+                isLowPowerMode: false,
+                isCharging: true
+            )
+        )
+        let battery = StubBatteryProvider()
+        battery.level = 0.9
+        battery.charging = true
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: StubAnalysisAudioProvider(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: StubAdDetectionProvider()
+        )
+        let scheduler = AnalysisWorkScheduler(
+            store: store,
+            jobRunner: runner,
+            capabilitiesService: capabilities,
+            downloadManager: StubDownloadProvider(),
+            batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider(),
+            storageBudgetSnapshotter: PlentifulSnapshotter(),
+            config: config,
+            clock: clock
+            // learnedDeviceProfileProvider intentionally omitted ⇒ NoOp default
+        )
+
+        // (a) Pre-swap: drive the helper. NoOp is in place, so a flag-ON
+        // helper invocation MUST land on the No-Op (which the recorder
+        // here is NOT) — recorder must remain empty.
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: leaseAcquiredAt
+        )
+        var recorded = await recorder.recorded
+        #expect(recorded.isEmpty,
+                "before setter swap, recorder must not see any observation; the scheduler holds NoOpLearnedDeviceProfileProvider (recorded=\(recorded.count))")
+
+        // (b) Swap: install the recording provider via the same setter
+        // the production runtime calls.
+        await scheduler.setLearnedDeviceProfileProvider(recorder)
+
+        // (c) Post-swap: drive the helper again. The new provider MUST
+        // receive the observation.
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: leaseAcquiredAt
+        )
+        recorded = await recorder.recorded
+        #expect(recorded.count == 1,
+                "after setter swap, recorder must see exactly one observation (got \(recorded.count)); if zero, the setter did not mutate the field the helper reads — regression of the R13 mutability fix")
+        if let first = recorded.first {
+            #expect(first.grantWindowSeconds == elapsed,
+                    "recorded grant-window duration must match the clock delta (expected \(elapsed), got \(first.grantWindowSeconds))")
+        }
+    }
+
+    // MARK: - (7) Attach-ordering canary (R14)
+    //
+    // The R14 race-narrowing fix moved the
+    // `attachLearnedDeviceProfileStore(...)` call site in
+    // `PlayheadApp.swift` to the TOP of `.task`, above every `await`
+    // suspension point so the scheduler runLoop (started from
+    // `PlayheadRuntime.init`'s deferred bootstrap Task) cannot
+    // complete a grant-window observation against
+    // `NoOpLearnedDeviceProfileProvider` after the first `await` runs.
+    // A future refactor that moves the attach call back down — e.g.
+    // someone reorders `.task` while consolidating wiring — silently
+    // reintroduces the same class of dropped-write bug R13 fixed,
+    // just narrower in wall-clock width. This canary pins the
+    // ordering: `attachLearnedDeviceProfileStore(` MUST appear before
+    // the `setEpisodeMetadataProvider(` line in PlayheadApp.swift,
+    // chosen as a stable later anchor because R14's comment block
+    // specifically calls out that suspension point as the original
+    // race window.
+
+    @Test("R14 attach-ordering canary: PlayheadApp calls attachLearnedDeviceProfileStore before setEpisodeMetadataProvider")
+    func sourceCanaryR14AttachOrdering() throws {
+        let appURL = Self.repoRoot.appendingPathComponent(
+            "Playhead/App/PlayheadApp.swift"
+        )
+        let appSource = try String(contentsOf: appURL, encoding: .utf8)
+
+        // Strip line comments before searching so the R14 comment block
+        // (which inline-quotes the `setEpisodeMetadataProvider(...)`
+        // call as part of its rationale) cannot satisfy the anchor
+        // search. Block comments are not used in this region.
+        let codeOnly: String = appSource
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> Substring in
+                if let commentStart = line.range(of: "//") {
+                    return line[..<commentStart.lowerBound]
+                }
+                return line
+            }
+            .joined(separator: "\n")
+
+        guard let attachRange = codeOnly.range(of: "await runtime.attachLearnedDeviceProfileStore(") else {
+            Issue.record("PlayheadApp.swift no longer contains `await runtime.attachLearnedDeviceProfileStore(...)` — the production call site has been removed or renamed; if intentional, update this canary")
+            return
+        }
+        // Anchor on the actual production call site (note the
+        // `(provider)` argument — the comment-block quote uses
+        // `(...)` so a post-strip residual would not match this exact
+        // form anyway, but using the precise call form keeps the
+        // intent unambiguous).
+        guard let metaRange = codeOnly.range(of: "adDetectionService.setEpisodeMetadataProvider(provider)") else {
+            Issue.record("PlayheadApp.swift no longer contains the `adDetectionService.setEpisodeMetadataProvider(provider)` production call — the anchor used by this canary has moved; pick a new stable later-stage anchor (any line that runs AFTER several `await` suspension points inside `.task`) and update this assertion")
+            return
+        }
+
+        #expect(attachRange.lowerBound < metaRange.lowerBound,
+                "attachLearnedDeviceProfileStore(...) MUST be called BEFORE setEpisodeMetadataProvider(provider) in PlayheadApp.swift's `.task` body — R14 moved it above every `await` suspension to minimise the scheduler-vs-attach race window; if the attach call has been moved back below later-stage wiring, observations completing in the gap will silently hit NoOpLearnedDeviceProfileProvider and drop")
+    }
+
+    // MARK: - (8) No-`await`-before-attach canary (R15)
+    //
+    // R14's positional canary above pins "attach < setEpisodeMetadataProvider"
+    // but does NOT pin the STRONGER invariant R14's comment-block actually
+    // describes: "attach must run BEFORE every `await` suspension point
+    // in `.task`". A refactor that introduced a NEW `await` BETWEEN the
+    // synchronous register calls at the top of `.task` and the attach
+    // call (e.g. `await someBootstrapHelper()` right above the attach)
+    // would silently re-open the race window R14 closed, yet R14's
+    // positional canary would still pass because the attach line is
+    // still positionally above `setEpisodeMetadataProvider`. This R15
+    // canary strengthens the contract by scanning the code window from
+    // the enclosing `.task {` opening brace to the attach call and
+    // asserting no `await` keyword appears in that window. The attach
+    // call's OWN `await` is excluded by anchoring the window's upper
+    // bound at the `await runtime.attachLearnedDeviceProfileStore(`
+    // token (exclusive), so this canary only fires on a NEW pre-attach
+    // suspension.
+    //
+    // Implementation note: there are multiple `.task` blocks in
+    // PlayheadApp's body. We locate the specific one containing the
+    // attach by scanning backwards from the attach call for the nearest
+    // preceding `.task {` substring — which is unambiguous because the
+    // attach call is unique in the file (the R13 wiring canary above
+    // already asserts that).
+
+    @Test("R15 attach-ordering canary: no `await` precedes attachLearnedDeviceProfileStore inside its enclosing `.task` body")
+    func sourceCanaryR15NoAwaitBeforeAttach() throws {
+        let appURL = Self.repoRoot.appendingPathComponent(
+            "Playhead/App/PlayheadApp.swift"
+        )
+        let appSource = try String(contentsOf: appURL, encoding: .utf8)
+
+        // Strip line comments before searching so R14's prose (which
+        // narrates `await` semantics inline) cannot pollute the scan.
+        let codeOnly: String = appSource
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> Substring in
+                if let commentStart = line.range(of: "//") {
+                    return line[..<commentStart.lowerBound]
+                }
+                return line
+            }
+            .joined(separator: "\n")
+
+        guard let attachRange = codeOnly.range(of: "await runtime.attachLearnedDeviceProfileStore(") else {
+            Issue.record("PlayheadApp.swift no longer contains `await runtime.attachLearnedDeviceProfileStore(...)` — the production call site has been removed or renamed; if intentional, update this canary")
+            return
+        }
+
+        // Locate the enclosing `.task {` opening brace by scanning the
+        // prefix before the attach call for the LAST occurrence of
+        // `.task {`. (Swift permits `.task { /* body */ }` or
+        // `.task {\n` — both forms contain the substring `.task {`.)
+        let prefix = codeOnly[..<attachRange.lowerBound]
+        guard let taskOpenRange = prefix.range(of: ".task {", options: .backwards) else {
+            Issue.record("PlayheadApp.swift no longer contains a `.task {` block enclosing attachLearnedDeviceProfileStore — the surrounding wiring shape has changed; if intentional, update this canary")
+            return
+        }
+
+        // Window from end of `.task {` to start of attach call. Any
+        // `await` keyword in this window is a NEW pre-attach suspension
+        // that re-opens the race window R14 closed.
+        let window = codeOnly[taskOpenRange.upperBound..<attachRange.lowerBound]
+        let awaitOccurrences = window.components(separatedBy: "await ").count - 1
+        #expect(awaitOccurrences == 0,
+                "Found \(awaitOccurrences) `await` reference(s) BEFORE attachLearnedDeviceProfileStore inside its enclosing `.task` body — R14's invariant is that the attach call must run BEFORE every `await` suspension point so the scheduler runLoop (started from PlayheadRuntime.init's deferred bootstrap Task) cannot complete a grant-window observation against NoOpLearnedDeviceProfileProvider after the first `.task` suspension. If a new pre-attach await is intentional, either move it AFTER the attach call or close the race window via the non-isolated shared-holder pattern (mirror of BackgroundFeedRefreshService.attachSharedService); do NOT relax this canary without addressing the race.")
+    }
+}

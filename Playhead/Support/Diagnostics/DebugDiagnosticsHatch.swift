@@ -91,12 +91,26 @@ func runDebugDiagnosticsExport(
     )
     let journalFetch = DebugDiagnosticsHatch.makeJournalFetch(store: runtime.analysisStore)
     let optInSink = SwiftDataDiagnosticsOptInSink(context: modelContext)
+    let learnedDeviceProfilesFetch =
+        DebugDiagnosticsHatch.makeLearnedDeviceProfilesFetch(modelContext: modelContext)
+
+    // playhead-2hpn: source live `ShowMusicBedProfile` snapshots from
+    // the SwiftData container so the debug-build bundle mirrors the
+    // production shape (parity with `ReleaseDiagnosticsHatch`).
+    let musicBedStore = ShowMusicBedProfileStore(
+        modelContainer: modelContext.container
+    )
+    let musicBedProfilesFetch: DiagnosticsMusicBedProfilesFetch = {
+        await musicBedStore.allSnapshots()
+    }
 
     let presenter = UIKitDiagnosticsPresenter(hostProvider: hostProvider)
     let coordinator = DiagnosticsExportCoordinator(
         environment: environment,
         presenter: presenter,
         journalFetch: journalFetch,
+        musicBedProfilesFetch: musicBedProfilesFetch,
+        learnedDeviceProfilesFetch: learnedDeviceProfilesFetch,
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -131,6 +145,39 @@ enum DebugDiagnosticsHatch {
     static func makeJournalFetch(store: AnalysisStore) -> DiagnosticsJournalFetch {
         { [store] in
             try await store.fetchRecentWorkJournalEntries(limit: journalFetchLimit)
+        }
+    }
+
+    // MARK: Learned device-profile adapter (playhead-beh3)
+
+    /// Adapter that snapshots every `LearnedDeviceProfile` row through
+    /// `SwiftDataLearnedDeviceProfileStore.snapshot()`, then maps each
+    /// state to a wire-shape `LearnedDeviceProfileDiagnosticRecord`.
+    ///
+    /// Threading: the returned closure is `@Sendable`. It captures
+    /// only the `ModelContainer` (which IS `Sendable`) and constructs
+    /// a fresh `SwiftDataLearnedDeviceProfileStore` on the MainActor
+    /// inside the closure body so neither `ModelContext` nor the store
+    /// (both non-`Sendable`) cross an isolation boundary. Fetch failures
+    /// are silently downgraded to `[]` (logged inside the store) so a
+    /// transient SwiftData error does not block the diagnostics bundle
+    /// from shipping — the other tails still encode.
+    static func makeLearnedDeviceProfilesFetch(
+        modelContext: ModelContext
+    ) -> DiagnosticsLearnedDeviceProfilesFetch {
+        let container = modelContext.container
+        return { @Sendable in
+            // The whole read happens inside `MainActor.run` so both
+            // `ModelContext` and the @MainActor-isolated store stay
+            // within their isolation domain — only the Sendable
+            // `[LearnedDeviceProfileDiagnosticRecord]` value crosses
+            // the boundary back to the caller.
+            await MainActor.run { () -> [LearnedDeviceProfileDiagnosticRecord] in
+                let context = ModelContext(container)
+                let store = SwiftDataLearnedDeviceProfileStore(context: context)
+                let snapshots = store.snapshotSync()
+                return snapshots.map { LearnedDeviceProfileDiagnosticRecord.from(snapshot: $0) }
+            }
         }
     }
 

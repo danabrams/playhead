@@ -11,6 +11,15 @@ import SwiftUI
 
 struct NowPlayingView: View {
 
+    /// playhead-3bv.4: shared logger for non-fatal correction-persistence
+    /// failures (e.g. the "Always skip this sponsor" sink). Defined at
+    /// view scope so the wiring closures inside `body` can reach it via
+    /// `Self.logger` without capturing a per-instance `let`.
+    fileprivate static let logger = Logger(
+        subsystem: "com.playhead",
+        category: "NowPlayingView"
+    )
+
     private var runtime: PlayheadRuntime
     private let ownsViewModel: Bool
     @State private var viewModel: NowPlayingViewModel
@@ -20,6 +29,10 @@ struct NowPlayingView: View {
     /// sheet hosts a `QueueView` whose VM reads the same
     /// `PlaybackQueueService` injected at App scene scope.
     @State private var showQueueSheet = false
+    /// playhead-3bv.4: drives the Activity sheet that opens scoped to
+    /// the currently-playing episode when the user taps the status
+    /// line below the timeline.
+    @State private var showActivitySheet = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.playbackQueueService) private var playbackQueueService
     @Environment(\.modelContext) private var modelContext
@@ -65,6 +78,24 @@ struct NowPlayingView: View {
                 // MARK: Timeline
                 timelineSection
                     .padding(.horizontal, Spacing.md)
+
+                // MARK: Status line (playhead-3bv.4, UI design §C-2)
+                //
+                // Slim one-line status that mirrors the episode-detail
+                // status reducer (`EpisodeSurfaceStatus`). Hidden when
+                // the current episode is fully analyzed. Tap → Activity
+                // scoped to this episode. The host child view owns the
+                // SwiftData `@Query` so it re-renders cleanly when the
+                // playing episode changes (id-keyed identity below).
+                if let episodeId = runtime.currentEpisodeId {
+                    PlayerStatusLineHost(
+                        episodeId: episodeId,
+                        onTap: { showActivitySheet = true }
+                    )
+                    .id(episodeId)
+                    .padding(.horizontal, Spacing.md)
+                    .padding(.top, Spacing.xs)
+                }
 
                 Spacer(minLength: Spacing.lg)
 
@@ -121,6 +152,53 @@ struct NowPlayingView: View {
                     let windowId = item.windowId
                     Task {
                         await orchestrator.acceptSuggestedSkip(windowId: windowId)
+                    }
+                },
+                // playhead-3bv.4: "Always skip this sponsor" on an
+                // auto-skipped banner. Records a `sponsorOnShow` scope
+                // correction so the SponsorKnowledgeStore's negative-
+                // memory pass filters this advertiser out of future
+                // episodes of the same show. Mirrors the normalization
+                // SponsorKnowledgeStore uses on its
+                // `normalizedValue` field — `entityValue.lowercased()
+                // .trimmingCharacters(in: .whitespaces)` — so the scope
+                // serializer produces an identity that the downstream
+                // lookup actually matches. Using `.whitespaces` (not
+                // `.whitespacesAndNewlines`) is deliberate: this is a
+                // contract drift guard against the knowledge-store's
+                // exact character-set choice.
+                onAlwaysSkipSponsor: { item in
+                    guard let advertiser = item.advertiser else { return }
+                    let normalized = advertiser
+                        .lowercased()
+                        .trimmingCharacters(in: .whitespaces)
+                    guard !normalized.isEmpty else { return }
+                    let podcastId = item.podcastId
+                    let assetId = runtime.currentAnalysisAssetId
+                        ?? "podcast:\(podcastId)"
+                    let scope = CorrectionScope.sponsorOnShow(
+                        podcastId: podcastId,
+                        sponsor: normalized
+                    )
+                    let event = CorrectionEvent(
+                        analysisAssetId: assetId,
+                        scope: scope.serialized,
+                        source: .manualVeto,
+                        podcastId: podcastId,
+                        correctionType: .falsePositive,
+                        targetRefs: CorrectionTargetRefs(
+                            sponsorEntity: normalized
+                        )
+                    )
+                    let store = runtime.correctionStore
+                    Task {
+                        do {
+                            try await store.record(event)
+                        } catch {
+                            Self.logger.error(
+                                "alwaysSkipSponsor: failed to persist sponsorOnShow event for \(normalized, privacy: .public) on \(podcastId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                            )
+                        }
                     }
                 }
             )
@@ -190,6 +268,27 @@ struct NowPlayingView: View {
                     .padding()
                     .presentationDetents([.medium])
             }
+        }
+        .sheet(isPresented: $showActivitySheet) {
+            // playhead-3bv.4: Activity sheet opened from the player's
+            // status line. Scoped to the currently-playing episode
+            // via `focusedEpisodeId` — the View filters every section
+            // down to that one episode's row(s) so the user lands on
+            // exactly the affordances that match what they're hearing.
+            // The provider closure mirrors the `ContentView` Activity
+            // tab wiring so the snapshot composition stays identical.
+            ActivityView(
+                inputProvider: { [runtime, modelContext] in
+                    let provider = runtime.makeActivitySnapshotProvider(
+                        modelContainer: modelContext.container
+                    )
+                    return await provider.loadInputs()
+                },
+                focusedEpisodeId: runtime.currentEpisodeId
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(AppColors.surface)
         }
         .sheet(isPresented: $showTranscriptPeek) {
             if let assetId = analysisAssetId {
@@ -564,6 +663,46 @@ private struct TransportButtonStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
             .animation(Motion.quick, value: configuration.isPressed)
+    }
+}
+
+// MARK: - PlayerStatusLineHost
+
+/// playhead-3bv.4: SwiftData-backed host for the player's status row.
+///
+/// Owns a `@Query` keyed on `canonicalEpisodeKey == episodeId` so the
+/// row re-renders whenever the underlying `Episode` row changes
+/// (coverage progression, anchor moves). The host is mounted with
+/// `.id(episodeId)` by `NowPlayingView`, which forces a fresh query
+/// when the playing episode changes — `@Query` with a predicate that
+/// captures `let episodeId` is parameter-stable for the lifetime of
+/// an identity, so this is the idiomatic SwiftData pattern.
+struct PlayerStatusLineHost: View {
+    @Query private var episodes: [Episode]
+
+    let onTap: () -> Void
+
+    init(episodeId: String, onTap: @escaping () -> Void) {
+        // FetchDescriptor with `fetchLimit: 1` keeps the query bounded
+        // even if the canonicalEpisodeKey uniqueness invariant is ever
+        // violated (defensive — the schema constraint should already
+        // guarantee at most one match).
+        let key = episodeId
+        var descriptor = FetchDescriptor<Episode>(
+            predicate: #Predicate<Episode> { $0.canonicalEpisodeKey == key }
+        )
+        descriptor.fetchLimit = 1
+        self._episodes = Query(descriptor)
+        self.onTap = onTap
+    }
+
+    var body: some View {
+        if let episode = episodes.first {
+            PlayerStatusLineRow(
+                inputs: playerStatusLineInputs(episode: episode),
+                onTap: onTap
+            )
+        }
     }
 }
 
