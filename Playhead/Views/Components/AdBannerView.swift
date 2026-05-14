@@ -249,6 +249,16 @@ struct AdBannerView: View {
     /// supplies this. Auto-skipped banners ignore the callback.
     var onSuggestSkip: ((AdSkipBannerItem) -> Void)?
 
+    /// playhead-3bv.4: Called when the user taps "Always skip this sponsor"
+    /// on an auto-skipped banner. The host records a `sponsorOnShow`
+    /// scope correction in `UserCorrectionStore` so future episodes of
+    /// the same show veto this advertiser proactively. The button is
+    /// hidden when this callback is nil, when the banner has no
+    /// advertiser name to scope against, or when the banner is
+    /// suggest-tier (the action only applies to confirmed auto-skips —
+    /// "always skip" presupposes we just successfully skipped it).
+    var onAlwaysSkipSponsor: ((AdSkipBannerItem) -> Void)?
+
     /// Injected haptic player — defaults to `SystemHapticPlayer` in
     /// production, tests swap in a `RecordingHapticPlayer`.
     var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
@@ -258,6 +268,19 @@ struct AdBannerView: View {
     /// expansion never carries over when the queue advances to the next
     /// banner — every new banner starts collapsed (default ergonomics).
     @State private var expandedBannerId: String?
+
+    /// playhead-3bv.4: Tracks the banner id that just received an
+    /// "Always skip this sponsor" tap. Drives the inline confirmation
+    /// replacement of the action row ("Will always skip this sponsor")
+    /// without dismissing the entire banner — the confirmation is the
+    /// receipt the user needs. A short delayed dismiss closes the
+    /// banner after the user has had time to read the line.
+    @State private var confirmedAlwaysSkipBannerId: String?
+
+    /// Duration before the banner auto-dismisses after the inline
+    /// "Will always skip this sponsor" confirmation appears. Short
+    /// enough that it never feels like a modal; long enough to read.
+    static let alwaysSkipConfirmationSeconds: TimeInterval = 2.0
 
     /// Factored handler for the banner-appear haptic so tests can drive
     /// it without rendering a live SwiftUI hierarchy.
@@ -285,6 +308,13 @@ struct AdBannerView: View {
             // ergonomics (compact, low-attention margin note) survive
             // queued skips.
             expandedBannerId = nil
+            // playhead-3bv.4: drop any stale "Always skip this sponsor"
+            // confirmation state when the queue advances. Without this,
+            // the delayed auto-dismiss task scheduled for the previous
+            // banner would see `confirmedAlwaysSkipBannerId == item.id`
+            // still true (because @State doesn't reset on its own) and
+            // call `queue.dismiss()` on the WRONG (newer) banner.
+            confirmedAlwaysSkipBannerId = nil
         }
     }
 
@@ -534,77 +564,156 @@ struct AdBannerView: View {
         evidenceLines: [String],
         isExpanded: Bool
     ) -> some View {
-        HStack {
-            // Phase 7.2: "Not an ad" correction button (leading, muted).
-            if let onNotAnAd {
+        // playhead-3bv.4: when the user has just tapped "Always skip
+        // this sponsor" the entire action row is replaced by an
+        // inline confirmation receipt. No buttons during the short
+        // confirmation window — there is nothing left to act on.
+        if confirmedAlwaysSkipBannerId == item.id {
+            alwaysSkipConfirmation(item: item)
+        } else {
+            HStack {
+                // Phase 7.2: "Not an ad" correction button (leading, muted).
+                if let onNotAnAd {
+                    Button {
+                        onNotAnAd(item)
+                        queue.dismiss()
+                    } label: {
+                        Text("Not an ad")
+                            .font(AppTypography.sans(size: 12, weight: .regular))
+                            .foregroundStyle(boneText.opacity(0.5))
+                    }
+                    .buttonStyle(BannerButtonStyle())
+                    .accessibilityLabel("Mark as not an ad")
+                    .accessibilityHint("Records that this segment was not an advertisement")
+                }
+
+                // playhead-3bv.4: "Always skip this sponsor" — sits
+                // alongside "Not an ad" so the two correction-style
+                // affordances are visually grouped (both muted, leading
+                // edge), separate from the rewind/dismiss actions
+                // (trailing edge, accent). Hidden when the host has
+                // not wired the callback OR when we have no advertiser
+                // name to record against (a sponsorOnShow scope with
+                // no sponsor is meaningless).
+                if let onAlwaysSkipSponsor,
+                   let advertiser = item.advertiser,
+                   !advertiser.isEmpty {
+                    Button {
+                        onAlwaysSkipSponsor(item)
+                        confirmedAlwaysSkipBannerId = item.id
+                        // Schedule a calm auto-dismiss so the
+                        // confirmation reads as a receipt, not a modal.
+                        Task { @MainActor in
+                            try? await Task.sleep(
+                                for: .seconds(Self.alwaysSkipConfirmationSeconds)
+                            )
+                            // Guard: only dismiss if we still own the
+                            // confirmation state for THIS banner AND
+                            // the queue's current banner is still this
+                            // one. A newer banner could have advanced
+                            // the queue in the meantime — dismissing
+                            // then would silently drop the new banner.
+                            // The `.onChange(of: queue.currentBanner?.id)`
+                            // handler resets `confirmedAlwaysSkipBannerId`
+                            // to nil on queue advance, but the explicit
+                            // queue-id check here is defense-in-depth.
+                            if confirmedAlwaysSkipBannerId == item.id,
+                               queue.currentBanner?.id == item.id {
+                                confirmedAlwaysSkipBannerId = nil
+                                queue.dismiss()
+                            }
+                        }
+                    } label: {
+                        Text("Always skip this sponsor")
+                            .font(AppTypography.sans(size: 12, weight: .regular))
+                            .foregroundStyle(boneText.opacity(0.5))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                    }
+                    .buttonStyle(BannerButtonStyle())
+                    .accessibilityLabel("Always skip this sponsor")
+                    .accessibilityHint(
+                        "Tells Playhead to skip \(advertiser) on this show without asking again"
+                    )
+                }
+
+                Spacer()
+
+                // playhead-vjxc: chevron toggle. Only shown when there is
+                // catalog evidence to surface — empty-list banners keep
+                // the original three-button action row exactly.
+                if !evidenceLines.isEmpty {
+                    Button {
+                        if expandedBannerId == item.id {
+                            expandedBannerId = nil
+                        } else {
+                            expandedBannerId = item.id
+                        }
+                    } label: {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(boneText.opacity(0.5))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(BannerButtonStyle())
+                    .accessibilityLabel(isExpanded ? "Hide evidence" : "Show evidence")
+                    .accessibilityHint("Reveals the signals that led Playhead to skip this segment")
+                }
+
+                // Listen button — copper accent
                 Button {
-                    onNotAnAd(item)
-                    queue.dismiss()
+                    onListen?(item)
                 } label: {
-                    Text("Not an ad")
-                        .font(AppTypography.sans(size: 12, weight: .regular))
-                        .foregroundStyle(boneText.opacity(0.5))
+                    Text("Listen")
+                        .font(AppTypography.sans(size: 13, weight: .semibold))
+                        .foregroundStyle(AppColors.accent)
+                        .padding(.horizontal, Spacing.sm)
+                        .padding(.vertical, Spacing.xxs)
+                        .background(
+                            RoundedRectangle(cornerRadius: CornerRadius.small)
+                                .fill(AppColors.accent.opacity(0.12))
+                        )
                 }
                 .buttonStyle(BannerButtonStyle())
-                .accessibilityLabel("Mark as not an ad")
-                .accessibilityHint("Records that this segment was not an advertisement")
-            }
+                .accessibilityLabel("Listen to skipped ad")
+                .accessibilityHint("Rewinds to the start of the skipped ad segment")
 
-            Spacer()
-
-            // playhead-vjxc: chevron toggle. Only shown when there is
-            // catalog evidence to surface — empty-list banners keep
-            // the original three-button action row exactly.
-            if !evidenceLines.isEmpty {
+                // Dismiss button
                 Button {
-                    if expandedBannerId == item.id {
-                        expandedBannerId = nil
-                    } else {
-                        expandedBannerId = item.id
-                    }
+                    queue.dismiss()
                 } label: {
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 11, weight: .semibold))
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(boneText.opacity(0.5))
                         .frame(width: 28, height: 28)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(BannerButtonStyle())
-                .accessibilityLabel(isExpanded ? "Hide evidence" : "Show evidence")
-                .accessibilityHint("Reveals the signals that led Playhead to skip this segment")
+                .accessibilityLabel("Dismiss banner")
             }
-
-            // Listen button — copper accent
-            Button {
-                onListen?(item)
-            } label: {
-                Text("Listen")
-                    .font(AppTypography.sans(size: 13, weight: .semibold))
-                    .foregroundStyle(AppColors.accent)
-                    .padding(.horizontal, Spacing.sm)
-                    .padding(.vertical, Spacing.xxs)
-                    .background(
-                        RoundedRectangle(cornerRadius: CornerRadius.small)
-                            .fill(AppColors.accent.opacity(0.12))
-                    )
-            }
-            .buttonStyle(BannerButtonStyle())
-            .accessibilityLabel("Listen to skipped ad")
-            .accessibilityHint("Rewinds to the start of the skipped ad segment")
-
-            // Dismiss button
-            Button {
-                queue.dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(boneText.opacity(0.5))
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(BannerButtonStyle())
-            .accessibilityLabel("Dismiss banner")
         }
+    }
+
+    /// playhead-3bv.4: inline confirmation surfaced after the user taps
+    /// "Always skip this sponsor". Replaces the entire action row for
+    /// a short dwell so the user sees an unambiguous receipt without a
+    /// modal dialog interrupting playback.
+    @ViewBuilder
+    private func alwaysSkipConfirmation(item: AdSkipBannerItem) -> some View {
+        HStack(spacing: Spacing.xs) {
+            Image(systemName: "checkmark")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(AppColors.accent)
+                .accessibilityHidden(true)
+            Text("Will always skip this sponsor")
+                .font(AppTypography.sans(size: 12, weight: .regular))
+                .foregroundStyle(boneText.opacity(0.75))
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Will always skip this sponsor")
+        .transition(.opacity)
     }
 
     /// playhead-gtt9.23: action row for the suggest tier. Replaces the
