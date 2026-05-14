@@ -1555,9 +1555,18 @@ private extension SettingsView {
                                 // time, not re-read per-evaluation. A
                                 // mid-episode flip therefore changes
                                 // behaviour on the next play-started
-                                // event rather than instantly; this
-                                // matches the 24cm/PreAnalysisConfig
-                                // rollback latency.
+                                // event rather than instantly. This is
+                                // the same "next-consumer-init" contract
+                                // that `2hpn` follows. (`24cm` is ALSO
+                                // `PreAnalysisConfig`-backed but
+                                // additionally applies live via
+                                // `DownloadManager.setUseDualBackgroundSessions(_:)`,
+                                // so its effective rollback is instant
+                                // — NOT the same contract as `xr3t`.
+                                // R12 doc audit: previously this comment
+                                // claimed parity with 24cm, which is
+                                // false for the same reason R11 fixed
+                                // the 2hpn block above.)
                                 LightweightInventoryChecksSettings(enabled: newValue).save()
                             } else if slug == "2hpn" {
                                 // playhead-2hpn: persist the
@@ -1567,8 +1576,17 @@ private extension SettingsView {
                                 // `AdDetectionService` init (next app
                                 // launch) — the service caches the
                                 // config snapshot at init time per its
-                                // doc comment. Same rollback-latency
-                                // contract as 24cm/xr3t.
+                                // doc comment. Same "next-consumer-init"
+                                // rollback contract as `xr3t`. (NOT the
+                                // same as `24cm`: 24cm additionally
+                                // applies live via
+                                // `DownloadManager.setUseDualBackgroundSessions(_:)`,
+                                // so its rollback is instant. R12 doc
+                                // audit: the prior "Same … contract as
+                                // 24cm/xr3t" was wrong — only the xr3t
+                                // half held. See the upper doc block on
+                                // this DisclosureGroup, which R11 already
+                                // corrected.)
                                 var config = PreAnalysisConfig.load()
                                 config.scopedMusicBedGeneralization = newValue
                                 config.save()
