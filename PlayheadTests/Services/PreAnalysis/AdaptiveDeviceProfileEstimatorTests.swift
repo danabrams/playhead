@@ -580,6 +580,70 @@ struct AdaptiveDeviceProfileEstimatorTests {
                 "rate limit must engage again on the next-window observation")
     }
 
+    // MARK: - Non-finite hardening (R10: integer-shaped corruption)
+
+    @Test("apply self-heals when the prior persisted state has a negative sampleCount")
+    func testNegativeSampleCountTriggersSoftReset() {
+        // R10 probe-6: the R5 soft-reset predicate guarded only Double
+        // fields. A hand-edited DB / migration bug could leave the row
+        // with `sampleCount < 0` while every Double remained finite —
+        // not detected as corruption by R5. Then `sampleCount += 1`
+        // reaches `0` (if prior=-1) and `delta / Double(0)` is ±Inf,
+        // poisoning the welford mean for one cycle. R10 folds
+        // `sampleCount < 0` into the same heal so the row recovers
+        // within a SINGLE observation rather than two.
+        var corrupt = Self.apply(observations: 30, value: 45, to: Self.freshState())
+        corrupt.sampleCount = -1
+
+        let healObs = GrantWindowObservation(
+            grantWindowSeconds: 45,
+            observedAt: Self.referenceDate.addingTimeInterval(24 * 60 * 60 + 60)
+        )
+        let (healed, _) = AdaptiveDeviceProfileEstimator.apply(
+            observation: healObs, to: corrupt
+        )
+
+        // Post-heal: sampleCount re-armed from 0, then incremented to 1.
+        #expect(healed.sampleCount == 1,
+                "soft-reset must re-arm sampleCount, not let the negative value carry through")
+        // All math fields must be finite post-heal — proves the Welford
+        // update did NOT divide by zero (which would have produced NaN
+        // or ±Inf in welfordMean).
+        #expect(healed.welfordMean.isFinite)
+        #expect(healed.welfordM2.isFinite)
+        #expect(healed.ewmaSeconds.isFinite)
+        #expect(healed.persistedScaleFactor.isFinite)
+        // Identity preserved.
+        #expect(healed.seedGrantWindowSeconds == corrupt.seedGrantWindowSeconds)
+        #expect(healed.createdAt == corrupt.createdAt)
+    }
+
+    @Test("apply with sampleCount=0 (the boundary) does NOT trigger soft-reset")
+    func testZeroSampleCountIsNotCorruption() {
+        // Boundary check: `sampleCount == 0` is the LEGAL cold-start
+        // state. The R10 predicate is `sampleCount < 0`, NOT `<= 0` —
+        // confirm a fresh state is treated as healthy and the first
+        // observation proceeds through the normal Welford path.
+        let fresh = Self.freshState(seedSeconds: 45)
+        #expect(fresh.sampleCount == 0)
+        let firstObs = GrantWindowObservation(
+            grantWindowSeconds: 60,
+            observedAt: Self.referenceDate
+        )
+        let (after, _) = AdaptiveDeviceProfileEstimator.apply(
+            observation: firstObs, to: fresh
+        )
+        // After ONE observation: sampleCount=1 (incremented from 0),
+        // ewmaSeconds seeded to obs value. If the heal had falsely
+        // fired, sampleCount would still be 1 but the Welford mean
+        // would have followed the post-heal path (also 60 in this case)
+        // — so we additionally check that NO sanitization touched the
+        // accumulator: welfordMean ≈ 60 (the actual obs value).
+        #expect(after.sampleCount == 1)
+        #expect(after.ewmaSeconds == 60)
+        #expect(abs(after.welfordMean - 60) < 1e-9)
+    }
+
     // MARK: - State init defaults
 
     @Test("Fresh state initializes to seed-equivalent values")

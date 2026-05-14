@@ -202,25 +202,52 @@ struct LearnedDeviceProfileDiagnosticRecord: Codable, Sendable, Equatable {
     /// Build a diagnostic record from a math-layer snapshot.
     /// Activation is derived against the supplied tuning (production
     /// always passes `.standard`).
+    ///
+    /// R10 encoder safety: every Double field is coerced through
+    /// `safeFinite(_:)`. `JSONEncoder` defaults to
+    /// `nonConformingFloatEncodingStrategy = .throw`, so a single
+    /// non-finite Double in the bundle would abort the entire
+    /// diagnostics export — exactly when the user is trying to ship us
+    /// the corruption evidence. The estimator's R5/R6 heal removes
+    /// non-finite math on the NEXT observation, but the diagnostics
+    /// path is read-only and reads BEFORE that next observation. Coerce
+    /// non-finite to 0 so encoding always succeeds; the support engineer
+    /// reading the bundle still sees the row's `sampleCount`,
+    /// `consecutiveClampedObservations`, and `activated` flags which
+    /// remain accurate enough to attribute the corruption. Empirically
+    /// SwiftData/SQLite normalises NaN Doubles to 0 at the storage
+    /// layer (see `corruptStoredRowDoublesHandledEndToEnd` test), so in
+    /// practice the coercion is a no-op on the production path; this
+    /// is pure defense-in-depth against a future storage layer that
+    /// preserves the corrupt bit pattern.
     static func from(
         snapshot: AdaptiveDeviceProfileState,
         tuning: AdaptiveDeviceProfileTuning = .standard
     ) -> LearnedDeviceProfileDiagnosticRecord {
         LearnedDeviceProfileDiagnosticRecord(
             deviceClass: snapshot.deviceClassRawValue,
-            seedGrantWindowSeconds: snapshot.seedGrantWindowSeconds,
+            seedGrantWindowSeconds: safeFinite(snapshot.seedGrantWindowSeconds),
             sampleCount: snapshot.sampleCount,
-            welfordMean: snapshot.welfordMean,
-            welfordVariance: snapshot.welfordVariance,
-            ewmaSeconds: snapshot.ewmaSeconds,
-            persistedScaleFactor: snapshot.persistedScaleFactor,
+            welfordMean: safeFinite(snapshot.welfordMean),
+            welfordVariance: safeFinite(snapshot.welfordVariance),
+            ewmaSeconds: safeFinite(snapshot.ewmaSeconds),
+            persistedScaleFactor: safeFinite(snapshot.persistedScaleFactor),
             activated: snapshot.isActivated(tuning: tuning),
             consecutiveClampedObservations: snapshot.consecutiveClampedObservations,
             lastRevertReason: snapshot.lastRevertReason?.rawValue,
-            lastNotchChangeAt: snapshot.lastNotchChangeAt?.timeIntervalSince1970,
-            createdAt: snapshot.createdAt.timeIntervalSince1970,
-            updatedAt: snapshot.updatedAt.timeIntervalSince1970,
+            lastNotchChangeAt: snapshot.lastNotchChangeAt
+                .map { safeFinite($0.timeIntervalSince1970) },
+            createdAt: safeFinite(snapshot.createdAt.timeIntervalSince1970),
+            updatedAt: safeFinite(snapshot.updatedAt.timeIntervalSince1970),
             schemaVersion: snapshot.schemaVersion
         )
+    }
+
+    /// Coerce a non-finite Double to 0 so `JSONEncoder` (which throws
+    /// on NaN / ±Inf by default) can always serialize the diagnostic
+    /// record. Finite values pass through unchanged. See the
+    /// `from(snapshot:)` doc-comment for the threat model.
+    private static func safeFinite(_ value: Double) -> Double {
+        value.isFinite ? value : 0
     }
 }

@@ -209,22 +209,32 @@ final class SwiftDataLearnedDeviceProfileStore: LearnedDeviceProfileProviding {
         // happened. Mirroring the math layer's entry guards keeps the
         // log truthful: it fires exactly when apply() will reach the
         // sanitization branch.
+        //
+        // R10 drift-mitigation: the `priorHadCorruptMath` predicate
+        // MUST mirror the math layer's soft-reset trigger exactly, or
+        // the log will silently desync from the heal it claims to
+        // describe. R10 extended the math heal to include
+        // `sampleCount < 0` (the integer-shaped cousin of non-finite
+        // math, see step (2) doc-comment in the estimator file); we
+        // mirror that addition here so the log keeps firing on the
+        // same axis the math layer heals on.
         let observationIsValid =
             observation.grantWindowSeconds.isFinite
             && observation.grantWindowSeconds > 0
             && observation.observedAt.timeIntervalSinceReferenceDate.isFinite
-        let priorHadNonFiniteMath =
+        let priorHadCorruptMath =
             !prior.welfordMean.isFinite
             || !prior.welfordM2.isFinite
             || !prior.ewmaSeconds.isFinite
             || !prior.persistedScaleFactor.isFinite
+            || prior.sampleCount < 0
         let priorHadNonFiniteDate: Bool = {
             guard let last = prior.lastNotchChangeAt else { return false }
             return !last.timeIntervalSinceReferenceDate.isFinite
         }()
-        if observationIsValid && (priorHadNonFiniteMath || priorHadNonFiniteDate) {
+        if observationIsValid && (priorHadCorruptMath || priorHadNonFiniteDate) {
             logger.notice(
-                "LearnedDeviceProfile soft-reset triggered for \(deviceClass.rawValue, privacy: .public) math=\(priorHadNonFiniteMath, privacy: .public) date=\(priorHadNonFiniteDate, privacy: .public)"
+                "LearnedDeviceProfile soft-reset triggered for \(deviceClass.rawValue, privacy: .public) math=\(priorHadCorruptMath, privacy: .public) date=\(priorHadNonFiniteDate, privacy: .public)"
             )
         }
         let (next, result) = AdaptiveDeviceProfileEstimator.apply(

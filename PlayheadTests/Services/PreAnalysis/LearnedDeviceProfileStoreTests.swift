@@ -700,6 +700,68 @@ struct LearnedDeviceProfileStoreTests {
         #expect(decoded == original)
     }
 
+    @Test("R10: Diagnostic record encoding succeeds even when the source snapshot has non-finite Doubles")
+    func diagnosticRecordCoercesNonFiniteDoublesForEncoder() throws {
+        // R10 probe-6: `JSONEncoder` defaults to
+        // `nonConformingFloatEncodingStrategy = .throw`, so a single
+        // non-finite Double anywhere in the diagnostics bundle aborts
+        // the entire export. The estimator's R5/R6 heal removes
+        // non-finite math on the NEXT recordObservation, but the
+        // diagnostics path is read-only: it reads the snapshot directly
+        // from SwiftData and projects it into the wire record. A user
+        // shipping us a corruption-evidence bundle would hit the throw
+        // BEFORE the heal had a chance to run. Coerce non-finite to 0
+        // in `from(snapshot:)` so the encoder always succeeds and the
+        // support engineer still sees `sampleCount`,
+        // `consecutiveClampedObservations`, and `activated` (all
+        // unaffected by the coercion).
+        let corrupt = AdaptiveDeviceProfileState(
+            deviceClassRawValue: DeviceClass.iPhone17Pro.rawValue,
+            seedGrantWindowSeconds: .nan,
+            welfordMean: .infinity,
+            welfordM2: -.infinity,
+            sampleCount: 30,
+            ewmaSeconds: .nan,
+            persistedScaleFactor: .nan,
+            lastNotchChangeAt: Date(timeIntervalSinceReferenceDate: .nan),
+            consecutiveClampedObservations: 5,
+            lastRevertReason: nil,
+            // createdAt / updatedAt have non-finite Doubles backing them.
+            createdAt: Date(timeIntervalSinceReferenceDate: .infinity),
+            updatedAt: Date(timeIntervalSinceReferenceDate: .nan),
+            schemaVersion: 1
+        )
+        let record = LearnedDeviceProfileDiagnosticRecord.from(snapshot: corrupt)
+
+        // Every Double-typed field on the record must be finite — the
+        // coercion contract.
+        #expect(record.seedGrantWindowSeconds.isFinite)
+        #expect(record.welfordMean.isFinite)
+        #expect(record.welfordVariance.isFinite)
+        #expect(record.ewmaSeconds.isFinite)
+        #expect(record.persistedScaleFactor.isFinite)
+        #expect(record.createdAt.isFinite)
+        #expect(record.updatedAt.isFinite)
+        if let last = record.lastNotchChangeAt {
+            #expect(last.isFinite)
+        }
+
+        // The integer / Bool / String fields pass through unchanged.
+        #expect(record.sampleCount == 30)
+        #expect(record.consecutiveClampedObservations == 5)
+        #expect(record.activated == true)  // sampleCount >= 30
+        #expect(record.deviceClass == DeviceClass.iPhone17Pro.rawValue)
+        #expect(record.schemaVersion == 1)
+
+        // The core contract: encoding succeeds. Without the R10 coercion
+        // this would throw `EncodingError.invalidValue` on the first
+        // non-finite Double.
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(record)
+        #expect(!data.isEmpty,
+                "JSONEncoder must successfully serialize the coerced record")
+    }
+
     @Test("Diagnostic record activation flag tracks sample count vs tuning floor")
     func diagnosticRecordActivationFlagIsCorrect() throws {
         let belowFloor = AdaptiveDeviceProfileState(

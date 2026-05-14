@@ -420,10 +420,24 @@ enum AdaptiveDeviceProfileEstimator {
         // until this step. Sample count is zeroed too so the
         // activation floor re-armed (the EWMA needs fresh observations
         // to converge — replaying old observations is not possible).
+        //
+        // R10 sampleCount addition: Int columns do not have a non-finite
+        // bit pattern, but a hand-edited DB / migration bug / unfortunate
+        // sign-flip could leave the row with `sampleCount < 0`. The R5
+        // predicate guarded only the Double fields, so a negative
+        // sampleCount would survive into the Welford update (`sampleCount
+        // += 1` reaches `0`, then `delta / Double(0)` is ±Inf and the
+        // running mean is poisoned for one cycle until the next apply
+        // triggers the R5 heal). Treat `sampleCount < 0` as the integer-
+        // shaped cousin of "non-finite math": fold it into the same
+        // heal branch so the row recovers within ONE observation rather
+        // than two, AND so the store-layer R8 log fires on this axis too
+        // (the predicate in `recordObservation` mirrors this list).
         if !next.welfordMean.isFinite
             || !next.welfordM2.isFinite
             || !next.ewmaSeconds.isFinite
-            || !next.persistedScaleFactor.isFinite {
+            || !next.persistedScaleFactor.isFinite
+            || next.sampleCount < 0 {
             next.welfordMean = 0
             next.welfordM2 = 0
             next.sampleCount = 0
