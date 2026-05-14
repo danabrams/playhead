@@ -378,6 +378,33 @@ enum AdaptiveDeviceProfileEstimator {
                 clampSaturatedThisObservation: false
             ))
         }
+        // (1b) Drop observations whose `observedAt` is non-finite.
+        // R7 symmetry probe: R6 sanitized the STORED `lastNotchChangeAt`,
+        // but `obs.observedAt` itself is the OTHER side of the same
+        // comparison (`obs.observedAt.timeIntervalSince(last)` further
+        // down). If the caller hands us a `Date(timeIntervalSinceReferenceDate:
+        // .nan)` — pathological but representable — the rate-limit guard
+        // returns NaN from the subtraction and `NaN < notchWindowSeconds`
+        // is false, so the 24-h limit silently fails open (identical bug
+        // pattern to the R6 stored-side fix). The corrupt date would
+        // ALSO get stored as the new `lastNotchChangeAt` / `updatedAt`,
+        // corrupting diagnostic data and forcing the next-observation
+        // soft-reset path to clean it up. Dropping at the entry guard
+        // keeps both invariants (rate-limit closed, stored Dates finite)
+        // intact in one place. The production write seam guards against
+        // this too (its `grantWindowSeconds.isFinite` already filters a
+        // non-finite `nowDate` because the duration arithmetic
+        // propagates NaN), but library code must defend independently —
+        // test/future callers that construct `GrantWindowObservation`
+        // directly do not go through the write seam.
+        guard obs.observedAt.timeIntervalSinceReferenceDate.isFinite else {
+            return (state, AdaptiveDeviceProfileApplyResult(
+                persistedScaleFactorChanged: false,
+                didRevertToSeed: false,
+                blockedByNotchRateLimit: false,
+                clampSaturatedThisObservation: false
+            ))
+        }
 
         var next = state
 

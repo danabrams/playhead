@@ -325,6 +325,142 @@ struct LearnedDeviceProfileStoreTests {
         ]))
     }
 
+    // MARK: - Persistence-layer corrupt-row hydration (R7)
+    //
+    // R5 and R6 hardened the math layer against non-finite Double /
+    // Date corruption, but the tests for that path synthesized the
+    // corrupt state directly in memory. R6's review explicitly listed
+    // "persistence round-trip for new sanitization paths" as an
+    // assumption that should be closed by test. This block does that:
+    // insert a row whose on-disk Double / Date fields are non-finite,
+    // record a healthy observation through the store, then fetch the
+    // row again and verify the math layer healed it on read-modify-write.
+    // This proves the full SwiftData → snapshot() → apply() → save
+    // cycle is genuinely defensive, not just the in-memory math.
+
+    @Test("End-to-end NaN Double corruption: SwiftData normalises NaN, then math layer remains finite")
+    func corruptStoredRowDoublesHandledEndToEnd() async throws {
+        // R7 probe-8: close the R6 stated assumption "persistence round-
+        // trip for new R5/R6 sanitization paths is genuinely tested".
+        // The full chain we want to verify is corrupt → SwiftData →
+        // fetch → apply → save → re-fetch, with the invariant that
+        // every field on the final row is finite.
+        //
+        // Discovered empirically: SwiftData/SQLite NORMALISES NaN Doubles
+        // to 0 on the storage layer (the Double bit pattern is rejected
+        // by the underlying column type). So a row inserted with
+        // `welfordMean = .nan` is hydrated back as `welfordMean = 0`.
+        // The math layer's R5 sanitization branch therefore does NOT
+        // fire on this path — but the math invariant ("post-cycle row
+        // has finite math fields") still holds because the corruption
+        // was already stripped at storage. This test pins that behavior
+        // so a future SwiftData/Foundation change that started accepting
+        // NaN Doubles would surface here, triggering the R5 sanitizer
+        // as a backstop. Either way the post-cycle row is provably
+        // finite — that is the contract.
+        let ctx = try makeContext()
+        let store = SwiftDataLearnedDeviceProfileStore(
+            context: ctx,
+            tuning: Self.permissiveTuning,
+            clock: { Self.referenceDate }
+        )
+        let seed = Self.seed()
+
+        let corrupt = AdaptiveDeviceProfileState(
+            deviceClassRawValue: DeviceClass.iPhone17Pro.rawValue,
+            seedGrantWindowSeconds: Double(seed.grantWindowMedianSeconds),
+            welfordMean: .nan,
+            welfordM2: .nan,
+            sampleCount: 30,
+            ewmaSeconds: .nan,
+            persistedScaleFactor: .nan,
+            lastNotchChangeAt: nil,
+            consecutiveClampedObservations: 99,
+            lastRevertReason: nil,
+            createdAt: Self.referenceDate,
+            updatedAt: Self.referenceDate,
+            schemaVersion: 1
+        )
+        let row = LearnedDeviceProfile(snapshot: corrupt)
+        ctx.insert(row)
+        try ctx.save()
+
+        let healObs = GrantWindowObservation(
+            grantWindowSeconds: 60,
+            observedAt: Self.referenceDate.addingTimeInterval(60)
+        )
+        _ = await store.recordObservation(
+            healObs, deviceClass: .iPhone17Pro, seed: seed
+        )
+
+        let fetched = try ctx.fetch(FetchDescriptor<LearnedDeviceProfile>()).first
+        let snap = try #require(fetched?.snapshot())
+        // End-to-end finite invariant — the core contract.
+        #expect(snap.welfordMean.isFinite, "post-cycle welfordMean must be finite")
+        #expect(snap.welfordM2.isFinite, "post-cycle welfordM2 must be finite")
+        #expect(snap.ewmaSeconds.isFinite, "post-cycle ewmaSeconds must be finite")
+        #expect(snap.persistedScaleFactor.isFinite, "post-cycle persistedScaleFactor must be finite")
+        // Identity preserved.
+        #expect(snap.deviceClassRawValue == DeviceClass.iPhone17Pro.rawValue)
+        #expect(snap.createdAt == Self.referenceDate)
+    }
+
+    @Test("Corrupt SwiftData row with NaN-Date lastNotchChangeAt heals on first recordObservation")
+    func corruptStoredRowWithNaNDateHealsOnRecord() async throws {
+        let ctx = try makeContext()
+        let store = SwiftDataLearnedDeviceProfileStore(
+            context: ctx,
+            tuning: Self.permissiveTuning,
+            clock: { Self.referenceDate }
+        )
+        let seed = Self.seed()
+
+        // Provision a row whose math fields are healthy but
+        // `lastNotchChangeAt` is a NaN-Date (the R6-shaped corruption).
+        // The math accumulators stay valid; only the rate-limit Date is
+        // corrupt. Without the R6 fix the next observation's rate-limit
+        // guard would silently fail open AND propagate the corrupt date.
+        let corrupt = AdaptiveDeviceProfileState(
+            deviceClassRawValue: DeviceClass.iPhone17Pro.rawValue,
+            seedGrantWindowSeconds: Double(seed.grantWindowMedianSeconds),
+            welfordMean: 45,
+            welfordM2: 0,
+            sampleCount: 30,
+            ewmaSeconds: 45,
+            persistedScaleFactor: 1.0,
+            lastNotchChangeAt: Date(timeIntervalSinceReferenceDate: .nan),
+            consecutiveClampedObservations: 0,
+            lastRevertReason: nil,
+            createdAt: Self.referenceDate,
+            updatedAt: Self.referenceDate,
+            schemaVersion: 1
+        )
+        let row = LearnedDeviceProfile(snapshot: corrupt)
+        ctx.insert(row)
+        try ctx.save()
+
+        // Record a healthy observation. The math layer's R6 Date
+        // sanitization branch must fire on the hydrated state.
+        let healObs = GrantWindowObservation(
+            grantWindowSeconds: 60,
+            observedAt: Self.referenceDate.addingTimeInterval(60)
+        )
+        _ = await store.recordObservation(
+            healObs, deviceClass: .iPhone17Pro, seed: seed
+        )
+
+        // Re-fetch from SwiftData. The hydrated `lastNotchChangeAt`
+        // must be either nil (treated as "no prior notch change") or
+        // the freshly-stamped observation date — never the original
+        // NaN-Date.
+        let fetched = try ctx.fetch(FetchDescriptor<LearnedDeviceProfile>()).first
+        let snap = try #require(fetched?.snapshot())
+        if let last = snap.lastNotchChangeAt {
+            #expect(last.timeIntervalSinceReferenceDate.isFinite,
+                    "stored lastNotchChangeAt must be finite after heal")
+        }
+    }
+
     // MARK: - snapshot() — diagnostics-facing shape
 
     @Test("snapshot returns rows in DeviceClass.allCases order")

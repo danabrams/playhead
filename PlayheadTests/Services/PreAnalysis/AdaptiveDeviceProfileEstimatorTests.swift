@@ -484,6 +484,50 @@ struct AdaptiveDeviceProfileEstimatorTests {
         #expect(healed.persistedScaleFactor == 1.0, "scale factor pins back to 1.0 on heal")
     }
 
+    @Test("apply drops an observation whose observedAt is non-finite (symmetry with stored lastNotchChangeAt fix)")
+    func testNonFiniteObservedAtDropped() {
+        // R7 symmetry probe: R6 sanitized the STORED side
+        // (`lastNotchChangeAt`), but a corrupt `obs.observedAt` causes
+        // the SAME NaN-comparison fail-open in the rate-limit guard
+        // (line 517: `obs.observedAt.timeIntervalSince(last)` returns
+        // NaN if either operand is non-finite). Without the entry-guard
+        // drop, a single bad-Date observation would (a) silently
+        // bypass the 24-h rate limit AND (b) get stored as
+        // `lastNotchChangeAt` / `updatedAt`, corrupting diagnostic data
+        // until the next observation triggers the R6 stored-side
+        // sanitizer. Drop at the entry guard so neither happens.
+        let state = Self.apply(observations: 30, value: 90, to: Self.freshState())
+        let priorFactor = state.persistedScaleFactor
+        let priorLastNotch = state.lastNotchChangeAt
+        let priorUpdatedAt = state.updatedAt
+
+        // NaN-Date observedAt.
+        let nanDateObs = GrantWindowObservation(
+            grantWindowSeconds: 90,
+            observedAt: Date(timeIntervalSinceReferenceDate: .nan)
+        )
+        let (afterNaN, resultNaN) = AdaptiveDeviceProfileEstimator.apply(
+            observation: nanDateObs, to: state
+        )
+        #expect(afterNaN == state, "non-finite observedAt must leave state byte-equal")
+        #expect(resultNaN.persistedScaleFactorChanged == false)
+        #expect(resultNaN.didRevertToSeed == false)
+        // Stored Dates must not have been overwritten with the corrupt value.
+        #expect(afterNaN.lastNotchChangeAt == priorLastNotch)
+        #expect(afterNaN.updatedAt == priorUpdatedAt)
+        #expect(afterNaN.persistedScaleFactor == priorFactor)
+
+        // +Infinity-Date observedAt (the other non-finite shape).
+        let infDateObs = GrantWindowObservation(
+            grantWindowSeconds: 90,
+            observedAt: Date(timeIntervalSinceReferenceDate: .infinity)
+        )
+        let (afterInf, _) = AdaptiveDeviceProfileEstimator.apply(
+            observation: infDateObs, to: state
+        )
+        #expect(afterInf == state, "non-finite (Inf) observedAt must also leave state byte-equal")
+    }
+
     @Test("apply coerces a corrupt (non-finite) lastNotchChangeAt to nil so the rate limit does not silently fail open")
     func testCorruptLastNotchChangeAtCoercedToNil() {
         // R6: a SwiftData row with a NaN-Date `lastNotchChangeAt`
