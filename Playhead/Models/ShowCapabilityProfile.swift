@@ -54,8 +54,11 @@ final class ShowCapabilityProfile {
 
     /// Total number of episodes of this show that have reached an
     /// analysis-completed terminal state. The activation floor (≥ 5)
-    /// is checked against this counter — see
-    /// `ShowCapabilityProfileEvaluator.activationFloorEpisodeCount`.
+    /// is checked against this counter by
+    /// `ShowCapabilityProfileEvaluator.classify(...)` reading
+    /// `ShowCapabilityProfile.activationFloorEpisodeCount` (the
+    /// constant lives on THIS type — see below — to keep the floor
+    /// alongside the per-predicate thresholds).
     var completedEpisodeCount: Int
 
     /// Number of those episodes whose detected ads were matched to

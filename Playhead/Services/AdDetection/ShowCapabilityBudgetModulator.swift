@@ -3,11 +3,17 @@
 // `ShowCapabilityProfileKind` into a budget adjustment the
 // per-show analysis path can apply.
 //
-// V1-additive scope (h6a6 R2 doc audit): both outputs below are
-// value-typed contracts produced at the end of every `runBackfill`
-// and stamped on `AdDetectionService.lastCapabilityBudgetAdjustment`
-// (test-observable via `lastCapabilityBudgetAdjustmentForTesting()`).
-// Neither output has a production CONSUMER as of this bead:
+// V1-additive scope (h6a6 R3 doc audit): both outputs below are
+// value-typed contracts produced at the READ path early in every
+// `runBackfill` (right after the per-show music-bed snapshot is
+// resolved, BEFORE any per-span scoring) and stamped on
+// `AdDetectionService.lastCapabilityBudgetAdjustment` (test-observable
+// via `lastCapabilityBudgetAdjustmentForTesting()`). The per-episode
+// capability-profile WRITE path runs separately at the END of
+// `runBackfill` (after all spans are persisted) and feeds the
+// observation counters back into the store; the budget adjustment
+// stamped here is derived from the PRE-write snapshot the read path
+// fetched. Neither output has a production CONSUMER as of this bead:
 //   * The multiplier is emitted in a single `[h6a6]` log line —
 //     no `runBackfill` consumer multiplies its per-episode budget by
 //     it. The "≥ 15% compute reduction" acceptance is enforced as a
