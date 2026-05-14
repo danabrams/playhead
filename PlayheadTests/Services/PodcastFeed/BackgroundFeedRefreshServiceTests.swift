@@ -22,9 +22,25 @@ import Testing
 /// Returned by `StubPodcastEnumerator` so the handler can compute a diff
 /// without holding a live SwiftData ModelContext. Mirrors the shape the
 /// production enumerator surfaces via a `@MainActor` fetch.
+///
+/// `autoDownloadOverride` (playhead-5w4) lets the per-show override
+/// flow through stubs without the test author having to touch SwiftData.
+/// Default `nil` keeps existing tests source-compatible (they all
+/// implicitly assert "inherit global").
 private struct PodcastFeedSnapshot: Sendable, Equatable {
     let feedURL: URL
     let existingEpisodeGUIDs: Set<String>
+    let autoDownloadOverride: AutoDownloadOnSubscribe?
+
+    init(
+        feedURL: URL,
+        existingEpisodeGUIDs: Set<String>,
+        autoDownloadOverride: AutoDownloadOnSubscribe? = nil
+    ) {
+        self.feedURL = feedURL
+        self.existingEpisodeGUIDs = existingEpisodeGUIDs
+        self.autoDownloadOverride = autoDownloadOverride
+    }
 }
 
 /// New episode record produced by a refresh pass. The handler hands
@@ -46,7 +62,8 @@ private actor StubPodcastEnumerator: PodcastEnumerating {
         snapshots.map {
             FeedRefreshPodcastSnapshot(
                 feedURL: $0.feedURL,
-                existingEpisodeGUIDs: $0.existingEpisodeGUIDs
+                existingEpisodeGUIDs: $0.existingEpisodeGUIDs,
+                autoDownloadOverride: $0.autoDownloadOverride
             )
         }
     }
@@ -85,9 +102,13 @@ private actor StubFeedRefresher: FeedRefreshing {
             throw error
         }
         let records = newEpisodesByFeedURL[feedURL] ?? []
+        // playhead-5w4: tag each surfaced episode with the originating
+        // feed URL so the handler can group by podcast and resolve the
+        // per-show override.
         return records.map {
             FeedRefreshNewEpisode(
                 canonicalEpisodeKey: $0.canonicalEpisodeKey,
+                feedURL: feedURL,
                 audioURL: $0.audioURL,
                 publishedAt: $0.publishedAt
             )
@@ -433,6 +454,213 @@ struct BackgroundFeedRefreshAutoDownloadSettingTests {
         let enqueued = Set(await downloader.enqueuedEpisodeIds())
         #expect(enqueued == Set(["ep-1", "ep-2", "ep-3"]),
                 ".last3 must enqueue only the three newest by publishedAt")
+    }
+}
+
+// MARK: - Per-podcast override (playhead-5w4)
+
+/// Pins the wiring contract for the per-show override: enumeration
+/// carries the override forward, the handler resolves
+/// `override ?? global` per feed, and per-show choices never leak
+/// across podcasts in the same refresh fire.
+@Suite("BackgroundFeedRefreshService — per-show auto-download override (playhead-5w4)")
+struct BackgroundFeedRefreshPerShowOverrideTests {
+
+    @Test("Per-show .off override suppresses downloads even when global is .all")
+    func perShowOffWinsOverGlobalAll() async throws {
+        let feed = URL(string: "https://example.com/a.xml")!
+        let (service, _, refresher, downloader, _) = makeService(
+            podcasts: [
+                PodcastFeedSnapshot(
+                    feedURL: feed,
+                    existingEpisodeGUIDs: [],
+                    autoDownloadOverride: .off
+                )
+            ],
+            // Global setting is "All" — the bead's motivating user
+            // story is a noisy show the user wants to silence without
+            // changing their global pick.
+            setting: .all
+        )
+        await refresher.setNewEpisodes(
+            [
+                newRecord(key: "ep-new-1", feed: feed),
+                newRecord(key: "ep-new-2", feed: feed),
+            ],
+            for: feed
+        )
+
+        let task = StubBackgroundTask()
+        await service.handleFeedRefreshTask(task)
+
+        let enqueued = await downloader.enqueuedEpisodeIds()
+        #expect(enqueued.isEmpty,
+                "Per-show .off must suppress all enqueues even when the global is .all")
+    }
+
+    @Test("Per-show .all override enqueues every new episode even when global is .off")
+    func perShowAllWinsOverGlobalOff() async throws {
+        let feed = URL(string: "https://example.com/a.xml")!
+        let (service, _, refresher, downloader, _) = makeService(
+            podcasts: [
+                PodcastFeedSnapshot(
+                    feedURL: feed,
+                    existingEpisodeGUIDs: [],
+                    autoDownloadOverride: .all
+                )
+            ],
+            // Global setting is "Off" — the bead's other motivating
+            // story is a favorite the user wants to auto-download
+            // without flipping their global to "All".
+            setting: .off
+        )
+        await refresher.setNewEpisodes(
+            [
+                newRecord(key: "ep-new-1", feed: feed),
+                newRecord(key: "ep-new-2", feed: feed),
+            ],
+            for: feed
+        )
+
+        let task = StubBackgroundTask()
+        await service.handleFeedRefreshTask(task)
+
+        let enqueued = Set(await downloader.enqueuedEpisodeIds())
+        #expect(enqueued == Set(["ep-new-1", "ep-new-2"]),
+                "Per-show .all must enqueue every new episode even when the global is .off")
+    }
+
+    @Test("Nil override falls back to the global setting")
+    func nilOverrideFollowsGlobal() async throws {
+        let feed = URL(string: "https://example.com/a.xml")!
+        let (service, _, refresher, downloader, _) = makeService(
+            podcasts: [
+                PodcastFeedSnapshot(
+                    feedURL: feed,
+                    existingEpisodeGUIDs: [],
+                    autoDownloadOverride: nil
+                )
+            ],
+            setting: .all
+        )
+        await refresher.setNewEpisodes(
+            [newRecord(key: "ep-new-1", feed: feed)],
+            for: feed
+        )
+
+        let task = StubBackgroundTask()
+        await service.handleFeedRefreshTask(task)
+
+        let enqueued = await downloader.enqueuedEpisodeIds()
+        #expect(enqueued == ["ep-new-1"],
+                "Nil override must inherit the global .all and enqueue the new episode")
+    }
+
+    @Test("Per-show overrides do not leak across podcasts in the same refresh fire")
+    func overridesAreIsolatedPerPodcast() async throws {
+        // Three feeds in one refresh fire, each with a different
+        // policy. The selection must group by feedURL and apply the
+        // resolved-per-podcast policy — a bug that re-introduced the
+        // pre-fix global-flat path would produce different counts.
+        let feedA = URL(string: "https://example.com/a.xml")!
+        let feedB = URL(string: "https://example.com/b.xml")!
+        let feedC = URL(string: "https://example.com/c.xml")!
+        let (service, _, refresher, downloader, _) = makeService(
+            podcasts: [
+                // Show A: inherit global (.last3).
+                PodcastFeedSnapshot(
+                    feedURL: feedA,
+                    existingEpisodeGUIDs: [],
+                    autoDownloadOverride: nil
+                ),
+                // Show B: explicit .off, ignoring the global.
+                PodcastFeedSnapshot(
+                    feedURL: feedB,
+                    existingEpisodeGUIDs: [],
+                    autoDownloadOverride: .off
+                ),
+                // Show C: explicit .last1, ignoring the global.
+                PodcastFeedSnapshot(
+                    feedURL: feedC,
+                    existingEpisodeGUIDs: [],
+                    autoDownloadOverride: .last1
+                ),
+            ],
+            setting: .last3
+        )
+        let t0 = Date.now
+        // Each feed publishes four new episodes with distinct dates.
+        for (feed, prefix) in [(feedA, "a"), (feedB, "b"), (feedC, "c")] {
+            await refresher.setNewEpisodes(
+                [
+                    newRecord(key: "\(prefix)-1", feed: feed, published: t0),
+                    newRecord(key: "\(prefix)-2", feed: feed, published: t0.addingTimeInterval(-100)),
+                    newRecord(key: "\(prefix)-3", feed: feed, published: t0.addingTimeInterval(-200)),
+                    newRecord(key: "\(prefix)-4", feed: feed, published: t0.addingTimeInterval(-300)),
+                ],
+                for: feed
+            )
+        }
+
+        let task = StubBackgroundTask()
+        await service.handleFeedRefreshTask(task)
+
+        let enqueued = Set(await downloader.enqueuedEpisodeIds())
+        // A: inherit .last3 → top 3 newest (a-1, a-2, a-3).
+        // B: .off → none.
+        // C: .last1 → top 1 newest (c-1).
+        let expected = Set(["a-1", "a-2", "a-3", "c-1"])
+        #expect(enqueued == expected,
+                "Per-show overrides must apply independently; got \(enqueued.sorted())")
+    }
+
+    @Test("Override .last1 picks the newest from this show's episodes only, ignoring other feeds")
+    func overrideLastNSortsWithinFeed() async throws {
+        // If the handler accidentally sorted-and-cut globally, the
+        // newest episode across all feeds would win and this show's
+        // newest could be lost. Pin the per-feed sort.
+        let feedA = URL(string: "https://example.com/a.xml")!
+        let feedB = URL(string: "https://example.com/b.xml")!
+        let (service, _, refresher, downloader, _) = makeService(
+            podcasts: [
+                PodcastFeedSnapshot(
+                    feedURL: feedA,
+                    existingEpisodeGUIDs: [],
+                    autoDownloadOverride: .last1
+                ),
+                PodcastFeedSnapshot(
+                    feedURL: feedB,
+                    existingEpisodeGUIDs: [],
+                    autoDownloadOverride: .last1
+                ),
+            ],
+            setting: .off
+        )
+        let t0 = Date.now
+        // Feed A's "newest" is older than feed B's "newest". A global-
+        // flat sort would pick only feed B's; the per-feed sort picks
+        // one from each.
+        await refresher.setNewEpisodes(
+            [
+                newRecord(key: "a-newest", feed: feedA, published: t0.addingTimeInterval(-500)),
+                newRecord(key: "a-older",  feed: feedA, published: t0.addingTimeInterval(-600)),
+            ],
+            for: feedA
+        )
+        await refresher.setNewEpisodes(
+            [
+                newRecord(key: "b-newest", feed: feedB, published: t0),
+                newRecord(key: "b-older",  feed: feedB, published: t0.addingTimeInterval(-100)),
+            ],
+            for: feedB
+        )
+
+        let task = StubBackgroundTask()
+        await service.handleFeedRefreshTask(task)
+
+        let enqueued = Set(await downloader.enqueuedEpisodeIds())
+        #expect(enqueued == Set(["a-newest", "b-newest"]),
+                "Each per-show .last1 must pick its own feed's newest; got \(enqueued.sorted())")
     }
 }
 

@@ -74,6 +74,7 @@ struct BackgroundFeedRefreshAnnouncementTests {
             [
                 FeedRefreshNewEpisode(
                     canonicalEpisodeKey: "a-1",
+                    feedURL: feedA,
                     audioURL: URL(string: "https://example.com/a-1.mp3")!,
                     publishedAt: .now
                 )
@@ -84,11 +85,13 @@ struct BackgroundFeedRefreshAnnouncementTests {
             [
                 FeedRefreshNewEpisode(
                     canonicalEpisodeKey: "b-1",
+                    feedURL: feedB,
                     audioURL: URL(string: "https://example.com/b-1.mp3")!,
                     publishedAt: .now
                 ),
                 FeedRefreshNewEpisode(
                     canonicalEpisodeKey: "b-2",
+                    feedURL: feedB,
                     audioURL: URL(string: "https://example.com/b-2.mp3")!,
                     publishedAt: .now
                 ),
@@ -150,6 +153,7 @@ struct BackgroundFeedRefreshAnnouncementTests {
         await refresher.setNew(
             [FeedRefreshNewEpisode(
                 canonicalEpisodeKey: "k",
+                feedURL: feed,
                 audioURL: URL(string: "https://example.com/k.mp3")!,
                 publishedAt: .now
             )],
