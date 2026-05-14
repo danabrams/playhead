@@ -151,6 +151,26 @@ struct FusionWeightConfig: Sendable {
         // (`RepeatedAdCacheConfig.init`, `ScoreCalibrationProfile.init`,
         // …). Consistency + always-on enforcement together justify the
         // upgrade.
+        //
+        // R6 (adversarial probe #3): the coupling check is intentionally
+        // ASYMMETRIC across caps — only `musicBedCap` carries one.
+        // Rationale: producers of every other source kind compute their
+        // emitted weight as a fraction of (or strictly bounded by) the
+        // corresponding cap — e.g. `MusicBedLedgerEvaluator` legacy path
+        // emits `presenceFraction * acousticCap`,
+        // `buildAcousticPipelineLedgerEntries` emits
+        // `maxCombined * acousticCap`, `buildCatalogLedgerEntries` emits
+        // `count * 0.05 * catalogCap`, `ChapterMetadataEvidenceBuilder`
+        // emits `0.10 < metadataCap = 0.15`. None can structurally
+        // exceed its cap and so none can be "silently truncated" by it.
+        // `.musicBed` is the lone exception: when the
+        // `scopedMusicBedGeneralization` flag is on, the producer emits
+        // a FIXED CONSTANT (`musicBedConfirmedJingleWeight`) whose value
+        // is set independently of `musicBedCap`. That asymmetry is what
+        // creates the silent-truncation hazard this precondition guards
+        // against. If a future bead introduces another fixed-emit
+        // constant for a source kind, this same coupling check should
+        // be added alongside it.
         precondition(
             musicBedCap >= MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight,
             "FusionWeightConfig.musicBedCap (\(musicBedCap)) must be >= MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight (\(MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight)) or the scoped-music-bed jingle boost is silently truncated inside buildLedger. Raise musicBedCap to match if you change the boost weight."
