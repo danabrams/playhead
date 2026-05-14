@@ -294,6 +294,101 @@ struct AnalysisJobRunnerRevalidationShortCircuitTests {
         #expect(audioStub.decodeCallCount == 1)
     }
 
+    @Test("flag ON + bump → outcome.cueCoverageSec reflects persisted AdWindow max-endTime; newCueCount = 0 (R2 parity pin)")
+    func revalidationOutcomeReportsHonestCueCoverageAndZeroNewCount() async throws {
+        // R2 audit pin: the R1 fix replaced `cueCoverageSec = 0` on
+        // the revalidation success path with a live re-fetch of the
+        // persisted `AdWindow` rows, filtered by the same
+        // (confidence >= 0.7, endTime > startTime) predicate the
+        // full-path return uses. The fix is correct only if (a) the
+        // filter matches the full-path filter, and (b) the value
+        // propagates into the returned `AnalysisOutcome`. Pin both
+        // by seeding a known set of windows pre-revalidation and
+        // asserting the outcome.
+        //
+        // Companion assertion: `newCueCount == 0` on the revalidation
+        // path is intentional (every "new" window on the revalidation
+        // path is a re-classification of an existing span; counting
+        // those as "new ad detections" would be misleading). Pin the
+        // 0 explicitly so a future refactor cannot silently start
+        // counting re-classifications without updating this test.
+        let assetId = "asset-cue-coverage-parity"
+        let store = try await makeTestStore()
+        try await seedAssetWithDuration(store: store, assetId: assetId)
+        try await seedOneChunk(store: store, assetId: assetId)
+
+        // Seed three pre-revalidation AdWindow rows. Two pass the
+        // (confidence >= 0.7, endTime > startTime) filter; the third
+        // is below the confidence threshold and must NOT contribute
+        // to the cue-coverage watermark. The highest endTime among
+        // the passing rows is 90, so the outcome must report exactly
+        // that.
+        let passingHigh = makeAdWindow(startTime: 30, endTime: 90, confidence: 0.85)
+        let passingLow = makeAdWindow(startTime: 60, endTime: 75, confidence: 0.95)
+        let belowThreshold = makeAdWindow(startTime: 0, endTime: 120, confidence: 0.5)
+        // makeAdWindow uses a fixed "test-asset" analysisAssetId; we
+        // need the real assetId for these rows so the runner can
+        // fetch them through `store.fetchAdWindows(assetId:)`.
+        let windowsToSeed = [passingHigh, passingLow, belowThreshold].map { w in
+            AdWindow(
+                id: w.id,
+                analysisAssetId: assetId,
+                startTime: w.startTime,
+                endTime: w.endTime,
+                confidence: w.confidence,
+                boundaryState: w.boundaryState,
+                decisionState: w.decisionState,
+                detectorVersion: w.detectorVersion,
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: w.startTime,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        }
+        try await store.insertAdWindows(windowsToSeed)
+
+        let audioStub = RecordingAudioProvider()
+        let adStub = StubAdDetectionProvider()
+        let runner = try await makeRunner(
+            store: store,
+            audioStub: audioStub,
+            adStub: adStub,
+            flagEnabled: true,
+            completedVersions: Self.baseVersions,
+            currentVersions: Self.bumpedVersions
+        )
+
+        let outcome = await runner.run(makeRequest(assetId: assetId))
+
+        // Sanity: the revalidation path was taken.
+        #expect(audioStub.decodeCallCount == 0)
+        #expect(adStub.revalidateFromFeaturesCallCount == 1)
+
+        // Honest cue coverage: highest endTime among confidence-passing,
+        // non-degenerate windows. The `belowThreshold` row's endTime
+        // 120 must NOT be picked up because confidence (0.5) < 0.7.
+        #expect(outcome.cueCoverageSec == 90, "outcome.cueCoverageSec must equal the max endTime of confidence-passing windows (90), not the unfiltered max (120) or the legacy hard-coded 0")
+
+        // Zero new-cue count on revalidation is intentional — every
+        // window on this path is a re-classification, not a new ad
+        // detection. Pin so a future change cannot silently start
+        // reporting non-zero values without updating this test.
+        #expect(outcome.newCueCount == 0, "outcome.newCueCount must be 0 on the revalidation success path (re-classifications are not new cues)")
+
+        // Feature + transcript coverage propagate from the persisted
+        // asset row (seeded to 120 in `seedAssetWithDuration`); pin
+        // them so a future refactor that drops the asset-row reload
+        // does not silently regress to 0.
+        #expect(outcome.featureCoverageSec == 120)
+        #expect(outcome.transcriptCoverageSec == 120)
+    }
+
     @Test("flag ON + bump + missing episodeDurationSec → falls back to full analysis")
     func missingDurationFallsBackToFullPath() async throws {
         let assetId = "asset-no-duration"

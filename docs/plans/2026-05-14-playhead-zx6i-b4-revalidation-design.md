@@ -124,24 +124,32 @@ classifier + fusion + boundary all wrote), stamp
 asset. This is the only producer; the only consumer is the
 `AnalysisJobRunner` short-circuit decision.
 
+The flag-gate that wraps the stamp-write re-loads the flag LIVE via
+`PreAnalysisConfig.load()` rather than reading a snapshot captured at
+`AdDetectionService` init. See §3.5.1 for the rationale; the short
+version is "producer and consumer must agree on the live value,
+otherwise a mid-session flag-ON unlocks the consumer but leaves the
+producer's cached `false` in place, so no stamp ever lands."
+
 A `runBackfill` that exits early via `guard chunks.isEmpty` does NOT
 stamp (no fusion ran, no decisions to validate).
 
 ### 3.5 AnalysisJobRunner short-circuit
 
-In `run(_:)`, before the `decode` stage:
+In `run(_:)`, before the `decode` stage. The gate is read LIVE on
+every call (see §3.5.1 for asymmetry rationale):
 
 ```swift
-if preAnalysisConfig.b4RevalidationFromFeaturesEnabled {
+if b4RevalidationEnabledProvider() {                       // live read of PreAnalysisConfig
     let persistedChunks = (try? await store.fetchTranscriptChunks(assetId: assetId)) ?? []
-    let completed = RevalidationStateStore.loadCompletedVersions(forAsset: assetId)
-    let current = PipelineVersions.current()
     if !persistedChunks.isEmpty,
-       let completed,
-       completed != current {
-        // Revalidate-from-features path: skip decode/features/ASR.
-        try await adDetection.revalidateFromFeatures(...)
-        return makeOutcome(...)
+       let completed = completedPipelineVersionsLoader(assetId) {
+        let current = currentPipelineVersionsProvider()
+        if completed != current {
+            // Revalidate-from-features path: skip decode/features/ASR.
+            try await adDetection.revalidateFromFeatures(...)
+            return makeOutcome(...)
+        }
     }
 }
 ```
@@ -157,6 +165,51 @@ revalidation fast path.
 
 If chunks are empty → no persisted state to revalidate from; full
 analysis required.
+
+### 3.5.1 Asymmetry: zx6i is live-read; 2hpn / xr3t are snapshot-at-init
+
+The other `PreAnalysisConfig`-gated flags in this codebase (2hpn
+`scopedMusicBedGeneralization`, xr3t lightweight-inventory) cache the
+flag value at consumer-init. Flipping those in Settings takes effect
+on the next consumer construction — typically next app launch.
+
+The zx6i wiring deliberately diverges. Both the consumer
+(`AnalysisJobRunner.b4RevalidationEnabledProvider`'s default closure)
+and the producer (`AdDetectionService.runBackfill`'s stamp-write gate)
+re-read `PreAnalysisConfig.load().b4RevalidationFromFeaturesEnabled` on
+every call. Rollback latency for the zx6i flag is therefore the next
+analysis run, not next app launch.
+
+Rationale:
+1. zx6i gates a perf optimization that can move the
+   `false_ready_rate`. Instant rollback minimizes the blast radius if
+   a beta cohort surfaces a regression.
+2. Producer/consumer parity. If the consumer is live and the producer
+   is cached, a mid-session flag-ON unlocks the consumer but the
+   producer never writes a stamp — so the feature silently never
+   activates until the next launch and the gates disagree on the same
+   value. R1 review caught and fixed exactly this bug. Keeping both
+   live is the only configuration where producer and consumer agree
+   for arbitrary flag-flip timing.
+3. Cost. `PreAnalysisConfig.load()` reads UserDefaults
+   (in-memory-cached after first sync) and JSON-decodes ~200 bytes per
+   call. For one call per `run(_:)` and one per successful `runBackfill`,
+   the overhead is in the microseconds range — well below the cost of
+   the rest of the pipeline. We have not regressed any benchmark.
+
+Mid-job flag-flip semantics (formally enumerated for the four cases):
+
+| Flag at `run(_:)` top | Flag at stamp-write | Resulting behavior                                     |
+|---|---|---|
+| OFF                   | OFF                 | No short-circuit, no stamp. Byte-identical to pre-zx6i. |
+| OFF                   | ON                  | No short-circuit on this run, but stamp writes. Next run with bumped versions revalidates. |
+| ON                    | OFF                 | Short-circuit may have fired this run; no stamp. Next run without a stamp falls through to full analysis (cold-start branch). |
+| ON                    | ON                  | Normal happy path. Stamp lands, future bumps revalidate. |
+
+All four are intentional and observably correct (see
+`AnalysisJobRunnerRevalidationShortCircuitTests` for ON/OFF
+short-circuit coverage and `AdDetectionServiceRevalidationTests` for
+ON/OFF stamp coverage).
 
 ### 3.6 Flag gating
 

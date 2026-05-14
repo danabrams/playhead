@@ -85,6 +85,16 @@ actor AnalysisJobRunner {
     /// `AdDetectionService` init, producing an asymmetric rollback
     /// where a mid-session flag-ON would never write a stamp because
     /// the producer's cached value was still `false`).
+    ///
+    /// Performance: `PreAnalysisConfig.load()` does an in-memory
+    /// UserDefaults read (Foundation caches the backing plist after
+    /// first sync) plus a JSON decode of ~200 bytes. One call per
+    /// `run(_:)` and one per successful `runBackfill`. Measured in
+    /// microseconds — well below the cost of the analysis pipeline
+    /// stages this short-circuit gates. The R2 audit confirmed no
+    /// benchmark regression. If the call count ever grows (e.g.
+    /// per-shard rather than per-asset), revisit caching.
+    ///
     /// Tests inject a fixed `Bool` (or a closure that flips it) so
     /// the short-circuit can be deterministically exercised without
     /// round-tripping through UserDefaults. Returning `false` makes
@@ -230,18 +240,40 @@ actor AnalysisJobRunner {
                             // rows so the scheduler sees the honest
                             // post-revalidation cue watermark, not a
                             // hard-coded `0`. The filter (confidence
-                            // >= 0.7, endTime > startTime) is the same
-                            // one used by the full-path return at
-                            // line 681. We leave `newCueCount = 0`
-                            // (the `makeOutcome` default) because the
+                            // >= `Self.cueConfidenceThreshold` (0.7),
+                            // `endTime > startTime`) is the same one
+                            // used by the full-path return below (the
+                            // `let cueCoverage = finalWindows.filter
+                            // {...}.max() ?? 0` block immediately
+                            // after the backfill `finalWindows`
+                            // reload). Both call sites share
+                            // `Self.cueConfidenceThreshold` so the
+                            // threshold cannot drift between the two
+                            // paths without a single-edit grep target.
+                            //
+                            // We leave `newCueCount = 0` (the
+                            // `makeOutcome` default) deliberately. The
                             // full path only computes `newCueCount`
                             // when `request.outputPolicy ==
-                            // .writeWindowsAndCues`, and the
-                            // revalidation path is policy-agnostic by
-                            // contract (it never materialises cues);
-                            // honouring the same "no count unless
-                            // explicitly requested" semantics keeps
-                            // the two return shapes consistent.
+                            // .writeWindowsAndCues`, and in that case
+                            // counts windows that did not exist in
+                            // `existingWindowsBeforeDetection`. On the
+                            // revalidation path EVERY window is a
+                            // re-classification of a span that already
+                            // had a window pre-revalidation
+                            // (`runBackfill` rewrites existing rows
+                            // against the new versions), so reporting
+                            // those as "new cues" would be misleading
+                            // — they are not new ad detections, just
+                            // re-derived decisions over the same
+                            // audio. Returning `0` is the honest
+                            // post-revalidation count. The
+                            // `AnalysisWorkScheduler`'s
+                            // `shouldRetryCoverageInsufficient`
+                            // disjunction still picks up progress via
+                            // the live `cueCoverageSec` re-fetch
+                            // above, so the scheduler does not stall
+                            // on a missing `newCueCount`.
                             let revalidatedWindows = (try? await store.fetchAdWindows(assetId: assetId)) ?? []
                             let confidenceThreshold = Self.cueConfidenceThreshold
                             let revalidatedCueCoverage = revalidatedWindows
