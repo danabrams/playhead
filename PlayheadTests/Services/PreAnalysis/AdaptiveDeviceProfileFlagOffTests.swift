@@ -224,22 +224,23 @@ struct AdaptiveDeviceProfileFlagOffTests {
                 "flag ON must call resolvedDeviceProfile per evaluateAdmissionGate pass (got \(resolveCount))")
     }
 
-    // MARK: - (4) Default config has the flag OFF (rollback contract)
+    // MARK: - (4) Default config has the flag ON (post-3bv production default)
 
-    @Test("PreAnalysisConfig() default value of useAdaptiveDeviceProfile is false")
-    func defaultConfigHasFlagOff() {
+    @Test("PreAnalysisConfig() default value of useAdaptiveDeviceProfile is true")
+    func defaultConfigHasFlagOn() {
         let config = PreAnalysisConfig()
-        #expect(config.useAdaptiveDeviceProfile == false,
-                "default config must keep the adaptive estimator opted OUT")
+        #expect(config.useAdaptiveDeviceProfile == true,
+                "default config must opt INTO the adaptive estimator post-3bv")
     }
 
-    @Test("PreAnalysisConfig.decode of legacy JSON (missing flag) defaults to false")
-    func legacyJSONDecodesFlagAsFalse() throws {
-        // JSON shape from a pre-beh3 ship: the new key is absent.
-        // The Codable init must default it to false (backward compat).
+    @Test("PreAnalysisConfig.decode of legacy JSON (missing flag) defaults to true")
+    func legacyJSONDecodesFlagAsTrue() throws {
+        // JSON shape from a pre-beh3 ship: the new key is absent. As
+        // of 2026-05-14, the Codable init defaults absent keys to true
+        // so existing users upgrade onto the adaptive estimator.
         let legacyJSON = #"{}"#.data(using: .utf8)!
         let decoder = JSONDecoder()
         let config = try decoder.decode(PreAnalysisConfig.self, from: legacyJSON)
-        #expect(config.useAdaptiveDeviceProfile == false)
+        #expect(config.useAdaptiveDeviceProfile == true)
     }
 }
