@@ -60,6 +60,13 @@ enum SettingsL274Copy {
     static let featureSchemaVersionLabel: String = "Feature-schema version"
     static let schedulerEventsLabel: String = "Last 50 scheduler events"
     static let perShowCapabilityProfileLabel: String = "Per-show capability profile"
+    /// Empty-state caption rendered inside the "Per-show capability profile"
+    /// DisclosureGroup when no profiles have been persisted yet. Hoisted
+    /// here (rather than inlined in `SettingsView`) per the file-header
+    /// invariant: "do not inline any of these literals into the SwiftUI
+    /// body directly". Verbatim — pinned by
+    /// `SettingsL274CopyTests.perShowCapabilityProfileEmptyCaption`.
+    static let perShowCapabilityProfileEmptyCaption: String = "Unknown — no observations yet."
     static let featureFlagsLabel: String = "Feature flags (rollback)"
     static let sendDiagnosticsButtonLabel: String = "Send diagnostics"
     static let exportDogfoodLogsButtonLabel: String = "Export dogfood logs"

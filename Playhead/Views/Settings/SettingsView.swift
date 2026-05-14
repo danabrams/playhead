@@ -295,8 +295,9 @@ struct SettingsView: View {
     /// `ShowCapabilityProfileStore` the runtime writes through, so
     /// the displayed value is always the live persisted state.
     /// An empty array (no persisted profiles at all) renders the
-    /// "Unknown — no observations yet." caption at the DisclosureGroup
-    /// call site; non-empty arrays render one row per persisted
+    /// `SettingsL274Copy.perShowCapabilityProfileEmptyCaption` ("Unknown —
+    /// no observations yet.") caption at the DisclosureGroup call site;
+    /// non-empty arrays render one row per persisted
     /// profile via `capabilityProfileRow(...)`, including rows whose
     /// kind is still `.unknown` (floor-not-met or SLIs-out-of-bounds
     /// intermediate state). h6a6 R5 doc-vs-code audit: the prior
@@ -1557,8 +1558,13 @@ private extension SettingsView {
             // for every show whose backfill ran while the flag was
             // on, regardless of whether its kind has yet transitioned
             // off `.unknown`). Empty state — i.e. zero persisted
-            // profiles — surfaces a single "Unknown — no observations
-            // yet." caption. h6a6 R5 doc-vs-code audit: the prior
+            // profiles — surfaces a single caption sourced from
+            // `SettingsL274Copy.perShowCapabilityProfileEmptyCaption`
+            // (verbatim: "Unknown — no observations yet.") so a copy
+            // edit forces an intentional test update in
+            // `SettingsL274CopyTests.perShowCapabilityProfileEmptyCaption`
+            // rather than silently flipping the user-visible string.
+            // h6a6 R5 doc-vs-code audit: the prior
             // comment claimed `.unknown` rows are filtered out; the
             // `ForEach` below does NOT filter, so rows with kind
             // `.unknown` (the floor-not-met / SLIs-out-of-bounds
@@ -1578,7 +1584,7 @@ private extension SettingsView {
             //     verbatim per the l274 spec.
             DisclosureGroup(SettingsL274Copy.perShowCapabilityProfileLabel) {
                 if capabilityProfileSnapshots.isEmpty {
-                    Text("Unknown — no observations yet.")
+                    Text(SettingsL274Copy.perShowCapabilityProfileEmptyCaption)
                         .font(AppTypography.caption)
                         .foregroundStyle(AppColors.textTertiary)
                 } else {

@@ -156,6 +156,23 @@ struct SettingsL274CopyTests {
         #expect(SettingsL274Copy.perShowCapabilityProfileLabel == "Per-show capability profile")
     }
 
+    @Test func perShowCapabilityProfileEmptyCaption() {
+        // h6a6 R8 review gap: the empty-state caption rendered inside the
+        // "Per-show capability profile" DisclosureGroup is a user-visible
+        // string that lived as an inline `Text("…")` literal in
+        // `SettingsView`. The SettingsL274 file header explicitly forbids
+        // inline literals ("do not inline any of these literals into the
+        // SwiftUI body directly"), and R7 pinned the six profile-kind
+        // labels but missed this companion caption. R8 hoists the string
+        // to `SettingsL274Copy` and pins it verbatim so a copy edit
+        // (e.g. en-dash → hyphen, missing trailing period) forces an
+        // intentional test update.
+        #expect(
+            SettingsL274Copy.perShowCapabilityProfileEmptyCaption
+                == "Unknown — no observations yet."
+        )
+    }
+
     @Test func showCapabilityProfileKindDisplayLabels() {
         // h6a6 R7 review gap: `ShowCapabilityProfileKind.displayLabel`
         // strings are rendered verbatim by `SettingsView
