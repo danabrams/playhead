@@ -645,4 +645,73 @@ struct AdaptiveDeviceProfileWriteSeamTests {
         #expect(attachRange.lowerBound < metaRange.lowerBound,
                 "attachLearnedDeviceProfileStore(...) MUST be called BEFORE setEpisodeMetadataProvider(provider) in PlayheadApp.swift's `.task` body — R14 moved it above every `await` suspension to minimise the scheduler-vs-attach race window; if the attach call has been moved back below later-stage wiring, observations completing in the gap will silently hit NoOpLearnedDeviceProfileProvider and drop")
     }
+
+    // MARK: - (8) No-`await`-before-attach canary (R15)
+    //
+    // R14's positional canary above pins "attach < setEpisodeMetadataProvider"
+    // but does NOT pin the STRONGER invariant R14's comment-block actually
+    // describes: "attach must run BEFORE every `await` suspension point
+    // in `.task`". A refactor that introduced a NEW `await` BETWEEN the
+    // synchronous register calls at the top of `.task` and the attach
+    // call (e.g. `await someBootstrapHelper()` right above the attach)
+    // would silently re-open the race window R14 closed, yet R14's
+    // positional canary would still pass because the attach line is
+    // still positionally above `setEpisodeMetadataProvider`. This R15
+    // canary strengthens the contract by scanning the code window from
+    // the enclosing `.task {` opening brace to the attach call and
+    // asserting no `await` keyword appears in that window. The attach
+    // call's OWN `await` is excluded by anchoring the window's upper
+    // bound at the `await runtime.attachLearnedDeviceProfileStore(`
+    // token (exclusive), so this canary only fires on a NEW pre-attach
+    // suspension.
+    //
+    // Implementation note: there are multiple `.task` blocks in
+    // PlayheadApp's body. We locate the specific one containing the
+    // attach by scanning backwards from the attach call for the nearest
+    // preceding `.task {` substring — which is unambiguous because the
+    // attach call is unique in the file (the R13 wiring canary above
+    // already asserts that).
+
+    @Test("R15 attach-ordering canary: no `await` precedes attachLearnedDeviceProfileStore inside its enclosing `.task` body")
+    func sourceCanaryR15NoAwaitBeforeAttach() throws {
+        let appURL = Self.repoRoot.appendingPathComponent(
+            "Playhead/App/PlayheadApp.swift"
+        )
+        let appSource = try String(contentsOf: appURL, encoding: .utf8)
+
+        // Strip line comments before searching so R14's prose (which
+        // narrates `await` semantics inline) cannot pollute the scan.
+        let codeOnly: String = appSource
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> Substring in
+                if let commentStart = line.range(of: "//") {
+                    return line[..<commentStart.lowerBound]
+                }
+                return line
+            }
+            .joined(separator: "\n")
+
+        guard let attachRange = codeOnly.range(of: "await runtime.attachLearnedDeviceProfileStore(") else {
+            Issue.record("PlayheadApp.swift no longer contains `await runtime.attachLearnedDeviceProfileStore(...)` — the production call site has been removed or renamed; if intentional, update this canary")
+            return
+        }
+
+        // Locate the enclosing `.task {` opening brace by scanning the
+        // prefix before the attach call for the LAST occurrence of
+        // `.task {`. (Swift permits `.task { /* body */ }` or
+        // `.task {\n` — both forms contain the substring `.task {`.)
+        let prefix = codeOnly[..<attachRange.lowerBound]
+        guard let taskOpenRange = prefix.range(of: ".task {", options: .backwards) else {
+            Issue.record("PlayheadApp.swift no longer contains a `.task {` block enclosing attachLearnedDeviceProfileStore — the surrounding wiring shape has changed; if intentional, update this canary")
+            return
+        }
+
+        // Window from end of `.task {` to start of attach call. Any
+        // `await` keyword in this window is a NEW pre-attach suspension
+        // that re-opens the race window R14 closed.
+        let window = codeOnly[taskOpenRange.upperBound..<attachRange.lowerBound]
+        let awaitOccurrences = window.components(separatedBy: "await ").count - 1
+        #expect(awaitOccurrences == 0,
+                "Found \(awaitOccurrences) `await` reference(s) BEFORE attachLearnedDeviceProfileStore inside its enclosing `.task` body — R14's invariant is that the attach call must run BEFORE every `await` suspension point so the scheduler runLoop (started from PlayheadRuntime.init's deferred bootstrap Task) cannot complete a grant-window observation against NoOpLearnedDeviceProfileProvider after the first `.task` suspension. If a new pre-attach await is intentional, either move it AFTER the attach call or close the race window via the non-isolated shared-holder pattern (mirror of BackgroundFeedRefreshService.attachSharedService); do NOT relax this canary without addressing the race.")
+    }
 }
