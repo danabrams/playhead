@@ -232,8 +232,20 @@ struct PlayheadApp: App {
                     // as `SwiftDataNewEpisodeAnnouncer` below. The flag
                     // (`PreAnalysisConfig.scopedMusicBedGeneralization`)
                     // remains the OFF/ON switch; the store is wired
-                    // unconditionally so flipping the flag at runtime
-                    // immediately picks up the persisted profile state.
+                    // unconditionally so that once the flag is effective,
+                    // each backfill resolves the latest persisted profile
+                    // (the snapshot lookup runs once per `runBackfill`
+                    // invocation — no per-init caching). NOTE: the FLAG
+                    // value itself is cached on `AdDetectionService` at
+                    // init time (see the `preAnalysisConfig` doc), so a
+                    // user-driven flip via Settings takes effect on the
+                    // NEXT `AdDetectionService` construction (next app
+                    // launch) — NOT instantly. R13 adversarial doc audit
+                    // fix: the prior "flipping the flag at runtime
+                    // immediately picks up the persisted profile state"
+                    // wording conflated two things — store wiring (eager
+                    // here) vs flag-cache rollback latency (next launch).
+                    // The contract here matches `xr3t` (R11), not `24cm`.
                     let showMusicBedProfileStore = ShowMusicBedProfileStore(
                         modelContainer: modelContainer
                     )
