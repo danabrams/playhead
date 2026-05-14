@@ -314,6 +314,84 @@ struct ShowMusicBedProfileEvaluatorTests {
         #expect(outcome.endHash.isZero)
     }
 
+    // MARK: - Span / jingle-slice overlap
+
+    @Test("span entirely inside the intro slice overlaps")
+    func spanInsideIntroOverlaps() {
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 1,
+            spanEnd: 5,
+            episodeDuration: 300
+        ) == true)
+    }
+
+    @Test("span entirely inside the outro slice overlaps")
+    func spanInsideOutroOverlaps() {
+        // Episode 300s; outro = [290, 300). A [295, 299] span overlaps.
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 295,
+            spanEnd: 299,
+            episodeDuration: 300
+        ) == true)
+    }
+
+    @Test("span starting at the intro boundary does NOT overlap (half-open)")
+    func spanAtIntroBoundaryNoOverlap() {
+        // Slice is [0, 10). A span starting at 10 has spanStart < 10 == false.
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 10,
+            spanEnd: 20,
+            episodeDuration: 300
+        ) == false)
+    }
+
+    @Test("span ending exactly at outro start does NOT overlap")
+    func spanEndingAtOutroStartNoOverlap() {
+        // Episode 300s; outro = [290, 300). A span [280, 290] has
+        // spanEnd > 290 == false (strict inequality).
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 280,
+            spanEnd: 290,
+            episodeDuration: 300
+        ) == false)
+    }
+
+    @Test("middle-of-episode span overlaps neither")
+    func spanInMiddleNoOverlap() {
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 100,
+            spanEnd: 200,
+            episodeDuration: 300
+        ) == false)
+    }
+
+    @Test("short episode (< jingleSliceSeconds) suppresses outro overlap")
+    func shortEpisodeOutroSuppressed() {
+        // Episode 5s; outroStart would be -5 → suppressed. A 3-second
+        // span starting at 1s overlaps intro only.
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 1,
+            spanEnd: 4,
+            episodeDuration: 5
+        ) == true)
+        // Even a span at the very end of the short episode is INSIDE the
+        // intro slice (because everything is < 10s), so it overlaps.
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 4,
+            spanEnd: 5,
+            episodeDuration: 5
+        ) == true)
+    }
+
+    @Test("zero-or-negative episode duration never overlaps")
+    func zeroDurationNeverOverlaps() {
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 0,
+            spanEnd: 10,
+            episodeDuration: 0
+        ) == false)
+    }
+
     // MARK: - Cross-show isolation
 
     @Test("cross-show isolation: showIdentifier does not bleed across apply calls")

@@ -98,6 +98,37 @@ enum ShowMusicBedProfileEvaluator {
         return EpisodeOutcome(startHash: startHash, endHash: endHash)
     }
 
+    // MARK: - Span / jingle-slice overlap
+
+    /// Returns `true` when the half-open span `[spanStart, spanEnd)`
+    /// overlaps EITHER the intro slice `[0, jingleSliceSeconds)` OR the
+    /// outro slice `[episodeDuration - jingleSliceSeconds, episodeDuration)`.
+    ///
+    /// Strict less-than at both upper bounds keeps the comparison
+    /// consistent with `extractEpisodeJingleHashes`'s slice-window filter
+    /// (`fw.startTime < startSliceEnd`) so the boost path and the hash
+    /// path agree on what "inside the jingle region" means.
+    ///
+    /// Outro suppression: when `episodeDuration < jingleSliceSeconds` the
+    /// outro region would otherwise start at a negative offset and
+    /// overlap every span; we suppress it the same way
+    /// `extractEpisodeJingleHashes` zeroes the end hash for short
+    /// episodes (no `outroStart > 0` → no outro overlap).
+    static func spanOverlapsJingleRegion(
+        spanStart: Double,
+        spanEnd: Double,
+        episodeDuration: Double
+    ) -> Bool {
+        guard episodeDuration > 0 else { return false }
+        let slice = jingleSliceSeconds
+        let overlapsIntro = spanStart < slice && spanEnd > 0
+        let outroStart = episodeDuration - slice
+        let overlapsOutro = (outroStart > 0)
+            && spanStart < episodeDuration
+            && spanEnd > outroStart
+        return overlapsIntro || overlapsOutro
+    }
+
     // MARK: - State transition (pure)
 
     /// Result of applying one episode's outcome to the previous profile

@@ -3462,15 +3462,14 @@ actor AdDetectionService {
         episodeDuration: Double
     ) -> MusicBedLedgerEvaluator.JingleBoost? {
         guard let snapshot, episodeDuration > 0 else { return nil }
-        let slice = ShowMusicBedProfileEvaluator.jingleSliceSeconds
-        let overlapsIntro = span.startTime < slice && span.endTime > 0
-        let outroStart = episodeDuration - slice
-        let overlapsOutro = (outroStart > 0)
-            && span.startTime < episodeDuration
-            && span.endTime > outroStart
+        let overlaps = ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: span.startTime,
+            spanEnd: span.endTime,
+            episodeDuration: episodeDuration
+        )
         return MusicBedLedgerEvaluator.JingleBoost(
             isConfirmed: snapshot.isConfirmed,
-            spanOverlapsJingle: overlapsIntro || overlapsOutro
+            spanOverlapsJingle: overlaps
         )
     }
 

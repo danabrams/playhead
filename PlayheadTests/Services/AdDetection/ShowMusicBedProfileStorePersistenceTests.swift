@@ -124,8 +124,14 @@ struct ShowMusicBedProfileStorePersistenceTests {
 
         let hashShared = RepeatedAdFingerprint(bits: 0xDEAD_BEEF_DEAD_BEEF)
 
-        // Confirm show A with three matching episodes.
-        for _ in 0..<4 {
+        // Drive Show A through enough episodes to reach the
+        // confirmation threshold. The first observation has no prior
+        // hashes to compare against (matched=false but the hash is
+        // recorded for the next pass), so reaching
+        // `confirmationThreshold` matches requires
+        // `confirmationThreshold + 1` total observations.
+        let episodeCount = ShowMusicBedProfile.confirmationThreshold + 1
+        for _ in 0..<episodeCount {
             _ = await store.recordEpisodeOutcome(
                 showIdentifier: "show-A",
                 outcome: ShowMusicBedEpisodeOutcome(startHash: hashShared, endHash: .zero),
@@ -134,7 +140,7 @@ struct ShowMusicBedProfileStorePersistenceTests {
         }
         let snapshotA = await store.snapshot(showIdentifier: "show-A")
         #expect(snapshotA?.isConfirmed == true,
-                "Show A should be confirmed after 3 matching episodes")
+                "Show A should be confirmed after reaching confirmationThreshold matches")
 
         // Show B has never been recorded. Its snapshot must remain nil
         // — show A's confirmation has not bled across the show boundary.
