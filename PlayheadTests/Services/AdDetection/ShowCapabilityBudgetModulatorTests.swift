@@ -155,6 +155,53 @@ struct ShowCapabilityBudgetModulatorTests {
         #expect(result == baseline)
     }
 
+    @Test("applyAdjustment with zero baseline and zero minimum returns zero — floor still holds")
+    func applyAdjustmentZeroBaselineZeroMinimum() {
+        // h6a6 R1 review gap: adversarial inputs (zero baseline, zero
+        // minimum) must not produce NaN, negative numbers, or break
+        // the floor contract. `max(0 * multiplier, 0) == 0` is the
+        // expected result, and zero is `>= 0` (the floor), so the
+        // contract is preserved. Pinning this so a careless refactor
+        // that adds e.g. division can't silently regress.
+        for kind in ShowCapabilityProfileKind.allCases {
+            let adj = ShowCapabilityBudgetModulator.adjustment(for: kind)
+            let result = ShowCapabilityBudgetModulator.applyAdjustment(
+                baseline: 0,
+                adjustment: adj,
+                minimumPerEpisodeBudget: 0
+            )
+            #expect(result == 0,
+                    "Zero baseline + zero minimum should return zero for \(kind.rawValue); got \(result)")
+            #expect(result.isFinite,
+                    "Zero baseline + zero minimum must be finite for \(kind.rawValue)")
+        }
+    }
+
+    @Test("applyAdjustment at the multiplier band boundary 0.50 preserves the minimum floor")
+    func applyAdjustmentAtMultiplierFloorBoundary() {
+        // h6a6 R1 review gap: when `minBudgetFloorRatio == 0.50` is
+        // both the clamp floor AND in principle a multiplier value a
+        // profile COULD raw-emit, ensure `applyAdjustment` still
+        // honors the caller-supplied minimum. Construct an
+        // `.unknown`-equivalent adjustment with the lowest possible
+        // multiplier; baseline * 0.5 vs minimum must always pick the
+        // minimum when the latter is higher.
+        let adj = ShowCapabilityBudgetAdjustment(
+            kind: .chapterRich,
+            analysisBudgetMultiplier: ShowCapabilityBudgetModulator.minBudgetFloorRatio,
+            detectorBiases: [:]
+        )
+        let baseline = 10.0
+        let minimum = 6.0 // baseline * 0.5 == 5.0; minimum (6.0) wins.
+        let result = ShowCapabilityBudgetModulator.applyAdjustment(
+            baseline: baseline,
+            adjustment: adj,
+            minimumPerEpisodeBudget: minimum
+        )
+        #expect(result == minimum,
+                "At multiplier floor 0.50, caller's larger minimum must hold the result")
+    }
+
     // MARK: - Floor / band invariants
 
     @Test("minBudgetFloorRatio is at least 0.5")

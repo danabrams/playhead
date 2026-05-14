@@ -2192,9 +2192,9 @@ actor AdDetectionService {
         // produces a non-unity multiplier when the flag is off, and
         // pinning the kind to `.unknown` (by an out-of-bounds SLI
         // gate, or a sub-floor episode count) deterministically
-        // disables modulation even when the flag is on. Adversarial
-        // floor test: see
-        // `ShowCapabilityBudgetModulatorTests.flagOffYieldsBaseline`.
+        // disables modulation even when the flag is on. The
+        // `.unknown` no-op contract is pinned in
+        // `ShowCapabilityBudgetModulatorTests.unknownIsBaseline`.
         let resolvedKind: ShowCapabilityProfileKind =
             capabilitySnapshot?.kind ?? .unknown
         lastCapabilityBudgetAdjustment = ShowCapabilityBudgetModulator.adjustment(
@@ -2819,6 +2819,17 @@ actor AdDetectionService {
         // We log a single `[2hpn]` marker so dogfood can grep activation
         // and see the post-update confirmation count / miss count without
         // scraping per-window logs.
+        //
+        // h6a6 R1 review fix: hoist `updatedMusicBedSnapshot` so the
+        // downstream h6a6 write can consume the POST-2hpn-write
+        // `isConfirmed` (rather than the stale `showMusicBedSnapshot`
+        // captured at the TOP of runBackfill). Without this hoist, the
+        // episode that flipped 2hpn from unconfirmed→confirmed would
+        // record `musicBedConfirmed=false` against h6a6, and the user
+        // would only see `.musicBedReliable` observed on the FOLLOWING
+        // episode's backfill — surfacing the classification one episode
+        // later than the 2hpn state would suggest.
+        var updatedMusicBedSnapshot: ShowMusicBedProfileSnapshot?
         if scopedMusicBedEnabled,
            !podcastId.isEmpty,
            let store = showMusicBedProfileStore,
@@ -2832,6 +2843,7 @@ actor AdDetectionService {
                 outcome: outcome,
                 now: Date()
             )
+            updatedMusicBedSnapshot = updated
             logger.info(
                 "[2hpn] show=\(podcastId, privacy: .public) confirmed=\(updated.isConfirmed) confirmationCount=\(updated.confirmationCount) missCount=\(updated.consecutiveMissCount) storedHashes=\(updated.confirmedJingleHashes.count)"
             )
@@ -2851,22 +2863,34 @@ actor AdDetectionService {
         // The capability observations for THIS bead are minimal: we
         // record the all-false sentinel outcome
         // (`ShowCapabilityEpisodeOutcome.nothingObserved`) plus the
-        // music-bed confirmation signal threaded directly from the
-        // 2hpn snapshot resolved at the top of `runBackfill`. The
-        // chapter-matched / host-voiced / sponsor-declared /
-        // dynamic-insertion-shift signals are wired by follow-on
-        // beads as those producers stabilize their outputs; the
-        // schema is in place today so adding the producers does NOT
-        // require a migration. The activation-floor and SLI-gate
-        // contracts are already enforced by
-        // `ShowCapabilityProfileEvaluator.classify(...)`, so the
+        // music-bed confirmation signal threaded from the POST-2hpn-
+        // write snapshot (falling back to the pre-write snapshot when
+        // the 2hpn write didn't happen — flag off, store missing, or
+        // zero-duration episode — so the read still reflects the
+        // freshest available 2hpn state). The chapter-matched /
+        // host-voiced / sponsor-declared / dynamic-insertion-shift
+        // signals are wired by follow-on beads as those producers
+        // stabilize their outputs; the schema is in place today so
+        // adding the producers does NOT require a migration. The
+        // activation-floor and SLI-gate contracts are already enforced
+        // by `ShowCapabilityProfileEvaluator.classify(...)`, so the
         // music-bed-reliable predicate is the live observation path
         // exercised end-to-end as of this bead.
+        //
+        // h6a6 R1 review fix: prefer `updatedMusicBedSnapshot?
+        // .isConfirmed` over `showMusicBedSnapshot?.isConfirmed`. The
+        // top-of-backfill snapshot is the PRE-write value; the
+        // post-write value is the one the user-visible 2hpn state
+        // would surface. Using the stale value would surface the
+        // capability profile one episode late on the transition.
         if capabilityProfilesEnabled,
            !podcastId.isEmpty,
            let capabilityStore = showCapabilityProfileStore {
             let outcome = ShowCapabilityEpisodeOutcome.nothingObserved
-            let musicBedConfirmed = showMusicBedSnapshot?.isConfirmed ?? false
+            let musicBedConfirmed =
+                updatedMusicBedSnapshot?.isConfirmed
+                ?? showMusicBedSnapshot?.isConfirmed
+                ?? false
             let gate = capabilityProfileSLIGate
             let updated = await capabilityStore.recordEpisodeOutcome(
                 showIdentifier: podcastId,

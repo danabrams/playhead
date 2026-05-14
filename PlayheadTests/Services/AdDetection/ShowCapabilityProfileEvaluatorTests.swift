@@ -247,6 +247,26 @@ struct ShowCapabilityProfileEvaluatorTests {
         #expect(kind == .hostReadOnly)
     }
 
+    @Test("sponsor-declared wins over dynamic-insertion-heavy when both fire at the 50% boundary")
+    func prioritySponsorOverDynamic() {
+        // h6a6 R1 review gap: both predicates share a 50% threshold;
+        // priority order says sponsor wins. Pin the tie-break so a
+        // future edit that reorders the predicates fails CI rather
+        // than silently flipping observed classifications.
+        let kind = ShowCapabilityProfileEvaluator.classify(
+            showIdentifier: "show",
+            completedEpisodeCount: 10,
+            chapterMatchedEpisodeCount: 0,
+            hostVoicedEpisodeCount: 0,
+            sponsorDeclaredEpisodeCount: 5,
+            dynamicInsertionEpisodeCount: 5,
+            musicBedConfirmed: false,
+            sliGate: Self.openGate
+        )
+        #expect(kind == .sponsorDeclared,
+                "Sponsor-declared must win over dynamic-insertion-heavy at the shared 50% boundary")
+    }
+
     // MARK: - apply(...) mutation
 
     @Test("apply increments completed count and counter for true outcome")
