@@ -158,6 +158,11 @@ enum ShowMusicBedProfileEvaluator {
     ///
     /// - Parameter showIdentifier: present in the signature for
     ///   logging / future per-show heuristics; not used in the math.
+    ///   Swift does not warn on unused function parameters, so no
+    ///   discard line is needed — the parameter is intentionally kept
+    ///   in the signature as a contract / breadcrumb for future
+    ///   per-show heuristics + diagnostics. (R7 cleanup: dropped the
+    ///   `_ = showIdentifier` cargo-cult discard.)
     static func apply(
         outcome: EpisodeOutcome,
         toShowIdentifier showIdentifier: String,
@@ -165,7 +170,9 @@ enum ShowMusicBedProfileEvaluator {
         confirmationCount: Int,
         consecutiveMissCount: Int
     ) -> Mutation {
-        _ = showIdentifier   // retained for future per-show heuristics + diagnostics breadcrumbs
+        // showIdentifier is intentionally unused in the math today; see the
+        // doc comment above for the rationale. Swift does not warn on
+        // unused function parameters, so no discard is required.
 
         // Detect a match against the previously stored hash set. Zero
         // hashes (sentinel for "no derivable signal") never match —

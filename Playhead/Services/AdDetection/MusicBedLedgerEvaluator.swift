@@ -66,6 +66,14 @@ enum MusicBedLedgerEvaluator {
     ///     always-on in both debug and release), and
     ///   * `MusicBedLedgerEvaluatorJingleBoostTests.musicBedCapAccommodatesBoostWeight`
     ///     for the default-init path.
+    ///
+    /// R7 cross-ref: the asymmetric-coupling rationale (why ONLY
+    /// `.musicBed` carries this coupling check while every other
+    /// source cap does not) is documented inline above the
+    /// `precondition` in `FusionWeightConfig.init`. If you introduce
+    /// a similar fixed-emit constant for another source kind (i.e.
+    /// the producer emits a weight set independently of its cap),
+    /// add the analogous coupling check there too.
     static let musicBedConfirmedJingleWeight: Double = 0.25
 
     /// Result of evaluating a span. Exposed for test assertions; the

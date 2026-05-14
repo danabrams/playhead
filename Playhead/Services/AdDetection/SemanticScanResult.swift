@@ -196,8 +196,14 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// span's interior windows. Distinct from `.acoustic` so the quorum
     /// gate's `distinctKinds.count` increments when both an RMS-drop and
     /// a music-bed signal fire. Shares the acoustic evidence family
-    /// (see `SourceEvidenceFamily.for`) and the `acousticCap` budget —
-    /// same underlying modality, different trigger geometry.
+    /// (see `SourceEvidenceFamily.for`) for trust-update orthogonality —
+    /// same underlying modality, different trigger geometry. Per-source
+    /// budget is `FusionWeightConfig.musicBedCap` (NOT `acousticCap`):
+    /// playhead-2hpn carved out a dedicated cap so the scoped-music-bed
+    /// jingle boost (0.10 → 0.25) is not silently truncated to 0.20. See
+    /// `BackfillEvidenceFusion.buildLedger()` for the dedicated branch
+    /// and `MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight` for
+    /// the coupling invariant.
     /// Persistence note: additive case; no migration required.
     case musicBed
     /// playhead-fqc8: Acoustic-break alignment with a `.classifierSeed`-anchored
