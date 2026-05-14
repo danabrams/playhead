@@ -407,6 +407,83 @@ struct AdaptiveDeviceProfileEstimatorTests {
         #expect(scaled == seed, "scale 1.0 must be the identity transform")
     }
 
+    // MARK: - Non-finite hardening (R5: corrupt persisted state + corrupt observation)
+
+    @Test("apply drops a NaN observation without mutating state")
+    func testNaNObservationDropped() {
+        let state = Self.apply(observations: 5, value: 45, to: Self.freshState())
+        let nanObs = GrantWindowObservation(
+            grantWindowSeconds: .nan,
+            observedAt: Self.referenceDate.addingTimeInterval(3600)
+        )
+        let (after, result) = AdaptiveDeviceProfileEstimator.apply(observation: nanObs, to: state)
+        #expect(after == state, "NaN observation must leave state byte-equal")
+        #expect(result.persistedScaleFactorChanged == false)
+        #expect(result.didRevertToSeed == false)
+    }
+
+    @Test("apply drops a +Infinity observation without poisoning the EWMA")
+    func testInfinityObservationDropped() {
+        let state = Self.apply(observations: 5, value: 45, to: Self.freshState())
+        let infObs = GrantWindowObservation(
+            grantWindowSeconds: .infinity,
+            observedAt: Self.referenceDate.addingTimeInterval(3600)
+        )
+        let (after, _) = AdaptiveDeviceProfileEstimator.apply(observation: infObs, to: state)
+        #expect(after.ewmaSeconds.isFinite, "EWMA must remain finite after an Inf observation")
+        #expect(after.welfordMean.isFinite)
+        #expect(after.welfordM2.isFinite)
+        // State should be byte-equal to the prior — Inf is dropped at
+        // the guard, not absorbed and re-clamped.
+        #expect(after == state)
+    }
+
+    @Test("apply self-heals when the prior persisted state has a NaN EWMA")
+    func testCorruptPriorStateHeals() {
+        // Simulate a SwiftData row that hydrated with a NaN EWMA — e.g.
+        // a hand-edited DB or a migration bug. Without the sanitization
+        // step the next `apply` would produce another NaN forever.
+        var corrupt = Self.apply(observations: 30, value: 45, to: Self.freshState())
+        corrupt.ewmaSeconds = .nan
+        corrupt.welfordMean = .nan
+        corrupt.welfordM2 = .nan
+        corrupt.persistedScaleFactor = .nan
+
+        let healObs = GrantWindowObservation(
+            grantWindowSeconds: 45,
+            observedAt: Self.referenceDate.addingTimeInterval(24 * 60 * 60 + 60)
+        )
+        let (healed, _) = AdaptiveDeviceProfileEstimator.apply(observation: healObs, to: corrupt)
+
+        #expect(healed.ewmaSeconds.isFinite, "EWMA must be finite after healing")
+        #expect(healed.welfordMean.isFinite)
+        #expect(healed.welfordM2.isFinite)
+        #expect(healed.persistedScaleFactor.isFinite)
+        // After the soft-reset the row begins re-bootstrapping. One
+        // observation in: sampleCount=1, EWMA seeded to obs value.
+        #expect(healed.sampleCount == 1, "soft-reset re-arms activation floor")
+        #expect(healed.ewmaSeconds == 45, "first post-heal observation seeds the EWMA")
+        // Identity fields survive the heal — `seedGrantWindowSeconds`
+        // and `createdAt` are immutable contract.
+        #expect(healed.seedGrantWindowSeconds == corrupt.seedGrantWindowSeconds)
+        #expect(healed.createdAt == corrupt.createdAt)
+        #expect(healed.deviceClassRawValue == corrupt.deviceClassRawValue)
+    }
+
+    @Test("apply self-heals when the prior persisted state has +Inf persistedScaleFactor")
+    func testInfinityPriorStateHeals() {
+        var corrupt = Self.apply(observations: 30, value: 45, to: Self.freshState())
+        corrupt.persistedScaleFactor = .infinity
+
+        let healObs = GrantWindowObservation(
+            grantWindowSeconds: 45,
+            observedAt: Self.referenceDate.addingTimeInterval(24 * 60 * 60 + 60)
+        )
+        let (healed, _) = AdaptiveDeviceProfileEstimator.apply(observation: healObs, to: corrupt)
+        #expect(healed.persistedScaleFactor.isFinite)
+        #expect(healed.persistedScaleFactor == 1.0, "scale factor pins back to 1.0 on heal")
+    }
+
     // MARK: - State init defaults
 
     @Test("Fresh state initializes to seed-equivalent values")

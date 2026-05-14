@@ -317,44 +317,60 @@ enum AdaptiveDeviceProfileEstimator {
     /// fired this observation (see `AdaptiveDeviceProfileApplyResult`).
     ///
     /// Semantics:
-    ///   1. Validate `obs.grantWindowSeconds > 0`. Non-positive
-    ///      observations are dropped (the never-zero floor); the
-    ///      state is returned unchanged with all flags false. This
-    ///      protects against caller bugs that pass `0` or negative
-    ///      durations to a math layer that would otherwise divide
-    ///      by zero downstream.
-    ///   2. Welford update: increment sampleCount, refresh mean,
+    ///   1. Validate `obs.grantWindowSeconds` is finite and > 0.
+    ///      Non-positive, NaN, and infinite observations are dropped
+    ///      (the never-zero floor + the finite-arithmetic invariant);
+    ///      the state is returned unchanged with all flags false.
+    ///      This protects against caller bugs that pass `0`, negative,
+    ///      NaN, or `.infinity` to a math layer that would otherwise
+    ///      poison the running EWMA / Welford accumulator forever.
+    ///   2. Sanitize the prior state's math fields if a corrupt SwiftData
+    ///      row delivered a non-finite `welfordMean`, `welfordM2`,
+    ///      `ewmaSeconds`, or `persistedScaleFactor`. Without this step
+    ///      one NaN/Inf in storage would propagate through every
+    ///      subsequent observation forever (NaN math is sticky). We
+    ///      heal by zeroing the math accumulators and pinning the
+    ///      scale factor back to 1.0 — equivalent to a soft cold-start
+    ///      that preserves identity fields (`createdAt`, seed, device
+    ///      class) so diagnostics still attribute the row correctly.
+    ///   3. Welford update: increment sampleCount, refresh mean,
     ///      accumulate M2.
-    ///   3. EWMA update: on the very first observation, seed EWMA to
+    ///   4. EWMA update: on the very first observation, seed EWMA to
     ///      the observation value (avoids the cold-start bias that
     ///      `α * obs + (1-α) * 0` would produce); otherwise apply
     ///      the standard formula.
-    ///   4. Clamp candidate: compute `candidate = ewma / seed` and
+    ///   5. Clamp candidate: compute `candidate = ewma / seed` and
     ///      track whether it saturated one end of the clamp band for
     ///      the divergence-revert counter.
-    ///   5. Activation gate: if sampleCount < activation floor, return
+    ///   6. Activation gate: if sampleCount < activation floor, return
     ///      with the EWMA + Welford updated but the persisted scale
     ///      factor unchanged. This keeps the cold-start path
     ///      byte-identical to the seed.
-    ///   6. Rate limit: cap the move toward the candidate at
+    ///   7. Rate limit: cap the move toward the candidate at
     ///      ±notchStep from the persisted scale factor, and refuse
     ///      to advance at all if `lastNotchChangeAt` is within
     ///      `notchWindowSeconds` of `obs.observedAt`.
-    ///   7. Divergence-revert: if the run-of-clamp-saturated
+    ///   8. Divergence-revert: if the run-of-clamp-saturated
     ///      observations hits `divergenceObservationThreshold`,
     ///      reset state to "cold" (sample count zeroed, EWMA cleared,
     ///      scale factor pinned back to 1.0), stamp the revert reason,
     ///      and flag `didRevertToSeed`.
-    ///   8. updatedAt is always advanced to `obs.observedAt`.
+    ///   9. updatedAt is always advanced to `obs.observedAt`.
     static func apply(
         observation obs: GrantWindowObservation,
         to state: AdaptiveDeviceProfileState,
         tuning: AdaptiveDeviceProfileTuning = .standard
     ) -> (state: AdaptiveDeviceProfileState, result: AdaptiveDeviceProfileApplyResult) {
 
-        // (1) Drop non-positive durations defensively. Never-zero
-        // floor is the strongest invariant in the spec.
-        guard obs.grantWindowSeconds > 0 else {
+        // (1) Drop non-finite or non-positive durations defensively.
+        // Never-zero floor is the strongest invariant in the spec, and
+        // a NaN/Inf observation would poison the EWMA/Welford
+        // accumulators for every subsequent observation (NaN-stickiness
+        // through `α * obs + (1-α) * ewma`). `Double.isFinite` covers
+        // both NaN and ±Inf; the `> 0` guard then catches genuine zero
+        // and negative-duration cases (e.g. NTP step backwards).
+        guard obs.grantWindowSeconds.isFinite,
+              obs.grantWindowSeconds > 0 else {
             return (state, AdaptiveDeviceProfileApplyResult(
                 persistedScaleFactorChanged: false,
                 didRevertToSeed: false,
@@ -365,14 +381,38 @@ enum AdaptiveDeviceProfileEstimator {
 
         var next = state
 
-        // (2) Welford update — running mean + M2.
+        // (2) Sanitize a corrupt prior state. SwiftData persists raw
+        // doubles, so a row with a NaN/Inf field (storage corruption,
+        // a hand-edited DB, a future migration bug) would otherwise
+        // make `apply` permanently NaN-stuck — every subsequent update
+        // produces NaN because NaN is absorbing under +/*. Healing
+        // here zeroes the accumulators and pins the scale factor back
+        // to 1.0; the consumer surface (`resolvedScaleFactor`) was
+        // already NaN-safe by argument ordering of its `min/max`
+        // clamps, but the persisted state itself never self-healed
+        // until this step. Sample count is zeroed too so the
+        // activation floor re-armed (the EWMA needs fresh observations
+        // to converge — replaying old observations is not possible).
+        if !next.welfordMean.isFinite
+            || !next.welfordM2.isFinite
+            || !next.ewmaSeconds.isFinite
+            || !next.persistedScaleFactor.isFinite {
+            next.welfordMean = 0
+            next.welfordM2 = 0
+            next.sampleCount = 0
+            next.ewmaSeconds = 0
+            next.persistedScaleFactor = 1.0
+            next.consecutiveClampedObservations = 0
+        }
+
+        // (3) Welford update — running mean + M2.
         next.sampleCount += 1
         let delta = obs.grantWindowSeconds - next.welfordMean
         next.welfordMean += delta / Double(next.sampleCount)
         let delta2 = obs.grantWindowSeconds - next.welfordMean
         next.welfordM2 += delta * delta2
 
-        // (3) EWMA update. First observation: seed the EWMA to the
+        // (4) EWMA update. First observation: seed the EWMA to the
         // observation value to avoid cold-start bias toward zero.
         if next.sampleCount == 1 {
             next.ewmaSeconds = obs.grantWindowSeconds
@@ -382,7 +422,7 @@ enum AdaptiveDeviceProfileEstimator {
                 + (1 - tuning.ewmaAlpha) * next.ewmaSeconds
         }
 
-        // (4) Compute the raw clamp-band candidate and detect
+        // (5) Compute the raw clamp-band candidate and detect
         // saturation. The candidate may exceed the clamp band even
         // when the persisted factor is still inside — saturation here
         // is about the RAW EWMA, not the persisted output.
@@ -405,7 +445,7 @@ enum AdaptiveDeviceProfileEstimator {
             next.consecutiveClampedObservations = 0
         }
 
-        // (5) Activation gate. Below the floor we keep the EWMA +
+        // (6) Activation gate. Below the floor we keep the EWMA +
         // Welford updates (so the state warms up) but do NOT move
         // the persisted scale factor — consumers see the seed.
         guard next.isActivated(tuning: tuning) else {
@@ -418,7 +458,7 @@ enum AdaptiveDeviceProfileEstimator {
             ))
         }
 
-        // (7') Divergence-revert is evaluated *after* the activation
+        // (8') Divergence-revert is evaluated *after* the activation
         // gate so a pre-activation noisy burst doesn't pre-poison the
         // counter. The counter accumulates pre-activation too, but
         // the revert can only fire once the estimator is live.
@@ -444,7 +484,7 @@ enum AdaptiveDeviceProfileEstimator {
             ))
         }
 
-        // (6) Rate-limit + clamp + notch the persisted scale factor.
+        // (7) Rate-limit + clamp + notch the persisted scale factor.
         // Clamp the raw candidate first so the rate-limit comparison
         // is against the legal target the estimator wants to occupy.
         let clampedCandidate = min(
