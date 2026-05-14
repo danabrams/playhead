@@ -173,6 +173,68 @@ struct SettingsL274CopyTests {
         )
     }
 
+    @Test func perShowCapabilityProfileRowSeparator() {
+        // h6a6 R9 review gap: the per-show capability-profile row caption
+        // joined the truncated identifier and the completed-episode count
+        // with an inline " · " literal. That mid-dot separator IS
+        // user-visible copy; R8's empty-state extraction pattern applies
+        // here too. Pin the separator string verbatim so a font-driven
+        // edit (e.g. ASCII " * ", " | ") forces a test update.
+        #expect(SettingsL274Copy.perShowCapabilityProfileRowSeparator == " · ")
+    }
+
+    @Test func perShowCapabilityProfileEpisodeSuffix() {
+        // h6a6 R9: the noun suffix attached to the completed-episode
+        // count is user-visible copy. The singular/plural split avoids
+        // the grammar bug the prior inline literal had ("… · 1
+        // episodes"). Pinning verbatim so future copy edits force an
+        // intentional test update.
+        #expect(SettingsL274Copy.perShowCapabilityProfileEpisodeSuffixSingular == " episode")
+        #expect(SettingsL274Copy.perShowCapabilityProfileEpisodeSuffixPlural == " episodes")
+    }
+
+    @Test func perShowCapabilityProfileRowCaption() {
+        // h6a6 R9: pin the composed caption for the three boundary cases
+        // (singular, plural, zero) AND the 40-character identifier
+        // truncation so the row's rendered string can never silently
+        // drift. The composition routes the separator + suffix from the
+        // copy namespace, so changing any of the four pinned fragments
+        // breaks both this test and the per-fragment tests above —
+        // localizing the failure to the exact field that drifted.
+        #expect(
+            SettingsL274Copy.perShowCapabilityProfileRowCaption(
+                showIdentifier: "show-A",
+                completedEpisodeCount: 1
+            ) == "show-A · 1 episode"
+        )
+        #expect(
+            SettingsL274Copy.perShowCapabilityProfileRowCaption(
+                showIdentifier: "show-A",
+                completedEpisodeCount: 5
+            ) == "show-A · 5 episodes"
+        )
+        #expect(
+            SettingsL274Copy.perShowCapabilityProfileRowCaption(
+                showIdentifier: "show-A",
+                completedEpisodeCount: 0
+            ) == "show-A · 0 episodes",
+            "Zero completed episodes must use the plural suffix (English convention)."
+        )
+        // 40-character truncation matches the scheduler-event row's
+        // hash-prefix pattern (`SettingsView.capabilityProfileRow`
+        // comment). A 41-character identifier should drop its 41st
+        // character before the separator.
+        let longIdentifier = String(repeating: "x", count: 41)
+        let truncated = String(repeating: "x", count: 40)
+        #expect(
+            SettingsL274Copy.perShowCapabilityProfileRowCaption(
+                showIdentifier: longIdentifier,
+                completedEpisodeCount: 5
+            ) == "\(truncated) · 5 episodes",
+            "Identifiers longer than 40 characters must truncate to the first 40."
+        )
+    }
+
     @Test func showCapabilityProfileKindDisplayLabels() {
         // h6a6 R7 review gap: `ShowCapabilityProfileKind.displayLabel`
         // strings are rendered verbatim by `SettingsView

@@ -1811,6 +1811,20 @@ private extension SettingsView {
     /// completed episodes alongside the kind gives the user a
     /// reason-to-believe ("Observed after 5 episodes") without
     /// surfacing any binding.
+    ///
+    /// h6a6 R9 review fix: the caption used to be assembled with an
+    /// inline interpolated literal (`"\(...) · \(...) episodes"`)
+    /// that mixed dynamic data with two user-visible copy fragments
+    /// (the middle-dot separator and the " episodes" suffix). That
+    /// inline literal violated the `SettingsL274.swift` file-header
+    /// rule against inline copy in the SwiftUI body — the same
+    /// invariant R8 enforced on the empty-state caption. R9 routes
+    /// the caption through
+    /// `SettingsL274Copy.perShowCapabilityProfileRowCaption(...)` so
+    /// the separator and singular/plural noun suffix are pinned by
+    /// tests. The helper also fixes a latent grammar regression
+    /// (the prior literal would render "… · 1 episodes" for the
+    /// first-record case the persistence tests exercise).
     @ViewBuilder
     func capabilityProfileRow(_ snap: ShowCapabilityProfileSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -1821,7 +1835,12 @@ private extension SettingsView {
             // the user can map the row to a subscription without
             // exposing the full feed URL. Truncation matches the
             // scheduler-event row's hash-prefix pattern.
-            Text("\(String(snap.showIdentifier.prefix(40))) · \(snap.completedEpisodeCount) episodes")
+            Text(
+                SettingsL274Copy.perShowCapabilityProfileRowCaption(
+                    showIdentifier: snap.showIdentifier,
+                    completedEpisodeCount: snap.completedEpisodeCount
+                )
+            )
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.textTertiary)
         }
