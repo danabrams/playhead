@@ -136,6 +136,34 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(!encoded.contains("evidenceText"))
     }
 
+    @Test("export suppresses snapshots instead of dropping invalid windows with stale coverage")
+    func exportSuppressesSnapshotWhenExportableWindowIsInvalid() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "full-file-sha-a"
+        )
+        try await store.updateConfirmedAdCoverage(id: "asset-a", endTime: 90)
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-invalid-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 90,
+                confidence: 1.4
+            )
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        #expect(snapshot == nil)
+    }
+
     @Test("import mismatch is an explicit no-op and leaves local windows untouched")
     func importMismatchIsNoOp() async throws {
         let store = try await makeTestStore()
@@ -277,6 +305,67 @@ struct AnalysisStoreCrossUserSharingTests {
 
         if case .incompatibleSnapshot(let reason) = result {
             #expect(reason == "pipelineVersions")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
+    @Test("import rejects invalid windows without partially inserting valid windows")
+    func importRejectsInvalidWindowsWithoutPartialInsert() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "shared-full-file-sha"
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-1",
+            fileSHA: "shared-full-file-sha"
+        )
+        let validWindow = CrossUserAnalysisSnapshot.Window(
+            adWindow: makeSharingWindow(
+                id: "source-valid-window",
+                assetId: "asset-a",
+                start: 12,
+                end: 60
+            )
+        )
+        let invalidWindow = CrossUserAnalysisSnapshot.Window(
+            sourceWindowId: "source-invalid-window",
+            startTime: 70,
+            endTime: 90,
+            confidence: 1.4,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "fm-test-v1",
+            advertiser: "Acme",
+            product: "Widget",
+            adDescription: "Invalid confidence promo",
+            metadataSource: "foundation-model",
+            metadataConfidence: 0.81,
+            metadataPromptVersion: "prompt-v1",
+            evidenceSources: "semantic,fusion",
+            eligibilityGate: "ready",
+            catalogStoreMatchSimilarity: 0.63
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [validWindow, invalidWindow]
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "window[1]")
         } else {
             Issue.record("Expected incompatibleSnapshot result, got \(result)")
         }

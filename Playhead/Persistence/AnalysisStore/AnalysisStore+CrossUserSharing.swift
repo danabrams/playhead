@@ -316,6 +316,9 @@ extension AnalysisStore {
         )
         let windows = try fetchAdWindows(assetId: assetId)
             .compactMap(CrossUserAnalysisSnapshot.Window.exported(from:))
+        guard windows.allSatisfy(Self.isValidSharedWindow) else {
+            return nil
+        }
         let windowCoverageEnd = windows
             .map(\.endTime)
             .filter(\.isFinite)
@@ -364,12 +367,15 @@ extension AnalysisStore {
         guard snapshot.analysisCoverageEndSec.isFinite, snapshot.analysisCoverageEndSec >= 0 else {
             return .incompatibleSnapshot(reason: "analysisCoverageEndSec")
         }
+        if let invalidWindowIndex = snapshot.windows.firstIndex(where: { !Self.isValidSharedWindow($0) }) {
+            return .incompatibleSnapshot(reason: "window[\(invalidWindowIndex)]")
+        }
 
         var existingWindows = try fetchAdWindows(assetId: targetAssetId)
         var existingIds = Set(existingWindows.map(\.id))
         var windowsToInsert: [AdWindow] = []
 
-        for window in snapshot.windows where Self.isValidSharedWindow(window) {
+        for window in snapshot.windows {
             guard let decisionState = CrossUserAnalysisSnapshot.Window.normalizedImportDecisionState(
                 window.decisionState,
                 isAd: window.isAd
@@ -471,6 +477,9 @@ extension AnalysisStore {
             && window.confidence.isFinite
             && window.startTime >= 0
             && window.endTime > window.startTime
+            && (0...1).contains(window.confidence)
+            && window.metadataConfidence.map { $0.isFinite && (0...1).contains($0) } ?? true
+            && window.catalogStoreMatchSimilarity.map { $0.isFinite && (0...1).contains($0) } ?? true
     }
 
     private static func hasEquivalentSpan(
