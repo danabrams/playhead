@@ -309,4 +309,92 @@ struct AdaptiveDeviceProfileWriteSeamTests {
         #expect(recorded.isEmpty,
                 "negative elapsed (NTP step back) must be dropped at the helper")
     }
+
+    // MARK: - (4) Static call-site canary
+    //
+    // R3: the file header (section (4)) promises a "compile-time
+    // guarantee" that the four success outcome arms in
+    // `AnalysisWorkScheduler.processJob` reference
+    // `recordGrantWindowObservationIfEnabled`. R2 wired the call sites
+    // and added unit tests that drive the helper directly, but never
+    // pinned the arm→helper edge. Without this canary a future refactor
+    // could silently drop one of the four `await` lines and every
+    // unit test would still pass.
+    //
+    // The canary scans `AnalysisWorkScheduler.swift` (the source file
+    // owning `processJob`) and asserts:
+    //   * the helper is defined exactly once, and
+    //   * the four success outcome arms each have at least one
+    //     call-site reference to it, demonstrated by a >=5 reference
+    //     count (4 success arms + 1 definition = 5 minimum).
+    //
+    // We use the same source-canary pattern established by
+    // `DebugDiagnosticsHatchSourceCanaryTests`. The test is in this
+    // file (rather than a parallel canary file) because the contract
+    // it pins is the same one this file documents.
+
+    private static let repoRoot: URL = {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // .../PreAnalysis/
+            .deletingLastPathComponent() // .../Services/
+            .deletingLastPathComponent() // .../PlayheadTests/
+            .deletingLastPathComponent() // .../<repo root>/
+    }()
+
+    @Test("Source canary: AnalysisWorkScheduler.processJob references recordGrantWindowObservationIfEnabled from all four success arms")
+    func sourceCanaryAllFourSuccessArmsReferenceHelper() throws {
+        let url = Self.repoRoot.appendingPathComponent(
+            "Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift"
+        )
+        let source = try String(contentsOf: url, encoding: .utf8)
+
+        // The helper definition must be present exactly once. Look for
+        // the `func recordGrantWindowObservationIfEnabled(` signature.
+        let definitionToken = "func recordGrantWindowObservationIfEnabled("
+        let definitionCount = source.components(separatedBy: definitionToken).count - 1
+        #expect(definitionCount == 1,
+                "expected exactly one helper definition, got \(definitionCount)")
+
+        // Total occurrences of the symbol = 1 definition + N call sites.
+        // The R2 wiring places one `await` reference in each of the four
+        // success arms (`tierAdvance`, `allTiersDone`,
+        // `coverageInsufficient.noProgress`, `coverageInsufficient.maxAttempts`).
+        // Counting raw symbol references is more refactor-robust than
+        // requiring a specific surrounding shape: a future refactor that
+        // routes the helper through a wrapper would still register on
+        // this canary as long as the call edges remain.
+        let totalReferences = source.components(separatedBy: "recordGrantWindowObservationIfEnabled").count - 1
+        #expect(totalReferences >= 5,
+                "expected ≥5 references (1 definition + 4 success-arm call sites); got \(totalReferences)")
+
+        // Spot-check each success arm by name — the call must appear
+        // inside the same source file as those arm labels. We assert the
+        // arm tag string is present (`"tierAdvance"` etc. — these are
+        // the `commitOutcomeArm` labels the production code passes to
+        // the journal), and that at least one helper reference follows
+        // within a generous window of source characters.
+        let armTags = [
+            "\"tierAdvance\"",
+            "\"allTiersDone\"",
+            "\"coverageInsufficient.noProgress\"",
+            "\"coverageInsufficient.maxAttempts\"",
+        ]
+        for tag in armTags {
+            guard let tagRange = source.range(of: tag) else {
+                Issue.record("success arm tag \(tag) missing from AnalysisWorkScheduler.swift")
+                continue
+            }
+            // The helper invocation appears within the success branch
+            // of each arm. The arms are short (the helper call sits ≤
+            // 30 lines after the tag in every case), so a 4_000-char
+            // window comfortably covers each one without crossing into
+            // the next arm.
+            let windowEnd = source.index(tagRange.upperBound,
+                                         offsetBy: 4_000,
+                                         limitedBy: source.endIndex) ?? source.endIndex
+            let window = source[tagRange.upperBound..<windowEnd]
+            #expect(window.contains("recordGrantWindowObservationIfEnabled("),
+                    "expected helper invocation within the \(tag) arm body")
+        }
+    }
 }

@@ -3815,6 +3815,26 @@ actor AnalysisWorkScheduler {
     /// wall-clock interval is a faithful "grant-window slice completion"
     /// duration the spec asks the estimator to learn from.
     ///
+    /// Failure arms excluded — rationale (R3 explicit): `.failed`,
+    /// `.pausedForThermal`, `.memoryPressure`, `.blockedByModel`,
+    /// `.backgroundExpired`, `.cancelledByPlayback`, `.preempted`, and
+    /// the outer-catch / cancel-catch paths all SKIP this helper. These
+    /// outcomes either (a) terminated mid-slice (thermal trip, BG-task
+    /// expiry, runner exception), or (b) never produced a real slice in
+    /// the first place (model unavailable, playback preemption). The
+    /// resulting wall-clock interval is not a "we ran a slice end-to-end"
+    /// observation; recording would teach the EWMA that grant windows
+    /// are bounded by external events (thermals, OS time budgets) rather
+    /// than the device's actual throughput. The trade-off is a mild
+    /// survivorship bias: a device that consistently trips thermals on
+    /// long slices will never feed those long-and-aborted windows into
+    /// the EWMA, so the estimator may converge slightly higher than the
+    /// "true" sustainable budget. The clamp band (≤2× seed) caps the
+    /// magnitude of that drift, and the divergence-revert path catches
+    /// pathological cases. We prefer the bias direction (slightly over-
+    /// optimistic) over polluting the estimator with externally-bounded
+    /// durations.
+    ///
     /// Flag gating: the method is the SINGLE production write site for
     /// the estimator. It returns immediately when
     /// `config.useAdaptiveDeviceProfile == false`, so a flag-off run
@@ -3822,6 +3842,16 @@ actor AnalysisWorkScheduler {
     /// never mutates estimator state — that is the byte-identical
     /// rollback contract from the bead spec, mechanically enforced here
     /// rather than at every call site.
+    ///
+    /// `leaseAcquiredAt` capture point: the timestamp is captured at
+    /// the top of `processJob` BEFORE the `await store.acquireLeaseWithJournal(...)`
+    /// call, identical to the `now` value the SQL layer is given as its
+    /// transaction timestamp. The measured `grantWindowSeconds`
+    /// therefore includes any SQLite lease-acquisition latency. This is
+    /// intentional: the next slice will also pay that cost, so an EWMA
+    /// trained on "from-attempted-acquire" durations predicts the next
+    /// slice's wall-clock budget more faithfully than a "from-confirmed-
+    /// acquire" alternative would.
     ///
     /// `lostOwnership` mirror: the success arms commit BEFORE the
     /// `lostOwnership` short-circuit higher up (the renewer cannot flip
