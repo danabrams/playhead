@@ -186,6 +186,31 @@ final class SwiftDataLearnedDeviceProfileStore: LearnedDeviceProfileProviding {
     ) async -> AdaptiveDeviceProfileApplyResult {
         let row = fetchOrCreate(for: deviceClass, seed: seed)
         let prior = row.snapshot()
+        // playhead-beh3 (R8): observability for the math-layer soft-reset
+        // path. R5/R6 added in-memory healing for non-finite math/Date
+        // fields; the math layer is pure and intentionally has no logger,
+        // so a corruption-heal would otherwise fire silently in
+        // production. Detecting the prior shape here (BEFORE the apply
+        // call) is the cheapest cross-cut: it requires no new field on
+        // `AdaptiveDeviceProfileApplyResult` and no new enum case. If
+        // corruption is firing in the wild we'll see exactly which
+        // device class and which axis tripped the heal. Logged at
+        // `.notice` (same level as the divergence-revert log) so it
+        // surfaces in default OSLog captures without being chatty.
+        let priorHadNonFiniteMath =
+            !prior.welfordMean.isFinite
+            || !prior.welfordM2.isFinite
+            || !prior.ewmaSeconds.isFinite
+            || !prior.persistedScaleFactor.isFinite
+        let priorHadNonFiniteDate: Bool = {
+            guard let last = prior.lastNotchChangeAt else { return false }
+            return !last.timeIntervalSinceReferenceDate.isFinite
+        }()
+        if priorHadNonFiniteMath || priorHadNonFiniteDate {
+            logger.notice(
+                "LearnedDeviceProfile soft-reset triggered for \(deviceClass.rawValue, privacy: .public) math=\(priorHadNonFiniteMath, privacy: .public) date=\(priorHadNonFiniteDate, privacy: .public)"
+            )
+        }
         let (next, result) = AdaptiveDeviceProfileEstimator.apply(
             observation: observation,
             to: prior,
