@@ -639,19 +639,19 @@ actor BackgroundFeedRefreshService {
         let podcasts = await enumerator.enumeratePodcasts()
         logger.info("Refreshing \(podcasts.count, privacy: .public) subscribed podcasts")
 
-        // playhead-5w4: track the per-feed override alongside the
-        // discovered episodes so the auto-download selection can resolve
-        // the effective policy (override ?? global) per podcast. Pre-fix
-        // the handler flattened every feed's new episodes into one list
-        // and applied the global setting once; that path could not
-        // distinguish a per-show "off" override from the user's global
-        // "Last 3".
+        // playhead-5w4: group discovered episodes by their feed URL so
+        // the auto-download selection loop can resolve the effective
+        // policy (override ?? global) per podcast. Pre-fix the handler
+        // flattened every feed's new episodes into one list and applied
+        // the global setting once; that path could not distinguish a
+        // per-show "off" override from the user's global "Last 3", and
+        // the override itself reads directly off the enumerated
+        // `FeedRefreshPodcastSnapshot` in the second loop so no parallel
+        // override-by-feed dictionary is needed.
         var newEpisodesByFeed: [URL: [FeedRefreshNewEpisode]] = [:]
-        var overrideByFeed: [URL: AutoDownloadOnSubscribe?] = [:]
         var allNewEpisodesCount = 0
         for snapshot in podcasts {
             if expired { break }
-            overrideByFeed[snapshot.feedURL] = snapshot.autoDownloadOverride
             do {
                 let newEpisodes = try await refresher.refreshEpisodes(
                     feedURL: snapshot.feedURL,
