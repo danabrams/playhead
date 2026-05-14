@@ -183,7 +183,7 @@ private extension LibraryView {
 
                         // playhead-5w4: per-show auto-download override.
                         // `nil` = inherit global, surfaced as
-                        // "Inherit global (X)" so the user sees what
+                        // "Inherit Global (X)" so the user sees what
                         // global setting is currently active. A
                         // non-nil value bypasses the global for this
                         // podcast only.
@@ -204,7 +204,7 @@ private extension LibraryView {
     // MARK: - Per-show auto-download override (playhead-5w4)
 
     /// Submenu that surfaces the four `AutoDownloadOnSubscribe` options
-    /// plus an "Inherit global (X)" row for `nil`. Tapping a value
+    /// plus an "Inherit Global (X)" row for `nil`. Tapping a value
     /// writes through to the SwiftData `Podcast` row; SwiftData
     /// autosaves on the next runloop tick so the choice persists
     /// across app launches.
