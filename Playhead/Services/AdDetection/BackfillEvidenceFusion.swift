@@ -130,6 +130,20 @@ struct FusionWeightConfig: Sendable {
         self.fingerprintCap = fingerprintCap
         self.metadataCap = metadataCap
         self.musicBedCap = musicBedCap
+
+        // playhead-2hpn R4: enforce the musicBedCap >=
+        // musicBedConfirmedJingleWeight invariant at construction time, not
+        // only inside the default-init test. Catches any non-default
+        // initializer (e.g. a tuning helper) that would set `musicBedCap`
+        // below the boost weight and silently truncate it. Debug-only so
+        // the production binary pays no runtime cost; the inline-doc
+        // coupling comment + the
+        // `musicBedCapAccommodatesBoostWeight` test continue to enforce
+        // it for the default path.
+        assert(
+            musicBedCap >= MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight,
+            "FusionWeightConfig.musicBedCap (\(musicBedCap)) must be >= MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight (\(MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight)) or the scoped-music-bed jingle boost is silently truncated inside buildLedger. Raise musicBedCap to match if you change the boost weight."
+        )
     }
 }
 
