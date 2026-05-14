@@ -511,9 +511,16 @@ actor AdDetectionService {
     /// Rollback latency: flipping the flag via Settings persists to
     /// `UserDefaults` immediately but this cache is only refreshed at
     /// the next `AdDetectionService` construction (i.e. next app
-    /// launch). This matches the documented rollback latency of the
-    /// other `PreAnalysisConfig`-backed flags (`24cm`, `xr3t`) per the
-    /// `SettingsView` toggle comment.
+    /// launch). This matches the `xr3t` flag's rollback latency
+    /// (consumer caches the value at init and re-reads on next init).
+    /// Note: `24cm` — the OTHER `PreAnalysisConfig`-backed flag —
+    /// additionally applies live via `DownloadManager
+    /// .setUseDualBackgroundSessions(_:)` so its effective rollback is
+    /// instant, NOT next-launch; the latency contract here is the
+    /// next-init one, identical to `xr3t` (which persists to
+    /// `LightweightInventoryChecksSettings`, not `PreAnalysisConfig`,
+    /// but shares the same "read at consumer init" pattern). R11
+    /// adversarial doc audit fix.
     private let preAnalysisConfig: PreAnalysisConfig = PreAnalysisConfig.load()
 
     /// playhead-8em9 (narL): Optional decision logger for offline replay.

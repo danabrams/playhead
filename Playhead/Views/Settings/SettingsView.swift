@@ -1527,8 +1527,13 @@ private extension SettingsView {
             // `PreAnalysisConfig.scopedMusicBedGeneralization`; the new
             // value takes effect on the next `AdDetectionService` init
             // (next app launch) — `AdDetectionService` caches the config
-            // snapshot at init time per its doc comment, matching the
-            // 24cm/xr3t rollback latency. All default OFF per spec.
+            // snapshot at init time per its doc comment. This matches
+            // `xr3t`'s next-consumer-init rollback latency. (`24cm` is
+            // ALSO `PreAnalysisConfig`-backed, but additionally applies
+            // live via `DownloadManager.setUseDualBackgroundSessions(_:)`,
+            // so its effective rollback is instant — not the same
+            // contract as `2hpn`. R11 adversarial doc audit fix.) All
+            // default OFF per spec.
             DisclosureGroup(SettingsL274Copy.featureFlagsLabel) {
                 ForEach(FeatureFlagPlaceholders.orderedSlugs, id: \.self) { slug in
                     Toggle(isOn: Binding(
