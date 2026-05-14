@@ -137,6 +137,103 @@ struct MusicBedLedgerEvaluatorJingleBoostTests {
                 "Confirmed show + overlapping span = 0.25 boosted weight")
     }
 
+    // MARK: - End-to-end: boost survives fusion clamping (R2 fix)
+
+    @Test("0.25 boost survives BackfillEvidenceFusion clamping (musicBedCap)")
+    func boostSurvivesFusionClamp() {
+        // Without the playhead-2hpn `musicBedCap` carve-out the
+        // 0.25 entry would be silently clamped to `acousticCap = 0.20`
+        // inside `BackfillEvidenceFusion.buildLedger()`, defeating the
+        // bead-spec'd 0.10 → 0.25 promotion. This test runs the
+        // evaluator's output through the real fusion path to confirm
+        // the boosted weight reaches the final ledger intact.
+        let boost = MusicBedLedgerEvaluator.JingleBoost(
+            isConfirmed: true,
+            spanOverlapsJingle: true
+        )
+        let result = MusicBedLedgerEvaluator.evaluate(
+            spanWindows: span08,
+            fusionConfig: config,
+            jingleBoost: boost
+        )
+        guard let entry = result.entry else {
+            Issue.record("Expected ledger entry from evaluator")
+            return
+        }
+
+        let span = DecodedSpan(
+            id: DecodedSpan.makeId(assetId: "a", firstAtomOrdinal: 0, lastAtomOrdinal: 1),
+            assetId: "a",
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: 1,
+            startTime: 0,
+            endTime: 20,
+            anchorProvenance: []
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0,
+            fmEntries: [],
+            lexicalEntries: [],
+            acousticEntries: [entry], // the .musicBed entry rides this list
+            catalogEntries: [],
+            mode: .off,
+            config: config
+        )
+        let ledger = fusion.buildLedger()
+        let musicBedEntry = ledger.first(where: { $0.source == .musicBed })
+        #expect(musicBedEntry != nil, "Fusion must preserve the .musicBed entry")
+        #expect(
+            abs((musicBedEntry?.weight ?? 0) - MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight) < 1e-9,
+            "Boosted .musicBed weight (0.25) must NOT be clamped to acousticCap (0.20) by fusion"
+        )
+    }
+
+    @Test("flag-OFF legacy musicBed weight is byte-identical post-fusion")
+    func flagOffLegacyWeightByteIdentical() {
+        // Belt-and-suspenders: the new musicBedCap (0.25) must not
+        // change the flag-OFF path's emitted weight. The legacy
+        // evaluator emits `presenceFraction * acousticCap` (≤ 0.20),
+        // which is already ≤ musicBedCap, so the cap should not bite.
+        let result = MusicBedLedgerEvaluator.evaluate(
+            spanWindows: span08,
+            fusionConfig: config,
+            jingleBoost: nil
+        )
+        guard let entry = result.entry else {
+            Issue.record("Expected ledger entry from legacy path")
+            return
+        }
+        let preFusionWeight = entry.weight
+
+        let span = DecodedSpan(
+            id: DecodedSpan.makeId(assetId: "a", firstAtomOrdinal: 0, lastAtomOrdinal: 1),
+            assetId: "a",
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: 1,
+            startTime: 0,
+            endTime: 20,
+            anchorProvenance: []
+        )
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0,
+            fmEntries: [],
+            lexicalEntries: [],
+            acousticEntries: [entry],
+            catalogEntries: [],
+            mode: .off,
+            config: config
+        )
+        let ledger = fusion.buildLedger()
+        let musicBedEntry = ledger.first(where: { $0.source == .musicBed })
+        #expect(musicBedEntry != nil)
+        #expect(
+            abs((musicBedEntry?.weight ?? 0) - preFusionWeight) < 1e-9,
+            "Flag-OFF legacy weight MUST pass through fusion unchanged"
+        )
+    }
+
     // MARK: - Non-firing path
 
     @Test("flag-on does not bypass the 30% presence floor")

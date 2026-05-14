@@ -87,6 +87,19 @@ struct FusionWeightConfig: Sendable {
     /// (RSS-feed-derived) entry. Spec mandates 0.15 of fusion budget per
     /// Plan §7.4. Hard-clamped via `FusionBudgetClamp`; never redistributed.
     let metadataCap: Double
+    /// playhead-2hpn: Maximum weight contribution from a single
+    /// `.musicBed` entry. Distinct from `acousticCap` because the
+    /// `scopedMusicBedGeneralization` boost path emits a 0.25 weight
+    /// when a confirmed-show span overlaps a detected jingle region —
+    /// clamping that at `acousticCap = 0.20` would silently truncate
+    /// the bead-spec'd 0.10 → 0.25 promotion to 0.10 → 0.20 and the
+    /// feature would never deliver the documented boost. The default
+    /// 0.25 also preserves byte-identical flag-OFF behavior: the legacy
+    /// `MusicBedLedgerEvaluator` path emits at most
+    /// `presenceFraction * acousticCap = 0.20`, so `min(legacy, 0.25)
+    /// == legacy` for every legacy input — the new cap only bites on
+    /// the boosted path.
+    let musicBedCap: Double
 
     init(
         fmCap: Double = 0.4,
@@ -96,7 +109,8 @@ struct FusionWeightConfig: Sendable {
         breakAlignmentCap: Double = 0.2,
         catalogCap: Double = 0.2,
         fingerprintCap: Double = 0.25,
-        metadataCap: Double = 0.15
+        metadataCap: Double = 0.15,
+        musicBedCap: Double = 0.25
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
@@ -106,6 +120,7 @@ struct FusionWeightConfig: Sendable {
         self.catalogCap = catalogCap
         self.fingerprintCap = fingerprintCap
         self.metadataCap = metadataCap
+        self.musicBedCap = musicBedCap
     }
 }
 
@@ -252,16 +267,27 @@ struct BackfillEvidenceFusion: Sendable {
         // `entry.source` so `.musicBed` keeps its distinct kind
         // instead of being flattened to `.acoustic` — that's what
         // lets the quorum gate's `distinctKinds.count` increment.
-        // Both `.acoustic` and `.musicBed` share the acoustic family
-        // weight budget (`config.acousticCap`), so the cap is the same.
+        //
+        // playhead-2hpn: clamp `.musicBed` against `musicBedCap` (0.25)
+        // and `.acoustic` against `acousticCap` (0.20). Before this
+        // bead the two shared `acousticCap`, but the 2hpn boost path
+        // emits 0.25 on a confirmed-show jingle-overlap span — that
+        // would have been silently truncated to 0.20. The legacy
+        // (flag-OFF) `MusicBedLedgerEvaluator` output is bounded by
+        // `presenceFraction * acousticCap ≤ 0.20 < musicBedCap`, so
+        // routing it through `musicBedCap` is byte-identical for the
+        // flag-OFF case while admitting the boost when the flag is on.
         // playhead-fqc8 cycle-1 review: continue to preserve
         // `entry.subSource` per the uniform-invariant (no producer in
         // this loop currently sets it now that breakAlignment moved to
         // its own source kind, but the pass-through stays defensive).
         for entry in acousticEntries {
+            let cap = (entry.source == .musicBed)
+                ? config.musicBedCap
+                : config.acousticCap
             let capped = EvidenceLedgerEntry(
                 source: entry.source,
-                weight: min(entry.weight, config.acousticCap),
+                weight: min(entry.weight, cap),
                 detail: entry.detail,
                 subSource: entry.subSource
             )

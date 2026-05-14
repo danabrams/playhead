@@ -81,6 +81,23 @@ final class ShowMusicBedProfile {
     /// Bead spec: ≥ 3 distinct episodes of the same show with matching
     /// hashes. We check this against `confirmationCount` which advances
     /// once per matching episode.
+    ///
+    /// Episode-count semantics (asymmetric):
+    ///   "Match" is a 2-element relation between an episode's hash and
+    ///   the set of PRIOR stored hashes — an episode whose edges produce
+    ///   the same fingerprint as one of the previously observed episodes.
+    ///   Episode #1 therefore can never "match" (the prior set is empty);
+    ///   it merely SEEDS the profile. Episode #2 is the first that can
+    ///   match the seed. So a show reaches `confirmationCount == 3` —
+    ///   the bead's "≥ 3 episodes have matching hashes" — after FOUR
+    ///   total observations:
+    ///     ep#1: seed (matched=false), confirmationCount stays 0
+    ///     ep#2: match against ep#1's seed → confirmationCount = 1
+    ///     ep#3: match → 2
+    ///     ep#4: match → 3 → `isConfirmed` becomes true
+    ///   See `ShowMusicBedProfileEvaluator.apply` for the transition
+    ///   rule; `ShowMusicBedProfileStorePersistenceTests.crossShowIsolation`
+    ///   exercises the count empirically.
     static let confirmationThreshold: Int = 3
 
     /// Consecutive-miss threshold above which the profile is reset.
