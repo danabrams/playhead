@@ -529,13 +529,15 @@ actor AdDetectionService {
     private(set) var capabilityProfileSLIGate: ShowCapabilitySLIGate = { _ in false }
 
     /// playhead-h6a6: Most recent capability-budget adjustment
-    /// resolved for a `runBackfill` invocation. Reset to
-    /// `.unknown`-yielded (multiplier 1.0, empty bias map) at the
-    /// start of each backfill so stale adjustments from a prior run
-    /// cannot leak into a fresh one. Test-observable via
-    /// `lastCapabilityBudgetAdjustmentForTesting()`. Flag-OFF runs
-    /// leave this at the `.unknown`-yielded value, which is exactly
-    /// the no-modulation no-op contract.
+    /// resolved for a `runBackfill` invocation. Overwritten at the
+    /// start of each backfill (via the read-path block in
+    /// `runBackfill`) so stale adjustments from a prior run cannot
+    /// leak into a fresh one. Initial value is the `.unknown`-yielded
+    /// baseline (multiplier 1.0, empty bias map) so a read BEFORE
+    /// the first backfill is the no-modulation no-op. Flag-OFF runs
+    /// resolve to the same `.unknown`-yielded value (the snapshot is
+    /// nil, the resolved kind is `.unknown`). Test-observable via
+    /// `lastCapabilityBudgetAdjustmentForTesting()`.
     private var lastCapabilityBudgetAdjustment: ShowCapabilityBudgetAdjustment =
         ShowCapabilityBudgetModulator.adjustment(for: .unknown)
 

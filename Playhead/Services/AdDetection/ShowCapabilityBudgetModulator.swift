@@ -3,14 +3,33 @@
 // `ShowCapabilityProfileKind` into a budget adjustment the
 // per-show analysis path can apply.
 //
+// V1-additive scope (h6a6 R2 doc audit): both outputs below are
+// value-typed contracts produced at the end of every `runBackfill`
+// and stamped on `AdDetectionService.lastCapabilityBudgetAdjustment`
+// (test-observable via `lastCapabilityBudgetAdjustmentForTesting()`).
+// Neither output has a production CONSUMER as of this bead:
+//   * The multiplier is emitted in a single `[h6a6]` log line —
+//     no `runBackfill` consumer multiplies its per-episode budget by
+//     it. The "≥ 15% compute reduction" acceptance is enforced as a
+//     CI invariant (`ShowCapabilityBudgetModulatorTests
+//     .reducesByAtLeast15Percent`) on the produced multiplier value;
+//     the wall-clock effect on `runBackfill` lands when a follow-on
+//     bead wires the budget knob through to the per-episode budget.
+//   * The detector-bias map is similarly value-only — the per-detector
+//     consumer wiring (BackfillEvidenceFusion / per-detector weights)
+//     is a follow-on bead. The map's shape and per-profile defaults
+//     are pinned by the unit tests so the consumer bead lands against
+//     a stable contract.
+//
 // Two outputs:
 //   1. `analysisBudgetMultiplier` — a scalar in
-//      `[minBudgetFloorRatio, 1.0]`. The runtime caller multiplies its
-//      baseline per-episode budget by this scalar, then clamps to a
-//      hard floor so a single per-episode minimum can never be zeroed
-//      out. The bead spec: profile-guided analysis reduces compute by
-//      ≥ 15% on profile-matched shows vs baseline, AND the always-on
-//      minimum per-episode budget is preserved.
+//      `[minBudgetFloorRatio, 1.0]`. When a future bead wires the
+//      consumer, it will multiply its baseline per-episode budget by
+//      this scalar, then clamp to a hard floor so a single
+//      per-episode minimum can never be zeroed out. The bead spec:
+//      profile-guided analysis reduces compute by ≥ 15% on
+//      profile-matched shows vs baseline, AND the always-on minimum
+//      per-episode budget is preserved.
 //
 //   2. `detectorBiases` — per-detector relative weight in [0.5, 1.5].
 //      Different profiles bias different detectors in the fusion
@@ -27,6 +46,11 @@
 //   * Floor enforcement is here so callers cannot accidentally
 //     undercut the minimum: the multiplier is clamped to
 //     `[minBudgetFloorRatio, 1.0]` AFTER per-profile reduction.
+//   * `applyAdjustment(baseline:adjustment:minimumPerEpisodeBudget:)`
+//     is the helper a future consumer SHOULD route through so the
+//     always-on minimum is enforced uniformly. Today it has only
+//     unit-test callers; pinning the helper in CI now means the
+//     consumer bead inherits a tested floor contract on day one.
 
 import Foundation
 
