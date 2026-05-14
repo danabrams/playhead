@@ -373,7 +373,17 @@ actor SkipOrchestrator {
         correctionStore: (any UserCorrectionStore)? = nil,
         invariantLogger: SurfaceStatusInvariantLogger = SurfaceStatusInvariantLogger(),
         episodeIdHasher: (@Sendable (String) -> String)? = nil,
-        inventoryFilter: InventorySanityFilter = .production()
+        // playhead-xr3t (review): default to a disabled no-op filter so
+        // pre-existing test surface that constructs `SkipOrchestrator`
+        // — and never sets episode-duration / declared-chapter context
+        // — doesn't silently lose pre-roll/post-roll spans to the
+        // head-/tail-edge rules. Production wires the real settings-
+        // backed filter explicitly via `InventorySanityFilter
+        // .production()` (see `PlayheadRuntime`), preserving the bead's
+        // spec default ON for new builds. This avoids an implicit
+        // `UserDefaults.standard` dependency leaking into every test
+        // that didn't ask for one.
+        inventoryFilter: InventorySanityFilter = InventorySanityFilter(isEnabled: false)
     ) {
         self.store = store
         self.config = config
