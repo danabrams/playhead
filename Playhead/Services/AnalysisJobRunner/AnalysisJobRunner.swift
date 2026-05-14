@@ -68,15 +68,28 @@ actor AnalysisJobRunner {
 
     /// playhead-zx6i — gate the B4 revalidation short-circuit. Returns
     /// `true` when the `b4_revalidation_from_features_enabled` flag is
-    /// ON for THIS process. Production wiring reads the flag from
-    /// `PreAnalysisConfig.load().b4RevalidationFromFeaturesEnabled` at
-    /// construction time so the runner has the same "next-init"
-    /// rollback contract as 2hpn / xr3t. Tests inject a fixed `Bool`
-    /// (or a closure that flips it) so the short-circuit can be
-    /// deterministically exercised without round-tripping through
-    /// UserDefaults. Returning `false` makes the short-circuit
-    /// structurally unreachable — flag-OFF is byte-identical to
-    /// pre-zx6i behaviour.
+    /// ON for THIS process. Production wiring re-reads the flag from
+    /// `PreAnalysisConfig.load().b4RevalidationFromFeaturesEnabled` on
+    /// EVERY call (this closure is invoked at the top of each
+    /// `run(_:)`), giving the runner an **instant rollback** contract:
+    /// flipping the flag OFF in Settings disables the short-circuit on
+    /// the very next analysis run, not on next app launch. This
+    /// diverges from 2hpn / xr3t (which snapshot at consumer-init);
+    /// instant rollback is preferred here because the short-circuit
+    /// gates a perf optimization with a potential `false_ready_rate`
+    /// risk, and minimising blast-radius matters more than caching
+    /// the read. The companion stamp-write inside
+    /// `AdDetectionService.runBackfill` also re-reads on every write
+    /// so the producer and consumer agree on the live value
+    /// (R1 doc audit fix: prior wiring snapshotted the writer at
+    /// `AdDetectionService` init, producing an asymmetric rollback
+    /// where a mid-session flag-ON would never write a stamp because
+    /// the producer's cached value was still `false`).
+    /// Tests inject a fixed `Bool` (or a closure that flips it) so
+    /// the short-circuit can be deterministically exercised without
+    /// round-tripping through UserDefaults. Returning `false` makes
+    /// the short-circuit structurally unreachable — flag-OFF is
+    /// byte-identical to pre-zx6i behaviour.
     private let b4RevalidationEnabledProvider: @Sendable () -> Bool
 
     /// playhead-zx6i — current pipeline-version triple reader. Defaults
@@ -211,11 +224,36 @@ actor AnalysisJobRunner {
                             // tier-advancement bookkeeping sees the
                             // same coverage it would have seen on a
                             // no-op fall-through.
+                            //
+                            // R1 doc audit fix: derive `cueCoverageSec`
+                            // from the freshly produced `AdWindow`
+                            // rows so the scheduler sees the honest
+                            // post-revalidation cue watermark, not a
+                            // hard-coded `0`. The filter (confidence
+                            // >= 0.7, endTime > startTime) is the same
+                            // one used by the full-path return at
+                            // line 681. We leave `newCueCount = 0`
+                            // (the `makeOutcome` default) because the
+                            // full path only computes `newCueCount`
+                            // when `request.outputPolicy ==
+                            // .writeWindowsAndCues`, and the
+                            // revalidation path is policy-agnostic by
+                            // contract (it never materialises cues);
+                            // honouring the same "no count unless
+                            // explicitly requested" semantics keeps
+                            // the two return shapes consistent.
+                            let revalidatedWindows = (try? await store.fetchAdWindows(assetId: assetId)) ?? []
+                            let confidenceThreshold = Self.cueConfidenceThreshold
+                            let revalidatedCueCoverage = revalidatedWindows
+                                .filter { $0.confidence >= confidenceThreshold && $0.endTime > $0.startTime }
+                                .map(\.endTime)
+                                .max() ?? 0
                             return makeOutcome(
                                 assetId: assetId,
                                 request: request,
                                 featureCoverageSec: asset?.featureCoverageEndTime ?? 0,
                                 transcriptCoverageSec: asset?.fastTranscriptCoverageEndTime ?? 0,
+                                cueCoverageSec: revalidatedCueCoverage,
                                 stopReason: .reachedTarget
                             )
                         } catch {

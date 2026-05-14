@@ -2775,7 +2775,21 @@ actor AdDetectionService {
         // failure that returns/throws earlier leaves the prior stamp
         // (or absent state) intact and the next run will redo the
         // work rather than incorrectly trust an aborted run.
-        if preAnalysisConfig.b4RevalidationFromFeaturesEnabled {
+        //
+        // R1 doc audit fix: re-load the flag LIVE here instead of
+        // reading the init-time `preAnalysisConfig` snapshot.
+        // `AnalysisJobRunner` reads its flag live on every `run(_:)`
+        // (see `b4RevalidationEnabledProvider`'s doc comment), so the
+        // producer (this stamp write) and the consumer (the short-
+        // circuit) must agree on the live value. Otherwise a
+        // mid-session flag-ON would unlock the consumer but leave the
+        // producer's cached `false` in place, so no stamp would ever
+        // be written and the feature would silently never activate
+        // until the next app launch. The other `preAnalysisConfig`
+        // consumers (2hpn `scopedMusicBedGeneralization` at line 2123)
+        // keep their snapshot-at-init semantics — only the zx6i flag
+        // routes through the live read here.
+        if PreAnalysisConfig.load().b4RevalidationFromFeaturesEnabled {
             RevalidationStateStore.recordCompleted(
                 versions: PipelineVersions.current(),
                 forAsset: analysisAssetId

@@ -53,11 +53,18 @@ struct PipelineVersions: Sendable, Equatable, Codable {
 }
 ```
 
-`current()` reads from the three canonical sources. Sentinel comparison
-(`'pre-instrumentation' / 0 / 0`) is handled in the state-store
-comparison: an asset whose persisted snapshot equals the sentinel
-triple is always treated as "version bump needed" (per the 7mq doc
-comment).
+`current()` reads from the three canonical sources. The 7mq sentinel
+(`'pre-instrumentation' / 0 / 0`) is defined on `PipelineVersions` for
+documentation/regression-test parity, but the state-store never
+writes a sentinel value — `recordCompleted` is only called inside the
+flag-ON stamp-write path of `runBackfill`, which always writes
+`PipelineVersions.current()`. The sentinel is therefore handled
+implicitly by `!=`: any persisted snapshot that decodes to the
+sentinel is structurally inequal to a non-sentinel `current()` and
+flows down the "version bump needed" branch. No bespoke sentinel
+check is required in the consumer. (Originally R1 doc audit corrected
+a misleading claim that the state store explicitly recognised the
+sentinel.)
 
 ### 3.2 Per-asset state store
 

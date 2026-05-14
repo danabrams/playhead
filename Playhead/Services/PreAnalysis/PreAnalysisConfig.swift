@@ -77,10 +77,16 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// gated on this flag — when off, no stamp is written and the
     /// short-circuit is structurally unreachable. Default `false` so
     /// production behavior is byte-identical to pre-zx6i until the
-    /// flag is flipped per-beta-cohort. Rollback latency matches
-    /// 2hpn / xr3t: next consumer-init (next app launch) for the
-    /// short-circuit decision, since `AnalysisJobRunner` reads the
-    /// config snapshot when constructed.
+    /// flag is flipped per-beta-cohort. Rollback latency for the zx6i
+    /// flag is **instant** (next analysis run), not next-launch:
+    /// `AnalysisJobRunner`'s default `b4RevalidationEnabledProvider`
+    /// and `AdDetectionService.runBackfill`'s stamp-write gate BOTH
+    /// re-read `PreAnalysisConfig.load()` on every call instead of
+    /// snapshotting at init. This intentionally diverges from
+    /// 2hpn `scopedMusicBedGeneralization` (snapshot-at-init via
+    /// `preAnalysisConfig`), because the zx6i short-circuit gates a
+    /// perf optimization with `false_ready_rate` risk, and minimizing
+    /// blast-radius on flag-OFF matters more than caching the read.
     var b4RevalidationFromFeaturesEnabled: Bool = false
 
     static let analysisVersion: Int = 1

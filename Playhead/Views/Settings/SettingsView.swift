@@ -206,11 +206,15 @@ struct SettingsView: View {
                     // playhead-zx6i: B4 revalidation-from-features
                     // flag — wired to `PreAnalysisConfig`. Initialize
                     // from the persisted value so the toggle reflects
-                    // ground truth. Same "next-consumer-init"
-                    // rollback contract as 2hpn / xr3t —
-                    // `AnalysisJobRunner` reads the flag at
-                    // construction time (next app launch), not
-                    // per-job.
+                    // ground truth. Unlike 2hpn / xr3t (snapshot at
+                    // consumer-init), the zx6i flag has an INSTANT
+                    // rollback contract: both the runner's
+                    // `b4RevalidationEnabledProvider` and the
+                    // stamp-write gate in
+                    // `AdDetectionService.runBackfill` re-read
+                    // `PreAnalysisConfig.load()` on every call, so a
+                    // toggle flip takes effect on the next analysis
+                    // run, not next app launch.
                     featureFlagValues["zx6i"] = pre.b4RevalidationFromFeaturesEnabled
                 }
                 .task {
@@ -1603,19 +1607,25 @@ private extension SettingsView {
                             } else if slug == "zx6i" {
                                 // playhead-zx6i: persist the B4
                                 // revalidation-from-features flag to
-                                // `PreAnalysisConfig`. The new value
-                                // takes effect on the next
-                                // `AnalysisJobRunner` init (next app
-                                // launch) — the runner captures the
-                                // flag via its
-                                // `b4RevalidationEnabledProvider`
-                                // closure at construction. Same
-                                // "next-consumer-init" rollback
-                                // contract as `2hpn` / `xr3t`. (NOT
-                                // `24cm`'s instant-apply contract;
-                                // there is no live mutator that can
-                                // re-thread the flag into an
-                                // already-running runner.)
+                                // `PreAnalysisConfig`. Rollback is
+                                // INSTANT, not next-launch: the
+                                // runner's default
+                                // `b4RevalidationEnabledProvider` and
+                                // the stamp-write gate in
+                                // `AdDetectionService.runBackfill`
+                                // BOTH re-read
+                                // `PreAnalysisConfig.load()` on every
+                                // call. This intentionally diverges
+                                // from 2hpn / xr3t (snapshot at
+                                // consumer-init) — the short-circuit
+                                // gates a perf optimization with
+                                // `false_ready_rate` risk, so
+                                // minimizing blast-radius on flag-OFF
+                                // matters more than caching the read.
+                                // R1 doc audit fix: prior comment
+                                // documented a "next-launch" contract
+                                // that didn't match the wired
+                                // closures.
                                 var config = PreAnalysisConfig.load()
                                 config.b4RevalidationFromFeaturesEnabled = newValue
                                 config.save()

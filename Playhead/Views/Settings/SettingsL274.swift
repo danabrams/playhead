@@ -399,7 +399,13 @@ struct DiagnosticsVersions: Sendable, Equatable {
 /// `PreAnalysisConfig.scopedMusicBedGeneralization` and applies on the
 /// next `AdDetectionService` init (next app launch). `zx6i` persists
 /// via `PreAnalysisConfig.b4RevalidationFromFeaturesEnabled` and
-/// applies on the next `AnalysisJobRunner` init (next app launch).
+/// applies INSTANTLY (next analysis run) — both the runner's default
+/// `b4RevalidationEnabledProvider` and the stamp-write gate in
+/// `AdDetectionService.runBackfill` re-read `PreAnalysisConfig.load()`
+/// on every call rather than caching the value at init. This is the
+/// only flag in this group with an instant-rollback contract; it
+/// diverges from 2hpn / xr3t deliberately because zx6i gates a perf
+/// optimization with `false_ready_rate` risk.
 /// Defaults remain `false` across all flags.
 ///
 /// Identifiers match the bd slugs so grep-cross-references are trivial:
