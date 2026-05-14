@@ -166,6 +166,19 @@ revalidation fast path.
 If chunks are empty → no persisted state to revalidate from; full
 analysis required.
 
+If chunks + stamp + bump are all met BUT
+`analysis_assets.episodeDurationSec` is NULL or zero → fall through to
+full analysis. Rationale: the classifier's per-span position priors
+need `episodeDuration` as a denominator (early-position vs late-
+position weighting). The full-path stage 1 computes this from the
+freshly decoded shards; the revalidation path skips decode, so it
+relies on the cached `analysis_assets.episodeDurationSec` column
+written by playhead-5uvz.6's gap-7 fix. A NULL column means the asset
+predates 5uvz.6 or never completed stage 1 successfully; one full
+re-analysis re-populates the column and unlocks the fast path for
+subsequent bumps. Pinned by
+`AnalysisJobRunnerRevalidationShortCircuitTests.missingDurationFallsBackToFullPath`.
+
 ### 3.5.1 Asymmetry: zx6i is live-read; 2hpn / xr3t are snapshot-at-init
 
 The other `PreAnalysisConfig`-gated flags in this codebase (2hpn
@@ -203,7 +216,7 @@ Mid-job flag-flip semantics (formally enumerated for the four cases):
 |---|---|---|
 | OFF                   | OFF                 | No short-circuit, no stamp. Byte-identical to pre-zx6i. |
 | OFF                   | ON                  | No short-circuit on this run, but stamp writes. Next run with bumped versions revalidates. |
-| ON                    | OFF                 | Short-circuit may have fired this run; no stamp. Next run without a stamp falls through to full analysis (cold-start branch). |
+| ON                    | OFF                 | Short-circuit may have fired this run; no NEW stamp is written, but the PRIOR stamp (which was a precondition for the short-circuit firing) remains in place unchanged. `RevalidationStateStore.recordCompleted` only writes; it never clears, and there is no flag-OFF eviction. If the next run has flag ON and versions are still bumped, the same prior stamp triggers an idempotent re-revalidation; if the next run has flag OFF, the prior stamp is simply unread. The "cold-start" branch is NOT taken — that branch requires `completedPipelineVersionsLoader` to return `nil`. |
 | ON                    | ON                  | Normal happy path. Stamp lands, future bumps revalidate. |
 
 All four are intentional and observably correct (see

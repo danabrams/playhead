@@ -51,10 +51,21 @@ struct PipelineVersions: Sendable, Equatable, Codable {
     /// Bumped when window sizes / mel bin counts / feature shapes
     /// change so that prior `FeatureWindow` rows can no longer be
     /// consumed by the current classifier without re-extraction.
-    /// (Note: B4 itself does not re-extract; if the feature schema
-    /// bumps the revalidation path correctly aborts and the runner
-    /// falls back to a full re-analysis. See `RevalidationStateStore`
-    /// semantics.)
+    ///
+    /// IMPORTANT — B4 does NOT today distinguish a `featureSchemaVersion`
+    /// bump from a `modelVersion` / `policyVersion` bump: the runner
+    /// fires the revalidation short-circuit on ANY field mismatch
+    /// (`completed != current`), and the revalidation path consumes
+    /// whatever `FeatureWindow` rows are persisted as-is. A schema bump
+    /// that genuinely changes window sizes / bin counts therefore
+    /// requires either (a) a paired full-pipeline migration that
+    /// re-extracts features before flipping the schema version, or
+    /// (b) a follow-up bead that adds a per-axis policy to the
+    /// short-circuit gate. The current single-axis-or-nothing wiring is
+    /// adequate for the in-scope use cases (model / policy tuning
+    /// bumps; feature schema is rarely bumped without a migration
+    /// alongside), but the abort-on-feature-schema-bump behaviour
+    /// callers might assume from this name is NOT implemented here.
     let featureSchemaVersion: Int
 
     /// Read the current process's pipeline-version triple. Every
