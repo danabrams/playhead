@@ -92,11 +92,22 @@ func runDebugDiagnosticsExport(
     let journalFetch = DebugDiagnosticsHatch.makeJournalFetch(store: runtime.analysisStore)
     let optInSink = SwiftDataDiagnosticsOptInSink(context: modelContext)
 
+    // playhead-2hpn: source live `ShowMusicBedProfile` snapshots from
+    // the SwiftData container so the debug-build bundle mirrors the
+    // production shape (parity with `ReleaseDiagnosticsHatch`).
+    let musicBedStore = ShowMusicBedProfileStore(
+        modelContainer: modelContext.container
+    )
+    let musicBedProfilesFetch: DiagnosticsMusicBedProfilesFetch = {
+        await musicBedStore.allSnapshots()
+    }
+
     let presenter = UIKitDiagnosticsPresenter(hostProvider: hostProvider)
     let coordinator = DiagnosticsExportCoordinator(
         environment: environment,
         presenter: presenter,
         journalFetch: journalFetch,
+        musicBedProfilesFetch: musicBedProfilesFetch,
         optInSink: optInSink,
         optInEpisodes: []
     )

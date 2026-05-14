@@ -182,7 +182,12 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
         case .classifier: return config.classifierCap
         case .fingerprint: return config.fingerprintCap
         case .metadata: return config.metadataCap  // playhead-z3ch
-        case .musicBed: return config.acousticCap  // Shares the acoustic family's weight budget.
+        // playhead-2hpn: `.musicBed` now has its own cap (default 0.25)
+        // so the scoped-music-bed-generalization boost (0.10 → 0.25)
+        // is not silently truncated to `acousticCap = 0.20`. The
+        // flag-OFF legacy path emits ≤ 0.20, so the higher cap is
+        // byte-identical for that case; only the boost path benefits.
+        case .musicBed: return config.musicBedCap
         case .breakAlignment: return config.breakAlignmentCap  // playhead-fqc8: independent budget from the RMS-drop family.
         case .fusedScore: return 1.0  // Fused score is post-aggregation; no per-source cap applies.
         case .audit, .operational: return 0.0  // Phase 11 observability rows are not fusion inputs.

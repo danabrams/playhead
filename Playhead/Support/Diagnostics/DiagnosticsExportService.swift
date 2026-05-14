@@ -165,6 +165,15 @@ typealias DiagnosticsJournalFetch = @Sendable () async throws -> [WorkJournalEnt
 /// the default `{ [] }` closure and tests supply a canned list directly.
 typealias DiagnosticsChapterPhaseEventsFetch = @Sendable () async throws -> [ChapterPhaseEvent]
 
+/// playhead-2hpn: async fetch closure for every show that has a
+/// recurring-jingle music-bed profile. Mirrors the existing fetch
+/// closure pattern so the coordinator stays decoupled from SwiftData;
+/// the live wiring sources rows from `ShowMusicBedProfileStore`. Until
+/// any consumer wires it in, the production wiring uses the default
+/// `{ [] }` closure (the diagnostics bundle then simply emits an empty
+/// `music_bed_profiles` array).
+typealias DiagnosticsMusicBedProfilesFetch = @Sendable () async -> [ShowMusicBedProfileSnapshot]
+
 /// Seam for flipping `Episode.diagnosticsOptIn = false` on the rows
 /// that actually shipped in the bundle. Abstracted so the coordinator
 /// remains pure-logic and the SwiftData/ModelContext dependency lives in

@@ -22,6 +22,11 @@ enum SwiftDataStore {
             // Activity screen, playhead-cjqq) — this is the user-facing
             // "Up Next" playback queue that drives auto-advance.
             QueueEntry.self,
+            // playhead-2hpn: per-show recurring-jingle profile. Empty
+            // until the scoped-music-bed-generalization feature flag
+            // turns on AND the evaluator observes ≥3 episodes with a
+            // matching intro/outro hash for that show.
+            ShowMusicBedProfile.self,
         ])
     }
 
@@ -98,6 +103,11 @@ enum PlayheadSchemaV1: VersionedSchema {
             // launch. Once V2 is introduced these references must be
             // replaced with frozen type snapshots per the warning above.
             QueueEntry.self,
+            // playhead-2hpn: additive new entity for the per-show
+            // recurring-jingle profile. Same V1-additive rationale: an
+            // existing install simply observes an empty table until the
+            // evaluator first writes a profile.
+            ShowMusicBedProfile.self,
         ]
     }
 }

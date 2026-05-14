@@ -90,6 +90,14 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// already accept unknown keys (`JSONDecoder` default) or used
     /// `init(from:)` overloads that decode-if-present.
     let chapterPhaseEvents: [ChapterPhaseEvent]
+    /// playhead-2hpn: one row per show with a recurring-jingle profile.
+    /// Carries only the show identifier hash, the confirmation /
+    /// consecutive-miss counts, the stored hash count, and the version
+    /// stamp — never the raw audio-derived bits. Empty array when the
+    /// `scopedMusicBedGeneralization` flag has never fired (or no shows
+    /// have observed enough episodes). Legacy bundles missing this key
+    /// decode as `[]` via the tolerant `init(from:)`.
+    let musicBedProfiles: [MusicBedProfileSummary]
 
     enum CodingKeys: String, CodingKey {
         case appVersion = "app_version"
@@ -101,6 +109,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case schedulerEvents = "scheduler_events"
         case workJournalTail = "work_journal_tail"
         case chapterPhaseEvents = "chapter_phase_events"
+        case musicBedProfiles = "music_bed_profiles"
     }
 
     init(
@@ -112,7 +121,8 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         analysisUnavailableReason: AnalysisUnavailableReason?,
         schedulerEvents: [SchedulerEvent],
         workJournalTail: [WorkJournalRecord],
-        chapterPhaseEvents: [ChapterPhaseEvent] = []
+        chapterPhaseEvents: [ChapterPhaseEvent] = [],
+        musicBedProfiles: [MusicBedProfileSummary] = []
     ) {
         self.appVersion = appVersion
         self.osVersion = osVersion
@@ -123,6 +133,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.schedulerEvents = schedulerEvents
         self.workJournalTail = workJournalTail
         self.chapterPhaseEvents = chapterPhaseEvents
+        self.musicBedProfiles = musicBedProfiles
     }
 
     /// Decode-time tolerance for older bundles that pre-date the
@@ -149,6 +160,9 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         )
         self.chapterPhaseEvents = try container.decodeIfPresent(
             [ChapterPhaseEvent].self, forKey: .chapterPhaseEvents
+        ) ?? []
+        self.musicBedProfiles = try container.decodeIfPresent(
+            [MusicBedProfileSummary].self, forKey: .musicBedProfiles
         ) ?? []
     }
 
@@ -191,6 +205,32 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             case timestamp
             case eventType = "event_type"
             case cause
+        }
+    }
+
+    /// playhead-2hpn: support-safe summary of one show's recurring-jingle
+    /// profile. The `show_identifier_hash` is the same install-scoped
+    /// hex produced by `EpisodeIdHasher` (re-used here for shows: the
+    /// hash is a per-install opaque key, NOT a globally identifiable
+    /// catalogue token). The raw 64-bit jingle hashes themselves are
+    /// deliberately omitted — they are derived from podcast audio and
+    /// could in principle be back-correlated against a public catalogue
+    /// fingerprint; only the COUNT is exposed.
+    struct MusicBedProfileSummary: Codable, Sendable, Equatable {
+        let showIdentifierHash: String
+        let confirmationCount: Int
+        let consecutiveMissCount: Int
+        let storedHashCount: Int
+        let isConfirmed: Bool
+        let versionStamp: Int
+
+        enum CodingKeys: String, CodingKey {
+            case showIdentifierHash = "show_identifier_hash"
+            case confirmationCount = "confirmation_count"
+            case consecutiveMissCount = "consecutive_miss_count"
+            case storedHashCount = "stored_hash_count"
+            case isConfirmed = "is_confirmed"
+            case versionStamp = "version_stamp"
         }
     }
 }

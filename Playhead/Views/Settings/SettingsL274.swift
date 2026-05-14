@@ -388,14 +388,17 @@ struct DiagnosticsVersions: Sendable, Equatable {
 // MARK: - Feature flag placeholders
 
 /// Storage shape for the Diagnostics → Feature flags toggle group.
-/// Four of the flag beads (xr3t, zx6i, 2hpn, 43ed) are OPEN — when those
-/// beads land they will supply the real storage + rollback wiring and
-/// this shim will be replaced at the call site. The fifth slug (`24cm`)
-/// is wired through to its real backing store: `SettingsView` persists
-/// the toggle via `PreAnalysisConfig.save()` and applies the new value
-/// live via `DownloadManager.setUseDualBackgroundSessions(_:)` so the
-/// lane split takes effect without waiting for a relaunch. Defaults
-/// remain `false` across all flags.
+/// Three of the flag beads (24cm, xr3t, 2hpn) are now wired to real
+/// backing stores; the remaining two slugs (zx6i, 43ed) are OPEN
+/// placeholder shims until their beads land. `24cm` persists via
+/// `PreAnalysisConfig.save()` and applies live via
+/// `DownloadManager.setUseDualBackgroundSessions(_:)` so the lane split
+/// takes effect without waiting for a relaunch. `xr3t` persists via
+/// `LightweightInventoryChecksSettings.save()` and applies on the next
+/// `SkipOrchestrator` init. `2hpn` persists via
+/// `PreAnalysisConfig.scopedMusicBedGeneralization` and applies on the
+/// next `AdDetectionService` init (next app launch). Defaults remain
+/// `false` across all flags.
 ///
 /// Identifiers match the bd slugs so grep-cross-references are trivial:
 /// a flag named `zx6i` in the UI maps to bd playhead-zx6i.

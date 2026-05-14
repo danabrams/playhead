@@ -221,6 +221,38 @@ struct PlayheadApp: App {
                     )
                     await runtime.adDetectionService.setEpisodeMetadataProvider(provider)
 
+                    // playhead-2hpn: install the SwiftData-backed
+                    // `ShowMusicBedProfileStore` on the AdDetectionService
+                    // so the scoped-music-bed-generalization read path can
+                    // resolve per-show snapshots, and the post-backfill
+                    // write path can persist this episode's intro/outro
+                    // jingle hashes. Wiring lives here (not in
+                    // `PlayheadRuntime.init`) because `ModelContainer` is
+                    // owned by the App-scope environment — same rationale
+                    // as `SwiftDataNewEpisodeAnnouncer` below. The flag
+                    // (`PreAnalysisConfig.scopedMusicBedGeneralization`)
+                    // remains the OFF/ON switch; the store is wired
+                    // unconditionally so that once the flag is effective,
+                    // each backfill resolves the latest persisted profile
+                    // (the snapshot lookup runs once per `runBackfill`
+                    // invocation — no per-init caching). NOTE: the FLAG
+                    // value itself is cached on `AdDetectionService` at
+                    // init time (see the `preAnalysisConfig` doc), so a
+                    // user-driven flip via Settings takes effect on the
+                    // NEXT `AdDetectionService` construction (next app
+                    // launch) — NOT instantly. R13 adversarial doc audit
+                    // fix: the prior "flipping the flag at runtime
+                    // immediately picks up the persisted profile state"
+                    // wording conflated two things — store wiring (eager
+                    // here) vs flag-cache rollback latency (next launch).
+                    // The contract here matches `xr3t` (R11), not `24cm`.
+                    let showMusicBedProfileStore = ShowMusicBedProfileStore(
+                        modelContainer: modelContainer
+                    )
+                    await runtime.adDetectionService.setShowMusicBedProfileStore(
+                        showMusicBedProfileStore
+                    )
+
                     // playhead-5c1t: cold-start hop for iCloud sync.
                     // Once the ModelContainer is available we ask the
                     // coordinator for the server-side subscription set
