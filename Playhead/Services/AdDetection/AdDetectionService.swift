@@ -491,6 +491,24 @@ actor AdDetectionService {
     /// are both alive).
     private(set) var episodeMetadataProvider: EpisodeMetadataProvider
 
+    /// playhead-2hpn: Optional per-show music-bed profile store. When
+    /// `nil` (default — production wiring may leave unset; tests that
+    /// don't exercise the flag pass `nil`), the scoped-music-bed code
+    /// path is fully disabled regardless of the
+    /// `scopedMusicBedGeneralization` flag. Mutable so the runtime can
+    /// install a SwiftData-backed implementation post-init (mirrors the
+    /// `setEpisodeMetadataProvider` pattern). When the store is wired
+    /// AND the flag is ON, `runBackfill` reads the snapshot once per
+    /// episode and writes back the post-episode mutation.
+    private(set) var showMusicBedProfileStore: (any ShowMusicBedProfileResolving)?
+
+    /// playhead-2hpn: Cached snapshot of `PreAnalysisConfig` resolved at
+    /// init from the persisted user config. Used by `runBackfill` to
+    /// decide whether the scoped-music-bed-generalization flag is on
+    /// for THIS process. Re-resolving inside the per-span loop would
+    /// be wasteful — the flag is process-stable.
+    private var preAnalysisConfig: PreAnalysisConfig = PreAnalysisConfig.load()
+
     /// playhead-8em9 (narL): Optional decision logger for offline replay.
     /// DEBUG-only; release builds keep the `NoOpDecisionLogger` default so
     /// no log file is ever written on a shipping binary.
@@ -804,6 +822,22 @@ actor AdDetectionService {
     /// the `setUserCorrectionStore` pattern.
     func setEpisodeMetadataProvider(_ provider: EpisodeMetadataProvider) {
         self.episodeMetadataProvider = provider
+    }
+
+    /// playhead-2hpn: Install the per-show music-bed profile store
+    /// post-init. The flag-off path never reads from this store, so
+    /// installing it is safe whether or not the feature flag is on.
+    /// Mirrors `setEpisodeMetadataProvider`.
+    func setShowMusicBedProfileStore(_ store: any ShowMusicBedProfileResolving) {
+        self.showMusicBedProfileStore = store
+    }
+
+    /// playhead-2hpn: Override the cached `PreAnalysisConfig` snapshot.
+    /// Production reads the persisted config at init; tests use this to
+    /// flip the `scopedMusicBedGeneralization` flag on/off without
+    /// touching `UserDefaults`.
+    func setPreAnalysisConfig(_ config: PreAnalysisConfig) {
+        self.preAnalysisConfig = config
     }
 
     // MARK: - playhead-gtt9.16: AcousticFeaturePipeline accessors
@@ -2041,6 +2075,23 @@ actor AdDetectionService {
         // supplied (rare — matches the analogous priors-update guard above).
         let catalogShowId: String? = podcastId.isEmpty ? nil : podcastId
 
+        // playhead-2hpn: resolve the per-show music-bed profile ONCE per
+        // backfill so every span sees the same snapshot. The flag-off
+        // path skips the lookup entirely (byte-identical to pre-2hpn).
+        // The snapshot is consumed by `buildMusicBedLedgerEntries` to
+        // decide whether to emit a boosted (0.25) or baseline (0.10)
+        // weight entry, and by the post-loop write path to record this
+        // episode's outcome. Cross-show isolation is enforced here:
+        // a show's snapshot is keyed by `podcastId`, so Show A's
+        // confirmation never feeds Show B's evaluation.
+        let scopedMusicBedEnabled = preAnalysisConfig.scopedMusicBedGeneralization
+        let showMusicBedSnapshot: ShowMusicBedProfileSnapshot?
+        if scopedMusicBedEnabled, !podcastId.isEmpty, let store = showMusicBedProfileStore {
+            showMusicBedSnapshot = await store.snapshot(showIdentifier: podcastId)
+        } else {
+            showMusicBedSnapshot = nil
+        }
+
         // playhead-arf8: reset per-backfill bracket-refinement counts and
         // resolve the per-show music-bracket trust once per run. The store
         // backs onto the same `AnalysisStore` as everything else; lookup is
@@ -2250,7 +2301,12 @@ actor AdDetectionService {
                 acousticPipelineFusion: acousticPipelineResult.fusion,
                 acousticBreaks: assetAcousticBreaks,
                 catalogMatchSimilarity: spanTopCatalogSimilarity,
-                fusionConfig: fusionConfig
+                fusionConfig: fusionConfig,
+                // playhead-2hpn: thread the per-show snapshot resolved
+                // once above; `nil` when the flag is off, the podcast
+                // is unknown, or no profile exists yet for this show.
+                showMusicBedSnapshot: showMusicBedSnapshot,
+                episodeDuration: episodeDuration
             )
 
             // Phase ef2.4.6: FM suppression — targeted downweight of weak evidence
@@ -2635,6 +2691,37 @@ actor AdDetectionService {
         logger.info(
             "[arf8] backfill bracket counts: refined=\(arf8Counts.bracketRefined) noBracket=\(arf8Counts.noBracket) trustGated=\(arf8Counts.trustGated) coarseGated=\(arf8Counts.coarseGated) fineGated=\(arf8Counts.fineConfidenceGated) legacyBypass=\(arf8Counts.legacyBypass) showTrust=\(String(format: "%.2f", bracketShowTrust))"
         )
+
+        // playhead-2hpn (write path): once per episode, after all spans
+        // have been scored and persisted, push this episode's intro/outro
+        // jingle hashes into the show's profile. Gated by the same
+        // conditions as the read path so flag-OFF behavior is byte
+        // identical to pre-2hpn (no store mutation, no allocation).
+        //
+        // Cross-show isolation: `podcastId` is the bead-spec "per show"
+        // key — the store records this outcome ONLY against that show's
+        // row. Show A's profile is never touched by Show B's runBackfill.
+        //
+        // We log a single `[2hpn]` marker so dogfood can grep activation
+        // and see the post-update confirmation count / miss count without
+        // scraping per-window logs.
+        if scopedMusicBedEnabled,
+           !podcastId.isEmpty,
+           let store = showMusicBedProfileStore,
+           episodeDuration > 0 {
+            let outcome = ShowMusicBedProfileEvaluator.extractEpisodeJingleHashes(
+                featureWindows: featureWindows,
+                episodeDuration: episodeDuration
+            )
+            let updated = await store.recordEpisodeOutcome(
+                showIdentifier: podcastId,
+                outcome: outcome,
+                now: Date()
+            )
+            logger.info(
+                "[2hpn] show=\(podcastId, privacy: .public) confirmed=\(updated.isConfirmed) confirmationCount=\(updated.confirmationCount) missCount=\(updated.consecutiveMissCount) storedHashes=\(updated.confirmedJingleHashes.count)"
+            )
+        }
     }
 
     // MARK: - ChapterGenerationPhase wire-up (playhead-au2v.1.13)
@@ -2864,7 +2951,13 @@ actor AdDetectionService {
         acousticPipelineFusion: [AcousticFeatureFusion.WindowFusion] = [],
         acousticBreaks: [AcousticBreak] = [],
         catalogMatchSimilarity: Float = 0,
-        fusionConfig: FusionWeightConfig
+        fusionConfig: FusionWeightConfig,
+        // playhead-2hpn: when both are non-nil/positive AND the flag is
+        // on, the music-bed evaluator switches to fixed weights
+        // (0.10 baseline / 0.25 jingle-overlap). `nil` when the flag is
+        // off — preserves byte-identical pre-2hpn fusion output.
+        showMusicBedSnapshot: ShowMusicBedProfileSnapshot? = nil,
+        episodeDuration: Double = 0
     ) -> [EvidenceLedgerEntry] {
         // Classifier entry: find the best-matching ClassifierResult for this span.
         let classifierScore = bestClassifierScore(
@@ -2912,10 +3005,18 @@ actor AdDetectionService {
         // `.musicBed` ledger entry (distinct EvidenceSourceType) so
         // the quorum gate's `distinctKinds.count` increments when a
         // span has both an RMS-drop edge and an interior bed.
+        // playhead-2hpn: when the scoped-music-bed-generalization flag
+        // is ON (signalled by a non-nil `showMusicBedSnapshot`), the
+        // evaluator returns a boosted weight (0.25) for spans that
+        // overlap a detected jingle on a confirmed show, or 0.10
+        // baseline otherwise. Flag-off path leaves the evaluator on its
+        // legacy presenceFraction*acousticCap math.
         let musicBedEntries = buildMusicBedLedgerEntries(
             span: span,
             featureWindows: featureWindows,
-            fusionConfig: fusionConfig
+            fusionConfig: fusionConfig,
+            showMusicBedSnapshot: showMusicBedSnapshot,
+            episodeDuration: episodeDuration
         )
         // musicBed entries are merged into the acousticEntries list
         // passed to BackfillEvidenceFusion. The fusion code already
@@ -3308,22 +3409,69 @@ actor AdDetectionService {
     /// Delegates the threshold/weight logic to the pure
     /// `MusicBedLedgerEvaluator`; this method is just the span-window
     /// filter + plumbing.
+    ///
+    /// playhead-2hpn: when `showMusicBedSnapshot` is non-nil (set by the
+    /// caller when the `scopedMusicBedGeneralization` flag is on AND a
+    /// profile resolver is wired AND the podcastId is non-empty), the
+    /// evaluator runs the flag-on weighting (0.10/0.25); otherwise it
+    /// preserves the legacy presenceFraction*acousticCap path
+    /// byte-identically.
     private func buildMusicBedLedgerEntries(
         span: DecodedSpan,
         featureWindows: [FeatureWindow],
-        fusionConfig: FusionWeightConfig
+        fusionConfig: FusionWeightConfig,
+        showMusicBedSnapshot: ShowMusicBedProfileSnapshot? = nil,
+        episodeDuration: Double = 0
     ) -> [EvidenceLedgerEntry] {
         let spanWindows = featureWindows.filter { fw in
             fw.startTime < span.endTime && fw.endTime > span.startTime
         }
+        let jingleBoost = makeJingleBoost(
+            for: span,
+            snapshot: showMusicBedSnapshot,
+            episodeDuration: episodeDuration
+        )
         let result = MusicBedLedgerEvaluator.evaluate(
             spanWindows: spanWindows,
-            fusionConfig: fusionConfig
+            fusionConfig: fusionConfig,
+            jingleBoost: jingleBoost
         )
         if let entry = result.entry {
             return [entry]
         }
         return []
+    }
+
+    /// playhead-2hpn: build the optional `JingleBoost` context for a
+    /// single span.
+    ///
+    /// Returns `nil` (legacy fusion behavior) when:
+    ///   * the show snapshot is missing (flag off, no podcastId, or no
+    ///     profile recorded yet), OR
+    ///   * the episode duration is non-positive (no overlap region can
+    ///     be computed).
+    ///
+    /// Returns a non-nil `JingleBoost` otherwise. `isConfirmed` mirrors
+    /// the snapshot's confirmation state; `spanOverlapsJingle` is
+    /// `true` when the span overlaps `[0, jingleSliceSeconds)` or
+    /// `[episodeDuration - jingleSliceSeconds, episodeDuration)` — the
+    /// intro/outro slices the evaluator hashes against.
+    private func makeJingleBoost(
+        for span: DecodedSpan,
+        snapshot: ShowMusicBedProfileSnapshot?,
+        episodeDuration: Double
+    ) -> MusicBedLedgerEvaluator.JingleBoost? {
+        guard let snapshot, episodeDuration > 0 else { return nil }
+        let slice = ShowMusicBedProfileEvaluator.jingleSliceSeconds
+        let overlapsIntro = span.startTime < slice && span.endTime > 0
+        let outroStart = episodeDuration - slice
+        let overlapsOutro = (outroStart > 0)
+            && span.startTime < episodeDuration
+            && span.endTime > outroStart
+        return MusicBedLedgerEvaluator.JingleBoost(
+            isConfirmed: snapshot.isConfirmed,
+            spanOverlapsJingle: overlapsIntro || overlapsOutro
+        )
     }
 
     /// Build catalog ledger entries from EvidenceEntry items overlapping the span.

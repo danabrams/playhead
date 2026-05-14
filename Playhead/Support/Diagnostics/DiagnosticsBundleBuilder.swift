@@ -122,7 +122,8 @@ enum DiagnosticsBundleBuilder {
         eligibility: AnalysisEligibility,
         workJournalEntries: [WorkJournalEntry],
         installID: UUID,
-        chapterPhaseEvents: [ChapterPhaseEvent] = []
+        chapterPhaseEvents: [ChapterPhaseEvent] = [],
+        musicBedProfileSnapshots: [ShowMusicBedProfileSnapshot] = []
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -165,6 +166,24 @@ enum DiagnosticsBundleBuilder {
 
         let reason = AnalysisUnavailableReason.derive(from: eligibility)
 
+        // playhead-2hpn: project each show-music-bed snapshot into a
+        // support-safe summary. The show identifier is the same opaque
+        // per-install hash used for episode IDs (legal checklist item a
+        // — never the raw catalogue identifier). The audio-derived
+        // hash bits themselves are omitted; only the count is exposed.
+        let musicBedProfiles = musicBedProfileSnapshots.map { snapshot in
+            DefaultBundle.MusicBedProfileSummary(
+                showIdentifierHash: EpisodeIdHasher.hash(
+                    installID: installID, episodeId: snapshot.showIdentifier
+                ),
+                confirmationCount: snapshot.confirmationCount,
+                consecutiveMissCount: snapshot.consecutiveMissCount,
+                storedHashCount: snapshot.confirmedJingleHashes.count,
+                isConfirmed: snapshot.isConfirmed,
+                versionStamp: snapshot.versionStamp
+            )
+        }
+
         return DefaultBundle(
             appVersion: appVersion,
             osVersion: osVersion,
@@ -174,7 +193,8 @@ enum DiagnosticsBundleBuilder {
             analysisUnavailableReason: reason,
             schedulerEvents: schedulerEvents,
             workJournalTail: Array(workJournalTail),
-            chapterPhaseEvents: chapterPhaseEvents
+            chapterPhaseEvents: chapterPhaseEvents,
+            musicBedProfiles: musicBedProfiles
         )
     }
 

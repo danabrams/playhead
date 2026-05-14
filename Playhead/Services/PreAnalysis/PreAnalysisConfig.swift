@@ -55,6 +55,16 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// the scheduler queue.
     var seekRelatchThresholdSeconds: TimeInterval = 30
 
+    /// playhead-2hpn feature flag: when `true`, the ad-detection
+    /// pipeline reads/writes `ShowMusicBedProfile` rows and applies the
+    /// per-show recurring-jingle boost to the `.musicBed` fusion entry.
+    /// Default `false` so production keeps the byte-identical pre-2hpn
+    /// behavior until the flag is flipped per-beta-cohort. The flag is
+    /// scoped to BOTH the read path (profile lookup at fusion time) and
+    /// the write path (profile mutation at the end of `runBackfill`);
+    /// when off, neither path runs.
+    var scopedMusicBedGeneralization: Bool = false
+
     static let analysisVersion: Int = 1
 
     private static let key = "PreAnalysisConfig"
@@ -68,7 +78,8 @@ struct PreAnalysisConfig: Codable, Sendable {
         nominalShardDurationSec: Double = 20,
         unplayedCandidateWindowSeconds: TimeInterval = 20 * 60,
         resumedCandidateWindowSeconds: TimeInterval = 15 * 60,
-        seekRelatchThresholdSeconds: TimeInterval = 30
+        seekRelatchThresholdSeconds: TimeInterval = 30,
+        scopedMusicBedGeneralization: Bool = false
     ) {
         self.isEnabled = isEnabled
         self.defaultT0DepthSeconds = defaultT0DepthSeconds
@@ -79,6 +90,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.unplayedCandidateWindowSeconds = unplayedCandidateWindowSeconds
         self.resumedCandidateWindowSeconds = resumedCandidateWindowSeconds
         self.seekRelatchThresholdSeconds = seekRelatchThresholdSeconds
+        self.scopedMusicBedGeneralization = scopedMusicBedGeneralization
     }
 
     // Custom decoder so configs persisted before 24cm (which lack the
@@ -99,6 +111,10 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.unplayedCandidateWindowSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .unplayedCandidateWindowSeconds) ?? (20 * 60)
         self.resumedCandidateWindowSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .resumedCandidateWindowSeconds) ?? (15 * 60)
         self.seekRelatchThresholdSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .seekRelatchThresholdSeconds) ?? 30
+        // playhead-2hpn: configs persisted before this bead omit the
+        // key; default to `false` so the scoped-music-bed feature stays
+        // OFF on upgrade (rollback-friendly default).
+        self.scopedMusicBedGeneralization = try container.decodeIfPresent(Bool.self, forKey: .scopedMusicBedGeneralization) ?? false
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -111,6 +127,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         case unplayedCandidateWindowSeconds
         case resumedCandidateWindowSeconds
         case seekRelatchThresholdSeconds
+        case scopedMusicBedGeneralization
     }
 
     static func load() -> PreAnalysisConfig {

@@ -235,7 +235,12 @@ struct DiagnosticsBundleShapeTests {
         // to the allowed set so the shape audit (a) does not reject a
         // bundle that legitimately carries chapter-phase events — both
         // the empty-array and populated forms are permitted.
-        "chapter_phase_events"
+        "chapter_phase_events",
+        // playhead-2hpn: per-show recurring-jingle profile summaries.
+        // Carries no raw episodeId/feedURL — only the install-scoped
+        // `show_identifier_hash`. Added to the allowed set so the
+        // shape audit (a) does not reject a bundle carrying these.
+        "music_bed_profiles"
     ]
 
     /// Substrings that — if present anywhere in the encoded JSON's

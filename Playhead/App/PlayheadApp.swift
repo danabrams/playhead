@@ -221,6 +221,26 @@ struct PlayheadApp: App {
                     )
                     await runtime.adDetectionService.setEpisodeMetadataProvider(provider)
 
+                    // playhead-2hpn: install the SwiftData-backed
+                    // `ShowMusicBedProfileStore` on the AdDetectionService
+                    // so the scoped-music-bed-generalization read path can
+                    // resolve per-show snapshots, and the post-backfill
+                    // write path can persist this episode's intro/outro
+                    // jingle hashes. Wiring lives here (not in
+                    // `PlayheadRuntime.init`) because `ModelContainer` is
+                    // owned by the App-scope environment — same rationale
+                    // as `SwiftDataNewEpisodeAnnouncer` below. The flag
+                    // (`PreAnalysisConfig.scopedMusicBedGeneralization`)
+                    // remains the OFF/ON switch; the store is wired
+                    // unconditionally so flipping the flag at runtime
+                    // immediately picks up the persisted profile state.
+                    let showMusicBedProfileStore = ShowMusicBedProfileStore(
+                        modelContainer: modelContainer
+                    )
+                    await runtime.adDetectionService.setShowMusicBedProfileStore(
+                        showMusicBedProfileStore
+                    )
+
                     // playhead-5c1t: cold-start hop for iCloud sync.
                     // Once the ModelContainer is available we ask the
                     // coordinator for the server-side subscription set

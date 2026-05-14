@@ -74,11 +74,25 @@ func runReleaseDiagnosticsExport(
     let journalFetch = ReleaseDiagnosticsHatch.makeJournalFetch(store: runtime.analysisStore)
     let optInSink = SwiftDataDiagnosticsOptInSink(context: modelContext)
 
+    // playhead-2hpn: source live `ShowMusicBedProfile` snapshots from
+    // the SwiftData container so the diagnostics bundle's
+    // `music_bed_profiles` field reflects whatever the runtime has
+    // observed. Constructed here (not on the runtime) so the
+    // ModelContainer dependency stays local to the App-scope wiring
+    // surface, matching how `SwiftDataDiagnosticsOptInSink` is built.
+    let musicBedStore = ShowMusicBedProfileStore(
+        modelContainer: modelContext.container
+    )
+    let musicBedProfilesFetch: DiagnosticsMusicBedProfilesFetch = {
+        await musicBedStore.allSnapshots()
+    }
+
     let presenter = UIKitDiagnosticsPresenter(hostProvider: hostProvider)
     let coordinator = DiagnosticsExportCoordinator(
         environment: environment,
         presenter: presenter,
         journalFetch: journalFetch,
+        musicBedProfilesFetch: musicBedProfilesFetch,
         optInSink: optInSink,
         optInEpisodes: []
     )
