@@ -308,6 +308,13 @@ struct AdBannerView: View {
             // ergonomics (compact, low-attention margin note) survive
             // queued skips.
             expandedBannerId = nil
+            // playhead-3bv.4: drop any stale "Always skip this sponsor"
+            // confirmation state when the queue advances. Without this,
+            // the delayed auto-dismiss task scheduled for the previous
+            // banner would see `confirmedAlwaysSkipBannerId == item.id`
+            // still true (because @State doesn't reset on its own) and
+            // call `queue.dismiss()` on the WRONG (newer) banner.
+            confirmedAlwaysSkipBannerId = nil
         }
     }
 
@@ -601,10 +608,17 @@ struct AdBannerView: View {
                                 for: .seconds(Self.alwaysSkipConfirmationSeconds)
                             )
                             // Guard: only dismiss if we still own the
-                            // confirmation state for this banner. A
-                            // newer banner could have advanced the
-                            // queue in the meantime.
-                            if confirmedAlwaysSkipBannerId == item.id {
+                            // confirmation state for THIS banner AND
+                            // the queue's current banner is still this
+                            // one. A newer banner could have advanced
+                            // the queue in the meantime — dismissing
+                            // then would silently drop the new banner.
+                            // The `.onChange(of: queue.currentBanner?.id)`
+                            // handler resets `confirmedAlwaysSkipBannerId`
+                            // to nil on queue advance, but the explicit
+                            // queue-id check here is defense-in-depth.
+                            if confirmedAlwaysSkipBannerId == item.id,
+                               queue.currentBanner?.id == item.id {
                                 confirmedAlwaysSkipBannerId = nil
                                 queue.dismiss()
                             }

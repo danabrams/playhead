@@ -146,15 +146,33 @@ struct ActivityView: View {
     /// collapse the snapshot down to just those rows — a sheet that
     /// shows the user only their own episode + nothing else.
     fileprivate var effectiveSnapshot: ActivitySnapshot {
-        guard let focusedEpisodeId else { return viewModel.snapshot }
-        let snap = viewModel.snapshot
-        let filteredNow = snap.now.filter { $0.episodeId == focusedEpisodeId }
-        let filteredUpNext = snap.upNext.filter { $0.episodeId == focusedEpisodeId }
-        let filteredPaused = snap.paused.filter { $0.episodeId == focusedEpisodeId }
-        let filteredFinished = snap.recentlyFinished.filter { $0.episodeId == focusedEpisodeId }
+        ActivityView.applyFocus(
+            snapshot: viewModel.snapshot,
+            focusedEpisodeId: focusedEpisodeId
+        )
+    }
+
+    /// playhead-3bv.4: pure projection of the focused-episode filter used
+    /// by `effectiveSnapshot`. Exposed at file scope (and `internal` for
+    /// the test target) so unit tests can pin the contract without
+    /// driving a SwiftUI hierarchy. Behavior:
+    ///   * `focusedEpisodeId == nil` → returns the input snapshot.
+    ///   * Focus matches at least one row across any section → returns a
+    ///     filtered snapshot containing only matching rows in each section.
+    ///   * Focus matches zero rows → falls back to the input snapshot
+    ///     (better than an empty sheet).
+    static func applyFocus(
+        snapshot: ActivitySnapshot,
+        focusedEpisodeId: String?
+    ) -> ActivitySnapshot {
+        guard let focusedEpisodeId else { return snapshot }
+        let filteredNow = snapshot.now.filter { $0.episodeId == focusedEpisodeId }
+        let filteredUpNext = snapshot.upNext.filter { $0.episodeId == focusedEpisodeId }
+        let filteredPaused = snapshot.paused.filter { $0.episodeId == focusedEpisodeId }
+        let filteredFinished = snapshot.recentlyFinished.filter { $0.episodeId == focusedEpisodeId }
         let anyMatch = !(filteredNow.isEmpty && filteredUpNext.isEmpty
             && filteredPaused.isEmpty && filteredFinished.isEmpty)
-        guard anyMatch else { return snap }
+        guard anyMatch else { return snapshot }
         return ActivitySnapshot(
             now: filteredNow,
             upNext: filteredUpNext,

@@ -83,7 +83,10 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
     /// `lowercased() + trimmingCharacters(in: .whitespaces)`. The
     /// `NowPlayingView` wiring must apply the same normalization so the
     /// scope a user records here actually negates the same sponsor
-    /// entry the next time the knowledge store is consulted.
+    /// entry the next time the knowledge store is consulted. Note the
+    /// character set is `.whitespaces`, NOT `.whitespacesAndNewlines` —
+    /// a drift would cause sponsor names carrying an embedded newline
+    /// to round-trip to different normalized values on either side.
     ///
     /// We pin the canonical scope serialization shape directly: if the
     /// downstream contract drifts (or our wiring stops normalizing)
@@ -92,7 +95,7 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
         let advertiser = "  Squarespace  "
         let normalized = advertiser
             .lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .whitespaces)
         XCTAssertEqual(normalized, "squarespace")
 
         let scope = CorrectionScope.sponsorOnShow(
@@ -103,6 +106,37 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
             scope.serialized,
             "sponsorOnShow:podcast-42:squarespace",
             "Sponsor scope must be lowercased + trimmed so SponsorKnowledgeStore's negative-memory pass finds the match"
+        )
+    }
+
+    /// Round-trip check: the banner-side normalization must produce the
+    /// same string that `SponsorKnowledgeStore` stamps onto its
+    /// `normalizedValue` field for the same input. Constructing a
+    /// `SponsorKnowledgeEntry` with `normalizedValue: nil` exercises the
+    /// store's own default derivation (`entityValue.lowercased()
+    /// .trimmingCharacters(in: .whitespaces)`); comparing both sides
+    /// catches any drift if either changes its character set.
+    func testSponsorScopeNormalizationMatchesKnowledgeStoreContract() {
+        let raw = "  Squarespace  "
+        let bannerSide = raw
+            .lowercased()
+            .trimmingCharacters(in: .whitespaces)
+        let entry = SponsorKnowledgeEntry(
+            podcastId: "podcast-x",
+            entityType: .sponsor,
+            entityValue: raw,
+            normalizedValue: nil,  // forces the store's default derivation
+            state: .active,
+            confirmationCount: 1,
+            rollbackCount: 0,
+            firstSeenAt: 0,
+            lastConfirmedAt: 0,
+            lastRollbackAt: nil
+        )
+        XCTAssertEqual(
+            bannerSide,
+            entry.normalizedValue,
+            "Banner-side normalization must equal SponsorKnowledgeStore's normalizedValue derivation"
         )
     }
 
@@ -177,6 +211,63 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
             AdBannerView.alwaysSkipConfirmationSeconds,
             2.0,
             "Confirmation dwell should be ~2s — long enough to read, short enough to never feel modal"
+        )
+    }
+
+    // MARK: - Queue-advance race regression
+
+    /// The auto-dismiss task spawned by tapping "Always skip this
+    /// sponsor" sleeps for ~2s before calling `queue.dismiss()`. If a
+    /// second banner is enqueued (and the queue advances) during the
+    /// sleep, dismissing then would drop the NEW banner — silently
+    /// stealing a skip notification from the user.
+    ///
+    /// The fix lives in two places:
+    ///   1. `.onChange(of: queue.currentBanner?.id)` resets
+    ///      `confirmedAlwaysSkipBannerId` to nil on queue advance, so
+    ///      the View's @State guard `confirmedAlwaysSkipBannerId == item.id`
+    ///      fails for the stale task.
+    ///   2. The delayed task itself ALSO checks
+    ///      `queue.currentBanner?.id == item.id` as defense-in-depth.
+    ///
+    /// Both layers depend on the queue's `currentBanner` reflecting
+    /// reality after `dismiss()` advances to the next entry. This test
+    /// pins THAT contract: after dismissing banner A, the queue's
+    /// current banner is B, so the stale guard (which captured A's id)
+    /// can never match `queue.currentBanner?.id` on the live queue.
+    func testQueueAdvanceMakesStaleBannerIdNotMatchCurrent() async {
+        let queue = AdBannerQueue()
+        let bannerA = makeItem(id: "banner-A", advertiser: "Squarespace")
+        let bannerB = makeItem(id: "banner-B", advertiser: "BetterHelp")
+
+        queue.enqueue(bannerA)
+        XCTAssertEqual(queue.currentBanner?.id, "banner-A")
+
+        // Simulate: a second banner arrives during the confirmation dwell.
+        queue.enqueue(bannerB)
+
+        // Simulate the queue advancing (banner A finishes / is dismissed
+        // by some other path — e.g. its natural lifetime expiring or
+        // the user undoing). `dismiss()` clears `currentBanner` to nil
+        // immediately, then schedules `showNext()` via a 350ms async
+        // sleep — wait for that so we can assert the post-advance state.
+        queue.dismiss()
+        try? await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(
+            queue.currentBanner?.id,
+            "banner-B",
+            "Queue should advance to banner B after A is dismissed"
+        )
+
+        // Now if the stale delayed task fires with its captured
+        // `item.id == "banner-A"`, the defense-in-depth check
+        // `queue.currentBanner?.id == item.id` is false → it must NOT
+        // call `queue.dismiss()`. We pin that asymmetry directly.
+        let staleCapturedId = "banner-A"
+        XCTAssertNotEqual(
+            queue.currentBanner?.id,
+            staleCapturedId,
+            "Stale delayed-task captured id must not equal the current banner's id after queue advance — the guard relies on this to avoid dismissing the wrong banner"
         )
     }
 }

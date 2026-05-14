@@ -160,14 +160,18 @@ struct NowPlayingView: View {
                 // memory pass filters this advertiser out of future
                 // episodes of the same show. Mirrors the normalization
                 // SponsorKnowledgeStore uses on its
-                // `normalizedValue` field (lowercased + trimmed) so
-                // the scope serializer produces an identity that the
-                // downstream lookup actually matches.
+                // `normalizedValue` field — `entityValue.lowercased()
+                // .trimmingCharacters(in: .whitespaces)` — so the scope
+                // serializer produces an identity that the downstream
+                // lookup actually matches. Using `.whitespaces` (not
+                // `.whitespacesAndNewlines`) is deliberate: this is a
+                // contract drift guard against the knowledge-store's
+                // exact character-set choice.
                 onAlwaysSkipSponsor: { item in
                     guard let advertiser = item.advertiser else { return }
                     let normalized = advertiser
                         .lowercased()
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .trimmingCharacters(in: .whitespaces)
                     guard !normalized.isEmpty else { return }
                     let podcastId = item.podcastId
                     let assetId = runtime.currentAnalysisAssetId
