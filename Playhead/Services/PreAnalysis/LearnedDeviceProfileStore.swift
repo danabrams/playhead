@@ -197,6 +197,22 @@ final class SwiftDataLearnedDeviceProfileStore: LearnedDeviceProfileProviding {
         // device class and which axis tripped the heal. Logged at
         // `.notice` (same level as the divergence-revert log) so it
         // surfaces in default OSLog captures without being chatty.
+        //
+        // R9 false-positive fix: gate the log on the observation also
+        // being valid (`grantWindowSeconds` finite + > 0 AND `observedAt`
+        // finite). The math layer's entry guards (estimator step (1)/(1b))
+        // drop non-finite observations BEFORE the soft-reset branch
+        // (step (2)) runs, returning the state unchanged. Without this
+        // gate, the log would falsely claim "soft-reset triggered" when
+        // a corrupt prior coincides with a corrupt observation — the
+        // state is actually byte-unchanged in that case, no heal
+        // happened. Mirroring the math layer's entry guards keeps the
+        // log truthful: it fires exactly when apply() will reach the
+        // sanitization branch.
+        let observationIsValid =
+            observation.grantWindowSeconds.isFinite
+            && observation.grantWindowSeconds > 0
+            && observation.observedAt.timeIntervalSinceReferenceDate.isFinite
         let priorHadNonFiniteMath =
             !prior.welfordMean.isFinite
             || !prior.welfordM2.isFinite
@@ -206,7 +222,7 @@ final class SwiftDataLearnedDeviceProfileStore: LearnedDeviceProfileProviding {
             guard let last = prior.lastNotchChangeAt else { return false }
             return !last.timeIntervalSinceReferenceDate.isFinite
         }()
-        if priorHadNonFiniteMath || priorHadNonFiniteDate {
+        if observationIsValid && (priorHadNonFiniteMath || priorHadNonFiniteDate) {
             logger.notice(
                 "LearnedDeviceProfile soft-reset triggered for \(deviceClass.rawValue, privacy: .public) math=\(priorHadNonFiniteMath, privacy: .public) date=\(priorHadNonFiniteDate, privacy: .public)"
             )

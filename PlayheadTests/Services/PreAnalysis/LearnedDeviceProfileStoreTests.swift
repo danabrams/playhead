@@ -461,6 +461,112 @@ struct LearnedDeviceProfileStoreTests {
         }
     }
 
+    // R9 false-positive fix: the R8 "soft-reset triggered" log was gated
+    // ONLY on the prior state's shape (non-finite math or Date). The
+    // math layer's entry guards (estimator step (1)/(1b)) drop non-finite
+    // observations BEFORE the soft-reset branch runs — so a corrupt
+    // prior + corrupt observation would log "soft-reset triggered"
+    // even though the state was returned byte-unchanged. R9 added an
+    // `observationIsValid` gate to mirror the math layer's entry guards
+    // so the log is truthful: it fires exactly when the heal will run.
+    // The test verifies the side-effect contract: when the observation
+    // is non-finite, the row's columns are byte-unchanged from the
+    // corrupt input (no heal happened) — which is the directly
+    // observable signature of "the apply entry guard fired before the
+    // sanitization branch".
+
+    @Test("R9: non-finite observation against a healthy prior is dropped (no row mutation, no false-positive heal log)")
+    func nonFiniteObservationDoesNotMutateRow() async throws {
+        let ctx = try makeContext()
+        let store = SwiftDataLearnedDeviceProfileStore(
+            context: ctx,
+            tuning: Self.permissiveTuning,
+            clock: { Self.referenceDate }
+        )
+        let seed = Self.seed()
+
+        // Bootstrap an activated row through normal recordObservation
+        // calls so the row is genuinely persisted in SwiftData. This
+        // avoids depending on whether SwiftData normalises non-finite
+        // Doubles/Dates on insert (the existing
+        // `corruptStoredRowDoublesHandledEndToEnd` test documents
+        // that NaN Doubles are normalised to 0 at the storage layer).
+        let baselineTime = Self.referenceDate
+        let goodObs = GrantWindowObservation(
+            grantWindowSeconds: 60,
+            observedAt: baselineTime
+        )
+        _ = await store.recordObservation(
+            goodObs, deviceClass: .iPhone17Pro, seed: seed
+        )
+        let pre = try #require(
+            try ctx.fetch(FetchDescriptor<LearnedDeviceProfile>()).first?.snapshot()
+        )
+
+        // Now feed a non-finite observation. The math layer's entry
+        // guard (`grantWindowSeconds.isFinite` step (1)) drops this
+        // observation BEFORE any sanitization branch runs and returns
+        // the state byte-unchanged. The R9 false-positive guard in
+        // `recordObservation` mirrors the same predicate so the
+        // "soft-reset triggered" log does not fire when prior +
+        // observation are BOTH corrupt — that combination still does
+        // not actually heal the state.
+        let badObs = GrantWindowObservation(
+            grantWindowSeconds: .nan,
+            observedAt: baselineTime.addingTimeInterval(60)
+        )
+        _ = await store.recordObservation(
+            badObs, deviceClass: .iPhone17Pro, seed: seed
+        )
+
+        // The row must be byte-equal to the pre-bad-obs snapshot. The
+        // math layer's entry guard returns state unchanged, and the
+        // store's `row.apply(next)` writes back the same values. No
+        // mutation, so no false-positive "soft-reset" heal occurred.
+        let post = try #require(
+            try ctx.fetch(FetchDescriptor<LearnedDeviceProfile>()).first?.snapshot()
+        )
+        #expect(post == pre,
+                "non-finite observation must leave the persisted row byte-equal to its pre-call snapshot")
+    }
+
+    @Test("R9: non-finite observedAt against a healthy prior is dropped (no row mutation)")
+    func nonFiniteObservedAtDoesNotMutateRow() async throws {
+        let ctx = try makeContext()
+        let store = SwiftDataLearnedDeviceProfileStore(
+            context: ctx,
+            tuning: Self.permissiveTuning,
+            clock: { Self.referenceDate }
+        )
+        let seed = Self.seed()
+
+        // Activate a row.
+        _ = await store.recordObservation(
+            GrantWindowObservation(grantWindowSeconds: 60, observedAt: Self.referenceDate),
+            deviceClass: .iPhone17Pro,
+            seed: seed
+        )
+        let pre = try #require(
+            try ctx.fetch(FetchDescriptor<LearnedDeviceProfile>()).first?.snapshot()
+        )
+
+        // Non-finite `observedAt` is the OTHER axis of the R9 guard.
+        // Mirrors the math layer's step (1b) entry guard.
+        let badObs = GrantWindowObservation(
+            grantWindowSeconds: 60,
+            observedAt: Date(timeIntervalSinceReferenceDate: .nan)
+        )
+        _ = await store.recordObservation(
+            badObs, deviceClass: .iPhone17Pro, seed: seed
+        )
+
+        let post = try #require(
+            try ctx.fetch(FetchDescriptor<LearnedDeviceProfile>()).first?.snapshot()
+        )
+        #expect(post == pre,
+                "non-finite observedAt must leave the persisted row byte-equal to its pre-call snapshot")
+    }
+
     // MARK: - snapshot() — diagnostics-facing shape
 
     @Test("snapshot returns rows in DeviceClass.allCases order")
