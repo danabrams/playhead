@@ -433,11 +433,26 @@ enum AdaptiveDeviceProfileEstimator {
         // heal branch so the row recovers within ONE observation rather
         // than two, AND so the store-layer R8 log fires on this axis too
         // (the predicate in `recordObservation` mirrors this list).
+        //
+        // R11 consecutiveClampedObservations addition: the OTHER Int
+        // column on the row. A negative value here does not poison the
+        // Welford math directly (no division), but it materially weakens
+        // the divergence-revert invariant: with `consecutiveClampedObservations
+        // = -1000` (hand-edited DB / migration sign-flip), 1010 saturating
+        // observations have to land in a row before the
+        // `>= divergenceObservationThreshold (10)` revert fires, so the
+        // estimator walks freely through the clamp band for ~1000 obs
+        // before the spec-mandated safety engages. This is the same
+        // integer-shaped corruption pathology as `sampleCount < 0` — fold
+        // it into the same heal branch so the saturation counter starts
+        // from a clean 0 and the K-consecutive invariant holds. The
+        // store-layer R8 log predicate mirrors this addition.
         if !next.welfordMean.isFinite
             || !next.welfordM2.isFinite
             || !next.ewmaSeconds.isFinite
             || !next.persistedScaleFactor.isFinite
-            || next.sampleCount < 0 {
+            || next.sampleCount < 0
+            || next.consecutiveClampedObservations < 0 {
             next.welfordMean = 0
             next.welfordM2 = 0
             next.sampleCount = 0

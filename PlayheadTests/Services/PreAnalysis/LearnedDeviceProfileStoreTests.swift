@@ -762,6 +762,96 @@ struct LearnedDeviceProfileStoreTests {
                 "JSONEncoder must successfully serialize the coerced record")
     }
 
+    @Test("R11: Full DiagnosticsBundleFile assembly + DiagnosticsExportService.encode succeeds when a learned-profile snapshot carries non-finite Doubles")
+    func fullBundleAssemblyEncodesCorruptLearnedProfileSnapshot() throws {
+        // R11 probe-4: R10 added `safeFinite` coercion in
+        // `LearnedDeviceProfileDiagnosticRecord.from(snapshot:)` and a
+        // unit test that encodes the standalone record. But the
+        // diagnostics ship path is `DefaultBundle` → `DiagnosticsBundleFile`
+        // → `DiagnosticsExportService.encode(_:)` — the latter uses a
+        // plain `JSONEncoder()` whose
+        // `nonConformingFloatEncodingStrategy` defaults to `.throw`.
+        // Without an end-to-end test there's no proof the FULL bundle
+        // (not just the standalone record) survives corruption — a
+        // future refactor that adds a non-finite Double to a sibling
+        // diagnostic struct, or replaces `from(snapshot:)` with a path
+        // that skips the coercion, would silently regress the
+        // "user can ship the corruption-evidence bundle" contract that
+        // R10 promised.
+        //
+        // This test assembles a `DiagnosticsBundleFile` whose
+        // `learned_device_profiles` array contains a record built from a
+        // fully-corrupt snapshot (every Double is NaN/Inf, every Date
+        // is non-finite), then calls the same encoder the production
+        // export path uses. If the coercion contract is intact the
+        // bundle bytes ship cleanly; if a future regression breaks it
+        // the encoder throws `EncodingError.invalidValue` and this test
+        // fails at the `try` rather than letting the bug ship to users.
+        let corruptSnapshot = AdaptiveDeviceProfileState(
+            deviceClassRawValue: DeviceClass.iPhone17Pro.rawValue,
+            seedGrantWindowSeconds: .nan,
+            welfordMean: .infinity,
+            welfordM2: -.infinity,
+            sampleCount: 30,
+            ewmaSeconds: .nan,
+            persistedScaleFactor: .nan,
+            lastNotchChangeAt: Date(timeIntervalSinceReferenceDate: .nan),
+            consecutiveClampedObservations: 5,
+            lastRevertReason: nil,
+            createdAt: Date(timeIntervalSinceReferenceDate: .infinity),
+            updatedAt: Date(timeIntervalSinceReferenceDate: .nan),
+            schemaVersion: 1
+        )
+        let corruptRecord = LearnedDeviceProfileDiagnosticRecord.from(
+            snapshot: corruptSnapshot
+        )
+
+        // Build a minimum-viable DefaultBundle that carries the corrupt
+        // record. Every other field is healthy so any encoder failure
+        // is unambiguously attributable to the learned-profile axis.
+        let bundle = DefaultBundle(
+            appVersion: "1.0.0",
+            osVersion: "iOS 26.0",
+            deviceClass: .iPhone17Pro,
+            buildType: .release,
+            eligibilitySnapshot: AnalysisEligibility(
+                hardwareSupported: true,
+                appleIntelligenceEnabled: true,
+                regionSupported: true,
+                languageSupported: true,
+                modelAvailableNow: true,
+                capturedAt: Self.referenceDate
+            ),
+            analysisUnavailableReason: nil,
+            schedulerEvents: [],
+            workJournalTail: [],
+            chapterPhaseEvents: [],
+            learnedDeviceProfiles: [corruptRecord]
+        )
+        let file = DiagnosticsBundleFile(
+            generatedAt: Self.referenceDate,
+            default: bundle,
+            optIn: nil
+        )
+
+        // The core contract: the production encoder ships the bundle.
+        // Without R10's `safeFinite` coercion this `try` would throw
+        // `EncodingError.invalidValue` because `JSONEncoder()`'s default
+        // `.throw` strategy aborts on the first non-finite Double.
+        let data = try DiagnosticsExportService.encode(file)
+        #expect(!data.isEmpty,
+                "full DiagnosticsBundleFile must encode cleanly when learned_device_profiles carries a non-finite-source record")
+
+        // Belt-and-suspenders: the resulting JSON re-decodes cleanly,
+        // proving the bytes are not just a length-positive blob but a
+        // valid JSON document the support engineer can `jq` against.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let roundTripped = try decoder.decode(DiagnosticsBundleFile.self, from: data)
+        #expect(roundTripped.default.learnedDeviceProfiles.count == 1,
+                "learned_device_profiles must round-trip through the full encoder + decoder")
+    }
+
     @Test("Diagnostic record activation flag tracks sample count vs tuning floor")
     func diagnosticRecordActivationFlagIsCorrect() throws {
         let belowFloor = AdaptiveDeviceProfileState(

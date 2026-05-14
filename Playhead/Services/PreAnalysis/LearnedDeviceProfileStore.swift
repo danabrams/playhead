@@ -218,6 +218,14 @@ final class SwiftDataLearnedDeviceProfileStore: LearnedDeviceProfileProviding {
         // math, see step (2) doc-comment in the estimator file); we
         // mirror that addition here so the log keeps firing on the
         // same axis the math layer heals on.
+        //
+        // R11 drift-mitigation: R11 extended the math heal again to
+        // include `consecutiveClampedObservations < 0` (the OTHER Int
+        // column with a negative-value pathology — see the step (2)
+        // doc-comment in the estimator). Mirror the addition here so
+        // the predicate-sync invariant holds. The R8 log fires exactly
+        // when the math layer's sanitization branch will run, on every
+        // axis it heals.
         let observationIsValid =
             observation.grantWindowSeconds.isFinite
             && observation.grantWindowSeconds > 0
@@ -228,6 +236,7 @@ final class SwiftDataLearnedDeviceProfileStore: LearnedDeviceProfileProviding {
             || !prior.ewmaSeconds.isFinite
             || !prior.persistedScaleFactor.isFinite
             || prior.sampleCount < 0
+            || prior.consecutiveClampedObservations < 0
         let priorHadNonFiniteDate: Bool = {
             guard let last = prior.lastNotchChangeAt else { return false }
             return !last.timeIntervalSinceReferenceDate.isFinite
