@@ -75,6 +75,21 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// when off, neither path runs.
     var scopedMusicBedGeneralization: Bool = false
 
+    /// playhead-h6a6 feature flag: when `true`, the ad-detection
+    /// pipeline observes a `ShowCapabilityProfile` per show (after
+    /// activation floor of ≥ 5 analysis-completed episodes AND
+    /// Phase-2 SLIs within defended bounds per playhead-d99) and
+    /// applies a per-show analysis-budget modulator. When `false`
+    /// (the default), the observation path and the modulation path
+    /// are both byte-identical no-ops — no profile row writes, no
+    /// budget multiplier reads. The flag has the same "next
+    /// `AdDetectionService` init takes effect" rollback contract as
+    /// `2hpn` and `xr3t` (the service caches the config snapshot at
+    /// init time). Settings → Diagnostics exposes the OBSERVED
+    /// profile read-only; there is no user-facing setter for the
+    /// profile kind itself.
+    var showCapabilityProfilesEnabled: Bool = false
+
     static let analysisVersion: Int = 1
 
     private static let key = "PreAnalysisConfig"
@@ -90,7 +105,8 @@ struct PreAnalysisConfig: Codable, Sendable {
         resumedCandidateWindowSeconds: TimeInterval = 15 * 60,
         seekRelatchThresholdSeconds: TimeInterval = 30,
         scopedMusicBedGeneralization: Bool = false,
-        useAdaptiveDeviceProfile: Bool = false
+        useAdaptiveDeviceProfile: Bool = false,
+        showCapabilityProfilesEnabled: Bool = false
     ) {
         self.isEnabled = isEnabled
         self.defaultT0DepthSeconds = defaultT0DepthSeconds
@@ -103,6 +119,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.seekRelatchThresholdSeconds = seekRelatchThresholdSeconds
         self.scopedMusicBedGeneralization = scopedMusicBedGeneralization
         self.useAdaptiveDeviceProfile = useAdaptiveDeviceProfile
+        self.showCapabilityProfilesEnabled = showCapabilityProfilesEnabled
     }
 
     // Custom decoder so configs persisted before 24cm (which lack the
@@ -131,6 +148,11 @@ struct PreAnalysisConfig: Codable, Sendable {
         // adaptive-estimator flag; default to `false` so the legacy
         // static-seed path stays in force until the flag is flipped.
         self.useAdaptiveDeviceProfile = try container.decodeIfPresent(Bool.self, forKey: .useAdaptiveDeviceProfile) ?? false
+        // playhead-h6a6: configs persisted before this bead omit the
+        // capability-profiles flag; default to `false` so the
+        // observation + modulation paths stay OFF on upgrade
+        // (rollback-friendly default; identical to 2hpn rationale).
+        self.showCapabilityProfilesEnabled = try container.decodeIfPresent(Bool.self, forKey: .showCapabilityProfilesEnabled) ?? false
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -145,6 +167,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         case seekRelatchThresholdSeconds
         case scopedMusicBedGeneralization
         case useAdaptiveDeviceProfile
+        case showCapabilityProfilesEnabled
     }
 
     static func load() -> PreAnalysisConfig {

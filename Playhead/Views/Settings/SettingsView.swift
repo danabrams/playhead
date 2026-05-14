@@ -81,6 +81,17 @@ struct SettingsView: View {
     /// playhead-l274: scheduler-event tail (up to 50 entries) for the
     /// Diagnostics group. Loaded lazily on section appearance.
     @State private var schedulerEvents: [WorkJournalEntry] = []
+    /// playhead-h6a6: read-only snapshots of every persisted
+    /// `ShowCapabilityProfile`. Loaded lazily on Diagnostics
+    /// appearance from the same `ModelContainer` the runtime uses
+    /// for backfill writes. Display-only — there is NO setter
+    /// exposed in the UI for the observed profile kind. The view
+    /// renders one row per persisted profile, OR an empty-state
+    /// caption when no rows have been observed yet. (The capability-
+    /// profile feature flag is gated separately on the
+    /// `AdDetectionService` side; the diagnostic row reflects
+    /// whatever has been persisted by the runtime so far.)
+    @State private var capabilityProfileSnapshots: [ShowCapabilityProfileSnapshot] = []
     /// Focused Phase 1.5 dogfood export. Unlike Xcode's full-container
     /// download, this emits one small support-safe JSON archive containing
     /// only surface-status JSONL logs.
@@ -207,6 +218,12 @@ struct SettingsView: View {
                 .task {
                     await viewModel.computeStorageSizes()
                     await refreshSchedulerEvents()
+                    // playhead-h6a6: hydrate the read-only
+                    // per-show capability profile rows. No setter
+                    // is exposed at the call site (or anywhere else
+                    // in this view) — the row is a strictly
+                    // observed-value display.
+                    await refreshCapabilityProfileSnapshots()
                     // playhead-j2u: hydrate the Models section's
                     // status-only readout from the live evaluator. The
                     // call is non-blocking by contract.
@@ -271,6 +288,23 @@ struct SettingsView: View {
         } catch {
             schedulerEvents = []
         }
+    }
+
+    /// playhead-h6a6: refresh the per-show capability profile
+    /// snapshots for the Diagnostics group. Reads through the same
+    /// `ShowCapabilityProfileStore` the runtime writes through, so
+    /// the displayed value is always the live persisted state.
+    /// Empty results are rendered as an "Unknown" caption row — see
+    /// `capabilityProfileRow(...)` below. There is NO writer
+    /// exposed at this read site; the row is strictly an observed-
+    /// value display per the bead's "OBSERVED, never user-set"
+    /// contract.
+    @MainActor
+    private func refreshCapabilityProfileSnapshots() async {
+        let store = ShowCapabilityProfileStore(
+            modelContainer: modelContext.container
+        )
+        capabilityProfileSnapshots = await store.allSnapshots()
     }
 
 }
@@ -1510,16 +1544,34 @@ private extension SettingsView {
             }
             .listRowBackground(AppColors.surface)
 
-            // Per-show capability profile (h6a6 is OPEN — hide when no data)
-            // No producer API exists yet; the row stays hidden. When h6a6
-            // lands, add the provider call here and render the row using
-            // `SettingsL274Copy.perShowCapabilityProfileLabel` as the
-            // row label (already test-pinned in `SettingsL274CopyTests`
-            // so the copy is locked-in for the future landing).
-            // (Explicit no-op keeps the scope discipline visible.)
-            // TODO(bd playhead-h6a6): render per-show capability profile
-            //   row using `SettingsL274Copy.perShowCapabilityProfileLabel`
-            //   when the producer API lands.
+            // playhead-h6a6: per-show capability profile read-only
+            // display. The row(s) render the OBSERVED profile kind
+            // for each show that has reached the activation floor;
+            // shows whose profile is still `.unknown` are skipped
+            // (the user only sees positively-observed rows). Empty
+            // state surfaces a single "Unknown" caption.
+            //
+            // Spec compliance:
+            //   * READ-ONLY — there is no setter (no Toggle, Picker,
+            //     binding) on the profile field. Bead requires
+            //     "OBSERVED, never user-set"; an audit grep for
+            //     `ShowCapabilityProfile` under `Views/Settings/`
+            //     turns up only `Text(...)` reads.
+            //   * Label is pinned to
+            //     `SettingsL274Copy.perShowCapabilityProfileLabel`,
+            //     verbatim per the l274 spec.
+            DisclosureGroup(SettingsL274Copy.perShowCapabilityProfileLabel) {
+                if capabilityProfileSnapshots.isEmpty {
+                    Text("Unknown — no observations yet.")
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.textTertiary)
+                } else {
+                    ForEach(capabilityProfileSnapshots, id: \.showIdentifier) { snap in
+                        capabilityProfileRow(snap)
+                    }
+                }
+            }
+            .listRowBackground(AppColors.surface)
 
             // Feature-flag toggles. `24cm`, `xr3t`, and `2hpn` are wired to
             // real storage; `zx6i` and `43ed` remain placeholder shims
@@ -1726,6 +1778,30 @@ private extension SettingsView {
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
                 .truncationMode(.middle)
+        }
+        .listRowBackground(AppColors.surface)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// playhead-h6a6: read-only row rendering a single observed
+    /// capability profile snapshot. NO interactive controls — the
+    /// row body is exclusively `Text(...)`. Showing the count of
+    /// completed episodes alongside the kind gives the user a
+    /// reason-to-believe ("Observed after 5 episodes") without
+    /// surfacing any binding.
+    @ViewBuilder
+    func capabilityProfileRow(_ snap: ShowCapabilityProfileSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(snap.kind.displayLabel)
+                .font(AppTypography.body)
+                .foregroundStyle(AppColors.textPrimary)
+            // Show the truncated show identifier as a caption so
+            // the user can map the row to a subscription without
+            // exposing the full feed URL. Truncation matches the
+            // scheduler-event row's hash-prefix pattern.
+            Text("\(String(snap.showIdentifier.prefix(40))) · \(snap.completedEpisodeCount) episodes")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
         }
         .listRowBackground(AppColors.surface)
         .accessibilityElement(children: .combine)
