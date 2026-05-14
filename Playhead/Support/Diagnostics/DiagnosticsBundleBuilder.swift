@@ -122,7 +122,8 @@ enum DiagnosticsBundleBuilder {
         eligibility: AnalysisEligibility,
         workJournalEntries: [WorkJournalEntry],
         installID: UUID,
-        chapterPhaseEvents: [ChapterPhaseEvent] = []
+        chapterPhaseEvents: [ChapterPhaseEvent] = [],
+        learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = []
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -174,7 +175,8 @@ enum DiagnosticsBundleBuilder {
             analysisUnavailableReason: reason,
             schedulerEvents: schedulerEvents,
             workJournalTail: Array(workJournalTail),
-            chapterPhaseEvents: chapterPhaseEvents
+            chapterPhaseEvents: chapterPhaseEvents,
+            learnedDeviceProfiles: learnedDeviceProfiles
         )
     }
 

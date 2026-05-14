@@ -499,6 +499,18 @@ actor AnalysisWorkScheduler {
     /// foreground catch-up.
     private let acousticPromotionPolicy: AcousticPromotionPolicy
 
+    /// playhead-beh3 (Phase 3 deliverable 5): adaptive Welford+EWMA
+    /// estimator for per-device-class slice/grant-window sizing. Held
+    /// behind the `LearnedDeviceProfileProviding` protocol seam so the
+    /// scheduler does not have to know about SwiftData. Defaults to
+    /// `NoOpLearnedDeviceProfileProvider`, which short-circuits every
+    /// call back to the seed — that is the byte-identical-to-today
+    /// rollback path. The feature flag
+    /// (`PreAnalysisConfig.useAdaptiveDeviceProfile`) gates whether the
+    /// scheduler even queries the provider at the call site, so a flag-
+    /// off run never touches the estimator state.
+    private let learnedDeviceProfileProvider: any LearnedDeviceProfileProviding
+
     private var shouldCancelCurrentJob = false
     /// Set to `true` by the lease-renewal task when its CAS finds no
     /// matching row — i.e. orphan recovery (or another scheduler
@@ -630,7 +642,8 @@ actor AnalysisWorkScheduler {
         clock: @escaping @Sendable () -> Date = { Date() },
         backfillScheduler: (any BackfillScheduling)? = nil,
         catchupPolicy: PlayheadCatchupPolicy = .default,
-        acousticPromotionPolicy: AcousticPromotionPolicy = .default
+        acousticPromotionPolicy: AcousticPromotionPolicy = .default,
+        learnedDeviceProfileProvider: (any LearnedDeviceProfileProviding)? = nil
     ) {
         self.store = store
         self.jobRunner = jobRunner
@@ -645,6 +658,12 @@ actor AnalysisWorkScheduler {
         self.backfillScheduler = backfillScheduler
         self.catchupPolicy = catchupPolicy
         self.acousticPromotionPolicy = acousticPromotionPolicy
+        // playhead-beh3: adaptive device-profile estimator seam. Nil
+        // (or `NoOpLearnedDeviceProfileProvider` injected by the tests
+        // that exercise the flag-on path) means "use the seed verbatim"
+        // — byte-identical to today's behavior.
+        self.learnedDeviceProfileProvider =
+            learnedDeviceProfileProvider ?? NoOpLearnedDeviceProfileProvider()
         var continuation: AsyncStream<Void>.Continuation?
         self.wakeStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { continuation = $0 }
         self.wakeContinuation = continuation
@@ -2366,7 +2385,13 @@ actor AnalysisWorkScheduler {
     /// - `deviceClass` / `deviceProfile`: from the snapshot + the
     ///   playhead-dh9b hard-coded fallback table (the JSON manifest
     ///   loader is not plumbed here — slice-sizing uses the fallback row
-    ///   until a loader is injected).
+    ///   until a loader is injected). playhead-beh3 layers an adaptive
+    ///   Welford+EWMA estimator over this seed: when the
+    ///   `useAdaptiveDeviceProfile` flag is ON and the estimator has
+    ///   activated (≥30 grant-window observations), the
+    ///   `learnedDeviceProfileProvider` returns a scaled copy of the
+    ///   seed row; flag-off (or pre-activation) returns the seed
+    ///   verbatim.
     /// - `transport`: synthesized from `transportStatusProvider`
     ///   (defaults to `LiveTransportStatusProvider`, which wraps
     ///   `NWPathMonitor` + the user's `allowsCellular` pref) and the
@@ -2387,7 +2412,23 @@ actor AnalysisWorkScheduler {
             isCharging: batteryState.isCharging
         )
         let deviceClass = snapshot.deviceClass
-        let deviceProfile = DeviceClassProfile.fallback(for: deviceClass)
+        // playhead-beh3: seed remains the Phase-1 static fallback. The
+        // adaptive estimator (`learnedDeviceProfileProvider`) layers on
+        // top — when the feature flag is ON and the estimator has
+        // activated (≥30 samples), the provider returns a SCALED copy
+        // of the seed. Flag OFF (or pre-activation) returns the seed
+        // verbatim, which is byte-identical to the pre-beh3 behavior.
+        let seedDeviceProfile = DeviceClassProfile.fallback(for: deviceClass)
+        let deviceProfile: DeviceClassProfile
+        if config.useAdaptiveDeviceProfile {
+            deviceProfile = await learnedDeviceProfileProvider.resolvedDeviceProfile(
+                seed: seedDeviceProfile,
+                deviceClass: deviceClass,
+                observedAt: clock()
+            )
+        } else {
+            deviceProfile = seedDeviceProfile
+        }
 
         let reachability = await transportStatusProvider.currentReachability()
         let allowsCellular = await transportStatusProvider.userAllowsCellular()

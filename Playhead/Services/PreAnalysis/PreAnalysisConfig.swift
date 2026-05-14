@@ -24,6 +24,16 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// until the flag is flipped per-beta-cohort.
     var useDualBackgroundSessions: Bool = false
 
+    /// playhead-beh3 feature flag: when `true`, the scheduler consults
+    /// the adaptive Welford+EWMA estimator (`LearnedDeviceProfile`
+    /// table) instead of the Phase-1 static seed table when computing
+    /// slice / grant-window values. Defaults to `false` so production
+    /// stays byte-identical to today until the flag is flipped per-
+    /// beta-cohort. The flag-off path bypasses the estimator entirely
+    /// (no fetch, no record) so any persistence bug in the new code
+    /// path cannot affect production until the flag is on.
+    var useAdaptiveDeviceProfile: Bool = false
+
     /// playhead-44h1: nominal shard duration (seconds) used by the Live
     /// Activity ETA formula to estimate `totalShardsEstimate =
     /// ceil(episode.durationSec / nominalShardDurationSec)`. This is an
@@ -68,7 +78,8 @@ struct PreAnalysisConfig: Codable, Sendable {
         nominalShardDurationSec: Double = 20,
         unplayedCandidateWindowSeconds: TimeInterval = 20 * 60,
         resumedCandidateWindowSeconds: TimeInterval = 15 * 60,
-        seekRelatchThresholdSeconds: TimeInterval = 30
+        seekRelatchThresholdSeconds: TimeInterval = 30,
+        useAdaptiveDeviceProfile: Bool = false
     ) {
         self.isEnabled = isEnabled
         self.defaultT0DepthSeconds = defaultT0DepthSeconds
@@ -79,6 +90,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.unplayedCandidateWindowSeconds = unplayedCandidateWindowSeconds
         self.resumedCandidateWindowSeconds = resumedCandidateWindowSeconds
         self.seekRelatchThresholdSeconds = seekRelatchThresholdSeconds
+        self.useAdaptiveDeviceProfile = useAdaptiveDeviceProfile
     }
 
     // Custom decoder so configs persisted before 24cm (which lack the
@@ -99,6 +111,10 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.unplayedCandidateWindowSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .unplayedCandidateWindowSeconds) ?? (20 * 60)
         self.resumedCandidateWindowSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .resumedCandidateWindowSeconds) ?? (15 * 60)
         self.seekRelatchThresholdSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .seekRelatchThresholdSeconds) ?? 30
+        // playhead-beh3: configs persisted before this bead omit the
+        // adaptive-estimator flag; default to `false` so the legacy
+        // static-seed path stays in force until the flag is flipped.
+        self.useAdaptiveDeviceProfile = try container.decodeIfPresent(Bool.self, forKey: .useAdaptiveDeviceProfile) ?? false
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -111,6 +127,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         case unplayedCandidateWindowSeconds
         case resumedCandidateWindowSeconds
         case seekRelatchThresholdSeconds
+        case useAdaptiveDeviceProfile
     }
 
     static func load() -> PreAnalysisConfig {

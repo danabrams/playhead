@@ -41,6 +41,7 @@ final class DiagnosticsExportCoordinator {
     private let presenter: DiagnosticsExportPresenter
     private let journalFetch: DiagnosticsJournalFetch
     private let chapterPhaseEventsFetch: DiagnosticsChapterPhaseEventsFetch
+    private let learnedDeviceProfilesFetch: DiagnosticsLearnedDeviceProfilesFetch
     private let optInSink: DiagnosticsOptInSink
     private let optInEpisodes: [DiagnosticsEpisodeInput]
 
@@ -55,6 +56,13 @@ final class DiagnosticsExportCoordinator {
     ///     Defaults to "no events"; the live emit call sites land in
     ///     `playhead-au2v.1.10` and onwards, at which point the closure
     ///     will source rows from a persistence-backed store.
+    ///   - learnedDeviceProfilesFetch: playhead-beh3 — async fetch of
+    ///     the adaptive Welford+EWMA estimator's per-device-class state.
+    ///     Defaults to "no rows"; production wires this to the live
+    ///     `SwiftDataLearnedDeviceProfileStore.snapshot()`. When the
+    ///     adaptive feature flag is OFF the store is never queried so
+    ///     the array is empty — but the JSON key is still emitted by
+    ///     the builder for grep stability.
     ///   - optInSink: adapter that mutates `Episode.diagnosticsOptIn`.
     ///   - optInEpisodes: per-episode inputs for the OptIn bundle. Only
     ///     entries with `diagnosticsOptIn == true` ship; the builder
@@ -65,6 +73,7 @@ final class DiagnosticsExportCoordinator {
         presenter: DiagnosticsExportPresenter,
         journalFetch: @escaping DiagnosticsJournalFetch,
         chapterPhaseEventsFetch: @escaping DiagnosticsChapterPhaseEventsFetch = { [] },
+        learnedDeviceProfilesFetch: @escaping DiagnosticsLearnedDeviceProfilesFetch = { [] },
         optInSink: DiagnosticsOptInSink,
         optInEpisodes: [DiagnosticsEpisodeInput] = []
     ) {
@@ -72,6 +81,7 @@ final class DiagnosticsExportCoordinator {
         self.presenter = presenter
         self.journalFetch = journalFetch
         self.chapterPhaseEventsFetch = chapterPhaseEventsFetch
+        self.learnedDeviceProfilesFetch = learnedDeviceProfilesFetch
         self.optInSink = optInSink
         self.optInEpisodes = optInEpisodes
     }
@@ -106,6 +116,7 @@ final class DiagnosticsExportCoordinator {
     func buildAndEncode() async throws -> (data: Data, filename: String, subject: String) {
         let journal = try await journalFetch()
         let chapterPhaseEvents = try await chapterPhaseEventsFetch()
+        let learnedDeviceProfiles = try await learnedDeviceProfilesFetch()
 
         let defaultBundle = DiagnosticsBundleBuilder.buildDefault(
             appVersion: environment.appVersion,
@@ -115,7 +126,8 @@ final class DiagnosticsExportCoordinator {
             eligibility: environment.eligibility,
             workJournalEntries: journal,
             installID: environment.installID,
-            chapterPhaseEvents: chapterPhaseEvents
+            chapterPhaseEvents: chapterPhaseEvents,
+            learnedDeviceProfiles: learnedDeviceProfiles
         )
         let optInBundle = DiagnosticsBundleBuilder.buildOptIn(episodes: optInEpisodes)
 
