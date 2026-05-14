@@ -61,15 +61,12 @@ struct RuntimeShutdownLifecycleTests {
             await runtime.shutdown()
             return
         }
+        await runtime._startShadowRetryObserverForTesting()
 
-        // Wait for the observer loop to actually be running before
-        // tearing it down — the startup chain is multi-hop async (the
-        // migrate task → startShadowRetryObserverIfNeeded → observer
-        // startup task → observer.start()). Without this poll, we race
-        // into shutdown before the loop exists and
-        // `testHasExitedLoop()` would be trivially false (there was no
-        // loop to exit).
-        try await waitForLoopRunning(observer: observer)
+        #expect(
+            await observer.testIsLoopRunning(),
+            "explicit test startup seam must arm the observer loop synchronously"
+        )
 
         // Drive the teardown explicitly so we can assert its effects
         // without relying on scope exit.
@@ -270,41 +267,25 @@ struct RuntimeShutdownLifecycleTests {
                 runtime._shadowRetryObserverForTesting() != nil,
                 "non-preview runtime must construct the observer"
             )
-            // Give the migrate chain time to reach
-            // `startShadowRetryObserverIfNeeded` so we're testing
-            // deinit-while-loop-running, which is the hard case for
-            // cycle avoidance. Without this wait the test would be
-            // trivially easy (no loop task exists yet).
-            //
-            // playhead-p06: originally this used a fixed 50ms wall-clock
-            // sleep which was cooperative-pool sensitive. It now polls
-            // the observer directly for loop liveness with a bounded
-            // wall-clock budget — the same pattern as `waitForLoopRunning`
-            // in test 1. We DON'T Issue.record on timeout here because
-            // the deinit test is also legal in the "no loop ever started"
-            // path; we just need to give it a fair chance.
+            // Start the observer through the explicit DEBUG seam so this
+            // exercises deinit-while-loop-running without depending on
+            // the production migrate/bootstrap task order.
             if let obs = runtime._shadowRetryObserverForTesting() {
-                let loopDeadline = Date().addingTimeInterval(8.0)
-                while Date() < loopDeadline {
-                    if await obs.testIsLoopRunning() { break }
-                    try? await Task.sleep(nanoseconds: 5_000_000)  // 5ms
-                }
+                await runtime._startShadowRetryObserverForTesting()
+                #expect(
+                    await obs.testIsLoopRunning(),
+                    "explicit test startup seam must arm the observer loop synchronously"
+                )
             }
             // Runtime drops here.
         }()
 
-        // Bounded wait for ARC to settle. The runtime must release
-        // even though the observer loop is still running in the
-        // background. Budget is generous (8s) because the FastTests
-        // plan runs 5k+ tests in parallel and ARC reclaim on a
-        // saturated cooperative pool can take several seconds; the
-        // happy path completes in milliseconds, so this only matters
-        // under load. A real cycle would still pin the reference
-        // forever — the bounded wait still catches it.
-        let deadline = Date().addingTimeInterval(8.0)
-        while weakRuntime != nil && Date() < deadline {
+        // Bounded yield budget for ARC to settle. A real cycle would
+        // still pin the reference forever; this just gives any queued
+        // release work a few cooperative turns without sleeping.
+        for _ in 0..<200 {
+            if weakRuntime == nil { break }
             await Task.yield()
-            try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
         }
 
         #expect(
@@ -347,25 +328,5 @@ struct RuntimeShutdownLifecycleTests {
         // remains cancelled.
         await runtime.shutdown()
         #expect(task.isCancelled, "observer task must remain cancelled after second shutdown()")
-    }
-
-    // MARK: - Helpers
-
-    /// Polls the observer until its loop task exists. Mirrors the
-    /// pattern used in `RuntimeTeardownTests` — the runtime's startup
-    /// chain is multi-hop async, so tests that want to assert clean
-    /// teardown must first wait for the loop to actually be running.
-    private func waitForLoopRunning(
-        observer: ShadowRetryObserver,
-        timeout: TimeInterval = 5.0
-    ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if await observer.testIsLoopRunning() {
-                return
-            }
-            try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
-        }
-        Issue.record("observer loop did not start within \(timeout)s")
     }
 }

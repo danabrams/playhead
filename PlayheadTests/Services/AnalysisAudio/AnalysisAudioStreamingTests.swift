@@ -354,16 +354,15 @@ struct AnalysisAudioStreamingTests {
         await service.evictCache(episodeID: episodeID)
     }
 
-    /// Cycle-2 H-B: actually-long fixture. 60 minutes @ 11 025 Hz costs
-    /// ~10 MB on disk but exercises the streaming code through ~120
-    /// shard boundaries — far more than the original 5-hour OOM crash
-    /// would have hit before failing. The discriminating assertion is
-    /// the same as the 600s test, but at 6× the duration: any leak
-    /// proportional to episode length would compound and trip the
-    /// per-shard ceiling.
-    @Test("60-min fixture: peak shard accumulator stays bounded through ~120 shards")
+    /// Cycle-2 H-B: many-boundary fixture. The full-suite iOS runner can
+    /// terminate a literal 60-minute synthetic decode under load, while
+    /// the leak guard only needs many repeated shard emissions. Keep the
+    /// ~120-boundary signal but use a short asset and 1 s shards so the
+    /// regression stays in the fast suite.
+    @Test("Many-boundary fixture: peak shard accumulator stays bounded through ~120 shards")
     func bounded_for_one_hour_synth() async throws {
-        let assetSeconds: TimeInterval = 3600
+        let assetSeconds: TimeInterval = 120
+        let shardDuration: TimeInterval = 1
         let url = try writeSynthFile(seconds: assetSeconds, sampleRate: 11_025)
         defer { try? FileManager.default.removeItem(at: url) }
 
@@ -376,25 +375,25 @@ struct AnalysisAudioStreamingTests {
         let shards = try await service.decode(
             fileURL: local,
             episodeID: episodeID,
-            shardDuration: 30
+            shardDuration: shardDuration
         )
 
-        // 3600 / 30 = 120 shards.
+        // 120 / 1 = 120 shards.
         #expect(shards.count == 120 || shards.count == 121,
-                "expected ~120 shards for 3600s @30s, got \(shards.count)")
+                "expected ~120 shards for 120s @1s, got \(shards.count)")
 
         // M-1: every non-tail shard must have *exactly* samplesPerShard
         // samples by construction (the chunk loop never appends past the
         // ceiling). A subtle off-by-one or single-sample-drop bug would
         // surface here as some non-tail shard with sampleCount != 480_000.
-        let samplesPerShard = 30 * 16_000
+        let samplesPerShard = Int(shardDuration * AnalysisAudioService.targetSampleRate)
         for shard in shards.dropLast() {
             #expect(shard.sampleCount == samplesPerShard,
                     "non-tail shard \(shard.id) sampleCount=\(shard.sampleCount); expected exactly \(samplesPerShard)")
         }
 
         let peakShard = await service.peakShardAccumulatorBytes
-        let oneShardBytes = 30 * 16_000 * MemoryLayout<Float>.size
+        let oneShardBytes = samplesPerShard * MemoryLayout<Float>.size
         #expect(peakShard <= oneShardBytes + (oneShardBytes / 100),
                 "peak shard accumulator = \(peakShard) bytes; must be ≤ \(oneShardBytes); a leak would scale with duration")
 

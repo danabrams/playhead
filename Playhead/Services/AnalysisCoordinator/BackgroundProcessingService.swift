@@ -300,6 +300,30 @@ actor BackgroundProcessingService {
         pendingInjectionWaiters.count
     }
 
+    /// Test seam for the continued-processing expiration path.
+    ///
+    /// `BGContinuedProcessingTask.expirationHandler` is synchronous, so
+    /// production has to hop into an unstructured `Task` before it can
+    /// ask the coordinator to pause and append the terminal WorkJournal
+    /// row. Full-suite tests can starve that unstructured hop long
+    /// enough to turn a behavior assertion into a scheduler assertion.
+    /// This method drives the exact same actor-isolated cleanup path
+    /// directly, keeping the production expiration handler unchanged
+    /// while making the regression test deterministic.
+    func expireContinuedProcessingTaskForTesting(
+        _ task: any ContinuedProcessingTaskProtocol
+    ) async {
+        guard let episodeId = Self.parseEpisodeId(from: task.identifier) else {
+            markComplete(task, success: false)
+            return
+        }
+        await expireContinuedProcessingTask(
+            task,
+            episodeId: episodeId,
+            detail: "continued-processing-expired"
+        )
+    }
+
     // MARK: - State
 
     /// Whether the hot-path is currently active (audio playing in foreground).
@@ -958,7 +982,7 @@ actor BackgroundProcessingService {
                         jobsCompleted: 0
                     )
                 )
-                await self.markComplete(task, success: true)
+                self.markComplete(task, success: true)
                 return
             }
 
@@ -1031,7 +1055,7 @@ actor BackgroundProcessingService {
             )
 
             // Let the coordinator run until the task expires or completes.
-            await self.markComplete(task, success: true)
+            self.markComplete(task, success: true)
             self.logger.info("Backfill task completed")
         }
 
@@ -1231,27 +1255,39 @@ actor BackgroundProcessingService {
         // makes the work task return promptly so resources are
         // reclaimed.
         task.expirationHandler = { [weak self] in
-            guard let self else { return }
             Task { [weak self] in
-                guard let self else { return }
-                await self.emitExpire(
-                    identifier: task.identifier,
-                    taskRef: task as AnyObject,
+                await self?.expireContinuedProcessingTask(
+                    task,
+                    episodeId: episodeId,
                     detail: "continued-processing-expired"
                 )
-                await self.coordinator.pauseAtNextCheckpoint(
-                    episodeId: episodeId,
-                    cause: .taskExpired
-                )
-                await self.appendTerminal(
-                    episodeId: episodeId,
-                    eventType: .failed,
-                    cause: .taskExpired
-                )
-                await self.markComplete(task, success: false)
-                workTask.cancel()
             }
         }
+    }
+
+    private func expireContinuedProcessingTask(
+        _ task: any ContinuedProcessingTaskProtocol,
+        episodeId: String,
+        detail: String
+    ) async {
+        let taskID = ObjectIdentifier(task as AnyObject)
+        let workTask = activeBackgroundTasks[taskID]
+        await emitExpire(
+            identifier: task.identifier,
+            taskRef: task as AnyObject,
+            detail: detail
+        )
+        await coordinator.pauseAtNextCheckpoint(
+            episodeId: episodeId,
+            cause: .taskExpired
+        )
+        await appendTerminal(
+            episodeId: episodeId,
+            eventType: .failed,
+            cause: .taskExpired
+        )
+        markComplete(task, success: false)
+        workTask?.cancel()
     }
 
     /// playhead-44h1 (fix): shared terminal-append helper for the
@@ -1391,7 +1427,7 @@ actor BackgroundProcessingService {
 
     func handleExpiredProcessingTask(_ task: any BackgroundProcessingTaskProtocol) async {
         await coordinator.stop()
-        await markComplete(task, success: false)
+        markComplete(task, success: false)
     }
 
     // MARK: - Pre-Analysis Recovery
@@ -1529,7 +1565,7 @@ actor BackgroundProcessingService {
                     )
                 )
             }
-            await self.markComplete(task, success: true)
+            self.markComplete(task, success: true)
             self.logger.info("Pre-analysis recovery task completed")
         }
 

@@ -1441,6 +1441,63 @@ actor AnalysisWorkScheduler {
         await dispatchAcousticPromotion(opportunity: opportunity)
     }
 
+    /// Runs one standard dispatch pass synchronously for tests that need to
+    /// assert `processJob` outcomes without racing the background run loop
+    /// against full-suite cooperative-pool load.
+    @discardableResult
+    func processNextDispatchableJobForTesting(
+        cancelAfterRunnerStart cause: InternalMissCause? = nil
+    ) async -> Bool {
+        guard config.isEnabled else { return false }
+
+        let admission = await currentLaneAdmission()
+        guard !admission.pauseAllWork else { return false }
+        guard !admissionBlocksDeferred() else { return false }
+
+        let deferredWorkAllowed = admission.policy.allowSoonLane
+            || admission.policy.allowBackgroundLane
+        let now = clock().timeIntervalSince1970
+
+        guard let selected = await selectNextDispatchableJob(
+            deferredWorkAllowed: deferredWorkAllowed,
+            now: now
+        ) else {
+            return false
+        }
+
+        let job = selected.job
+        if job.jobType != "playback",
+           !admission.allowsDeferredJob(
+                desiredCoverageSec: job.desiredCoverageSec,
+                t2Threshold: config.t2DepthSeconds
+           ) {
+            return false
+        }
+
+        guard canAdmit(job: job) else { return false }
+
+        let gateDecision = await evaluateAdmissionGate(for: job)
+        switch gateDecision {
+        case .reject:
+            return false
+        case .admit:
+            break
+        }
+
+        if job.schedulerLane == .now, let preempt = preemptionHandler {
+            await preempt.preemptLowerLanes(for: job.schedulerLane)
+        }
+
+        didStart(job: job)
+        defer { didFinish(job: job) }
+        await processJob(
+            job,
+            cascadeWindow: selected.cascadeWindow,
+            testCancelAfterRunnerStart: cause
+        )
+        return true
+    }
+
     /// Test-only accessor for the live playhead position field.
     func playheadPositionSecForTesting() -> TimeInterval? {
         playheadPositionSec
@@ -1711,6 +1768,10 @@ actor AnalysisWorkScheduler {
     /// externally.
     func pendingCancelCauseForTesting() -> InternalMissCause? {
         pendingCancelCause
+    }
+
+    func hasCurrentRunningTaskForTesting() -> Bool {
+        currentRunningTask != nil
     }
 
     /// skeptical-review-cycle-5 #48 test-only entry point. The
@@ -2548,7 +2609,11 @@ actor AnalysisWorkScheduler {
 
     // MARK: - Job Processing
 
-    private func processJob(_ job: AnalysisJob, cascadeWindow: CandidateWindow? = nil) async {
+    private func processJob(
+        _ job: AnalysisJob,
+        cascadeWindow: CandidateWindow? = nil,
+        testCancelAfterRunnerStart: InternalMissCause? = nil
+    ) async {
         // Resolve audio URL from download cache.
         guard let fileURL = await downloadManager.cachedFileURL(for: job.episodeId) else {
             logger.warning("No cached audio for episode \(job.episodeId), blocking job \(job.jobId)")
@@ -2638,8 +2703,12 @@ actor AnalysisWorkScheduler {
         defer {
             leaseRenewalTask?.cancel()
             leaseRenewalTask = nil
+            currentRunningTask?.cancel()
+            currentRunningTask = nil
             currentJobId = nil
             currentEpisodeId = nil
+            shouldCancelCurrentJob = false
+            pendingCancelCause = nil
         }
 
         // Build request and run.
@@ -2826,6 +2895,15 @@ actor AnalysisWorkScheduler {
                     runTask.cancel()
                 }
             }
+
+            #if DEBUG
+            if let testCancelAfterRunnerStart {
+                pendingCancelCause = testCancelAfterRunnerStart
+                shouldCancelCurrentJob = true
+                currentRunningTask?.cancel()
+                runTask.cancel()
+            }
+            #endif
 
             let outcome: AnalysisOutcome
             do {

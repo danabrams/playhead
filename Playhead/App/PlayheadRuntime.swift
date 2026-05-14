@@ -1503,7 +1503,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp] in
+        Task { [weak self, analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp, shadowRetryObserver, finalPassThermalRecoveryObserver, finalPassSweepInFlightFlag] in
             // skeptical-review-cycle-9 L-4: pin the implicit MainActor
             // isolation that cycle-8 M1 relies on. PlayheadRuntime is
             // declared `@MainActor` (file:line 19), and an unannotated
@@ -1635,7 +1635,7 @@ final class PlayheadRuntime {
             if let store = optionalFeedbackStore {
                 await store.migrate()
             }
-            await surfaceStatusLogger.migrate()
+            surfaceStatusLogger.migrate()
             if let decisionLogger = preBuiltDecisionLogger as? DecisionLogger {
                 do {
                     try await decisionLogger.migrate()
@@ -1736,14 +1736,14 @@ final class PlayheadRuntime {
             // queries the sessions table, so starting it earlier races the
             // schema bootstrap on cold launch.
             if let shadowRetryObserver {
-                await self.startShadowRetryObserverIfNeeded(observer: shadowRetryObserver)
+                self?.startShadowRetryObserverIfNeeded(observer: shadowRetryObserver)
             }
             // playhead-l8dz: start the recovery observer alongside the
             // shadow-retry observer. Same store-migrated precondition
             // applies — kickSweep eventually calls into AnalysisStore for
             // the full asset list.
             if let finalPassThermalRecoveryObserver {
-                await self.startFinalPassRecoveryObserverIfNeeded(observer: finalPassThermalRecoveryObserver)
+                self?.startFinalPassRecoveryObserverIfNeeded(observer: finalPassThermalRecoveryObserver)
             }
 
             // playhead-8u3i: pre-analysis service injection moved to the top
@@ -1878,9 +1878,9 @@ final class PlayheadRuntime {
                 // atomic relative to a concurrent shutdown — there is
                 // no suspension point between `if !isShutdown` and the
                 // assignment. If shutdown already ran, skip the install.
-                if !isShutdown {
+                if self?.isShutdown == false {
                     let sweepFlagForLaunch = finalPassSweepInFlightFlag
-                    finalPassLaunchSweepTask = Task.detached { [analysisStore, downloadManager, finalPassRetranscriptionRunner, episodePodcastIdBatchResolverBox, episodePodcastIdResolverBox, sweepFlagForLaunch] in
+                    let launchSweepTask = Task.detached { [analysisStore, downloadManager, finalPassRetranscriptionRunner, episodePodcastIdBatchResolverBox, episodePodcastIdResolverBox, sweepFlagForLaunch] in
                         // playhead-l8dz M1 (cycle 1 review): acquire the
                         // shared in-flight flag so the recovery observer's
                         // kickSweep skips overlapping the launch sweep.
@@ -1918,6 +1918,9 @@ final class PlayheadRuntime {
                             podcastIdResolver: perEpisodeResolver,
                             podcastIdBatchResolver: batchResolver
                         )
+                    }
+                    if self?.installFinalPassLaunchSweepTaskIfActive(launchSweepTask) != true {
+                        launchSweepTask.cancel()
                     }
                 }
             }
@@ -2118,7 +2121,7 @@ final class PlayheadRuntime {
         // is available; see `BackgroundFeedRefreshService.attachSharedService`.
         BackgroundFeedRefreshService.registerTaskHandler()
 
-        Task { [downloadManager] in
+        Task { [downloadManager, speechService, backgroundProcessingService, entitlementManager, iCloudSyncCoordinator, capabilitiesService] in
             do {
                 try await downloadManager.bootstrap()
             } catch {
@@ -2211,6 +2214,15 @@ final class PlayheadRuntime {
     /// unchanged.
     func _shadowRetryObserverForTesting() -> ShadowRetryObserver? {
         shadowRetryObserver
+    }
+
+    /// DEBUG-only startup seam for runtime lifecycle tests. The
+    /// production launch bootstrap intentionally starts the observer
+    /// after the store migration chain has completed; full-suite tests
+    /// should not wait on that unrelated bootstrap just to exercise
+    /// observer shutdown semantics.
+    func _startShadowRetryObserverForTesting() async {
+        await shadowRetryObserver?.start()
     }
 
     /// playhead-43ed M1: DEBUG-only accessor so
@@ -2363,6 +2375,17 @@ final class PlayheadRuntime {
             }
         }
         return driven
+    }
+
+    /// Installs the launch sweep task only while the runtime is still live.
+    /// This keeps the weak-captured startup bootstrap atomic with shutdown.
+    private func installFinalPassLaunchSweepTaskIfActive(_ task: Task<Void, Never>) -> Bool {
+        guard !isShutdown else {
+            task.cancel()
+            return false
+        }
+        finalPassLaunchSweepTask = task
+        return true
     }
 
     /// Stops long-lived runtime observers and cancels any pending startup

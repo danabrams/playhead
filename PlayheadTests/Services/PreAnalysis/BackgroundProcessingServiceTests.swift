@@ -331,8 +331,8 @@ struct ContinuedProcessingHandlerTests {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        task.simulateExpiration()
-        try await waitForCompletion(of: task)
+        #expect(task.expirationHandler != nil)
+        await bps.expireContinuedProcessingTaskForTesting(task)
 
         #expect(task.completedSuccess == false,
                 "Expiration MUST map to setTaskCompleted(success: false)")
@@ -1275,6 +1275,7 @@ struct RunPendingBackfillPollingLoopTests {
                 await state.advance()
                 await Task.yield()
             },
+            isTaskCancelled: { false },
             logger: Self.testLogger
         )
 
@@ -1321,6 +1322,7 @@ struct RunPendingBackfillPollingLoopTests {
             // pending-count sequences, not on timing. A noop sleep keeps
             // the test deterministic under parallel execution.
             sleep: { _ in await Task.yield() },
+            isTaskCancelled: { false },
             logger: Self.testLogger
         )
 
@@ -1358,6 +1360,7 @@ struct RunPendingBackfillPollingLoopTests {
             fetchPendingCount: { await counts.next() },
             // playhead-p06: noop sleep for deterministic timing.
             sleep: { _ in await Task.yield() },
+            isTaskCancelled: { false },
             logger: Self.testLogger
         )
 
@@ -1420,6 +1423,7 @@ struct RunPendingBackfillPollingLoopTests {
             // Virtual sleep: advances the injected clock, never waits
             // wall-clock time.
             sleep: { duration in vclock.advance(by: duration) },
+            isTaskCancelled: { false },
             now: { vclock.current() },
             logger: Self.testLogger
         )

@@ -227,7 +227,15 @@ struct ReplaySimulatorBasicTests {
 
     @Test("Latency metrics are populated")
     func latencyMetrics() {
-        let config = makeConfig()
+        let groundTruth = [
+            GroundTruthAdSegment(
+                startTime: 120, endTime: 180,
+                advertiser: "Acme", product: "Widget",
+                adType: .midRoll,
+                deliveryStyle: .hostRead
+            )
+        ]
+        let config = makeConfig(groundTruth: groundTruth, duration: 240)
         let driver = SimulatedPlaybackDriver(config: config, rng: SeededRandomNumberGenerator(seed: 42))
         _ = driver.runReplay()
 

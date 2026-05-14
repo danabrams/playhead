@@ -371,6 +371,7 @@ actor SpeechService {
 
     /// The underlying recognizer (Apple Speech or stub).
     private let recognizer: any SpeechRecognizer
+    private let serializesRecognizerRequests: Bool
 
     /// Which model role is currently loaded.
     private(set) var activeModelRole: ModelRole?
@@ -385,14 +386,19 @@ actor SpeechService {
 
     init(vocabularyProvider: ASRVocabularyProvider? = nil) {
         self.recognizer = makeDefaultSpeechRecognizer(vocabularyProvider: vocabularyProvider)
+        self.serializesRecognizerRequests = true
 
         let (stream, continuation) = AsyncStream<TranscriptSegment>.makeStream()
         self.segmentStream = stream
         self.segmentContinuation = continuation
     }
 
-    init(recognizer: any SpeechRecognizer) {
+    init(
+        recognizer: any SpeechRecognizer,
+        serializesRecognizerRequests: Bool = true
+    ) {
         self.recognizer = recognizer
+        self.serializesRecognizerRequests = serializesRecognizerRequests
 
         let (stream, continuation) = AsyncStream<TranscriptSegment>.makeStream()
         self.segmentStream = stream
@@ -457,7 +463,7 @@ actor SpeechService {
             """)
         let start = ContinuousClock.now
         let recognizer = self.recognizer
-        let rawSegments = try await Self.requestGate.withExclusiveAccess {
+        let rawSegments = try await performRecognizerRequest {
             try await recognizer.transcribe(shard: shard, podcastId: podcastId)
         }
         let elapsed = ContinuousClock.now - start
@@ -502,7 +508,7 @@ actor SpeechService {
 
             // Run VAD first to skip non-speech chunks.
             let recognizer = self.recognizer
-            let vadResults = try await Self.requestGate.withExclusiveAccess {
+            let vadResults = try await performRecognizerRequest {
                 try await recognizer.detectVoiceActivity(shard: shard)
             }
             let hasSpeech = vadResults.contains { $0.speechProbability >= speechThreshold }
@@ -524,6 +530,16 @@ actor SpeechService {
     /// Whether the service is ready for transcription.
     func isReady() async -> Bool {
         await recognizer.isModelLoaded()
+    }
+
+    private func performRecognizerRequest<T: Sendable>(
+        _ operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        guard serializesRecognizerRequests else {
+            try Task.checkCancellation()
+            return try await operation()
+        }
+        return try await Self.requestGate.withExclusiveAccess(operation)
     }
 }
 

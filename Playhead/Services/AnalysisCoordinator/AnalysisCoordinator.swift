@@ -470,13 +470,14 @@ actor AnalysisCoordinator {
         isStopRequested: @Sendable () async -> Bool,
         fetchPendingCount: @Sendable () async -> Int,
         sleep: @Sendable (Duration) async throws -> Void,
+        isTaskCancelled: @Sendable () -> Bool = { Task.isCancelled },
         now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
         logger: Logger
     ) async {
         var processedAny = false
         var consecutiveZeroCount = 0
 
-        while !Task.isCancelled, now() < deadline {
+        while !isTaskCancelled(), now() < deadline {
             if await isStopRequested() {
                 logger.info("runPendingBackfill: coordinator stop requested, exiting loop")
                 return
@@ -507,7 +508,7 @@ actor AnalysisCoordinator {
             }
         }
 
-        if Task.isCancelled {
+        if isTaskCancelled() {
             logger.info("runPendingBackfill: cancelled")
         } else {
             logger.info("runPendingBackfill: deadline reached after draining")
@@ -949,6 +950,7 @@ actor AnalysisCoordinator {
     /// Main entry point: receive a playback event and react.
     /// Play-start resolves the analysis asset id so the runtime can wire
     /// the shared analysis session into skip/UI services.
+    @discardableResult
     func handlePlaybackEvent(_ event: PlaybackEvent) async -> String? {
         switch event {
         case .playStarted(let episodeId, let podcastId, let audioURL, let time, let rate):

@@ -226,14 +226,9 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        await scheduler.startSchedulerLoop()
-
-        let entered = await pollUntil {
-            await audioStub.decodeCallCount >= 1
-        }
-        #expect(entered, "Decode never started")
-
-        await scheduler.cancelCurrentJob(cause: .taskExpired)
+        let processed = await scheduler.processNextDispatchableJobForTesting(
+            cancelAfterRunnerStart: .taskExpired
+        )
 
         // Wait for the journal row carrying `.taskExpired`. We pin the
         // cause string here because the `cancelCatch.requeue` arm
@@ -246,8 +241,8 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             )) ?? []
             return rows.contains { $0.eventType == .preempted && $0.cause == .taskExpired }
         }
-        await scheduler.stop()
 
+        #expect(processed, "Scheduler test hook should process task-expired")
         #expect(landed, "Expected a `.preempted` row tagged `.taskExpired` after cancelCurrentJob(.taskExpired)")
 
         // Pin the full row shape: `acquired` from
@@ -305,14 +300,9 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        await scheduler.startSchedulerLoop()
-
-        let entered = await pollUntil {
-            await audioStub.decodeCallCount >= 1
-        }
-        #expect(entered, "Decode never started")
-
-        await scheduler.cancelCurrentJob(cause: .taskExpired)
+        let processed = await scheduler.processNextDispatchableJobForTesting(
+            cancelAfterRunnerStart: .taskExpired
+        )
 
         // Two assertions: the analysis_jobs row must terminate at
         // `superseded` (proving we hit the `cancelCatch.supersede`
@@ -330,8 +320,8 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             )) ?? []
             return rows.contains { $0.eventType == .failed && $0.cause == .pipelineError }
         }
-        await scheduler.stop()
 
+        #expect(processed, "Scheduler test hook should process cancel-supersede")
         #expect(landed, "Expected a `.failed` row tagged `.pipelineError` after cancelCatch.supersede")
 
         // Also pin: no `.finalized` row should leak in — the
@@ -378,23 +368,19 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        await scheduler.startSchedulerLoop()
+        let processed = await scheduler.processNextDispatchableJobForTesting()
 
         // Job must reach `superseded` via `failed.supersede` AND a
         // `.failed/.pipelineError` row must land in the journal.
-        let superseded = await pollUntil {
-            let j = try? await store.fetchJob(byId: "runner-failed-supersede")
-            return j?.state == "superseded"
-        }
+        #expect(processed, "Scheduler test hook should process runner-failed-supersede")
+        let superseded = (try await store.fetchJob(byId: "runner-failed-supersede"))?.state == "superseded"
         #expect(superseded, "Expected job to reach state=superseded via failed.supersede")
 
-        let landed = await pollUntil {
-            let rows = (try? await fetchJournalRowsForEpisode(
-                store: store, jobId: "runner-failed-supersede", episodeId: "ep-runner-failed-supersede"
-            )) ?? []
-            return rows.contains { $0.eventType == .failed && $0.cause == .pipelineError }
-        }
-        await scheduler.stop()
+        let landed = try await fetchJournalRowsForEpisode(
+            store: store,
+            jobId: "runner-failed-supersede",
+            episodeId: "ep-runner-failed-supersede"
+        ).contains { $0.eventType == .failed && $0.cause == .pipelineError }
 
         #expect(landed, "Expected a `.failed` row tagged `.pipelineError` after failed.supersede")
 
@@ -442,18 +428,17 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        await scheduler.startSchedulerLoop()
+        let processed = await scheduler.processNextDispatchableJobForTesting()
 
         // The arm sets `state="failed"` with a backoff. We poll for
         // either `failed` or for the journal row directly — whichever
         // comes first reliably indicates `failed.requeue` fired.
-        let landed = await pollUntil {
-            let rows = (try? await fetchJournalRowsForEpisode(
-                store: store, jobId: "runner-failed-requeue", episodeId: "ep-runner-failed-requeue"
-            )) ?? []
-            return rows.contains { $0.eventType == .preempted && $0.cause == .pipelineError }
-        }
-        await scheduler.stop()
+        #expect(processed, "Scheduler test hook should process runner-failed-requeue")
+        let landed = try await fetchJournalRowsForEpisode(
+            store: store,
+            jobId: "runner-failed-requeue",
+            episodeId: "ep-runner-failed-requeue"
+        ).contains { $0.eventType == .preempted && $0.cause == .pipelineError }
 
         #expect(landed, "Expected a `.preempted` row tagged `.pipelineError` after failed.requeue")
 
@@ -524,24 +509,20 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             downloads: downloads,
             thermalStateProvider: { .critical }
         )
-        await scheduler.startSchedulerLoop()
+        let processed = await scheduler.processNextDispatchableJobForTesting()
 
         // The job must reach `state="paused"` (the
         // `pausedThermalOrMemory` arm's stateUpdate) AND the journal
         // must carry a `.preempted/.thermal` row.
-        let paused = await pollUntil {
-            let j = try? await store.fetchJob(byId: "thermal-paused")
-            return j?.state == "paused"
-        }
+        #expect(processed, "Scheduler test hook should process thermal-paused")
+        let paused = (try await store.fetchJob(byId: "thermal-paused"))?.state == "paused"
         #expect(paused, "Expected job to reach state=paused via pausedThermalOrMemory arm")
 
-        let landed = await pollUntil {
-            let rows = (try? await fetchJournalRowsForEpisode(
-                store: store, jobId: "thermal-paused", episodeId: "ep-thermal-paused"
-            )) ?? []
-            return rows.contains { $0.eventType == .preempted && $0.cause == .thermal }
-        }
-        await scheduler.stop()
+        let landed = try await fetchJournalRowsForEpisode(
+            store: store,
+            jobId: "thermal-paused",
+            episodeId: "ep-thermal-paused"
+        ).contains { $0.eventType == .preempted && $0.cause == .thermal }
 
         #expect(landed, "Expected a `.preempted` row tagged `.thermal` after pausedForThermal outcome")
 
@@ -622,13 +603,9 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
         )
         // NOTE: deliberately NOT calling `setWorkJournalRecorder(...)`.
 
-        await scheduler.startSchedulerLoop()
-        let entered = await pollUntil {
-            await audioStub.decodeCallCount >= 1
-        }
-        #expect(entered, "Decode never started")
-
-        await scheduler.cancelCurrentJob(cause: .taskExpired)
+        let processed = await scheduler.processNextDispatchableJobForTesting(
+            cancelAfterRunnerStart: .taskExpired
+        )
 
         // Wait for the analysis_jobs row to settle into a non-running
         // state, which proves the cancel-cleanup arm fired. With the
@@ -641,8 +618,16 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             default: return true
             }
         }
-        await scheduler.stop()
+        #expect(processed, "Scheduler test hook should process noop-job")
         #expect(cleared, "Cancel-cleanup arm never fired")
+        #expect(
+            await !scheduler.hasCurrentRunningTaskForTesting(),
+            "Cancel-cleanup arm must clear the current running task handle"
+        )
+        #expect(
+            await scheduler.pendingCancelCauseForTesting() == nil,
+            "Cancel-cleanup arm must not leak its cause into later dispatches"
+        )
 
         // The `acquired` row IS still written: it is appended
         // atomically by `acquireLeaseWithJournal` inside the store

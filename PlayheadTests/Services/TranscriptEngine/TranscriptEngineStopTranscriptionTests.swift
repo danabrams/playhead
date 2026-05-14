@@ -238,7 +238,10 @@ struct TranscriptEngineStopTranscriptionTests {
         try await store.insertAsset(makeStopTestAsset(id: "asset-stalled"))
 
         let recognizer = StallingRecognizer()
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -305,7 +308,10 @@ struct TranscriptEngineStopTranscriptionTests {
         try await store.insertAsset(makeStopTestAsset(id: "asset-evgated"))
 
         let recognizer = StallingRecognizer()
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -338,7 +344,10 @@ struct TranscriptEngineStopTranscriptionTests {
         try await store.insertAsset(makeStopTestAsset(id: "asset-late-append"))
 
         let recognizer = StallingRecognizer()
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -388,7 +397,10 @@ struct TranscriptEngineStopTranscriptionTests {
         try await store.insertAsset(makeStopTestAsset(id: "asset-rerun"))
 
         let recognizer = StallingRecognizer()
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -437,7 +449,10 @@ struct TranscriptEngineStopTranscriptionTests {
         try await store.insertAsset(makeStopTestAsset(id: "asset-fresh"))
 
         let recognizer = StallingRecognizer()
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -488,7 +503,10 @@ struct TranscriptEngineStopTranscriptionTests {
         try await store.insertAsset(makeStopTestAsset(id: "asset-inactive"))
 
         let recognizer = StallingRecognizer()
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)

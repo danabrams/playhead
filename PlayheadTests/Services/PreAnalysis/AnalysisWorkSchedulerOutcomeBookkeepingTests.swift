@@ -138,7 +138,9 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        await scheduler.startSchedulerLoop()
+        let processing = Task {
+            await scheduler.processNextDispatchableJobForTesting()
+        }
 
         // Wait until the loop has acquired the lease and entered the
         // runner's decode call. Polling on `decodeCallCount` is the
@@ -163,8 +165,9 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             return (j?.attemptCount ?? 0) >= 1
         }
 
-        await scheduler.stop()
+        let processed = await processing.value
 
+        #expect(processed, "Scheduler test hook should process cancel-mid-decode")
         #expect(bumped,
                 "attemptCount must increment after a cancel-mid-decode cleanup, otherwise the job loops forever")
         let after = try await store.fetchJob(byId: "cancel-mid-decode")
@@ -224,14 +227,10 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        await scheduler.startSchedulerLoop()
+        let processed = await scheduler.processNextDispatchableJobForTesting()
 
-        let superseded = await pollUntil {
-            let j = try? await store.fetchJob(byId: "poison-decode")
-            return j?.state == "superseded"
-        }
-        await scheduler.stop()
-
+        #expect(processed, "Scheduler test hook should process poison-decode")
+        let superseded = (try await store.fetchJob(byId: "poison-decode"))?.state == "superseded"
         #expect(superseded, "Repeated decode failure must supersede after maxAttemptsReached")
         let after = try await store.fetchJob(byId: "poison-decode")
         #expect(after?.attemptCount == 5)
@@ -290,7 +289,9 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
                 audioProvider: audioStub,
                 downloads: downloads
             )
-            await scheduler.startSchedulerLoop()
+            let processing = Task {
+                await scheduler.processNextDispatchableJobForTesting()
+            }
 
             // skeptical-review-cycle-16 #45 root-cause: the original
             // timeout (15s) was tight enough that, when this test ran
@@ -330,7 +331,8 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             let backoff = (after?.nextEligibleAt ?? 0) - beforeCancel
             observedBackoffs.append(backoff)
 
-            await scheduler.stop()
+            let processed = await processing.value
+            #expect(processed, "Scheduler test hook should process \(jobId)")
         }
 
         // Exponential helper: min(2^attempt * 60, 3600). Attempts here
@@ -386,7 +388,9 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        await scheduler.startSchedulerLoop()
+        let processing = Task {
+            await scheduler.processNextDispatchableJobForTesting()
+        }
 
         let entered = await pollUntil {
             audioStub.decodeCallCount >= 1
@@ -399,8 +403,9 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             let j = try? await store.fetchJob(byId: "cancel-loop")
             return j?.state == "superseded"
         }
-        await scheduler.stop()
+        let processed = await processing.value
 
+        #expect(processed, "Scheduler test hook should process cancel-loop")
         #expect(superseded, "Repeated cancel-mid-decode must supersede after maxAttemptsReached")
         let after = try await store.fetchJob(byId: "cancel-loop")
         #expect(after?.attemptCount == 5)
@@ -459,21 +464,13 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        await scheduler.startSchedulerLoop()
+        let poisonedProcessed = await scheduler.processNextDispatchableJobForTesting()
+        let cleanProcessed = await scheduler.processNextDispatchableJobForTesting()
 
-        let cleanProgressed = await pollUntil {
-            let j = try? await store.fetchJob(byId: "clean-behind")
-            // Once the loop has admitted the clean job, its state
-            // moves out of `queued` (running → terminal). Either way
-            // proves the slot is no longer pinned by the poisoned
-            // job.
-            switch j?.state {
-            case "queued", nil: return false
-            default: return true
-            }
-        }
-        await scheduler.stop()
-
+        #expect(poisonedProcessed, "Scheduler test hook should process poisoned job")
+        #expect(cleanProcessed, "Scheduler test hook should process queued clean job")
+        let cleanAfter = try await store.fetchJob(byId: "clean-behind")
+        let cleanProgressed = cleanAfter?.state != "queued" && cleanAfter != nil
         #expect(cleanProgressed, "Queued work behind a poisoned asset must eventually be admitted")
         let poisonedAfter = try await store.fetchJob(byId: "poison-blocks")
         #expect(poisonedAfter?.state == "superseded",

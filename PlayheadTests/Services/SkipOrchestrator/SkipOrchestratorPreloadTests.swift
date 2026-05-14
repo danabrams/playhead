@@ -40,6 +40,12 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         orchestrator = SkipOrchestrator(store: store)
     }
 
+    override func tearDown() async throws {
+        orchestrator = nil
+        store = nil
+        try await super.tearDown()
+    }
+
     // MARK: - Helpers
 
     /// Build a representative AdWindow row for the preload tests.

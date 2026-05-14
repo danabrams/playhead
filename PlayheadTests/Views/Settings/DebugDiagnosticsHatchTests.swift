@@ -98,11 +98,9 @@ struct DebugDiagnosticsHatchTests {
 
     @Test("InstallIDProvider yields a stable UUID across two successive hatch invocations")
     func installIDIsStableAcrossRuns() throws {
-        let ctx = try makeDiagnosticsInMemoryContext()
         // Stand up InstallIdentity in the same schema the hatch uses.
-        // `makeDiagnosticsInMemoryContext` does NOT include InstallIdentity
-        // (it's a diagnostics-local model), so use a dedicated schema
-        // here that mirrors what the app container carries at launch.
+        // Keep this test focused on install identity only; the diagnostics
+        // opt-in context is covered by the coordinator test below.
         let installSchema = Schema([InstallIdentity.self])
         let config = ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
         let installCtx = ModelContext(try ModelContainer(for: installSchema, configurations: [config]))
@@ -110,12 +108,6 @@ struct DebugDiagnosticsHatchTests {
         let first = try InstallIDProvider(context: installCtx).installID()
         let second = try InstallIDProvider(context: installCtx).installID()
         #expect(first == second)
-
-        // The diagnostics context doesn't influence install-ID stability;
-        // it only hosts Episode rows for the sink. This @Test stands in
-        // for the "two successive taps return the same installID" part
-        // of the ct2q acceptance list.
-        _ = ctx
     }
 
     // MARK: - CapabilitySnapshot → AnalysisEligibility mapping

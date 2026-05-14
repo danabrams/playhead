@@ -34,6 +34,38 @@ final class AdBannerQueueTests: XCTestCase {
         )
     }
 
+    private actor ControlledAutoDismissSleep {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var dwell: TimeInterval?
+        private var dwellWaiters: [CheckedContinuation<TimeInterval, Never>] = []
+
+        func sleep(seconds: TimeInterval) async {
+            await withCheckedContinuation { continuation in
+                let waiters = dwellWaiters
+                dwellWaiters.removeAll()
+                dwell = seconds
+                self.continuation = continuation
+                for waiter in waiters {
+                    waiter.resume(returning: seconds)
+                }
+            }
+        }
+
+        func release() {
+            continuation?.resume()
+            continuation = nil
+        }
+
+        func waitForObservedDwell() async -> TimeInterval {
+            if let dwell {
+                return dwell
+            }
+            return await withCheckedContinuation { continuation in
+                dwellWaiters.append(continuation)
+            }
+        }
+    }
+
     // MARK: - Coalescing (AC3)
 
     func testCoalesceAdjacentSkipsWithinGap() {
@@ -98,17 +130,31 @@ final class AdBannerQueueTests: XCTestCase {
 
     // MARK: - Auto-Dismiss (AC4)
 
-    func testAutoDismissAfter8Seconds() async throws {
-        let queue = AdBannerQueue()
+    func testAutoDismissAfterConfiguredDwell() async throws {
+        let sleep = ControlledAutoDismissSleep()
+        let queue = AdBannerQueue(
+            autoDismissSeconds: 0.01,
+            autoDismissSleep: { seconds in
+                await sleep.sleep(seconds: seconds)
+            }
+        )
         let item = makeItem(id: "auto")
         queue.enqueue(item)
 
         XCTAssertNotNil(queue.currentBanner, "Banner should be showing immediately")
 
-        // Wait just past the 8-second auto-dismiss window.
-        try await Task.sleep(for: .seconds(8.5))
+        let dismissTask = try XCTUnwrap(queue.autoDismissTaskForTesting())
+        let observedDwell = await sleep.waitForObservedDwell()
+        XCTAssertEqual(observedDwell, 0.01)
+
+        await sleep.release()
+        await dismissTask.value
         XCTAssertNil(queue.currentBanner,
-            "Banner should auto-dismiss after 8 seconds")
+            "Banner should auto-dismiss after its configured dwell")
+    }
+
+    func testAutoSkippedDwellIsEightSeconds() {
+        XCTAssertEqual(AdBannerQueue.dwellSeconds(for: .autoSkipped), 8.0)
     }
 
     func testManualDismissCancelsAutoDismiss() {

@@ -91,7 +91,7 @@ final class AdBannerQueue {
 
     /// Duration before auto-dismiss for an auto-skipped (high-tier) banner.
     /// 8 s is a calm dwell that leaves time to read but never lingers.
-    private static let autoDismissSeconds: TimeInterval = 8.0
+    private static let defaultAutoDismissSeconds: TimeInterval = 8.0
 
     /// playhead-gtt9.23: Duration before auto-fade for a suggest-tier
     /// (medium-confidence) banner. Slightly longer than the auto-skipped
@@ -99,10 +99,15 @@ final class AdBannerQueue {
     /// need a beat or two more to read the line and decide whether to
     /// tap "Skip". Auto-fade with no user action is interpreted as a
     /// silent decline (see `SkipOrchestrator.declineSuggestedSkip`).
-    private static let suggestAutoDismissSeconds: TimeInterval = 12.0
+    private static let defaultSuggestAutoDismissSeconds: TimeInterval = 12.0
 
     /// Maximum gap (seconds) between skipped ads to coalesce into one banner.
-    private static let coalesceGap: TimeInterval = 10.0
+    private static let defaultCoalesceGap: TimeInterval = 10.0
+
+    private let autoDismissSeconds: TimeInterval
+    private let suggestAutoDismissSeconds: TimeInterval
+    private let coalesceGap: TimeInterval
+    private let autoDismissSleep: @Sendable (TimeInterval) async -> Void
 
     /// playhead-gtt9.23: Invoked when a suggest-tier banner exits without
     /// the user tapping Skip — either via the dismiss button or via the
@@ -111,6 +116,20 @@ final class AdBannerQueue {
     /// drop the suggested window from its in-memory set. `nil` when the
     /// view does not need this signal (tests, previews).
     var onSuggestExitWithoutSkip: ((AdSkipBannerItem) -> Void)?
+
+    init(
+        autoDismissSeconds: TimeInterval = AdBannerQueue.defaultAutoDismissSeconds,
+        suggestAutoDismissSeconds: TimeInterval = AdBannerQueue.defaultSuggestAutoDismissSeconds,
+        coalesceGap: TimeInterval = AdBannerQueue.defaultCoalesceGap,
+        autoDismissSleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
+            try? await Task.sleep(for: .seconds(seconds))
+        }
+    ) {
+        self.autoDismissSeconds = autoDismissSeconds
+        self.suggestAutoDismissSeconds = suggestAutoDismissSeconds
+        self.coalesceGap = coalesceGap
+        self.autoDismissSleep = autoDismissSleep
+    }
 
     // MARK: - Public API
 
@@ -194,12 +213,13 @@ final class AdBannerQueue {
         dismissTask?.cancel()
         let dwell: TimeInterval = {
             switch currentBanner?.tier {
-            case .suggest: return Self.suggestAutoDismissSeconds
-            case .autoSkipped, .none: return Self.autoDismissSeconds
+            case .suggest: return suggestAutoDismissSeconds
+            case .autoSkipped, .none: return autoDismissSeconds
             }
         }()
+        let sleep = autoDismissSleep
         dismissTask = Task {
-            try? await Task.sleep(for: .seconds(dwell))
+            await sleep(dwell)
             guard !Task.isCancelled else { return }
             dismiss()
         }
@@ -209,9 +229,16 @@ final class AdBannerQueue {
     /// driving the live SwiftUI hierarchy.
     static func dwellSeconds(for tier: AdBannerTier) -> TimeInterval {
         switch tier {
-        case .suggest: return suggestAutoDismissSeconds
-        case .autoSkipped: return autoDismissSeconds
+        case .suggest: return defaultSuggestAutoDismissSeconds
+        case .autoSkipped: return defaultAutoDismissSeconds
         }
+    }
+
+    /// Test seam for capturing the exact auto-dismiss task scheduled by
+    /// `restartAutoDismiss()` before the test releases its controlled
+    /// sleep.
+    func autoDismissTaskForTesting() -> Task<Void, Never>? {
+        dismissTask
     }
 
     /// Two banners coalesce if they are close in time (adjacent/near-adjacent skips).
@@ -222,7 +249,7 @@ final class AdBannerQueue {
     /// would lose the distinction the user relies on to know what happened.
     private func canCoalesce(_ a: AdSkipBannerItem, _ b: AdSkipBannerItem) -> Bool {
         guard a.tier == b.tier else { return false }
-        return abs(a.adEndTime - b.adStartTime) <= Self.coalesceGap
+        return abs(a.adEndTime - b.adStartTime) <= coalesceGap
     }
 }
 

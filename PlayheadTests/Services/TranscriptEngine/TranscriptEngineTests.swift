@@ -660,7 +660,10 @@ struct IncrementalShardAppendTests {
     func appendShardsAfterCompletion() async throws {
         let store = try await makeTestStore()
         let recognizer = TrackingRecognizer()
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -734,7 +737,10 @@ struct IncrementalShardAppendTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeTranscriptAsset(id: "asset-race", episodeId: "ep-race"))
         let recognizer = TrackingRecognizer()
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -805,7 +811,10 @@ struct TranscriptEngineAssetSwitchingTests {
         try await store.insertAsset(makeTranscriptAsset(id: "asset-1", episodeId: "ep-1"))
         try await store.insertAsset(makeTranscriptAsset(id: "asset-2", episodeId: "ep-2"))
         let recognizer = TrackingRecognizer()
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -849,7 +858,10 @@ struct TranscriptEngineAssetSwitchingTests {
         try await store.insertAsset(makeTranscriptAsset(id: "asset-1", episodeId: "ep-1"))
         try await store.insertAsset(makeTranscriptAsset(id: "asset-2", episodeId: "ep-2"))
         let recognizer = TrackingRecognizer()
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -903,7 +915,10 @@ struct TranscriptEngineAssetSwitchingTests {
                 weakAnchorMetadata: weakAnchorMetadata
             ),
         ]
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -940,7 +955,10 @@ struct TranscriptEngineSpeakerIdTests {
             makeSegment(id: 1, text: "guest answer", startTime: 5, endTime: 10, speakerId: 2, avgConfidence: 0.72),
             makeSegment(id: 2, text: "guest continues", startTime: 10, endTime: 15, speakerId: 2, avgConfidence: 0.84),
         ]
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -1003,7 +1021,10 @@ struct TranscriptEngineSpeakerIdTests {
         recognizer.transcribeResult = [
             makeSegment(id: 0, text: "plain transcript", startTime: 0, endTime: 5)
         ]
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
 
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -1047,7 +1068,10 @@ struct TranscriptEngineSpeakerIdTests {
         recognizer.transcribeResult = [
             makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, avgConfidence: .nan)
         ]
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
         let engine = TranscriptEngineService(speechService: speech, store: store)
 
@@ -1110,7 +1134,10 @@ struct TranscriptEngineSpeakerIdTests {
         recognizer.transcribeResult = [
             makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 7, avgConfidence: 0.61)
         ]
-        let speech = SpeechService(recognizer: recognizer)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
         try await speech.loadFastModel()
         let engine = TranscriptEngineService(speechService: speech, store: store)
 

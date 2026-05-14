@@ -145,6 +145,7 @@ final class PlaybackService: NSObject, Sendable {
     /// and `tearDown` (actor-isolated by class isolation), and the
     /// observer block itself never reads this property.
     private nonisolated(unsafe) var finishObserverToken: (any NSObjectProtocol)?
+    private nonisolated(unsafe) var routeChangeObserverToken: (any NSObjectProtocol)?
 
     /// Separate NSObject that receives remote command callbacks without actor
     /// isolation, then hops to PlaybackServiceActor via Tasks. Stored strongly
@@ -198,6 +199,16 @@ final class PlaybackService: NSObject, Sendable {
                 object: nil
             )
         }
+        self.routeChangeObserverToken = notificationCenter.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] notification in
+            let reasonValue = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+            Task { @PlaybackServiceActor [weak self] in
+                self?.handleRouteChange(reasonValue: reasonValue)
+            }
+        }
 
         Task { @PlaybackServiceActor [self] in
             self.configureAudioSession()
@@ -210,7 +221,8 @@ final class PlaybackService: NSObject, Sendable {
             // (main queue), which triggers Swift 6 actor isolation
             // assertions when accessing actor-isolated self.
             self.observeInterruptionsAsync()
-            self.observeRouteChangesAsync()
+            // Route-change observer is installed synchronously above so
+            // immediate synthetic notifications cannot outrun registration.
             // Player-item-finish observer is installed synchronously
             // above (block-based) — no async hop needed because the
             // re-broadcast is a pure NotificationCenter.post and does
@@ -227,6 +239,10 @@ final class PlaybackService: NSObject, Sendable {
         if let token = finishObserverToken {
             notificationCenter.removeObserver(token)
             finishObserverToken = nil
+        }
+        if let token = routeChangeObserverToken {
+            notificationCenter.removeObserver(token)
+            routeChangeObserverToken = nil
         }
         rateObservation?.invalidate()
         itemStatusObservation?.invalidate()
@@ -638,28 +654,18 @@ final class PlaybackService: NSObject, Sendable {
         }
     }
 
-    // MARK: - Route Changes (Async)
+    // MARK: - Route Changes
 
-    private func observeRouteChangesAsync() {
-        let center = notificationCenter
-        Task { @PlaybackServiceActor [weak self] in
-            let notifications = center.notifications(
-                named: AVAudioSession.routeChangeNotification
-            )
-            for await notification in notifications {
-                guard let self else { break }
-                guard let info = notification.userInfo,
-                      let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
-                      let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue)
-                else { continue }
+    private func handleRouteChange(reasonValue: UInt?) {
+        guard let reasonValue,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue)
+        else { return }
 
-                switch reason {
-                case .oldDeviceUnavailable:
-                    self.pause()
-                default:
-                    break
-                }
-            }
+        switch reason {
+        case .oldDeviceUnavailable:
+            pause()
+        default:
+            break
         }
     }
 

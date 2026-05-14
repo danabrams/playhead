@@ -25,8 +25,8 @@ struct RuntimeTeardownTests {
 
     @MainActor
     @Test("Preview runtime leaves the shadow retry observer nil")
-    func previewRuntimeSkipsObserver() async throws {
-        try await withTestRuntime(isPreviewRuntime: true) { runtime in
+    func previewRuntimeSkipsObserver() async {
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
             let observer = runtime._shadowRetryObserverForTesting()
             #expect(observer == nil, "preview runtime must skip the observer to avoid leaked subscriptions")
         }
@@ -58,6 +58,7 @@ struct RuntimeTeardownTests {
             let observer = runtime._shadowRetryObserverForTesting()
             #expect(observer != nil, "non-preview runtime must construct the shadow retry observer")
             capturedObserver = observer
+            await runtime._startShadowRetryObserverForTesting()
 
             // Cycle 8 M-5 call-site rail: invoke the real factory closure
             // that was constructed inside `PlayheadRuntime.init` (the very
@@ -81,27 +82,10 @@ struct RuntimeTeardownTests {
                 "Cycle 8 M-5: the production runtime's backfill factory must inject an ACTIVE PromptRedactor. isActive=false means the call site reverted to .noop — sensitive prompts would ship unredacted."
             )
 
-            // The runtime spawns its shadow-retry observer inside a
-            // background startup task that waits on
-            // `analysisStore.migrate()` before calling
-            // `startShadowRetryObserverIfNeeded`, which in turn spawns
-            // ANOTHER task to call `observer.start()`. If we let
-            // `withTestRuntime` shut down immediately, the startup chain
-            // may still be parked and the observer's loop task may not
-            // exist yet — `stop()` would then have nothing to await and
-            // `loopDidExit` would never be flipped. Poll the observer
-            // until its loop task is actually running before releasing
-            // the closure (shutdown fires on scope exit).
-            let timeout = Date().addingTimeInterval(2.0)
-            var loopRunning = false
-            while Date() < timeout {
-                if await observer?.testIsLoopRunning() == true {
-                    loopRunning = true
-                    break
-                }
-                try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
-            }
-            #expect(loopRunning, "observer loop must start within 2s of runtime construction")
+            #expect(
+                await observer?.testIsLoopRunning() == true,
+                "explicit test startup seam must arm the observer loop synchronously"
+            )
         }
         guard let observer = capturedObserver else {
             Issue.record("observer was nil after withTestRuntime scope")

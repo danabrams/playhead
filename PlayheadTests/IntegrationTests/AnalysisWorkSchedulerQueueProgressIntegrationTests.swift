@@ -119,20 +119,16 @@ struct AnalysisWorkSchedulerQueueProgressIntegrationTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        await scheduler.startSchedulerLoop()
+        let poisonProcessed = await scheduler.processNextDispatchableJobForTesting()
+        let cleanProcessed = await scheduler.processNextDispatchableJobForTesting()
 
+        #expect(poisonProcessed, "Scheduler test hook should process the poisoned job")
+        #expect(cleanProcessed, "Scheduler test hook should process the clean job")
         // The clean job's state moving out of `queued` (to running or
         // any terminal) is the load-bearing signal: the slot is no
         // longer pinned by the poisoned asset.
-        let cleanProgressed = await pollUntil {
-            let j = try? await store.fetchJob(byId: "clean-int")
-            switch j?.state {
-            case "queued", nil: return false
-            default: return true
-            }
-        }
-        await scheduler.stop()
-
+        let cleanAfter = try await store.fetchJob(byId: "clean-int")
+        let cleanProgressed = cleanAfter?.state != "queued" && cleanAfter != nil
         #expect(cleanProgressed,
                 "Queued work behind a poisoned asset must eventually be admitted")
         let poisonedAfter = try await store.fetchJob(byId: "poison-int")

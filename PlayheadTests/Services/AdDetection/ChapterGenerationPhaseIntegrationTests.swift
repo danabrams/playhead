@@ -613,35 +613,140 @@ struct ChapterGenerationPhaseIntegrationTests {
     /// cancels the parent task, so cancellation reliably hits the
     /// phase's `Task.isCancelled` rail.
     ///
-    /// Implementation is a `Task.yield`-loop rather than a continuation
-    /// so we never get into "store-then-resume" races against the
-    /// cancellation handler — `Task.isCancelled` is sampled directly
-    /// each iteration, which Swift Concurrency guarantees observes the
-    /// cancellation flag deterministically after `Task.cancel()`.
+    /// Both synchronization points are continuation-backed: the test
+    /// suspends until the phase reaches the labeler, and the labeler
+    /// suspends until its task is cancelled. That keeps the test on
+    /// explicit task lifecycle hooks instead of cooperative yield order.
     private final class BlockingLabeler: ChapterLabeling, @unchecked Sendable {
-        private let entered = OSAllocatedUnfairLock(initialState: false)
+        private struct EntryState {
+            var entered = false
+            var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+            var cancelledWaiters: Set<UUID> = []
+        }
+
+        private struct CancellationState {
+            var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+            var cancelledWaiters: Set<UUID> = []
+        }
+
+        private let entryState = OSAllocatedUnfairLock(initialState: EntryState())
+        private let cancellationState = OSAllocatedUnfairLock(initialState: CancellationState())
 
         /// True once the phase has entered `label(...)` at least once.
-        var hasEntered: Bool { entered.withLock { $0 } }
+        var hasEntered: Bool { entryState.withLock { $0.entered } }
+
+        func waitForEntry(timeout: Duration) async -> Bool {
+            if hasEntered {
+                return true
+            }
+
+            return await withTaskGroup(of: Bool.self) { group in
+                group.addTask {
+                    await self.waitForEntrySignal()
+                    return self.hasEntered
+                }
+                group.addTask {
+                    do {
+                        try await Task.sleep(for: timeout)
+                    } catch {
+                        return false
+                    }
+                    return false
+                }
+
+                let result = await group.next() ?? false
+                group.cancelAll()
+                return result
+            }
+        }
 
         func label(
             candidate: ChapterBoundaryCandidate
         ) async throws -> LabelingResult? {
-            entered.withLock { $0 = true }
-            // Spin yielding until the parent task is cancelled. Bounded
-            // to ~5s of wall time as a safety net so a regression in
-            // cancellation propagation surfaces as a test failure, not
-            // a CI hang. With normal test execution the cancellation
-            // arrives within a handful of yields.
-            let deadline = Date().addingTimeInterval(5.0)
-            while !Task.isCancelled {
-                if Date() > deadline {
-                    Issue.record("BlockingLabeler timed out waiting for cancellation")
-                    return nil
-                }
-                await Task.yield()
-            }
+            markEntered()
+            await waitForCancellationSignal()
             throw CancellationError()
+        }
+
+        private func waitForEntrySignal() async {
+            let waiterID = UUID()
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    let shouldResume = entryState.withLock { state in
+                        if state.entered {
+                            return true
+                        }
+                        if state.cancelledWaiters.remove(waiterID) != nil {
+                            return true
+                        }
+                        state.waiters[waiterID] = continuation
+                        return false
+                    }
+                    if shouldResume {
+                        continuation.resume()
+                    }
+                }
+            } onCancel: {
+                self.cancelEntryWaiter(id: waiterID)
+            }
+        }
+
+        private func cancelEntryWaiter(id: UUID) {
+            let continuation: CheckedContinuation<Void, Never>? = entryState.withLock { state in
+                if let continuation = state.waiters.removeValue(forKey: id) {
+                    return continuation
+                }
+                guard !state.entered else { return nil }
+                state.cancelledWaiters.insert(id)
+                return nil
+            }
+            continuation?.resume()
+        }
+
+        private func markEntered() {
+            let waiters = entryState.withLock { state in
+                guard !state.entered else {
+                    return [CheckedContinuation<Void, Never>]()
+                }
+                state.entered = true
+                let waiters = Array(state.waiters.values)
+                state.waiters.removeAll()
+                return waiters
+            }
+            for waiter in waiters {
+                waiter.resume()
+            }
+        }
+
+        private func waitForCancellationSignal() async {
+            let waiterID = UUID()
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    let shouldResume = cancellationState.withLock { state in
+                        if state.cancelledWaiters.remove(waiterID) != nil {
+                            return true
+                        }
+                        state.waiters[waiterID] = continuation
+                        return false
+                    }
+                    if shouldResume {
+                        continuation.resume()
+                    }
+                }
+            } onCancel: {
+                self.cancelCancellationWaiter(id: waiterID)
+            }
+        }
+
+        private func cancelCancellationWaiter(id: UUID) {
+            let continuation: CheckedContinuation<Void, Never>? = cancellationState.withLock { state in
+                if let continuation = state.waiters.removeValue(forKey: id) {
+                    return continuation
+                }
+                state.cancelledWaiters.insert(id)
+                return nil
+            }
+            continuation?.resume()
         }
     }
 
@@ -706,11 +811,11 @@ struct ChapterGenerationPhaseIntegrationTests {
         // Synchronize: wait until the phase has actually entered the
         // labeler. After this point we know runBackfill has progressed
         // PAST the chapter-phase wire-up's pre-checks and is suspended
-        // inside the phase. We poll a sync flag with `Task.yield()`
-        // rather than a continuation to avoid store/resume races
-        // against the cancellation handler. Bounded poll: a regression
-        // that prevents the phase from reaching the labeler surfaces
-        // here as a fail, not a hang.
+        // inside the phase. The wait is continuation-backed so the test
+        // task suspends instead of repeatedly re-entering a yield loop
+        // while the backfill task is still waiting for executor time.
+        // Bounded wait: a regression that prevents the phase from
+        // reaching the labeler surfaces here as a fail, not a hang.
         //
         // Deadline 30s (not 5s) because under the full PlayheadFastTests
         // run (~6k tests in parallel), SQLite contention on the shared
@@ -718,15 +823,11 @@ struct ChapterGenerationPhaseIntegrationTests {
         // wire-up to several seconds. Normal local runs hit the
         // labeler within milliseconds; the generous deadline only
         // matters when CI/parallel-load is in play.
-        let entryDeadline = Date().addingTimeInterval(30.0)
-        while !blockingLabeler.hasEntered {
-            if Date() > entryDeadline {
-                Issue.record("phase did not enter labeler within deadline")
-                task.cancel()
-                _ = await task.value
-                return
-            }
-            await Task.yield()
+        if await !blockingLabeler.waitForEntry(timeout: .seconds(30)) {
+            Issue.record("phase did not enter labeler within deadline")
+            task.cancel()
+            _ = await task.value
+            return
         }
 
         // Now cancel — guaranteed to land while the labeler is
