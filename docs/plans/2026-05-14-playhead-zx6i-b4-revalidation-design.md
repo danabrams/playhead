@@ -160,9 +160,20 @@ if b4RevalidationEnabledProvider() {                       // live read of PreAn
 }
 ```
 
-If chunks exist but versions match → no work needed (fall through to
-the existing skip-hot-path / skip-backfill no-op branches, which already
-handle this case).
+If chunks exist but versions match → no REVALIDATION needed; the
+runner falls through to the full pipeline (decode → features → ASR →
+ad detection) just as it would have pre-zx6i. Stages 1–3 still run
+on the fall-through path; the existing stage-4 skip-hot-path /
+skip-backfill no-op branches (`wroteNewChunks == false &&
+existingWindowsBeforeDetection.isNotEmpty` and the paired
+`skippedBackfill` guard) handle the idempotency of the detection
+stage when ASR yields no new chunks. R11 doc audit: an earlier draft
+read "no work needed" here, which incorrectly implied the entire
+pipeline short-circuits when versions match. Only the revalidation
+branch short-circuits; the match-case is a plain pre-zx6i full
+analysis pass. The runner's inline comment at the top of `run(_:)`
+("condition 4 OFF → versions match, no revalidation needed") matches
+this corrected wording.
 
 If chunks exist but `completed == nil` → this is a pre-zx6i asset; we
 take the full re-analysis path to populate the stamp. After the run
