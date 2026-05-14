@@ -294,11 +294,18 @@ struct SettingsView: View {
     /// snapshots for the Diagnostics group. Reads through the same
     /// `ShowCapabilityProfileStore` the runtime writes through, so
     /// the displayed value is always the live persisted state.
-    /// Empty results are rendered as an "Unknown" caption row — see
-    /// `capabilityProfileRow(...)` below. There is NO writer
-    /// exposed at this read site; the row is strictly an observed-
-    /// value display per the bead's "OBSERVED, never user-set"
-    /// contract.
+    /// An empty array (no persisted profiles at all) renders the
+    /// "Unknown — no observations yet." caption at the DisclosureGroup
+    /// call site; non-empty arrays render one row per persisted
+    /// profile via `capabilityProfileRow(...)`, including rows whose
+    /// kind is still `.unknown` (floor-not-met or SLIs-out-of-bounds
+    /// intermediate state). h6a6 R5 doc-vs-code audit: the prior
+    /// "Empty results are rendered as an 'Unknown' caption row"
+    /// phrasing conflated "no persisted profiles" with "no observed
+    /// (non-`.unknown`) profiles" — only the FORMER triggers the
+    /// caption today. There is NO writer exposed at this read site;
+    /// the row is strictly an observed-value display per the bead's
+    /// "OBSERVED, never user-set" contract.
     @MainActor
     private func refreshCapabilityProfileSnapshots() async {
         let store = ShowCapabilityProfileStore(
@@ -1545,11 +1552,20 @@ private extension SettingsView {
             .listRowBackground(AppColors.surface)
 
             // playhead-h6a6: per-show capability profile read-only
-            // display. The row(s) render the OBSERVED profile kind
-            // for each show that has reached the activation floor;
-            // shows whose profile is still `.unknown` are skipped
-            // (the user only sees positively-observed rows). Empty
-            // state surfaces a single "Unknown" caption.
+            // display. The row(s) render one entry per persisted
+            // `ShowCapabilityProfile` (the store provisions a row
+            // for every show whose backfill ran while the flag was
+            // on, regardless of whether its kind has yet transitioned
+            // off `.unknown`). Empty state — i.e. zero persisted
+            // profiles — surfaces a single "Unknown — no observations
+            // yet." caption. h6a6 R5 doc-vs-code audit: the prior
+            // comment claimed `.unknown` rows are filtered out; the
+            // `ForEach` below does NOT filter, so rows with kind
+            // `.unknown` (the floor-not-met / SLIs-out-of-bounds
+            // intermediate state) are visible. The diagnostic intent
+            // is "what has the runtime persisted so far?", which
+            // includes pre-observation rows; filtering would hide
+            // the activation-progress observable from dogfood.
             //
             // Spec compliance:
             //   * READ-ONLY — there is no setter (no Toggle, Picker,

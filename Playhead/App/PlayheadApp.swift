@@ -311,11 +311,22 @@ struct PlayheadApp: App {
                     // is wired with a conservative default
                     // (`{ _ in false }`) on `AdDetectionService`. A
                     // future bead lands the live cohort-aware gate
-                    // here; until then the floor stays un-met and
-                    // the profile stays `.unknown`, which keeps the
-                    // budget modulator at its no-op baseline. This
-                    // is the desired behavior — observation should
-                    // not run ahead of the SLI ledger's confidence.
+                    // here by calling
+                    // `runtime.adDetectionService
+                    // .setCapabilityProfileSLIGate(_:)` with a closure
+                    // that reads playhead-d99's SLI ledger; until
+                    // then the floor stays un-met and the profile
+                    // stays `.unknown`, which keeps the budget
+                    // modulator at its no-op baseline. This is the
+                    // desired behavior — observation should not run
+                    // ahead of the SLI ledger's confidence. h6a6 R5
+                    // discoverability fix: previously this comment
+                    // described the future hook abstractly ("future
+                    // bead lands the live cohort-aware gate here")
+                    // without naming the setter; future implementers
+                    // grepping for "SLI gate" or
+                    // "setCapabilityProfileSLIGate" now find this
+                    // call site directly.
                     let showCapabilityProfileStore = ShowCapabilityProfileStore(
                         modelContainer: modelContainer
                     )

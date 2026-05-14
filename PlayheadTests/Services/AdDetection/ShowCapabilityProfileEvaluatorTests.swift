@@ -247,6 +247,34 @@ struct ShowCapabilityProfileEvaluatorTests {
         #expect(kind == .hostReadOnly)
     }
 
+    @Test("chapter-rich wins when every ratio predicate fires AT its exact boundary (chapter=80%, host=70%, sponsor=50%, dynamic=50%)")
+    func priorityAllRatiosAtBoundaryPicksChapter() {
+        // h6a6 R5 review gap (probe 6b): the per-predicate threshold
+        // tests cover each ratio at its boundary in isolation, and
+        // pairwise priority tests cover most adjacent pairs, but no
+        // test pinned the ALL-AT-BOUNDARY case where the four ratio
+        // predicates each fire at exactly their threshold AND the
+        // priority order must pick chapter (the highest-ratio kind
+        // among them). musicBed remains false here so the 2hpn
+        // override does not preempt; this is strictly the ratio
+        // tie-break. A regression that re-orders the four ratio
+        // predicates would silently flip observed classifications
+        // on this exact configuration — pinning it here forces CI
+        // to catch the reorder.
+        let kind = ShowCapabilityProfileEvaluator.classify(
+            showIdentifier: "show",
+            completedEpisodeCount: 10,
+            chapterMatchedEpisodeCount: 8, // 8/10 = 80%, chapter-rich boundary
+            hostVoicedEpisodeCount: 7,     // 7/10 = 70%, host-read-only boundary
+            sponsorDeclaredEpisodeCount: 5, // 5/10 = 50%, sponsor-declared boundary
+            dynamicInsertionEpisodeCount: 5, // 5/10 = 50%, dynamic-insertion boundary
+            musicBedConfirmed: false,
+            sliGate: Self.openGate
+        )
+        #expect(kind == .chapterRich,
+                "All four ratio predicates at their exact thresholds: chapter-rich must win by priority order")
+    }
+
     @Test("sponsor-declared wins over dynamic-insertion-heavy when both fire at the 50% boundary")
     func prioritySponsorOverDynamic() {
         // h6a6 R1 review gap: both predicates share a 50% threshold;
