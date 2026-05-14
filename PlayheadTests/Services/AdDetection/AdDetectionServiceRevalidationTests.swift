@@ -18,15 +18,20 @@ import Testing
 @testable import Playhead
 
 // Serialized because the success-stamp tests mutate the SHARED
-// `.standard` UserDefaults `PreAnalysisConfig` blob (the only path
-// `AdDetectionService.init` reads its flag through). Running the
-// flag-ON and flag-OFF stamp tests in parallel would let one test's
-// `config.save(true)` straddle the other test's
-// `AdDetectionService(...)` init, contaminating the captured
-// `preAnalysisConfig` snapshot. `.serialized` forces the two flag-
-// gating tests to run in source order; the parity test stays correct
-// either way because it constructs its services with `fmBackfillMode:
-// .off` and only inspects ad-window output, not the flag.
+// `.standard` UserDefaults `PreAnalysisConfig` blob, and the
+// producer-side stamp-write inside `AdDetectionService.runBackfill`
+// re-reads that blob LIVE via `PreAnalysisConfig.load()` on every
+// successful call (NOT a snapshot captured at `init`; see the R1
+// doc-audit comment block in `runBackfill` and §3.5.1 of the design
+// doc — only the 2hpn `scopedMusicBedGeneralization` flag still
+// snapshots at init). Running the flag-ON and flag-OFF stamp tests
+// in parallel would let one test's `config.save(true)` straddle the
+// other test's `runBackfill` stamp-write, flipping which branch the
+// live read sees and contaminating both assertions. `.serialized`
+// forces the two flag-gating tests to run in source order; the
+// parity test stays correct either way because it constructs its
+// services with `fmBackfillMode: .off` and only inspects ad-window
+// output, not the flag.
 @Suite("AdDetectionService B4 revalidation", .serialized)
 struct AdDetectionServiceRevalidationTests {
 
@@ -180,13 +185,17 @@ struct AdDetectionServiceRevalidationTests {
     //
     // These tests construct an `AdDetectionService`, run a backfill,
     // and inspect the `RevalidationStateStore` to assert that the
-    // stamp is written iff the flag is ON. The flag is consumed via
-    // `PreAnalysisConfig.load()` in the service's init, so we flip
-    // the persisted config before constructing the service and
-    // restore it after. The store reads/writes go through
-    // `.standard` UserDefaults in production, so we use a unique
-    // asset id per test and `clear` on entry/exit to guarantee
-    // isolation without holding a lock on the global suite.
+    // stamp is written iff the flag is ON. The zx6i flag is NOT
+    // captured at service init — `runBackfill` calls
+    // `PreAnalysisConfig.load()` LIVE at the stamp-write site (R1
+    // doc-audit fix; see the R1 commentary inside `runBackfill` and
+    // §3.5.1 of the design doc). The tests therefore flip the
+    // persisted config BEFORE calling `runBackfill` so the live read
+    // observes the desired value, then restore the prior value on
+    // exit. The store reads/writes go through `.standard`
+    // UserDefaults in production, so we use a unique asset id per
+    // test and `clear` on entry/exit to guarantee isolation without
+    // holding a lock on the global suite.
 
     @Test("flag ON: a successful runBackfill stamps PipelineVersions.current()")
     func flagOnStampsCurrentVersions() async throws {
