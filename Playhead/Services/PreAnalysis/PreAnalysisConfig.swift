@@ -27,12 +27,11 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// playhead-beh3 feature flag: when `true`, the scheduler consults
     /// the adaptive Welford+EWMA estimator (`LearnedDeviceProfile`
     /// table) instead of the Phase-1 static seed table when computing
-    /// slice / grant-window values. Defaults to `false` so production
-    /// stays byte-identical to today until the flag is flipped per-
-    /// beta-cohort. The flag-off path bypasses the estimator entirely
-    /// (no fetch, no record) so any persistence bug in the new code
-    /// path cannot affect production until the flag is on.
-    var useAdaptiveDeviceProfile: Bool = false
+    /// slice / grant-window values. Default ON as of 2026-05-14 (post
+    /// epic-3bv landing). The flag-off path bypasses the estimator
+    /// entirely (no fetch, no record); flipping OFF via Settings is
+    /// the rollback path.
+    var useAdaptiveDeviceProfile: Bool = true
 
     /// playhead-44h1: nominal shard duration (seconds) used by the Live
     /// Activity ETA formula to estimate `totalShardsEstimate =
@@ -85,10 +84,9 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// only classifier + fusion + boundary against the persisted
     /// rows. The success-stamp at the end of `runBackfill` is ALSO
     /// gated on this flag — when off, no stamp is written and the
-    /// short-circuit is structurally unreachable. Default `false` so
-    /// production behavior is byte-identical to pre-zx6i until the
-    /// flag is flipped per-beta-cohort. Rollback latency for the zx6i
-    /// flag is **instant** (next analysis run), not next-launch:
+    /// short-circuit is structurally unreachable. Default ON as of
+    /// 2026-05-14 (post epic-3bv landing). Rollback latency for the
+    /// zx6i flag is **instant** (next analysis run), not next-launch:
     /// `AnalysisJobRunner`'s default `b4RevalidationEnabledProvider`
     /// and `AdDetectionService.runBackfill`'s stamp-write gate BOTH
     /// re-read `PreAnalysisConfig.load()` on every call instead of
@@ -97,7 +95,7 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// `preAnalysisConfig`), because the zx6i short-circuit gates a
     /// perf optimization with `false_ready_rate` risk, and minimizing
     /// blast-radius on flag-OFF matters more than caching the read.
-    var b4RevalidationFromFeaturesEnabled: Bool = false
+    var b4RevalidationFromFeaturesEnabled: Bool = true
 
     /// playhead-h6a6 feature flag: when `true`, the ad-detection
     /// pipeline observes a `ShowCapabilityProfile` per show (after
@@ -129,8 +127,8 @@ struct PreAnalysisConfig: Codable, Sendable {
         resumedCandidateWindowSeconds: TimeInterval = 15 * 60,
         seekRelatchThresholdSeconds: TimeInterval = 30,
         scopedMusicBedGeneralization: Bool = false,
-        useAdaptiveDeviceProfile: Bool = false,
-        b4RevalidationFromFeaturesEnabled: Bool = false,
+        useAdaptiveDeviceProfile: Bool = true,
+        b4RevalidationFromFeaturesEnabled: Bool = true,
         showCapabilityProfilesEnabled: Bool = false
     ) {
         self.isEnabled = isEnabled
@@ -171,15 +169,18 @@ struct PreAnalysisConfig: Codable, Sendable {
         // OFF on upgrade (rollback-friendly default).
         self.scopedMusicBedGeneralization = try container.decodeIfPresent(Bool.self, forKey: .scopedMusicBedGeneralization) ?? false
         // playhead-beh3: configs persisted before this bead omit the
-        // adaptive-estimator flag; default to `false` so the legacy
-        // static-seed path stays in force until the flag is flipped.
-        self.useAdaptiveDeviceProfile = try container.decodeIfPresent(Bool.self, forKey: .useAdaptiveDeviceProfile) ?? false
+        // adaptive-estimator flag. As of 2026-05-14, the production
+        // default is ON, so absent keys decode to `true` — existing
+        // users upgrade onto the adaptive estimator silently. Opt-OUT
+        // is via the Settings toggle.
+        self.useAdaptiveDeviceProfile = try container.decodeIfPresent(Bool.self, forKey: .useAdaptiveDeviceProfile) ?? true
         // playhead-zx6i: configs persisted before this bead omit the
-        // key; default to `false` so B4 revalidation stays OFF on
-        // upgrade and the AnalysisJobRunner short-circuit is
-        // structurally unreachable until the flag is explicitly
-        // flipped via Settings.
-        self.b4RevalidationFromFeaturesEnabled = try container.decodeIfPresent(Bool.self, forKey: .b4RevalidationFromFeaturesEnabled) ?? false
+        // key. As of 2026-05-14, the production default is ON, so
+        // absent keys decode to `true` — existing users get B4
+        // revalidation on next analysis run. Rollback is instant via
+        // the Settings toggle (no relaunch needed) per the live-read
+        // contract on `PreAnalysisConfig.load()`.
+        self.b4RevalidationFromFeaturesEnabled = try container.decodeIfPresent(Bool.self, forKey: .b4RevalidationFromFeaturesEnabled) ?? true
         // playhead-h6a6: configs persisted before this bead omit the
         // capability-profiles flag; default to `false` so the
         // observation + modulation paths stay OFF on upgrade
