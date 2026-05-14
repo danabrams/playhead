@@ -253,4 +253,70 @@ struct AdDetectionServiceRevalidationTests {
         let stamped = RevalidationStateStore.loadCompletedVersions(forAsset: assetId)
         #expect(stamped == nil, "flag OFF must NOT stamp — pre-zx6i behaviour byte-identical")
     }
+
+    /// R6 audit pin: the design doc §3.5.1 truth-table row 3 (flag ON
+    /// at `run(_:)` top, flag OFF at stamp-write) claims that a PRIOR
+    /// stamp written during a flag-ON period remains in place when the
+    /// flag flips OFF before stamp-write — `recordCompleted` only
+    /// writes, never clears, and there is no flag-OFF eviction. The
+    /// claim is structurally guaranteed by the code (no `clear` site
+    /// in production; the stamp-write gate is the only producer), but
+    /// the prior review rounds had no test pinning this behaviour. A
+    /// future change that added a flag-OFF eviction (e.g. "clear stamp
+    /// when flag flips" as a tidy-up gesture) would silently invalidate
+    /// the row-3 invariant and break ON→OFF→ON resumption: a session
+    /// that flipped OFF then back ON would have to redo a full
+    /// analysis rather than picking up the cached stamp. This test
+    /// pins the no-eviction behaviour so any such regression
+    /// surfaces immediately.
+    @Test("prior stamp survives a flag-OFF runBackfill (truth-table row 3 no-eviction)")
+    func priorStampSurvivesFlagOffRunBackfill() async throws {
+        let assetId = "asset-stamp-survives-off-\(UUID().uuidString)"
+        defer { RevalidationStateStore.clear(forAsset: assetId) }
+        RevalidationStateStore.clear(forAsset: assetId)
+
+        // Pre-seed a stamp as if a prior flag-ON `runBackfill` had
+        // completed. We bypass the service here and write directly to
+        // the store — the production producer is the only call site,
+        // so we synthesise its output to set up the row-3 scenario.
+        let priorStamp = PipelineVersions(
+            modelVersion: "prior-detector-v1",
+            policyVersion: "prior-policy-v1",
+            featureSchemaVersion: 1
+        )
+        RevalidationStateStore.recordCompleted(versions: priorStamp, forAsset: assetId)
+        #expect(RevalidationStateStore.loadCompletedVersions(forAsset: assetId) == priorStamp)
+
+        // Flip the persisted flag OFF, then run a successful backfill.
+        // The stamp-write gate inside `runBackfill` re-reads the flag
+        // live and sees OFF → no NEW stamp. The doc claim is that the
+        // PRIOR stamp also remains in place (no eviction).
+        var config = PreAnalysisConfig.load()
+        let restoreValue = config.b4RevalidationFromFeaturesEnabled
+        config.b4RevalidationFromFeaturesEnabled = false
+        config.save()
+        defer {
+            var restore = PreAnalysisConfig.load()
+            restore.b4RevalidationFromFeaturesEnabled = restoreValue
+            restore.save()
+        }
+
+        let store = try await makeTestStore()
+        let episode = makeEpisode(assetId: assetId)
+        try await store.insertAsset(makeAsset(id: assetId))
+        let service = makeService(store: store)
+
+        try await service.runBackfill(
+            chunks: episode.chunks,
+            analysisAssetId: assetId,
+            podcastId: episode.podcastId,
+            episodeDuration: episode.duration
+        )
+
+        // No NEW stamp (gate read OFF) AND prior stamp still present
+        // (no eviction). The combination pins row 3's "PRIOR stamp …
+        // remains in place unchanged" wording.
+        let stamped = RevalidationStateStore.loadCompletedVersions(forAsset: assetId)
+        #expect(stamped == priorStamp, "flag-OFF runBackfill must NOT clear an existing stamp — the row-3 truth-table claim depends on no-eviction semantics")
+    }
 }

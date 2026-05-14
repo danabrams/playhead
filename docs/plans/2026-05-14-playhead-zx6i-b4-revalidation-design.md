@@ -187,10 +187,18 @@ subsequent bumps. Pinned by
 
 ### 3.5.1 Asymmetry: zx6i is live-read; 2hpn / xr3t are snapshot-at-init
 
-The other `PreAnalysisConfig`-gated flags in this codebase (2hpn
-`scopedMusicBedGeneralization`, xr3t lightweight-inventory) cache the
-flag value at consumer-init. Flipping those in Settings takes effect
-on the next consumer construction — typically next app launch.
+The other feature-flag toggles wired through the Diagnostics group
+cache their flag value at consumer-init. 2hpn
+(`PreAnalysisConfig.scopedMusicBedGeneralization`, read by
+`AdDetectionService` at init into a `preAnalysisConfig` snapshot) and
+xr3t (`LightweightInventoryChecksSettings.enabled`, read by
+`SkipOrchestrator` at init into the post-hoc inventory filter) are both
+snapshot-at-consumer-init. Flipping either in Settings takes effect on
+the next consumer construction — typically next app launch. (Note: xr3t
+lives in its own `LightweightInventoryChecksSettings` UserDefaults
+type, NOT in `PreAnalysisConfig`; both are UserDefaults-backed feature
+flags but they do not share a storage type. R6 doc audit fixed an
+earlier claim that lumped them as "`PreAnalysisConfig`-gated".)
 
 The zx6i wiring deliberately diverges. Both the consumer
 (`AnalysisJobRunner.b4RevalidationEnabledProvider`'s default closure)
