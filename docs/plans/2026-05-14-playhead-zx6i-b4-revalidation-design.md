@@ -45,7 +45,7 @@ version triple has changed.
 
 ```swift
 struct PipelineVersions: Sendable, Equatable, Codable {
-    let modelVersion: String              // AdDetectionConfig.detectorVersion
+    let modelVersion: String              // AdDetectionConfig.default.detectorVersion
     let policyVersion: String             // SkipPolicyConfig.default.policyVersion
     let featureSchemaVersion: Int         // SharedVersionConstants.featureSchemaVersion
 
@@ -137,8 +137,8 @@ version is "producer and consumer must agree on the live value,
 otherwise a mid-session flag-ON unlocks the consumer but leaves the
 producer's cached `false` in place, so no stamp ever lands."
 
-A `runBackfill` that exits early via `guard chunks.isEmpty` does NOT
-stamp (no fusion ran, no decisions to validate).
+A `runBackfill` that exits early via `guard !chunks.isEmpty else {
+return }` does NOT stamp (no fusion ran, no decisions to validate).
 
 ### 3.5 AnalysisJobRunner short-circuit
 
@@ -242,10 +242,12 @@ live flag read — so no NEW stamp is written. Runtime behavior is
 byte-identical to pre-zx6i. Note however that flag-OFF does NOT clear
 existing storage: any stamp written during a prior flag-ON period
 remains in UserDefaults under
-`playhead.zx6i.completedVersions.<assetId>` and is simply unread (see
-§3.5.1 truth-table row 3 for the ON-then-OFF semantics and §3.5.1's
-cheap-re-enable note for the consequence on a subsequent ON → ON
-return).
+`playhead.zx6i.completedVersions.<assetId>` and is simply unread. See
+§3.5.1 truth-table row 3 — that single row covers BOTH the ON→OFF
+"no NEW stamp + prior remains" outcome AND the subsequent ON→ON
+"idempotent re-revalidation off the unchanged prior stamp" outcome
+(both consequences are documented inline within the row's "Resulting
+behavior" cell).
 
 When `true`: the short-circuit fires when the version triple has
 bumped. Stamp is written at end of every successful `runBackfill` so
