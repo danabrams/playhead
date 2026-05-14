@@ -821,12 +821,19 @@ final class PlayheadRuntime {
         // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
         // adDetectionService so it can be injected for step-17 forwarding.
         // The orchestrator is otherwise wired identically to before this change.
+        //
+        // playhead-xr3t: production wires the inventory sanity filter
+        // explicitly so the bead's spec default ON ships in real
+        // builds. The `SkipOrchestrator` initializer default is a
+        // disabled no-op so tests that don't supply context don't
+        // silently lose spans — production opts in here.
         self.skipOrchestrator = SkipOrchestrator(
             store: analysisStore,
             trustService: trustService,
             correctionStore: correctionStore,
             invariantLogger: surfaceStatusLogger,
-            episodeIdHasher: surfaceStatusHasher
+            episodeIdHasher: surfaceStatusHasher,
+            inventoryFilter: .production()
         )
 
         // playhead-epii: structure-aware silence compression. Construct

@@ -320,6 +320,38 @@ actor SkipOrchestrator {
     /// with the same installId.
     private let invariantLogger: SurfaceStatusInvariantLogger
 
+    // MARK: - playhead-xr3t: inventory sanity filter
+
+    /// playhead-xr3t: post-hoc filter applied to spans arriving at the
+    /// fusion → user-visible-skip-decision boundary. Constructed from
+    /// `LightweightInventoryChecksSettings` at init time. When the flag
+    /// is OFF the filter is a no-op pass-through and behaviour is
+    /// byte-identical to the pre-bead orchestrator.
+    ///
+    /// The filter is stateless; per-episode context (duration,
+    /// declared chapters) is supplied at evaluation time from the
+    /// orchestrator's `activeEpisodeDuration` / `activeDeclaredChapters`
+    /// fields below.
+    private let inventoryFilter: InventorySanityFilter
+
+    /// playhead-xr3t: episode duration for the active episode in
+    /// seconds. Set in `beginEpisode` from
+    /// `AnalysisAsset.episodeDurationSec` (best-effort fetch) and
+    /// updatable mid-episode via `setEpisodeDuration(_:)` when the
+    /// duration-backfill probe rewrites the row. `nil` when the
+    /// asset row carries no duration yet — the filter treats that
+    /// as "tail edge unknown" and applies only the head-edge rule.
+    private var activeEpisodeDuration: Double?
+
+    /// playhead-xr3t: declared (publisher-provided) content chapters
+    /// for the active episode. Loaded by AdDetectionService on its
+    /// metadata fetch and pushed via `setDeclaredChapters(_:)`. Only
+    /// creator-source ChapterEvidence (id3, pc20, rssInline) is
+    /// stored here — `.inferred` chapters are filtered out by
+    /// `setDeclaredChapters` so the inventory filter cannot
+    /// accidentally consult them.
+    private var activeDeclaredChapters: [ChapterEvidence] = []
+
     // MARK: - Init
 
     /// - Parameters:
@@ -340,7 +372,18 @@ actor SkipOrchestrator {
         trustService: TrustScoringService? = nil,
         correctionStore: (any UserCorrectionStore)? = nil,
         invariantLogger: SurfaceStatusInvariantLogger = SurfaceStatusInvariantLogger(),
-        episodeIdHasher: (@Sendable (String) -> String)? = nil
+        episodeIdHasher: (@Sendable (String) -> String)? = nil,
+        // playhead-xr3t (review): default to a disabled no-op filter so
+        // pre-existing test surface that constructs `SkipOrchestrator`
+        // — and never sets episode-duration / declared-chapter context
+        // — doesn't silently lose pre-roll/post-roll spans to the
+        // head-/tail-edge rules. Production wires the real settings-
+        // backed filter explicitly via `InventorySanityFilter
+        // .production()` (see `PlayheadRuntime`), preserving the bead's
+        // spec default ON for new builds. This avoids an implicit
+        // `UserDefaults.standard` dependency leaking into every test
+        // that didn't ask for one.
+        inventoryFilter: InventorySanityFilter = InventorySanityFilter(isEnabled: false)
     ) {
         self.store = store
         self.config = config
@@ -350,6 +393,7 @@ actor SkipOrchestrator {
         self.episodeIdHasher = episodeIdHasher ?? { [invariantLogger] episodeId in
             invariantLogger.hashEpisodeId(episodeId)
         }
+        self.inventoryFilter = inventoryFilter
     }
 
     // MARK: - Configuration
@@ -550,6 +594,13 @@ actor SkipOrchestrator {
         activeEpisodeId = episodeId
         activePodcastId = podcastId
         activeEvidenceCatalog = nil
+        // playhead-xr3t: clear per-episode inventory-filter context.
+        // Episode duration is rehydrated from the persisted asset row
+        // immediately below; declared chapters arrive later via
+        // `setDeclaredChapters(_:)` from the metadata fetch in
+        // `AdDetectionService.runBackfill`.
+        activeEpisodeDuration = nil
+        activeDeclaredChapters = []
         inAdState = false
         lastSeekTime = nil
         skipSuppressedAfterSeek = false
@@ -565,6 +616,27 @@ actor SkipOrchestrator {
             activeSkipMode = await trustService.effectiveMode(podcastId: podcastId)
         } else {
             activeSkipMode = .shadow
+        }
+
+        // playhead-xr3t: hydrate the inventory filter's episode duration
+        // from the persisted asset row. Best-effort: an absent row /
+        // absent duration leaves `activeEpisodeDuration = nil`, and the
+        // filter degrades to "head-edge guard only" (the safer failure
+        // mode — under-filter rather than mis-reject on unknown
+        // duration). The duration is refreshable mid-episode via
+        // `setEpisodeDuration(_:)` once `AnalysisCoordinator`'s
+        // duration-backfill probe rewrites the row.
+        do {
+            if let asset = try await store.fetchAsset(id: analysisAssetId),
+               let duration = asset.episodeDurationSec,
+               duration > 0,
+               duration.isFinite {
+                activeEpisodeDuration = duration
+            }
+        } catch {
+            logger.debug(
+                "beginEpisode: episode-duration lookup failed for \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
         }
 
         // Bug 5 (skip-cues-deletion): pre-load directly from `ad_windows`,
@@ -636,6 +708,10 @@ actor SkipOrchestrator {
         activeEpisodeId = nil
         activePodcastId = nil
         activeEvidenceCatalog = nil
+        // playhead-xr3t: clear per-episode inventory-filter context so
+        // the next episode doesn't inherit stale duration/chapters.
+        activeEpisodeDuration = nil
+        activeDeclaredChapters = []
         inAdState = false
         banneredWindowIds.removeAll()
         emittedAutoSkipBannerWindowIds.removeAll()
@@ -643,6 +719,179 @@ actor SkipOrchestrator {
         suggestWindows.removeAll()
         recentlyAcceptedSuggestIds.removeAll()
         pushSkipCues()
+    }
+
+    // MARK: - playhead-xr3t: inventory sanity context setters
+
+    /// Update the episode duration used by the inventory sanity filter.
+    /// Mirrors the `setEvidenceCatalog` pattern: late-arriving values
+    /// are dropped when the active asset has switched (so a duration-
+    /// backfill probe finishing mid-podcast-switch can't poison the
+    /// new episode's tail-edge guard).
+    ///
+    /// Pass a non-positive or non-finite `duration` to clear the cached
+    /// value (the filter will then degrade to head-edge-only behaviour).
+    func setEpisodeDuration(_ duration: Double, analysisAssetId: String) {
+        guard let activeAssetId, analysisAssetId == activeAssetId else {
+            logger.debug(
+                "setEpisodeDuration: dropping mismatched asset \(analysisAssetId, privacy: .public) (active=\(self.activeAssetId ?? "nil", privacy: .public))"
+            )
+            return
+        }
+        let previous = activeEpisodeDuration
+        if duration > 0, duration.isFinite {
+            activeEpisodeDuration = duration
+        } else {
+            activeEpisodeDuration = nil
+        }
+        // Re-evaluate managed windows against the freshest context.
+        // Skip the pass when the new value is identical to what we
+        // already had — nothing the filter sees would change.
+        if previous != activeEpisodeDuration {
+            reapplyInventoryFilterToManagedWindows()
+        }
+    }
+
+    /// Push the publisher-declared content chapters for the active
+    /// episode. Only creator-source ChapterEvidence (id3, pc20,
+    /// rssInline) is retained — `.inferred` chapters are filtered out
+    /// here as a defense-in-depth check so the filter cannot
+    /// accidentally consult them, even if a future caller mixes
+    /// sources.
+    ///
+    /// Chapters are sorted by `startTime` and any chapter missing an
+    /// explicit `endTime` has it synthesized from the NEXT chapter's
+    /// start time. The trailing chapter (last in the episode, no
+    /// successor) is left open-ended — the filter explicitly does NOT
+    /// reject overlap with an unbounded chapter, because over-rejection
+    /// in xr3t means the user misses an expected ad-skip (e.g. a
+    /// post-roll inside a publisher-declared "Outro" chapter).
+    ///
+    /// After the chapter context updates, currently-managed non-
+    /// terminal windows are re-evaluated against the new filter
+    /// context. Spans that the filter would now reject are removed
+    /// from the active set (mirrors `retireAdWindows`). Without this
+    /// pass, the `beginEpisode` preload (which runs BEFORE
+    /// `AdDetectionService.runBackfill` pushes chapters) would let
+    /// chapter-overlapping rows survive across launches even though
+    /// the filter is supposed to reject them.
+    ///
+    /// Mismatched-asset pushes are dropped silently (asset-switch race
+    /// guard), mirroring `setEvidenceCatalog`.
+    func setDeclaredChapters(_ chapters: [ChapterEvidence], analysisAssetId: String) {
+        guard let activeAssetId, analysisAssetId == activeAssetId else {
+            logger.debug(
+                "setDeclaredChapters: dropping mismatched asset \(analysisAssetId, privacy: .public) (active=\(self.activeAssetId ?? "nil", privacy: .public))"
+            )
+            return
+        }
+        activeDeclaredChapters = Self.normalizedDeclaredChapters(chapters)
+        reapplyInventoryFilterToManagedWindows()
+    }
+
+    /// Sort, filter, and synthesize missing chapter end times from the
+    /// next chapter's start. The trailing chapter (no successor) keeps
+    /// `endTime == nil` and is treated as unbounded by the inventory
+    /// filter (no rejection on overlap). See `setDeclaredChapters`
+    /// for the rationale.
+    private static func normalizedDeclaredChapters(
+        _ chapters: [ChapterEvidence]
+    ) -> [ChapterEvidence] {
+        let creatorOnly = chapters.filter { $0.source.isCreatorSource }
+        let sorted = creatorOnly.sorted { $0.startTime < $1.startTime }
+        guard !sorted.isEmpty else { return [] }
+        var result: [ChapterEvidence] = []
+        result.reserveCapacity(sorted.count)
+        for index in sorted.indices {
+            let chapter = sorted[index]
+            if chapter.endTime != nil {
+                result.append(chapter)
+                continue
+            }
+            // Synthesize end from the next chapter's start when it is
+            // strictly greater than this chapter's start. If the next
+            // chapter starts at the same time (degenerate), or the
+            // current chapter is the last, leave `endTime` as nil —
+            // the filter will skip rule (c) for unbounded chapters.
+            let nextIndex = index + 1
+            if nextIndex < sorted.count {
+                let nextStart = sorted[nextIndex].startTime
+                if nextStart > chapter.startTime, nextStart.isFinite {
+                    let synthesized = ChapterEvidence(
+                        startTime: chapter.startTime,
+                        endTime: nextStart,
+                        title: chapter.title,
+                        source: chapter.source,
+                        disposition: chapter.disposition,
+                        qualityScore: chapter.qualityScore
+                    )
+                    result.append(synthesized)
+                    continue
+                }
+            }
+            result.append(chapter)
+        }
+        return result
+    }
+
+    /// Re-evaluate currently-managed windows against the inventory
+    /// sanity filter using the freshest `activeEpisodeDuration` /
+    /// `activeDeclaredChapters` context. Removes any window that the
+    /// filter now rejects, subject to the user-already-acted guard
+    /// below.
+    ///
+    /// Called after `setDeclaredChapters` and `setEpisodeDuration` so
+    /// preloaded windows (which entered the active set before the
+    /// chapter / duration context was available) are belatedly
+    /// reconciled with the filter.
+    ///
+    /// Safety rules:
+    ///   * `.reverted` — user explicitly chose "Listen". Never touch.
+    ///   * `.applied` — the orchestrator has decided to auto-skip. We
+    ///     may still retire IF the playhead has not yet reached the
+    ///     window's start: yanking a cue the user is past, or one
+    ///     they're currently inside, would be a UX bug. The retire
+    ///     is purely the rule "if the filter would have rejected this
+    ///     before it ever became user-visible, do so now."
+    ///   * `.candidate` / `.confirmed` / `.suppressed` — re-evaluate
+    ///     freely; nothing user-visible has happened.
+    private func reapplyInventoryFilterToManagedWindows() {
+        guard inventoryFilter.isEnabled, !windows.isEmpty else { return }
+        var idsToRetire: [String] = []
+        for (id, managed) in windows {
+            switch managed.decisionState {
+            case .reverted:
+                continue
+            case .applied:
+                // Only retire if the playhead has not yet reached the
+                // window's start. Otherwise the user has either heard
+                // it or is hearing it now — silently dropping the
+                // skip cue mid-stream is worse than the false-positive
+                // skip we're trying to avoid.
+                guard currentPlayheadTime < managed.snappedStart else { continue }
+            case .candidate, .confirmed, .suppressed:
+                break
+            }
+
+            let verdict = inventoryFilter.evaluate(
+                startTime: managed.adWindow.startTime,
+                endTime: managed.adWindow.endTime,
+                episodeDuration: activeEpisodeDuration,
+                declaredChapters: activeDeclaredChapters
+            )
+            if case let .rejected(reason) = verdict {
+                logger.info(
+                    "AdWindow \(id, privacy: .public) retroactively rejected by inventory sanity filter: \(reason.rawValue, privacy: .public)"
+                )
+                idsToRetire.append(id)
+            }
+        }
+        guard !idsToRetire.isEmpty else { return }
+        for id in idsToRetire {
+            windows.removeValue(forKey: id)
+            banneredWindowIds.remove(id)
+        }
+        evaluateAndPush()
     }
 
     // MARK: - Ad Window Event Stream
@@ -661,6 +910,35 @@ actor SkipOrchestrator {
             // Never process a window that was already applied or reverted.
             if existingState == .applied || existingState == .reverted {
                 continue
+            }
+
+            // playhead-xr3t: post-hoc inventory sanity filter. Runs
+            // BEFORE the eligibility-gate decode below so a rejected
+            // span never enters the active window set (and therefore
+            // never reaches `evaluateAndPush` / banner emission). The
+            // filter is a no-op when its feature flag is OFF —
+            // identical pre-Phase-3 behaviour, asserted by the rollback
+            // tests.
+            //
+            // Already-managed windows (`existingState != nil`) bypass
+            // the filter: if a window made it into the active set on
+            // an earlier push it has already been validated, and a
+            // mid-episode state update (e.g. a hot-path refresh) MUST
+            // NOT silently drop it just because the duration/chapter
+            // context arrived in a different order between pushes.
+            if existingState == nil {
+                let verdict = inventoryFilter.evaluate(
+                    startTime: adWindow.startTime,
+                    endTime: adWindow.endTime,
+                    episodeDuration: activeEpisodeDuration,
+                    declaredChapters: activeDeclaredChapters
+                )
+                if case let .rejected(reason) = verdict {
+                    logger.info(
+                        "AdWindow \(adWindow.id, privacy: .public) rejected by inventory sanity filter: \(reason.rawValue, privacy: .public)"
+                    )
+                    continue
+                }
             }
 
             // playhead-gtt9.11: precision gate. A window stamped
@@ -868,6 +1146,26 @@ actor SkipOrchestrator {
                     "AdDecisionResult \(result.id, privacy: .public) gate=blocked — not adding to active windows"
                 )
                 continue
+            }
+
+            // playhead-xr3t: post-hoc inventory sanity filter. Mirrors
+            // the symmetric guard in `receiveAdWindows`. Only applied
+            // to fresh entries (`existingState == nil`); a result for
+            // an already-managed window is allowed through so a
+            // mid-episode state update doesn't silently drop it.
+            if existingState == nil {
+                let verdict = inventoryFilter.evaluate(
+                    startTime: result.startTime,
+                    endTime: result.endTime,
+                    episodeDuration: activeEpisodeDuration,
+                    declaredChapters: activeDeclaredChapters
+                )
+                if case let .rejected(reason) = verdict {
+                    logger.info(
+                        "AdDecisionResult \(result.id, privacy: .public) rejected by inventory sanity filter: \(reason.rawValue, privacy: .public)"
+                    )
+                    continue
+                }
             }
 
             // playhead-rfu-sad: tap-then-flip race guard, fusion path.

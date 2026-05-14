@@ -191,6 +191,12 @@ struct SettingsView: View {
                     // default. The other four slugs remain placeholder
                     // shims until their beads land.
                     featureFlagValues["24cm"] = PreAnalysisConfig.load().useDualBackgroundSessions
+                    // playhead-xr3t: the xr3t flag is wired to real
+                    // storage (LightweightInventoryChecksSettings) and
+                    // defaults ON per spec. Initialize from the
+                    // persisted value so the Diagnostics toggle
+                    // reflects ground truth on every appearance.
+                    featureFlagValues["xr3t"] = LightweightInventoryChecksSettings.load().enabled
                 }
                 .task {
                     await viewModel.computeStorageSizes()
@@ -1528,6 +1534,18 @@ private extension SettingsView {
                                 Task { @MainActor in
                                     await DownloadManager.shared?.setUseDualBackgroundSessions(newValue)
                                 }
+                            } else if slug == "xr3t" {
+                                // playhead-xr3t: persist the rollback
+                                // toggle. The new value takes effect on
+                                // the next `SkipOrchestrator` init —
+                                // the filter is read at construction
+                                // time, not re-read per-evaluation. A
+                                // mid-episode flip therefore changes
+                                // behaviour on the next play-started
+                                // event rather than instantly; this
+                                // matches the 24cm/PreAnalysisConfig
+                                // rollback latency.
+                                LightweightInventoryChecksSettings(enabled: newValue).save()
                             }
                         }
                     )) {
