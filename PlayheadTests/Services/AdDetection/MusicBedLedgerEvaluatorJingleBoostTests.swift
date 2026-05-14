@@ -234,6 +234,31 @@ struct MusicBedLedgerEvaluatorJingleBoostTests {
         )
     }
 
+    // MARK: - Coupling invariant (R3)
+
+    @Test("musicBedCap default accommodates the confirmed-jingle boost weight")
+    func musicBedCapAccommodatesBoostWeight() {
+        // R3 adversarial #1: if a future contributor raises
+        // `musicBedConfirmedJingleWeight` (e.g. 0.25 → 0.30) without
+        // also raising `FusionWeightConfig.musicBedCap`, the boost is
+        // silently truncated by `BackfillEvidenceFusion.buildLedger()`
+        // — the exact regression R2 fixed. Lock the invariant here so
+        // the violation produces a loud test failure instead of a
+        // silent capacity loss on the production path.
+        let defaultConfig = FusionWeightConfig()
+        #expect(
+            defaultConfig.musicBedCap >= MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight,
+            "FusionWeightConfig.musicBedCap (\(defaultConfig.musicBedCap)) must be >= MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight (\(MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight)) or the boost is silently truncated. Raise musicBedCap to match if you change the boost weight."
+        )
+        // Belt-and-suspenders: also verify the cap is strictly greater
+        // than the baseline weight, otherwise the baseline-vs-boost
+        // distinction collapses inside fusion.
+        #expect(
+            defaultConfig.musicBedCap >= MusicBedLedgerEvaluator.musicBedBaselineWeight,
+            "musicBedCap must also accommodate the baseline weight"
+        )
+    }
+
     // MARK: - Non-firing path
 
     @Test("flag-on does not bypass the 30% presence floor")

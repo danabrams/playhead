@@ -54,6 +54,15 @@ enum MusicBedLedgerEvaluator {
     /// the show has reached the 3-episode confirmation threshold AND
     /// the span overlaps a detected jingle region. Bead spec: 0.10 →
     /// 0.25 boost for matching spans.
+    ///
+    /// COUPLING WARNING: this weight is the SOURCE OF TRUTH for the
+    /// `.musicBed` ceiling. `FusionWeightConfig.musicBedCap` MUST be
+    /// `>= musicBedConfirmedJingleWeight` or the boost is silently
+    /// truncated by `BackfillEvidenceFusion.buildLedger()` (the bug
+    /// fixed in R2). If you raise this constant, you MUST also raise
+    /// `FusionWeightConfig.musicBedCap` to match. The invariant is
+    /// asserted at runtime by
+    /// `MusicBedLedgerEvaluatorJingleBoostTests.musicBedCapAccommodatesBoostWeight`.
     static let musicBedConfirmedJingleWeight: Double = 0.25
 
     /// Result of evaluating a span. Exposed for test assertions; the
@@ -97,9 +106,18 @@ enum MusicBedLedgerEvaluator {
     /// Trigger rule:
     ///   Fire when the span contains ≥`minWindowsRequired` windows AND
     ///   at least `minPresenceFraction` of them carry a non-`.none`
-    ///   music bed level. The weight scales linearly with the presence
-    ///   fraction and is clamped to `fusionConfig.acousticCap` — a
-    ///   half-bed span produces a half-weight contribution.
+    ///   music bed level. Weight depends on the `jingleBoost` parameter:
+    ///     * `jingleBoost == nil` (flag OFF) — legacy path: weight
+    ///       scales linearly with presence fraction and is clamped to
+    ///       `fusionConfig.acousticCap`. A half-bed span produces a
+    ///       half-weight contribution.
+    ///     * `jingleBoost != nil` (flag ON) — fixed-weight path:
+    ///       `musicBedConfirmedJingleWeight` (0.25) when both
+    ///       `isConfirmed` and `spanOverlapsJingle` are true,
+    ///       `musicBedBaselineWeight` (0.10) otherwise. Presence
+    ///       fraction still gates firing (≥ `minPresenceFraction`)
+    ///       but does NOT scale the emitted weight — the boost is a
+    ///       categorical promotion, not a multiplier.
     ///
     /// The rule is intentionally orthogonal to
     /// `buildAcousticLedgerEntries`'s boundary-only RMS-drop detector:
@@ -111,9 +129,14 @@ enum MusicBedLedgerEvaluator {
     /// - Parameters:
     ///   - spanWindows: `FeatureWindow`s that overlap the target span,
     ///     already filtered by the caller.
-    ///   - fusionConfig: Source of `acousticCap`; the `.musicBed` kind
-    ///     reuses the acoustic weight budget since it's the same
-    ///     evidence family (per `SourceEvidenceFamily`).
+    ///   - fusionConfig: Source of `acousticCap` (legacy path) and
+    ///     `musicBedCap` (downstream clamp in `BackfillEvidenceFusion`).
+    ///     The 0.25 boosted weight is admitted by `musicBedCap`
+    ///     specifically — see `FusionWeightConfig.musicBedCap` for the
+    ///     coupling invariant.
+    ///   - jingleBoost: When non-nil, switches the evaluator to the
+    ///     fixed-weight (0.10/0.25) flag-ON path. When nil, the legacy
+    ///     `presenceFraction * acousticCap` path runs unchanged.
     /// - Returns: A tuple of the (optional) ledger entry and the
     ///   diagnostic struct. Caller decides whether to append the entry.
     static func evaluate(

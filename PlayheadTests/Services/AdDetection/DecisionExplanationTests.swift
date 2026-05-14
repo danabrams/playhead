@@ -272,6 +272,49 @@ final class DecisionExplanationBuilderTests: XCTestCase {
         XCTAssertEqual(explanation.evidenceBreakdown.count, 6)
         XCTAssertEqual(explanation.contributingFamilies.count, 6)
     }
+
+    func testMusicBedCapReportedDistinctFromAcousticCap() {
+        // playhead-2hpn R3: the cap surfaced in DecisionExplanation for a
+        // `.musicBed` entry must be `musicBedCap` (0.25), NOT
+        // `acousticCap` (0.20). Otherwise diagnostics traces would
+        // under-report the source's actual headroom and a future
+        // operator inspecting the JSON would conclude the boost was
+        // truncated when it wasn't (or, worse, confirm a stale
+        // mis-conclusion that the two caps still share). This test
+        // also serves as the contract surface for R3 adversarial #3.
+        let ledger = [
+            EvidenceLedgerEntry(
+                source: .musicBed,
+                weight: MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight,
+                detail: .musicBed(presenceFraction: 0.8, foregroundCount: 0)
+            )
+        ]
+        let decision = DecisionResult(
+            proposalConfidence: 0.25,
+            skipConfidence: 0.25,
+            eligibilityGate: .eligible
+        )
+        let config = FusionWeightConfig()
+        let explanation = DecisionExplanation.build(
+            ledger: ledger,
+            decision: decision,
+            policyAction: .logOnly,
+            config: config,
+            skipThreshold: 0.65
+        )
+        let musicBedRow = explanation.evidenceBreakdown.first { $0.source == "musicBed" }
+        XCTAssertNotNil(musicBedRow, "musicBed source must appear in evidence breakdown")
+        XCTAssertEqual(
+            musicBedRow?.capApplied,
+            config.musicBedCap,
+            "capApplied must be musicBedCap (\(config.musicBedCap)) for .musicBed entries"
+        )
+        XCTAssertNotEqual(
+            musicBedRow?.capApplied,
+            config.acousticCap,
+            "capApplied for .musicBed must NOT be acousticCap (would be the pre-R2 silent-truncation bug)"
+        )
+    }
 }
 
 // MARK: - DecisionEvent explanationJSON Field

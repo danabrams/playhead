@@ -99,6 +99,15 @@ struct FusionWeightConfig: Sendable {
     /// `presenceFraction * acousticCap = 0.20`, so `min(legacy, 0.25)
     /// == legacy` for every legacy input — the new cap only bites on
     /// the boosted path.
+    ///
+    /// COUPLING INVARIANT (see
+    /// `MusicBedLedgerEvaluator.musicBedConfirmedJingleWeight`):
+    /// `musicBedCap >= musicBedConfirmedJingleWeight` must hold at all
+    /// times or the boost is silently truncated. Today both default to
+    /// 0.25 (the cap equals the boost — zero headroom). If you raise
+    /// the boost weight you MUST raise this cap at least as much. The
+    /// invariant is asserted at runtime by
+    /// `MusicBedLedgerEvaluatorJingleBoostTests.musicBedCapAccommodatesBoostWeight`.
     let musicBedCap: Double
 
     init(
