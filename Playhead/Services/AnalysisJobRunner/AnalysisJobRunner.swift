@@ -116,6 +116,10 @@ actor AnalysisJobRunner {
     /// scenario calls for (nil → simulates pre-zx6i asset; equal →
     /// simulates "no bump"; different → simulates a version bump).
     private let completedPipelineVersionsLoader: @Sendable (_ assetId: String) -> PipelineVersions?
+    /// playhead-bbrv.1 — optional Phase A cross-user sharing seam. The
+    /// default provider is disabled and returns no snapshots, so production
+    /// behavior is unchanged unless explicit wiring installs a provider.
+    private let analysisSharingProvider: CrossUserAnalysisSharingProviding
 
     // MARK: - Init
 
@@ -141,7 +145,8 @@ actor AnalysisJobRunner {
         },
         completedPipelineVersionsLoader: @escaping @Sendable (_ assetId: String) -> PipelineVersions? = { assetId in
             RevalidationStateStore.loadCompletedVersions(forAsset: assetId)
-        }
+        },
+        analysisSharingProvider: CrossUserAnalysisSharingProviding = NoOpCrossUserAnalysisSharingProvider()
     ) {
         self.store = store
         self.audioProvider = audioProvider
@@ -157,6 +162,7 @@ actor AnalysisJobRunner {
         self.b4RevalidationEnabledProvider = b4RevalidationEnabledProvider
         self.currentPipelineVersionsProvider = currentPipelineVersionsProvider
         self.completedPipelineVersionsLoader = completedPipelineVersionsLoader
+        self.analysisSharingProvider = analysisSharingProvider
     }
 
     // MARK: - Run
@@ -165,6 +171,13 @@ actor AnalysisJobRunner {
     /// Returns an `AnalysisOutcome` summarizing coverage achieved and stop reason.
     func run(_ request: AnalysisRangeRequest) async -> AnalysisOutcome {
         let assetId = request.analysisAssetId
+
+        if let sharedOutcome = await importSharedAnalysisIfAvailable(
+            assetId: assetId,
+            request: request
+        ) {
+            return sharedOutcome
+        }
 
         // playhead-zx6i — B4 fast revalidation short-circuit. Runs
         // BEFORE the preemption-coordinator registration / decode /
@@ -275,11 +288,14 @@ actor AnalysisJobRunner {
                             // above, so the scheduler does not stall
                             // on a missing `newCueCount`.
                             let revalidatedWindows = (try? await store.fetchAdWindows(assetId: assetId)) ?? []
-                            let confidenceThreshold = Self.cueConfidenceThreshold
                             let revalidatedCueCoverage = revalidatedWindows
-                                .filter { $0.confidence >= confidenceThreshold && $0.endTime > $0.startTime }
+                                .filter(Self.isCueWindow)
                                 .map(\.endTime)
                                 .max() ?? 0
+                            await publishSharedAnalysisIfEnabled(
+                                assetId: assetId,
+                                podcastId: request.podcastId
+                            )
                             return makeOutcome(
                                 assetId: assetId,
                                 request: request,
@@ -730,13 +746,12 @@ actor AnalysisJobRunner {
 
         PreAnalysisInstrumentation.endStage(detectionSignpost)
 
-        // Compute coverage from confidence-filtered windows only, mirroring
-        // the 0.7 threshold the (now-deleted) `SkipCueMaterializer` used,
-        // so that tier advancement reflects actual high-confidence ad
-        // windows rather than raw ad detections.
-        let confidenceThreshold = Self.cueConfidenceThreshold
+        // Compute coverage from cue-eligible windows only, mirroring
+        // the 0.7 threshold the (now-deleted) `SkipCueMaterializer` used
+        // while excluding suppressed/non-ad decisions from banner/cue
+        // progress.
         let cueCoverage = finalWindows
-            .filter { $0.confidence >= confidenceThreshold && $0.endTime > $0.startTime }
+            .filter(Self.isCueWindow)
             .map(\.endTime)
             .max() ?? 0
 
@@ -744,8 +759,8 @@ actor AnalysisJobRunner {
         //
         // Bug 5 (skip-cues-deletion): the cue materialization stage was
         // removed when the `skip_cues` table was deleted. `newCueCount`
-        // is now defined as the count of confidence-passing windows that
-        // are newly present after this run (i.e. did not exist in
+        // is now defined as the count of cue-eligible windows that are
+        // newly present after this run (i.e. did not exist in
         // `existingWindowsBeforeDetection`). The scheduler uses
         // `newCueCount > 0` as a "made progress" signal in
         // `shouldRetryCoverageInsufficient`; that signal is preserved.
@@ -759,15 +774,18 @@ actor AnalysisJobRunner {
         if request.outputPolicy == .writeWindowsAndCues {
             let priorCueIds = Set(
                 existingWindowsBeforeDetection
-                    .filter { $0.confidence >= confidenceThreshold && $0.endTime > $0.startTime }
+                    .filter(Self.isCueWindow)
                     .map(\.id)
             )
             newCueCount = finalWindows.filter {
-                $0.confidence >= confidenceThreshold
-                    && $0.endTime > $0.startTime
-                    && !priorCueIds.contains($0.id)
+                Self.isCueWindow($0) && !priorCueIds.contains($0.id)
             }.count
         }
+
+        await publishSharedAnalysisIfEnabled(
+            assetId: assetId,
+            podcastId: request.podcastId
+        )
 
         return AnalysisOutcome(
             assetId: assetId,
@@ -781,6 +799,110 @@ actor AnalysisJobRunner {
     }
 
     // MARK: - Stop Condition Checks
+
+    private func importSharedAnalysisIfAvailable(
+        assetId: String,
+        request: AnalysisRangeRequest
+    ) async -> AnalysisOutcome? {
+        guard analysisSharingProvider.isEnabled else { return nil }
+        guard let asset = try? await store.fetchAsset(id: assetId) else { return nil }
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: request.podcastId,
+            episodeId: asset.episodeId,
+            fileSHA: asset.assetFingerprint
+        )
+        guard let snapshot = await analysisSharingProvider.matchingSnapshot(for: key) else {
+            return nil
+        }
+        guard snapshot.analysisCoverageEndSec >= request.desiredCoverageSec else {
+            logger.info("Shared analysis snapshot for asset \(assetId) covers \(snapshot.analysisCoverageEndSec)s, below requested \(request.desiredCoverageSec)s — falling back to full analysis")
+            return nil
+        }
+
+        do {
+            let result = try await store.importCrossUserAnalysisSnapshot(
+                snapshot,
+                targetAssetId: assetId,
+                podcastId: request.podcastId
+            )
+            guard case .imported(let receipt) = result else {
+                logger.info("Shared analysis snapshot did not match asset \(assetId): \(String(describing: result))")
+                return nil
+            }
+            logger.info("Imported shared analysis for asset \(assetId): inserted \(receipt.insertedWindowCount) windows, cueCoverage=\(receipt.cueCoverageSec)")
+            await publishImportedSharedAdWindows(
+                receipt: receipt,
+                assetId: assetId,
+                outputPolicy: request.outputPolicy
+            )
+            return makeOutcome(
+                assetId: assetId,
+                request: request,
+                featureCoverageSec: asset.featureCoverageEndTime ?? 0,
+                transcriptCoverageSec: asset.fastTranscriptCoverageEndTime ?? 0,
+                cueCoverageSec: receipt.cueCoverageSec,
+                newCueCount: request.outputPolicy == .writeWindowsAndCues ? receipt.insertedCueCount : 0,
+                stopReason: .reachedTarget
+            )
+        } catch {
+            logger.warning("Shared analysis import failed for asset \(assetId): \(error.localizedDescription) — falling back to full analysis")
+            return nil
+        }
+    }
+
+    private func publishImportedSharedAdWindows(
+        receipt: CrossUserAnalysisImportReceipt,
+        assetId: String,
+        outputPolicy: OutputPolicy
+    ) async {
+        guard outputPolicy != .writeWindowsOnly,
+              !receipt.insertedWindowIds.isEmpty else {
+            return
+        }
+
+        do {
+            let insertedIds = Set(receipt.insertedWindowIds)
+            let windows = try await store.fetchAdWindows(assetId: assetId)
+            let importedWindows = windows.filter {
+                insertedIds.contains($0.id) && Self.isCueWindow($0)
+            }
+            guard !importedWindows.isEmpty else { return }
+            await analysisSharingProvider.didImportSharedAdWindows(importedWindows)
+        } catch {
+            logger.warning("Shared analysis import notification failed for asset \(assetId): \(error.localizedDescription)")
+        }
+    }
+
+    private func publishSharedAnalysisIfEnabled(
+        assetId: String,
+        podcastId: String
+    ) async {
+        guard analysisSharingProvider.isEnabled else { return }
+
+        do {
+            guard let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+                assetId: assetId,
+                podcastId: podcastId
+            ) else {
+                return
+            }
+            try await analysisSharingProvider.publish(snapshot)
+            logger.info("Published shared analysis for asset \(assetId): windows=\(snapshot.windows.count), coverage=\(snapshot.analysisCoverageEndSec)")
+        } catch {
+            logger.warning("Shared analysis publish failed for asset \(assetId): \(error.localizedDescription)")
+        }
+    }
+
+    private static func isCueWindow(_ window: AdWindow) -> Bool {
+        window.confidence >= cueConfidenceThreshold
+            && window.endTime > window.startTime
+            && (
+                window.decisionState == AdDecisionState.candidate.rawValue
+                    || window.decisionState == AdDecisionState.confirmed.rawValue
+                    || window.decisionState == AdDecisionState.applied.rawValue
+            )
+    }
 
     /// Check for cancellation and critical thermal distress between pipeline
     /// stages.

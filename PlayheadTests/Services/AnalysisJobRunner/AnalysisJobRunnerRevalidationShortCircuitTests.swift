@@ -317,19 +317,20 @@ struct AnalysisJobRunnerRevalidationShortCircuitTests {
         try await seedAssetWithDuration(store: store, assetId: assetId)
         try await seedOneChunk(store: store, assetId: assetId)
 
-        // Seed three pre-revalidation AdWindow rows. Two pass the
-        // (confidence >= 0.7, endTime > startTime) filter; the third
-        // is below the confidence threshold and must NOT contribute
-        // to the cue-coverage watermark. The highest endTime among
-        // the passing rows is 90, so the outcome must report exactly
-        // that.
+        // Seed four pre-revalidation AdWindow rows. Two pass the
+        // cue filter; one is below the confidence threshold; one is a
+        // high-confidence suppressed/non-ad decision. Neither rejected
+        // row may contribute to the cue-coverage watermark. The highest
+        // endTime among the passing rows is 90, so the outcome must
+        // report exactly that.
         let passingHigh = makeAdWindow(startTime: 30, endTime: 90, confidence: 0.85)
         let passingLow = makeAdWindow(startTime: 60, endTime: 75, confidence: 0.95)
         let belowThreshold = makeAdWindow(startTime: 0, endTime: 120, confidence: 0.5)
+        let suppressedHigh = makeAdWindow(startTime: 95, endTime: 120, confidence: 0.99)
         // makeAdWindow uses a fixed "test-asset" analysisAssetId; we
         // need the real assetId for these rows so the runner can
         // fetch them through `store.fetchAdWindows(assetId:)`.
-        let windowsToSeed = [passingHigh, passingLow, belowThreshold].map { w in
+        let windowsToSeed = [passingHigh, passingLow, belowThreshold, suppressedHigh].map { w in
             AdWindow(
                 id: w.id,
                 analysisAssetId: assetId,
@@ -337,7 +338,9 @@ struct AnalysisJobRunnerRevalidationShortCircuitTests {
                 endTime: w.endTime,
                 confidence: w.confidence,
                 boundaryState: w.boundaryState,
-                decisionState: w.decisionState,
+                decisionState: w.id == suppressedHigh.id
+                    ? AdDecisionState.suppressed.rawValue
+                    : w.decisionState,
                 detectorVersion: w.detectorVersion,
                 advertiser: nil,
                 product: nil,
@@ -371,9 +374,10 @@ struct AnalysisJobRunnerRevalidationShortCircuitTests {
         #expect(adStub.revalidateFromFeaturesCallCount == 1)
 
         // Honest cue coverage: highest endTime among confidence-passing,
-        // non-degenerate windows. The `belowThreshold` row's endTime
-        // 120 must NOT be picked up because confidence (0.5) < 0.7.
-        #expect(outcome.cueCoverageSec == 90, "outcome.cueCoverageSec must equal the max endTime of confidence-passing windows (90), not the unfiltered max (120) or the legacy hard-coded 0")
+        // non-degenerate ad windows. The `belowThreshold` and
+        // `suppressedHigh` rows both end at 120 and must NOT be picked
+        // up.
+        #expect(outcome.cueCoverageSec == 90, "outcome.cueCoverageSec must equal the max endTime of cue-eligible windows (90), not the unfiltered max (120) or the legacy hard-coded 0")
 
         // Zero new-cue count on revalidation is intentional — every
         // window on this path is a re-classification, not a new ad

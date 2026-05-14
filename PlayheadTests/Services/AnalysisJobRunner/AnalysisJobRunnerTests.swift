@@ -100,12 +100,14 @@ private func makeTranscriptChunk(
 private func seedAsset(
     store: AnalysisStore,
     assetId: String = "test-asset",
-    fastTranscriptCoverageEndTime: Double? = nil
+    fastTranscriptCoverageEndTime: Double? = nil,
+    assetFingerprint: String? = nil,
+    episodeDurationSec: Double? = nil
 ) async throws {
     let asset = AnalysisAsset(
         id: assetId,
         episodeId: "test-ep",
-        assetFingerprint: assetId,
+        assetFingerprint: assetFingerprint ?? assetId,
         weakFingerprint: nil,
         sourceURL: "",
         featureCoverageEndTime: nil,
@@ -113,9 +115,73 @@ private func seedAsset(
         confirmedAdCoverageEndTime: nil,
         analysisState: SessionState.queued.rawValue,
         analysisVersion: 1,
-        capabilitySnapshot: nil
+        capabilitySnapshot: nil,
+        episodeDurationSec: episodeDurationSec
     )
     try await store.insertAsset(asset)
+}
+
+private final class StubCrossUserAnalysisSharingProvider: CrossUserAnalysisSharingProviding, @unchecked Sendable {
+    let isEnabled = true
+    var snapshot: CrossUserAnalysisSnapshot?
+    private(set) var requestedKeys: [CrossUserAnalysisShareKey] = []
+    private(set) var importedWindows: [AdWindow] = []
+    private(set) var publishedSnapshots: [CrossUserAnalysisSnapshot] = []
+
+    func matchingSnapshot(for key: CrossUserAnalysisShareKey) async -> CrossUserAnalysisSnapshot? {
+        requestedKeys.append(key)
+        guard snapshot?.key == key else { return nil }
+        return snapshot
+    }
+
+    func publish(_ snapshot: CrossUserAnalysisSnapshot) async throws {
+        publishedSnapshots.append(snapshot)
+    }
+
+    func didImportSharedAdWindows(_ windows: [AdWindow]) async {
+        importedWindows.append(contentsOf: windows)
+    }
+}
+
+private func makeSharedAnalysisSnapshot(
+    key: CrossUserAnalysisShareKey,
+    analysisCoverageEndSec: Double = 60,
+    sourceAnalysisVersion: Int = 1
+) -> CrossUserAnalysisSnapshot {
+    CrossUserAnalysisSnapshot(
+        key: key,
+        provenance: CrossUserAnalysisProvenance(
+            exportedAt: 1_800_000_000,
+            sourceAnalysisVersion: sourceAnalysisVersion,
+            sourceAppBuild: "runner-test"
+        ),
+        analysisCoverageEndSec: analysisCoverageEndSec,
+        measurements: CrossUserAnalysisMeasurements(
+            fmMinutesSaved: 2,
+            queueToReadyLatencySec: 1.25,
+            batteryDeltaPercent: nil
+        ),
+        windows: [
+            CrossUserAnalysisSnapshot.Window(
+                sourceWindowId: "peer-window",
+                startTime: 10,
+                endTime: 60,
+                confidence: 0.9,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.confirmed.rawValue,
+                detectorVersion: "fm-test-v1",
+                advertiser: "Acme",
+                product: "Widget",
+                adDescription: "Imported promo",
+                metadataSource: "foundation-model",
+                metadataConfidence: 0.82,
+                metadataPromptVersion: "prompt-v1",
+                evidenceSources: "semantic,fusion",
+                eligibilityGate: "ready",
+                catalogStoreMatchSimilarity: nil
+            ),
+        ]
+    )
 }
 
 // MARK: - Tests
@@ -370,7 +436,7 @@ struct AnalysisJobRunnerTests {
                 analysisAssetId: "test-asset",
                 startTime: 5,
                 endTime: 20,
-                confidence: 0.4,
+                confidence: 0.9,
                 boundaryState: AdBoundaryState.lexical.rawValue,
                 decisionState: AdDecisionState.suppressed.rawValue,
                 detectorVersion: "test-v1",
@@ -412,6 +478,7 @@ struct AnalysisJobRunnerTests {
 
         #expect(adStub.hotPathCallCount == 0)
         #expect(adStub.backfillCallCount == 0)
+        #expect(outcome.cueCoverageSec == 0)
         if case .reachedTarget = outcome.stopReason {
             // expected
         } else {
@@ -519,6 +586,321 @@ struct AnalysisJobRunnerTests {
         } else {
             Issue.record("Expected .reachedTarget but got \(outcome.stopReason)")
         }
+    }
+
+    @Test("matching shared analysis import persists windows and skips ad detection")
+    func testSharedAnalysisImportHitSkipsDetection() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(
+            store: store,
+            fastTranscriptCoverageEndTime: nil,
+            assetFingerprint: "full-file-sha-runner",
+            episodeDurationSec: 120
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "test-pod",
+            episodeId: "test-ep",
+            fileSHA: "full-file-sha-runner"
+        )
+        let sharingProvider = StubCrossUserAnalysisSharingProvider()
+        sharingProvider.snapshot = makeSharedAnalysisSnapshot(key: key)
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 4)
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            analysisSharingProvider: sharingProvider
+        )
+
+        let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 60))
+
+        #expect(sharingProvider.requestedKeys == [key])
+        #expect(audioStub.decodeCallCount == 0)
+        #expect(adStub.hotPathCallCount == 0)
+        #expect(adStub.backfillCallCount == 0)
+        #expect(sharingProvider.importedWindows.count == 1)
+        #expect(sharingProvider.importedWindows.first?.analysisAssetId == "test-asset")
+        #expect(sharingProvider.importedWindows.first?.adDescription == "Imported promo")
+        if case .reachedTarget = outcome.stopReason {
+            // expected
+        } else {
+            Issue.record("Expected .reachedTarget but got \(outcome.stopReason)")
+        }
+        #expect(outcome.cueCoverageSec == 60)
+        #expect(outcome.newCueCount == 1)
+
+        let windows = try await store.fetchAdWindows(assetId: "test-asset")
+        #expect(windows.count == 1)
+        #expect(windows.first?.analysisAssetId == "test-asset")
+        #expect(windows.first?.adDescription == "Imported promo")
+        #expect(windows.first?.evidenceText == nil)
+    }
+
+    @Test("shared analysis hit preserves writeWindowsOnly cue-count semantics")
+    func testSharedAnalysisImportHitHonorsOutputPolicy() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(
+            store: store,
+            assetFingerprint: "full-file-sha-runner-policy",
+            episodeDurationSec: 120
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "test-pod",
+            episodeId: "test-ep",
+            fileSHA: "full-file-sha-runner-policy"
+        )
+        let sharingProvider = StubCrossUserAnalysisSharingProvider()
+        sharingProvider.snapshot = makeSharedAnalysisSnapshot(key: key)
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 4)
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            analysisSharingProvider: sharingProvider
+        )
+
+        let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 60, outputPolicy: .writeWindowsOnly))
+
+        #expect(audioStub.decodeCallCount == 0)
+        #expect(adStub.hotPathCallCount == 0)
+        #expect(adStub.backfillCallCount == 0)
+        #expect(outcome.cueCoverageSec == 60)
+        #expect(outcome.newCueCount == 0)
+        #expect(sharingProvider.importedWindows.isEmpty)
+    }
+
+    @Test("shared non-ad import skips detection without publishing banner windows")
+    func testSharedNonAdImportDoesNotPublishBannerWindows() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(
+            store: store,
+            assetFingerprint: "full-file-sha-runner-non-ad",
+            episodeDurationSec: 120
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "test-pod",
+            episodeId: "test-ep",
+            fileSHA: "full-file-sha-runner-non-ad"
+        )
+        let sharingProvider = StubCrossUserAnalysisSharingProvider()
+        sharingProvider.snapshot = CrossUserAnalysisSnapshot(
+            key: key,
+            provenance: CrossUserAnalysisProvenance(
+                exportedAt: 1_800_000_000,
+                sourceAnalysisVersion: 1,
+                sourceAppBuild: "runner-test"
+            ),
+            analysisCoverageEndSec: 60,
+            measurements: CrossUserAnalysisMeasurements(),
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    sourceWindowId: "peer-non-ad-window",
+                    startTime: 10,
+                    endTime: 60,
+                    confidence: 0.99,
+                    boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                    decisionState: AdDecisionState.suppressed.rawValue,
+                    isAd: false,
+                    detectorVersion: "fm-test-v1",
+                    advertiser: nil,
+                    product: nil,
+                    adDescription: nil,
+                    metadataSource: "foundation-model",
+                    metadataConfidence: 0.82,
+                    metadataPromptVersion: "prompt-v1",
+                    evidenceSources: "semantic,fusion",
+                    eligibilityGate: "not-ad",
+                    catalogStoreMatchSimilarity: nil
+                ),
+            ]
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 4)
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            analysisSharingProvider: sharingProvider
+        )
+
+        let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 60))
+
+        #expect(audioStub.decodeCallCount == 0)
+        #expect(adStub.hotPathCallCount == 0)
+        #expect(adStub.backfillCallCount == 0)
+        #expect(outcome.cueCoverageSec == 0)
+        #expect(outcome.newCueCount == 0)
+        #expect(sharingProvider.importedWindows.isEmpty)
+
+        let windows = try await store.fetchAdWindows(assetId: "test-asset")
+        #expect(windows.count == 1)
+        #expect(windows.first?.decisionState == AdDecisionState.suppressed.rawValue)
+    }
+
+    @Test("shared analysis below requested coverage falls through to local detection")
+    func testSharedAnalysisBelowRequestedCoverageFallsThrough() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(
+            store: store,
+            fastTranscriptCoverageEndTime: nil,
+            assetFingerprint: "full-file-sha-runner-partial",
+            episodeDurationSec: 120
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "test-pod",
+            episodeId: "test-ep",
+            fileSHA: "full-file-sha-runner-partial"
+        )
+        let sharingProvider = StubCrossUserAnalysisSharingProvider()
+        sharingProvider.snapshot = makeSharedAnalysisSnapshot(
+            key: key,
+            analysisCoverageEndSec: 30
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 2)
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            analysisSharingProvider: sharingProvider
+        )
+
+        _ = await runner.run(makeTestRequest(desiredCoverageSec: 60))
+
+        #expect(sharingProvider.requestedKeys == [key])
+        #expect(audioStub.decodeCallCount == 1)
+        #expect(adStub.hotPathCallCount == 1)
+        #expect(adStub.backfillCallCount == 1)
+    }
+
+    @Test("local analysis success publishes a shared snapshot when provider is enabled")
+    func testLocalAnalysisPublishesSharedSnapshot() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(
+            store: store,
+            fastTranscriptCoverageEndTime: 30,
+            assetFingerprint: "full-file-sha-publish",
+            episodeDurationSec: 30
+        )
+        let segment = makeTranscriptSegment()
+        try await store.insertTranscriptChunks([makeTranscriptChunk(from: segment)])
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "publish-window",
+                analysisAssetId: "test-asset",
+                startTime: 5,
+                endTime: 20,
+                confidence: 0.9,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.confirmed.rawValue,
+                detectorVersion: "test-v1",
+                advertiser: "Acme",
+                product: "Widget",
+                adDescription: "Imported later",
+                evidenceText: "local transcript evidence",
+                evidenceStartTime: 5,
+                metadataSource: "foundation-model",
+                metadataConfidence: 0.8,
+                metadataPromptVersion: "prompt-v1",
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+
+        let sharingProvider = StubCrossUserAnalysisSharingProvider()
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 1)
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            analysisSharingProvider: sharingProvider
+        )
+
+        let outcome = await runner.run(makeTestRequest(desiredCoverageSec: 30))
+
+        if case .reachedTarget = outcome.stopReason {
+            // expected
+        } else {
+            Issue.record("Expected .reachedTarget but got \(outcome.stopReason)")
+        }
+        #expect(sharingProvider.publishedSnapshots.count == 1)
+        let snapshot = try #require(sharingProvider.publishedSnapshots.first)
+        #expect(snapshot.key == CrossUserAnalysisShareKey(
+            podcastId: "test-pod",
+            episodeId: "test-ep",
+            fileSHA: "full-file-sha-publish"
+        ))
+        #expect(snapshot.windows.count == 1)
+        #expect(snapshot.windows.first?.sourceWindowId == "publish-window")
+
+        let encodedData = try JSONEncoder().encode(snapshot)
+        let encoded = String(data: encodedData, encoding: .utf8) ?? ""
+        #expect(!encoded.contains("local transcript evidence"))
+        #expect(!encoded.contains("evidenceText"))
     }
 
     // MARK: - playhead-5uvz.6 (Gap-7) episodeDurationSec persistence

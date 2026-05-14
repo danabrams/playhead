@@ -10,8 +10,10 @@ import Foundation
 final class StubAnalysisAudioProvider: AnalysisAudioProviding, @unchecked Sendable {
     var shardsToReturn: [AnalysisShard] = []
     var errorToThrow: Error?
+    var decodeCallCount = 0
 
     func decode(fileURL: LocalAudioURL, episodeID: String, shardDuration: TimeInterval) async throws -> [AnalysisShard] {
+        decodeCallCount += 1
         if let error = errorToThrow { throw error }
         return shardsToReturn
     }
