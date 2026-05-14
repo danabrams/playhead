@@ -235,6 +235,41 @@ struct SettingsL274CopyTests {
         )
     }
 
+    @Test func perShowCapabilityProfileRowCaptionGraphemeBoundary() {
+        // h6a6 R10 review gap: the row-caption truncation routes through
+        // `String.prefix(40)`, which operates on `Character` (extended
+        // grapheme clusters) — emojis and combining marks count as ONE
+        // character regardless of underlying UTF-8 byte count. If a
+        // future refactor swaps `prefix(40)` for a UTF-8-byte or
+        // Unicode-scalar prefix, an emoji at the 40-character boundary
+        // could split mid-codepoint and render mojibake. Pin the
+        // grapheme-safe contract for an emoji-leading identifier so
+        // such a regression is a loud test failure rather than a
+        // user-visible glyph corruption.
+        //
+        // Test vector: a single emoji (3-glyph "family" character)
+        // followed by 39 ASCII chars = exactly 40 graphemes. The
+        // caption must contain the emoji intact + all 39 ASCII chars +
+        // the separator/count fragments.
+        let familyEmoji = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}" // 👨‍👩‍👧 (one grapheme)
+        let asciiTail = String(repeating: "a", count: 39)
+        let identifier = familyEmoji + asciiTail + "EXTRA-must-be-dropped"
+        let caption = SettingsL274Copy.perShowCapabilityProfileRowCaption(
+            showIdentifier: identifier,
+            completedEpisodeCount: 3
+        )
+        // Expected prefix: the emoji intact + 39 'a's.
+        let expectedPrefix = familyEmoji + asciiTail
+        #expect(
+            caption == "\(expectedPrefix) · 3 episodes",
+            "Truncation must operate on extended grapheme clusters so emojis are never split"
+        )
+        // Belt-and-braces: the caption MUST contain the full emoji
+        // sequence and MUST NOT contain the trailing "EXTRA-..." suffix.
+        #expect(caption.contains(familyEmoji))
+        #expect(!caption.contains("EXTRA"))
+    }
+
     @Test func showCapabilityProfileKindDisplayLabels() {
         // h6a6 R7 review gap: `ShowCapabilityProfileKind.displayLabel`
         // strings are rendered verbatim by `SettingsView
