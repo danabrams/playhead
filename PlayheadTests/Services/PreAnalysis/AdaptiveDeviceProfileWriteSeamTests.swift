@@ -497,4 +497,152 @@ struct AdaptiveDeviceProfileWriteSeamTests {
         #expect(appSource.contains("attachLearnedDeviceProfileStore("),
                 "PlayheadApp must call runtime.attachLearnedDeviceProfileStore(modelContainer:) so the production scheduler actually receives the SwiftData store; without this call the LearnedDeviceProfile table stays empty even with the feature flag ON")
     }
+
+    // MARK: - (6) Setter-swap behaviour (R14)
+    //
+    // R13 added the source-grep canary above; this test covers the
+    // missing BEHAVIOURAL leg. The scheduler is constructed with the
+    // default `NoOpLearnedDeviceProfileProvider`, then the production
+    // `setLearnedDeviceProfileProvider(...)` setter swaps in a recording
+    // provider. A subsequent flag-ON
+    // `recordGrantWindowObservationIfEnabled(...)` MUST land on the new
+    // provider — proving the setter actually mutates the field the
+    // helper reads, not a snapshot captured at init time. If a future
+    // refactor accidentally restores the `let` declaration (or stores
+    // the provider in a closure captured at init), this test fails
+    // even though the R13 grep canary still passes.
+
+    @Test("R14 setter swap: setLearnedDeviceProfileProvider routes subsequent recordObservation to the new provider")
+    @MainActor
+    func r14SetterSwapRoutesSubsequentObservations() async throws {
+        let store = try await makeTestStore()
+        let recorder = RecordingProvider()
+        var config = PreAnalysisConfig()
+        config.useAdaptiveDeviceProfile = true
+
+        let leaseAcquiredAt: TimeInterval = 1_700_000_000
+        let elapsed: TimeInterval = 31
+        let clock: @Sendable () -> Date = {
+            Date(timeIntervalSince1970: leaseAcquiredAt + elapsed)
+        }
+
+        // Construct scheduler WITHOUT a provider argument — exactly
+        // what PlayheadRuntime.init does in production. The scheduler
+        // boots holding `NoOpLearnedDeviceProfileProvider`.
+        let capabilities = StubCapabilitiesProvider(
+            snapshot: makeCapabilitySnapshot(
+                thermalState: .nominal,
+                isLowPowerMode: false,
+                isCharging: true
+            )
+        )
+        let battery = StubBatteryProvider()
+        battery.level = 0.9
+        battery.charging = true
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: StubAnalysisAudioProvider(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: StubAdDetectionProvider()
+        )
+        let scheduler = AnalysisWorkScheduler(
+            store: store,
+            jobRunner: runner,
+            capabilitiesService: capabilities,
+            downloadManager: StubDownloadProvider(),
+            batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider(),
+            storageBudgetSnapshotter: PlentifulSnapshotter(),
+            config: config,
+            clock: clock
+            // learnedDeviceProfileProvider intentionally omitted ⇒ NoOp default
+        )
+
+        // (a) Pre-swap: drive the helper. NoOp is in place, so a flag-ON
+        // helper invocation MUST land on the No-Op (which the recorder
+        // here is NOT) — recorder must remain empty.
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: leaseAcquiredAt
+        )
+        var recorded = await recorder.recorded
+        #expect(recorded.isEmpty,
+                "before setter swap, recorder must not see any observation; the scheduler holds NoOpLearnedDeviceProfileProvider (recorded=\(recorded.count))")
+
+        // (b) Swap: install the recording provider via the same setter
+        // the production runtime calls.
+        await scheduler.setLearnedDeviceProfileProvider(recorder)
+
+        // (c) Post-swap: drive the helper again. The new provider MUST
+        // receive the observation.
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: leaseAcquiredAt
+        )
+        recorded = await recorder.recorded
+        #expect(recorded.count == 1,
+                "after setter swap, recorder must see exactly one observation (got \(recorded.count)); if zero, the setter did not mutate the field the helper reads — regression of the R13 mutability fix")
+        if let first = recorded.first {
+            #expect(first.grantWindowSeconds == elapsed,
+                    "recorded grant-window duration must match the clock delta (expected \(elapsed), got \(first.grantWindowSeconds))")
+        }
+    }
+
+    // MARK: - (7) Attach-ordering canary (R14)
+    //
+    // The R14 race-narrowing fix moved the
+    // `attachLearnedDeviceProfileStore(...)` call site in
+    // `PlayheadApp.swift` to the TOP of `.task`, above every `await`
+    // suspension point so the scheduler runLoop (started from
+    // `PlayheadRuntime.init`'s deferred bootstrap Task) cannot
+    // complete a grant-window observation against
+    // `NoOpLearnedDeviceProfileProvider` after the first `await` runs.
+    // A future refactor that moves the attach call back down — e.g.
+    // someone reorders `.task` while consolidating wiring — silently
+    // reintroduces the same class of dropped-write bug R13 fixed,
+    // just narrower in wall-clock width. This canary pins the
+    // ordering: `attachLearnedDeviceProfileStore(` MUST appear before
+    // the `setEpisodeMetadataProvider(` line in PlayheadApp.swift,
+    // chosen as a stable later anchor because R14's comment block
+    // specifically calls out that suspension point as the original
+    // race window.
+
+    @Test("R14 attach-ordering canary: PlayheadApp calls attachLearnedDeviceProfileStore before setEpisodeMetadataProvider")
+    func sourceCanaryR14AttachOrdering() throws {
+        let appURL = Self.repoRoot.appendingPathComponent(
+            "Playhead/App/PlayheadApp.swift"
+        )
+        let appSource = try String(contentsOf: appURL, encoding: .utf8)
+
+        // Strip line comments before searching so the R14 comment block
+        // (which inline-quotes the `setEpisodeMetadataProvider(...)`
+        // call as part of its rationale) cannot satisfy the anchor
+        // search. Block comments are not used in this region.
+        let codeOnly: String = appSource
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> Substring in
+                if let commentStart = line.range(of: "//") {
+                    return line[..<commentStart.lowerBound]
+                }
+                return line
+            }
+            .joined(separator: "\n")
+
+        guard let attachRange = codeOnly.range(of: "await runtime.attachLearnedDeviceProfileStore(") else {
+            Issue.record("PlayheadApp.swift no longer contains `await runtime.attachLearnedDeviceProfileStore(...)` — the production call site has been removed or renamed; if intentional, update this canary")
+            return
+        }
+        // Anchor on the actual production call site (note the
+        // `(provider)` argument — the comment-block quote uses
+        // `(...)` so a post-strip residual would not match this exact
+        // form anyway, but using the precise call form keeps the
+        // intent unambiguous).
+        guard let metaRange = codeOnly.range(of: "adDetectionService.setEpisodeMetadataProvider(provider)") else {
+            Issue.record("PlayheadApp.swift no longer contains the `adDetectionService.setEpisodeMetadataProvider(provider)` production call — the anchor used by this canary has moved; pick a new stable later-stage anchor (any line that runs AFTER several `await` suspension points inside `.task`) and update this assertion")
+            return
+        }
+
+        #expect(attachRange.lowerBound < metaRange.lowerBound,
+                "attachLearnedDeviceProfileStore(...) MUST be called BEFORE setEpisodeMetadataProvider(provider) in PlayheadApp.swift's `.task` body — R14 moved it above every `await` suspension to minimise the scheduler-vs-attach race window; if the attach call has been moved back below later-stage wiring, observations completing in the gap will silently hit NoOpLearnedDeviceProfileProvider and drop")
+    }
 }
