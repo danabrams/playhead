@@ -69,15 +69,21 @@ sentinel.)
 ### 3.2 Per-asset state store
 
 UserDefaults-backed, keyed by `analysisAssetId`. Mirrors
-`LightweightInventoryChecksSettings`:
+`LightweightInventoryChecksSettings`'s namespacing convention but is
+implemented as a stateless `enum` (every method `static`; no instance
+state, hence `enum` rather than `struct`):
 
 ```swift
-struct RevalidationStateStore: Sendable {
+enum RevalidationStateStore {
+    static let keyPrefix = "playhead.zx6i.completedVersions."
+
     static func loadCompletedVersions(forAsset: String,
                                       defaults: UserDefaults = .standard) -> PipelineVersions?
     static func recordCompleted(versions: PipelineVersions,
                                 forAsset: String,
                                 defaults: UserDefaults = .standard)
+    static func clear(forAsset: String,
+                      defaults: UserDefaults = .standard)   // tests-only; no production caller
 }
 ```
 
@@ -228,9 +234,18 @@ ON/OFF stamp coverage).
 
 `PreAnalysisConfig.b4RevalidationFromFeaturesEnabled: Bool = false`.
 
-When `false`: `AnalysisJobRunner` never takes the short-circuit branch.
-The stamp is NOT written either (no need to track state for a feature
-that's off). This keeps default-OFF byte-identical to today's behavior.
+When `false`: `AnalysisJobRunner` never takes the short-circuit branch
+(the `if b4RevalidationEnabledProvider()` guard at the top of `run(_:)`
+short-circuits BEFORE any `loadCompletedVersions` read), and the
+producer-side stamp-write inside `runBackfill` is also guarded by the
+live flag read — so no NEW stamp is written. Runtime behavior is
+byte-identical to pre-zx6i. Note however that flag-OFF does NOT clear
+existing storage: any stamp written during a prior flag-ON period
+remains in UserDefaults under
+`playhead.zx6i.completedVersions.<assetId>` and is simply unread (see
+§3.5.1 truth-table row 3 for the ON-then-OFF semantics and §3.5.1's
+cheap-re-enable note for the consequence on a subsequent ON → ON
+return).
 
 When `true`: the short-circuit fires when the version triple has
 bumped. Stamp is written at end of every successful `runBackfill` so
