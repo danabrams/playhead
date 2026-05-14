@@ -98,6 +98,34 @@ struct InventorySanityFilterDurationTests {
         )
         #expect(result == .rejected(reason: .tooShort))
     }
+
+    @Test("Negative timestamps that satisfy duration floor and head-edge rules pass")
+    func negativeStartButLongSpanReachingEpisodeStartHandledSafely() {
+        // Review round 2 edge math: a span with a negative start that
+        // ends past the head-edge threshold trivially fails rule (b)
+        // (tooEarly, because startTime < edgeMarginSeconds). The
+        // filter must not crash and must reject as `.tooEarly`.
+        let filter = InventorySanityFilter(isEnabled: true)
+        let result = filter.evaluate(
+            startTime: -5,
+            endTime: 30,
+            episodeDuration: 600,
+            declaredChapters: []
+        )
+        #expect(result == .rejected(reason: .tooEarly))
+    }
+
+    @Test("NaN start endpoint is rejected as .tooShort")
+    func nanStartEndpointRejected() {
+        let filter = InventorySanityFilter(isEnabled: true)
+        let result = filter.evaluate(
+            startTime: .nan,
+            endTime: 60,
+            episodeDuration: 600,
+            declaredChapters: []
+        )
+        #expect(result == .rejected(reason: .tooShort))
+    }
 }
 
 @Suite("InventorySanityFilter — rule (b) edge guards")
@@ -302,11 +330,17 @@ struct InventorySanityFilterChapterTests {
         }
     }
 
-    @Test("Chapter without endTime is treated as open-ended")
-    func openEndedChapterCoversToEnd() {
-        // An RSS chapter with no end time runs through the rest of the
-        // episode. A span starting after the chapter start should
-        // still be flagged as overlap.
+    @Test("Open-ended chapter (no successor synthesized) does NOT reject — safer for post-roll")
+    func openEndedTrailingChapterDoesNotReject() {
+        // Review round 2: a chapter with no end time and no synthesized
+        // bound is treated as unbounded; the filter must NOT reject on
+        // overlap because over-rejection in xr3t means the user expected
+        // an ad-skip and didn't get one (e.g. a post-roll ad embedded in
+        // a publisher-declared "Outro" chapter with no explicit end).
+        // The bound-synthesis logic in
+        // `SkipOrchestrator.setDeclaredChapters` fills end-times from
+        // the next chapter; only the *trailing* chapter ever reaches
+        // the filter with `endTime == nil`.
         let filter = InventorySanityFilter(isEnabled: true)
         let chapters = [
             makeChapter(startTime: 100, endTime: nil, title: "Outro"),
@@ -317,7 +351,7 @@ struct InventorySanityFilterChapterTests {
             episodeDuration: 1_000,
             declaredChapters: chapters
         )
-        #expect(result == .rejected(reason: .overlapsDeclaredChapter))
+        #expect(result == .passed)
     }
 
     @Test("Ambiguous-disposition chapters still trigger rejection")
@@ -748,6 +782,207 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
         let active = await orchestrator.activeWindowIDs()
         #expect(!active.contains("fusion-short"))
         #expect(active.contains("fusion-good"))
+    }
+
+    @Test("Chapters arriving AFTER preloaded spans retroactively reject overlapping windows")
+    func chapterArrivalAfterSpansRetroactivelyFilters() async throws {
+        // Review round 2: regression test for the preload-vs-chapter
+        // ordering bug. `beginEpisode` preloads persisted `ad_windows`
+        // BEFORE `AdDetectionService.runBackfill` pushes chapters, so
+        // the chapter rule had no input on the preload pass. Without
+        // re-evaluation, a chapter-overlapping ad-span persisted from a
+        // prior run would survive into the active set even though the
+        // filter is supposed to reject it.
+        let (orchestrator, _) = try await makeOrchestrator(episodeDuration: 1_800)
+
+        // Push the span FIRST (simulates the preload path firing before
+        // the chapter context lands).
+        let overlapping = makeSkipTestAdWindow(
+            id: "ad-stale-from-prior-run",
+            assetId: "asset-xr3t",
+            startTime: 250,
+            endTime: 350,
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([overlapping])
+        var active = await orchestrator.activeWindowIDs()
+        #expect(active.contains("ad-stale-from-prior-run"))
+
+        // Now push the chapter context — the span must be retired.
+        let chapters = [
+            makeChapter(startTime: 200, endTime: 400, title: "Interview"),
+        ]
+        await orchestrator.setDeclaredChapters(chapters, analysisAssetId: "asset-xr3t")
+
+        active = await orchestrator.activeWindowIDs()
+        #expect(!active.contains("ad-stale-from-prior-run"))
+    }
+
+    @Test("Retro re-evaluation retires .applied windows ONLY when playhead has not reached them yet")
+    func retroactiveReevaluationRespectsPlayheadOnApplied() async throws {
+        // The orchestrator promotes a confidence-≥-threshold window to
+        // `.applied` immediately (auto mode). The retroactive
+        // re-evaluation pass DOES retire applied windows IF the playhead
+        // hasn't reached the start — yanking a not-yet-consumed cue is
+        // safer than letting a chapter-overlapping false positive
+        // auto-skip user-visible content. After the playhead reaches
+        // (or passes) the window, leave it alone.
+        let (orchestrator, _) = try await makeOrchestrator(episodeDuration: 1_800)
+
+        // Case 1: playhead has NOT reached the window — retire allowed.
+        let beforePlayhead = makeSkipTestAdWindow(
+            id: "ad-applied-before-playhead",
+            assetId: "asset-xr3t",
+            startTime: 250,
+            endTime: 350,
+            confidence: 0.95,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([beforePlayhead])
+        await orchestrator.updatePlayheadTime(0)
+        let chapters = [
+            makeChapter(startTime: 200, endTime: 400, title: "Interview"),
+        ]
+        await orchestrator.setDeclaredChapters(chapters, analysisAssetId: "asset-xr3t")
+        var active = await orchestrator.activeWindowIDs()
+        #expect(!active.contains("ad-applied-before-playhead"))
+
+        // Case 2: playhead HAS reached the applied window — protect.
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-xr3t",
+            episodeId: "ep-xr3t",
+            podcastId: "podcast-1"
+        )
+        let afterPlayhead = makeSkipTestAdWindow(
+            id: "ad-applied-after-playhead",
+            assetId: "asset-xr3t",
+            startTime: 250,
+            endTime: 350,
+            confidence: 0.95,
+            decisionState: "confirmed"
+        )
+        // Tick playhead PAST the window's start before pushing chapters.
+        await orchestrator.updatePlayheadTime(260)
+        await orchestrator.receiveAdWindows([afterPlayhead])
+        await orchestrator.setDeclaredChapters(chapters, analysisAssetId: "asset-xr3t")
+        active = await orchestrator.activeWindowIDs()
+        #expect(active.contains("ad-applied-after-playhead"))
+    }
+
+    @Test("Open-ended LAST chapter does not retroactively retire a post-roll-ish span")
+    func openEndedTrailingChapterDoesNotRetireSpan() async throws {
+        // Review round 2: with the orchestrator's bound-synthesis fix,
+        // a trailing chapter with `endTime == nil` should NOT cause the
+        // filter to reject overlapping spans — over-rejection of a
+        // post-roll embedded in an open-ended "Outro" chapter is a
+        // user-visible regression.
+        let (orchestrator, _) = try await makeOrchestrator(episodeDuration: 1_800)
+        let chapters = [
+            makeChapter(startTime: 100, endTime: 600, title: "Interview"),
+            makeChapter(startTime: 600, endTime: nil, title: "Outro / credits"),
+        ]
+        await orchestrator.setDeclaredChapters(chapters, analysisAssetId: "asset-xr3t")
+
+        let postRoll = makeSkipTestAdWindow(
+            id: "ad-postroll-in-open-outro",
+            assetId: "asset-xr3t",
+            startTime: 1_650,
+            endTime: 1_720,    // not in tail-edge band (< 1797)
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([postRoll])
+
+        let active = await orchestrator.activeWindowIDs()
+        #expect(active.contains("ad-postroll-in-open-outro"))
+    }
+
+    @Test("Non-trailing open-ended chapter gets its end synthesized from the next chapter")
+    func nonTrailingOpenChapterSynthesizesEnd() async throws {
+        // Review round 2: a chapter with `endTime == nil` that has a
+        // SUCCESSOR has its end synthesized from the next chapter's
+        // start. A span overlapping that synthesized interval must be
+        // rejected by the filter.
+        let (orchestrator, _) = try await makeOrchestrator(episodeDuration: 1_800)
+        let chapters = [
+            makeChapter(startTime: 100, endTime: nil, title: "Cold open"),
+            makeChapter(startTime: 300, endTime: 600, title: "Interview"),
+            makeChapter(startTime: 600, endTime: nil, title: "Outro"),
+        ]
+        await orchestrator.setDeclaredChapters(chapters, analysisAssetId: "asset-xr3t")
+
+        // Span at [150, 250] sits inside the synthesized interval
+        // [100, 300) for the open-ended cold-open chapter; the filter
+        // must reject it.
+        let inSynthesizedInterval = makeSkipTestAdWindow(
+            id: "ad-in-synthesized-interval",
+            assetId: "asset-xr3t",
+            startTime: 150,
+            endTime: 250,
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([inSynthesizedInterval])
+
+        let active = await orchestrator.activeWindowIDs()
+        #expect(!active.contains("ad-in-synthesized-interval"))
+    }
+
+    @Test("Episode duration arriving mid-episode retroactively retires late-edge spans")
+    func episodeDurationArrivalRetroactivelyFilters() async throws {
+        // When the orchestrator constructs with a nil-duration asset,
+        // the tail-edge rule is dormant on the first push. After
+        // `setEpisodeDuration` lands the rule must run retroactively.
+        let (orchestrator, _) = try await makeOrchestrator(episodeDuration: nil)
+
+        let lateSpan = makeSkipTestAdWindow(
+            id: "ad-late-arriving-tail",
+            assetId: "asset-xr3t",
+            startTime: 540,
+            endTime: 599,
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([lateSpan])
+        var active = await orchestrator.activeWindowIDs()
+        #expect(active.contains("ad-late-arriving-tail"))
+
+        await orchestrator.setEpisodeDuration(600, analysisAssetId: "asset-xr3t")
+        active = await orchestrator.activeWindowIDs()
+        #expect(!active.contains("ad-late-arriving-tail"))
+    }
+
+    @Test("Flag-OFF orchestrator preserves all windows on retroactive update (no-op invariant)")
+    func disabledFilterIsNoOpOnReevaluation() async throws {
+        // Pass-through invariant: when the filter is OFF, neither the
+        // initial filter pass nor the retroactive re-evaluation pass
+        // may drop windows. Even with chapters + duration that would
+        // ALL trigger rejection, every window must survive.
+        let (orchestrator, _) = try await makeOrchestrator(
+            episodeDuration: 600,
+            filterEnabled: false
+        )
+
+        let windows = [
+            makeSkipTestAdWindow(id: "ad-short", assetId: "asset-xr3t", startTime: 60, endTime: 61),
+            makeSkipTestAdWindow(id: "ad-early", assetId: "asset-xr3t", startTime: 0.5, endTime: 30),
+            makeSkipTestAdWindow(id: "ad-late", assetId: "asset-xr3t", startTime: 540, endTime: 599),
+            makeSkipTestAdWindow(id: "ad-chapter", assetId: "asset-xr3t", startTime: 200, endTime: 220),
+        ]
+        await orchestrator.receiveAdWindows(windows)
+
+        // Retro pushes — would retire everything if filter were on.
+        let chapters = [
+            makeChapter(startTime: 0, endTime: 600, title: "Whole episode"),
+        ]
+        await orchestrator.setDeclaredChapters(chapters, analysisAssetId: "asset-xr3t")
+        await orchestrator.setEpisodeDuration(600, analysisAssetId: "asset-xr3t")
+
+        let active = await orchestrator.activeWindowIDs()
+        for id in ["ad-short", "ad-early", "ad-late", "ad-chapter"] {
+            #expect(active.contains(id), "Filter OFF: \(id) must survive retroactive update")
+        }
     }
 
     @Test("Mismatched-asset push to setDeclaredChapters is a silent no-op")

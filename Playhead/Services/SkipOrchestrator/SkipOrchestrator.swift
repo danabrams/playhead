@@ -738,10 +738,17 @@ actor SkipOrchestrator {
             )
             return
         }
+        let previous = activeEpisodeDuration
         if duration > 0, duration.isFinite {
             activeEpisodeDuration = duration
         } else {
             activeEpisodeDuration = nil
+        }
+        // Re-evaluate managed windows against the freshest context.
+        // Skip the pass when the new value is identical to what we
+        // already had — nothing the filter sees would change.
+        if previous != activeEpisodeDuration {
+            reapplyInventoryFilterToManagedWindows()
         }
     }
 
@@ -752,6 +759,23 @@ actor SkipOrchestrator {
     /// accidentally consult them, even if a future caller mixes
     /// sources.
     ///
+    /// Chapters are sorted by `startTime` and any chapter missing an
+    /// explicit `endTime` has it synthesized from the NEXT chapter's
+    /// start time. The trailing chapter (last in the episode, no
+    /// successor) is left open-ended — the filter explicitly does NOT
+    /// reject overlap with an unbounded chapter, because over-rejection
+    /// in xr3t means the user misses an expected ad-skip (e.g. a
+    /// post-roll inside a publisher-declared "Outro" chapter).
+    ///
+    /// After the chapter context updates, currently-managed non-
+    /// terminal windows are re-evaluated against the new filter
+    /// context. Spans that the filter would now reject are removed
+    /// from the active set (mirrors `retireAdWindows`). Without this
+    /// pass, the `beginEpisode` preload (which runs BEFORE
+    /// `AdDetectionService.runBackfill` pushes chapters) would let
+    /// chapter-overlapping rows survive across launches even though
+    /// the filter is supposed to reject them.
+    ///
     /// Mismatched-asset pushes are dropped silently (asset-switch race
     /// guard), mirroring `setEvidenceCatalog`.
     func setDeclaredChapters(_ chapters: [ChapterEvidence], analysisAssetId: String) {
@@ -761,7 +785,113 @@ actor SkipOrchestrator {
             )
             return
         }
-        activeDeclaredChapters = chapters.filter { $0.source.isCreatorSource }
+        activeDeclaredChapters = Self.normalizedDeclaredChapters(chapters)
+        reapplyInventoryFilterToManagedWindows()
+    }
+
+    /// Sort, filter, and synthesize missing chapter end times from the
+    /// next chapter's start. The trailing chapter (no successor) keeps
+    /// `endTime == nil` and is treated as unbounded by the inventory
+    /// filter (no rejection on overlap). See `setDeclaredChapters`
+    /// for the rationale.
+    private static func normalizedDeclaredChapters(
+        _ chapters: [ChapterEvidence]
+    ) -> [ChapterEvidence] {
+        let creatorOnly = chapters.filter { $0.source.isCreatorSource }
+        let sorted = creatorOnly.sorted { $0.startTime < $1.startTime }
+        guard !sorted.isEmpty else { return [] }
+        var result: [ChapterEvidence] = []
+        result.reserveCapacity(sorted.count)
+        for index in sorted.indices {
+            let chapter = sorted[index]
+            if chapter.endTime != nil {
+                result.append(chapter)
+                continue
+            }
+            // Synthesize end from the next chapter's start when it is
+            // strictly greater than this chapter's start. If the next
+            // chapter starts at the same time (degenerate), or the
+            // current chapter is the last, leave `endTime` as nil —
+            // the filter will skip rule (c) for unbounded chapters.
+            let nextIndex = index + 1
+            if nextIndex < sorted.count {
+                let nextStart = sorted[nextIndex].startTime
+                if nextStart > chapter.startTime, nextStart.isFinite {
+                    let synthesized = ChapterEvidence(
+                        startTime: chapter.startTime,
+                        endTime: nextStart,
+                        title: chapter.title,
+                        source: chapter.source,
+                        disposition: chapter.disposition,
+                        qualityScore: chapter.qualityScore
+                    )
+                    result.append(synthesized)
+                    continue
+                }
+            }
+            result.append(chapter)
+        }
+        return result
+    }
+
+    /// Re-evaluate currently-managed windows against the inventory
+    /// sanity filter using the freshest `activeEpisodeDuration` /
+    /// `activeDeclaredChapters` context. Removes any window that the
+    /// filter now rejects, subject to the user-already-acted guard
+    /// below.
+    ///
+    /// Called after `setDeclaredChapters` and `setEpisodeDuration` so
+    /// preloaded windows (which entered the active set before the
+    /// chapter / duration context was available) are belatedly
+    /// reconciled with the filter.
+    ///
+    /// Safety rules:
+    ///   * `.reverted` — user explicitly chose "Listen". Never touch.
+    ///   * `.applied` — the orchestrator has decided to auto-skip. We
+    ///     may still retire IF the playhead has not yet reached the
+    ///     window's start: yanking a cue the user is past, or one
+    ///     they're currently inside, would be a UX bug. The retire
+    ///     is purely the rule "if the filter would have rejected this
+    ///     before it ever became user-visible, do so now."
+    ///   * `.candidate` / `.confirmed` / `.suppressed` — re-evaluate
+    ///     freely; nothing user-visible has happened.
+    private func reapplyInventoryFilterToManagedWindows() {
+        guard inventoryFilter.isEnabled, !windows.isEmpty else { return }
+        var idsToRetire: [String] = []
+        for (id, managed) in windows {
+            switch managed.decisionState {
+            case .reverted:
+                continue
+            case .applied:
+                // Only retire if the playhead has not yet reached the
+                // window's start. Otherwise the user has either heard
+                // it or is hearing it now — silently dropping the
+                // skip cue mid-stream is worse than the false-positive
+                // skip we're trying to avoid.
+                guard currentPlayheadTime < managed.snappedStart else { continue }
+            case .candidate, .confirmed, .suppressed:
+                break
+            }
+
+            let verdict = inventoryFilter.evaluate(
+                startTime: managed.adWindow.startTime,
+                endTime: managed.adWindow.endTime,
+                episodeDuration: activeEpisodeDuration,
+                declaredChapters: activeDeclaredChapters
+            )
+            if case let .rejected(reason) = verdict {
+                logger.info(
+                    "AdWindow \(id, privacy: .public) retroactively rejected by inventory sanity filter: \(reason.rawValue, privacy: .public)"
+                )
+                idsToRetire.append(id)
+            }
+        }
+        guard !idsToRetire.isEmpty else { return }
+        for id in idsToRetire {
+            windows.removeValue(forKey: id)
+            banneredWindowIds.remove(id)
+        }
+        evaluateAndPush()
     }
 
     // MARK: - Ad Window Event Stream

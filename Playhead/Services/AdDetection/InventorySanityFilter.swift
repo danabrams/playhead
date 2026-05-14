@@ -178,15 +178,19 @@ struct InventorySanityFilter: Sendable, Equatable {
             // them is the *intended* fusion outcome.
             if chapter.disposition == .adBreak { continue }
 
-            // Open chapter end: when an RSS chapter lacks an explicit
-            // end time it implicitly runs to the next chapter's start
-            // (or episode end). Without that signal the safest thing
-            // is to treat the chapter as covering [startTime, +∞);
-            // a span starting after the chapter's start can still
-            // overlap. This is consistent with how downstream
-            // chapter-evidence consumers handle missing `endTime`.
+            // Open chapter end: when a chapter lacks an explicit end
+            // time, its true span is unknown. The caller (e.g.
+            // `SkipOrchestrator.setDeclaredChapters`) is responsible
+            // for synthesizing an end from the next chapter's start
+            // where available — see review-round-2 fix. For the
+            // trailing open-ended chapter (last in the episode, no
+            // successor) we have no bound, so we must NOT reject:
+            // over-rejection means the user expected an ad-skip and
+            // didn't get one (a regression in xr3t terms). Skip the
+            // chapter for this rule. The other rules ((a), (b)-tail)
+            // still apply.
+            guard let chapterEnd = chapter.endTime else { continue }
             let chapterStart = chapter.startTime
-            let chapterEnd = chapter.endTime ?? .infinity
 
             // Strict-strict overlap: spans that merely touch the
             // boundary (start == chapterEnd, or end == chapterStart)
