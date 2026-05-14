@@ -27,6 +27,14 @@ enum SwiftDataStore {
             // turns on AND the evaluator observes ≥3 episodes with a
             // matching intro/outro hash for that show.
             ShowMusicBedProfile.self,
+            // playhead-beh3: per-device-class adaptive estimator state
+            // for the Welford+EWMA slice-sizing loop. Additive entity;
+            // lightweight migration creates the table on existing
+            // installs. The row itself is provisioned lazily by the
+            // estimator's `recordObservation(...)` path, so a freshly
+            // upgraded install observes the entity but no rows until
+            // the feature flag is on AND a grant window completes.
+            LearnedDeviceProfile.self,
         ])
     }
 
@@ -108,6 +116,14 @@ enum PlayheadSchemaV1: VersionedSchema {
             // existing install simply observes an empty table until the
             // evaluator first writes a profile.
             ShowMusicBedProfile.self,
+            // playhead-beh3: additive new entity for the adaptive
+            // device-profile estimator's per-class state. Same
+            // additive-to-V1 rationale as `QueueEntry` above: existing
+            // installs observe the empty table on first launch and
+            // get rows provisioned lazily by the estimator. Must be
+            // replaced with a frozen type snapshot once V2 is
+            // introduced (see MIGRATION WARNING above).
+            LearnedDeviceProfile.self,
         ]
     }
 }

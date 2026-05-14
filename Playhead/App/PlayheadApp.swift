@@ -126,6 +126,43 @@ struct PlayheadApp: App {
                     // routing. Safe to call repeatedly.
                     DownloadManager.registerAppDelegate(appDelegate)
                     DownloadManager.registerShared(runtime.downloadManager)
+
+                    // playhead-beh3 (R14): attach the SwiftData-backed
+                    // adaptive-estimator store as early as possible in
+                    // `.task`. The R13 attach call previously sat near the
+                    // bottom of `.task`, AFTER an
+                    // `await runtime.adDetectionService.setEpisodeMetadataProvider(...)`
+                    // suspension point. The scheduler's run loop is
+                    // started from `PlayheadRuntime.init`'s deferred
+                    // bootstrap Task, which can interleave with this
+                    // `.task` body at every suspension point. If a
+                    // grant-window completed during the gap between
+                    // scheduler start and attach, the resulting
+                    // `recordObservation` would hit the
+                    // `NoOpLearnedDeviceProfileProvider` default and the
+                    // SwiftData row never accrues — the same class of
+                    // silent-drop bug R13 fixed, just narrower in
+                    // wall-clock width. Moving the attach above every
+                    // `await` in `.task` minimises that window to the
+                    // microseconds between scheduler-Task dispatch and
+                    // first SwiftUI `.task` tick. Background-launch
+                    // BGTask wakes (where `.task` may run minimally or
+                    // not at all before iOS releases the launch budget)
+                    // remain a narrow residual race — fully closing that
+                    // would require a non-isolated shared-holder pattern
+                    // (mirror of `BackgroundFeedRefreshService.attachSharedService`)
+                    // which is out of scope for R14; the
+                    // `useAdaptiveDeviceProfile` flag defaults to OFF so
+                    // production stays unaffected until the flag is
+                    // flipped, at which point the existing diagnostic
+                    // bundle path (which reads from a fresh
+                    // `SwiftDataLearnedDeviceProfileStore` directly off
+                    // the ModelContainer) still surfaces every persisted
+                    // row regardless of attach timing.
+                    await runtime.attachLearnedDeviceProfileStore(
+                        modelContainer: modelContainer
+                    )
+
                     runtime.setPlaybackPositionPersistenceHandler { trigger in
                         await Self.persistPlaybackPosition(
                             runtime: runtime,
@@ -343,6 +380,19 @@ struct PlayheadApp: App {
                     )
                     BackgroundFeedRefreshService.attachSharedService(feedRefreshService)
                     feedRefreshService.start()
+
+                    // playhead-beh3 (R14): the SwiftData-backed
+                    // `LearnedDeviceProfile` store is now attached at the
+                    // very top of `.task` (see the R14 comment block near
+                    // line 129) to minimise the race window between the
+                    // scheduler runLoop starting (from
+                    // `PlayheadRuntime.init`'s deferred bootstrap Task)
+                    // and the production provider being installed. The
+                    // R13 attach call previously lived here and ran AFTER
+                    // multiple `await` suspension points — observations
+                    // completing inside that window would silently hit
+                    // `NoOpLearnedDeviceProfileProvider`. The earlier
+                    // attach site is idempotent and `@MainActor`-safe.
 
                     // playhead-05i: wire the playback queue + auto-advance.
                     // The play handler resolves a `canonicalEpisodeKey`

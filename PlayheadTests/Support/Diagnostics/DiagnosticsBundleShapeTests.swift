@@ -240,7 +240,14 @@ struct DiagnosticsBundleShapeTests {
         // Carries no raw episodeId/feedURL — only the install-scoped
         // `show_identifier_hash`. Added to the allowed set so the
         // shape audit (a) does not reject a bundle carrying these.
-        "music_bed_profiles"
+        "music_bed_profiles",
+        // playhead-beh3: per-device-class adaptive estimator state for
+        // the Welford+EWMA slice-sizing loop. Always encoded (empty
+        // array when no rows exist) so the shape audit must accept the
+        // key. Privacy review: the record carries device-class bucket
+        // strings + math telemetry — NO episodeId, NO PII — so it stays
+        // in the default subtree alongside other device-class fields.
+        "learned_device_profiles"
     ]
 
     /// Substrings that — if present anywhere in the encoded JSON's

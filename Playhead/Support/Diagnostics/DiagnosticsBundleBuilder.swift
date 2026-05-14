@@ -123,7 +123,8 @@ enum DiagnosticsBundleBuilder {
         workJournalEntries: [WorkJournalEntry],
         installID: UUID,
         chapterPhaseEvents: [ChapterPhaseEvent] = [],
-        musicBedProfileSnapshots: [ShowMusicBedProfileSnapshot] = []
+        musicBedProfileSnapshots: [ShowMusicBedProfileSnapshot] = [],
+        learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = []
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -194,7 +195,8 @@ enum DiagnosticsBundleBuilder {
             schedulerEvents: schedulerEvents,
             workJournalTail: Array(workJournalTail),
             chapterPhaseEvents: chapterPhaseEvents,
-            musicBedProfiles: musicBedProfiles
+            musicBedProfiles: musicBedProfiles,
+            learnedDeviceProfiles: learnedDeviceProfiles
         )
     }
 

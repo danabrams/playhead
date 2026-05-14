@@ -73,6 +73,8 @@ func runReleaseDiagnosticsExport(
     )
     let journalFetch = ReleaseDiagnosticsHatch.makeJournalFetch(store: runtime.analysisStore)
     let optInSink = SwiftDataDiagnosticsOptInSink(context: modelContext)
+    let learnedDeviceProfilesFetch =
+        ReleaseDiagnosticsHatch.makeLearnedDeviceProfilesFetch(modelContext: modelContext)
 
     // playhead-2hpn: source live `ShowMusicBedProfile` snapshots from
     // the SwiftData container so the diagnostics bundle's
@@ -93,6 +95,7 @@ func runReleaseDiagnosticsExport(
         presenter: presenter,
         journalFetch: journalFetch,
         musicBedProfilesFetch: musicBedProfilesFetch,
+        learnedDeviceProfilesFetch: learnedDeviceProfilesFetch,
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -120,6 +123,28 @@ enum ReleaseDiagnosticsHatch {
     static func makeJournalFetch(store: AnalysisStore) -> DiagnosticsJournalFetch {
         { [store] in
             try await store.fetchRecentWorkJournalEntries(limit: journalFetchLimit)
+        }
+    }
+
+    // MARK: Learned device-profile adapter (playhead-beh3)
+
+    /// Adapter that snapshots every `LearnedDeviceProfile` row through
+    /// `SwiftDataLearnedDeviceProfileStore.snapshotSync()`, then maps
+    /// each state to a wire-shape `LearnedDeviceProfileDiagnosticRecord`.
+    /// Mirrors `DebugDiagnosticsHatch.makeLearnedDeviceProfilesFetch`
+    /// (same isolation pattern; both files keep their helpers in
+    /// lock-step).
+    static func makeLearnedDeviceProfilesFetch(
+        modelContext: ModelContext
+    ) -> DiagnosticsLearnedDeviceProfilesFetch {
+        let container = modelContext.container
+        return { @Sendable in
+            await MainActor.run { () -> [LearnedDeviceProfileDiagnosticRecord] in
+                let context = ModelContext(container)
+                let store = SwiftDataLearnedDeviceProfileStore(context: context)
+                let snapshots = store.snapshotSync()
+                return snapshots.map { LearnedDeviceProfileDiagnosticRecord.from(snapshot: $0) }
+            }
         }
     }
 

@@ -14,6 +14,9 @@
       "modelAvailableNow" : true,
       "regionSupported" : true
     },
+    "learned_device_profiles" : [
+
+    ],
     "os_version" : "iOS 26.0",
     "scheduler_events" : [
       {

@@ -99,6 +99,15 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// decode as `[]` via the tolerant `init(from:)`.
     let musicBedProfiles: [MusicBedProfileSummary]
 
+    /// playhead-beh3: per-device-class adaptive estimator state for the
+    /// Welford+EWMA slice-sizing loop. Empty array when no rows exist
+    /// (estimator never activated, or feature flag is OFF). ALWAYS
+    /// encoded (even empty) so support engineer's grep cheat sheet can
+    /// rely on its presence in any v≥beh3 bundle. Older readers either
+    /// already accept unknown keys (`JSONDecoder` default) or use
+    /// `init(from:)`'s `decodeIfPresent` fallback below.
+    let learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord]
+
     enum CodingKeys: String, CodingKey {
         case appVersion = "app_version"
         case osVersion = "os_version"
@@ -110,6 +119,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case workJournalTail = "work_journal_tail"
         case chapterPhaseEvents = "chapter_phase_events"
         case musicBedProfiles = "music_bed_profiles"
+        case learnedDeviceProfiles = "learned_device_profiles"
     }
 
     init(
@@ -122,7 +132,8 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         schedulerEvents: [SchedulerEvent],
         workJournalTail: [WorkJournalRecord],
         chapterPhaseEvents: [ChapterPhaseEvent] = [],
-        musicBedProfiles: [MusicBedProfileSummary] = []
+        musicBedProfiles: [MusicBedProfileSummary] = [],
+        learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = []
     ) {
         self.appVersion = appVersion
         self.osVersion = osVersion
@@ -134,12 +145,15 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.workJournalTail = workJournalTail
         self.chapterPhaseEvents = chapterPhaseEvents
         self.musicBedProfiles = musicBedProfiles
+        self.learnedDeviceProfiles = learnedDeviceProfiles
     }
 
     /// Decode-time tolerance for older bundles that pre-date the
     /// `chapter_phase_events` field: missing key decodes as `[]`.
     /// Existing fixtures (`sample-default-bundle.json`) and any bundle
     /// emitted before playhead-au2v.1.3 stay forward-compatible.
+    /// Same tolerance for the playhead-beh3 `learned_device_profiles`
+    /// field: missing key decodes as `[]`.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.appVersion = try container.decode(String.self, forKey: .appVersion)
@@ -163,6 +177,9 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         ) ?? []
         self.musicBedProfiles = try container.decodeIfPresent(
             [MusicBedProfileSummary].self, forKey: .musicBedProfiles
+        ) ?? []
+        self.learnedDeviceProfiles = try container.decodeIfPresent(
+            [LearnedDeviceProfileDiagnosticRecord].self, forKey: .learnedDeviceProfiles
         ) ?? []
     }
 

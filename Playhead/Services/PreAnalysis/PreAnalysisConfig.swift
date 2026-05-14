@@ -24,6 +24,16 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// until the flag is flipped per-beta-cohort.
     var useDualBackgroundSessions: Bool = false
 
+    /// playhead-beh3 feature flag: when `true`, the scheduler consults
+    /// the adaptive Welford+EWMA estimator (`LearnedDeviceProfile`
+    /// table) instead of the Phase-1 static seed table when computing
+    /// slice / grant-window values. Defaults to `false` so production
+    /// stays byte-identical to today until the flag is flipped per-
+    /// beta-cohort. The flag-off path bypasses the estimator entirely
+    /// (no fetch, no record) so any persistence bug in the new code
+    /// path cannot affect production until the flag is on.
+    var useAdaptiveDeviceProfile: Bool = false
+
     /// playhead-44h1: nominal shard duration (seconds) used by the Live
     /// Activity ETA formula to estimate `totalShardsEstimate =
     /// ceil(episode.durationSec / nominalShardDurationSec)`. This is an
@@ -79,7 +89,8 @@ struct PreAnalysisConfig: Codable, Sendable {
         unplayedCandidateWindowSeconds: TimeInterval = 20 * 60,
         resumedCandidateWindowSeconds: TimeInterval = 15 * 60,
         seekRelatchThresholdSeconds: TimeInterval = 30,
-        scopedMusicBedGeneralization: Bool = false
+        scopedMusicBedGeneralization: Bool = false,
+        useAdaptiveDeviceProfile: Bool = false
     ) {
         self.isEnabled = isEnabled
         self.defaultT0DepthSeconds = defaultT0DepthSeconds
@@ -91,6 +102,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.resumedCandidateWindowSeconds = resumedCandidateWindowSeconds
         self.seekRelatchThresholdSeconds = seekRelatchThresholdSeconds
         self.scopedMusicBedGeneralization = scopedMusicBedGeneralization
+        self.useAdaptiveDeviceProfile = useAdaptiveDeviceProfile
     }
 
     // Custom decoder so configs persisted before 24cm (which lack the
@@ -115,6 +127,10 @@ struct PreAnalysisConfig: Codable, Sendable {
         // key; default to `false` so the scoped-music-bed feature stays
         // OFF on upgrade (rollback-friendly default).
         self.scopedMusicBedGeneralization = try container.decodeIfPresent(Bool.self, forKey: .scopedMusicBedGeneralization) ?? false
+        // playhead-beh3: configs persisted before this bead omit the
+        // adaptive-estimator flag; default to `false` so the legacy
+        // static-seed path stays in force until the flag is flipped.
+        self.useAdaptiveDeviceProfile = try container.decodeIfPresent(Bool.self, forKey: .useAdaptiveDeviceProfile) ?? false
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -128,6 +144,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         case resumedCandidateWindowSeconds
         case seekRelatchThresholdSeconds
         case scopedMusicBedGeneralization
+        case useAdaptiveDeviceProfile
     }
 
     static func load() -> PreAnalysisConfig {

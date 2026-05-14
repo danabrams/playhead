@@ -499,6 +499,31 @@ actor AnalysisWorkScheduler {
     /// foreground catch-up.
     private let acousticPromotionPolicy: AcousticPromotionPolicy
 
+    /// playhead-beh3 (Phase 3 deliverable 5): adaptive Welford+EWMA
+    /// estimator for per-device-class slice/grant-window sizing. Held
+    /// behind the `LearnedDeviceProfileProviding` protocol seam so the
+    /// scheduler does not have to know about SwiftData. Defaults to
+    /// `NoOpLearnedDeviceProfileProvider`, which short-circuits every
+    /// call back to the seed — that is the byte-identical-to-today
+    /// rollback path. The feature flag
+    /// (`PreAnalysisConfig.useAdaptiveDeviceProfile`) gates whether the
+    /// scheduler even queries the provider at the call site, so a flag-
+    /// off run never touches the estimator state.
+    ///
+    /// R13 fix: switched from `let` to `var` so the production runtime
+    /// can install a `SwiftDataLearnedDeviceProfileStore` AFTER
+    /// `AnalysisWorkScheduler.init` (init runs synchronously before the
+    /// `ModelContainer` is available — see `PlayheadRuntime.init` notes).
+    /// Without the setter the production scheduler permanently held the
+    /// No-Op provider and the `useAdaptiveDeviceProfile` flag had no
+    /// effect: `recordObservation` was dropped, `resolvedDeviceProfile`
+    /// returned the seed verbatim, and the SwiftData
+    /// `LearnedDeviceProfile` table stayed empty even with the flag ON
+    /// — the bead's "Adaptive estimator runs in production, gated by the
+    /// flag" acceptance criterion was silently unmet. Mutation is safe
+    /// because the field lives on an `actor` so reads + writes serialize.
+    private var learnedDeviceProfileProvider: any LearnedDeviceProfileProviding
+
     private var shouldCancelCurrentJob = false
     /// Set to `true` by the lease-renewal task when its CAS finds no
     /// matching row — i.e. orphan recovery (or another scheduler
@@ -630,7 +655,8 @@ actor AnalysisWorkScheduler {
         clock: @escaping @Sendable () -> Date = { Date() },
         backfillScheduler: (any BackfillScheduling)? = nil,
         catchupPolicy: PlayheadCatchupPolicy = .default,
-        acousticPromotionPolicy: AcousticPromotionPolicy = .default
+        acousticPromotionPolicy: AcousticPromotionPolicy = .default,
+        learnedDeviceProfileProvider: (any LearnedDeviceProfileProviding)? = nil
     ) {
         self.store = store
         self.jobRunner = jobRunner
@@ -645,6 +671,12 @@ actor AnalysisWorkScheduler {
         self.backfillScheduler = backfillScheduler
         self.catchupPolicy = catchupPolicy
         self.acousticPromotionPolicy = acousticPromotionPolicy
+        // playhead-beh3: adaptive device-profile estimator seam. Nil
+        // (or `NoOpLearnedDeviceProfileProvider` injected by the tests
+        // that exercise the flag-on path) means "use the seed verbatim"
+        // — byte-identical to today's behavior.
+        self.learnedDeviceProfileProvider =
+            learnedDeviceProfileProvider ?? NoOpLearnedDeviceProfileProvider()
         var continuation: AsyncStream<Void>.Continuation?
         self.wakeStream = AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { continuation = $0 }
         self.wakeContinuation = continuation
@@ -1813,6 +1845,25 @@ actor AnalysisWorkScheduler {
         self.shadowLaneTickHandler = handler
     }
 
+    /// playhead-beh3 (R13): install the adaptive-estimator provider once
+    /// the SwiftData `ModelContainer` is available. The scheduler is
+    /// constructed in `PlayheadRuntime.init` BEFORE the container exists
+    /// (init is synchronous; the container is built by `PlayheadApp.task`
+    /// and threaded back in via setters), so without this seam the
+    /// production scheduler permanently holds the
+    /// `NoOpLearnedDeviceProfileProvider` default — every
+    /// `recordObservation` is dropped, `resolvedDeviceProfile` returns
+    /// the seed verbatim, and the `LearnedDeviceProfile` table never
+    /// fills even with `useAdaptiveDeviceProfile = true`.
+    ///
+    /// Mirrors `setWorkJournalRecorder` / `setLanePreemptionHandler`:
+    /// idempotent (re-installing replaces the prior provider), call-once
+    /// in production (from `PlayheadRuntime.attachLearnedDeviceProfileStore`),
+    /// no-op in preview runtimes that never reach that wiring step.
+    func setLearnedDeviceProfileProvider(_ provider: any LearnedDeviceProfileProviding) {
+        self.learnedDeviceProfileProvider = provider
+    }
+
     /// Start the scheduler loop. Call after reconciliation is complete.
     func startSchedulerLoop() {
         schedulerTask?.cancel()
@@ -2366,7 +2417,13 @@ actor AnalysisWorkScheduler {
     /// - `deviceClass` / `deviceProfile`: from the snapshot + the
     ///   playhead-dh9b hard-coded fallback table (the JSON manifest
     ///   loader is not plumbed here — slice-sizing uses the fallback row
-    ///   until a loader is injected).
+    ///   until a loader is injected). playhead-beh3 layers an adaptive
+    ///   Welford+EWMA estimator over this seed: when the
+    ///   `useAdaptiveDeviceProfile` flag is ON and the estimator has
+    ///   activated (≥30 grant-window observations), the
+    ///   `learnedDeviceProfileProvider` returns a scaled copy of the
+    ///   seed row; flag-off (or pre-activation) returns the seed
+    ///   verbatim.
     /// - `transport`: synthesized from `transportStatusProvider`
     ///   (defaults to `LiveTransportStatusProvider`, which wraps
     ///   `NWPathMonitor` + the user's `allowsCellular` pref) and the
@@ -2387,7 +2444,22 @@ actor AnalysisWorkScheduler {
             isCharging: batteryState.isCharging
         )
         let deviceClass = snapshot.deviceClass
-        let deviceProfile = DeviceClassProfile.fallback(for: deviceClass)
+        // playhead-beh3: seed remains the Phase-1 static fallback. The
+        // adaptive estimator (`learnedDeviceProfileProvider`) layers on
+        // top — when the feature flag is ON and the estimator has
+        // activated (≥30 samples), the provider returns a SCALED copy
+        // of the seed. Flag OFF (or pre-activation) returns the seed
+        // verbatim, which is byte-identical to the pre-beh3 behavior.
+        let seedDeviceProfile = DeviceClassProfile.fallback(for: deviceClass)
+        let deviceProfile: DeviceClassProfile
+        if config.useAdaptiveDeviceProfile {
+            deviceProfile = await learnedDeviceProfileProvider.resolvedDeviceProfile(
+                seed: seedDeviceProfile,
+                deviceClass: deviceClass
+            )
+        } else {
+            deviceProfile = seedDeviceProfile
+        }
 
         let reachability = await transportStatusProvider.currentReachability()
         let allowsCellular = await transportStatusProvider.userAllowsCellular()
@@ -2577,6 +2649,13 @@ actor AnalysisWorkScheduler {
         // `recoverOrphans` (the journal-aware cold-launch reaper)
         // degrades to the same blind sweep AnalysisJobReconciler runs.
         let now = clock().timeIntervalSince1970
+        // playhead-beh3 (R2): capture the lease-acquired wall-clock for
+        // the adaptive estimator write seam. Equal to `now` but kept as
+        // a separate binding so the success outcome arms below can
+        // compute `grantWindowSeconds = clock().timeIntervalSince1970 -
+        // leaseAcquiredAt` without re-reading the local that the lease-
+        // expiry math mutates conceptually.
+        let leaseAcquiredAt = now
         let leaseExpiry = now + Self.leaseExpirySeconds
         let leaseAcquired: Bool
         do {
@@ -3030,6 +3109,17 @@ actor AnalysisWorkScheduler {
                     // own `acquired` row will land when the scheduler
                     // claims it on a future iteration.
                     await emitJournalFinalized(episodeId: job.episodeId)
+                    // playhead-beh3 (R2): record the grant-window
+                    // outcome for the adaptive estimator. Tier advance
+                    // = the slice ran end-to-end under our lease and
+                    // produced the next-tier paused row, so the
+                    // wall-clock interval since lease acquisition is a
+                    // genuine grant-window observation. Flag-gated
+                    // inside the helper — flag-off path never reaches
+                    // the provider.
+                    await recordGrantWindowObservationIfEnabled(
+                        leaseAcquiredAt: leaseAcquiredAt
+                    )
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Tier advancement: \(job.desiredCoverageSec)s -> \(nextCoverage)s for episode \(job.episodeId)")
                 } else {
@@ -3047,6 +3137,13 @@ actor AnalysisWorkScheduler {
                     // will not requeue. Emit `.finalized` to seal
                     // the journal trail.
                     await emitJournalFinalized(episodeId: job.episodeId)
+                    // playhead-beh3 (R2): record the grant-window
+                    // outcome. All tiers done = the episode reached
+                    // its highest coverage target under our lease;
+                    // same accounting as the tier-advance arm above.
+                    await recordGrantWindowObservationIfEnabled(
+                        leaseAcquiredAt: leaseAcquiredAt
+                    )
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Job \(job.jobId) complete (all tiers done)")
                 }
@@ -3076,6 +3173,17 @@ actor AnalysisWorkScheduler {
                     // terminal-success classification (orphan recovery
                     // treats `.finalized` as "nothing to resume").
                     await emitJournalFinalized(episodeId: job.episodeId)
+                    // playhead-beh3 (R2): record the grant-window
+                    // outcome. `coverageInsufficient.noProgress` is a
+                    // graceful give-up that terminates `state="complete"`
+                    // — the runner held the lease for the full grant
+                    // window and processed every shard it could, the
+                    // tier just couldn't reach the target. This is a
+                    // valid grant-window observation: the slice ran
+                    // end-to-end under our scheduler.
+                    await recordGrantWindowObservationIfEnabled(
+                        leaseAcquiredAt: leaseAcquiredAt
+                    )
                     logger.info("Job \(job.jobId) marked complete after no-progress pass (coverage insufficient)")
                 } else {
                     // playhead-5uvz.3: predict the post-increment value
@@ -3107,6 +3215,14 @@ actor AnalysisWorkScheduler {
                         // graceful give-up, not a runner failure, so
                         // `.finalized` is the correct lifecycle event.
                         await emitJournalFinalized(episodeId: job.episodeId)
+                        // playhead-beh3 (R2): record the grant-window
+                        // outcome. Max-attempts give-up terminates
+                        // `state="complete"` after the runner exhausted
+                        // retries; identical lease-end-to-end accounting
+                        // to the noProgress arm above.
+                        await recordGrantWindowObservationIfEnabled(
+                            leaseAcquiredAt: leaseAcquiredAt
+                        )
                         logger.info("Job \(job.jobId) marked complete after max attempts (coverage insufficient)")
                     } else {
                         // Backoff before next attempt: without a
@@ -3718,6 +3834,126 @@ actor AnalysisWorkScheduler {
             episodeId: episodeId,
             cause: cause,
             metadataJSON: metadataJSON
+        )
+    }
+
+    // MARK: - playhead-beh3 adaptive estimator write seam
+
+    /// playhead-beh3 (Phase 3 deliverable 5, R2): record one grant-window
+    /// observation against the adaptive estimator. Invoked from every
+    /// success outcome arm in `processJob` (`tierAdvance`, `allTiersDone`,
+    /// `coverageInsufficient.{noProgress,maxAttempts}`) — those are the
+    /// arms where the runner held the lease end-to-end and the resulting
+    /// wall-clock interval is a faithful "grant-window slice completion"
+    /// duration the spec asks the estimator to learn from.
+    ///
+    /// Failure arms excluded — rationale (R3 explicit): `.failed`,
+    /// `.pausedForThermal`, `.memoryPressure`, `.blockedByModel`,
+    /// `.backgroundExpired`, `.cancelledByPlayback`, `.preempted`, and
+    /// the outer-catch / cancel-catch paths all SKIP this helper. These
+    /// outcomes either (a) terminated mid-slice (thermal trip, BG-task
+    /// expiry, runner exception), or (b) never produced a real slice in
+    /// the first place (model unavailable, playback preemption). The
+    /// resulting wall-clock interval is not a "we ran a slice end-to-end"
+    /// observation; recording would teach the EWMA that grant windows
+    /// are bounded by external events (thermals, OS time budgets) rather
+    /// than the device's actual throughput. The trade-off is a mild
+    /// survivorship bias: a device that consistently trips thermals on
+    /// long slices will never feed those long-and-aborted windows into
+    /// the EWMA, so the estimator may converge slightly higher than the
+    /// "true" sustainable budget. The clamp band (≤2× seed) caps the
+    /// magnitude of that drift, and the divergence-revert path catches
+    /// pathological cases. We prefer the bias direction (slightly over-
+    /// optimistic) over polluting the estimator with externally-bounded
+    /// durations.
+    ///
+    /// Flag gating: the method is the SINGLE production write site for
+    /// the estimator. It returns immediately when
+    /// `config.useAdaptiveDeviceProfile == false`, so a flag-off run
+    /// never touches the SwiftData row, never invokes the provider, and
+    /// never mutates estimator state — that is the byte-identical
+    /// rollback contract from the bead spec, mechanically enforced here
+    /// rather than at every call site.
+    ///
+    /// `leaseAcquiredAt` capture point: the timestamp is captured at
+    /// the top of `processJob` BEFORE the `await store.acquireLeaseWithJournal(...)`
+    /// call, identical to the `now` value the SQL layer is given as its
+    /// transaction timestamp. The measured `grantWindowSeconds`
+    /// therefore includes any SQLite lease-acquisition latency. This is
+    /// intentional: the next slice will also pay that cost, so an EWMA
+    /// trained on "from-attempted-acquire" durations predicts the next
+    /// slice's wall-clock budget more faithfully than a "from-confirmed-
+    /// acquire" alternative would.
+    ///
+    /// `lostOwnership` mirror: the success arms commit BEFORE the
+    /// `lostOwnership` short-circuit higher up (the renewer cannot flip
+    /// the flag across an atomic `commitOutcomeArm` await), but we
+    /// re-check anyway so a future refactor that moves the call site
+    /// later in `processJob` cannot accidentally fire after the lease
+    /// was reclaimed by orphan recovery.
+    ///
+    /// Non-positive guard: the estimator's `apply(...)` already drops
+    /// observations whose `grantWindowSeconds <= 0` (the never-zero
+    /// floor invariant). We compute the duration off `clock()` here, so
+    /// in practice the duration is always strictly positive — the math
+    /// layer's guard is defense-in-depth, not the primary check.
+    ///
+    /// Device-class resolution: detect inside the helper (one call to
+    /// the pure `DeviceClass.detect()` mapping) rather than capturing
+    /// at lease-acquisition time. The earlier draft hopped to
+    /// `capabilitiesService.currentSnapshot.deviceClass` between lease
+    /// acquisition and the lease-renewal task arming — that suspension
+    /// point sometimes serialized poorly with the run-loop's mailbox
+    /// under real-time tests, leaving `pollUntil`-style waits stuck.
+    /// `DeviceClass.detect()` is a pure `utsname.machine` lookup; the
+    /// vanishing mid-run device-class-rotation concern is moot at the
+    /// resolution this estimator works at.
+    ///
+    /// Internal (rather than `private`) visibility so the R2 write-seam
+    /// tests can drive the helper directly. The success outcome arms in
+    /// `processJob` cannot be reached cleanly under stub inputs (see
+    /// the `AnalysisWorkSchedulerJournalEmissionTests` file header for
+    /// the full reasoning), so a unit test that synthesizes a lease-
+    /// acquired timestamp and calls this method is the cheapest way to
+    /// pin the flag-gating contract. The method is still called only
+    /// from the success arms in production.
+    func recordGrantWindowObservationIfEnabled(
+        leaseAcquiredAt: TimeInterval
+    ) async {
+        // Single flag check, single early return — the entire estimator
+        // surface is bypassed when the feature is OFF.
+        guard config.useAdaptiveDeviceProfile else { return }
+        // Mirror the journal helpers: if we no longer own the lease,
+        // the slice work didn't terminate under our scheduler's
+        // observation. Recording would attribute the new owner's
+        // outcome to our estimator state.
+        guard !lostOwnership else { return }
+
+        let nowDate = clock()
+        let grantWindowSeconds = nowDate.timeIntervalSince1970 - leaseAcquiredAt
+        // Drop non-finite or non-positive durations defensively: a
+        // clock-skew event (NTP step backward, simulated-clock test
+        // that didn't advance) or a corrupt clock (`Date` with a
+        // non-finite reference value — pathological but representable
+        // in the Swift type) would otherwise produce a meaningless
+        // observation. The estimator's math layer also drops these
+        // (R5 hardening tightened the entry guard to `isFinite && > 0`),
+        // but filtering here means we don't even build the value type
+        // for the no-op case. Defense-in-depth at the source mirrors
+        // the math layer's invariant so both ends agree on what
+        // qualifies as a real grant-window observation.
+        guard grantWindowSeconds.isFinite, grantWindowSeconds > 0 else { return }
+
+        let deviceClass = DeviceClass.detect()
+        let seed = DeviceClassProfile.fallback(for: deviceClass)
+        let observation = GrantWindowObservation(
+            grantWindowSeconds: grantWindowSeconds,
+            observedAt: nowDate
+        )
+        _ = await learnedDeviceProfileProvider.recordObservation(
+            observation,
+            deviceClass: deviceClass,
+            seed: seed
         )
     }
 
