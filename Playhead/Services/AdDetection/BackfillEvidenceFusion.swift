@@ -105,9 +105,18 @@ struct FusionWeightConfig: Sendable {
     /// `musicBedCap >= musicBedConfirmedJingleWeight` must hold at all
     /// times or the boost is silently truncated. Today both default to
     /// 0.25 (the cap equals the boost — zero headroom). If you raise
-    /// the boost weight you MUST raise this cap at least as much. The
-    /// invariant is asserted at runtime by
-    /// `MusicBedLedgerEvaluatorJingleBoostTests.musicBedCapAccommodatesBoostWeight`.
+    /// the boost weight you MUST raise this cap at least as much.
+    ///
+    /// Enforcement is layered:
+    ///   * Runtime (always-on, debug + release) — the `precondition`
+    ///     inside `FusionWeightConfig.init` (R4→R5) traps any caller
+    ///     that constructs a config with `musicBedCap` below the boost
+    ///     weight, on every initializer path.
+    ///   * Compile-time-equivalent — the default-init values are
+    ///     pinned by `MusicBedLedgerEvaluatorJingleBoostTests
+    ///     .musicBedCapAccommodatesBoostWeight`, which lights up if a
+    ///     reviewer drops the default cap below the default boost
+    ///     without re-running the runtime path.
     let musicBedCap: Double
 
     init(
