@@ -65,6 +65,24 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// when off, neither path runs.
     var scopedMusicBedGeneralization: Bool = false
 
+    /// playhead-zx6i feature flag: when `true`, the `AnalysisJobRunner`
+    /// consults the per-asset `RevalidationStateStore` at the top of
+    /// `run(_:)`. If the stored `PipelineVersions` snapshot differs
+    /// from `PipelineVersions.current()` AND the asset has persisted
+    /// `TranscriptChunk` rows, the runner short-circuits stages 1–3
+    /// (decode, feature extraction, transcription) and delegates to
+    /// `AdDetectionService.revalidateFromFeatures(...)`, which re-runs
+    /// only classifier + fusion + boundary against the persisted
+    /// rows. The success-stamp at the end of `runBackfill` is ALSO
+    /// gated on this flag — when off, no stamp is written and the
+    /// short-circuit is structurally unreachable. Default `false` so
+    /// production behavior is byte-identical to pre-zx6i until the
+    /// flag is flipped per-beta-cohort. Rollback latency matches
+    /// 2hpn / xr3t: next consumer-init (next app launch) for the
+    /// short-circuit decision, since `AnalysisJobRunner` reads the
+    /// config snapshot when constructed.
+    var b4RevalidationFromFeaturesEnabled: Bool = false
+
     static let analysisVersion: Int = 1
 
     private static let key = "PreAnalysisConfig"
@@ -79,7 +97,8 @@ struct PreAnalysisConfig: Codable, Sendable {
         unplayedCandidateWindowSeconds: TimeInterval = 20 * 60,
         resumedCandidateWindowSeconds: TimeInterval = 15 * 60,
         seekRelatchThresholdSeconds: TimeInterval = 30,
-        scopedMusicBedGeneralization: Bool = false
+        scopedMusicBedGeneralization: Bool = false,
+        b4RevalidationFromFeaturesEnabled: Bool = false
     ) {
         self.isEnabled = isEnabled
         self.defaultT0DepthSeconds = defaultT0DepthSeconds
@@ -91,6 +110,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.resumedCandidateWindowSeconds = resumedCandidateWindowSeconds
         self.seekRelatchThresholdSeconds = seekRelatchThresholdSeconds
         self.scopedMusicBedGeneralization = scopedMusicBedGeneralization
+        self.b4RevalidationFromFeaturesEnabled = b4RevalidationFromFeaturesEnabled
     }
 
     // Custom decoder so configs persisted before 24cm (which lack the
@@ -115,6 +135,12 @@ struct PreAnalysisConfig: Codable, Sendable {
         // key; default to `false` so the scoped-music-bed feature stays
         // OFF on upgrade (rollback-friendly default).
         self.scopedMusicBedGeneralization = try container.decodeIfPresent(Bool.self, forKey: .scopedMusicBedGeneralization) ?? false
+        // playhead-zx6i: configs persisted before this bead omit the
+        // key; default to `false` so B4 revalidation stays OFF on
+        // upgrade and the AnalysisJobRunner short-circuit is
+        // structurally unreachable until the flag is explicitly
+        // flipped via Settings.
+        self.b4RevalidationFromFeaturesEnabled = try container.decodeIfPresent(Bool.self, forKey: .b4RevalidationFromFeaturesEnabled) ?? false
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -128,6 +154,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         case resumedCandidateWindowSeconds
         case seekRelatchThresholdSeconds
         case scopedMusicBedGeneralization
+        case b4RevalidationFromFeaturesEnabled
     }
 
     static func load() -> PreAnalysisConfig {

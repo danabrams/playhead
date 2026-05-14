@@ -66,6 +66,34 @@ actor AnalysisJobRunner {
     /// outcome is reproducible.
     private let safetySampleRNG: @Sendable () -> Double
 
+    /// playhead-zx6i — gate the B4 revalidation short-circuit. Returns
+    /// `true` when the `b4_revalidation_from_features_enabled` flag is
+    /// ON for THIS process. Production wiring reads the flag from
+    /// `PreAnalysisConfig.load().b4RevalidationFromFeaturesEnabled` at
+    /// construction time so the runner has the same "next-init"
+    /// rollback contract as 2hpn / xr3t. Tests inject a fixed `Bool`
+    /// (or a closure that flips it) so the short-circuit can be
+    /// deterministically exercised without round-tripping through
+    /// UserDefaults. Returning `false` makes the short-circuit
+    /// structurally unreachable — flag-OFF is byte-identical to
+    /// pre-zx6i behaviour.
+    private let b4RevalidationEnabledProvider: @Sendable () -> Bool
+
+    /// playhead-zx6i — current pipeline-version triple reader. Defaults
+    /// to `PipelineVersions.current()` in production. Tests inject a
+    /// fixed snapshot so the short-circuit's version-comparison branch
+    /// can be exercised without touching the global
+    /// `AdDetectionConfig` / `SkipPolicyConfig` / `SharedVersionConstants`
+    /// singletons (which are static `let`s and cannot be mutated mid-test).
+    private let currentPipelineVersionsProvider: @Sendable () -> PipelineVersions
+
+    /// playhead-zx6i — per-asset "completed versions" loader. Defaults
+    /// to `RevalidationStateStore.loadCompletedVersions` against
+    /// `.standard`. Tests inject a closure that returns whatever the
+    /// scenario calls for (nil → simulates pre-zx6i asset; equal →
+    /// simulates "no bump"; different → simulates a version bump).
+    private let completedPipelineVersionsLoader: @Sendable (_ assetId: String) -> PipelineVersions?
+
     // MARK: - Init
 
     init(
@@ -81,7 +109,16 @@ actor AnalysisJobRunner {
         clock: @escaping @Sendable () -> Date = { Date() },
         acousticGateConfig: AcousticTranscriptGateConfig = .default,
         transcriptShadowGateLogger: TranscriptShadowGateLogging = NoOpTranscriptShadowGateLogger(),
-        safetySampleRNG: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }
+        safetySampleRNG: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
+        b4RevalidationEnabledProvider: @escaping @Sendable () -> Bool = {
+            PreAnalysisConfig.load().b4RevalidationFromFeaturesEnabled
+        },
+        currentPipelineVersionsProvider: @escaping @Sendable () -> PipelineVersions = {
+            PipelineVersions.current()
+        },
+        completedPipelineVersionsLoader: @escaping @Sendable (_ assetId: String) -> PipelineVersions? = { assetId in
+            RevalidationStateStore.loadCompletedVersions(forAsset: assetId)
+        }
     ) {
         self.store = store
         self.audioProvider = audioProvider
@@ -94,6 +131,9 @@ actor AnalysisJobRunner {
         self.acousticGateConfig = acousticGateConfig
         self.transcriptShadowGateLogger = transcriptShadowGateLogger
         self.safetySampleRNG = safetySampleRNG
+        self.b4RevalidationEnabledProvider = b4RevalidationEnabledProvider
+        self.currentPipelineVersionsProvider = currentPipelineVersionsProvider
+        self.completedPipelineVersionsLoader = completedPipelineVersionsLoader
     }
 
     // MARK: - Run
@@ -102,6 +142,94 @@ actor AnalysisJobRunner {
     /// Returns an `AnalysisOutcome` summarizing coverage achieved and stop reason.
     func run(_ request: AnalysisRangeRequest) async -> AnalysisOutcome {
         let assetId = request.analysisAssetId
+
+        // playhead-zx6i — B4 fast revalidation short-circuit. Runs
+        // BEFORE the preemption-coordinator registration / decode /
+        // feature-extraction / transcription stages because the
+        // revalidation path consumes only persisted rows and skips
+        // every one of those stages. Structurally, this branch is
+        // unreachable unless ALL of the following hold:
+        //   1. The `b4_revalidation_from_features_enabled` flag is ON.
+        //   2. The asset has persisted `TranscriptChunk` rows from a
+        //      prior successful `runBackfill`.
+        //   3. The `RevalidationStateStore` recorded a completed
+        //      `PipelineVersions` snapshot for this asset (i.e. the
+        //      prior run happened AFTER zx6i shipped, so we have a
+        //      baseline to compare against).
+        //   4. The stored snapshot differs from
+        //      `PipelineVersions.current()` (i.e. at least one of
+        //      `modelVersion` / `policyVersion` / `featureSchemaVersion`
+        //      has bumped since the last successful run).
+        //
+        // When any condition fails the branch falls through to the
+        // existing full-analysis path (decode → features → ASR → ad
+        // detection). This is the explicit fail-open path:
+        //   - condition 1 OFF → flag rollback (instant revert to
+        //     pre-zx6i behaviour).
+        //   - condition 2 OFF → cold-start asset (no chunks to
+        //     revalidate against).
+        //   - condition 3 OFF → pre-zx6i asset (no stamp recorded);
+        //     we MUST take the full path to establish a stamp before
+        //     the next bump can short-circuit.
+        //   - condition 4 OFF → versions match, no revalidation needed.
+        //     (Note: the existing skip-hot-path / skip-backfill no-op
+        //     branches inside the full-path stage 4 already handle
+        //     this case correctly — they detect "no new chunks + windows
+        //     already exist" and return without re-running the
+        //     classifier. So falling through is safe.)
+        if b4RevalidationEnabledProvider() {
+            let persistedChunks = (try? await store.fetchTranscriptChunks(assetId: assetId)) ?? []
+            if !persistedChunks.isEmpty,
+               let completed = completedPipelineVersionsLoader(assetId) {
+                let current = currentPipelineVersionsProvider()
+                if completed != current {
+                    logger.info("[zx6i] revalidation triggered for asset \(assetId): completed=\(String(describing: completed)) current=\(String(describing: current))")
+                    // Resolve `episodeDuration` from the persisted
+                    // asset row (the full-path stage 1 computes this
+                    // from decoded shards; the revalidation path skips
+                    // decode, so we read the cached value written by
+                    // playhead-5uvz.6's gap-7 fix to
+                    // `analysis_assets.episodeDurationSec`). If the
+                    // column is NULL we fall through to full analysis
+                    // — without a duration the classifier's per-span
+                    // position priors degrade, so a one-time full
+                    // re-analysis to repopulate the column is the
+                    // safest answer.
+                    let asset = try? await store.fetchAsset(id: assetId)
+                    if let duration = asset?.episodeDurationSec, duration > 0 {
+                        do {
+                            try await adDetection.revalidateFromFeatures(
+                                analysisAssetId: assetId,
+                                podcastId: request.podcastId,
+                                episodeDuration: duration,
+                                sessionId: nil
+                            )
+                            // Feature + transcript coverage are not
+                            // re-derived on the revalidation path; we
+                            // pass through the persisted asset's
+                            // existing watermarks so the scheduler's
+                            // tier-advancement bookkeeping sees the
+                            // same coverage it would have seen on a
+                            // no-op fall-through.
+                            return makeOutcome(
+                                assetId: assetId,
+                                request: request,
+                                featureCoverageSec: asset?.featureCoverageEndTime ?? 0,
+                                transcriptCoverageSec: asset?.fastTranscriptCoverageEndTime ?? 0,
+                                stopReason: .reachedTarget
+                            )
+                        } catch {
+                            logger.warning("[zx6i] revalidation failed for asset \(assetId): \(error.localizedDescription) — falling back to full analysis")
+                            // Intentional fall-through: a revalidation
+                            // failure should not be a user-visible
+                            // outage; the worst case is we redo work.
+                        }
+                    } else {
+                        logger.info("[zx6i] revalidation skipped for asset \(assetId): episodeDurationSec missing — falling back to full analysis")
+                    }
+                }
+            }
+        }
 
         // playhead-01t8: register with the preemption coordinator so a
         // higher-lane admission can flip our signal at its next safe

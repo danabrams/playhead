@@ -28,6 +28,17 @@ final class StubAdDetectionProvider: AdDetectionProviding, @unchecked Sendable {
     /// Cycle 4 H5: records the sessionId passed on each `runBackfill` call
     /// so regression tests can assert the coordinator threaded it through.
     var backfillSessionIds: [String?] = []
+    /// playhead-zx6i — counts every `revalidateFromFeatures` call so the
+    /// B4 short-circuit tests can assert the runner picked the
+    /// revalidation path over the full-analysis path.
+    var revalidateFromFeaturesCallCount = 0
+    /// playhead-zx6i — error to throw on the next `revalidateFromFeatures`
+    /// call, mirroring `backfillError` for failure-path coverage.
+    var revalidateFromFeaturesError: Error?
+    /// playhead-zx6i — records every `(assetId, podcastId, episodeDuration, sessionId)`
+    /// tuple passed to `revalidateFromFeatures` so tests can assert the
+    /// runner forwarded the parameters intact.
+    var revalidateFromFeaturesCalls: [(assetId: String, podcastId: String, episodeDuration: Double, sessionId: String?)] = []
 
     func runHotPath(chunks: [TranscriptChunk], analysisAssetId: String, episodeDuration: Double) async throws -> [AdWindow] {
         hotPathCallCount += 1
@@ -45,6 +56,22 @@ final class StubAdDetectionProvider: AdDetectionProviding, @unchecked Sendable {
         backfillCallCount += 1
         backfillSessionIds.append(sessionId)
         if let error = backfillError { throw error }
+    }
+
+    func revalidateFromFeatures(
+        analysisAssetId: String,
+        podcastId: String,
+        episodeDuration: Double,
+        sessionId: String?
+    ) async throws {
+        revalidateFromFeaturesCallCount += 1
+        revalidateFromFeaturesCalls.append((
+            assetId: analysisAssetId,
+            podcastId: podcastId,
+            episodeDuration: episodeDuration,
+            sessionId: sessionId
+        ))
+        if let error = revalidateFromFeaturesError { throw error }
     }
 }
 

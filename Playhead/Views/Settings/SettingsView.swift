@@ -203,6 +203,15 @@ struct SettingsView: View {
                     // from the persisted value so the toggle reflects
                     // ground truth, matching the 24cm pattern.
                     featureFlagValues["2hpn"] = pre.scopedMusicBedGeneralization
+                    // playhead-zx6i: B4 revalidation-from-features
+                    // flag — wired to `PreAnalysisConfig`. Initialize
+                    // from the persisted value so the toggle reflects
+                    // ground truth. Same "next-consumer-init"
+                    // rollback contract as 2hpn / xr3t —
+                    // `AnalysisJobRunner` reads the flag at
+                    // construction time (next app launch), not
+                    // per-job.
+                    featureFlagValues["zx6i"] = pre.b4RevalidationFromFeaturesEnabled
                 }
                 .task {
                     await viewModel.computeStorageSizes()
@@ -1521,9 +1530,10 @@ private extension SettingsView {
             //   row using `SettingsL274Copy.perShowCapabilityProfileLabel`
             //   when the producer API lands.
 
-            // Feature-flag toggles. `24cm`, `xr3t`, and `2hpn` are wired to
-            // real storage; `zx6i` and `43ed` remain placeholder shims
-            // until their beads close. The `2hpn` toggle persists to
+            // Feature-flag toggles. `24cm`, `xr3t`, `2hpn`, and `zx6i`
+            // are wired to real storage; only `43ed` remains a
+            // placeholder shim until its bead closes. The `2hpn` toggle
+            // persists to
             // `PreAnalysisConfig.scopedMusicBedGeneralization`; the new
             // value takes effect on the next `AdDetectionService` init
             // (next app launch) — `AdDetectionService` caches the config
@@ -1589,6 +1599,25 @@ private extension SettingsView {
                                 // corrected.)
                                 var config = PreAnalysisConfig.load()
                                 config.scopedMusicBedGeneralization = newValue
+                                config.save()
+                            } else if slug == "zx6i" {
+                                // playhead-zx6i: persist the B4
+                                // revalidation-from-features flag to
+                                // `PreAnalysisConfig`. The new value
+                                // takes effect on the next
+                                // `AnalysisJobRunner` init (next app
+                                // launch) — the runner captures the
+                                // flag via its
+                                // `b4RevalidationEnabledProvider`
+                                // closure at construction. Same
+                                // "next-consumer-init" rollback
+                                // contract as `2hpn` / `xr3t`. (NOT
+                                // `24cm`'s instant-apply contract;
+                                // there is no live mutator that can
+                                // re-thread the flag into an
+                                // already-running runner.)
+                                var config = PreAnalysisConfig.load()
+                                config.b4RevalidationFromFeaturesEnabled = newValue
                                 config.save()
                             }
                         }
