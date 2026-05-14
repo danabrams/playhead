@@ -109,11 +109,19 @@ enum ShowMusicBedProfileEvaluator {
     /// (`fw.startTime < startSliceEnd`) so the boost path and the hash
     /// path agree on what "inside the jingle region" means.
     ///
-    /// Outro suppression: when `episodeDuration < jingleSliceSeconds` the
-    /// outro region would otherwise start at a negative offset and
-    /// overlap every span; we suppress it the same way
-    /// `extractEpisodeJingleHashes` zeroes the end hash for short
-    /// episodes (no `outroStart > 0` → no outro overlap).
+    /// Outro suppression — symmetric with `extractEpisodeJingleHashes`:
+    /// the extractor emits `.zero` for the end hash whenever
+    /// `episodeDuration < 2 * jingleSliceSeconds` so the intro and outro
+    /// slices cannot overlap and a short episode does not double-count
+    /// the same audio in both. We MUST gate the outro overlap on the
+    /// same predicate, or — for 10 s ≤ duration < 20 s episodes —
+    /// `spanOverlapsJingleRegion` would claim a real outro overlap
+    /// while the show profile has no corresponding outro hash to match
+    /// against. R8 adversarial probe #12 fix: previously this branch
+    /// used `outroStart > 0` (duration > 10), which left a silent gap
+    /// where any 10–20 s span on a confirmed show received the 0.25
+    /// boost from "outro overlap" even though no outro hash exists. The
+    /// new predicate matches the extractor exactly.
     static func spanOverlapsJingleRegion(
         spanStart: Double,
         spanEnd: Double,
@@ -122,8 +130,11 @@ enum ShowMusicBedProfileEvaluator {
         guard episodeDuration > 0 else { return false }
         let slice = jingleSliceSeconds
         let overlapsIntro = spanStart < slice && spanEnd > 0
+        // Symmetric with `extractEpisodeJingleHashes`: outro only when
+        // the episode is long enough to host non-overlapping intro/outro
+        // slices. Same `>= 2 * jingleSliceSeconds` gate the extractor uses.
         let outroStart = episodeDuration - slice
-        let overlapsOutro = (outroStart > 0)
+        let overlapsOutro = (episodeDuration >= 2 * slice)
             && spanStart < episodeDuration
             && spanEnd > outroStart
         return overlapsIntro || overlapsOutro
@@ -170,10 +181,6 @@ enum ShowMusicBedProfileEvaluator {
         confirmationCount: Int,
         consecutiveMissCount: Int
     ) -> Mutation {
-        // showIdentifier is intentionally unused in the math today; see the
-        // doc comment above for the rationale. Swift does not warn on
-        // unused function parameters, so no discard is required.
-
         // Detect a match against the previously stored hash set. Zero
         // hashes (sentinel for "no derivable signal") never match —
         // they would otherwise collide with every other zero.

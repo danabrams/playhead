@@ -506,8 +506,15 @@ actor AdDetectionService {
     /// init from the persisted user config. Used by `runBackfill` to
     /// decide whether the scoped-music-bed-generalization flag is on
     /// for THIS process. Re-resolving inside the per-span loop would
-    /// be wasteful — the flag is process-stable.
-    private var preAnalysisConfig: PreAnalysisConfig = PreAnalysisConfig.load()
+    /// be wasteful — the flag is process-stable per-launch.
+    ///
+    /// Rollback latency: flipping the flag via Settings persists to
+    /// `UserDefaults` immediately but this cache is only refreshed at
+    /// the next `AdDetectionService` construction (i.e. next app
+    /// launch). This matches the documented rollback latency of the
+    /// other `PreAnalysisConfig`-backed flags (`24cm`, `xr3t`) per the
+    /// `SettingsView` toggle comment.
+    private let preAnalysisConfig: PreAnalysisConfig = PreAnalysisConfig.load()
 
     /// playhead-8em9 (narL): Optional decision logger for offline replay.
     /// DEBUG-only; release builds keep the `NoOpDecisionLogger` default so
@@ -830,14 +837,6 @@ actor AdDetectionService {
     /// Mirrors `setEpisodeMetadataProvider`.
     func setShowMusicBedProfileStore(_ store: any ShowMusicBedProfileResolving) {
         self.showMusicBedProfileStore = store
-    }
-
-    /// playhead-2hpn: Override the cached `PreAnalysisConfig` snapshot.
-    /// Production reads the persisted config at init; tests use this to
-    /// flip the `scopedMusicBedGeneralization` flag on/off without
-    /// touching `UserDefaults`.
-    func setPreAnalysisConfig(_ config: PreAnalysisConfig) {
-        self.preAnalysisConfig = config
     }
 
     // MARK: - playhead-gtt9.16: AcousticFeaturePipeline accessors

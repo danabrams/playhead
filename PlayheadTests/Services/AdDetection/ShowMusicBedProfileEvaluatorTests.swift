@@ -383,6 +383,46 @@ struct ShowMusicBedProfileEvaluatorTests {
         ) == true)
     }
 
+    @Test("medium episode (jingleSliceSeconds ≤ duration < 2 * jingleSliceSeconds) suppresses outro overlap")
+    func mediumEpisodeOutroSuppressed() {
+        // R8 adversarial probe #12: for episodes in the gap region
+        // 10 s ≤ duration < 20 s, `extractEpisodeJingleHashes` emits
+        // `.zero` for the end hash because the intro + outro slices
+        // would overlap. `spanOverlapsJingleRegion` MUST suppress the
+        // outro overlap by the same predicate or the boost path can
+        // fire on a "matched outro" the show profile never recorded a
+        // hash for. Pre-R8, the 15-s case below would have returned
+        // `true` (outroStart = 5 > 0) — a silent correctness gap.
+        //
+        // Episode 15 s; outroStart = 5; intro slice = [0, 10).
+        // A 12–14 s span is OUTSIDE the intro slice (12 ≥ 10) so the
+        // ONLY overlap could come from a real outro, which is suppressed
+        // for this duration. Expected: no overlap.
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 12,
+            spanEnd: 14,
+            episodeDuration: 15
+        ) == false,
+                "12–14 s span on a 15 s episode must not match a (non-existent) outro slice")
+        // A 1–4 s span on the same episode is squarely inside intro
+        // and must STILL match — only outro should suppress.
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 1,
+            spanEnd: 4,
+            episodeDuration: 15
+        ) == true,
+                "Intro overlap must still fire on a medium-length episode")
+        // Exact boundary: duration == 2 * jingleSliceSeconds (20 s) —
+        // outro slice [10, 20) is now non-overlapping with intro
+        // [0, 10), so an 18-s span MUST overlap the outro.
+        #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(
+            spanStart: 15,
+            spanEnd: 18,
+            episodeDuration: 20
+        ) == true,
+                "At duration == 2 * jingleSliceSeconds the outro slice exists and must match")
+    }
+
     @Test("zero-or-negative episode duration never overlaps")
     func zeroDurationNeverOverlaps() {
         #expect(ShowMusicBedProfileEvaluator.spanOverlapsJingleRegion(

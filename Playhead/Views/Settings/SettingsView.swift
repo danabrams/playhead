@@ -188,15 +188,21 @@ struct SettingsView: View {
                     // and applied live via `DownloadManager`), so
                     // initialize its toggle value from the persisted
                     // config rather than the `FeatureFlagPlaceholders`
-                    // default. The other four slugs remain placeholder
-                    // shims until their beads land.
-                    featureFlagValues["24cm"] = PreAnalysisConfig.load().useDualBackgroundSessions
+                    // default. The remaining placeholder slugs (zx6i,
+                    // 43ed) stay shims until their beads land.
+                    let pre = PreAnalysisConfig.load()
+                    featureFlagValues["24cm"] = pre.useDualBackgroundSessions
                     // playhead-xr3t: the xr3t flag is wired to real
                     // storage (LightweightInventoryChecksSettings) and
                     // defaults ON per spec. Initialize from the
                     // persisted value so the Diagnostics toggle
                     // reflects ground truth on every appearance.
                     featureFlagValues["xr3t"] = LightweightInventoryChecksSettings.load().enabled
+                    // playhead-2hpn: scoped-music-bed-generalization
+                    // flag — wired to `PreAnalysisConfig`. Initialize
+                    // from the persisted value so the toggle reflects
+                    // ground truth, matching the 24cm pattern.
+                    featureFlagValues["2hpn"] = pre.scopedMusicBedGeneralization
                 }
                 .task {
                     await viewModel.computeStorageSizes()
@@ -1515,12 +1521,14 @@ private extension SettingsView {
             //   row using `SettingsL274Copy.perShowCapabilityProfileLabel`
             //   when the producer API lands.
 
-            // Feature-flag toggles. `24cm` is wired to real storage
-            // (`PreAnalysisConfig.useDualBackgroundSessions`) and applied
-            // to the live `DownloadManager` on change. The other four
-            // slugs are placeholder shims that persist to in-memory state
-            // only — their real storage lands with their respective beads
-            // (xr3t, zx6i, 2hpn, 43ed). All default OFF per spec.
+            // Feature-flag toggles. `24cm`, `xr3t`, and `2hpn` are wired to
+            // real storage; `zx6i` and `43ed` remain placeholder shims
+            // until their beads close. The `2hpn` toggle persists to
+            // `PreAnalysisConfig.scopedMusicBedGeneralization`; the new
+            // value takes effect on the next `AdDetectionService` init
+            // (next app launch) — `AdDetectionService` caches the config
+            // snapshot at init time per its doc comment, matching the
+            // 24cm/xr3t rollback latency. All default OFF per spec.
             DisclosureGroup(SettingsL274Copy.featureFlagsLabel) {
                 ForEach(FeatureFlagPlaceholders.orderedSlugs, id: \.self) { slug in
                     Toggle(isOn: Binding(
@@ -1546,6 +1554,19 @@ private extension SettingsView {
                                 // matches the 24cm/PreAnalysisConfig
                                 // rollback latency.
                                 LightweightInventoryChecksSettings(enabled: newValue).save()
+                            } else if slug == "2hpn" {
+                                // playhead-2hpn: persist the
+                                // scoped-music-bed-generalization flag
+                                // to `PreAnalysisConfig`. The new value
+                                // takes effect on the next
+                                // `AdDetectionService` init (next app
+                                // launch) — the service caches the
+                                // config snapshot at init time per its
+                                // doc comment. Same rollback-latency
+                                // contract as 24cm/xr3t.
+                                var config = PreAnalysisConfig.load()
+                                config.scopedMusicBedGeneralization = newValue
+                                config.save()
                             }
                         }
                     )) {
