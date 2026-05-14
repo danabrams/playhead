@@ -35,6 +35,14 @@ enum SwiftDataStore {
             // upgraded install observes the entity but no rows until
             // the feature flag is on AND a grant window completes.
             LearnedDeviceProfile.self,
+            // playhead-h6a6: per-show capability profile observed by
+            // the scheduler / detection ensemble. Additive entity; the
+            // row is provisioned lazily by `ShowCapabilityProfileStore`
+            // on the first analysis-completed episode for a show, but
+            // ONLY when the `showCapabilityProfilesEnabled` flag is on.
+            // Flag-off installs observe the empty table on every
+            // launch.
+            ShowCapabilityProfile.self,
         ])
     }
 
@@ -124,6 +132,14 @@ enum PlayheadSchemaV1: VersionedSchema {
             // replaced with a frozen type snapshot once V2 is
             // introduced (see MIGRATION WARNING above).
             LearnedDeviceProfile.self,
+            // playhead-h6a6: additive new entity for the per-show
+            // capability profile. Same additive-to-V1 rationale:
+            // existing installs observe an empty table until the
+            // `showCapabilityProfilesEnabled` flag is on AND the
+            // evaluator first writes a profile. Must be replaced with
+            // a frozen type snapshot once V2 is introduced (see
+            // MIGRATION WARNING above).
+            ShowCapabilityProfile.self,
         ]
     }
 }

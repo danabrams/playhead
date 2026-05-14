@@ -60,6 +60,50 @@ enum SettingsL274Copy {
     static let featureSchemaVersionLabel: String = "Feature-schema version"
     static let schedulerEventsLabel: String = "Last 50 scheduler events"
     static let perShowCapabilityProfileLabel: String = "Per-show capability profile"
+    /// Empty-state caption rendered inside the "Per-show capability profile"
+    /// DisclosureGroup when no profiles have been persisted yet. Hoisted
+    /// here (rather than inlined in `SettingsView`) per the file-header
+    /// invariant: "do not inline any of these literals into the SwiftUI
+    /// body directly". Verbatim — pinned by
+    /// `SettingsL274CopyTests.perShowCapabilityProfileEmptyCaption`.
+    static let perShowCapabilityProfileEmptyCaption: String = "Unknown — no observations yet."
+    /// Middle-dot separator joining the truncated show identifier and the
+    /// completed-episode count in the per-show capability-profile row.
+    /// User-visible copy fragment — must NOT be inlined into the SwiftUI
+    /// body per the file-header rule. Pinned verbatim by
+    /// `SettingsL274CopyTests.perShowCapabilityProfileRowSeparator`.
+    static let perShowCapabilityProfileRowSeparator: String = " · "
+    /// Singular suffix for the completed-episode count in the per-show
+    /// capability-profile row when the snapshot reports exactly one
+    /// completed episode. Pinned verbatim by
+    /// `SettingsL274CopyTests.perShowCapabilityProfileEpisodeSuffix`.
+    static let perShowCapabilityProfileEpisodeSuffixSingular: String = " episode"
+    /// Plural suffix for the completed-episode count in the per-show
+    /// capability-profile row when the snapshot reports zero or two-or-more
+    /// completed episodes. Pinned verbatim by
+    /// `SettingsL274CopyTests.perShowCapabilityProfileEpisodeSuffix`.
+    static let perShowCapabilityProfileEpisodeSuffixPlural: String = " episodes"
+
+    /// Compose the per-show capability-profile row's caption from the
+    /// truncated show identifier and a completed-episode count. Hoisted
+    /// out of the SwiftUI body so the user-visible separator and noun
+    /// suffix are test-pinned (callers must not assemble the caption
+    /// inline). The 40-character prefix truncation matches the
+    /// scheduler-event row's hash-prefix pattern; the singular/plural
+    /// switch keeps the caption grammatical when a show has exactly one
+    /// observation (otherwise the row would read "… · 1 episodes").
+    /// Verbatim — pinned by
+    /// `SettingsL274CopyTests.perShowCapabilityProfileRowCaption`.
+    static func perShowCapabilityProfileRowCaption(
+        showIdentifier: String,
+        completedEpisodeCount: Int
+    ) -> String {
+        let truncatedIdentifier = String(showIdentifier.prefix(40))
+        let suffix = (completedEpisodeCount == 1)
+            ? perShowCapabilityProfileEpisodeSuffixSingular
+            : perShowCapabilityProfileEpisodeSuffixPlural
+        return "\(truncatedIdentifier)\(perShowCapabilityProfileRowSeparator)\(completedEpisodeCount)\(suffix)"
+    }
     static let featureFlagsLabel: String = "Feature flags (rollback)"
     static let sendDiagnosticsButtonLabel: String = "Send diagnostics"
     static let exportDogfoodLogsButtonLabel: String = "Export dogfood logs"

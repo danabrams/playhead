@@ -532,6 +532,45 @@ actor AdDetectionService {
     /// episode and writes back the post-episode mutation.
     private(set) var showMusicBedProfileStore: (any ShowMusicBedProfileResolving)?
 
+    /// playhead-h6a6: Optional per-show capability-profile store. When
+    /// `nil` (default — production wiring may leave unset; tests that
+    /// don't exercise the flag pass `nil`), the capability-profile
+    /// code path is fully disabled regardless of the
+    /// `showCapabilityProfilesEnabled` flag. Mirrors the music-bed
+    /// store seam above: mutable so the runtime can install a
+    /// SwiftData-backed implementation post-init via
+    /// `setShowCapabilityProfileStore(_:)`. When the store is wired
+    /// AND the flag is ON, `runBackfill` reads the snapshot once at
+    /// the start of the run (to derive the budget adjustment) and
+    /// writes back the per-episode outcome once at the end of the
+    /// run.
+    private(set) var showCapabilityProfileStore: (any ShowCapabilityProfileResolving)?
+
+    /// playhead-h6a6: Caller-supplied predicate that returns `true`
+    /// iff the show's cohort has Phase-2 SLIs within defended bounds
+    /// per playhead-d99. The runtime owns the SLI ledger lookup; this
+    /// closure is the seam through which it's read. Defaults to
+    /// `{ _ in false }` so a service constructed WITHOUT an SLI
+    /// predicate keeps the profile pinned at `.unknown` (the
+    /// activation floor is conservatively un-met). Tests that want to
+    /// exercise the observed-profile path inject a `{ _ in true }`
+    /// predicate. Mutable so the runtime can install the live
+    /// predicate post-init.
+    private(set) var capabilityProfileSLIGate: ShowCapabilitySLIGate = { _ in false }
+
+    /// playhead-h6a6: Most recent capability-budget adjustment
+    /// resolved for a `runBackfill` invocation. Overwritten at the
+    /// start of each backfill (via the read-path block in
+    /// `runBackfill`) so stale adjustments from a prior run cannot
+    /// leak into a fresh one. Initial value is the `.unknown`-yielded
+    /// baseline (multiplier 1.0, empty bias map) so a read BEFORE
+    /// the first backfill is the no-modulation no-op. Flag-OFF runs
+    /// resolve to the same `.unknown`-yielded value (the snapshot is
+    /// nil, the resolved kind is `.unknown`). Test-observable via
+    /// `lastCapabilityBudgetAdjustmentForTesting()`.
+    private var lastCapabilityBudgetAdjustment: ShowCapabilityBudgetAdjustment =
+        ShowCapabilityBudgetModulator.adjustment(for: .unknown)
+
     /// playhead-2hpn: Cached snapshot of `PreAnalysisConfig` resolved at
     /// init from the persisted user config. Used by `runBackfill` to
     /// decide whether the scoped-music-bed-generalization flag is on
@@ -874,6 +913,49 @@ actor AdDetectionService {
     /// Mirrors `setEpisodeMetadataProvider`.
     func setShowMusicBedProfileStore(_ store: any ShowMusicBedProfileResolving) {
         self.showMusicBedProfileStore = store
+    }
+
+    /// playhead-h6a6: Install the per-show capability-profile store
+    /// post-init. Mirrors `setShowMusicBedProfileStore`. The
+    /// flag-off path NEVER reads from or writes to this store, so
+    /// installing it is safe whether or not the
+    /// `showCapabilityProfilesEnabled` flag is on. The runtime calls
+    /// this once on cold-start after the `ModelContainer` is alive.
+    func setShowCapabilityProfileStore(_ store: any ShowCapabilityProfileResolving) {
+        self.showCapabilityProfileStore = store
+    }
+
+    /// playhead-h6a6: Install the Phase-2 SLI gate predicate
+    /// post-init. The predicate returns `true` iff the show's cohort
+    /// has Phase-2 SLIs within defended bounds per playhead-d99.
+    /// Without an installed gate the service treats every show as
+    /// "SLIs not in bounds" — the conservative default that keeps
+    /// the profile pinned at `.unknown` until an explicit gate is
+    /// installed by the runtime.
+    func setCapabilityProfileSLIGate(_ gate: @escaping ShowCapabilitySLIGate) {
+        self.capabilityProfileSLIGate = gate
+    }
+
+    /// playhead-h6a6: Test seam returning the most recent
+    /// capability-budget adjustment resolved in `runBackfill`. Flag-
+    /// OFF runs leave this at the `.unknown`-yielded baseline
+    /// (multiplier 1.0, empty bias map) — the no-modulation no-op
+    /// contract. Pre-backfill (before the first `runBackfill` ever
+    /// runs) the value is also the `.unknown` baseline, pinned by
+    /// the init-seed on `lastCapabilityBudgetAdjustment` (line 541).
+    ///
+    /// h6a6 R4: the init-seed half of the contract is asserted by
+    /// `ShowCapabilityBudgetModulatorTests
+    /// .adDetectionServiceInitSeedsUnknownBaseline`. The full
+    /// flag-on / runBackfill-driven behavioral contract ("modulator
+    /// applied when flag on + profile observed; pass-through when
+    /// flag off") will be asserted via this seam by the follow-on
+    /// consumer bead that wires the multiplier into the per-episode
+    /// budget — at which point a runBackfill-driven test on a
+    /// synthetic `ShowCapabilityProfileResolving` can assert both
+    /// the stamp and its consumption in one fixture.
+    func lastCapabilityBudgetAdjustmentForTesting() -> ShowCapabilityBudgetAdjustment {
+        lastCapabilityBudgetAdjustment
     }
 
     // MARK: - playhead-gtt9.16: AcousticFeaturePipeline accessors
@@ -2128,6 +2210,44 @@ actor AdDetectionService {
             showMusicBedSnapshot = nil
         }
 
+        // playhead-h6a6 (read path): resolve the per-show capability
+        // profile ONCE per backfill so every consumer sees the same
+        // adjustment snapshot. Flag-off, missing-store, missing-podcastId,
+        // and "no profile observed yet" all short-circuit to the
+        // `.unknown`-yielded baseline (multiplier 1.0, empty bias map)
+        // — the no-modulation no-op contract. The adjustment is
+        // exposed via `lastCapabilityBudgetAdjustmentForTesting()` so
+        // the behavioral contract (modulation applied iff flag-ON +
+        // profile observed) can be asserted directly.
+        let capabilityProfilesEnabled = preAnalysisConfig.showCapabilityProfilesEnabled
+        let capabilitySnapshot: ShowCapabilityProfileSnapshot?
+        if capabilityProfilesEnabled,
+           !podcastId.isEmpty,
+           let store = showCapabilityProfileStore {
+            capabilitySnapshot = await store.snapshot(showIdentifier: podcastId)
+        } else {
+            capabilitySnapshot = nil
+        }
+        // Resolve the budget adjustment. A `nil` snapshot OR a
+        // snapshot whose kind is `.unknown` BOTH yield the
+        // no-modulation baseline — there is no other path that
+        // produces a non-unity multiplier when the flag is off, and
+        // pinning the kind to `.unknown` (by an out-of-bounds SLI
+        // gate, or a sub-floor episode count) deterministically
+        // disables modulation even when the flag is on. The
+        // `.unknown` no-op contract is pinned in
+        // `ShowCapabilityBudgetModulatorTests.unknownIsBaseline`.
+        let resolvedKind: ShowCapabilityProfileKind =
+            capabilitySnapshot?.kind ?? .unknown
+        lastCapabilityBudgetAdjustment = ShowCapabilityBudgetModulator.adjustment(
+            for: resolvedKind
+        )
+        if capabilityProfilesEnabled, resolvedKind != .unknown {
+            logger.info(
+                "[h6a6] show=\(podcastId, privacy: .public) profile=\(resolvedKind.rawValue, privacy: .public) multiplier=\(self.lastCapabilityBudgetAdjustment.analysisBudgetMultiplier)"
+            )
+        }
+
         // playhead-arf8: reset per-backfill bracket-refinement counts and
         // resolve the per-show music-bracket trust once per run. The store
         // backs onto the same `AnalysisStore` as everything else; lookup is
@@ -2741,6 +2861,17 @@ actor AdDetectionService {
         // We log a single `[2hpn]` marker so dogfood can grep activation
         // and see the post-update confirmation count / miss count without
         // scraping per-window logs.
+        //
+        // h6a6 R1 review fix: hoist `updatedMusicBedSnapshot` so the
+        // downstream h6a6 write can consume the POST-2hpn-write
+        // `isConfirmed` (rather than the stale `showMusicBedSnapshot`
+        // captured at the TOP of runBackfill). Without this hoist, the
+        // episode that flipped 2hpn from unconfirmed→confirmed would
+        // record `musicBedConfirmed=false` against h6a6, and the user
+        // would only see `.musicBedReliable` observed on the FOLLOWING
+        // episode's backfill — surfacing the classification one episode
+        // later than the 2hpn state would suggest.
+        var updatedMusicBedSnapshot: ShowMusicBedProfileSnapshot?
         if scopedMusicBedEnabled,
            !podcastId.isEmpty,
            let store = showMusicBedProfileStore,
@@ -2754,8 +2885,64 @@ actor AdDetectionService {
                 outcome: outcome,
                 now: Date()
             )
+            updatedMusicBedSnapshot = updated
             logger.info(
                 "[2hpn] show=\(podcastId, privacy: .public) confirmed=\(updated.isConfirmed) confirmationCount=\(updated.confirmationCount) missCount=\(updated.consecutiveMissCount) storedHashes=\(updated.confirmedJingleHashes.count)"
+            )
+        }
+
+        // playhead-h6a6 (write path): once per episode, after all
+        // spans have been scored and persisted, push this episode's
+        // capability observations into the show's profile. Gated by
+        // the same `showCapabilityProfilesEnabled` flag + non-empty
+        // `podcastId` + installed store as the read path so flag-OFF
+        // behavior is byte-identical to pre-h6a6 (no store mutation,
+        // no allocation). The SLI gate is consulted INSIDE the
+        // evaluator's `classify(...)` — passing the closure here
+        // gives the evaluator access to it without coupling the
+        // store to the SLI ledger directly.
+        //
+        // The capability observations for THIS bead are minimal: we
+        // record the all-false sentinel outcome
+        // (`ShowCapabilityEpisodeOutcome.nothingObserved`) plus the
+        // music-bed confirmation signal threaded from the POST-2hpn-
+        // write snapshot (falling back to the pre-write snapshot when
+        // the 2hpn write didn't happen — flag off, store missing, or
+        // zero-duration episode — so the read still reflects the
+        // freshest available 2hpn state). The chapter-matched /
+        // host-voiced / sponsor-declared / dynamic-insertion-shift
+        // signals are wired by follow-on beads as those producers
+        // stabilize their outputs; the schema is in place today so
+        // adding the producers does NOT require a migration. The
+        // activation-floor and SLI-gate contracts are already enforced
+        // by `ShowCapabilityProfileEvaluator.classify(...)`, so the
+        // music-bed-reliable predicate is the live observation path
+        // exercised end-to-end as of this bead.
+        //
+        // h6a6 R1 review fix: prefer `updatedMusicBedSnapshot?
+        // .isConfirmed` over `showMusicBedSnapshot?.isConfirmed`. The
+        // top-of-backfill snapshot is the PRE-write value; the
+        // post-write value is the one the user-visible 2hpn state
+        // would surface. Using the stale value would surface the
+        // capability profile one episode late on the transition.
+        if capabilityProfilesEnabled,
+           !podcastId.isEmpty,
+           let capabilityStore = showCapabilityProfileStore {
+            let outcome = ShowCapabilityEpisodeOutcome.nothingObserved
+            let musicBedConfirmed =
+                updatedMusicBedSnapshot?.isConfirmed
+                ?? showMusicBedSnapshot?.isConfirmed
+                ?? false
+            let gate = capabilityProfileSLIGate
+            let updated = await capabilityStore.recordEpisodeOutcome(
+                showIdentifier: podcastId,
+                outcome: outcome,
+                musicBedConfirmed: musicBedConfirmed,
+                sliGate: gate,
+                now: Date()
+            )
+            logger.info(
+                "[h6a6] show=\(podcastId, privacy: .public) kind=\(updated.kind.rawValue, privacy: .public) completed=\(updated.completedEpisodeCount) musicBedConfirmed=\(musicBedConfirmed)"
             )
         }
 

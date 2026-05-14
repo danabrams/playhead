@@ -156,6 +156,139 @@ struct SettingsL274CopyTests {
         #expect(SettingsL274Copy.perShowCapabilityProfileLabel == "Per-show capability profile")
     }
 
+    @Test func perShowCapabilityProfileEmptyCaption() {
+        // h6a6 R8 review gap: the empty-state caption rendered inside the
+        // "Per-show capability profile" DisclosureGroup is a user-visible
+        // string that lived as an inline `Text("…")` literal in
+        // `SettingsView`. The SettingsL274 file header explicitly forbids
+        // inline literals ("do not inline any of these literals into the
+        // SwiftUI body directly"), and R7 pinned the six profile-kind
+        // labels but missed this companion caption. R8 hoists the string
+        // to `SettingsL274Copy` and pins it verbatim so a copy edit
+        // (e.g. en-dash → hyphen, missing trailing period) forces an
+        // intentional test update.
+        #expect(
+            SettingsL274Copy.perShowCapabilityProfileEmptyCaption
+                == "Unknown — no observations yet."
+        )
+    }
+
+    @Test func perShowCapabilityProfileRowSeparator() {
+        // h6a6 R9 review gap: the per-show capability-profile row caption
+        // joined the truncated identifier and the completed-episode count
+        // with an inline " · " literal. That mid-dot separator IS
+        // user-visible copy; R8's empty-state extraction pattern applies
+        // here too. Pin the separator string verbatim so a font-driven
+        // edit (e.g. ASCII " * ", " | ") forces a test update.
+        #expect(SettingsL274Copy.perShowCapabilityProfileRowSeparator == " · ")
+    }
+
+    @Test func perShowCapabilityProfileEpisodeSuffix() {
+        // h6a6 R9: the noun suffix attached to the completed-episode
+        // count is user-visible copy. The singular/plural split avoids
+        // the grammar bug the prior inline literal had ("… · 1
+        // episodes"). Pinning verbatim so future copy edits force an
+        // intentional test update.
+        #expect(SettingsL274Copy.perShowCapabilityProfileEpisodeSuffixSingular == " episode")
+        #expect(SettingsL274Copy.perShowCapabilityProfileEpisodeSuffixPlural == " episodes")
+    }
+
+    @Test func perShowCapabilityProfileRowCaption() {
+        // h6a6 R9: pin the composed caption for the three boundary cases
+        // (singular, plural, zero) AND the 40-character identifier
+        // truncation so the row's rendered string can never silently
+        // drift. The composition routes the separator + suffix from the
+        // copy namespace, so changing any of the four pinned fragments
+        // breaks both this test and the per-fragment tests above —
+        // localizing the failure to the exact field that drifted.
+        #expect(
+            SettingsL274Copy.perShowCapabilityProfileRowCaption(
+                showIdentifier: "show-A",
+                completedEpisodeCount: 1
+            ) == "show-A · 1 episode"
+        )
+        #expect(
+            SettingsL274Copy.perShowCapabilityProfileRowCaption(
+                showIdentifier: "show-A",
+                completedEpisodeCount: 5
+            ) == "show-A · 5 episodes"
+        )
+        #expect(
+            SettingsL274Copy.perShowCapabilityProfileRowCaption(
+                showIdentifier: "show-A",
+                completedEpisodeCount: 0
+            ) == "show-A · 0 episodes",
+            "Zero completed episodes must use the plural suffix (English convention)."
+        )
+        // 40-character truncation matches the scheduler-event row's
+        // hash-prefix pattern (`SettingsView.capabilityProfileRow`
+        // comment). A 41-character identifier should drop its 41st
+        // character before the separator.
+        let longIdentifier = String(repeating: "x", count: 41)
+        let truncated = String(repeating: "x", count: 40)
+        #expect(
+            SettingsL274Copy.perShowCapabilityProfileRowCaption(
+                showIdentifier: longIdentifier,
+                completedEpisodeCount: 5
+            ) == "\(truncated) · 5 episodes",
+            "Identifiers longer than 40 characters must truncate to the first 40."
+        )
+    }
+
+    @Test func perShowCapabilityProfileRowCaptionGraphemeBoundary() {
+        // h6a6 R10 review gap: the row-caption truncation routes through
+        // `String.prefix(40)`, which operates on `Character` (extended
+        // grapheme clusters) — emojis and combining marks count as ONE
+        // character regardless of underlying UTF-8 byte count. If a
+        // future refactor swaps `prefix(40)` for a UTF-8-byte or
+        // Unicode-scalar prefix, an emoji at the 40-character boundary
+        // could split mid-codepoint and render mojibake. Pin the
+        // grapheme-safe contract for an emoji-leading identifier so
+        // such a regression is a loud test failure rather than a
+        // user-visible glyph corruption.
+        //
+        // Test vector: a single emoji (3-glyph "family" character)
+        // followed by 39 ASCII chars = exactly 40 graphemes. The
+        // caption must contain the emoji intact + all 39 ASCII chars +
+        // the separator/count fragments.
+        let familyEmoji = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}" // 👨‍👩‍👧 (one grapheme)
+        let asciiTail = String(repeating: "a", count: 39)
+        let identifier = familyEmoji + asciiTail + "EXTRA-must-be-dropped"
+        let caption = SettingsL274Copy.perShowCapabilityProfileRowCaption(
+            showIdentifier: identifier,
+            completedEpisodeCount: 3
+        )
+        // Expected prefix: the emoji intact + 39 'a's.
+        let expectedPrefix = familyEmoji + asciiTail
+        #expect(
+            caption == "\(expectedPrefix) · 3 episodes",
+            "Truncation must operate on extended grapheme clusters so emojis are never split"
+        )
+        // Belt-and-braces: the caption MUST contain the full emoji
+        // sequence and MUST NOT contain the trailing "EXTRA-..." suffix.
+        #expect(caption.contains(familyEmoji))
+        #expect(!caption.contains("EXTRA"))
+    }
+
+    @Test func showCapabilityProfileKindDisplayLabels() {
+        // h6a6 R7 review gap: `ShowCapabilityProfileKind.displayLabel`
+        // strings are rendered verbatim by `SettingsView
+        // .capabilityProfileRow(_:)`. The model's doc comment
+        // (`ShowCapabilityProfile.swift` `displayLabel`) explicitly
+        // claims these are "test-pinned in `SettingsL274CopyTests`",
+        // but no test actually pinned them before this round. A
+        // regression renaming any of the six user-visible labels
+        // (e.g. "Chapter-rich" → "Chapter rich") would silently flip
+        // Settings copy. Pinning verbatim so a copy edit forces an
+        // intentional test update.
+        #expect(ShowCapabilityProfileKind.unknown.displayLabel == "Unknown")
+        #expect(ShowCapabilityProfileKind.chapterRich.displayLabel == "Chapter-rich")
+        #expect(ShowCapabilityProfileKind.hostReadOnly.displayLabel == "Host-read only")
+        #expect(ShowCapabilityProfileKind.musicBedReliable.displayLabel == "Music-bed reliable")
+        #expect(ShowCapabilityProfileKind.sponsorDeclared.displayLabel == "Sponsor-declared")
+        #expect(ShowCapabilityProfileKind.dynamicInsertionHeavy.displayLabel == "Dynamic-insertion heavy")
+    }
+
     @Test func featureFlagsLabel() {
         #expect(SettingsL274Copy.featureFlagsLabel == "Feature flags (rollback)")
     }

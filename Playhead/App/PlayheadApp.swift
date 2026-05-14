@@ -290,6 +290,50 @@ struct PlayheadApp: App {
                         showMusicBedProfileStore
                     )
 
+                    // playhead-h6a6: install the SwiftData-backed
+                    // `ShowCapabilityProfileStore` on the
+                    // AdDetectionService so the capability-profile
+                    // read path can resolve the per-show observed
+                    // kind, and the post-backfill write path can
+                    // advance the per-show counters. Wiring follows
+                    // the same pattern as the music-bed store above:
+                    // the store is installed unconditionally so that
+                    // once the `showCapabilityProfilesEnabled` flag
+                    // is effective at next `AdDetectionService`
+                    // init, each backfill resolves the latest
+                    // persisted profile. The flag itself is cached
+                    // at init time per the `preAnalysisConfig` doc —
+                    // a user-driven flip in Settings takes effect on
+                    // the next app launch, identical to the 2hpn /
+                    // xr3t rollback contract.
+                    //
+                    // The SLI gate (Phase-2 SLIs per playhead-d99)
+                    // is wired with a conservative default
+                    // (`{ _ in false }`) on `AdDetectionService`. A
+                    // future bead lands the live cohort-aware gate
+                    // here by calling
+                    // `runtime.adDetectionService
+                    // .setCapabilityProfileSLIGate(_:)` with a closure
+                    // that reads playhead-d99's SLI ledger; until
+                    // then the floor stays un-met and the profile
+                    // stays `.unknown`, which keeps the budget
+                    // modulator at its no-op baseline. This is the
+                    // desired behavior — observation should not run
+                    // ahead of the SLI ledger's confidence. h6a6 R5
+                    // discoverability fix: previously this comment
+                    // described the future hook abstractly ("future
+                    // bead lands the live cohort-aware gate here")
+                    // without naming the setter; future implementers
+                    // grepping for "SLI gate" or
+                    // "setCapabilityProfileSLIGate" now find this
+                    // call site directly.
+                    let showCapabilityProfileStore = ShowCapabilityProfileStore(
+                        modelContainer: modelContainer
+                    )
+                    await runtime.adDetectionService.setShowCapabilityProfileStore(
+                        showCapabilityProfileStore
+                    )
+
                     // playhead-5c1t: cold-start hop for iCloud sync.
                     // Once the ModelContainer is available we ask the
                     // coordinator for the server-side subscription set
