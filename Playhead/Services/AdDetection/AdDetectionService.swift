@@ -2566,10 +2566,34 @@ actor AdDetectionService {
         // Phase 6.5 (playhead-4my.16): wires fusion output to the orchestrator so
         // Phase 7 (UserCorrections) has banner impressions + skip cues to correct.
         // The orchestrator guards on activeAssetId and eligibilityGate internally.
-        if let orchestrator = skipOrchestrator, !fusionDecisionResults.isEmpty {
-            await orchestrator.receiveAdDecisionResults(fusionDecisionResults)
-            let eligibleCount = fusionDecisionResults.filter { $0.eligibilityGate == .eligible }.count
-            logger.info("Backfill: forwarded \(fusionDecisionResults.count) fusion results (\(eligibleCount) eligible) to SkipOrchestrator")
+        if let orchestrator = skipOrchestrator {
+            // playhead-xr3t: push the inventory-sanity-filter context
+            // (declared chapters + episode duration) to the orchestrator
+            // BEFORE forwarding the fusion decisions, so the filter has
+            // the up-to-date context when each span is evaluated. The
+            // orchestrator drops mismatched-asset pushes silently
+            // (asset-switch race guard), so an out-of-order delivery
+            // during an episode change is benign.
+            //
+            // We push unconditionally even when `fusionDecisionResults`
+            // is empty: a future hot-path push using the AdWindow path
+            // can still benefit from refreshed chapter / duration
+            // state, and the setters are pure assignment + a guard
+            // check (cheap).
+            await orchestrator.setDeclaredChapters(
+                assetChapterEvidence,
+                analysisAssetId: analysisAssetId
+            )
+            await orchestrator.setEpisodeDuration(
+                episodeDuration,
+                analysisAssetId: analysisAssetId
+            )
+
+            if !fusionDecisionResults.isEmpty {
+                await orchestrator.receiveAdDecisionResults(fusionDecisionResults)
+                let eligibleCount = fusionDecisionResults.filter { $0.eligibilityGate == .eligible }.count
+                logger.info("Backfill: forwarded \(fusionDecisionResults.count) fusion results (\(eligibleCount) eligible) to SkipOrchestrator")
+            }
         }
 
         // ── Post-pipeline: priors + coverage watermark ────────────────────────
