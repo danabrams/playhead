@@ -484,6 +484,58 @@ struct AdaptiveDeviceProfileEstimatorTests {
         #expect(healed.persistedScaleFactor == 1.0, "scale factor pins back to 1.0 on heal")
     }
 
+    @Test("apply coerces a corrupt (non-finite) lastNotchChangeAt to nil so the rate limit does not silently fail open")
+    func testCorruptLastNotchChangeAtCoercedToNil() {
+        // R6: a SwiftData row with a NaN-Date `lastNotchChangeAt`
+        // would make `timeIntervalSince(...)` return NaN, and
+        // `NaN < notchWindowSeconds` is false, so the rate-limit guard
+        // would silently FAIL OPEN — the next observation could
+        // freely advance the notch even though "less than 24h" since
+        // the previous one. The sanitization coerces the corrupt date
+        // to `nil` (treated as "no prior notch change"). The first
+        // observation after the heal is permitted to notch once;
+        // subsequent observations within the window are blocked
+        // normally. This proves the rate-limit invariant is restored
+        // after one observation rather than indefinitely bypassed.
+        var corrupt = Self.apply(observations: 30, value: 90, to: Self.freshState())
+        #expect(corrupt.lastNotchChangeAt != nil)
+        // Mint a corrupt Date with a non-finite reference value.
+        corrupt.lastNotchChangeAt = Date(timeIntervalSinceReferenceDate: .nan)
+
+        let firstAfter = GrantWindowObservation(
+            grantWindowSeconds: 90,
+            observedAt: Self.referenceDate.addingTimeInterval(31 * 60)
+        )
+        let (afterFirst, firstResult) = AdaptiveDeviceProfileEstimator.apply(
+            observation: firstAfter, to: corrupt
+        )
+        // First observation after the heal is allowed to walk (we
+        // treat the corrupt date as "no prior change"), and the rate-
+        // limit branch did NOT block it — proving the corrupt date
+        // didn't carry through.
+        #expect(firstResult.blockedByNotchRateLimit == false,
+                "corrupt lastNotchChangeAt must not propagate into the rate-limit check")
+        #expect(afterFirst.lastNotchChangeAt != nil,
+                "first observation after heal restamps lastNotchChangeAt with a valid date")
+        if let restamped = afterFirst.lastNotchChangeAt {
+            #expect(restamped.timeIntervalSinceReferenceDate.isFinite,
+                    "restamped date must be finite, restoring the rate-limit invariant")
+        }
+
+        // Second observation 1h later (well within 24h) MUST be
+        // blocked by the rate limit — proving the limit is genuinely
+        // restored after the heal, not permanently bypassed.
+        let secondAfter = GrantWindowObservation(
+            grantWindowSeconds: 90,
+            observedAt: afterFirst.lastNotchChangeAt!.addingTimeInterval(60 * 60)
+        )
+        let (_, secondResult) = AdaptiveDeviceProfileEstimator.apply(
+            observation: secondAfter, to: afterFirst
+        )
+        #expect(secondResult.blockedByNotchRateLimit == true,
+                "rate limit must engage again on the next-window observation")
+    }
+
     // MARK: - State init defaults
 
     @Test("Fresh state initializes to seed-equivalent values")

@@ -3899,12 +3899,18 @@ actor AnalysisWorkScheduler {
 
         let nowDate = clock()
         let grantWindowSeconds = nowDate.timeIntervalSince1970 - leaseAcquiredAt
-        // Drop non-positive durations defensively: a clock-skew event
-        // (NTP step backward, simulated-clock test that didn't advance)
-        // would otherwise produce a meaningless observation. The
-        // estimator's math layer also drops these, but filtering here
-        // means we don't even build the value type for the no-op case.
-        guard grantWindowSeconds > 0 else { return }
+        // Drop non-finite or non-positive durations defensively: a
+        // clock-skew event (NTP step backward, simulated-clock test
+        // that didn't advance) or a corrupt clock (`Date` with a
+        // non-finite reference value — pathological but representable
+        // in the Swift type) would otherwise produce a meaningless
+        // observation. The estimator's math layer also drops these
+        // (R5 hardening tightened the entry guard to `isFinite && > 0`),
+        // but filtering here means we don't even build the value type
+        // for the no-op case. Defense-in-depth at the source mirrors
+        // the math layer's invariant so both ends agree on what
+        // qualifies as a real grant-window observation.
+        guard grantWindowSeconds.isFinite, grantWindowSeconds > 0 else { return }
 
         let deviceClass = DeviceClass.detect()
         let seed = DeviceClassProfile.fallback(for: deviceClass)

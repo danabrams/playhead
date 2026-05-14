@@ -310,6 +310,47 @@ struct AdaptiveDeviceProfileWriteSeamTests {
                 "negative elapsed (NTP step back) must be dropped at the helper")
     }
 
+    @Test("Flag ON, non-finite leaseAcquiredAt: helper drops the observation at the source guard")
+    @MainActor
+    func flagOnNonFiniteLeaseAcquiredAtIsDropped() async throws {
+        // R6 defense-in-depth: if `leaseAcquiredAt` carries a non-
+        // finite Double (corrupt timer / pathological caller), the
+        // subtraction `clock.timeIntervalSince1970 - leaseAcquiredAt`
+        // can produce NaN or ±Inf. The math layer drops both (R5
+        // tightened entry guard to `isFinite && > 0`), but the source
+        // guard mirrors that invariant so the value type is never
+        // even constructed for the no-op case. Without the source
+        // `isFinite` check, the prior `> 0` was true for `+Inf` and
+        // would have built a `GrantWindowObservation` with an
+        // infinite duration before the math layer dropped it.
+        let store = try await makeTestStore()
+        let recorder = RecordingProvider()
+        var config = PreAnalysisConfig()
+        config.useAdaptiveDeviceProfile = true
+
+        // Clock returns a healthy finite date; the corruption is
+        // entirely in the `leaseAcquiredAt` Double we pass in.
+        let clock: @Sendable () -> Date = {
+            Date(timeIntervalSince1970: 1_700_000_000)
+        }
+        let scheduler = makeScheduler(
+            store: store, config: config, provider: recorder, clock: clock
+        )
+
+        // NaN leaseAcquiredAt → grantWindowSeconds = NaN.
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: .nan
+        )
+        // -Infinity leaseAcquiredAt → grantWindowSeconds = +Infinity.
+        await scheduler.recordGrantWindowObservationIfEnabled(
+            leaseAcquiredAt: -.infinity
+        )
+
+        let recorded = await recorder.recorded
+        #expect(recorded.isEmpty,
+                "non-finite leaseAcquiredAt must be dropped at the source guard; recorded=\(recorded.count)")
+    }
+
     // MARK: - (4) Static call-site canary
     //
     // R3: the file header (section (4)) promises a "compile-time

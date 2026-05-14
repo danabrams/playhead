@@ -405,6 +405,25 @@ enum AdaptiveDeviceProfileEstimator {
             next.consecutiveClampedObservations = 0
         }
 
+        // (2b) Sanitize `lastNotchChangeAt` independently of the math
+        // accumulators. `Date` is backed by a `Double` offset, so a
+        // hydrated row with a non-finite reference value (storage
+        // corruption / hand-edited DB) would make
+        // `obs.observedAt.timeIntervalSince(last)` return NaN, and
+        // `NaN < notchWindowSeconds` is `false` — so the 24-h rate
+        // limit would silently fail open and the notch would advance
+        // freely. Coerce to `nil` so the rate-limit branch below
+        // treats the row as "no prior notch change", which is the
+        // safe interpretation: the next observation is allowed to
+        // notch once, then `lastNotchChangeAt` is restamped with the
+        // valid `obs.observedAt`. This is the Date-shaped cousin of
+        // the Double soft-reset above and lives outside that block
+        // because the math accumulators may still be valid.
+        if let last = next.lastNotchChangeAt,
+           !last.timeIntervalSinceReferenceDate.isFinite {
+            next.lastNotchChangeAt = nil
+        }
+
         // (3) Welford update — running mean + M2.
         next.sampleCount += 1
         let delta = obs.grantWindowSeconds - next.welfordMean
