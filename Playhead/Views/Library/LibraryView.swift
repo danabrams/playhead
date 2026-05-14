@@ -180,6 +180,14 @@ private extension LibraryView {
                                 )
                             }
                         }
+
+                        // playhead-5w4: per-show auto-download override.
+                        // `nil` = inherit global, surfaced as
+                        // "Inherit global (X)" so the user sees what
+                        // global setting is currently active. A
+                        // non-nil value bypasses the global for this
+                        // podcast only.
+                        autoDownloadOverrideMenu(for: podcast)
                     }
                     .accessibilityLabel("\(podcast.title), \(unplayedCount) unplayed")
                 }
@@ -190,6 +198,43 @@ private extension LibraryView {
         }
         .refreshable {
             await refreshAllFeeds()
+        }
+    }
+
+    // MARK: - Per-show auto-download override (playhead-5w4)
+
+    /// Submenu that surfaces the four `AutoDownloadOnSubscribe` options
+    /// plus an "Inherit global (X)" row for `nil`. Tapping a value
+    /// writes through to the SwiftData `Podcast` row; SwiftData
+    /// autosaves on the next runloop tick so the choice persists
+    /// across app launches.
+    ///
+    /// The inherit-row label is computed via
+    /// `AutoDownloadOverrideMenu.inheritLabel(global:)` so the verbatim
+    /// string (which the user sees) is unit-testable without touching
+    /// SwiftUI.
+    @ViewBuilder
+    func autoDownloadOverrideMenu(for podcast: Podcast) -> some View {
+        let global = DownloadsSettings.load().autoDownloadOnSubscribe
+        Menu {
+            Picker(
+                AutoDownloadOverrideMenu.title,
+                selection: Binding<AutoDownloadOverrideSelection>(
+                    get: { AutoDownloadOverrideSelection(podcast.autoDownloadOverride) },
+                    set: { newValue in
+                        podcast.autoDownloadOverride = newValue.override
+                    }
+                )
+            ) {
+                Text(AutoDownloadOverrideMenu.inheritLabel(global: global))
+                    .tag(AutoDownloadOverrideSelection.inherit)
+                ForEach(AutoDownloadOnSubscribe.allCases, id: \.self) { option in
+                    Text(option.displayLabel)
+                        .tag(AutoDownloadOverrideSelection.override(option))
+                }
+            }
+        } label: {
+            Label(AutoDownloadOverrideMenu.title, systemImage: "arrow.down.circle")
         }
     }
 
@@ -350,4 +395,50 @@ private struct PodcastGridCell: View {
         .environment(PlayheadRuntime(isPreviewRuntime: true))
         .preferredColorScheme(.dark)
         .modelContainer(for: [Podcast.self, Episode.self], inMemory: true)
+}
+
+// MARK: - Per-show auto-download override (playhead-5w4)
+
+/// Selection model for the per-show auto-download picker. The picker
+/// binds to this enum rather than directly to
+/// `AutoDownloadOnSubscribe?` because SwiftUI `Picker` rejects nil-
+/// valued tags. The `Hashable` `.inherit` case stands in for `nil`,
+/// keeping the picker happy while preserving the "override ?? global"
+/// resolution at the model layer.
+enum AutoDownloadOverrideSelection: Hashable, Sendable {
+    case inherit
+    case override(AutoDownloadOnSubscribe)
+
+    /// Bridge from the model column to the picker tag.
+    init(_ override: AutoDownloadOnSubscribe?) {
+        if let override {
+            self = .override(override)
+        } else {
+            self = .inherit
+        }
+    }
+
+    /// Inverse bridge: picker tag back to the model column.
+    var override: AutoDownloadOnSubscribe? {
+        switch self {
+        case .inherit:                return nil
+        case .override(let value):    return value
+        }
+    }
+}
+
+/// Pure helpers for the per-show auto-download submenu. Extracted so
+/// the label-derivation logic is unit-testable without instantiating
+/// SwiftUI. The verbatim strings here ARE the contract — tests pin
+/// them character-for-character.
+enum AutoDownloadOverrideMenu {
+    /// Top-level menu title and accessibility label.
+    static let title: String = "Auto-Download"
+
+    /// Label for the "inherit global" row, which substitutes the
+    /// user's current global setting into the parenthetical so they
+    /// can see what they're falling back to without leaving the menu.
+    static func inheritLabel(global: AutoDownloadOnSubscribe) -> String {
+        "Inherit Global (\(global.displayLabel))"
+    }
 }

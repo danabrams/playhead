@@ -90,6 +90,24 @@ enum AutoDownloadOnSubscribe: String, Codable, Sendable, CaseIterable, Hashable 
         case .all:   return "All"
         }
     }
+
+    // MARK: - Per-show override resolver (playhead-5w4)
+
+    /// Resolve the effective auto-download policy for a single show
+    /// given its per-show override (nil = inherit) and the user's
+    /// current global setting. Returns `override ?? global`.
+    ///
+    /// Centralized here so every caller in the subscription
+    /// auto-download path (`BackgroundFeedRefreshService` and any
+    /// future entry point) routes through one helper — drift between
+    /// the picker UI and the runtime gate would otherwise silently
+    /// re-introduce the bug this resolver exists to prevent.
+    static func effective(
+        override: AutoDownloadOnSubscribe?,
+        global: AutoDownloadOnSubscribe
+    ) -> AutoDownloadOnSubscribe {
+        override ?? global
+    }
 }
 
 // MARK: - CellularPolicy

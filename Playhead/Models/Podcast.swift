@@ -45,6 +45,26 @@ final class Podcast {
     /// no app-wide setting to disable compression entirely.
     var keepFullMusic: Bool = false
 
+    /// playhead-5w4: per-show override for the global
+    /// `SettingsL274.DownloadsSettings.autoDownloadOnSubscribe` policy
+    /// (Off / Last 1 / Last 3 / All). `nil` means "inherit the global
+    /// setting"; a non-nil value bypasses the global and is used as the
+    /// effective policy for this podcast's auto-download decisions in
+    /// the subscription auto-download path (`BackgroundFeedRefreshService`).
+    ///
+    /// Persisted as the rawValue of `AutoDownloadOnSubscribe` (String?).
+    /// SwiftData encodes the enum directly because `AutoDownloadOnSubscribe`
+    /// is `Codable`.
+    ///
+    /// Additive optional with no Swift default — existing rows decode
+    /// with `nil`, preserving the spec'd "all subscribed shows inherit
+    /// the global setting" behavior for already-subscribed podcasts.
+    /// This is a SwiftData lightweight migration (new optional property).
+    ///
+    /// Effective policy resolution lives on the `AutoDownloadOnSubscribe`
+    /// type as `effective(override:global:)` so call sites cannot drift.
+    var autoDownloadOverride: AutoDownloadOnSubscribe?
+
     init(
         feedURL: URL,
         title: String,
@@ -53,7 +73,8 @@ final class Podcast {
         episodes: [Episode] = [],
         subscribedAt: Date = .now,
         notificationsEnabled: Bool = true,
-        keepFullMusic: Bool = false
+        keepFullMusic: Bool = false,
+        autoDownloadOverride: AutoDownloadOnSubscribe? = nil
     ) {
         self.feedURL = feedURL
         self.title = title
@@ -63,6 +84,7 @@ final class Podcast {
         self.subscribedAt = subscribedAt
         self.notificationsEnabled = notificationsEnabled
         self.keepFullMusic = keepFullMusic
+        self.autoDownloadOverride = autoDownloadOverride
     }
 }
 

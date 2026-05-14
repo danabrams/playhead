@@ -86,6 +86,7 @@ struct SwiftDataNewEpisodeAnnouncerTests {
         await announcer.announce(newEpisodes: [
             FeedRefreshNewEpisode(
                 canonicalEpisodeKey: episode.canonicalEpisodeKey,
+                feedURL: feedURL,
                 audioURL: episode.audioURL,
                 publishedAt: episode.publishedAt
             )
@@ -131,6 +132,7 @@ struct SwiftDataNewEpisodeAnnouncerTests {
         await announcer.announce(newEpisodes: [
             FeedRefreshNewEpisode(
                 canonicalEpisodeKey: episode.canonicalEpisodeKey,
+                feedURL: feedURL,
                 audioURL: episode.audioURL,
                 publishedAt: episode.publishedAt
             )
@@ -158,6 +160,7 @@ struct SwiftDataNewEpisodeAnnouncerTests {
         await announcer.announce(newEpisodes: [
             FeedRefreshNewEpisode(
                 canonicalEpisodeKey: "https://example.com/none::ghost",
+                feedURL: URL(string: "https://example.com/none.xml")!,
                 audioURL: URL(string: "https://example.com/g.mp3")!,
                 publishedAt: .now
             )
@@ -200,6 +203,7 @@ struct SwiftDataNewEpisodeAnnouncerTests {
         await announcer.announce(newEpisodes: [
             FeedRefreshNewEpisode(
                 canonicalEpisodeKey: episode.canonicalEpisodeKey,
+                feedURL: feedURL,
                 audioURL: episode.audioURL,
                 publishedAt: episode.publishedAt
             )

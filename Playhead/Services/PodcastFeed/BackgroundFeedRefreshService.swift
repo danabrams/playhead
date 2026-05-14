@@ -56,16 +56,36 @@ extension BGAppRefreshTask: BackgroundProcessingTaskProtocol {}
 /// SwiftData ModelContext. The GUID set is the denominator the handler
 /// passes to the refresher so the diff-against-existing happens at the
 /// layer that actually fetched the feed.
+///
+/// `autoDownloadOverride` (playhead-5w4) carries the podcast's per-show
+/// override at snapshot time so the handler can resolve the effective
+/// policy without re-touching the SwiftData store from the actor. `nil`
+/// means "inherit the global setting"; a non-nil value bypasses the
+/// global for this podcast only.
 struct FeedRefreshPodcastSnapshot: Sendable, Equatable {
     let feedURL: URL
     let existingEpisodeGUIDs: Set<String>
+    let autoDownloadOverride: AutoDownloadOnSubscribe?
+
+    init(
+        feedURL: URL,
+        existingEpisodeGUIDs: Set<String>,
+        autoDownloadOverride: AutoDownloadOnSubscribe? = nil
+    ) {
+        self.feedURL = feedURL
+        self.existingEpisodeGUIDs = existingEpisodeGUIDs
+        self.autoDownloadOverride = autoDownloadOverride
+    }
 }
 
 /// A newly-discovered episode, surfaced by the refresher to the handler.
 /// Minimal shape — only the bits the downloader needs plus a publish
-/// date so `.last1` / `.last3` can do deterministic newest-first cuts.
+/// date so `.last1` / `.last3` can do deterministic newest-first cuts,
+/// and a `feedURL` so the handler can group results back to their
+/// originating podcast for per-show override resolution (playhead-5w4).
 struct FeedRefreshNewEpisode: Sendable, Equatable {
     let canonicalEpisodeKey: String
+    let feedURL: URL
     let audioURL: URL
     let publishedAt: Date?
 }
@@ -619,15 +639,29 @@ actor BackgroundFeedRefreshService {
         let podcasts = await enumerator.enumeratePodcasts()
         logger.info("Refreshing \(podcasts.count, privacy: .public) subscribed podcasts")
 
-        var allNewEpisodes: [FeedRefreshNewEpisode] = []
+        // playhead-5w4: track the per-feed override alongside the
+        // discovered episodes so the auto-download selection can resolve
+        // the effective policy (override ?? global) per podcast. Pre-fix
+        // the handler flattened every feed's new episodes into one list
+        // and applied the global setting once; that path could not
+        // distinguish a per-show "off" override from the user's global
+        // "Last 3".
+        var newEpisodesByFeed: [URL: [FeedRefreshNewEpisode]] = [:]
+        var overrideByFeed: [URL: AutoDownloadOnSubscribe?] = [:]
+        var allNewEpisodesCount = 0
         for snapshot in podcasts {
             if expired { break }
+            overrideByFeed[snapshot.feedURL] = snapshot.autoDownloadOverride
             do {
                 let newEpisodes = try await refresher.refreshEpisodes(
                     feedURL: snapshot.feedURL,
                     existingEpisodeGUIDs: snapshot.existingEpisodeGUIDs
                 )
-                allNewEpisodes.append(contentsOf: newEpisodes)
+                if !newEpisodes.isEmpty {
+                    newEpisodesByFeed[snapshot.feedURL, default: []]
+                        .append(contentsOf: newEpisodes)
+                    allNewEpisodesCount += newEpisodes.count
+                }
             } catch {
                 // Swallow per-feed errors — partial refresh is better
                 // than none, and transient network failures on one feed
@@ -640,11 +674,26 @@ actor BackgroundFeedRefreshService {
             }
         }
 
-        let setting = settingsProvider.currentAutoDownloadSetting()
-        let toDownload = Self.pickEpisodesForDownload(
-            newEpisodes: allNewEpisodes,
-            setting: setting
-        )
+        let globalSetting = settingsProvider.currentAutoDownloadSetting()
+        // Resolve + select per feed so a per-show override never leaks
+        // into another podcast's selection. Iterate the feed list in
+        // enumeration order so the enqueue sequence stays stable for
+        // tests; the producer's order over a Dictionary is undefined.
+        var toDownload: [FeedRefreshNewEpisode] = []
+        for snapshot in podcasts {
+            guard let episodes = newEpisodesByFeed[snapshot.feedURL],
+                  !episodes.isEmpty else { continue }
+            let effective = AutoDownloadOnSubscribe.effective(
+                override: snapshot.autoDownloadOverride,
+                global: globalSetting
+            )
+            let picked = Self.pickEpisodesForDownload(
+                newEpisodes: episodes,
+                setting: effective
+            )
+            toDownload.append(contentsOf: picked)
+        }
+
         var enqueuedCount = 0
         for episode in toDownload {
             if expired { break }
@@ -655,7 +704,7 @@ actor BackgroundFeedRefreshService {
             enqueuedCount += 1
         }
         logger.info(
-            "Feed refresh: \(allNewEpisodes.count, privacy: .public) new episodes, \(toDownload.count, privacy: .public) enqueued (setting=\(setting.rawValue, privacy: .public))"
+            "Feed refresh: \(allNewEpisodesCount, privacy: .public) new episodes, \(toDownload.count, privacy: .public) enqueued (global=\(globalSetting.rawValue, privacy: .public))"
         )
 
         // playhead-5uvz.4 (Gap-5): if this fire enqueued any new
@@ -677,8 +726,21 @@ actor BackgroundFeedRefreshService {
         // Skip the call when nothing new surfaced (clean no-op cap on
         // an idle refresh) and when the BG task has expired so we don't
         // run additional MainActor work past the post-expiration grace.
-        if !allNewEpisodes.isEmpty && !expired {
-            await newEpisodeAnnouncer.announce(newEpisodes: allNewEpisodes)
+        //
+        // Flatten in enumeration order so the announcer observes a
+        // stable sequence (per-feed groups concatenated in the order
+        // their podcasts were enumerated). Independent of the per-show
+        // override (playhead-5w4): announcements are a UX signal, not
+        // gated on the auto-download policy.
+        if allNewEpisodesCount > 0 && !expired {
+            var flattened: [FeedRefreshNewEpisode] = []
+            flattened.reserveCapacity(allNewEpisodesCount)
+            for snapshot in podcasts {
+                if let episodes = newEpisodesByFeed[snapshot.feedURL] {
+                    flattened.append(contentsOf: episodes)
+                }
+            }
+            await newEpisodeAnnouncer.announce(newEpisodes: flattened)
         }
     }
 
@@ -688,6 +750,16 @@ actor BackgroundFeedRefreshService {
     /// with a nil `publishedAt` are treated as oldest so a refresh that
     /// surfaces a fresh episode alongside an old one without a date
     /// still picks the dated one first under `.lastN`.
+    ///
+    /// **Per-podcast scope (playhead-5w4):** call sites in `runRefreshOnce`
+    /// pass a SINGLE feed's new-episode list, so `.last3` means "the
+    /// three newest from THIS show" — which matches the user-facing
+    /// option label ("Last 3" of a subscribed show). The pre-5w4 path
+    /// flattened every feed into one list and applied the cut globally,
+    /// which silently dropped a feed's newest in favor of another
+    /// feed's even-newer episode. The per-feed scope is now also a
+    /// hard requirement for the override resolver to apply distinct
+    /// policies per podcast in the same refresh fire.
     static func pickEpisodesForDownload(
         newEpisodes: [FeedRefreshNewEpisode],
         setting: AutoDownloadOnSubscribe
@@ -735,7 +807,11 @@ struct ProductionPodcastEnumerator: PodcastEnumerating {
             return podcasts.map { podcast in
                 FeedRefreshPodcastSnapshot(
                     feedURL: podcast.feedURL,
-                    existingEpisodeGUIDs: Set(podcast.episodes.map(\.feedItemGUID))
+                    existingEpisodeGUIDs: Set(podcast.episodes.map(\.feedItemGUID)),
+                    // playhead-5w4: snapshot the per-show override at
+                    // enumeration time so the actor can resolve the
+                    // effective policy without re-touching SwiftData.
+                    autoDownloadOverride: podcast.autoDownloadOverride
                 )
             }
         } catch {
@@ -774,10 +850,13 @@ struct ProductionFeedRefresher: FeedRefreshing {
             in: context
         )
         // Flatten to Sendable value type so the result can cross back
-        // to the (non-main) service actor.
+        // to the (non-main) service actor. The `feedURL` tag
+        // (playhead-5w4) lets the handler group results back to their
+        // originating podcast for per-show override resolution.
         return newEpisodes.map {
             FeedRefreshNewEpisode(
                 canonicalEpisodeKey: $0.canonicalEpisodeKey,
+                feedURL: feedURL,
                 audioURL: $0.audioURL,
                 publishedAt: $0.publishedAt
             )
