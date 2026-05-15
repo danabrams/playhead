@@ -767,6 +767,73 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(windows.first?.id == "local-existing-span")
         #expect(windows.first?.evidenceText == "local evidence stays local")
     }
+
+    @Test("import applies shared ad when equivalent local span is suppressed")
+    func importAppliesSharedAdWhenEquivalentLocalSpanIsSuppressed() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "shared-full-file-sha",
+            episodeDurationSec: 120
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "local-suppressed-span",
+                assetId: "asset-b",
+                start: 12.1,
+                end: 60.1,
+                confidence: 0.96,
+                evidenceText: "local evidence stays local"
+            ).withDecisionState(AdDecisionState.suppressed.rawValue)
+        )
+
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "podcast-1",
+                episodeId: "episode-1",
+                fileSHA: "shared-full-file-sha"
+            ),
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(
+                        id: "source-window",
+                        assetId: "asset-a",
+                        start: 12,
+                        end: 60
+                    )
+                ),
+            ]
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        guard case .imported(let receipt) = result else {
+            Issue.record("Expected import to apply shared ad despite local suppressed span, got \(result)")
+            return
+        }
+        #expect(receipt.insertedWindowCount == 1)
+        #expect(receipt.insertedWindowIds.count == 1)
+        #expect(receipt.bannerEligibleWindowIds == receipt.insertedWindowIds)
+        #expect(receipt.insertedCueCount == 1)
+        #expect(receipt.totalWindowCount == 2)
+        #expect(receipt.cueCoverageSec == 60)
+
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.count == 2)
+        let local = try #require(windows.first { $0.id == "local-suppressed-span" })
+        #expect(local.decisionState == AdDecisionState.suppressed.rawValue)
+        #expect(local.evidenceText == "local evidence stays local")
+
+        let imported = try #require(windows.first { $0.id != "local-suppressed-span" })
+        #expect(imported.decisionState == AdDecisionState.confirmed.rawValue)
+        #expect(imported.evidenceText == nil)
+    }
 }
 
 private extension Encodable {

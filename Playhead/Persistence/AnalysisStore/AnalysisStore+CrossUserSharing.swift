@@ -394,19 +394,29 @@ extension AnalysisStore {
             ) else {
                 continue
             }
+            let sharedWindowIsCueEligible = Self.isCueWindow(
+                window,
+                normalizedDecisionState: decisionState
+            )
             let id = Self.importedAdWindowId(
                 key: snapshot.key,
                 window: window,
                 targetAssetId: targetAssetId
             )
             if existingIds.contains(id) {
-                if Self.isCueWindow(window, normalizedDecisionState: decisionState) {
+                if sharedWindowIsCueEligible {
                     rememberBannerEligibleWindowId(id)
                 }
                 continue
             }
-            guard !Self.hasEquivalentSpan(window, in: existingWindows) else {
-                continue
+            if sharedWindowIsCueEligible {
+                guard !Self.hasEquivalentCueSpan(window, in: existingWindows) else {
+                    continue
+                }
+            } else {
+                guard !Self.hasEquivalentSpan(window, in: existingWindows) else {
+                    continue
+                }
             }
 
             let adWindow = AdWindow(
@@ -435,7 +445,7 @@ extension AnalysisStore {
             windowsToInsert.append(adWindow)
             existingWindows.append(adWindow)
             existingIds.insert(id)
-            if Self.isCueWindow(adWindow) {
+            if sharedWindowIsCueEligible {
                 rememberBannerEligibleWindowId(id)
             }
         }
@@ -513,6 +523,17 @@ extension AnalysisStore {
     ) -> Bool {
         existingWindows.contains { existing in
             abs(existing.startTime - window.startTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
+                && abs(existing.endTime - window.endTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
+        }
+    }
+
+    private static func hasEquivalentCueSpan(
+        _ window: CrossUserAnalysisSnapshot.Window,
+        in existingWindows: [AdWindow]
+    ) -> Bool {
+        existingWindows.contains { existing in
+            isCueWindow(existing)
+                && abs(existing.startTime - window.startTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
                 && abs(existing.endTime - window.endTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
         }
     }
