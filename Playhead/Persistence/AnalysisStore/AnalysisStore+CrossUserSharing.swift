@@ -315,6 +315,7 @@ struct FileBackedCrossUserAnalysisSharingProvider: CrossUserAnalysisSharingProvi
 enum CrossUserAnalysisSharingConstants {
     static let cueConfidenceThreshold: Double = 0.7
     static let spanDedupToleranceSec: Double = 0.25
+    static let coverageToleranceSec: Double = 0.000_001
 }
 
 extension AnalysisStore {
@@ -342,10 +343,7 @@ extension AnalysisStore {
         guard windows.allSatisfy(Self.isValidSharedWindow) else {
             return nil
         }
-        let windowCoverageEnd = windows
-            .map(\.endTime)
-            .filter(\.isFinite)
-            .max() ?? 0
+        let windowCoverageEnd = Self.coverageEnd(from: windows)
 
         return CrossUserAnalysisSnapshot(
             key: key,
@@ -392,6 +390,10 @@ extension AnalysisStore {
         if let invalidWindowIndex = snapshot.windows.firstIndex(where: { !Self.isValidSharedWindow($0) }) {
             return .incompatibleSnapshot(reason: "window[\(invalidWindowIndex)]")
         }
+        let exportedWindowCoverageEnd = Self.coverageEnd(from: snapshot.windows)
+        guard snapshot.analysisCoverageEndSec <= exportedWindowCoverageEnd + CrossUserAnalysisSharingConstants.coverageToleranceSec else {
+            return .incompatibleSnapshot(reason: "analysisCoverageEndSec")
+        }
 
         var existingWindows = try fetchAdWindows(assetId: targetAssetId)
         var existingIds = Set(existingWindows.map(\.id))
@@ -421,7 +423,32 @@ extension AnalysisStore {
                 targetAssetId: targetAssetId
             )
             if existingIds.contains(id) {
-                if sharedWindowIsCueEligible {
+                if sharedWindowIsCueEligible,
+                   let existing = existingWindows.first(where: { $0.id == id }),
+                   existing.decisionState == AdDecisionState.suppressed.rawValue {
+                    let supersedingId = Self.supersedingImportedAdWindowId(
+                        key: snapshot.key,
+                        window: window,
+                        targetAssetId: targetAssetId
+                    )
+                    if existingIds.contains(supersedingId) {
+                        rememberBannerEligibleWindowId(supersedingId)
+                        continue
+                    }
+                    guard !Self.hasEquivalentCueSpan(window, in: existingWindows) else {
+                        continue
+                    }
+                    let adWindow = Self.importedAdWindow(
+                        id: supersedingId,
+                        window: window,
+                        targetAssetId: targetAssetId,
+                        decisionState: decisionState
+                    )
+                    windowsToInsert.append(adWindow)
+                    existingWindows.append(adWindow)
+                    existingIds.insert(supersedingId)
+                    rememberBannerEligibleWindowId(supersedingId)
+                } else if sharedWindowIsCueEligible {
                     rememberBannerEligibleWindowId(id)
                 }
                 continue
@@ -436,28 +463,11 @@ extension AnalysisStore {
                 }
             }
 
-            let adWindow = AdWindow(
+            let adWindow = Self.importedAdWindow(
                 id: id,
-                analysisAssetId: targetAssetId,
-                startTime: window.startTime,
-                endTime: window.endTime,
-                confidence: min(max(window.confidence, 0), 1),
-                boundaryState: window.boundaryState,
-                decisionState: decisionState,
-                detectorVersion: window.detectorVersion,
-                advertiser: window.advertiser,
-                product: window.product,
-                adDescription: window.adDescription,
-                evidenceText: nil,
-                evidenceStartTime: nil,
-                metadataSource: window.metadataSource,
-                metadataConfidence: window.metadataConfidence,
-                metadataPromptVersion: window.metadataPromptVersion,
-                wasSkipped: false,
-                userDismissedBanner: false,
-                evidenceSources: window.evidenceSources,
-                eligibilityGate: window.eligibilityGate,
-                catalogStoreMatchSimilarity: window.catalogStoreMatchSimilarity
+                window: window,
+                targetAssetId: targetAssetId,
+                decisionState: decisionState
             )
             windowsToInsert.append(adWindow)
             existingWindows.append(adWindow)
@@ -493,6 +503,13 @@ extension AnalysisStore {
         ))
     }
 
+    private static func coverageEnd(from windows: [CrossUserAnalysisSnapshot.Window]) -> Double {
+        windows
+            .map(\.endTime)
+            .filter(\.isFinite)
+            .max() ?? 0
+    }
+
     private static func importedAdWindowId(
         key: CrossUserAnalysisShareKey,
         window: CrossUserAnalysisSnapshot.Window,
@@ -510,6 +527,57 @@ extension AnalysisStore {
         let digest = SHA256.hash(data: Data(seed.utf8))
         let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
         return "shared-\(hex)"
+    }
+
+    private static func supersedingImportedAdWindowId(
+        key: CrossUserAnalysisShareKey,
+        window: CrossUserAnalysisSnapshot.Window,
+        targetAssetId: String
+    ) -> String {
+        let seed = [
+            key.podcastId,
+            key.episodeId,
+            key.fileSHA,
+            targetAssetId,
+            window.sourceWindowId,
+            String(format: "%.6f", window.startTime),
+            String(format: "%.6f", window.endTime),
+            "cue-supersedes-non-ad",
+        ].joined(separator: "|")
+        let digest = SHA256.hash(data: Data(seed.utf8))
+        let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+        return "shared-\(hex)"
+    }
+
+    private static func importedAdWindow(
+        id: String,
+        window: CrossUserAnalysisSnapshot.Window,
+        targetAssetId: String,
+        decisionState: String
+    ) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: targetAssetId,
+            startTime: window.startTime,
+            endTime: window.endTime,
+            confidence: min(max(window.confidence, 0), 1),
+            boundaryState: window.boundaryState,
+            decisionState: decisionState,
+            detectorVersion: window.detectorVersion,
+            advertiser: window.advertiser,
+            product: window.product,
+            adDescription: window.adDescription,
+            evidenceText: nil,
+            evidenceStartTime: nil,
+            metadataSource: window.metadataSource,
+            metadataConfidence: window.metadataConfidence,
+            metadataPromptVersion: window.metadataPromptVersion,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: window.evidenceSources,
+            eligibilityGate: window.eligibilityGate,
+            catalogStoreMatchSimilarity: window.catalogStoreMatchSimilarity
+        )
     }
 
     private static func cueCoverage(from windows: [AdWindow]) -> Double {

@@ -408,6 +408,51 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(windows.isEmpty)
     }
 
+    @Test("import rejects inflated coverage that exceeds exported windows")
+    func importRejectsInflatedCoverageBeyondExportedWindows() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "shared-full-file-sha"
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-1",
+            fileSHA: "shared-full-file-sha"
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(
+                        id: "source-window",
+                        assetId: "asset-a",
+                        start: 10,
+                        end: 40
+                    )
+                ),
+            ],
+            analysisCoverageEndSec: 90
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "analysisCoverageEndSec")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
     @Test("import rejects semantically invalid windows without partially inserting valid windows")
     func importRejectsInvalidDecisionStateWindowsWithoutPartialInsert() async throws {
         let store = try await makeTestStore()
@@ -945,6 +990,109 @@ struct AnalysisStoreCrossUserSharingTests {
         let imported = try #require(windows.first { $0.id != "local-suppressed-span" })
         #expect(imported.decisionState == AdDecisionState.confirmed.rawValue)
         #expect(imported.evidenceText == nil)
+    }
+
+    @Test("later shared cue ad supersedes prior imported non-ad row with same source id")
+    func laterSharedCueAdSupersedesPriorImportedNonAdWithSameSourceId() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "shared-full-file-sha",
+            episodeDurationSec: 120
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-1",
+            fileSHA: "shared-full-file-sha"
+        )
+        let nonAdSnapshot = makeSnapshot(
+            key: key,
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    sourceWindowId: "source-changing-window",
+                    startTime: 12,
+                    endTime: 60,
+                    confidence: 0.99,
+                    boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                    decisionState: AdDecisionState.suppressed.rawValue,
+                    isAd: false,
+                    detectorVersion: "fm-test-v1",
+                    advertiser: nil,
+                    product: nil,
+                    adDescription: nil,
+                    metadataSource: "foundation-model",
+                    metadataConfidence: 0.81,
+                    metadataPromptVersion: "prompt-v1",
+                    evidenceSources: "semantic,fusion",
+                    eligibilityGate: "not-ad",
+                    catalogStoreMatchSimilarity: nil
+                ),
+            ]
+        )
+        let adSnapshot = makeSnapshot(
+            key: key,
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(
+                        id: "source-changing-window",
+                        assetId: "asset-a",
+                        start: 12,
+                        end: 60
+                    )
+                ),
+            ]
+        )
+
+        let first = try await store.importCrossUserAnalysisSnapshot(
+            nonAdSnapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+        let second = try await store.importCrossUserAnalysisSnapshot(
+            adSnapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+        let third = try await store.importCrossUserAnalysisSnapshot(
+            adSnapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        guard case .imported(let firstReceipt) = first else {
+            Issue.record("Expected first import to apply, got \(first)")
+            return
+        }
+        guard case .imported(let secondReceipt) = second else {
+            Issue.record("Expected second import to apply, got \(second)")
+            return
+        }
+        guard case .imported(let thirdReceipt) = third else {
+            Issue.record("Expected third import to apply idempotently, got \(third)")
+            return
+        }
+        #expect(firstReceipt.insertedWindowCount == 1)
+        #expect(firstReceipt.insertedCueCount == 0)
+        #expect(firstReceipt.bannerEligibleWindowIds.isEmpty)
+        #expect(secondReceipt.insertedWindowCount == 1)
+        #expect(secondReceipt.insertedCueCount == 1)
+        #expect(secondReceipt.bannerEligibleWindowIds == secondReceipt.insertedWindowIds)
+        #expect(thirdReceipt.insertedWindowCount == 0)
+        #expect(thirdReceipt.insertedCueCount == 0)
+        #expect(thirdReceipt.bannerEligibleWindowIds == secondReceipt.bannerEligibleWindowIds)
+
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.count == 2)
+        #expect(windows.contains { $0.decisionState == AdDecisionState.suppressed.rawValue })
+        let importedAd = try #require(windows.first {
+            $0.decisionState == AdDecisionState.confirmed.rawValue
+        })
+        #expect(importedAd.adDescription == "Mid-roll promo")
+        #expect(importedAd.evidenceText == nil)
+        #expect(importedAd.endTime == 60)
     }
 }
 

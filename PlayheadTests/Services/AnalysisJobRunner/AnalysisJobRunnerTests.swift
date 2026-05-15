@@ -840,6 +840,81 @@ struct AnalysisJobRunnerTests {
         #expect(adStub.backfillCallCount == 1)
     }
 
+    @Test("shared analysis with inflated coverage falls through to local detection")
+    func testSharedAnalysisWithInflatedCoverageFallsThrough() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(
+            store: store,
+            fastTranscriptCoverageEndTime: nil,
+            assetFingerprint: "full-file-sha-runner-inflated",
+            episodeDurationSec: 120
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "test-pod",
+            episodeId: "test-ep",
+            fileSHA: "full-file-sha-runner-inflated"
+        )
+        let sharingProvider = StubCrossUserAnalysisSharingProvider()
+        sharingProvider.snapshot = CrossUserAnalysisSnapshot(
+            key: key,
+            provenance: CrossUserAnalysisProvenance(
+                exportedAt: 1_800_000_000,
+                sourceAnalysisVersion: 1,
+                sourceAppBuild: "runner-test"
+            ),
+            analysisCoverageEndSec: 60,
+            measurements: CrossUserAnalysisMeasurements(),
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    sourceWindowId: "peer-window",
+                    startTime: 10,
+                    endTime: 30,
+                    confidence: 0.9,
+                    boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                    decisionState: AdDecisionState.confirmed.rawValue,
+                    detectorVersion: "fm-test-v1",
+                    advertiser: "Acme",
+                    product: "Widget",
+                    adDescription: "Inflated promo",
+                    metadataSource: "foundation-model",
+                    metadataConfidence: 0.82,
+                    metadataPromptVersion: "prompt-v1",
+                    evidenceSources: "semantic,fusion",
+                    eligibilityGate: "ready",
+                    catalogStoreMatchSimilarity: nil
+                ),
+            ]
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 2)
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            analysisSharingProvider: sharingProvider
+        )
+
+        _ = await runner.run(makeTestRequest(desiredCoverageSec: 60))
+
+        #expect(sharingProvider.requestedKeys == [key])
+        #expect(audioStub.decodeCallCount == 1)
+        #expect(adStub.hotPathCallCount == 1)
+        #expect(adStub.backfillCallCount == 1)
+    }
+
     @Test("local analysis success publishes a shared snapshot when provider is enabled")
     func testLocalAnalysisPublishesSharedSnapshot() async throws {
         let store = try await makeTestStore()
