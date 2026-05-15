@@ -4153,6 +4153,77 @@ struct FoundationModelClassifierTests {
         #expect(!detail.recordReflect.isEmpty)
     }
 
+    @Test("refinement refusal explanation fetch times out without blocking diagnostics")
+    func refinementRefusalExplanationFetchTimesOutWithoutBlockingDiagnostics() async throws {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, *) else { return }
+
+        let captureBox = RefinementRefusalDiagnosticCaptureBox()
+        let previousObserver = FoundationModelClassifier.refinementRefusalDiagnosticObserver
+        let previousTimeout = FoundationModelClassifier.refinementRefusalExplanationTimeout
+        let previousFetcher = FoundationModelClassifier.refinementRefusalExplanationFetcherOverride
+        FoundationModelClassifier.refinementRefusalDiagnosticObserver = { diagnostic in
+            captureBox.append(diagnostic)
+        }
+        FoundationModelClassifier.refinementRefusalExplanationTimeout = .milliseconds(25)
+        FoundationModelClassifier.refinementRefusalExplanationFetcherOverride = { _ in
+            try await Task.sleep(for: .seconds(60))
+            return "late explanation"
+        }
+        defer {
+            FoundationModelClassifier.refinementRefusalDiagnosticObserver = previousObserver
+            FoundationModelClassifier.refinementRefusalExplanationTimeout = previousTimeout
+            FoundationModelClassifier.refinementRefusalExplanationFetcherOverride = previousFetcher
+        }
+
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "First sponsor talk."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com today.")
+        ]
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 0,
+            lineRefs: [1, 2],
+            focusLineRefs: [1, 2],
+            focusClusters: [[1, 2]],
+            prompt: "Refine ad spans.\nL1> \"First sponsor talk.\"\nL2> \"Visit example.com today.\"",
+            promptTokenCount: 4,
+            startTime: 5,
+            endTime: 15,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementFailures: [.refusal]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        let elapsed = start.duration(to: clock.now)
+
+        let detail = try #require(captureBox.snapshot().first)
+        #expect(output.status == .refusal)
+        #expect(detail.refusalExplanation == nil)
+        #expect(elapsed < .seconds(5))
+        #else
+        return
+        #endif
+    }
+
     // bd-fmfb: when a refinement-pass refusal fires AND a feedbackStore is
     // wired in, the classifier must invoke `Session.logFeedback` and hand
     // the resulting Data to the store BEFORE the per-window session goes

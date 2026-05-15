@@ -1055,6 +1055,17 @@ struct FoundationModelClassifier: Sendable {
     /// `refinementDecodeFailureObserver` in shape and intent.
     nonisolated(unsafe) static var refinementRefusalDiagnosticObserver: (@Sendable (RefinementPassRefusalDiagnostic) -> Void)?
 
+    /// Diagnostic-only timeout for fetching Apple's model-generated refusal
+    /// explanation. Explanation capture must never block the classifier.
+    nonisolated(unsafe) static var refinementRefusalExplanationTimeout: Duration = .seconds(2)
+
+    #if canImport(FoundationModels)
+    /// Test hook for forcing slow or failing refusal-explanation fetches
+    /// without invoking the live FoundationModels backend.
+    @available(iOS 26.0, *)
+    nonisolated(unsafe) static var refinementRefusalExplanationFetcherOverride: (@Sendable (LanguageModelSession.GenerationError.Refusal) async throws -> String?)?
+    #endif
+
     /// bd-34e diagnostic payload emitted around every coarse-pass window
     /// `respond` call: one event per submission attempt and one event per
     /// catch arm. Captures the prompt metadata an investigator needs to
@@ -4066,13 +4077,9 @@ struct FoundationModelClassifier: Sendable {
             return nil
         }
 
-        // playhead-36t: capture the model-generated explanation. This is
-        // an async call to `LanguageModelSession.GenerationError.Refusal.explanation`
-        // which generates a plain-text description of why the safety
-        // classifier refused. `try?` swallows fetch failures so the
-        // diagnostic path never blocks the caller on a secondary FM error.
-        let explanation = try? await refusal.explanation
-        let explanationText = explanation?.content
+        // playhead-36t: capture the model-generated explanation without
+        // letting a diagnostic-only FM call block classification.
+        let explanationText = await Self.refinementRefusalExplanationText(from: refusal)
 
         let refusalReflect = String(reflecting: refusal)
         let contextDebugDescription = context.debugDescription
@@ -4114,6 +4121,45 @@ struct FoundationModelClassifier: Sendable {
         return nil
         #endif
     }
+
+    #if canImport(FoundationModels)
+    @available(iOS 26.0, *)
+    private static func refinementRefusalExplanationText(
+        from refusal: LanguageModelSession.GenerationError.Refusal
+    ) async -> String? {
+        let timeout = refinementRefusalExplanationTimeout
+        let stream = AsyncStream<String?>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let fetchTask = Task {
+                #if DEBUG
+                if let override = refinementRefusalExplanationFetcherOverride {
+                    let result = try? await override(refusal)
+                    continuation.yield(result)
+                    continuation.finish()
+                    return
+                }
+                #endif
+
+                let explanation = try? await refusal.explanation
+                continuation.yield(explanation?.content)
+                continuation.finish()
+            }
+
+            let timeoutTask = Task {
+                try? await Task.sleep(for: timeout)
+                continuation.yield(nil)
+                continuation.finish()
+            }
+
+            continuation.onTermination = { @Sendable _ in
+                fetchTask.cancel()
+                timeoutTask.cancel()
+            }
+        }
+
+        var iterator = stream.makeAsyncIterator()
+        return await iterator.next() ?? nil
+    }
+    #endif
 
     /// bd-34e diagnostic: emit a structured breadcrumb on every coarse-pass
     /// window submission so investigators can correlate the prompt metadata
