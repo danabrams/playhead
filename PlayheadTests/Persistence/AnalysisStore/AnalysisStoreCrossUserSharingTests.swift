@@ -155,6 +155,44 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(snapshot == nil)
     }
 
+    @Test("export suppresses snapshots when the local fingerprint is not canonical")
+    func exportSuppressesSnapshotWhenFingerprintIsNotCanonical() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+        )
+        try await store.insertAdWindow(makeSharingWindow(id: "source-window", assetId: "asset-a"))
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        #expect(snapshot == nil)
+    }
+
+    @Test("export suppresses snapshots when the podcast id is missing")
+    func exportSuppressesSnapshotWhenPodcastIdIsMissing() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try await store.insertAdWindow(makeSharingWindow(id: "source-window", assetId: "asset-a"))
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: ""
+        )
+
+        #expect(snapshot == nil)
+    }
+
     @Test("import rejects local assets whose fingerprint is not a full-file SHA")
     func importRejectsLocalWeakFingerprintWithoutPartialInsert() async throws {
         let store = try await makeTestStore()
@@ -181,6 +219,39 @@ struct AnalysisStoreCrossUserSharingTests {
 
         if case .incompatibleSnapshot(let reason) = result {
             #expect(reason == "fileSHA")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
+    @Test("import rejects missing podcast id without partially inserting windows")
+    func importRejectsMissingPodcastIdWithoutPartialInsert() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "",
+                episodeId: "episode-1",
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            ),
+            windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a"))]
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: ""
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "podcastId")
         } else {
             Issue.record("Expected incompatibleSnapshot result, got \(result)")
         }
@@ -922,6 +993,115 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(asset?.confirmedAdCoverageEndTime == nil)
     }
 
+    @Test("import rejects non-ad windows that carry ad metadata")
+    func importRejectsNonAdWindowsWithAdMetadata() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    sourceWindowId: "source-incoherent-non-ad",
+                    startTime: 12,
+                    endTime: 60,
+                    confidence: 0.99,
+                    boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                    decisionState: AdDecisionState.suppressed.rawValue,
+                    isAd: false,
+                    detectorVersion: "fm-test-v1",
+                    advertiser: "Acme",
+                    product: nil,
+                    adDescription: nil,
+                    metadataSource: "foundation-model",
+                    metadataConfidence: 0.81,
+                    metadataPromptVersion: "prompt-v1",
+                    evidenceSources: "semantic,fusion",
+                    eligibilityGate: "not-ad",
+                    catalogStoreMatchSimilarity: nil
+                ),
+            ]
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "window[0]")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
+    @Test("import rejects shared windows with missing provenance identifiers")
+    func importRejectsWindowsWithMissingProvenanceIdentifiers() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    sourceWindowId: "",
+                    startTime: 12,
+                    endTime: 60,
+                    confidence: 0.99,
+                    boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                    decisionState: AdDecisionState.confirmed.rawValue,
+                    detectorVersion: "fm-test-v1",
+                    advertiser: "Acme",
+                    product: "Widget",
+                    adDescription: "Missing id promo",
+                    metadataSource: "foundation-model",
+                    metadataConfidence: 0.81,
+                    metadataPromptVersion: "prompt-v1",
+                    evidenceSources: "semantic,fusion",
+                    eligibilityGate: "ready",
+                    catalogStoreMatchSimilarity: nil
+                ),
+            ]
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "window[0]")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
     @Test("file-backed provider publishes and fetches snapshots by tuple key")
     func fileBackedProviderPublishesAndFetchesByTupleKey() async throws {
         let directory = try makeTempDir(prefix: "CrossUserAnalysisSharingProvider")
@@ -971,6 +1151,130 @@ struct AnalysisStoreCrossUserSharingTests {
             includingPropertiesForKeys: nil
         )
         #expect(contents.isEmpty)
+
+        let uppercaseKey = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-1",
+            fileSHA: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+        )
+        let uppercaseSnapshot = makeSnapshot(
+            key: uppercaseKey,
+            windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a"))]
+        )
+
+        try await provider.publish(uppercaseSnapshot)
+
+        let uppercaseFetched = await provider.matchingSnapshot(for: uppercaseKey)
+        #expect(uppercaseFetched == nil)
+        let contentsAfterUppercase = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        #expect(contentsAfterUppercase.isEmpty)
+    }
+
+    @Test("file-backed provider ignores snapshots with missing tuple components")
+    func fileBackedProviderIgnoresMissingTupleComponents() async throws {
+        let directory = try makeTempDir(prefix: "CrossUserAnalysisSharingProvider")
+        let provider = FileBackedCrossUserAnalysisSharingProvider(directory: directory)
+        let invalidKey = CrossUserAnalysisShareKey(
+            podcastId: "",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+        let snapshot = makeSnapshot(
+            key: invalidKey,
+            windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a"))]
+        )
+
+        try await provider.publish(snapshot)
+
+        let fetched = await provider.matchingSnapshot(for: invalidKey)
+        #expect(fetched == nil)
+        let contents = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        #expect(contents.isEmpty)
+    }
+
+    @Test("file-backed provider keeps separator-containing tuple keys distinct")
+    func fileBackedProviderKeepsSeparatorContainingTupleKeysDistinct() async throws {
+        let directory = try makeTempDir(prefix: "CrossUserAnalysisSharingProvider")
+        let provider = FileBackedCrossUserAnalysisSharingProvider(directory: directory)
+        let fileSHA = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        let firstKey = CrossUserAnalysisShareKey(
+            podcastId: "podcast",
+            episodeId: "a|b",
+            fileSHA: fileSHA
+        )
+        let secondKey = CrossUserAnalysisShareKey(
+            podcastId: "podcast|a",
+            episodeId: "b",
+            fileSHA: fileSHA
+        )
+        let firstSnapshot = makeSnapshot(
+            key: firstKey,
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(id: "first-window", assetId: "asset-a")
+                ),
+            ]
+        )
+        let secondSnapshot = makeSnapshot(
+            key: secondKey,
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(id: "second-window", assetId: "asset-a")
+                ),
+            ]
+        )
+
+        try await provider.publish(firstSnapshot)
+        try await provider.publish(secondSnapshot)
+
+        #expect(await provider.matchingSnapshot(for: firstKey) == firstSnapshot)
+        #expect(await provider.matchingSnapshot(for: secondKey) == secondSnapshot)
+    }
+
+    @Test("file-backed provider rejects files whose embedded snapshot key does not match")
+    func fileBackedProviderRejectsMismatchedEmbeddedSnapshotKey() async throws {
+        let directory = try makeTempDir(prefix: "CrossUserAnalysisSharingProvider")
+        let provider = FileBackedCrossUserAnalysisSharingProvider(directory: directory)
+        let requestedKey = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+        let embeddedKey = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-2",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+        let embeddedSnapshot = makeSnapshot(
+            key: embeddedKey,
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a")
+                ),
+            ]
+        )
+        let data = try JSONEncoder().encode(embeddedSnapshot)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try data.write(
+            to: FileBackedCrossUserAnalysisSharingProvider.fileURL(
+                for: requestedKey,
+                directory: directory
+            ),
+            options: [.atomic]
+        )
+
+        let fetched = await provider.matchingSnapshot(for: requestedKey)
+
+        #expect(fetched == nil)
     }
 
     @Test("matching import remaps windows to the local asset and is idempotent")
@@ -1265,6 +1569,74 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(windows.first?.id == "local-reverted-span")
         #expect(windows.first?.decisionState == AdDecisionState.reverted.rawValue)
         #expect(windows.first?.evidenceText == "local evidence stays local")
+    }
+
+    @Test("import does not supersede an imported ad after local suppression")
+    func importDoesNotSupersedeImportedAdAfterLocalSuppression() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            episodeDurationSec: 120
+        )
+
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "podcast-1",
+                episodeId: "episode-1",
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            ),
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(
+                        id: "source-window",
+                        assetId: "asset-a",
+                        start: 12,
+                        end: 60
+                    )
+                ),
+            ]
+        )
+
+        let first = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+        guard case .imported(let firstReceipt) = first,
+              let importedId = firstReceipt.insertedWindowIds.first else {
+            Issue.record("Expected first import to apply, got \(first)")
+            return
+        }
+
+        try await store.updateAdWindowDecision(
+            id: importedId,
+            decisionState: AdDecisionState.suppressed.rawValue
+        )
+
+        let second = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        guard case .imported(let secondReceipt) = second else {
+            Issue.record("Expected second import to respect local suppression, got \(second)")
+            return
+        }
+        #expect(secondReceipt.insertedWindowCount == 0)
+        #expect(secondReceipt.insertedWindowIds.isEmpty)
+        #expect(secondReceipt.bannerEligibleWindowIds.isEmpty)
+        #expect(secondReceipt.insertedCueCount == 0)
+        #expect(secondReceipt.cueCoverageSec == 0)
+
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.count == 1)
+        #expect(windows.first?.id == importedId)
+        #expect(windows.first?.decisionState == AdDecisionState.suppressed.rawValue)
+        #expect(windows.first?.adDescription == "Mid-roll promo")
     }
 
     @Test("later shared cue ad supersedes prior imported non-ad row with same source id")

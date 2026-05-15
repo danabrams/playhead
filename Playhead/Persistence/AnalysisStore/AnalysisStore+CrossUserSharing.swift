@@ -10,8 +10,12 @@ struct CrossUserAnalysisShareKey: Codable, Equatable, Hashable, Sendable {
     let episodeId: String
     let fileSHA: String
 
-    var usesCanonicalFullFileSHA: Bool {
-        Self.normalizedFullFileSHA(fileSHA) == fileSHA
+    var isCanonicalShareKey: Bool {
+        Self.validationFailureReason(
+            podcastId: podcastId,
+            episodeId: episodeId,
+            fileSHA: fileSHA
+        ) == nil
     }
 
     static func make(
@@ -19,6 +23,13 @@ struct CrossUserAnalysisShareKey: Codable, Equatable, Hashable, Sendable {
         episodeId: String,
         fileSHA: String
     ) -> CrossUserAnalysisShareKey? {
+        guard validationFailureReason(
+            podcastId: podcastId,
+            episodeId: episodeId,
+            fileSHA: fileSHA
+        ) == nil else {
+            return nil
+        }
         guard let normalizedFileSHA = normalizedFullFileSHA(fileSHA) else {
             return nil
         }
@@ -27,6 +38,21 @@ struct CrossUserAnalysisShareKey: Codable, Equatable, Hashable, Sendable {
             episodeId: episodeId,
             fileSHA: normalizedFileSHA
         )
+    }
+
+    static func validationFailureReason(
+        podcastId: String,
+        episodeId: String,
+        fileSHA: String
+    ) -> String? {
+        guard isUsableTupleComponent(podcastId) else { return "podcastId" }
+        guard isUsableTupleComponent(episodeId) else { return "episodeId" }
+        guard normalizedFullFileSHA(fileSHA) == fileSHA else { return "fileSHA" }
+        return nil
+    }
+
+    private static func isUsableTupleComponent(_ value: String) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private static func normalizedFullFileSHA(_ value: String) -> String? {
@@ -333,17 +359,19 @@ struct FileBackedCrossUserAnalysisSharingProvider: CrossUserAnalysisSharingProvi
     }
 
     func matchingSnapshot(for key: CrossUserAnalysisShareKey) async -> CrossUserAnalysisSnapshot? {
-        guard isEnabled, key.usesCanonicalFullFileSHA else { return nil }
+        guard isEnabled, key.isCanonicalShareKey else { return nil }
         do {
             let data = try Data(contentsOf: Self.fileURL(for: key, directory: directory))
-            return try JSONDecoder().decode(CrossUserAnalysisSnapshot.self, from: data)
+            let snapshot = try JSONDecoder().decode(CrossUserAnalysisSnapshot.self, from: data)
+            guard snapshot.key == key else { return nil }
+            return snapshot
         } catch {
             return nil
         }
     }
 
     func publish(_ snapshot: CrossUserAnalysisSnapshot) async throws {
-        guard isEnabled, snapshot.key.usesCanonicalFullFileSHA else { return }
+        guard isEnabled, snapshot.key.isCanonicalShareKey else { return }
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true
@@ -358,10 +386,22 @@ struct FileBackedCrossUserAnalysisSharingProvider: CrossUserAnalysisSharingProvi
     }
 
     static func fileURL(for key: CrossUserAnalysisShareKey, directory: URL) -> URL {
-        let seed = [key.podcastId, key.episodeId, key.fileSHA].joined(separator: "|")
+        let seed = CrossUserAnalysisStableHash.seed([
+            key.podcastId,
+            key.episodeId,
+            key.fileSHA,
+        ])
         let digest = SHA256.hash(data: Data(seed.utf8))
         let hex = digest.map { String(format: "%02x", $0) }.joined()
         return directory.appendingPathComponent("cross-user-analysis-\(hex).json")
+    }
+}
+
+private enum CrossUserAnalysisStableHash {
+    static func seed(_ components: [String]) -> String {
+        components
+            .map { "\($0.utf8.count):\($0)" }
+            .joined()
     }
 }
 
@@ -421,6 +461,13 @@ extension AnalysisStore {
             return .localAssetMissing(targetAssetId: targetAssetId)
         }
 
+        if let keyFailureReason = CrossUserAnalysisShareKey.validationFailureReason(
+            podcastId: podcastId,
+            episodeId: asset.episodeId,
+            fileSHA: asset.assetFingerprint
+        ) {
+            return .incompatibleSnapshot(reason: keyFailureReason)
+        }
         guard let expectedKey = CrossUserAnalysisShareKey.make(
             podcastId: podcastId,
             episodeId: asset.episodeId,
@@ -481,7 +528,7 @@ extension AnalysisStore {
             if existingIds.contains(id) {
                 if sharedWindowIsCueEligible,
                    let existing = existingWindows.first(where: { $0.id == id }),
-                   existing.decisionState == AdDecisionState.suppressed.rawValue {
+                   Self.isImportedNonAdVerdict(existing) {
                     let supersedingId = Self.supersedingImportedAdWindowId(
                         key: snapshot.key,
                         window: window,
@@ -573,7 +620,7 @@ extension AnalysisStore {
         window: CrossUserAnalysisSnapshot.Window,
         targetAssetId: String
     ) -> String {
-        let seed = [
+        let seed = CrossUserAnalysisStableHash.seed([
             key.podcastId,
             key.episodeId,
             key.fileSHA,
@@ -581,7 +628,7 @@ extension AnalysisStore {
             window.sourceWindowId,
             String(format: "%.6f", window.startTime),
             String(format: "%.6f", window.endTime),
-        ].joined(separator: "|")
+        ])
         let digest = SHA256.hash(data: Data(seed.utf8))
         let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
         return "shared-\(hex)"
@@ -592,7 +639,7 @@ extension AnalysisStore {
         window: CrossUserAnalysisSnapshot.Window,
         targetAssetId: String
     ) -> String {
-        let seed = [
+        let seed = CrossUserAnalysisStableHash.seed([
             key.podcastId,
             key.episodeId,
             key.fileSHA,
@@ -601,7 +648,7 @@ extension AnalysisStore {
             String(format: "%.6f", window.startTime),
             String(format: "%.6f", window.endTime),
             "cue-supersedes-non-ad",
-        ].joined(separator: "|")
+        ])
         let digest = SHA256.hash(data: Data(seed.utf8))
         let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
         return "shared-\(hex)"
@@ -646,7 +693,10 @@ extension AnalysisStore {
     }
 
     private static func isValidSharedWindow(_ window: CrossUserAnalysisSnapshot.Window) -> Bool {
-        window.startTime.isFinite
+        hasUsableString(window.sourceWindowId)
+            && hasUsableString(window.detectorVersion)
+            && hasUsableString(window.metadataSource)
+            && window.startTime.isFinite
             && window.endTime.isFinite
             && window.confidence.isFinite
             && window.startTime >= 0
@@ -659,6 +709,11 @@ extension AnalysisStore {
                 window.decisionState,
                 isAd: window.isAd
             )
+            && (window.isAd || !hasAdMetadata(window))
+    }
+
+    private static func hasUsableString(_ value: String) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private static func hasEquivalentSpan(
@@ -680,6 +735,19 @@ extension AnalysisStore {
                 && abs(existing.startTime - window.startTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
                 && abs(existing.endTime - window.endTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
         }
+    }
+
+    private static func hasAdMetadata(_ window: CrossUserAnalysisSnapshot.Window) -> Bool {
+        window.advertiser != nil
+            || window.product != nil
+            || window.adDescription != nil
+    }
+
+    private static func isImportedNonAdVerdict(_ window: AdWindow) -> Bool {
+        window.decisionState == AdDecisionState.suppressed.rawValue
+            && window.advertiser == nil
+            && window.product == nil
+            && window.adDescription == nil
     }
 
     private static func isCueWindow(

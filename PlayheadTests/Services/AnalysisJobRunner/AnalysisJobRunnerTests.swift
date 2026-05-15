@@ -10,6 +10,7 @@ import Testing
 
 private func makeTestRequest(
     desiredCoverageSec: Double = 120,
+    podcastId: String = "test-pod",
     outputPolicy: OutputPolicy = .writeWindowsAndCues,
     priority: TaskPriority = .medium
 ) -> AnalysisRangeRequest {
@@ -21,7 +22,7 @@ private func makeTestRequest(
     return AnalysisRangeRequest(
         jobId: UUID().uuidString,
         episodeId: "test-ep",
-        podcastId: "test-pod",
+        podcastId: podcastId,
         analysisAssetId: "test-asset",
         audioURL: localURL,
         desiredCoverageSec: desiredCoverageSec,
@@ -690,6 +691,54 @@ struct AnalysisJobRunnerTests {
         )
 
         _ = await runner.run(makeTestRequest(desiredCoverageSec: 60))
+
+        #expect(sharingProvider.requestedKeys.isEmpty)
+        #expect(sharingProvider.publishedSnapshots.isEmpty)
+        #expect(audioStub.decodeCallCount == 1)
+        #expect(adStub.hotPathCallCount == 1)
+        #expect(adStub.backfillCallCount == 1)
+    }
+
+    @Test("sharing provider is not queried when the podcast id is missing")
+    func testSharedAnalysisSkipsProviderForMissingPodcastId() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(
+            store: store,
+            fastTranscriptCoverageEndTime: nil,
+            assetFingerprint: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            episodeDurationSec: 120
+        )
+
+        let sharingProvider = StubCrossUserAnalysisSharingProvider()
+        sharingProvider.snapshot = makeSharedAnalysisSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "",
+                episodeId: "test-ep",
+                fileSHA: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            )
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 2)
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            analysisSharingProvider: sharingProvider
+        )
+
+        _ = await runner.run(makeTestRequest(desiredCoverageSec: 60, podcastId: ""))
 
         #expect(sharingProvider.requestedKeys.isEmpty)
         #expect(sharingProvider.publishedSnapshots.isEmpty)
