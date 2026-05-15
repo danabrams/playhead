@@ -346,7 +346,6 @@ extension AnalysisStore {
             .map(\.endTime)
             .filter(\.isFinite)
             .max() ?? 0
-        let analysisCoverageEndSec = max(asset.confirmedAdCoverageEndTime ?? 0, windowCoverageEnd)
 
         return CrossUserAnalysisSnapshot(
             key: key,
@@ -355,7 +354,7 @@ extension AnalysisStore {
                 sourceAnalysisVersion: asset.analysisVersion,
                 sourceAppBuild: sourceAppBuild
             ),
-            analysisCoverageEndSec: analysisCoverageEndSec,
+            analysisCoverageEndSec: windowCoverageEnd,
             measurements: measurements,
             windows: windows
         )

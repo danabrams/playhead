@@ -510,6 +510,43 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(windows.first?.isAd == true)
     }
 
+    @Test("export coverage does not include locally reverted windows")
+    func exportCoverageDoesNotIncludeLocallyRevertedWindows() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "full-file-sha-a"
+        )
+        try await store.updateConfirmedAdCoverage(id: "asset-a", endTime: 90)
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-confirmed-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            )
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-reverted-window",
+                assetId: "asset-a",
+                start: 50,
+                end: 90
+            ).withDecisionState(AdDecisionState.reverted.rawValue)
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        let exported = try #require(snapshot)
+        #expect(exported.windows.map(\.sourceWindowId) == ["source-confirmed-window"])
+        #expect(exported.analysisCoverageEndSec == 40)
+    }
+
     @Test("import rejects reverted local lifecycle state from externally supplied snapshots")
     func importRejectsRevertedLifecycleStateWithoutPartialInsert() async throws {
         let store = try await makeTestStore()
