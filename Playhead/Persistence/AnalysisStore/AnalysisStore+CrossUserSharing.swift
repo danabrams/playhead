@@ -517,6 +517,9 @@ extension AnalysisStore {
         if let invalidWindowIndex = snapshot.windows.firstIndex(where: { !Self.isValidSharedWindow($0) }) {
             return .incompatibleSnapshot(reason: "window[\(invalidWindowIndex)]")
         }
+        if let duplicateWindowIndex = Self.duplicateSourceWindowIdIndex(in: snapshot.windows) {
+            return .incompatibleSnapshot(reason: "window[\(duplicateWindowIndex)].sourceWindowId")
+        }
         let exportedWindowCoverageEnd = Self.coverageEnd(from: snapshot.windows)
         guard snapshot.analysisCoverageEndSec <= exportedWindowCoverageEnd + CrossUserAnalysisSharingConstants.coverageToleranceSec else {
             return .incompatibleSnapshot(reason: "analysisCoverageEndSec")
@@ -657,8 +660,7 @@ extension AnalysisStore {
         windows: [CrossUserAnalysisSnapshot.Window],
         withinLocalDuration localDuration: Double?
     ) -> Bool {
-        guard let localDuration else { return true }
-        guard localDuration.isFinite, localDuration > 0 else { return false }
+        guard let localDuration, localDuration.isFinite, localDuration > 0 else { return false }
         let tolerance = CrossUserAnalysisSharingConstants.coverageToleranceSec
         guard analysisCoverageEndSec <= localDuration + tolerance else { return false }
         return windows.allSatisfy { window in
@@ -744,9 +746,9 @@ extension AnalysisStore {
     }
 
     private static func isValidSharedWindow(_ window: CrossUserAnalysisSnapshot.Window) -> Bool {
-        hasUsableString(window.sourceWindowId)
-            && hasUsableString(window.detectorVersion)
-            && hasUsableString(window.metadataSource)
+        hasCanonicalRequiredString(window.sourceWindowId)
+            && hasCanonicalRequiredString(window.detectorVersion)
+            && hasCanonicalRequiredString(window.metadataSource)
             && window.startTime.isFinite
             && window.endTime.isFinite
             && window.confidence.isFinite
@@ -763,8 +765,21 @@ extension AnalysisStore {
             && (window.isAd || !hasAdMetadata(window))
     }
 
-    private static func hasUsableString(_ value: String) -> Bool {
-        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private static func hasCanonicalRequiredString(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed == value
+    }
+
+    private static func duplicateSourceWindowIdIndex(
+        in windows: [CrossUserAnalysisSnapshot.Window]
+    ) -> Int? {
+        var seen = Set<String>()
+        for (index, window) in windows.enumerated() {
+            guard seen.insert(window.sourceWindowId).inserted else {
+                return index
+            }
+        }
+        return nil
     }
 
     private static func isValidSharedMeasurements(

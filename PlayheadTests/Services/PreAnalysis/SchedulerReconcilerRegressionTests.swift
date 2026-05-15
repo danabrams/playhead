@@ -968,6 +968,64 @@ struct SchedulerBugFixRegressionTests {
         #expect(newAsset.sourceURL == localURL.absoluteString)
     }
 
+    @Test("scheduler does not treat an empty current weak fingerprint as upgrade proof")
+    func testSchedulerDoesNotUpgradeWeakAssetWhenCurrentWeakFingerprintIsEmpty() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-empty-weak.mp3")
+        downloads.cachedURLs["ep-sha-empty-weak"] = localURL
+
+        let fullFileSHA = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        let existingAsset = AnalysisAsset(
+            id: "empty-weak-asset",
+            episodeId: "ep-sha-empty-weak",
+            assetFingerprint: "",
+            weakFingerprint: nil,
+            sourceURL: "old.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+        try await store.insertAsset(existingAsset)
+        downloads.fingerprints["ep-sha-empty-weak"] = AudioFingerprint(
+            weak: "",
+            strong: fullFileSHA
+        )
+
+        let job = makeAnalysisJob(
+            jobId: "sha-empty-weak-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-empty-weak",
+            analysisAssetId: nil,
+            workKey: "\(fullFileSHA):1:preAnalysis",
+            sourceFingerprint: fullFileSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-empty-weak-job")
+        let updatedJob = try #require(await store.fetchJob(byId: "sha-empty-weak-job"))
+        let newAssetId = try #require(updatedJob.analysisAssetId)
+        #expect(newAssetId != "empty-weak-asset")
+
+        let oldAsset = try #require(await store.fetchAsset(id: "empty-weak-asset"))
+        #expect(oldAsset.assetFingerprint == "")
+        #expect(oldAsset.weakFingerprint == nil)
+
+        let newAsset = try #require(await store.fetchAsset(id: newAssetId))
+        #expect(newAsset.episodeId == "ep-sha-empty-weak")
+        #expect(newAsset.assetFingerprint == fullFileSHA)
+        #expect(newAsset.sourceURL == localURL.absoluteString)
+    }
+
     @Test("scheduler reuses older asset when its canonical SHA matches the job")
     func testSchedulerReusesOlderMatchingCanonicalFullFileSHA() async throws {
         let store = try await makeTestStore()

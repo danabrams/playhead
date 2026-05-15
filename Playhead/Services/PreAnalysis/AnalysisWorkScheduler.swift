@@ -4168,8 +4168,12 @@ actor AnalysisWorkScheduler {
               currentAudioFingerprint.strong == jobSourceFingerprint else {
             return false
         }
-        return asset.assetFingerprint == currentAudioFingerprint.weak
-            || asset.weakFingerprint == currentAudioFingerprint.weak
+        let currentWeakFingerprint = currentAudioFingerprint.weak
+        guard !currentWeakFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        return asset.assetFingerprint == currentWeakFingerprint
+            || asset.weakFingerprint == currentWeakFingerprint
     }
 
     static func shouldRetryCoverageInsufficient(job: AnalysisJob, outcome: AnalysisOutcome) -> Bool {
