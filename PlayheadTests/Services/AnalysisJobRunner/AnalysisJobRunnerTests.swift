@@ -601,8 +601,8 @@ struct AnalysisJobRunnerTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "test-pod",
-            episodeId: "test-ep",
-            fileSHA: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            fileSHA: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            analysisVersion: 1
         )
         let sharingProvider = StubCrossUserAnalysisSharingProvider()
         sharingProvider.snapshot = makeSharedAnalysisSnapshot(key: key)
@@ -665,8 +665,8 @@ struct AnalysisJobRunnerTests {
         sharingProvider.snapshot = makeSharedAnalysisSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "test-pod",
-                episodeId: "test-ep",
-                fileSHA: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                fileSHA: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                analysisVersion: 1
             )
         )
 
@@ -713,8 +713,8 @@ struct AnalysisJobRunnerTests {
         sharingProvider.snapshot = makeSharedAnalysisSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "",
-                episodeId: "test-ep",
-                fileSHA: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                fileSHA: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                analysisVersion: 1
             )
         )
 
@@ -758,8 +758,8 @@ struct AnalysisJobRunnerTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "test-pod",
-            episodeId: "test-ep",
-            fileSHA: "1111111111111111111111111111111111111111111111111111111111111111"
+            fileSHA: "1111111111111111111111111111111111111111111111111111111111111111",
+            analysisVersion: 1
         )
         let sharingProvider = StubCrossUserAnalysisSharingProvider()
         sharingProvider.snapshot = makeSharedAnalysisSnapshot(key: key)
@@ -819,8 +819,8 @@ struct AnalysisJobRunnerTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "test-pod",
-            episodeId: "test-ep",
-            fileSHA: "2222222222222222222222222222222222222222222222222222222222222222"
+            fileSHA: "2222222222222222222222222222222222222222222222222222222222222222",
+            analysisVersion: 1
         )
         let sharingProvider = StubCrossUserAnalysisSharingProvider()
         sharingProvider.snapshot = CrossUserAnalysisSnapshot(
@@ -900,8 +900,8 @@ struct AnalysisJobRunnerTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "test-pod",
-            episodeId: "test-ep",
-            fileSHA: "3333333333333333333333333333333333333333333333333333333333333333"
+            fileSHA: "3333333333333333333333333333333333333333333333333333333333333333",
+            analysisVersion: 1
         )
         let sharingProvider = StubCrossUserAnalysisSharingProvider()
         sharingProvider.snapshot = makeSharedAnalysisSnapshot(
@@ -949,8 +949,8 @@ struct AnalysisJobRunnerTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "test-pod",
-            episodeId: "test-ep",
-            fileSHA: "4444444444444444444444444444444444444444444444444444444444444444"
+            fileSHA: "4444444444444444444444444444444444444444444444444444444444444444",
+            analysisVersion: 1
         )
         let sharingProvider = StubCrossUserAnalysisSharingProvider()
         sharingProvider.snapshot = CrossUserAnalysisSnapshot(
@@ -1077,8 +1077,8 @@ struct AnalysisJobRunnerTests {
         let snapshot = try #require(sharingProvider.publishedSnapshots.first)
         #expect(snapshot.key == CrossUserAnalysisShareKey(
             podcastId: "test-pod",
-            episodeId: "test-ep",
-            fileSHA: "5555555555555555555555555555555555555555555555555555555555555555"
+            fileSHA: "5555555555555555555555555555555555555555555555555555555555555555",
+            analysisVersion: 1
         ))
         #expect(snapshot.windows.count == 1)
         #expect(snapshot.windows.first?.sourceWindowId == "publish-window")

@@ -94,8 +94,8 @@ private func makeSnapshot(
 @Suite("AnalysisStoreCrossUserSharing")
 struct AnalysisStoreCrossUserSharingTests {
 
-    @Test("export snapshot is keyed by podcast episode and asset full-file SHA without transcript evidence")
-    func exportSnapshotUsesFullFileSHATupleAndOmitsTranscriptEvidence() async throws {
+    @Test("export snapshot is keyed by podcast full-file SHA and analysis version without transcript evidence")
+    func exportSnapshotUsesFullFileSHAAnalysisVersionKeyAndOmitsTranscriptEvidence() async throws {
         let store = try await makeTestStore()
         try await seedSharingAsset(
             store: store,
@@ -118,9 +118,10 @@ struct AnalysisStoreCrossUserSharingTests {
 
         #expect(snapshot?.key == CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            analysisVersion: 1
         ))
+        #expect(snapshot?.schemaVersion == 3)
         #expect(snapshot?.measurements.fmMinutesSaved == nil)
         #expect(snapshot?.analysisCoverageEndSec == 40)
         #expect(snapshot?.measurements.queueToReadyLatencySec == 3.25)
@@ -132,6 +133,7 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(snapshot?.windows.first?.isAd == true)
 
         let encoded = try #require(snapshot).encodedJSONString()
+        #expect(!encoded.contains("episodeId"))
         #expect(!encoded.contains("raw transcript evidence"))
         #expect(!encoded.contains("evidenceText"))
     }
@@ -205,8 +207,8 @@ struct AnalysisStoreCrossUserSharingTests {
         let snapshot = makeSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
-                episodeId: "episode-1",
-                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                analysisVersion: 1
             ),
             windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a"))]
         )
@@ -238,8 +240,8 @@ struct AnalysisStoreCrossUserSharingTests {
         let snapshot = makeSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "",
-                episodeId: "episode-1",
-                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                analysisVersion: 1
             ),
             windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a"))]
         )
@@ -335,8 +337,8 @@ struct AnalysisStoreCrossUserSharingTests {
         let snapshot = makeSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
-                episodeId: "episode-1",
-                fileSHA: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                fileSHA: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                analysisVersion: 1
             ),
             windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a"))]
         )
@@ -369,8 +371,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -405,8 +407,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -441,8 +443,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let staleVersions = PipelineVersions(
             modelVersion: "old-detector",
@@ -482,8 +484,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let validWindow = CrossUserAnalysisSnapshot.Window(
             adWindow: makeSharingWindow(
@@ -543,8 +545,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -588,8 +590,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let validWindow = CrossUserAnalysisSnapshot.Window(
             adWindow: makeSharingWindow(
@@ -810,8 +812,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let validWindow = CrossUserAnalysisSnapshot.Window(
             adWindow: makeSharingWindow(
@@ -862,8 +864,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -906,8 +908,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -947,8 +949,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -1005,8 +1007,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -1060,8 +1062,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -1102,14 +1104,14 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(windows.isEmpty)
     }
 
-    @Test("file-backed provider publishes and fetches snapshots by tuple key")
-    func fileBackedProviderPublishesAndFetchesByTupleKey() async throws {
+    @Test("file-backed provider publishes and fetches snapshots by share key")
+    func fileBackedProviderPublishesAndFetchesByShareKey() async throws {
         let directory = try makeTempDir(prefix: "CrossUserAnalysisSharingProvider")
         let provider = FileBackedCrossUserAnalysisSharingProvider(directory: directory)
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -1122,10 +1124,16 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(fetched == snapshot)
         let miss = await provider.matchingSnapshot(for: CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            fileSHA: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            analysisVersion: 1
         ))
         #expect(miss == nil)
+        let versionMiss = await provider.matchingSnapshot(for: CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 2
+        ))
+        #expect(versionMiss == nil)
     }
 
     @Test("file-backed provider ignores snapshots not keyed by a canonical full-file SHA")
@@ -1134,8 +1142,8 @@ struct AnalysisStoreCrossUserSharingTests {
         let provider = FileBackedCrossUserAnalysisSharingProvider(directory: directory)
         let invalidKey = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "https://example.com/audio.mp3|etag|12345|Tue, 01 Jan 2030 00:00:00 GMT"
+            fileSHA: "https://example.com/audio.mp3|etag|12345|Tue, 01 Jan 2030 00:00:00 GMT",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: invalidKey,
@@ -1146,6 +1154,18 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let fetched = await provider.matchingSnapshot(for: invalidKey)
         #expect(fetched == nil)
+        let invalidVersionKey = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 0
+        )
+        let invalidVersionSnapshot = makeSnapshot(
+            key: invalidVersionKey,
+            windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window-v0", assetId: "asset-a"))]
+        )
+        try await provider.publish(invalidVersionSnapshot)
+        let invalidVersionFetched = await provider.matchingSnapshot(for: invalidVersionKey)
+        #expect(invalidVersionFetched == nil)
         let contents = try FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: nil
@@ -1154,8 +1174,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let uppercaseKey = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+            fileSHA: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+            analysisVersion: 1
         )
         let uppercaseSnapshot = makeSnapshot(
             key: uppercaseKey,
@@ -1173,14 +1193,14 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(contentsAfterUppercase.isEmpty)
     }
 
-    @Test("file-backed provider ignores snapshots with missing tuple components")
-    func fileBackedProviderIgnoresMissingTupleComponents() async throws {
+    @Test("file-backed provider ignores snapshots with missing key components")
+    func fileBackedProviderIgnoresMissingKeyComponents() async throws {
         let directory = try makeTempDir(prefix: "CrossUserAnalysisSharingProvider")
         let provider = FileBackedCrossUserAnalysisSharingProvider(directory: directory)
         let invalidKey = CrossUserAnalysisShareKey(
             podcastId: "",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let snapshot = makeSnapshot(
             key: invalidKey,
@@ -1198,20 +1218,20 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(contents.isEmpty)
     }
 
-    @Test("file-backed provider keeps separator-containing tuple keys distinct")
-    func fileBackedProviderKeepsSeparatorContainingTupleKeysDistinct() async throws {
+    @Test("file-backed provider keeps separator-containing key components distinct")
+    func fileBackedProviderKeepsSeparatorContainingKeyComponentsDistinct() async throws {
         let directory = try makeTempDir(prefix: "CrossUserAnalysisSharingProvider")
         let provider = FileBackedCrossUserAnalysisSharingProvider(directory: directory)
         let fileSHA = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         let firstKey = CrossUserAnalysisShareKey(
             podcastId: "podcast",
-            episodeId: "a|b",
-            fileSHA: fileSHA
+            fileSHA: fileSHA,
+            analysisVersion: 1
         )
         let secondKey = CrossUserAnalysisShareKey(
             podcastId: "podcast|a",
-            episodeId: "b",
-            fileSHA: fileSHA
+            fileSHA: fileSHA,
+            analysisVersion: 1
         )
         let firstSnapshot = makeSnapshot(
             key: firstKey,
@@ -1243,13 +1263,13 @@ struct AnalysisStoreCrossUserSharingTests {
         let provider = FileBackedCrossUserAnalysisSharingProvider(directory: directory)
         let requestedKey = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let embeddedKey = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-2",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 2
         )
         let embeddedSnapshot = makeSnapshot(
             key: embeddedKey,
@@ -1301,8 +1321,8 @@ struct AnalysisStoreCrossUserSharingTests {
         let snapshot = makeSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
-                episodeId: "episode-1",
-                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                analysisVersion: 1
             ),
             windows: [
                 CrossUserAnalysisSnapshot.Window(
@@ -1406,8 +1426,8 @@ struct AnalysisStoreCrossUserSharingTests {
         let snapshot = makeSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
-                episodeId: "episode-1",
-                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                analysisVersion: 1
             ),
             windows: [
                 CrossUserAnalysisSnapshot.Window(
@@ -1465,8 +1485,8 @@ struct AnalysisStoreCrossUserSharingTests {
         let snapshot = makeSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
-                episodeId: "episode-1",
-                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                analysisVersion: 1
             ),
             windows: [
                 CrossUserAnalysisSnapshot.Window(
@@ -1528,8 +1548,8 @@ struct AnalysisStoreCrossUserSharingTests {
         let snapshot = makeSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
-                episodeId: "episode-1",
-                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                analysisVersion: 1
             ),
             windows: [
                 CrossUserAnalysisSnapshot.Window(
@@ -1581,8 +1601,8 @@ struct AnalysisStoreCrossUserSharingTests {
         let snapshot = makeSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
-                episodeId: "episode-1",
-                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                analysisVersion: 1
             ),
             windows: [
                 CrossUserAnalysisSnapshot.Window(
@@ -1648,8 +1668,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let nonAdSnapshot = makeSnapshot(
             key: key,
@@ -1751,8 +1771,8 @@ struct AnalysisStoreCrossUserSharingTests {
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
-            episodeId: "episode-1",
-            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
         )
         let nonAdSnapshot = makeSnapshot(
             key: key,

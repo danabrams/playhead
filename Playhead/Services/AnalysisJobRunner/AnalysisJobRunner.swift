@@ -811,8 +811,8 @@ actor AnalysisJobRunner {
 
         guard let key = CrossUserAnalysisShareKey.make(
             podcastId: request.podcastId,
-            episodeId: asset.episodeId,
-            fileSHA: asset.assetFingerprint
+            fileSHA: asset.assetFingerprint,
+            analysisVersion: asset.analysisVersion
         ) else { return nil }
         guard let snapshot = await analysisSharingProvider.matchingSnapshot(for: key) else {
             return nil

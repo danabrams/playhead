@@ -1,32 +1,32 @@
 // AnalysisStore+CrossUserSharing.swift
 // Phase A cross-user sharing for derived ad-window analysis keyed by
-// (podcastId, episodeId, full-file SHA).
+// (podcastId, full-file SHA, analysisVersion).
 
 import CryptoKit
 import Foundation
 
 struct CrossUserAnalysisShareKey: Codable, Equatable, Hashable, Sendable {
     let podcastId: String
-    let episodeId: String
     let fileSHA: String
+    let analysisVersion: Int
 
     var isCanonicalShareKey: Bool {
         Self.validationFailureReason(
             podcastId: podcastId,
-            episodeId: episodeId,
-            fileSHA: fileSHA
+            fileSHA: fileSHA,
+            analysisVersion: analysisVersion
         ) == nil
     }
 
     static func make(
         podcastId: String,
-        episodeId: String,
-        fileSHA: String
+        fileSHA: String,
+        analysisVersion: Int
     ) -> CrossUserAnalysisShareKey? {
         guard validationFailureReason(
             podcastId: podcastId,
-            episodeId: episodeId,
-            fileSHA: fileSHA
+            fileSHA: fileSHA,
+            analysisVersion: analysisVersion
         ) == nil else {
             return nil
         }
@@ -35,19 +35,19 @@ struct CrossUserAnalysisShareKey: Codable, Equatable, Hashable, Sendable {
         }
         return CrossUserAnalysisShareKey(
             podcastId: podcastId,
-            episodeId: episodeId,
-            fileSHA: normalizedFileSHA
+            fileSHA: normalizedFileSHA,
+            analysisVersion: analysisVersion
         )
     }
 
     static func validationFailureReason(
         podcastId: String,
-        episodeId: String,
-        fileSHA: String
+        fileSHA: String,
+        analysisVersion: Int
     ) -> String? {
         guard isUsableTupleComponent(podcastId) else { return "podcastId" }
-        guard isUsableTupleComponent(episodeId) else { return "episodeId" }
         guard normalizedFullFileSHA(fileSHA) == fileSHA else { return "fileSHA" }
+        guard analysisVersion > 0 else { return "analysisVersion" }
         return nil
     }
 
@@ -107,7 +107,7 @@ struct CrossUserAnalysisMeasurements: Codable, Equatable, Sendable {
 }
 
 struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 3
 
     let schemaVersion: Int
     let key: CrossUserAnalysisShareKey
@@ -392,8 +392,8 @@ struct FileBackedCrossUserAnalysisSharingProvider: CrossUserAnalysisSharingProvi
     static func fileURL(for key: CrossUserAnalysisShareKey, directory: URL) -> URL {
         let seed = CrossUserAnalysisStableHash.seed([
             key.podcastId,
-            key.episodeId,
             key.fileSHA,
+            String(key.analysisVersion),
         ])
         let digest = SHA256.hash(data: Data(seed.utf8))
         let hex = digest.map { String(format: "%02x", $0) }.joined()
@@ -426,8 +426,8 @@ extension AnalysisStore {
         guard let asset = try fetchAsset(id: assetId) else { return nil }
         guard let key = CrossUserAnalysisShareKey.make(
             podcastId: podcastId,
-            episodeId: asset.episodeId,
-            fileSHA: asset.assetFingerprint
+            fileSHA: asset.assetFingerprint,
+            analysisVersion: asset.analysisVersion
         ) else { return nil }
         let adWindows = try fetchAdWindows(assetId: assetId)
         guard adWindows.allSatisfy({
@@ -467,15 +467,15 @@ extension AnalysisStore {
 
         if let keyFailureReason = CrossUserAnalysisShareKey.validationFailureReason(
             podcastId: podcastId,
-            episodeId: asset.episodeId,
-            fileSHA: asset.assetFingerprint
+            fileSHA: asset.assetFingerprint,
+            analysisVersion: asset.analysisVersion
         ) {
             return .incompatibleSnapshot(reason: keyFailureReason)
         }
         guard let expectedKey = CrossUserAnalysisShareKey.make(
             podcastId: podcastId,
-            episodeId: asset.episodeId,
-            fileSHA: asset.assetFingerprint
+            fileSHA: asset.assetFingerprint,
+            analysisVersion: asset.analysisVersion
         ) else {
             return .incompatibleSnapshot(reason: "fileSHA")
         }
@@ -629,8 +629,8 @@ extension AnalysisStore {
     ) -> String {
         let seed = CrossUserAnalysisStableHash.seed([
             key.podcastId,
-            key.episodeId,
             key.fileSHA,
+            String(key.analysisVersion),
             targetAssetId,
             window.sourceWindowId,
             String(format: "%.6f", window.startTime),
@@ -648,8 +648,8 @@ extension AnalysisStore {
     ) -> String {
         let seed = CrossUserAnalysisStableHash.seed([
             key.podcastId,
-            key.episodeId,
             key.fileSHA,
+            String(key.analysisVersion),
             targetAssetId,
             window.sourceWindowId,
             String(format: "%.6f", window.startTime),
