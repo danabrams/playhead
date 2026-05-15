@@ -748,8 +748,8 @@ struct SchedulerBugFixRegressionTests {
         #expect(asset.sourceURL == localURL.absoluteString)
     }
 
-    @Test("scheduler upgrades reused placeholder asset to canonical full-file SHA")
-    func testSchedulerUpgradesExistingPlaceholderAssetToFullFileSHA() async throws {
+    @Test("scheduler upgrades reused placeholder asset to canonical full-file SHA when current fingerprint proves identity")
+    func testSchedulerUpgradesExistingPlaceholderAssetToFullFileSHAWithFingerprintProof() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-upgrade.mp3")
@@ -770,6 +770,10 @@ struct SchedulerBugFixRegressionTests {
         try await store.insertAsset(placeholderAsset)
 
         let fullFileSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        downloads.fingerprints["ep-sha-upgrade"] = AudioFingerprint(
+            weak: "placeholder-asset",
+            strong: fullFileSHA
+        )
         let job = makeAnalysisJob(
             jobId: "sha-upgrade-job",
             jobType: "preAnalysis",
@@ -793,6 +797,60 @@ struct SchedulerBugFixRegressionTests {
         let asset = try #require(await store.fetchAsset(id: "placeholder-asset"))
         #expect(asset.assetFingerprint == fullFileSHA)
         #expect(asset.weakFingerprint == "placeholder-asset")
+    }
+
+    @Test("scheduler does not upgrade placeholder asset without current fingerprint proof")
+    func testSchedulerDoesNotUpgradePlaceholderAssetWithoutFingerprintProof() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-placeholder-no-proof.mp3")
+        downloads.cachedURLs["ep-sha-placeholder-no-proof"] = localURL
+        let placeholderAsset = AnalysisAsset(
+            id: "placeholder-no-proof-asset",
+            episodeId: "ep-sha-placeholder-no-proof",
+            assetFingerprint: "placeholder-no-proof-asset",
+            weakFingerprint: nil,
+            sourceURL: "",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+        try await store.insertAsset(placeholderAsset)
+
+        let fullFileSHA = "abababababababababababababababababababababababababababababababab"
+        let job = makeAnalysisJob(
+            jobId: "sha-placeholder-no-proof-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-placeholder-no-proof",
+            analysisAssetId: nil,
+            workKey: "\(fullFileSHA):1:preAnalysis",
+            sourceFingerprint: fullFileSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-placeholder-no-proof-job")
+        let updatedJob = try #require(await store.fetchJob(byId: "sha-placeholder-no-proof-job"))
+        let newAssetId = try #require(updatedJob.analysisAssetId)
+        #expect(newAssetId != "placeholder-no-proof-asset")
+
+        let oldAsset = try #require(await store.fetchAsset(id: "placeholder-no-proof-asset"))
+        #expect(oldAsset.assetFingerprint == "placeholder-no-proof-asset")
+        #expect(oldAsset.weakFingerprint == nil)
+
+        let newAsset = try #require(await store.fetchAsset(id: newAssetId))
+        #expect(newAsset.episodeId == "ep-sha-placeholder-no-proof")
+        #expect(newAsset.assetFingerprint == fullFileSHA)
+        #expect(newAsset.weakFingerprint == nil)
+        #expect(newAsset.sourceURL == localURL.absoluteString)
     }
 
     @Test("scheduler creates new asset when existing full-file SHA differs")

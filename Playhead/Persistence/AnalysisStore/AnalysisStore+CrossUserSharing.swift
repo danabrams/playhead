@@ -45,7 +45,7 @@ struct CrossUserAnalysisShareKey: Codable, Equatable, Hashable, Sendable {
         fileSHA: String,
         analysisVersion: Int
     ) -> String? {
-        guard isUsableTupleComponent(podcastId) else { return "podcastId" }
+        guard isCanonicalTupleComponent(podcastId) else { return "podcastId" }
         guard normalizedFullFileSHA(fileSHA) == fileSHA else { return "fileSHA" }
         guard analysisVersion > 0 else { return "analysisVersion" }
         return nil
@@ -55,8 +55,9 @@ struct CrossUserAnalysisShareKey: Codable, Equatable, Hashable, Sendable {
         normalizedFullFileSHA(value) == value
     }
 
-    private static func isUsableTupleComponent(_ value: String) -> Bool {
-        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private static func isCanonicalTupleComponent(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed == value
     }
 
     private static func normalizedFullFileSHA(_ value: String) -> String? {
@@ -447,6 +448,13 @@ extension AnalysisStore {
             return nil
         }
         let windowCoverageEnd = Self.coverageEnd(from: windows)
+        guard Self.isSharedSnapshotCoverage(
+            analysisCoverageEndSec: windowCoverageEnd,
+            windows: windows,
+            withinLocalDuration: asset.episodeDurationSec
+        ) else {
+            return nil
+        }
 
         return CrossUserAnalysisSnapshot(
             key: key,
@@ -512,6 +520,16 @@ extension AnalysisStore {
         let exportedWindowCoverageEnd = Self.coverageEnd(from: snapshot.windows)
         guard snapshot.analysisCoverageEndSec <= exportedWindowCoverageEnd + CrossUserAnalysisSharingConstants.coverageToleranceSec else {
             return .incompatibleSnapshot(reason: "analysisCoverageEndSec")
+        }
+        guard exportedWindowCoverageEnd <= snapshot.analysisCoverageEndSec + CrossUserAnalysisSharingConstants.coverageToleranceSec else {
+            return .incompatibleSnapshot(reason: "analysisCoverageEndSec")
+        }
+        guard Self.isSharedSnapshotCoverage(
+            analysisCoverageEndSec: snapshot.analysisCoverageEndSec,
+            windows: snapshot.windows,
+            withinLocalDuration: asset.episodeDurationSec
+        ) else {
+            return .incompatibleSnapshot(reason: "episodeDurationSec")
         }
 
         var existingWindows = try fetchAdWindows(assetId: targetAssetId)
@@ -632,6 +650,20 @@ extension AnalysisStore {
             .map(\.endTime)
             .filter(\.isFinite)
             .max() ?? 0
+    }
+
+    private static func isSharedSnapshotCoverage(
+        analysisCoverageEndSec: Double,
+        windows: [CrossUserAnalysisSnapshot.Window],
+        withinLocalDuration localDuration: Double?
+    ) -> Bool {
+        guard let localDuration else { return true }
+        guard localDuration.isFinite, localDuration > 0 else { return false }
+        let tolerance = CrossUserAnalysisSharingConstants.coverageToleranceSec
+        guard analysisCoverageEndSec <= localDuration + tolerance else { return false }
+        return windows.allSatisfy { window in
+            window.endTime <= localDuration + tolerance
+        }
     }
 
     private static func importedAdWindowId(

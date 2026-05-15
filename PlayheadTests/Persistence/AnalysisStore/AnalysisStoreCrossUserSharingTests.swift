@@ -195,6 +195,25 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(snapshot == nil)
     }
 
+    @Test("export suppresses snapshots when the podcast id is not canonical")
+    func exportSuppressesSnapshotWhenPodcastIdHasOuterWhitespace() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try await store.insertAdWindow(makeSharingWindow(id: "source-window", assetId: "asset-a"))
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: " podcast-1 "
+        )
+
+        #expect(snapshot == nil)
+    }
+
     @Test("import rejects local assets whose fingerprint is not a full-file SHA")
     func importRejectsLocalWeakFingerprintWithoutPartialInsert() async throws {
         let store = try await makeTestStore()
@@ -314,6 +333,33 @@ struct AnalysisStoreCrossUserSharingTests {
                 start: 50,
                 end: 90
             ).withDecisionState("locally-unknown-state")
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        #expect(snapshot == nil)
+    }
+
+    @Test("export suppresses snapshots whose shared windows exceed known local duration")
+    func exportSuppressesSnapshotsBeyondKnownLocalDuration() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            episodeDurationSec: 30
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-window-beyond-duration",
+                assetId: "asset-a",
+                start: 20,
+                end: 40
+            )
         )
 
         let snapshot = try await store.exportCrossUserAnalysisSnapshot(
@@ -660,6 +706,105 @@ struct AnalysisStoreCrossUserSharingTests {
 
         if case .incompatibleSnapshot(let reason) = result {
             #expect(reason == "analysisCoverageEndSec")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
+    @Test("import rejects windows that exceed the snapshot coverage without partial insertion")
+    func importRejectsWindowsBeyondClaimedCoverageWithoutPartialInsert() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            episodeDurationSec: 120
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(
+                        id: "source-window-beyond-coverage",
+                        assetId: "asset-a",
+                        start: 12,
+                        end: 60
+                    )
+                ),
+            ],
+            analysisCoverageEndSec: 30
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "analysisCoverageEndSec")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
+    @Test("import rejects snapshots beyond known local duration without partially inserting windows")
+    func importRejectsSnapshotBeyondKnownLocalDurationWithoutPartialInsert() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            episodeDurationSec: 120
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
+        )
+        let validWindow = CrossUserAnalysisSnapshot.Window(
+            adWindow: makeSharingWindow(
+                id: "source-valid-window",
+                assetId: "asset-a",
+                start: 12,
+                end: 60
+            )
+        )
+        let unsafeWindow = CrossUserAnalysisSnapshot.Window(
+            adWindow: makeSharingWindow(
+                id: "source-beyond-local-duration-window",
+                assetId: "asset-a",
+                start: 130,
+                end: 150
+            )
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [validWindow, unsafeWindow],
+            analysisCoverageEndSec: 150
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "episodeDurationSec")
         } else {
             Issue.record("Expected incompatibleSnapshot result, got \(result)")
         }
@@ -1305,6 +1450,26 @@ struct AnalysisStoreCrossUserSharingTests {
             includingPropertiesForKeys: nil
         )
         #expect(contents.isEmpty)
+
+        let whitespaceKey = CrossUserAnalysisShareKey(
+            podcastId: " podcast-1 ",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
+        )
+        let whitespaceSnapshot = makeSnapshot(
+            key: whitespaceKey,
+            windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window-whitespace", assetId: "asset-a"))]
+        )
+
+        try await provider.publish(whitespaceSnapshot)
+
+        let whitespaceFetched = await provider.matchingSnapshot(for: whitespaceKey)
+        #expect(whitespaceFetched == nil)
+        let contentsAfterWhitespace = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        #expect(contentsAfterWhitespace.isEmpty)
     }
 
     @Test("file-backed provider keeps separator-containing key components distinct")

@@ -4164,9 +4164,6 @@ actor AnalysisWorkScheduler {
         jobSourceFingerprint: String,
         currentAudioFingerprint: AudioFingerprint?
     ) -> Bool {
-        if asset.assetFingerprint == asset.id, asset.weakFingerprint == nil {
-            return true
-        }
         guard let currentAudioFingerprint,
               currentAudioFingerprint.strong == jobSourceFingerprint else {
             return false
