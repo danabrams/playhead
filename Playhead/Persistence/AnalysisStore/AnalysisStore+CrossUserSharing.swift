@@ -517,6 +517,9 @@ extension AnalysisStore {
         guard snapshot.analysisCoverageEndSec.isFinite, snapshot.analysisCoverageEndSec >= 0 else {
             return .incompatibleSnapshot(reason: "analysisCoverageEndSec")
         }
+        guard !snapshot.windows.isEmpty else {
+            return .incompatibleSnapshot(reason: "windows")
+        }
         if let invalidWindowIndex = snapshot.windows.firstIndex(where: { !Self.isValidSharedWindow($0) }) {
             return .incompatibleSnapshot(reason: "window[\(invalidWindowIndex)]")
         }

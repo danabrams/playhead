@@ -787,6 +787,43 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(windows.isEmpty)
     }
 
+    @Test("import rejects empty snapshots without partial insertion")
+    func importRejectsEmptySnapshotsWithoutPartialInsert() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            episodeDurationSec: 120
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [],
+            analysisCoverageEndSec: 0
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "windows")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
     @Test("import rejects windows that exceed the snapshot coverage without partial insertion")
     func importRejectsWindowsBeyondClaimedCoverageWithoutPartialInsert() async throws {
         let store = try await makeTestStore()
