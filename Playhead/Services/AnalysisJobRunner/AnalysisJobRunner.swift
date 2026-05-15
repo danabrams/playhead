@@ -294,7 +294,8 @@ actor AnalysisJobRunner {
                                 .max() ?? 0
                             await publishSharedAnalysisIfEnabled(
                                 assetId: assetId,
-                                podcastId: request.podcastId
+                                podcastId: request.podcastId,
+                                outputPolicy: request.outputPolicy
                             )
                             return makeOutcome(
                                 assetId: assetId,
@@ -784,7 +785,8 @@ actor AnalysisJobRunner {
 
         await publishSharedAnalysisIfEnabled(
             assetId: assetId,
-            podcastId: request.podcastId
+            podcastId: request.podcastId,
+            outputPolicy: request.outputPolicy
         )
 
         return AnalysisOutcome(
@@ -876,9 +878,11 @@ actor AnalysisJobRunner {
 
     private func publishSharedAnalysisIfEnabled(
         assetId: String,
-        podcastId: String
+        podcastId: String,
+        outputPolicy: OutputPolicy
     ) async {
-        guard analysisSharingProvider.isEnabled else { return }
+        guard analysisSharingProvider.isEnabled,
+              outputPolicy != .writeWindowsOnly else { return }
 
         do {
             guard let snapshot = try await store.exportCrossUserAnalysisSnapshot(

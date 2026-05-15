@@ -5263,6 +5263,43 @@ actor AnalysisStore {
         return readAsset(stmt)
     }
 
+    func fetchAssetByEpisodeId(
+        _ episodeId: String,
+        assetFingerprint: String
+    ) throws -> AnalysisAsset? {
+        let sql = """
+            SELECT \(assetSelectColumns)
+            FROM analysis_assets
+            WHERE episodeId = ? AND assetFingerprint = ?
+            ORDER BY createdAt DESC, rowid DESC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        bind(stmt, 2, assetFingerprint)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readAsset(stmt)
+    }
+
+    func updateAssetFingerprint(
+        id: String,
+        assetFingerprint: String,
+        weakFingerprint: String?
+    ) throws {
+        let sql = """
+            UPDATE analysis_assets
+            SET assetFingerprint = ?, weakFingerprint = ?
+            WHERE id = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetFingerprint)
+        bind(stmt, 2, weakFingerprint)
+        bind(stmt, 3, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     /// playhead-hkn1: latest-per-episode map of every asset in the
     /// store. Single SQL pass, no `IN`-clause variable count to worry
     /// about. The provider uses this to filter its SwiftData

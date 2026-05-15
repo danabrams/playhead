@@ -51,6 +51,10 @@ struct CrossUserAnalysisShareKey: Codable, Equatable, Hashable, Sendable {
         return nil
     }
 
+    static func isCanonicalFullFileSHA(_ value: String) -> Bool {
+        normalizedFullFileSHA(value) == value
+    }
+
     private static func isUsableTupleComponent(_ value: String) -> Bool {
         !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -538,7 +542,10 @@ extension AnalysisStore {
                         rememberBannerEligibleWindowId(supersedingId)
                         continue
                     }
-                    guard !Self.hasEquivalentCueSpan(window, in: existingWindows) else {
+                    guard !Self.hasEquivalentCueSpan(
+                        window,
+                        in: existingWindows.filter { $0.id != id }
+                    ) else {
                         continue
                     }
                     let adWindow = Self.importedAdWindow(
@@ -731,10 +738,19 @@ extension AnalysisStore {
         in existingWindows: [AdWindow]
     ) -> Bool {
         existingWindows.contains { existing in
-            (isCueWindow(existing) || existing.decisionState == AdDecisionState.reverted.rawValue)
+            protectsEquivalentCueSpan(existing)
                 && abs(existing.startTime - window.startTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
                 && abs(existing.endTime - window.endTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
         }
+    }
+
+    private static func protectsEquivalentCueSpan(_ window: AdWindow) -> Bool {
+        isCueWindow(window)
+            || window.decisionState == AdDecisionState.reverted.rawValue
+            || (
+                window.decisionState == AdDecisionState.suppressed.rawValue
+                    && !isImportedNonAdVerdict(window)
+            )
     }
 
     private static func hasAdMetadata(_ window: CrossUserAnalysisSnapshot.Window) -> Bool {
@@ -744,7 +760,8 @@ extension AnalysisStore {
     }
 
     private static func isImportedNonAdVerdict(_ window: AdWindow) -> Bool {
-        window.decisionState == AdDecisionState.suppressed.rawValue
+        window.id.hasPrefix("shared-")
+            && window.decisionState == AdDecisionState.suppressed.rawValue
             && window.advertiser == nil
             && window.product == nil
             && window.adDescription == nil

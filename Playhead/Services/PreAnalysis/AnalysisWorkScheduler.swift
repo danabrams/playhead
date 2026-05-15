@@ -4062,10 +4062,49 @@ actor AnalysisWorkScheduler {
         // existing asset-resolution catch in processJob hits its
         // `guard !lostOwnership` and skips its own cleanup writes too.
         // Orphan recovery (or the new owner) will redo this work cleanly.
+        let jobUsesCanonicalFullFileSHA = CrossUserAnalysisShareKey.isCanonicalFullFileSHA(job.sourceFingerprint)
+        if jobUsesCanonicalFullFileSHA,
+           let exactMatch = try await store.fetchAssetByEpisodeId(
+               job.episodeId,
+               assetFingerprint: job.sourceFingerprint
+           ) {
+            guard !lostOwnership else { throw CancellationError() }
+            try await store.updateJobAnalysisAssetId(
+                jobId: job.jobId,
+                analysisAssetId: exactMatch.id
+            )
+            return exactMatch.id
+        }
+
         if let existing = try await store.fetchAssetByEpisodeId(job.episodeId) {
             guard !lostOwnership else { throw CancellationError() }
-            try await store.updateJobAnalysisAssetId(jobId: job.jobId, analysisAssetId: existing.id)
-            return existing.id
+            if jobUsesCanonicalFullFileSHA {
+                if CrossUserAnalysisShareKey.isCanonicalFullFileSHA(existing.assetFingerprint) {
+                    // Same episode id can legitimately point at changed
+                    // bytes after a feed correction or re-download. Keep
+                    // the old analysis anchored to its SHA and create a
+                    // new asset for this file below.
+                } else {
+                    let preservedWeakFingerprint = existing.weakFingerprint ?? existing.assetFingerprint
+                    try await store.updateAssetFingerprint(
+                        id: existing.id,
+                        assetFingerprint: job.sourceFingerprint,
+                        weakFingerprint: preservedWeakFingerprint
+                    )
+                    guard !lostOwnership else { throw CancellationError() }
+                    try await store.updateJobAnalysisAssetId(
+                        jobId: job.jobId,
+                        analysisAssetId: existing.id
+                    )
+                    return existing.id
+                }
+            } else {
+                try await store.updateJobAnalysisAssetId(
+                    jobId: job.jobId,
+                    analysisAssetId: existing.id
+                )
+                return existing.id
+            }
         }
 
         let capabilityJSON: String?

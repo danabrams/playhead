@@ -1089,6 +1089,78 @@ struct AnalysisJobRunnerTests {
         #expect(!encoded.contains("evidenceText"))
     }
 
+    @Test("local writeWindowsOnly analysis does not publish until a later live-capable pass")
+    func testLocalWriteWindowsOnlyAnalysisDefersSharedSnapshotPublish() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(
+            store: store,
+            fastTranscriptCoverageEndTime: 30,
+            assetFingerprint: "6666666666666666666666666666666666666666666666666666666666666666",
+            episodeDurationSec: 30
+        )
+        let segment = makeTranscriptSegment()
+        try await store.insertTranscriptChunks([makeTranscriptChunk(from: segment)])
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "deferred-publish-window",
+                analysisAssetId: "test-asset",
+                startTime: 5,
+                endTime: 20,
+                confidence: 0.9,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.confirmed.rawValue,
+                detectorVersion: "test-v1",
+                advertiser: "Acme",
+                product: "Widget",
+                adDescription: "Deferred publish",
+                evidenceText: "local transcript evidence",
+                evidenceStartTime: 5,
+                metadataSource: "foundation-model",
+                metadataConfidence: 0.8,
+                metadataPromptVersion: "prompt-v1",
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+
+        let sharingProvider = StubCrossUserAnalysisSharingProvider()
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 1)
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            analysisSharingProvider: sharingProvider
+        )
+
+        _ = await runner.run(makeTestRequest(
+            desiredCoverageSec: 30,
+            outputPolicy: .writeWindowsOnly
+        ))
+
+        #expect(sharingProvider.publishedSnapshots.isEmpty)
+
+        _ = await runner.run(makeTestRequest(
+            desiredCoverageSec: 30,
+            outputPolicy: .writeWindowsAndPushLive
+        ))
+
+        #expect(sharingProvider.publishedSnapshots.count == 1)
+        let snapshot = try #require(sharingProvider.publishedSnapshots.first)
+        #expect(snapshot.windows.count == 1)
+        #expect(snapshot.windows.first?.sourceWindowId == "deferred-publish-window")
+    }
+
     // MARK: - playhead-5uvz.6 (Gap-7) episodeDurationSec persistence
 
     /// Pipeline B (scheduler-driven) must persist the shard-sum

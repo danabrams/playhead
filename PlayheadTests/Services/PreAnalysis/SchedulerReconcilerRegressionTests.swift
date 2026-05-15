@@ -747,6 +747,169 @@ struct SchedulerBugFixRegressionTests {
         #expect(asset.assetFingerprint == "fp-fk-regression")
         #expect(asset.sourceURL == localURL.absoluteString)
     }
+
+    @Test("scheduler upgrades reused placeholder asset to canonical full-file SHA")
+    func testSchedulerUpgradesExistingPlaceholderAssetToFullFileSHA() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-upgrade.mp3")
+        downloads.cachedURLs["ep-sha-upgrade"] = localURL
+        let placeholderAsset = AnalysisAsset(
+            id: "placeholder-asset",
+            episodeId: "ep-sha-upgrade",
+            assetFingerprint: "placeholder-asset",
+            weakFingerprint: nil,
+            sourceURL: "",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+        try await store.insertAsset(placeholderAsset)
+
+        let fullFileSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let job = makeAnalysisJob(
+            jobId: "sha-upgrade-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-upgrade",
+            analysisAssetId: nil,
+            workKey: "\(fullFileSHA):1:preAnalysis",
+            sourceFingerprint: fullFileSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-upgrade-job")
+        let updatedJob = try #require(await store.fetchJob(byId: "sha-upgrade-job"))
+        #expect(updatedJob.analysisAssetId == "placeholder-asset")
+
+        let asset = try #require(await store.fetchAsset(id: "placeholder-asset"))
+        #expect(asset.assetFingerprint == fullFileSHA)
+        #expect(asset.weakFingerprint == "placeholder-asset")
+    }
+
+    @Test("scheduler creates new asset when existing full-file SHA differs")
+    func testSchedulerDoesNotReuseDifferentCanonicalFullFileSHA() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-mismatch.mp3")
+        downloads.cachedURLs["ep-sha-mismatch"] = localURL
+
+        let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let newSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let existingAsset = AnalysisAsset(
+            id: "old-sha-asset",
+            episodeId: "ep-sha-mismatch",
+            assetFingerprint: oldSHA,
+            weakFingerprint: nil,
+            sourceURL: "",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+        try await store.insertAsset(existingAsset)
+
+        let job = makeAnalysisJob(
+            jobId: "sha-mismatch-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-mismatch",
+            analysisAssetId: nil,
+            workKey: "\(newSHA):1:preAnalysis",
+            sourceFingerprint: newSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-mismatch-job")
+        let updatedJob = try #require(await store.fetchJob(byId: "sha-mismatch-job"))
+        let newAssetId = try #require(updatedJob.analysisAssetId)
+        #expect(newAssetId != "old-sha-asset")
+
+        let oldAsset = try #require(await store.fetchAsset(id: "old-sha-asset"))
+        #expect(oldAsset.assetFingerprint == oldSHA)
+
+        let newAsset = try #require(await store.fetchAsset(id: newAssetId))
+        #expect(newAsset.episodeId == "ep-sha-mismatch")
+        #expect(newAsset.assetFingerprint == newSHA)
+        #expect(newAsset.weakFingerprint == nil)
+        #expect(newAsset.sourceURL == localURL.absoluteString)
+    }
+
+    @Test("scheduler reuses older asset when its canonical SHA matches the job")
+    func testSchedulerReusesOlderMatchingCanonicalFullFileSHA() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-reuse.mp3")
+        downloads.cachedURLs["ep-sha-reuse"] = localURL
+
+        let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let newSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        try await store.insertAsset(AnalysisAsset(
+            id: "old-sha-asset",
+            episodeId: "ep-sha-reuse",
+            assetFingerprint: oldSHA,
+            weakFingerprint: nil,
+            sourceURL: "old.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        ))
+        try await store.insertAsset(AnalysisAsset(
+            id: "new-sha-asset",
+            episodeId: "ep-sha-reuse",
+            assetFingerprint: newSHA,
+            weakFingerprint: nil,
+            sourceURL: "new.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        ))
+
+        let job = makeAnalysisJob(
+            jobId: "sha-reuse-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-reuse",
+            analysisAssetId: nil,
+            workKey: "\(oldSHA):1:preAnalysis",
+            sourceFingerprint: oldSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-reuse-job")
+        let updatedJob = try #require(await store.fetchJob(byId: "sha-reuse-job"))
+        #expect(updatedJob.analysisAssetId == "old-sha-asset")
+
+        let assets = try await store.fetchAllAssets()
+            .filter { $0.episodeId == "ep-sha-reuse" }
+        #expect(assets.count == 2)
+    }
 }
 
 // MARK: - Reconciler Bug-Fix Regression Tests
