@@ -857,15 +857,15 @@ actor AnalysisJobRunner {
         outputPolicy: OutputPolicy
     ) async {
         guard outputPolicy != .writeWindowsOnly,
-              !receipt.insertedWindowIds.isEmpty else {
+              !receipt.bannerEligibleWindowIds.isEmpty else {
             return
         }
 
         do {
-            let insertedIds = Set(receipt.insertedWindowIds)
+            let bannerEligibleIds = Set(receipt.bannerEligibleWindowIds)
             let windows = try await store.fetchAdWindows(assetId: assetId)
             let importedWindows = windows.filter {
-                insertedIds.contains($0.id) && Self.isCueWindow($0)
+                bannerEligibleIds.contains($0.id) && Self.isCueWindow($0)
             }
             guard !importedWindows.isEmpty else { return }
             await analysisSharingProvider.didImportSharedAdWindows(importedWindows)

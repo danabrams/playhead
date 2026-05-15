@@ -475,8 +475,8 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(windows.first?.isAd == true)
     }
 
-    @Test("import normalizes local lifecycle state from externally supplied snapshots")
-    func importNormalizesLocalLifecycleState() async throws {
+    @Test("import rejects reverted local lifecycle state from externally supplied snapshots")
+    func importRejectsRevertedLifecycleStateWithoutPartialInsert() async throws {
         let store = try await makeTestStore()
         try await seedSharingAsset(
             store: store,
@@ -510,16 +510,14 @@ struct AnalysisStoreCrossUserSharingTests {
             podcastId: "podcast-1"
         )
 
-        guard case .imported(let receipt) = result else {
-            Issue.record("Expected import to apply normalized windows, got \(result)")
-            return
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "window[1]")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
         }
-        #expect(receipt.insertedWindowCount == 1)
 
         let windows = try await store.fetchAdWindows(assetId: "asset-b")
-        #expect(windows.count == 1)
-        #expect(windows.first?.decisionState == AdDecisionState.confirmed.rawValue)
-        #expect(windows.first?.wasSkipped == false)
+        #expect(windows.isEmpty)
     }
 
     @Test("imported non-ad windows do not count as cue coverage")
@@ -671,6 +669,7 @@ struct AnalysisStoreCrossUserSharingTests {
         }
         #expect(firstReceipt.insertedWindowCount == 1)
         #expect(firstReceipt.insertedWindowIds.count == 1)
+        #expect(firstReceipt.bannerEligibleWindowIds == firstReceipt.insertedWindowIds)
         #expect(firstReceipt.insertedCueCount == 1)
         #expect(firstReceipt.analysisCoverageEndSec == 60)
         #expect(firstReceipt.fmMinutesSaved == 2)
@@ -678,6 +677,7 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(firstReceipt.batteryDeltaPercent == -1.5)
         #expect(secondReceipt.insertedWindowCount == 0)
         #expect(secondReceipt.insertedWindowIds.isEmpty)
+        #expect(secondReceipt.bannerEligibleWindowIds == firstReceipt.insertedWindowIds)
         #expect(secondReceipt.insertedCueCount == 0)
 
         let windows = try await store.fetchAdWindows(assetId: "asset-b")

@@ -650,8 +650,8 @@ struct AnalysisJobRunnerTests {
         #expect(windows.first?.evidenceText == nil)
     }
 
-    @Test("shared analysis hit preserves writeWindowsOnly cue-count semantics")
-    func testSharedAnalysisImportHitHonorsOutputPolicy() async throws {
+    @Test("shared analysis hit preserves writeWindowsOnly semantics and publishes on later live pass")
+    func testSharedAnalysisImportHitHonorsOutputPolicyAndPublishesExistingImport() async throws {
         let store = try await makeTestStore()
         try await seedAsset(
             store: store,
@@ -695,6 +695,20 @@ struct AnalysisJobRunnerTests {
         #expect(outcome.cueCoverageSec == 60)
         #expect(outcome.newCueCount == 0)
         #expect(sharingProvider.importedWindows.isEmpty)
+
+        let liveOutcome = await runner.run(makeTestRequest(
+            desiredCoverageSec: 60,
+            outputPolicy: .writeWindowsAndPushLive
+        ))
+
+        #expect(audioStub.decodeCallCount == 0)
+        #expect(adStub.hotPathCallCount == 0)
+        #expect(adStub.backfillCallCount == 0)
+        #expect(liveOutcome.cueCoverageSec == 60)
+        #expect(liveOutcome.newCueCount == 0)
+        #expect(sharingProvider.importedWindows.count == 1)
+        #expect(sharingProvider.importedWindows.first?.analysisAssetId == "test-asset")
+        #expect(sharingProvider.importedWindows.first?.adDescription == "Imported promo")
     }
 
     @Test("shared non-ad import skips detection without publishing banner windows")

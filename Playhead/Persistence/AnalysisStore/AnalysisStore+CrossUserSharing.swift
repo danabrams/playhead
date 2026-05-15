@@ -177,9 +177,6 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
         }
 
         static func normalizedImportDecisionState(_ decisionState: String, isAd: Bool) -> String? {
-            if decisionState == AdDecisionState.reverted.rawValue {
-                return nil
-            }
             guard isAd else {
                 return AdDecisionState.suppressed.rawValue
             }
@@ -187,9 +184,6 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
         }
 
         static func isValidSharedDecisionState(_ decisionState: String, isAd: Bool) -> Bool {
-            if decisionState == AdDecisionState.reverted.rawValue {
-                return !isAd
-            }
             if isAd {
                 return isAdDecision(decisionState)
             }
@@ -227,6 +221,7 @@ struct CrossUserAnalysisImportReceipt: Codable, Equatable, Sendable {
     let targetAssetId: String
     let analysisCoverageEndSec: Double
     let insertedWindowIds: [String]
+    let bannerEligibleWindowIds: [String]
     let insertedWindowCount: Int
     let insertedCueCount: Int
     let totalWindowCount: Int
@@ -384,6 +379,13 @@ extension AnalysisStore {
         var existingWindows = try fetchAdWindows(assetId: targetAssetId)
         var existingIds = Set(existingWindows.map(\.id))
         var windowsToInsert: [AdWindow] = []
+        var bannerEligibleWindowIds: [String] = []
+        var seenBannerEligibleWindowIds = Set<String>()
+
+        func rememberBannerEligibleWindowId(_ id: String) {
+            guard seenBannerEligibleWindowIds.insert(id).inserted else { return }
+            bannerEligibleWindowIds.append(id)
+        }
 
         for window in snapshot.windows {
             guard let decisionState = CrossUserAnalysisSnapshot.Window.normalizedImportDecisionState(
@@ -397,8 +399,13 @@ extension AnalysisStore {
                 window: window,
                 targetAssetId: targetAssetId
             )
-            guard !existingIds.contains(id),
-                  !Self.hasEquivalentSpan(window, in: existingWindows) else {
+            if existingIds.contains(id) {
+                if Self.isCueWindow(window, normalizedDecisionState: decisionState) {
+                    rememberBannerEligibleWindowId(id)
+                }
+                continue
+            }
+            guard !Self.hasEquivalentSpan(window, in: existingWindows) else {
                 continue
             }
 
@@ -428,6 +435,9 @@ extension AnalysisStore {
             windowsToInsert.append(adWindow)
             existingWindows.append(adWindow)
             existingIds.insert(id)
+            if Self.isCueWindow(adWindow) {
+                rememberBannerEligibleWindowId(id)
+            }
         }
 
         if !windowsToInsert.isEmpty {
@@ -445,6 +455,7 @@ extension AnalysisStore {
             targetAssetId: targetAssetId,
             analysisCoverageEndSec: snapshot.analysisCoverageEndSec,
             insertedWindowIds: windowsToInsert.map(\.id),
+            bannerEligibleWindowIds: bannerEligibleWindowIds,
             insertedWindowCount: windowsToInsert.count,
             insertedCueCount: windowsToInsert.filter(Self.isCueWindow).count,
             totalWindowCount: finalWindows.count,
@@ -504,6 +515,19 @@ extension AnalysisStore {
             abs(existing.startTime - window.startTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
                 && abs(existing.endTime - window.endTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
         }
+    }
+
+    private static func isCueWindow(
+        _ window: CrossUserAnalysisSnapshot.Window,
+        normalizedDecisionState: String
+    ) -> Bool {
+        window.confidence >= CrossUserAnalysisSharingConstants.cueConfidenceThreshold
+            && window.endTime > window.startTime
+            && (
+                normalizedDecisionState == AdDecisionState.candidate.rawValue
+                    || normalizedDecisionState == AdDecisionState.confirmed.rawValue
+                    || normalizedDecisionState == AdDecisionState.applied.rawValue
+            )
     }
 
     private static func isCueWindow(_ window: AdWindow) -> Bool {
