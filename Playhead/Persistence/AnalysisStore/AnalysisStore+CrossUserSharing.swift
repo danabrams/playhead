@@ -272,6 +272,17 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                 || isLocalOnlyBoundaryState(boundaryState)
         }
 
+        static func hasKnownExportDisposition(_ adWindow: AdWindow) -> Bool {
+            switch adWindow.decisionState {
+            case AdDecisionState.suppressed.rawValue,
+                 AdDecisionState.reverted.rawValue:
+                return true
+            default:
+                return isKnownExportDecisionState(adWindow.decisionState)
+                    && isKnownExportBoundaryState(adWindow.boundaryState)
+            }
+        }
+
         private static func normalizedExportDecisionState(_ decisionState: String) -> String? {
             switch decisionState {
             case AdDecisionState.candidate.rawValue,
@@ -436,10 +447,7 @@ extension AnalysisStore {
             return nil
         }
         let adWindows = try fetchAdWindows(assetId: assetId)
-        guard adWindows.allSatisfy({
-            CrossUserAnalysisSnapshot.Window.isKnownExportDecisionState($0.decisionState)
-                && CrossUserAnalysisSnapshot.Window.isKnownExportBoundaryState($0.boundaryState)
-        }) else {
+        guard adWindows.allSatisfy(CrossUserAnalysisSnapshot.Window.hasKnownExportDisposition) else {
             return nil
         }
         let windows = adWindows

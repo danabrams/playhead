@@ -1258,6 +1258,58 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(exported.windows.allSatisfy { $0.decisionState != AdDecisionState.suppressed.rawValue })
     }
 
+    @Test("export drops suppressed or reverted windows with unknown boundary state")
+    func exportDropsSuppressedOrRevertedWindowsWithUnknownBoundaryState() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            episodeDurationSec: 160
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-confirmed-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            )
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-suppressed-unknown-boundary",
+                assetId: "asset-a",
+                start: 50,
+                end: 90
+            )
+            .withDecisionState(AdDecisionState.suppressed.rawValue)
+            .withBoundaryState("future-suppressed-boundary")
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-reverted-unknown-boundary",
+                assetId: "asset-a",
+                start: 100,
+                end: 140
+            )
+            .withDecisionState(AdDecisionState.reverted.rawValue)
+            .withBoundaryState("future-reverted-boundary")
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        let exported = try #require(snapshot)
+        #expect(exported.windows.map(\.sourceWindowId) == ["source-confirmed-window"])
+        #expect(exported.analysisCoverageEndSec == 40)
+        let encoded = try exported.encodedJSONString()
+        #expect(!encoded.contains("future-suppressed-boundary"))
+        #expect(!encoded.contains("future-reverted-boundary"))
+    }
+
     @Test("export drops local correction boundary states without inflating coverage")
     func exportDropsLocalCorrectionBoundaryStatesWithoutInflatingCoverage() async throws {
         let store = try await makeTestStore()
