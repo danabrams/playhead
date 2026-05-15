@@ -444,6 +444,9 @@ extension AnalysisStore {
         }
         let windows = adWindows
             .compactMap(CrossUserAnalysisSnapshot.Window.exported(from:))
+        guard !windows.isEmpty else {
+            return nil
+        }
         guard windows.allSatisfy(Self.isValidSharedWindow) else {
             return nil
         }

@@ -1124,6 +1124,40 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(exported.analysisCoverageEndSec == 40)
     }
 
+    @Test("export suppresses snapshots when no shareable windows remain")
+    func exportSuppressesSnapshotWhenNoShareableWindowsRemain() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-reverted-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            ).withDecisionState(AdDecisionState.reverted.rawValue)
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-user-marked-window",
+                assetId: "asset-a",
+                start: 50,
+                end: 90
+            ).withBoundaryState("userMarked")
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        #expect(snapshot == nil)
+    }
+
     @Test("export drops local correction boundary states without inflating coverage")
     func exportDropsLocalCorrectionBoundaryStatesWithoutInflatingCoverage() async throws {
         let store = try await makeTestStore()
