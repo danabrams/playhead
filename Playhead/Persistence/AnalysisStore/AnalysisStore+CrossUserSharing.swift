@@ -186,6 +186,16 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
             return normalizedExportDecisionState(decisionState)
         }
 
+        static func isValidSharedDecisionState(_ decisionState: String, isAd: Bool) -> Bool {
+            if decisionState == AdDecisionState.reverted.rawValue {
+                return !isAd
+            }
+            if isAd {
+                return isAdDecision(decisionState)
+            }
+            return decisionState == AdDecisionState.suppressed.rawValue
+        }
+
         private static func normalizedExportDecisionState(_ decisionState: String) -> String? {
             switch decisionState {
             case AdDecisionState.candidate.rawValue,
@@ -480,6 +490,10 @@ extension AnalysisStore {
             && (0...1).contains(window.confidence)
             && window.metadataConfidence.map { $0.isFinite && (0...1).contains($0) } ?? true
             && window.catalogStoreMatchSimilarity.map { $0.isFinite && (0...1).contains($0) } ?? true
+            && CrossUserAnalysisSnapshot.Window.isValidSharedDecisionState(
+                window.decisionState,
+                isAd: window.isAd
+            )
     }
 
     private static func hasEquivalentSpan(
