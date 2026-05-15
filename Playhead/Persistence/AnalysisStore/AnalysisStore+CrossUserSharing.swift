@@ -177,17 +177,29 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
         }
 
         static func normalizedImportDecisionState(_ decisionState: String, isAd: Bool) -> String? {
-            guard isAd else {
+            if !isAd, decisionState == AdDecisionState.suppressed.rawValue {
                 return AdDecisionState.suppressed.rawValue
             }
-            return normalizedExportDecisionState(decisionState)
+            switch decisionState {
+            case AdDecisionState.candidate.rawValue,
+                 AdDecisionState.confirmed.rawValue:
+                return isAd ? decisionState : nil
+            default:
+                return nil
+            }
         }
 
         static func isValidSharedDecisionState(_ decisionState: String, isAd: Bool) -> Bool {
             if isAd {
-                return isAdDecision(decisionState)
+                return decisionState == AdDecisionState.candidate.rawValue
+                    || decisionState == AdDecisionState.confirmed.rawValue
             }
             return decisionState == AdDecisionState.suppressed.rawValue
+        }
+
+        static func isKnownExportDecisionState(_ decisionState: String) -> Bool {
+            normalizedExportDecisionState(decisionState) != nil
+                || decisionState == AdDecisionState.reverted.rawValue
         }
 
         private static func normalizedExportDecisionState(_ decisionState: String) -> String? {
@@ -319,7 +331,13 @@ extension AnalysisStore {
             episodeId: asset.episodeId,
             fileSHA: asset.assetFingerprint
         )
-        let windows = try fetchAdWindows(assetId: assetId)
+        let adWindows = try fetchAdWindows(assetId: assetId)
+        guard adWindows.allSatisfy({
+            CrossUserAnalysisSnapshot.Window.isKnownExportDecisionState($0.decisionState)
+        }) else {
+            return nil
+        }
+        let windows = adWindows
             .compactMap(CrossUserAnalysisSnapshot.Window.exported(from:))
         guard windows.allSatisfy(Self.isValidSharedWindow) else {
             return nil

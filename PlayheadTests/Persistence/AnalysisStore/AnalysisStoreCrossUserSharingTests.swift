@@ -164,6 +164,41 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(snapshot == nil)
     }
 
+    @Test("export suppresses snapshots instead of dropping unknown decision states with stale coverage")
+    func exportSuppressesSnapshotWhenLocalDecisionStateIsUnknown() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "full-file-sha-a"
+        )
+        try await store.updateConfirmedAdCoverage(id: "asset-a", endTime: 90)
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-valid-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            )
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-unknown-state-window",
+                assetId: "asset-a",
+                start: 50,
+                end: 90
+            ).withDecisionState("locally-unknown-state")
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        #expect(snapshot == nil)
+    }
+
     @Test("import mismatch is an explicit no-op and leaves local windows untouched")
     func importMismatchIsNoOp() async throws {
         let store = try await makeTestStore()
@@ -494,8 +529,7 @@ struct AnalysisStoreCrossUserSharingTests {
             key: key,
             windows: [
                 CrossUserAnalysisSnapshot.Window(
-                    adWindow: makeSharingWindow(id: "source-applied-window", assetId: "asset-a")
-                        .withDecisionState(AdDecisionState.applied.rawValue)
+                    adWindow: makeSharingWindow(id: "source-valid-window", assetId: "asset-a")
                 ),
                 CrossUserAnalysisSnapshot.Window(
                     adWindow: makeSharingWindow(id: "source-reverted-window", assetId: "asset-a", start: 50, end: 80)
@@ -512,6 +546,47 @@ struct AnalysisStoreCrossUserSharingTests {
 
         if case .incompatibleSnapshot(let reason) = result {
             #expect(reason == "window[1]")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
+    @Test("import rejects applied playback lifecycle state from externally supplied snapshots")
+    func importRejectsAppliedLifecycleStateWithoutPartialInsert() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "shared-full-file-sha"
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-1",
+            fileSHA: "shared-full-file-sha"
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(id: "source-applied-window", assetId: "asset-a")
+                        .withDecisionState(AdDecisionState.applied.rawValue)
+                ),
+            ]
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "window[0]")
         } else {
             Issue.record("Expected incompatibleSnapshot result, got \(result)")
         }
