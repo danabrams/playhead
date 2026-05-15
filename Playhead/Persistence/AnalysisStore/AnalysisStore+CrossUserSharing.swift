@@ -263,6 +263,7 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
 
         static func isKnownExportDecisionState(_ decisionState: String) -> Bool {
             normalizedExportDecisionState(decisionState) != nil
+                || decisionState == AdDecisionState.suppressed.rawValue
                 || decisionState == AdDecisionState.reverted.rawValue
         }
 
@@ -274,8 +275,7 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
         private static func normalizedExportDecisionState(_ decisionState: String) -> String? {
             switch decisionState {
             case AdDecisionState.candidate.rawValue,
-                 AdDecisionState.confirmed.rawValue,
-                 AdDecisionState.suppressed.rawValue:
+                 AdDecisionState.confirmed.rawValue:
                 return decisionState
             case AdDecisionState.applied.rawValue:
                 return AdDecisionState.confirmed.rawValue

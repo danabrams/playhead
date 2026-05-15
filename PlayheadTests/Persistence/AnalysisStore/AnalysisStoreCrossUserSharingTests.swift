@@ -1195,6 +1195,69 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(snapshot == nil)
     }
 
+    @Test("export suppresses snapshots when only suppressed windows remain")
+    func exportSuppressesSnapshotWhenOnlySuppressedWindowsRemain() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-suppressed-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            ).withDecisionState(AdDecisionState.suppressed.rawValue)
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        #expect(snapshot == nil)
+    }
+
+    @Test("export drops suppressed windows without inflating coverage")
+    func exportDropsSuppressedWindowsWithoutInflatingCoverage() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-confirmed-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            )
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-suppressed-window",
+                assetId: "asset-a",
+                start: 50,
+                end: 90
+            ).withDecisionState(AdDecisionState.suppressed.rawValue)
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        let exported = try #require(snapshot)
+        #expect(exported.windows.map(\.sourceWindowId) == ["source-confirmed-window"])
+        #expect(exported.analysisCoverageEndSec == 40)
+        #expect(exported.windows.allSatisfy { $0.decisionState != AdDecisionState.suppressed.rawValue })
+    }
+
     @Test("export drops local correction boundary states without inflating coverage")
     func exportDropsLocalCorrectionBoundaryStatesWithoutInflatingCoverage() async throws {
         let store = try await makeTestStore()
