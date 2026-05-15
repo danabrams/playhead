@@ -807,11 +807,11 @@ actor AnalysisJobRunner {
         guard analysisSharingProvider.isEnabled else { return nil }
         guard let asset = try? await store.fetchAsset(id: assetId) else { return nil }
 
-        let key = CrossUserAnalysisShareKey(
+        guard let key = CrossUserAnalysisShareKey.make(
             podcastId: request.podcastId,
             episodeId: asset.episodeId,
             fileSHA: asset.assetFingerprint
-        )
+        ) else { return nil }
         guard let snapshot = await analysisSharingProvider.matchingSnapshot(for: key) else {
             return nil
         }

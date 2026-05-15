@@ -101,7 +101,7 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-a",
             episodeId: "episode-1",
-            fileSHA: "full-file-sha-a",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             episodeDurationSec: 180
         )
         try await store.insertAdWindow(makeSharingWindow(id: "source-window", assetId: "asset-a"))
@@ -119,7 +119,7 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(snapshot?.key == CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "full-file-sha-a"
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         ))
         #expect(snapshot?.measurements.fmMinutesSaved == nil)
         #expect(snapshot?.analysisCoverageEndSec == 40)
@@ -136,6 +136,58 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(!encoded.contains("evidenceText"))
     }
 
+    @Test("export suppresses snapshots when the local fingerprint is not a full-file SHA")
+    func exportSuppressesSnapshotWhenFingerprintIsWeak() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "https://example.com/audio.mp3|etag|12345|Tue, 01 Jan 2030 00:00:00 GMT"
+        )
+        try await store.insertAdWindow(makeSharingWindow(id: "source-window", assetId: "asset-a"))
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        #expect(snapshot == nil)
+    }
+
+    @Test("import rejects local assets whose fingerprint is not a full-file SHA")
+    func importRejectsLocalWeakFingerprintWithoutPartialInsert() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "https://example.com/audio.mp3|etag|12345|Tue, 01 Jan 2030 00:00:00 GMT"
+        )
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "podcast-1",
+                episodeId: "episode-1",
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            ),
+            windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a"))]
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "fileSHA")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
     @Test("export suppresses snapshots instead of dropping invalid windows with stale coverage")
     func exportSuppressesSnapshotWhenExportableWindowIsInvalid() async throws {
         let store = try await makeTestStore()
@@ -143,7 +195,7 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-a",
             episodeId: "episode-1",
-            fileSHA: "full-file-sha-a"
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         )
         try await store.updateConfirmedAdCoverage(id: "asset-a", endTime: 90)
         try await store.insertAdWindow(
@@ -171,7 +223,7 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-a",
             episodeId: "episode-1",
-            fileSHA: "full-file-sha-a"
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         )
         try await store.updateConfirmedAdCoverage(id: "asset-a", endTime: 90)
         try await store.insertAdWindow(
@@ -206,14 +258,14 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "local-full-file-sha"
+            fileSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         )
 
         let snapshot = makeSnapshot(
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
                 episodeId: "episode-1",
-                fileSHA: "other-full-file-sha"
+                fileSHA: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
             ),
             windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a"))]
         )
@@ -225,8 +277,8 @@ struct AnalysisStoreCrossUserSharingTests {
         )
 
         if case .mismatchedKey(let expected, let actual) = result {
-            #expect(expected.fileSHA == "local-full-file-sha")
-            #expect(actual.fileSHA == "other-full-file-sha")
+            #expect(expected.fileSHA == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            #expect(actual.fileSHA == "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
         } else {
             Issue.record("Expected mismatchedKey result, got \(result)")
         }
@@ -241,13 +293,13 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -277,13 +329,13 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -313,13 +365,13 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let staleVersions = PipelineVersions(
             modelVersion: "old-detector",
@@ -354,13 +406,13 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let validWindow = CrossUserAnalysisSnapshot.Window(
             adWindow: makeSharingWindow(
@@ -415,13 +467,13 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -460,13 +512,13 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let validWindow = CrossUserAnalysisSnapshot.Window(
             adWindow: makeSharingWindow(
@@ -522,7 +574,7 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-a",
             episodeId: "episode-1",
-            fileSHA: "full-file-sha-a"
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         )
         try await store.insertAdWindow(
             makeSharingWindow(
@@ -562,7 +614,7 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-a",
             episodeId: "episode-1",
-            fileSHA: "full-file-sha-a"
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         )
         try await store.updateConfirmedAdCoverage(id: "asset-a", endTime: 90)
         try await store.insertAdWindow(
@@ -592,6 +644,141 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(exported.analysisCoverageEndSec == 40)
     }
 
+    @Test("export drops local correction boundary states without inflating coverage")
+    func exportDropsLocalCorrectionBoundaryStatesWithoutInflatingCoverage() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-derived-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            )
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-user-marked-window",
+                assetId: "asset-a",
+                start: 50,
+                end: 90
+            ).withBoundaryState("userMarked")
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-correction-replay-window",
+                assetId: "asset-a",
+                start: 95,
+                end: 120
+            ).withBoundaryState("correctionReplay")
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        let exported = try #require(snapshot)
+        #expect(exported.windows.map(\.sourceWindowId) == ["source-derived-window"])
+        #expect(exported.windows.first?.boundaryState == AdBoundaryState.acousticRefined.rawValue)
+        #expect(exported.analysisCoverageEndSec == 40)
+
+        let encoded = try exported.encodedJSONString()
+        #expect(!encoded.contains("userMarked"))
+        #expect(!encoded.contains("correctionReplay"))
+    }
+
+    @Test("export suppresses snapshots when a boundary state is unknown")
+    func exportSuppressesSnapshotWhenBoundaryStateIsUnknown() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-valid-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            )
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-unknown-boundary-window",
+                assetId: "asset-a",
+                start: 50,
+                end: 90
+            ).withBoundaryState("future-boundary-state")
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        #expect(snapshot == nil)
+    }
+
+    @Test("import rejects local correction boundary state without partially inserting valid windows")
+    func importRejectsLocalCorrectionBoundaryStateWithoutPartialInsert() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+        let validWindow = CrossUserAnalysisSnapshot.Window(
+            adWindow: makeSharingWindow(
+                id: "source-valid-window",
+                assetId: "asset-a",
+                start: 12,
+                end: 60
+            )
+        )
+        let correctionWindow = CrossUserAnalysisSnapshot.Window(
+            adWindow: makeSharingWindow(
+                id: "source-user-marked-window",
+                assetId: "asset-a",
+                start: 70,
+                end: 90
+            ).withBoundaryState("userMarked")
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [validWindow, correctionWindow]
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "window[1]")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
     @Test("import rejects reverted local lifecycle state from externally supplied snapshots")
     func importRejectsRevertedLifecycleStateWithoutPartialInsert() async throws {
         let store = try await makeTestStore()
@@ -599,13 +786,13 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -643,13 +830,13 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -684,13 +871,13 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -742,7 +929,7 @@ struct AnalysisStoreCrossUserSharingTests {
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let snapshot = makeSnapshot(
             key: key,
@@ -756,9 +943,34 @@ struct AnalysisStoreCrossUserSharingTests {
         let miss = await provider.matchingSnapshot(for: CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "other-full-file-sha"
+            fileSHA: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         ))
         #expect(miss == nil)
+    }
+
+    @Test("file-backed provider ignores snapshots not keyed by a canonical full-file SHA")
+    func fileBackedProviderIgnoresNonSHAKeys() async throws {
+        let directory = try makeTempDir(prefix: "CrossUserAnalysisSharingProvider")
+        let provider = FileBackedCrossUserAnalysisSharingProvider(directory: directory)
+        let invalidKey = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            episodeId: "episode-1",
+            fileSHA: "https://example.com/audio.mp3|etag|12345|Tue, 01 Jan 2030 00:00:00 GMT"
+        )
+        let snapshot = makeSnapshot(
+            key: invalidKey,
+            windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a"))]
+        )
+
+        try await provider.publish(snapshot)
+
+        let fetched = await provider.matchingSnapshot(for: invalidKey)
+        #expect(fetched == nil)
+        let contents = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        #expect(contents.isEmpty)
     }
 
     @Test("matching import remaps windows to the local asset and is idempotent")
@@ -768,7 +980,7 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
             episodeDurationSec: 120
         )
         try await store.insertAdWindow(
@@ -786,7 +998,7 @@ struct AnalysisStoreCrossUserSharingTests {
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
                 episodeId: "episode-1",
-                fileSHA: "shared-full-file-sha"
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             ),
             windows: [
                 CrossUserAnalysisSnapshot.Window(
@@ -873,7 +1085,7 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
             episodeDurationSec: 120
         )
         try await store.insertAdWindow(
@@ -891,7 +1103,7 @@ struct AnalysisStoreCrossUserSharingTests {
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
                 episodeId: "episode-1",
-                fileSHA: "shared-full-file-sha"
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             ),
             windows: [
                 CrossUserAnalysisSnapshot.Window(
@@ -932,7 +1144,7 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
             episodeDurationSec: 120
         )
         try await store.insertAdWindow(
@@ -950,7 +1162,7 @@ struct AnalysisStoreCrossUserSharingTests {
             key: CrossUserAnalysisShareKey(
                 podcastId: "podcast-1",
                 episodeId: "episode-1",
-                fileSHA: "shared-full-file-sha"
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             ),
             windows: [
                 CrossUserAnalysisSnapshot.Window(
@@ -992,6 +1204,69 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(imported.evidenceText == nil)
     }
 
+    @Test("import does not override an equivalent local reverted span")
+    func importDoesNotOverrideEquivalentLocalRevertedSpan() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            episodeDurationSec: 120
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "local-reverted-span",
+                assetId: "asset-b",
+                start: 12.1,
+                end: 60.1,
+                confidence: 0.96,
+                evidenceText: "local evidence stays local"
+            ).withDecisionState(AdDecisionState.reverted.rawValue)
+        )
+
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "podcast-1",
+                episodeId: "episode-1",
+                fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            ),
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(
+                        id: "source-window",
+                        assetId: "asset-a",
+                        start: 12,
+                        end: 60
+                    )
+                ),
+            ]
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        guard case .imported(let receipt) = result else {
+            Issue.record("Expected import to respect local reverted span, got \(result)")
+            return
+        }
+        #expect(receipt.insertedWindowCount == 0)
+        #expect(receipt.insertedWindowIds.isEmpty)
+        #expect(receipt.bannerEligibleWindowIds.isEmpty)
+        #expect(receipt.insertedCueCount == 0)
+        #expect(receipt.totalWindowCount == 1)
+        #expect(receipt.cueCoverageSec == 0)
+
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.count == 1)
+        #expect(windows.first?.id == "local-reverted-span")
+        #expect(windows.first?.decisionState == AdDecisionState.reverted.rawValue)
+        #expect(windows.first?.evidenceText == "local evidence stays local")
+    }
+
     @Test("later shared cue ad supersedes prior imported non-ad row with same source id")
     func laterSharedCueAdSupersedesPriorImportedNonAdWithSameSourceId() async throws {
         let store = try await makeTestStore()
@@ -999,14 +1274,14 @@ struct AnalysisStoreCrossUserSharingTests {
             store: store,
             id: "asset-b",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
             episodeDurationSec: 120
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "podcast-1",
             episodeId: "episode-1",
-            fileSHA: "shared-full-file-sha"
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         )
         let nonAdSnapshot = makeSnapshot(
             key: key,
@@ -1107,6 +1382,32 @@ private extension Encodable {
 
 private extension AdWindow {
     func withDecisionState(_ decisionState: String) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: analysisAssetId,
+            startTime: startTime,
+            endTime: endTime,
+            confidence: confidence,
+            boundaryState: boundaryState,
+            decisionState: decisionState,
+            detectorVersion: detectorVersion,
+            advertiser: advertiser,
+            product: product,
+            adDescription: adDescription,
+            evidenceText: evidenceText,
+            evidenceStartTime: evidenceStartTime,
+            metadataSource: metadataSource,
+            metadataConfidence: metadataConfidence,
+            metadataPromptVersion: metadataPromptVersion,
+            wasSkipped: wasSkipped,
+            userDismissedBanner: userDismissedBanner,
+            evidenceSources: evidenceSources,
+            eligibilityGate: eligibilityGate,
+            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
+        )
+    }
+
+    func withBoundaryState(_ boundaryState: String) -> AdWindow {
         AdWindow(
             id: id,
             analysisAssetId: analysisAssetId,

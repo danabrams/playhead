@@ -594,14 +594,14 @@ struct AnalysisJobRunnerTests {
         try await seedAsset(
             store: store,
             fastTranscriptCoverageEndTime: nil,
-            assetFingerprint: "full-file-sha-runner",
+            assetFingerprint: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
             episodeDurationSec: 120
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "test-pod",
             episodeId: "test-ep",
-            fileSHA: "full-file-sha-runner"
+            fileSHA: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         )
         let sharingProvider = StubCrossUserAnalysisSharingProvider()
         sharingProvider.snapshot = makeSharedAnalysisSnapshot(key: key)
@@ -650,19 +650,67 @@ struct AnalysisJobRunnerTests {
         #expect(windows.first?.evidenceText == nil)
     }
 
+    @Test("sharing provider is not queried when the local fingerprint is not a full-file SHA")
+    func testSharedAnalysisSkipsProviderForWeakFingerprint() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(
+            store: store,
+            fastTranscriptCoverageEndTime: nil,
+            assetFingerprint: "https://example.com/audio.mp3|etag|12345|Tue, 01 Jan 2030 00:00:00 GMT",
+            episodeDurationSec: 120
+        )
+
+        let sharingProvider = StubCrossUserAnalysisSharingProvider()
+        sharingProvider.snapshot = makeSharedAnalysisSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "test-pod",
+                episodeId: "test-ep",
+                fileSHA: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            )
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 2)
+
+        let featureService = FeatureExtractionService(store: store)
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub,
+            analysisSharingProvider: sharingProvider
+        )
+
+        _ = await runner.run(makeTestRequest(desiredCoverageSec: 60))
+
+        #expect(sharingProvider.requestedKeys.isEmpty)
+        #expect(sharingProvider.publishedSnapshots.isEmpty)
+        #expect(audioStub.decodeCallCount == 1)
+        #expect(adStub.hotPathCallCount == 1)
+        #expect(adStub.backfillCallCount == 1)
+    }
+
     @Test("shared analysis hit preserves writeWindowsOnly semantics and publishes on later live pass")
     func testSharedAnalysisImportHitHonorsOutputPolicyAndPublishesExistingImport() async throws {
         let store = try await makeTestStore()
         try await seedAsset(
             store: store,
-            assetFingerprint: "full-file-sha-runner-policy",
+            assetFingerprint: "1111111111111111111111111111111111111111111111111111111111111111",
             episodeDurationSec: 120
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "test-pod",
             episodeId: "test-ep",
-            fileSHA: "full-file-sha-runner-policy"
+            fileSHA: "1111111111111111111111111111111111111111111111111111111111111111"
         )
         let sharingProvider = StubCrossUserAnalysisSharingProvider()
         sharingProvider.snapshot = makeSharedAnalysisSnapshot(key: key)
@@ -716,14 +764,14 @@ struct AnalysisJobRunnerTests {
         let store = try await makeTestStore()
         try await seedAsset(
             store: store,
-            assetFingerprint: "full-file-sha-runner-non-ad",
+            assetFingerprint: "2222222222222222222222222222222222222222222222222222222222222222",
             episodeDurationSec: 120
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "test-pod",
             episodeId: "test-ep",
-            fileSHA: "full-file-sha-runner-non-ad"
+            fileSHA: "2222222222222222222222222222222222222222222222222222222222222222"
         )
         let sharingProvider = StubCrossUserAnalysisSharingProvider()
         sharingProvider.snapshot = CrossUserAnalysisSnapshot(
@@ -797,14 +845,14 @@ struct AnalysisJobRunnerTests {
         try await seedAsset(
             store: store,
             fastTranscriptCoverageEndTime: nil,
-            assetFingerprint: "full-file-sha-runner-partial",
+            assetFingerprint: "3333333333333333333333333333333333333333333333333333333333333333",
             episodeDurationSec: 120
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "test-pod",
             episodeId: "test-ep",
-            fileSHA: "full-file-sha-runner-partial"
+            fileSHA: "3333333333333333333333333333333333333333333333333333333333333333"
         )
         let sharingProvider = StubCrossUserAnalysisSharingProvider()
         sharingProvider.snapshot = makeSharedAnalysisSnapshot(
@@ -846,14 +894,14 @@ struct AnalysisJobRunnerTests {
         try await seedAsset(
             store: store,
             fastTranscriptCoverageEndTime: nil,
-            assetFingerprint: "full-file-sha-runner-inflated",
+            assetFingerprint: "4444444444444444444444444444444444444444444444444444444444444444",
             episodeDurationSec: 120
         )
 
         let key = CrossUserAnalysisShareKey(
             podcastId: "test-pod",
             episodeId: "test-ep",
-            fileSHA: "full-file-sha-runner-inflated"
+            fileSHA: "4444444444444444444444444444444444444444444444444444444444444444"
         )
         let sharingProvider = StubCrossUserAnalysisSharingProvider()
         sharingProvider.snapshot = CrossUserAnalysisSnapshot(
@@ -921,7 +969,7 @@ struct AnalysisJobRunnerTests {
         try await seedAsset(
             store: store,
             fastTranscriptCoverageEndTime: 30,
-            assetFingerprint: "full-file-sha-publish",
+            assetFingerprint: "5555555555555555555555555555555555555555555555555555555555555555",
             episodeDurationSec: 30
         )
         let segment = makeTranscriptSegment()
@@ -981,7 +1029,7 @@ struct AnalysisJobRunnerTests {
         #expect(snapshot.key == CrossUserAnalysisShareKey(
             podcastId: "test-pod",
             episodeId: "test-ep",
-            fileSHA: "full-file-sha-publish"
+            fileSHA: "5555555555555555555555555555555555555555555555555555555555555555"
         ))
         #expect(snapshot.windows.count == 1)
         #expect(snapshot.windows.first?.sourceWindowId == "publish-window")

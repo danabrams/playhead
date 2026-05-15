@@ -9,6 +9,36 @@ struct CrossUserAnalysisShareKey: Codable, Equatable, Hashable, Sendable {
     let podcastId: String
     let episodeId: String
     let fileSHA: String
+
+    var usesCanonicalFullFileSHA: Bool {
+        Self.normalizedFullFileSHA(fileSHA) == fileSHA
+    }
+
+    static func make(
+        podcastId: String,
+        episodeId: String,
+        fileSHA: String
+    ) -> CrossUserAnalysisShareKey? {
+        guard let normalizedFileSHA = normalizedFullFileSHA(fileSHA) else {
+            return nil
+        }
+        return CrossUserAnalysisShareKey(
+            podcastId: podcastId,
+            episodeId: episodeId,
+            fileSHA: normalizedFileSHA
+        )
+    }
+
+    private static func normalizedFullFileSHA(_ value: String) -> String? {
+        let normalized = value.lowercased()
+        guard normalized.count == 64 else { return nil }
+        guard normalized.unicodeScalars.allSatisfy({ scalar in
+            (48...57).contains(scalar.value) || (97...102).contains(scalar.value)
+        }) else {
+            return nil
+        }
+        return normalized
+    }
 }
 
 struct CrossUserAnalysisProvenance: Codable, Equatable, Sendable {
@@ -155,12 +185,15 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
             guard let decisionState = normalizedExportDecisionState(adWindow.decisionState) else {
                 return nil
             }
+            guard let boundaryState = normalizedExportBoundaryState(adWindow.boundaryState) else {
+                return nil
+            }
             return Window(
                 sourceWindowId: adWindow.id,
                 startTime: adWindow.startTime,
                 endTime: adWindow.endTime,
                 confidence: adWindow.confidence,
-                boundaryState: adWindow.boundaryState,
+                boundaryState: boundaryState,
                 decisionState: decisionState,
                 isAd: isAdDecision(decisionState),
                 detectorVersion: adWindow.detectorVersion,
@@ -202,6 +235,11 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                 || decisionState == AdDecisionState.reverted.rawValue
         }
 
+        static func isKnownExportBoundaryState(_ boundaryState: String) -> Bool {
+            normalizedExportBoundaryState(boundaryState) != nil
+                || isLocalOnlyBoundaryState(boundaryState)
+        }
+
         private static func normalizedExportDecisionState(_ decisionState: String) -> String? {
             switch decisionState {
             case AdDecisionState.candidate.rawValue,
@@ -212,6 +250,21 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                 return AdDecisionState.confirmed.rawValue
             default:
                 return nil
+            }
+        }
+
+        private static func normalizedExportBoundaryState(_ boundaryState: String) -> String? {
+            AdBoundaryState(rawValue: boundaryState) == nil ? nil : boundaryState
+        }
+
+        private static func isLocalOnlyBoundaryState(_ boundaryState: String) -> Bool {
+            switch boundaryState {
+            case "userMarked",
+                 "userConfirmedSuggested",
+                 "correctionReplay":
+                return true
+            default:
+                return false
             }
         }
 
@@ -280,7 +333,7 @@ struct FileBackedCrossUserAnalysisSharingProvider: CrossUserAnalysisSharingProvi
     }
 
     func matchingSnapshot(for key: CrossUserAnalysisShareKey) async -> CrossUserAnalysisSnapshot? {
-        guard isEnabled else { return nil }
+        guard isEnabled, key.usesCanonicalFullFileSHA else { return nil }
         do {
             let data = try Data(contentsOf: Self.fileURL(for: key, directory: directory))
             return try JSONDecoder().decode(CrossUserAnalysisSnapshot.self, from: data)
@@ -290,7 +343,7 @@ struct FileBackedCrossUserAnalysisSharingProvider: CrossUserAnalysisSharingProvi
     }
 
     func publish(_ snapshot: CrossUserAnalysisSnapshot) async throws {
-        guard isEnabled else { return }
+        guard isEnabled, snapshot.key.usesCanonicalFullFileSHA else { return }
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true
@@ -327,14 +380,15 @@ extension AnalysisStore {
         measurements: CrossUserAnalysisMeasurements = CrossUserAnalysisMeasurements()
     ) throws -> CrossUserAnalysisSnapshot? {
         guard let asset = try fetchAsset(id: assetId) else { return nil }
-        let key = CrossUserAnalysisShareKey(
+        guard let key = CrossUserAnalysisShareKey.make(
             podcastId: podcastId,
             episodeId: asset.episodeId,
             fileSHA: asset.assetFingerprint
-        )
+        ) else { return nil }
         let adWindows = try fetchAdWindows(assetId: assetId)
         guard adWindows.allSatisfy({
             CrossUserAnalysisSnapshot.Window.isKnownExportDecisionState($0.decisionState)
+                && CrossUserAnalysisSnapshot.Window.isKnownExportBoundaryState($0.boundaryState)
         }) else {
             return nil
         }
@@ -367,11 +421,13 @@ extension AnalysisStore {
             return .localAssetMissing(targetAssetId: targetAssetId)
         }
 
-        let expectedKey = CrossUserAnalysisShareKey(
+        guard let expectedKey = CrossUserAnalysisShareKey.make(
             podcastId: podcastId,
             episodeId: asset.episodeId,
             fileSHA: asset.assetFingerprint
-        )
+        ) else {
+            return .incompatibleSnapshot(reason: "fileSHA")
+        }
         guard expectedKey == snapshot.key else {
             return .mismatchedKey(expected: expectedKey, actual: snapshot.key)
         }
@@ -448,7 +504,9 @@ extension AnalysisStore {
                     existingWindows.append(adWindow)
                     existingIds.insert(supersedingId)
                     rememberBannerEligibleWindowId(supersedingId)
-                } else if sharedWindowIsCueEligible {
+                } else if sharedWindowIsCueEligible,
+                          let existing = existingWindows.first(where: { $0.id == id }),
+                          Self.isCueWindow(existing) {
                     rememberBannerEligibleWindowId(id)
                 }
                 continue
@@ -594,6 +652,7 @@ extension AnalysisStore {
             && window.startTime >= 0
             && window.endTime > window.startTime
             && (0...1).contains(window.confidence)
+            && AdBoundaryState(rawValue: window.boundaryState) != nil
             && window.metadataConfidence.map { $0.isFinite && (0...1).contains($0) } ?? true
             && window.catalogStoreMatchSimilarity.map { $0.isFinite && (0...1).contains($0) } ?? true
             && CrossUserAnalysisSnapshot.Window.isValidSharedDecisionState(
@@ -617,7 +676,7 @@ extension AnalysisStore {
         in existingWindows: [AdWindow]
     ) -> Bool {
         existingWindows.contains { existing in
-            isCueWindow(existing)
+            (isCueWindow(existing) || existing.decisionState == AdDecisionState.reverted.rawValue)
                 && abs(existing.startTime - window.startTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
                 && abs(existing.endTime - window.endTime) <= CrossUserAnalysisSharingConstants.spanDedupToleranceSec
         }
