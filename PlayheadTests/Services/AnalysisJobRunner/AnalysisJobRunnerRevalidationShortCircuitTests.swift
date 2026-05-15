@@ -33,6 +33,19 @@ private final class RecordingAudioProvider: AnalysisAudioProviding, @unchecked S
     }
 }
 
+private final class RecordingCrossUserAnalysisSharingProvider: CrossUserAnalysisSharingProviding, @unchecked Sendable {
+    let isEnabled = true
+    private(set) var publishedSnapshots: [CrossUserAnalysisSnapshot] = []
+
+    func matchingSnapshot(for key: CrossUserAnalysisShareKey) async -> CrossUserAnalysisSnapshot? {
+        nil
+    }
+
+    func publish(_ snapshot: CrossUserAnalysisSnapshot) async throws {
+        publishedSnapshots.append(snapshot)
+    }
+}
+
 // MARK: - Helpers
 
 private func makeTempAudioFile() -> LocalAudioURL {
@@ -44,7 +57,8 @@ private func makeTempAudioFile() -> LocalAudioURL {
 
 private func makeRequest(
     assetId: String = "test-asset-zx6i",
-    desiredCoverageSec: Double = 120
+    desiredCoverageSec: Double = 120,
+    outputPolicy: OutputPolicy = .writeWindowsAndCues
 ) -> AnalysisRangeRequest {
     AnalysisRangeRequest(
         jobId: UUID().uuidString,
@@ -54,7 +68,7 @@ private func makeRequest(
         audioURL: makeTempAudioFile(),
         desiredCoverageSec: desiredCoverageSec,
         mode: .preRollWarmup,
-        outputPolicy: .writeWindowsAndCues,
+        outputPolicy: outputPolicy,
         priority: .medium
     )
 }
@@ -64,12 +78,13 @@ private func seedAssetWithDuration(
     assetId: String,
     episodeDurationSec: Double = 120,
     featureCoverage: Double? = 120,
-    transcriptCoverage: Double? = 120
+    transcriptCoverage: Double? = 120,
+    assetFingerprint: String? = nil
 ) async throws {
     let asset = AnalysisAsset(
         id: assetId,
         episodeId: "ep-zx6i",
-        assetFingerprint: assetId,
+        assetFingerprint: assetFingerprint ?? assetId,
         weakFingerprint: nil,
         sourceURL: "",
         featureCoverageEndTime: featureCoverage,
@@ -111,7 +126,8 @@ private func makeRunner(
     adStub: StubAdDetectionProvider,
     flagEnabled: Bool,
     completedVersions: PipelineVersions?,
-    currentVersions: PipelineVersions
+    currentVersions: PipelineVersions,
+    analysisSharingProvider: CrossUserAnalysisSharingProviding = NoOpCrossUserAnalysisSharingProvider()
 ) async throws -> AnalysisJobRunner {
     let featureService = FeatureExtractionService(store: store)
     let speechService = SpeechService(recognizer: StubSpeechRecognizer())
@@ -128,7 +144,8 @@ private func makeRunner(
         adDetection: adStub,
         b4RevalidationEnabledProvider: { flagEnabled },
         currentPipelineVersionsProvider: { currentVersions },
-        completedPipelineVersionsLoader: { _ in completedVersions }
+        completedPipelineVersionsLoader: { _ in completedVersions },
+        analysisSharingProvider: analysisSharingProvider
     )
 }
 
@@ -391,6 +408,68 @@ struct AnalysisJobRunnerRevalidationShortCircuitTests {
         // does not silently regress to 0.
         #expect(outcome.featureCoverageSec == 120)
         #expect(outcome.transcriptCoverageSec == 120)
+    }
+
+    @Test("revalidation writeWindowsAndCues does not publish shared analysis snapshots")
+    func revalidationWriteWindowsAndCuesDoesNotPublishSharedSnapshot() async throws {
+        let assetId = "asset-revalidation-share-publish"
+        let fullFileSHA = "7777777777777777777777777777777777777777777777777777777777777777"
+        let store = try await makeTestStore()
+        try await seedAssetWithDuration(
+            store: store,
+            assetId: assetId,
+            assetFingerprint: fullFileSHA
+        )
+        try await seedOneChunk(store: store, assetId: assetId)
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "revalidated-window",
+                analysisAssetId: assetId,
+                startTime: 15,
+                endTime: 45,
+                confidence: 0.91,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.confirmed.rawValue,
+                detectorVersion: "fm-test-v1",
+                advertiser: "Acme",
+                product: "Widget",
+                adDescription: "Revalidated promo",
+                evidenceText: nil,
+                evidenceStartTime: nil,
+                metadataSource: "foundation-model",
+                metadataConfidence: 0.82,
+                metadataPromptVersion: "prompt-v1",
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+
+        let audioStub = RecordingAudioProvider()
+        let adStub = StubAdDetectionProvider()
+        let sharingProvider = RecordingCrossUserAnalysisSharingProvider()
+        let runner = try await makeRunner(
+            store: store,
+            audioStub: audioStub,
+            adStub: adStub,
+            flagEnabled: true,
+            completedVersions: Self.baseVersions,
+            currentVersions: Self.bumpedVersions,
+            analysisSharingProvider: sharingProvider
+        )
+
+        let outcome = await runner.run(makeRequest(
+            assetId: assetId,
+            outputPolicy: .writeWindowsAndCues
+        ))
+
+        if case .reachedTarget = outcome.stopReason {
+            // expected
+        } else {
+            Issue.record("Expected .reachedTarget but got \(outcome.stopReason)")
+        }
+        #expect(audioStub.decodeCallCount == 0)
+        #expect(adStub.revalidateFromFeaturesCallCount == 1)
+        #expect(sharingProvider.publishedSnapshots.isEmpty)
     }
 
     @Test("flag ON + bump + missing episodeDurationSec → falls back to full analysis")

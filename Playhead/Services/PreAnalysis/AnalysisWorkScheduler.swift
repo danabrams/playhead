@@ -4085,18 +4085,26 @@ actor AnalysisWorkScheduler {
                     // the old analysis anchored to its SHA and create a
                     // new asset for this file below.
                 } else {
-                    let preservedWeakFingerprint = existing.weakFingerprint ?? existing.assetFingerprint
-                    try await store.updateAssetFingerprint(
-                        id: existing.id,
-                        assetFingerprint: job.sourceFingerprint,
-                        weakFingerprint: preservedWeakFingerprint
-                    )
+                    let currentAudioFingerprint = await downloadManager.fingerprint(for: job.episodeId)
                     guard !lostOwnership else { throw CancellationError() }
-                    try await store.updateJobAnalysisAssetId(
-                        jobId: job.jobId,
-                        analysisAssetId: existing.id
-                    )
-                    return existing.id
+                    if Self.canUpgradeWeakAssetToCanonicalSHA(
+                        existing,
+                        jobSourceFingerprint: job.sourceFingerprint,
+                        currentAudioFingerprint: currentAudioFingerprint
+                    ) {
+                        let preservedWeakFingerprint = existing.weakFingerprint ?? existing.assetFingerprint
+                        try await store.updateAssetFingerprint(
+                            id: existing.id,
+                            assetFingerprint: job.sourceFingerprint,
+                            weakFingerprint: preservedWeakFingerprint
+                        )
+                        guard !lostOwnership else { throw CancellationError() }
+                        try await store.updateJobAnalysisAssetId(
+                            jobId: job.jobId,
+                            analysisAssetId: existing.id
+                        )
+                        return existing.id
+                    }
                 }
             } else {
                 try await store.updateJobAnalysisAssetId(
@@ -4149,6 +4157,22 @@ actor AnalysisWorkScheduler {
         guard !lostOwnership else { throw CancellationError() }
         try await store.updateJobAnalysisAssetId(jobId: job.jobId, analysisAssetId: assetId)
         return assetId
+    }
+
+    private static func canUpgradeWeakAssetToCanonicalSHA(
+        _ asset: AnalysisAsset,
+        jobSourceFingerprint: String,
+        currentAudioFingerprint: AudioFingerprint?
+    ) -> Bool {
+        if asset.assetFingerprint == asset.id, asset.weakFingerprint == nil {
+            return true
+        }
+        guard let currentAudioFingerprint,
+              currentAudioFingerprint.strong == jobSourceFingerprint else {
+            return false
+        }
+        return asset.assetFingerprint == currentAudioFingerprint.weak
+            || asset.weakFingerprint == currentAudioFingerprint.weak
     }
 
     static func shouldRetryCoverageInsufficient(job: AnalysisJob, outcome: AnalysisOutcome) -> Bool {

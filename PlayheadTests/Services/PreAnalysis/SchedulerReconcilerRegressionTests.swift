@@ -850,6 +850,66 @@ struct SchedulerBugFixRegressionTests {
         #expect(newAsset.sourceURL == localURL.absoluteString)
     }
 
+    @Test("scheduler does not upgrade an unrelated weak asset to a canonical full-file SHA")
+    func testSchedulerDoesNotUpgradeMismatchedWeakAssetToFullFileSHA() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-weak-mismatch.mp3")
+        downloads.cachedURLs["ep-sha-weak-mismatch"] = localURL
+
+        let oldWeakFingerprint = "https://old.example.com/audio.mp3|old-etag|123|Mon, 01 Jan 2024 00:00:00 GMT"
+        let currentWeakFingerprint = "https://new.example.com/audio.mp3|new-etag|456|Tue, 02 Jan 2024 00:00:00 GMT"
+        let fullFileSHA = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        let existingAsset = AnalysisAsset(
+            id: "old-weak-asset",
+            episodeId: "ep-sha-weak-mismatch",
+            assetFingerprint: oldWeakFingerprint,
+            weakFingerprint: nil,
+            sourceURL: "old.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+        try await store.insertAsset(existingAsset)
+        downloads.fingerprints["ep-sha-weak-mismatch"] = AudioFingerprint(
+            weak: currentWeakFingerprint,
+            strong: fullFileSHA
+        )
+
+        let job = makeAnalysisJob(
+            jobId: "sha-weak-mismatch-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-weak-mismatch",
+            analysisAssetId: nil,
+            workKey: "\(fullFileSHA):1:preAnalysis",
+            sourceFingerprint: fullFileSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-weak-mismatch-job")
+        let updatedJob = try #require(await store.fetchJob(byId: "sha-weak-mismatch-job"))
+        let newAssetId = try #require(updatedJob.analysisAssetId)
+        #expect(newAssetId != "old-weak-asset")
+
+        let oldAsset = try #require(await store.fetchAsset(id: "old-weak-asset"))
+        #expect(oldAsset.assetFingerprint == oldWeakFingerprint)
+        #expect(oldAsset.weakFingerprint == nil)
+
+        let newAsset = try #require(await store.fetchAsset(id: newAssetId))
+        #expect(newAsset.episodeId == "ep-sha-weak-mismatch")
+        #expect(newAsset.assetFingerprint == fullFileSHA)
+        #expect(newAsset.sourceURL == localURL.absoluteString)
+    }
+
     @Test("scheduler reuses older asset when its canonical SHA matches the job")
     func testSchedulerReusesOlderMatchingCanonicalFullFileSHA() async throws {
         let store = try await makeTestStore()

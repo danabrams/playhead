@@ -429,6 +429,11 @@ extension AnalysisStore {
             fileSHA: asset.assetFingerprint,
             analysisVersion: asset.analysisVersion
         ) else { return nil }
+        guard exportedAt.timeIntervalSince1970.isFinite,
+              exportedAt.timeIntervalSince1970 >= 0,
+              Self.isValidSharedMeasurements(measurements) else {
+            return nil
+        }
         let adWindows = try fetchAdWindows(assetId: assetId)
         guard adWindows.allSatisfy({
             CrossUserAnalysisSnapshot.Window.isKnownExportDecisionState($0.decisionState)
@@ -485,11 +490,18 @@ extension AnalysisStore {
         guard snapshot.schemaVersion == CrossUserAnalysisSnapshot.currentSchemaVersion else {
             return .incompatibleSnapshot(reason: "schemaVersion")
         }
+        guard snapshot.provenance.exportedAt.isFinite,
+              snapshot.provenance.exportedAt >= 0 else {
+            return .incompatibleSnapshot(reason: "provenance.exportedAt")
+        }
         guard snapshot.provenance.sourceAnalysisVersion == asset.analysisVersion else {
             return .incompatibleSnapshot(reason: "analysisVersion")
         }
         guard snapshot.provenance.pipelineVersions == PipelineVersions.current() else {
             return .incompatibleSnapshot(reason: "pipelineVersions")
+        }
+        guard Self.isValidSharedMeasurements(snapshot.measurements) else {
+            return .incompatibleSnapshot(reason: "measurements")
         }
         guard snapshot.analysisCoverageEndSec.isFinite, snapshot.analysisCoverageEndSec >= 0 else {
             return .incompatibleSnapshot(reason: "analysisCoverageEndSec")
@@ -721,6 +733,14 @@ extension AnalysisStore {
 
     private static func hasUsableString(_ value: String) -> Bool {
         !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func isValidSharedMeasurements(
+        _ measurements: CrossUserAnalysisMeasurements
+    ) -> Bool {
+        measurements.fmMinutesSaved.map { $0.isFinite && $0 >= 0 } ?? true
+            && measurements.queueToReadyLatencySec.map { $0.isFinite && $0 >= 0 } ?? true
+            && measurements.batteryDeltaPercent.map(\.isFinite) ?? true
     }
 
     private static func hasEquivalentSpan(

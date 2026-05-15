@@ -292,11 +292,13 @@ actor AnalysisJobRunner {
                                 .filter(Self.isCueWindow)
                                 .map(\.endTime)
                                 .max() ?? 0
-                            await publishSharedAnalysisIfEnabled(
-                                assetId: assetId,
-                                podcastId: request.podcastId,
-                                outputPolicy: request.outputPolicy
-                            )
+                            if request.outputPolicy == .writeWindowsAndPushLive {
+                                await publishSharedAnalysisIfEnabled(
+                                    assetId: assetId,
+                                    podcastId: request.podcastId,
+                                    outputPolicy: request.outputPolicy
+                                )
+                            }
                             return makeOutcome(
                                 assetId: assetId,
                                 request: request,
