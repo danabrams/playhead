@@ -1216,6 +1216,21 @@ struct RunPendingBackfillPollingLoopTests {
 
     private static let testLogger = Logger(subsystem: "com.playhead.tests", category: "backfill-loop")
 
+    private final class VirtualClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var instant: ContinuousClock.Instant = .now
+
+        func current() -> ContinuousClock.Instant {
+            lock.lock(); defer { lock.unlock() }
+            return instant
+        }
+
+        func advance(by duration: Duration) {
+            lock.lock(); defer { lock.unlock() }
+            instant = instant.advanced(by: duration)
+        }
+    }
+
     @Test("Stop request exits the polling loop promptly")
     func runPendingBackfillRespectsStop() async throws {
         // Regression for H2: prior to this fix, the polling loop only
@@ -1312,17 +1327,25 @@ struct RunPendingBackfillPollingLoopTests {
             func served() -> Int { maxServed }
         }
         let counts = Counts([1, 0, 1, 0, 0])
+        let vclock = VirtualClock()
+        let pollInterval: Duration = .milliseconds(5)
+        let deadline = vclock.current().advanced(by: .milliseconds(50))
 
         await AnalysisCoordinator.runBackfillPollingLoop(
-            deadline: ContinuousClock.now + .seconds(30),
-            pollInterval: .milliseconds(5),
+            deadline: deadline,
+            pollInterval: pollInterval,
             isStopRequested: { false },
             fetchPendingCount: { await counts.next() },
             // playhead-p06: noop sleep — this test asserts on scripted
-            // pending-count sequences, not on timing. A noop sleep keeps
-            // the test deterministic under parallel execution.
-            sleep: { _ in await Task.yield() },
+            // pending-count sequences, not on wall-clock timing. Advancing
+            // the injected virtual clock keeps the test deterministic under
+            // parallel execution while still bounding broken loops.
+            sleep: { duration in
+                vclock.advance(by: duration)
+                await Task.yield()
+            },
             isTaskCancelled: { false },
+            now: { vclock.current() },
             logger: Self.testLogger
         )
 
@@ -1352,15 +1375,22 @@ struct RunPendingBackfillPollingLoopTests {
             func count() -> Int { served }
         }
         let counts = Counts()
+        let vclock = VirtualClock()
+        let pollInterval: Duration = .milliseconds(5)
+        let deadline = vclock.current().advanced(by: .milliseconds(50))
 
         await AnalysisCoordinator.runBackfillPollingLoop(
-            deadline: ContinuousClock.now + .seconds(30),
-            pollInterval: .milliseconds(5),
+            deadline: deadline,
+            pollInterval: pollInterval,
             isStopRequested: { false },
             fetchPendingCount: { await counts.next() },
-            // playhead-p06: noop sleep for deterministic timing.
-            sleep: { _ in await Task.yield() },
+            // playhead-p06: virtual sleep for deterministic timing.
+            sleep: { duration in
+                vclock.advance(by: duration)
+                await Task.yield()
+            },
             isTaskCancelled: { false },
+            now: { vclock.current() },
             logger: Self.testLogger
         )
 
@@ -1398,18 +1428,6 @@ struct RunPendingBackfillPollingLoopTests {
         // iteration. The deadline is 10 virtual poll intervals away, so
         // we expect roughly 10 polls before the `while now() < deadline`
         // guard trips.
-        final class VirtualClock: @unchecked Sendable {
-            private let lock = NSLock()
-            private var instant: ContinuousClock.Instant = .now
-            func current() -> ContinuousClock.Instant {
-                lock.lock(); defer { lock.unlock() }
-                return instant
-            }
-            func advance(by duration: Duration) {
-                lock.lock(); defer { lock.unlock() }
-                instant = instant.advanced(by: duration)
-            }
-        }
         let vclock = VirtualClock()
         let start = vclock.current()
         let pollInterval: Duration = .milliseconds(5)
