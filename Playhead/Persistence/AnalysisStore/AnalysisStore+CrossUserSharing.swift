@@ -443,6 +443,7 @@ extension AnalysisStore {
         ) else { return nil }
         guard exportedAt.timeIntervalSince1970.isFinite,
               exportedAt.timeIntervalSince1970 >= 0,
+              Self.isCanonicalOptionalString(sourceAppBuild),
               Self.isValidSharedMeasurements(measurements) else {
             return nil
         }
@@ -512,6 +513,9 @@ extension AnalysisStore {
         guard snapshot.provenance.exportedAt.isFinite,
               snapshot.provenance.exportedAt >= 0 else {
             return .incompatibleSnapshot(reason: "provenance.exportedAt")
+        }
+        guard Self.isCanonicalOptionalString(snapshot.provenance.sourceAppBuild) else {
+            return .incompatibleSnapshot(reason: "provenance.sourceAppBuild")
         }
         guard snapshot.provenance.sourceAnalysisVersion == asset.analysisVersion else {
             return .incompatibleSnapshot(reason: "analysisVersion")
@@ -763,6 +767,12 @@ extension AnalysisStore {
         hasCanonicalRequiredString(window.sourceWindowId)
             && hasCanonicalRequiredString(window.detectorVersion)
             && hasCanonicalRequiredString(window.metadataSource)
+            && isCanonicalOptionalString(window.advertiser)
+            && isCanonicalOptionalString(window.product)
+            && isCanonicalOptionalString(window.adDescription)
+            && isCanonicalOptionalString(window.metadataPromptVersion)
+            && isCanonicalOptionalString(window.evidenceSources)
+            && isCanonicalOptionalString(window.eligibilityGate)
             && window.startTime.isFinite
             && window.endTime.isFinite
             && window.confidence.isFinite
@@ -782,6 +792,11 @@ extension AnalysisStore {
     private static func hasCanonicalRequiredString(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty && trimmed == value
+    }
+
+    private static func isCanonicalOptionalString(_ value: String?) -> Bool {
+        guard let value else { return true }
+        return hasCanonicalRequiredString(value)
     }
 
     private static func duplicateSourceWindowIdIndex(

@@ -171,13 +171,7 @@ actor AnalysisJobRunner {
     /// Returns an `AnalysisOutcome` summarizing coverage achieved and stop reason.
     func run(_ request: AnalysisRangeRequest) async -> AnalysisOutcome {
         let assetId = request.analysisAssetId
-
-        if let sharedOutcome = await importSharedAnalysisIfAvailable(
-            assetId: assetId,
-            request: request
-        ) {
-            return sharedOutcome
-        }
+        var shouldAttemptSharedImport = true
 
         // playhead-zx6i — B4 fast revalidation short-circuit. Runs
         // BEFORE the preemption-coordinator registration / decode /
@@ -219,6 +213,7 @@ actor AnalysisJobRunner {
                let completed = completedPipelineVersionsLoader(assetId) {
                 let current = currentPipelineVersionsProvider()
                 if completed != current {
+                    shouldAttemptSharedImport = false
                     logger.info("[zx6i] revalidation triggered for asset \(assetId): completed=\(String(describing: completed)) current=\(String(describing: current))")
                     // Resolve `episodeDuration` from the persisted
                     // asset row (the full-path stage 1 computes this
@@ -317,7 +312,17 @@ actor AnalysisJobRunner {
                         logger.info("[zx6i] revalidation skipped for asset \(assetId): episodeDurationSec missing — falling back to full analysis")
                     }
                 }
+            } else if !persistedChunks.isEmpty {
+                shouldAttemptSharedImport = false
             }
+        }
+
+        if shouldAttemptSharedImport,
+           let sharedOutcome = await importSharedAnalysisIfAvailable(
+               assetId: assetId,
+               request: request
+           ) {
+            return sharedOutcome
         }
 
         // playhead-01t8: register with the preemption coordinator so a

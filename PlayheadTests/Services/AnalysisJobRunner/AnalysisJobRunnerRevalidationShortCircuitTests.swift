@@ -35,14 +35,23 @@ private final class RecordingAudioProvider: AnalysisAudioProviding, @unchecked S
 
 private final class RecordingCrossUserAnalysisSharingProvider: CrossUserAnalysisSharingProviding, @unchecked Sendable {
     let isEnabled = true
+    var snapshot: CrossUserAnalysisSnapshot?
+    private(set) var requestedKeys: [CrossUserAnalysisShareKey] = []
+    private(set) var importedWindows: [AdWindow] = []
     private(set) var publishedSnapshots: [CrossUserAnalysisSnapshot] = []
 
     func matchingSnapshot(for key: CrossUserAnalysisShareKey) async -> CrossUserAnalysisSnapshot? {
-        nil
+        requestedKeys.append(key)
+        guard snapshot?.key == key else { return nil }
+        return snapshot
     }
 
     func publish(_ snapshot: CrossUserAnalysisSnapshot) async throws {
         publishedSnapshots.append(snapshot)
+    }
+
+    func didImportSharedAdWindows(_ windows: [AdWindow]) async {
+        importedWindows.append(contentsOf: windows)
     }
 }
 
@@ -118,6 +127,42 @@ private func seedOneChunk(store: AnalysisStore, assetId: String) async throws {
         atomOrdinal: nil
     )
     try await store.insertTranscriptChunks([chunk])
+}
+
+private func makeSharedAnalysisSnapshot(
+    key: CrossUserAnalysisShareKey,
+    analysisCoverageEndSec: Double = 60
+) -> CrossUserAnalysisSnapshot {
+    CrossUserAnalysisSnapshot(
+        key: key,
+        provenance: CrossUserAnalysisProvenance(
+            exportedAt: 1_800_000_000,
+            sourceAnalysisVersion: key.analysisVersion,
+            sourceAppBuild: "revalidation-test"
+        ),
+        analysisCoverageEndSec: analysisCoverageEndSec,
+        measurements: CrossUserAnalysisMeasurements(),
+        windows: [
+            CrossUserAnalysisSnapshot.Window(
+                sourceWindowId: "peer-revalidation-window",
+                startTime: 10,
+                endTime: analysisCoverageEndSec,
+                confidence: 0.9,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.confirmed.rawValue,
+                detectorVersion: "fm-test-v1",
+                advertiser: "Acme",
+                product: "Widget",
+                adDescription: "Imported promo",
+                metadataSource: "foundation-model",
+                metadataConfidence: 0.82,
+                metadataPromptVersion: "prompt-v1",
+                evidenceSources: "semantic,fusion",
+                eligibilityGate: "ready",
+                catalogStoreMatchSimilarity: nil
+            ),
+        ]
+    )
 }
 
 private func makeRunner(
@@ -206,6 +251,51 @@ struct AnalysisJobRunnerRevalidationShortCircuitTests {
         else { Issue.record("Expected .reachedTarget but got \(outcome.stopReason)") }
     }
 
+    @Test("flag ON + chunks + stamp + version bump → shared import is not queried before revalidation")
+    func bumpDoesNotShortCircuitThroughSharedImport() async throws {
+        let assetId = "asset-bump-shared-import-gated"
+        let fullFileSHA = "8888888888888888888888888888888888888888888888888888888888888888"
+        let store = try await makeTestStore()
+        try await seedAssetWithDuration(
+            store: store,
+            assetId: assetId,
+            assetFingerprint: fullFileSHA
+        )
+        try await seedOneChunk(store: store, assetId: assetId)
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "pod-zx6i",
+            fileSHA: fullFileSHA,
+            analysisVersion: 1
+        )
+        let sharingProvider = RecordingCrossUserAnalysisSharingProvider()
+        sharingProvider.snapshot = makeSharedAnalysisSnapshot(key: key)
+
+        let audioStub = RecordingAudioProvider()
+        let adStub = StubAdDetectionProvider()
+        let runner = try await makeRunner(
+            store: store,
+            audioStub: audioStub,
+            adStub: adStub,
+            flagEnabled: true,
+            completedVersions: Self.baseVersions,
+            currentVersions: Self.bumpedVersions,
+            analysisSharingProvider: sharingProvider
+        )
+
+        let outcome = await runner.run(makeRequest(assetId: assetId))
+
+        if case .reachedTarget = outcome.stopReason {
+            // expected
+        } else {
+            Issue.record("Expected .reachedTarget but got \(outcome.stopReason)")
+        }
+        #expect(audioStub.decodeCallCount == 0)
+        #expect(adStub.revalidateFromFeaturesCallCount == 1)
+        #expect(sharingProvider.requestedKeys.isEmpty)
+        #expect(sharingProvider.importedWindows.isEmpty)
+    }
+
     @Test("flag OFF → full analysis path runs even with a stamp and a version bump")
     func flagOffTakesFullPath() async throws {
         let assetId = "asset-flag-off"
@@ -285,6 +375,46 @@ struct AnalysisJobRunnerRevalidationShortCircuitTests {
 
         #expect(adStub.revalidateFromFeaturesCallCount == 0)
         #expect(audioStub.decodeCallCount == 1)
+    }
+
+    @Test("flag ON + chunks + no stamp → shared import is not queried before baseline full analysis")
+    func noStampDoesNotShortCircuitThroughSharedImport() async throws {
+        let assetId = "asset-no-stamp-shared-import-gated"
+        let fullFileSHA = "9999999999999999999999999999999999999999999999999999999999999999"
+        let store = try await makeTestStore()
+        try await seedAssetWithDuration(
+            store: store,
+            assetId: assetId,
+            assetFingerprint: fullFileSHA
+        )
+        try await seedOneChunk(store: store, assetId: assetId)
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "pod-zx6i",
+            fileSHA: fullFileSHA,
+            analysisVersion: 1
+        )
+        let sharingProvider = RecordingCrossUserAnalysisSharingProvider()
+        sharingProvider.snapshot = makeSharedAnalysisSnapshot(key: key)
+
+        let audioStub = RecordingAudioProvider()
+        let adStub = StubAdDetectionProvider()
+        let runner = try await makeRunner(
+            store: store,
+            audioStub: audioStub,
+            adStub: adStub,
+            flagEnabled: true,
+            completedVersions: nil,
+            currentVersions: Self.bumpedVersions,
+            analysisSharingProvider: sharingProvider
+        )
+
+        _ = await runner.run(makeRequest(assetId: assetId))
+
+        #expect(audioStub.decodeCallCount == 1)
+        #expect(adStub.revalidateFromFeaturesCallCount == 0)
+        #expect(sharingProvider.requestedKeys.isEmpty)
+        #expect(sharingProvider.importedWindows.isEmpty)
     }
 
     @Test("flag ON + no persisted chunks → revalidation NOT triggered (cold start takes full path)")
