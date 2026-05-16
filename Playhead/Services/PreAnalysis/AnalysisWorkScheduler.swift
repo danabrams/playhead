@@ -632,14 +632,16 @@ actor AnalysisWorkScheduler {
     /// time so `resolveAnalysisAssetId` can populate `episodeDurationSec`
     /// on the `analysis_assets` row at first insert.
     ///
-    /// Mirrors the `pendingEpisodeTitles` shape. The probe runs once per
-    /// download against the cached file; the result is written to an
-    /// existing asset row immediately and otherwise stashed here so the
-    /// new asset row created by `resolveAnalysisAssetId` carries the
-    /// measured duration without waiting for the spool/decode pass.
+    /// The probe runs once per download against the cached file; the
+    /// result is written to an existing asset row immediately and
+    /// otherwise stashed here so the new asset row created by
+    /// `resolveAnalysisAssetId` carries the measured duration without
+    /// waiting for the spool/decode pass.
     ///
-    /// Cleared per-episode at materialization time. Best-effort: a probe
-    /// failure simply leaves the dictionary entry absent.
+    /// Keyed by episode plus source fingerprint so a stale canonical-SHA
+    /// job cannot consume or clear the current file's duration after a
+    /// feed correction / re-download. Best-effort: a probe failure simply
+    /// leaves the dictionary entry absent.
     private var pendingProbedEpisodeDurations: [String: Double] = [:]
 
     init(
@@ -824,11 +826,12 @@ actor AnalysisWorkScheduler {
                         episodeDurationSec: probedDuration
                     )
                 } else {
-                    // Same potential-leak shape as `pendingEpisodeTitles`: a
-                    // racing concurrent insert could leave this entry
-                    // unconsumed. Intentional parity with the existing
-                    // pattern — `resolveAnalysisAssetId` drains both stashes.
-                    pendingProbedEpisodeDurations[episodeId] = probedDuration
+                    pendingProbedEpisodeDurations[
+                        Self.durationStashKey(
+                            episodeId: episodeId,
+                            sourceFingerprint: sourceFingerprint
+                        )
+                    ] = probedDuration
                 }
             } catch {
                 logger.warning("Failed to persist probed duration for \(episodeId): \(error)")
@@ -2813,6 +2816,28 @@ actor AnalysisWorkScheduler {
             pendingCancelCause = nil
         }
 
+        if await cachedCanonicalFingerprintChanged(for: job, localAudioURL: localAudioURL) {
+            pendingProbedEpisodeDurations.removeValue(
+                forKey: Self.durationStashKey(
+                    episodeId: job.episodeId,
+                    sourceFingerprint: job.sourceFingerprint
+                )
+            )
+            logger.warning("Superseding stale canonical-SHA job \(job.jobId): cached audio for episode \(job.episodeId) no longer matches \(job.sourceFingerprint)")
+            await commitOutcomeArm(
+                "staleCanonicalFingerprint.supersede",
+                AnalysisStore.ProcessJobOutcomeArmCommit(
+                    jobId: job.jobId,
+                    stateUpdate: .init(
+                        state: "superseded",
+                        nextEligibleAt: nil,
+                        lastErrorCode: "staleFingerprint:cachedAudioMismatch"
+                    )
+                )
+            )
+            return
+        }
+
         // Build request and run.
         let assetId: String
         do {
@@ -4159,7 +4184,12 @@ actor AnalysisWorkScheduler {
         // (or wasn't an audio container) at enqueue time, in which case
         // the column stays nil until spool / the launch-time backfill
         // sweep heals it.
-        let stashedDuration = pendingProbedEpisodeDurations.removeValue(forKey: job.episodeId)
+        let stashedDuration = pendingProbedEpisodeDurations.removeValue(
+            forKey: Self.durationStashKey(
+                episodeId: job.episodeId,
+                sourceFingerprint: job.sourceFingerprint
+            )
+        )
         let asset = AnalysisAsset(
             id: assetId,
             episodeId: job.episodeId,
@@ -4180,6 +4210,29 @@ actor AnalysisWorkScheduler {
         guard !lostOwnership else { throw CancellationError() }
         try await store.updateJobAnalysisAssetId(jobId: job.jobId, analysisAssetId: assetId)
         return assetId
+    }
+
+    private func cachedCanonicalFingerprintChanged(
+        for job: AnalysisJob,
+        localAudioURL: LocalAudioURL
+    ) async -> Bool {
+        guard CrossUserAnalysisShareKey.isCanonicalFullFileSHA(job.sourceFingerprint) else {
+            return false
+        }
+        if let currentStrongFingerprint = await downloadManager.fingerprint(for: job.episodeId)?.strong,
+           CrossUserAnalysisShareKey.isCanonicalFullFileSHA(currentStrongFingerprint) {
+            return currentStrongFingerprint != job.sourceFingerprint
+        }
+        do {
+            return try FileHasher.sha256(fileURL: localAudioURL.url) != job.sourceFingerprint
+        } catch {
+            logger.warning("Could not hash cached audio for stale canonical-SHA check on job \(job.jobId): \(error)")
+            return false
+        }
+    }
+
+    private static func durationStashKey(episodeId: String, sourceFingerprint: String) -> String {
+        "\(episodeId)\u{0}\(sourceFingerprint)"
     }
 
     private static func canUpgradeWeakAssetToCanonicalSHA(

@@ -463,8 +463,7 @@ extension AnalysisStore {
         guard adWindows.allSatisfy(CrossUserAnalysisSnapshot.Window.hasKnownExportDisposition) else {
             return nil
         }
-        let windows = adWindows
-            .compactMap(CrossUserAnalysisSnapshot.Window.exported(from:))
+        let windows = Self.exportableSnapshotPrefix(from: adWindows)
         guard !windows.isEmpty else {
             return nil
         }
@@ -683,6 +682,19 @@ extension AnalysisStore {
             .map(\.endTime)
             .filter(\.isFinite)
             .max() ?? 0
+    }
+
+    private static func exportableSnapshotPrefix(
+        from adWindows: [AdWindow]
+    ) -> [CrossUserAnalysisSnapshot.Window] {
+        var windows: [CrossUserAnalysisSnapshot.Window] = []
+        for adWindow in adWindows {
+            guard let window = CrossUserAnalysisSnapshot.Window.exported(from: adWindow) else {
+                break
+            }
+            windows.append(window)
+        }
+        return windows
     }
 
     private static func isSharedSnapshotCoverage(

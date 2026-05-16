@@ -182,7 +182,8 @@ struct AnalysisWorkSchedulerDurationProbeTests {
         provider.cachedURLs["ep-5"] = url
 
         let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        let newSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let newSHA = try FileHasher.sha256(fileURL: url)
+        #expect(newSHA != oldSHA)
         let oldAsset = AnalysisAsset(
             id: "asset-old-sha",
             episodeId: "ep-5",

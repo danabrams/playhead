@@ -1671,6 +1671,51 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(!encoded.contains(SkipEligibilityGate.blockedByUserCorrection.rawValue))
     }
 
+    @Test("export stops at first omitted window instead of claiming later coverage")
+    func exportStopsAtFirstOmittedWindowInsteadOfClaimingLaterCoverage() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            episodeDurationSec: 180
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-first-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            )
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-user-blocked-window",
+                assetId: "asset-a",
+                start: 50,
+                end: 90
+            ).withEligibilityGate(SkipEligibilityGate.blockedByUserCorrection.rawValue)
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-later-window",
+                assetId: "asset-a",
+                start: 100,
+                end: 120
+            )
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        let exported = try #require(snapshot)
+        #expect(exported.windows.map(\.sourceWindowId) == ["source-first-window"])
+        #expect(exported.analysisCoverageEndSec == 40)
+    }
+
     @Test("export drops imported shared rows without inflating coverage")
     func exportDropsImportedSharedRowsWithoutInflatingCoverage() async throws {
         let store = try await makeTestStore()

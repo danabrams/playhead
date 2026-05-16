@@ -1086,6 +1086,120 @@ struct SchedulerBugFixRegressionTests {
             .filter { $0.episodeId == "ep-sha-reuse" }
         #expect(assets.count == 2)
     }
+
+    @Test("scheduler supersedes stale canonical SHA jobs when the cached file fingerprint changed")
+    func testSchedulerSupersedesCanonicalJobWhenCachedFingerprintChanged() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-stale-job.mp3")
+        downloads.cachedURLs["ep-sha-stale-job"] = localURL
+
+        let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let newSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        try await store.insertAsset(AnalysisAsset(
+            id: "old-sha-asset",
+            episodeId: "ep-sha-stale-job",
+            assetFingerprint: oldSHA,
+            weakFingerprint: nil,
+            sourceURL: "old.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        ))
+        downloads.fingerprints["ep-sha-stale-job"] = AudioFingerprint(
+            weak: "current-weak-fingerprint",
+            strong: newSHA
+        )
+
+        let job = makeAnalysisJob(
+            jobId: "sha-stale-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-stale-job",
+            analysisAssetId: nil,
+            workKey: "\(oldSHA):1:preAnalysis",
+            sourceFingerprint: oldSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-stale-job")
+        let updatedJob = try #require(await store.fetchJob(byId: "sha-stale-job"))
+        #expect(updatedJob.state == "superseded")
+        #expect(updatedJob.analysisAssetId == nil)
+        #expect(updatedJob.lastErrorCode == "staleFingerprint:cachedAudioMismatch")
+
+        let oldAsset = try #require(await store.fetchAsset(id: "old-sha-asset"))
+        #expect(oldAsset.assetFingerprint == oldSHA)
+
+        let assets = try await store.fetchAllAssets()
+            .filter { $0.episodeId == "ep-sha-stale-job" }
+        #expect(assets.count == 1)
+    }
+
+    @Test("scheduler hashes cached audio to supersede stale canonical SHA jobs when fingerprint cache is cold")
+    func testSchedulerSupersedesCanonicalJobWhenFingerprintCacheIsCold() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preanalysis-sha-stale-cold-\(UUID().uuidString).mp3")
+        try Data("current audio bytes".utf8).write(to: localURL)
+        defer { try? FileManager.default.removeItem(at: localURL) }
+        downloads.cachedURLs["ep-sha-stale-cold"] = localURL
+
+        let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let currentSHA = try FileHasher.sha256(fileURL: localURL)
+        #expect(currentSHA != oldSHA)
+        try await store.insertAsset(AnalysisAsset(
+            id: "old-sha-cold-asset",
+            episodeId: "ep-sha-stale-cold",
+            assetFingerprint: oldSHA,
+            weakFingerprint: nil,
+            sourceURL: "old.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        ))
+
+        let job = makeAnalysisJob(
+            jobId: "sha-stale-cold-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-stale-cold",
+            analysisAssetId: nil,
+            workKey: "\(oldSHA):1:preAnalysis",
+            sourceFingerprint: oldSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-stale-cold-job")
+        let updatedJob = try #require(await store.fetchJob(byId: "sha-stale-cold-job"))
+        #expect(updatedJob.state == "superseded")
+        #expect(updatedJob.analysisAssetId == nil)
+        #expect(updatedJob.lastErrorCode == "staleFingerprint:cachedAudioMismatch")
+
+        let oldAsset = try #require(await store.fetchAsset(id: "old-sha-cold-asset"))
+        #expect(oldAsset.assetFingerprint == oldSHA)
+
+        let assets = try await store.fetchAllAssets()
+            .filter { $0.episodeId == "ep-sha-stale-cold" }
+        #expect(assets.count == 1)
+    }
 }
 
 // MARK: - Reconciler Bug-Fix Regression Tests
