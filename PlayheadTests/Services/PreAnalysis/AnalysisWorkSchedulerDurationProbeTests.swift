@@ -227,6 +227,72 @@ struct AnalysisWorkSchedulerDurationProbeTests {
         #expect(oldAfterDispatch?.episodeDurationSec == 111)
     }
 
+    @Test("stale canonical SHA jobs do not clear a probed duration stashed for the current SHA")
+    func staleCanonicalJobDoesNotClearCurrentSHAStashedDuration() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloadProvider: provider)
+
+        let url = try writeSynthAudio(seconds: 4.25)
+        defer { try? FileManager.default.removeItem(at: url) }
+        provider.cachedURLs["ep-7"] = url
+
+        let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let newSHA = try FileHasher.sha256(fileURL: url)
+        #expect(newSHA != oldSHA)
+        try await store.insertAsset(AnalysisAsset(
+            id: "asset-stale-old-sha",
+            episodeId: "ep-7",
+            assetFingerprint: oldSHA,
+            weakFingerprint: nil,
+            sourceURL: "file:///old.caf",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 111
+        ))
+
+        await scheduler.enqueue(
+            episodeId: "ep-7",
+            podcastId: "pod-7",
+            downloadId: "dl-7",
+            sourceFingerprint: newSHA,
+            isExplicitDownload: true
+        )
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "stale-old-sha-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-7",
+            workKey: "\(oldSHA):1:preAnalysis",
+            sourceFingerprint: oldSHA,
+            priority: 20,
+            desiredCoverageSec: 90,
+            state: "queued"
+        ))
+
+        let processedStale = await scheduler.processNextDispatchableJobForTesting()
+        #expect(processedStale)
+        let staleJob = try #require(await store.fetchJob(byId: "stale-old-sha-job"))
+        #expect(staleJob.state == "superseded")
+        #expect(staleJob.lastErrorCode == "staleFingerprint:cachedAudioMismatch")
+
+        let processedCurrent = await scheduler.processNextDispatchableJobForTesting()
+        #expect(processedCurrent)
+
+        let assets = try await store.fetchAllAssets()
+            .filter { $0.episodeId == "ep-7" }
+        let newAsset = try #require(assets.first { $0.assetFingerprint == newSHA })
+        let probed = try #require(newAsset.episodeDurationSec)
+        #expect(abs(probed - 4.25) < 0.5, "current SHA asset should keep the stashed probed duration")
+
+        let oldAfterDispatch = try await store.fetchAsset(id: "asset-stale-old-sha")
+        #expect(oldAfterDispatch?.assetFingerprint == oldSHA)
+        #expect(oldAfterDispatch?.episodeDurationSec == 111)
+    }
+
     @Test("enqueue stashes probed duration for a new canonical SHA when a weak asset cannot be upgraded")
     func enqueueStashesDurationForNonUpgradeableWeakAsset() async throws {
         let store = try await makeTestStore()
@@ -239,7 +305,7 @@ struct AnalysisWorkSchedulerDurationProbeTests {
 
         let oldWeak = "https://old.example.com/audio.mp3|old-etag|123|Mon, 01 Jan 2024 00:00:00 GMT"
         let currentWeak = "https://new.example.com/audio.mp3|new-etag|456|Tue, 02 Jan 2024 00:00:00 GMT"
-        let newSHA = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        let newSHA = try FileHasher.sha256(fileURL: url)
         provider.fingerprints["ep-6"] = AudioFingerprint(weak: currentWeak, strong: newSHA)
 
         let oldAsset = AnalysisAsset(

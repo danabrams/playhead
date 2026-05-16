@@ -1144,6 +1144,122 @@ struct SchedulerBugFixRegressionTests {
         #expect(assets.count == 1)
     }
 
+    @Test("scheduler hashes cached audio even when the fingerprint cache still reports the stale SHA")
+    func testSchedulerSupersedesCanonicalJobWhenFingerprintCacheStillReportsStaleSHA() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preanalysis-sha-stale-cache-\(UUID().uuidString).mp3")
+        try Data("current cached audio bytes".utf8).write(to: localURL)
+        defer { try? FileManager.default.removeItem(at: localURL) }
+        downloads.cachedURLs["ep-sha-stale-cache"] = localURL
+
+        let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let currentSHA = try FileHasher.sha256(fileURL: localURL)
+        #expect(currentSHA != oldSHA)
+        try await store.insertAsset(AnalysisAsset(
+            id: "old-sha-stale-cache-asset",
+            episodeId: "ep-sha-stale-cache",
+            assetFingerprint: oldSHA,
+            weakFingerprint: nil,
+            sourceURL: "old.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        ))
+        downloads.fingerprints["ep-sha-stale-cache"] = AudioFingerprint(
+            weak: "stale-weak-fingerprint",
+            strong: oldSHA
+        )
+
+        let job = makeAnalysisJob(
+            jobId: "sha-stale-cache-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-stale-cache",
+            analysisAssetId: nil,
+            workKey: "\(oldSHA):1:preAnalysis",
+            sourceFingerprint: oldSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-stale-cache-job")
+        let updatedJob = try #require(await store.fetchJob(byId: "sha-stale-cache-job"))
+        #expect(updatedJob.state == "superseded")
+        #expect(updatedJob.analysisAssetId == nil)
+        #expect(updatedJob.lastErrorCode == "staleFingerprint:cachedAudioMismatch")
+
+        let assets = try await store.fetchAllAssets()
+            .filter { $0.episodeId == "ep-sha-stale-cache" }
+        #expect(assets.count == 1)
+    }
+
+    @Test("scheduler trusts cached audio over a stale mismatching fingerprint cache")
+    func testSchedulerDoesNotSupersedeCanonicalJobWhenFileMatchesDespiteStaleFingerprintCache() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preanalysis-sha-valid-stale-cache-\(UUID().uuidString).mp3")
+        try Data("original cached audio bytes".utf8).write(to: localURL)
+        defer { try? FileManager.default.removeItem(at: localURL) }
+        downloads.cachedURLs["ep-sha-valid-stale-cache"] = localURL
+
+        let matchingSHA = try FileHasher.sha256(fileURL: localURL)
+        let staleCacheSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        #expect(matchingSHA != staleCacheSHA)
+        try await store.insertAsset(AnalysisAsset(
+            id: "matching-sha-asset",
+            episodeId: "ep-sha-valid-stale-cache",
+            assetFingerprint: matchingSHA,
+            weakFingerprint: nil,
+            sourceURL: "matching.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        ))
+        downloads.fingerprints["ep-sha-valid-stale-cache"] = AudioFingerprint(
+            weak: "stale-weak-fingerprint",
+            strong: staleCacheSHA
+        )
+
+        let job = makeAnalysisJob(
+            jobId: "sha-valid-stale-cache-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-valid-stale-cache",
+            analysisAssetId: nil,
+            workKey: "\(matchingSHA):1:preAnalysis",
+            sourceFingerprint: matchingSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-valid-stale-cache-job")
+        let updatedJob = try #require(await store.fetchJob(byId: "sha-valid-stale-cache-job"))
+        #expect(updatedJob.analysisAssetId == "matching-sha-asset")
+        #expect(updatedJob.state != "superseded")
+        #expect(updatedJob.lastErrorCode != "staleFingerprint:cachedAudioMismatch")
+
+        let assets = try await store.fetchAllAssets()
+            .filter { $0.episodeId == "ep-sha-valid-stale-cache" }
+        #expect(assets.count == 1)
+    }
+
     @Test("scheduler hashes cached audio to supersede stale canonical SHA jobs when fingerprint cache is cold")
     func testSchedulerSupersedesCanonicalJobWhenFingerprintCacheIsCold() async throws {
         let store = try await makeTestStore()

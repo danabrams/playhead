@@ -642,7 +642,7 @@ actor AnalysisWorkScheduler {
     /// job cannot consume or clear the current file's duration after a
     /// feed correction / re-download. Best-effort: a probe failure simply
     /// leaves the dictionary entry absent.
-    private var pendingProbedEpisodeDurations: [String: Double] = [:]
+    private var pendingProbedEpisodeDurations: [DurationStashKey: Double] = [:]
 
     init(
         store: AnalysisStore,
@@ -4219,20 +4219,28 @@ actor AnalysisWorkScheduler {
         guard CrossUserAnalysisShareKey.isCanonicalFullFileSHA(job.sourceFingerprint) else {
             return false
         }
-        if let currentStrongFingerprint = await downloadManager.fingerprint(for: job.episodeId)?.strong,
-           CrossUserAnalysisShareKey.isCanonicalFullFileSHA(currentStrongFingerprint) {
-            return currentStrongFingerprint != job.sourceFingerprint
-        }
         do {
+            // The file on disk is the binding source of truth. The
+            // fingerprint cache is only a fallback because it can lag a
+            // feed correction or cache rewrite in tests and recovery paths.
             return try FileHasher.sha256(fileURL: localAudioURL.url) != job.sourceFingerprint
         } catch {
+            if let currentStrongFingerprint = await downloadManager.fingerprint(for: job.episodeId)?.strong,
+               CrossUserAnalysisShareKey.isCanonicalFullFileSHA(currentStrongFingerprint) {
+                return currentStrongFingerprint != job.sourceFingerprint
+            }
             logger.warning("Could not hash cached audio for stale canonical-SHA check on job \(job.jobId): \(error)")
             return false
         }
     }
 
-    private static func durationStashKey(episodeId: String, sourceFingerprint: String) -> String {
-        "\(episodeId)\u{0}\(sourceFingerprint)"
+    private struct DurationStashKey: Hashable {
+        let episodeId: String
+        let sourceFingerprint: String
+    }
+
+    private static func durationStashKey(episodeId: String, sourceFingerprint: String) -> DurationStashKey {
+        DurationStashKey(episodeId: episodeId, sourceFingerprint: sourceFingerprint)
     }
 
     private static func canUpgradeWeakAssetToCanonicalSHA(
