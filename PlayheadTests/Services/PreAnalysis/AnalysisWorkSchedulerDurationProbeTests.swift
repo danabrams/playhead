@@ -171,6 +171,119 @@ struct AnalysisWorkSchedulerDurationProbeTests {
         #expect(row == nil, "scheduler must not create the asset row eagerly")
     }
 
+    @Test("enqueue stashes probed duration for a new canonical SHA instead of mutating the old SHA asset")
+    func enqueueStashesDurationForChangedCanonicalSHA() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloadProvider: provider)
+
+        let url = try writeSynthAudio(seconds: 6.25)
+        defer { try? FileManager.default.removeItem(at: url) }
+        provider.cachedURLs["ep-5"] = url
+
+        let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let newSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let oldAsset = AnalysisAsset(
+            id: "asset-old-sha",
+            episodeId: "ep-5",
+            assetFingerprint: oldSHA,
+            weakFingerprint: nil,
+            sourceURL: "file:///old.caf",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 111
+        )
+        try await store.insertAsset(oldAsset)
+
+        await scheduler.enqueue(
+            episodeId: "ep-5",
+            podcastId: "pod-5",
+            downloadId: "dl-5",
+            sourceFingerprint: newSHA,
+            isExplicitDownload: true
+        )
+
+        let oldAfterEnqueue = try await store.fetchAsset(id: "asset-old-sha")
+        #expect(oldAfterEnqueue?.episodeDurationSec == 111)
+
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+        #expect(processed)
+
+        let assets = try await store.fetchAllAssets()
+            .filter { $0.episodeId == "ep-5" }
+        let newAsset = try #require(assets.first { $0.assetFingerprint == newSHA })
+        #expect(newAsset.id != "asset-old-sha")
+        #expect(newAsset.weakFingerprint == nil)
+        let probed = try #require(newAsset.episodeDurationSec)
+        #expect(abs(probed - 6.25) < 0.5, "new SHA asset should receive the current file's probed duration")
+
+        let oldAfterDispatch = try await store.fetchAsset(id: "asset-old-sha")
+        #expect(oldAfterDispatch?.assetFingerprint == oldSHA)
+        #expect(oldAfterDispatch?.episodeDurationSec == 111)
+    }
+
+    @Test("enqueue stashes probed duration for a new canonical SHA when a weak asset cannot be upgraded")
+    func enqueueStashesDurationForNonUpgradeableWeakAsset() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloadProvider: provider)
+
+        let url = try writeSynthAudio(seconds: 5.5)
+        defer { try? FileManager.default.removeItem(at: url) }
+        provider.cachedURLs["ep-6"] = url
+
+        let oldWeak = "https://old.example.com/audio.mp3|old-etag|123|Mon, 01 Jan 2024 00:00:00 GMT"
+        let currentWeak = "https://new.example.com/audio.mp3|new-etag|456|Tue, 02 Jan 2024 00:00:00 GMT"
+        let newSHA = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        provider.fingerprints["ep-6"] = AudioFingerprint(weak: currentWeak, strong: newSHA)
+
+        let oldAsset = AnalysisAsset(
+            id: "asset-old-weak",
+            episodeId: "ep-6",
+            assetFingerprint: oldWeak,
+            weakFingerprint: nil,
+            sourceURL: "file:///old.caf",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 111
+        )
+        try await store.insertAsset(oldAsset)
+
+        await scheduler.enqueue(
+            episodeId: "ep-6",
+            podcastId: "pod-6",
+            downloadId: "dl-6",
+            sourceFingerprint: newSHA,
+            isExplicitDownload: true
+        )
+
+        let oldAfterEnqueue = try await store.fetchAsset(id: "asset-old-weak")
+        #expect(oldAfterEnqueue?.episodeDurationSec == 111)
+
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+        #expect(processed)
+
+        let assets = try await store.fetchAllAssets()
+            .filter { $0.episodeId == "ep-6" }
+        let newAsset = try #require(assets.first { $0.assetFingerprint == newSHA })
+        #expect(newAsset.id != "asset-old-weak")
+        #expect(newAsset.weakFingerprint == nil)
+        let probed = try #require(newAsset.episodeDurationSec)
+        #expect(abs(probed - 5.5) < 0.5, "new SHA asset should receive the current file's probed duration")
+
+        let oldAfterDispatch = try await store.fetchAsset(id: "asset-old-weak")
+        #expect(oldAfterDispatch?.assetFingerprint == oldWeak)
+        #expect(oldAfterDispatch?.episodeDurationSec == 111)
+    }
+
     @Test("enqueue with no cached file is a no-op (probe path is skipped)")
     func enqueueWithoutCachedFile() async throws {
         let store = try await makeTestStore()

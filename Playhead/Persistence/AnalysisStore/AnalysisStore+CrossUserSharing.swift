@@ -213,6 +213,9 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
         }
 
         static func exported(from adWindow: AdWindow) -> Window? {
+            guard !AnalysisStore.isImportedSharedAdWindow(adWindow) else {
+                return nil
+            }
             guard let decisionState = normalizedExportDecisionState(adWindow.decisionState) else {
                 return nil
             }
@@ -279,6 +282,9 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
         }
 
         static func hasKnownExportDisposition(_ adWindow: AdWindow) -> Bool {
+            if AnalysisStore.isImportedSharedAdWindow(adWindow) {
+                return true
+            }
             switch adWindow.decisionState {
             case AdDecisionState.suppressed.rawValue,
                  AdDecisionState.reverted.rawValue:
@@ -877,11 +883,15 @@ extension AnalysisStore {
     }
 
     private static func isImportedNonAdVerdict(_ window: AdWindow) -> Bool {
-        window.id.hasPrefix("shared-")
+        isImportedSharedAdWindow(window)
             && window.decisionState == AdDecisionState.suppressed.rawValue
             && window.advertiser == nil
             && window.product == nil
             && window.adDescription == nil
+    }
+
+    fileprivate static func isImportedSharedAdWindow(_ window: AdWindow) -> Bool {
+        window.id.hasPrefix("shared-")
     }
 
     private static func isCueWindow(

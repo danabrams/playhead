@@ -788,14 +788,37 @@ actor AnalysisWorkScheduler {
         // Best-effort:
         //   - missing cached file (download not yet landed) → skip
         //   - probe returns nil (non-audio, indeterminate) → skip
-        //   - probe returns a positive duration → overwrite an
+        //   - probe returns a positive duration → overwrite the matching
         //     existing asset row, OR stash for the lazy
         //     `resolveAnalysisAssetId` path so the freshly-inserted
-        //     row carries the probed value at first insert.
+        //     row carries the probed value at first insert. If a
+        //     canonical SHA job sees an older canonical asset for the
+        //     same episode with different bytes, do not mutate the old
+        //     asset; the probed duration belongs to the new SHA row.
         if let cachedURL = await downloadManager.cachedFileURL(for: episodeId),
            let probedDuration = await AudioFileDurationProbe.probeDuration(at: cachedURL) {
             do {
-                if let asset = try await store.fetchAssetByEpisodeId(episodeId) {
+                let sourceIsCanonicalSHA = CrossUserAnalysisShareKey
+                    .isCanonicalFullFileSHA(sourceFingerprint)
+                let currentAudioFingerprint = sourceIsCanonicalSHA
+                    ? await downloadManager.fingerprint(for: episodeId)
+                    : nil
+                if sourceIsCanonicalSHA,
+                   let exactAsset = try await store.fetchAssetByEpisodeId(
+                       episodeId,
+                       assetFingerprint: sourceFingerprint
+                   ) {
+                    try await store.updateEpisodeDuration(
+                        id: exactAsset.id,
+                        episodeDurationSec: probedDuration
+                    )
+                } else if let asset = try await store.fetchAssetByEpisodeId(episodeId),
+                          !Self.shouldStashProbedDurationForDifferentCanonicalSource(
+                              existing: asset,
+                              sourceFingerprint: sourceFingerprint,
+                              sourceIsCanonicalSHA: sourceIsCanonicalSHA,
+                              currentAudioFingerprint: currentAudioFingerprint
+                          ) {
                     try await store.updateEpisodeDuration(
                         id: asset.id,
                         episodeDurationSec: probedDuration
@@ -4174,6 +4197,23 @@ actor AnalysisWorkScheduler {
         }
         return asset.assetFingerprint == currentWeakFingerprint
             || asset.weakFingerprint == currentWeakFingerprint
+    }
+
+    private static func shouldStashProbedDurationForDifferentCanonicalSource(
+        existing asset: AnalysisAsset,
+        sourceFingerprint: String,
+        sourceIsCanonicalSHA: Bool,
+        currentAudioFingerprint: AudioFingerprint?
+    ) -> Bool {
+        guard sourceIsCanonicalSHA else { return false }
+        if CrossUserAnalysisShareKey.isCanonicalFullFileSHA(asset.assetFingerprint) {
+            return asset.assetFingerprint != sourceFingerprint
+        }
+        return !canUpgradeWeakAssetToCanonicalSHA(
+            asset,
+            jobSourceFingerprint: sourceFingerprint,
+            currentAudioFingerprint: currentAudioFingerprint
+        )
     }
 
     static func shouldRetryCoverageInsufficient(job: AnalysisJob, outcome: AnalysisOutcome) -> Bool {

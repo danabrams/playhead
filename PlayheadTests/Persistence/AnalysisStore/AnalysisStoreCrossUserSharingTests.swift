@@ -1671,6 +1671,71 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(!encoded.contains(SkipEligibilityGate.blockedByUserCorrection.rawValue))
     }
 
+    @Test("export drops imported shared rows without inflating coverage")
+    func exportDropsImportedSharedRowsWithoutInflatingCoverage() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-derived-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            )
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "shared-peer-window",
+                assetId: "asset-a",
+                start: 50,
+                end: 90
+            )
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        let exported = try #require(snapshot)
+        #expect(exported.windows.map(\.sourceWindowId) == ["source-derived-window"])
+        #expect(exported.analysisCoverageEndSec == 40)
+
+        let encoded = try exported.encodedJSONString()
+        #expect(!encoded.contains("shared-peer-window"))
+    }
+
+    @Test("export suppresses snapshots when only imported shared rows remain")
+    func exportSuppressesSnapshotsWhenOnlyImportedSharedRowsRemain() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "shared-peer-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            )
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        #expect(snapshot == nil)
+    }
+
     @Test("export suppresses snapshots when a boundary state is unknown")
     func exportSuppressesSnapshotWhenBoundaryStateIsUnknown() async throws {
         let store = try await makeTestStore()
