@@ -686,6 +686,11 @@ struct SchedulerBugFixRegressionTests {
         )
     }
 
+    private func missingTemporaryAudioURL(named stem: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(stem)-\(UUID().uuidString).mp3")
+    }
+
     @Test("episodeDeleted supersedes all non-terminal states")
     func testEpisodeDeletedSupersedesAllNonTerminalStates() async throws {
         let store = try await makeTestStore()
@@ -716,7 +721,7 @@ struct SchedulerBugFixRegressionTests {
     func testSchedulerResolvesRealAssetIdForNilJobAssetId() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
-        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-fk-regression.mp3")
+        let localURL = missingTemporaryAudioURL(named: "preanalysis-fk-regression")
         downloads.cachedURLs["ep-fk-regression"] = localURL
 
         let job = makeAnalysisJob(
@@ -752,7 +757,7 @@ struct SchedulerBugFixRegressionTests {
     func testSchedulerUpgradesExistingPlaceholderAssetToFullFileSHAWithFingerprintProof() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
-        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-upgrade.mp3")
+        let localURL = missingTemporaryAudioURL(named: "preanalysis-sha-upgrade")
         downloads.cachedURLs["ep-sha-upgrade"] = localURL
         let placeholderAsset = AnalysisAsset(
             id: "placeholder-asset",
@@ -803,7 +808,7 @@ struct SchedulerBugFixRegressionTests {
     func testSchedulerDoesNotUpgradePlaceholderAssetWithoutFingerprintProof() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
-        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-placeholder-no-proof.mp3")
+        let localURL = missingTemporaryAudioURL(named: "preanalysis-sha-placeholder-no-proof")
         downloads.cachedURLs["ep-sha-placeholder-no-proof"] = localURL
         let placeholderAsset = AnalysisAsset(
             id: "placeholder-no-proof-asset",
@@ -857,7 +862,7 @@ struct SchedulerBugFixRegressionTests {
     func testSchedulerDoesNotReuseDifferentCanonicalFullFileSHA() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
-        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-mismatch.mp3")
+        let localURL = missingTemporaryAudioURL(named: "preanalysis-sha-mismatch")
         downloads.cachedURLs["ep-sha-mismatch"] = localURL
 
         let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -912,7 +917,7 @@ struct SchedulerBugFixRegressionTests {
     func testSchedulerDoesNotUpgradeMismatchedWeakAssetToFullFileSHA() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
-        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-weak-mismatch.mp3")
+        let localURL = missingTemporaryAudioURL(named: "preanalysis-sha-weak-mismatch")
         downloads.cachedURLs["ep-sha-weak-mismatch"] = localURL
 
         let oldWeakFingerprint = "https://old.example.com/audio.mp3|old-etag|123|Mon, 01 Jan 2024 00:00:00 GMT"
@@ -972,7 +977,7 @@ struct SchedulerBugFixRegressionTests {
     func testSchedulerDoesNotUpgradeWeakAssetWhenCurrentWeakFingerprintIsEmpty() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
-        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-empty-weak.mp3")
+        let localURL = missingTemporaryAudioURL(named: "preanalysis-sha-empty-weak")
         downloads.cachedURLs["ep-sha-empty-weak"] = localURL
 
         let fullFileSHA = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
@@ -1030,7 +1035,7 @@ struct SchedulerBugFixRegressionTests {
     func testSchedulerReusesOlderMatchingCanonicalFullFileSHA() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
-        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-reuse.mp3")
+        let localURL = missingTemporaryAudioURL(named: "preanalysis-sha-reuse")
         downloads.cachedURLs["ep-sha-reuse"] = localURL
 
         let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1091,7 +1096,7 @@ struct SchedulerBugFixRegressionTests {
     func testSchedulerSupersedesCanonicalJobWhenCachedFingerprintChanged() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
-        let localURL = URL(fileURLWithPath: "/tmp/preanalysis-sha-stale-job.mp3")
+        let localURL = missingTemporaryAudioURL(named: "preanalysis-sha-stale-job")
         downloads.cachedURLs["ep-sha-stale-job"] = localURL
 
         let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
