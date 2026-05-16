@@ -58,7 +58,7 @@ private func makeSharingWindow(
         wasSkipped: true,
         userDismissedBanner: true,
         evidenceSources: "semantic,fusion",
-        eligibilityGate: "ready",
+        eligibilityGate: SkipEligibilityGate.eligible.rawValue,
         catalogStoreMatchSimilarity: 0.63
     )
 }
@@ -731,7 +731,7 @@ struct AnalysisStoreCrossUserSharingTests {
             metadataConfidence: 0.81,
             metadataPromptVersion: "prompt-v1",
             evidenceSources: "semantic,fusion",
-            eligibilityGate: "ready",
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue,
             catalogStoreMatchSimilarity: 0.63
         )
         let snapshot = makeSnapshot(
@@ -787,7 +787,7 @@ struct AnalysisStoreCrossUserSharingTests {
                     metadataConfidence: 0.81,
                     metadataPromptVersion: "prompt-v1",
                     evidenceSources: "semantic,fusion",
-                    eligibilityGate: "ready",
+                    eligibilityGate: SkipEligibilityGate.eligible.rawValue,
                     catalogStoreMatchSimilarity: nil
                 ),
             ]
@@ -841,7 +841,7 @@ struct AnalysisStoreCrossUserSharingTests {
                     metadataConfidence: 0.81,
                     metadataPromptVersion: "prompt-v1",
                     evidenceSources: "semantic,fusion",
-                    eligibilityGate: "ready",
+                    eligibilityGate: SkipEligibilityGate.eligible.rawValue,
                     catalogStoreMatchSimilarity: nil
                 ),
             ]
@@ -1181,12 +1181,138 @@ struct AnalysisStoreCrossUserSharingTests {
             metadataConfidence: 0.81,
             metadataPromptVersion: "prompt-v1",
             evidenceSources: "semantic,fusion",
-            eligibilityGate: "ready",
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue,
             catalogStoreMatchSimilarity: 0.63
         )
         let snapshot = makeSnapshot(
             key: key,
             windows: [validWindow, invalidWindow]
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "window[1]")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
+    @Test("import rejects non-actionable eligibility gates without partially inserting valid windows")
+    func importRejectsNonActionableEligibilityGatesWithoutPartialInsert() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
+        )
+        let validWindow = CrossUserAnalysisSnapshot.Window(
+            adWindow: makeSharingWindow(
+                id: "source-valid-window",
+                assetId: "asset-a",
+                start: 12,
+                end: 60
+            )
+        )
+        let blockedWindow = CrossUserAnalysisSnapshot.Window(
+            sourceWindowId: "source-blocked-window",
+            startTime: 70,
+            endTime: 90,
+            confidence: 0.94,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            isAd: true,
+            detectorVersion: "fm-test-v1",
+            advertiser: "Acme",
+            product: "Widget",
+            adDescription: "Blocked gate promo",
+            metadataSource: "foundation-model",
+            metadataConfidence: 0.81,
+            metadataPromptVersion: "prompt-v1",
+            evidenceSources: "semantic,fusion",
+            eligibilityGate: SkipEligibilityGate.blockedByUserCorrection.rawValue,
+            catalogStoreMatchSimilarity: 0.63
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [validWindow, blockedWindow],
+            analysisCoverageEndSec: 90
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+
+        if case .incompatibleSnapshot(let reason) = result {
+            #expect(reason == "window[1]")
+        } else {
+            Issue.record("Expected incompatibleSnapshot result, got \(result)")
+        }
+        let windows = try await store.fetchAdWindows(assetId: "asset-b")
+        #expect(windows.isEmpty)
+    }
+
+    @Test("import rejects non-ad verdicts with ad eligibility gates without partial insert")
+    func importRejectsNonAdVerdictsWithAdEligibilityGatesWithoutPartialInsert() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-b",
+            episodeId: "episode-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        )
+
+        let key = CrossUserAnalysisShareKey(
+            podcastId: "podcast-1",
+            fileSHA: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            analysisVersion: 1
+        )
+        let validWindow = CrossUserAnalysisSnapshot.Window(
+            adWindow: makeSharingWindow(
+                id: "source-valid-window",
+                assetId: "asset-a",
+                start: 12,
+                end: 60
+            )
+        )
+        let invalidNonAdWindow = CrossUserAnalysisSnapshot.Window(
+            sourceWindowId: "source-non-ad-window",
+            startTime: 70,
+            endTime: 90,
+            confidence: 0.94,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.suppressed.rawValue,
+            isAd: false,
+            detectorVersion: "fm-test-v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            metadataSource: "foundation-model",
+            metadataConfidence: 0.81,
+            metadataPromptVersion: "prompt-v1",
+            evidenceSources: "semantic,fusion",
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue,
+            catalogStoreMatchSimilarity: nil
+        )
+        let snapshot = makeSnapshot(
+            key: key,
+            windows: [validWindow, invalidNonAdWindow],
+            analysisCoverageEndSec: 90
         )
 
         let result = try await store.importCrossUserAnalysisSnapshot(
@@ -1479,6 +1605,72 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(!encoded.contains("correctionReplay"))
     }
 
+    @Test("export drops non-actionable eligibility gates without inflating coverage")
+    func exportDropsNonActionableEligibilityGatesWithoutInflatingCoverage() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-derived-window",
+                assetId: "asset-a",
+                start: 10,
+                end: 40
+            )
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-user-blocked-window",
+                assetId: "asset-a",
+                start: 50,
+                end: 90
+            ).withEligibilityGate(SkipEligibilityGate.blockedByUserCorrection.rawValue)
+        )
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "source-non-ad-with-gate-window",
+                analysisAssetId: "asset-a",
+                startTime: 95,
+                endTime: 120,
+                confidence: 0.99,
+                boundaryState: AdBoundaryState.acousticRefined.rawValue,
+                decisionState: AdDecisionState.suppressed.rawValue,
+                detectorVersion: "fm-test-v1",
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: nil,
+                metadataSource: "foundation-model",
+                metadataConfidence: 0.81,
+                metadataPromptVersion: "prompt-v1",
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: "semantic,fusion",
+                eligibilityGate: SkipEligibilityGate.eligible.rawValue,
+                catalogStoreMatchSimilarity: nil
+            )
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: "asset-a",
+            podcastId: "podcast-1"
+        )
+
+        let exported = try #require(snapshot)
+        #expect(exported.windows.map(\.sourceWindowId) == ["source-derived-window"])
+        #expect(exported.analysisCoverageEndSec == 40)
+
+        let encoded = try exported.encodedJSONString()
+        #expect(!encoded.contains("source-user-blocked-window"))
+        #expect(!encoded.contains("source-non-ad-with-gate-window"))
+        #expect(!encoded.contains(SkipEligibilityGate.blockedByUserCorrection.rawValue))
+    }
+
     @Test("export suppresses snapshots when a boundary state is unknown")
     func exportSuppressesSnapshotWhenBoundaryStateIsUnknown() async throws {
         let store = try await makeTestStore()
@@ -1684,7 +1876,7 @@ struct AnalysisStoreCrossUserSharingTests {
                     metadataConfidence: 0.81,
                     metadataPromptVersion: "prompt-v1",
                     evidenceSources: "semantic,fusion",
-                    eligibilityGate: "not-ad",
+                    eligibilityGate: nil,
                     catalogStoreMatchSimilarity: nil
                 ),
             ]
@@ -1742,7 +1934,7 @@ struct AnalysisStoreCrossUserSharingTests {
                     metadataConfidence: 0.81,
                     metadataPromptVersion: "prompt-v1",
                     evidenceSources: "semantic,fusion",
-                    eligibilityGate: "not-ad",
+                    eligibilityGate: nil,
                     catalogStoreMatchSimilarity: nil
                 ),
             ]
@@ -1796,7 +1988,7 @@ struct AnalysisStoreCrossUserSharingTests {
                     metadataConfidence: 0.81,
                     metadataPromptVersion: "prompt-v1",
                     evidenceSources: "semantic,fusion",
-                    eligibilityGate: "ready",
+                    eligibilityGate: SkipEligibilityGate.eligible.rawValue,
                     catalogStoreMatchSimilarity: nil
                 ),
             ]
@@ -2127,7 +2319,7 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(imported.metadataConfidence == 0.81)
         #expect(imported.metadataPromptVersion == "prompt-v1")
         #expect(imported.evidenceSources == "semantic,fusion")
-        #expect(imported.eligibilityGate == "ready")
+        #expect(imported.eligibilityGate == SkipEligibilityGate.eligible.rawValue)
         #expect(imported.catalogStoreMatchSimilarity == 0.63)
         #expect(imported.evidenceText == nil)
         #expect(imported.evidenceStartTime == nil)
@@ -2423,7 +2615,7 @@ struct AnalysisStoreCrossUserSharingTests {
                     metadataConfidence: 0.81,
                     metadataPromptVersion: "prompt-v1",
                     evidenceSources: "semantic,fusion",
-                    eligibilityGate: "not-ad",
+                    eligibilityGate: nil,
                     catalogStoreMatchSimilarity: nil
                 ),
             ]
@@ -2526,7 +2718,7 @@ struct AnalysisStoreCrossUserSharingTests {
                     metadataConfidence: 0.81,
                     metadataPromptVersion: "prompt-v1",
                     evidenceSources: "semantic,fusion",
-                    eligibilityGate: "not-ad",
+                    eligibilityGate: nil,
                     catalogStoreMatchSimilarity: nil
                 ),
             ]
@@ -2614,6 +2806,32 @@ private extension AdWindow {
     }
 
     func withBoundaryState(_ boundaryState: String) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: analysisAssetId,
+            startTime: startTime,
+            endTime: endTime,
+            confidence: confidence,
+            boundaryState: boundaryState,
+            decisionState: decisionState,
+            detectorVersion: detectorVersion,
+            advertiser: advertiser,
+            product: product,
+            adDescription: adDescription,
+            evidenceText: evidenceText,
+            evidenceStartTime: evidenceStartTime,
+            metadataSource: metadataSource,
+            metadataConfidence: metadataConfidence,
+            metadataPromptVersion: metadataPromptVersion,
+            wasSkipped: wasSkipped,
+            userDismissedBanner: userDismissedBanner,
+            evidenceSources: evidenceSources,
+            eligibilityGate: eligibilityGate,
+            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
+        )
+    }
+
+    func withEligibilityGate(_ eligibilityGate: String?) -> AdWindow {
         AdWindow(
             id: id,
             analysisAssetId: analysisAssetId,

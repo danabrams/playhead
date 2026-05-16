@@ -908,11 +908,21 @@ actor AnalysisJobRunner {
     private static func isCueWindow(_ window: AdWindow) -> Bool {
         window.confidence >= cueConfidenceThreshold
             && window.endTime > window.startTime
+            && isActionableCueEligibilityGate(window.eligibilityGate)
             && (
                 window.decisionState == AdDecisionState.candidate.rawValue
                     || window.decisionState == AdDecisionState.confirmed.rawValue
                     || window.decisionState == AdDecisionState.applied.rawValue
             )
+    }
+
+    private static func isActionableCueEligibilityGate(_ eligibilityGate: String?) -> Bool {
+        guard let eligibilityGate else { return true }
+        if eligibilityGate == "autoSkip" { return true }
+        guard let decoded = SkipEligibilityGate(rawValue: eligibilityGate) else {
+            return false
+        }
+        return decoded == .eligible
     }
 
     /// Check for cancellation and critical thermal distress between pipeline

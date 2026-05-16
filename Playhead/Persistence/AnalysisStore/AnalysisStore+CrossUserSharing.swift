@@ -219,6 +219,12 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
             guard let boundaryState = normalizedExportBoundaryState(adWindow.boundaryState) else {
                 return nil
             }
+            guard AnalysisStore.isShareableCueEligibilityGate(
+                adWindow.eligibilityGate,
+                isAd: isAdDecision(decisionState)
+            ) else {
+                return nil
+            }
             return Window(
                 sourceWindowId: adWindow.id,
                 startTime: adWindow.startTime,
@@ -786,7 +792,22 @@ extension AnalysisStore {
                 window.decisionState,
                 isAd: window.isAd
             )
+            && isShareableCueEligibilityGate(window.eligibilityGate, isAd: window.isAd)
             && (window.isAd || !hasAdMetadata(window))
+    }
+
+    fileprivate static func isShareableCueEligibilityGate(
+        _ eligibilityGate: String?,
+        isAd: Bool
+    ) -> Bool {
+        guard let eligibilityGate else { return true }
+        if eligibilityGate == "autoSkip" {
+            return isAd
+        }
+        guard let decoded = SkipEligibilityGate(rawValue: eligibilityGate) else {
+            return false
+        }
+        return isAd && decoded == .eligible
     }
 
     private static func hasCanonicalRequiredString(_ value: String) -> Bool {
@@ -869,6 +890,7 @@ extension AnalysisStore {
     ) -> Bool {
         window.confidence >= CrossUserAnalysisSharingConstants.cueConfidenceThreshold
             && window.endTime > window.startTime
+            && isShareableCueEligibilityGate(window.eligibilityGate, isAd: window.isAd)
             && (
                 normalizedDecisionState == AdDecisionState.candidate.rawValue
                     || normalizedDecisionState == AdDecisionState.confirmed.rawValue
@@ -879,6 +901,7 @@ extension AnalysisStore {
     private static func isCueWindow(_ window: AdWindow) -> Bool {
         window.confidence >= CrossUserAnalysisSharingConstants.cueConfidenceThreshold
             && window.endTime > window.startTime
+            && isShareableCueEligibilityGate(window.eligibilityGate, isAd: true)
             && (
                 window.decisionState == AdDecisionState.candidate.rawValue
                     || window.decisionState == AdDecisionState.confirmed.rawValue
