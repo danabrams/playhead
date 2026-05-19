@@ -4234,6 +4234,8 @@ actor AnalysisWorkScheduler {
                assetFingerprint: job.sourceFingerprint
            ) {
             guard !lostOwnership else { throw CancellationError() }
+            await consumePendingProbedDurationIfPresent(for: job, assetId: exactMatch.id)
+            guard !lostOwnership else { throw CancellationError() }
             try await store.updateJobAnalysisAssetId(
                 jobId: job.jobId,
                 analysisAssetId: exactMatch.id
@@ -4261,6 +4263,8 @@ actor AnalysisWorkScheduler {
                 assetFingerprint: job.sourceFingerprint,
                 weakFingerprint: preservedWeakFingerprint
             )
+            guard !lostOwnership else { throw CancellationError() }
+            await consumePendingProbedDurationIfPresent(for: job, assetId: weakMatch.id)
             guard !lostOwnership else { throw CancellationError() }
             try await store.updateJobAnalysisAssetId(
                 jobId: job.jobId,
@@ -4292,6 +4296,8 @@ actor AnalysisWorkScheduler {
                             weakFingerprint: preservedWeakFingerprint
                         )
                         guard !lostOwnership else { throw CancellationError() }
+                        await consumePendingProbedDurationIfPresent(for: job, assetId: existing.id)
+                        guard !lostOwnership else { throw CancellationError() }
                         try await store.updateJobAnalysisAssetId(
                             jobId: job.jobId,
                             analysisAssetId: existing.id
@@ -4300,6 +4306,8 @@ actor AnalysisWorkScheduler {
                     }
                 }
             } else {
+                await consumePendingProbedDurationIfPresent(for: job, assetId: existing.id)
+                guard !lostOwnership else { throw CancellationError() }
                 try await store.updateJobAnalysisAssetId(
                     jobId: job.jobId,
                     analysisAssetId: existing.id
@@ -4355,6 +4363,27 @@ actor AnalysisWorkScheduler {
         guard !lostOwnership else { throw CancellationError() }
         try await store.updateJobAnalysisAssetId(jobId: job.jobId, analysisAssetId: assetId)
         return assetId
+    }
+
+    private func consumePendingProbedDurationIfPresent(
+        for job: AnalysisJob,
+        assetId: String
+    ) async {
+        let key = Self.durationStashKey(
+            episodeId: job.episodeId,
+            sourceFingerprint: job.sourceFingerprint
+        )
+        guard let stashedDuration = pendingProbedEpisodeDurations.removeValue(forKey: key) else {
+            return
+        }
+        do {
+            try await store.updateEpisodeDuration(
+                id: assetId,
+                episodeDurationSec: stashedDuration
+            )
+        } catch {
+            logger.warning("Failed to apply stashed probed duration for \(job.episodeId): \(error)")
+        }
     }
 
     private enum CachedCanonicalFingerprintStatus {

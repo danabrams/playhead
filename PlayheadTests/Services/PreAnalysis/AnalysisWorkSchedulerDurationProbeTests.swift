@@ -427,6 +427,64 @@ struct AnalysisWorkSchedulerDurationProbeTests {
         #expect(abs(weakDuration - 11.5) < 0.5, "upgradeable weak asset should receive the current file's probed duration")
     }
 
+    @Test("canonical duration stash is applied when fingerprint proof later upgrades a weak asset")
+    func canonicalDurationStashIsAppliedWhenWeakAssetUpgradeProofArrivesAfterEnqueue() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloadProvider: provider)
+
+        let url = try writeSynthAudio(seconds: 7.25)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let canonicalSHA = try FileHasher.sha256(fileURL: url)
+        let weakFingerprint = "https://example.com/later-proof.mp3|etag-later|12345|Tue, 19 May 2026 00:00:00 GMT"
+        provider.cachedURLs["ep-later-weak-duration"] = url
+
+        try await store.insertAsset(AnalysisAsset(
+            id: "asset-later-weak-duration",
+            episodeId: "ep-later-weak-duration",
+            assetFingerprint: weakFingerprint,
+            weakFingerprint: nil,
+            sourceURL: url.absoluteString,
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: nil
+        ))
+
+        await scheduler.enqueue(
+            episodeId: "ep-later-weak-duration",
+            podcastId: "pod-later-weak-duration",
+            downloadId: "dl-later-weak-duration",
+            sourceFingerprint: canonicalSHA,
+            isExplicitDownload: true
+        )
+
+        let beforeProof = try #require(
+            try await store.fetchAsset(id: "asset-later-weak-duration")
+        )
+        #expect(beforeProof.assetFingerprint == weakFingerprint)
+        #expect(beforeProof.episodeDurationSec == nil)
+
+        provider.fingerprints["ep-later-weak-duration"] = AudioFingerprint(
+            weak: weakFingerprint,
+            strong: canonicalSHA
+        )
+
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+        #expect(processed)
+
+        let upgraded = try #require(
+            try await store.fetchAsset(id: "asset-later-weak-duration")
+        )
+        #expect(upgraded.assetFingerprint == canonicalSHA)
+        #expect(upgraded.weakFingerprint == weakFingerprint)
+        let duration = try #require(upgraded.episodeDurationSec)
+        #expect(abs(duration - 7.25) < 0.5, "stashed probed duration should be applied to the weak asset upgraded during job resolution")
+    }
+
     @Test("stale canonical SHA jobs do not clear a probed duration stashed for the current SHA")
     func staleCanonicalJobDoesNotClearCurrentSHAStashedDuration() async throws {
         let store = try await makeTestStore()
