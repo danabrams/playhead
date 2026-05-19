@@ -5282,6 +5282,25 @@ actor AnalysisStore {
         return readAsset(stmt)
     }
 
+    func fetchAssetByEpisodeId(
+        _ episodeId: String,
+        weakFingerprint: String
+    ) throws -> AnalysisAsset? {
+        let sql = """
+            SELECT \(assetSelectColumns)
+            FROM analysis_assets
+            WHERE episodeId = ? AND weakFingerprint = ?
+            ORDER BY createdAt DESC, rowid DESC
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        bind(stmt, 2, weakFingerprint)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readAsset(stmt)
+    }
+
     func updateAssetFingerprint(
         id: String,
         assetFingerprint: String,

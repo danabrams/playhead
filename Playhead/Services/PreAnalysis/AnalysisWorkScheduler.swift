@@ -818,14 +818,13 @@ actor AnalysisWorkScheduler {
                             id: currentAsset.id,
                             episodeDurationSec: probedDuration
                         )
-                    } else if let asset = try await store.fetchAssetByEpisodeId(episodeId),
-                              Self.canUpgradeWeakAssetToCanonicalSHA(
-                                  asset,
-                                  jobSourceFingerprint: cachedAudioFingerprint,
-                                  currentAudioFingerprint: currentAudioFingerprint
-                              ) {
+                    } else if let weakAsset = try await fetchUpgradeableWeakAssetForCanonicalSHA(
+                        episodeId: episodeId,
+                        canonicalFingerprint: cachedAudioFingerprint,
+                        currentAudioFingerprint: currentAudioFingerprint
+                    ) {
                         try await store.updateEpisodeDuration(
-                            id: asset.id,
+                            id: weakAsset.id,
                             episodeDurationSec: probedDuration
                         )
                     } else {
@@ -853,6 +852,16 @@ actor AnalysisWorkScheduler {
                        ) {
                         try await store.updateEpisodeDuration(
                             id: exactAsset.id,
+                            episodeDurationSec: probedDuration
+                        )
+                    } else if sourceIsCanonicalSHA,
+                              let weakAsset = try await fetchUpgradeableWeakAssetForCanonicalSHA(
+                                  episodeId: episodeId,
+                                  canonicalFingerprint: sourceFingerprint,
+                                  currentAudioFingerprint: currentAudioFingerprint
+                              ) {
+                        try await store.updateEpisodeDuration(
+                            id: weakAsset.id,
                             episodeDurationSec: probedDuration
                         )
                     } else if let asset = try await store.fetchAssetByEpisodeId(episodeId),
@@ -4232,6 +4241,32 @@ actor AnalysisWorkScheduler {
             return exactMatch.id
         }
 
+        let currentAudioFingerprint = jobUsesCanonicalFullFileSHA
+            ? await downloadManager.fingerprint(for: job.episodeId)
+            : nil
+        guard !lostOwnership else { throw CancellationError() }
+
+        if jobUsesCanonicalFullFileSHA,
+           let weakMatch = try await fetchUpgradeableWeakAssetForCanonicalSHA(
+               episodeId: job.episodeId,
+               canonicalFingerprint: job.sourceFingerprint,
+               currentAudioFingerprint: currentAudioFingerprint
+           ) {
+            guard !lostOwnership else { throw CancellationError() }
+            let preservedWeakFingerprint = weakMatch.weakFingerprint ?? weakMatch.assetFingerprint
+            try await store.updateAssetFingerprint(
+                id: weakMatch.id,
+                assetFingerprint: job.sourceFingerprint,
+                weakFingerprint: preservedWeakFingerprint
+            )
+            guard !lostOwnership else { throw CancellationError() }
+            try await store.updateJobAnalysisAssetId(
+                jobId: job.jobId,
+                analysisAssetId: weakMatch.id
+            )
+            return weakMatch.id
+        }
+
         if let existing = try await store.fetchAssetByEpisodeId(job.episodeId) {
             guard !lostOwnership else { throw CancellationError() }
             if jobUsesCanonicalFullFileSHA {
@@ -4241,8 +4276,6 @@ actor AnalysisWorkScheduler {
                     // the old analysis anchored to its SHA and create a
                     // new asset for this file below.
                 } else {
-                    let currentAudioFingerprint = await downloadManager.fingerprint(for: job.episodeId)
-                    guard !lostOwnership else { throw CancellationError() }
                     if Self.canUpgradeWeakAssetToCanonicalSHA(
                         existing,
                         jobSourceFingerprint: job.sourceFingerprint,
@@ -4372,7 +4405,7 @@ actor AnalysisWorkScheduler {
             sourceFingerprint: currentFingerprint,
             downloadId: staleJob.downloadId,
             priority: staleJob.priority,
-            desiredCoverageSec: config.defaultT0DepthSeconds,
+            desiredCoverageSec: staleJob.desiredCoverageSec,
             featureCoverageSec: 0,
             transcriptCoverageSec: 0,
             cueCoverageSec: 0,
@@ -4396,6 +4429,42 @@ actor AnalysisWorkScheduler {
         }
     }
 
+    private func fetchUpgradeableWeakAssetForCanonicalSHA(
+        episodeId: String,
+        canonicalFingerprint: String,
+        currentAudioFingerprint: AudioFingerprint?
+    ) async throws -> AnalysisAsset? {
+        guard let currentAudioFingerprint,
+              currentAudioFingerprint.strong == canonicalFingerprint else {
+            return nil
+        }
+        let currentWeakFingerprint = currentAudioFingerprint.weak
+        guard !currentWeakFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        if let asset = try await store.fetchAssetByEpisodeId(
+            episodeId,
+            assetFingerprint: currentWeakFingerprint
+        ), Self.canUpgradeWeakAssetToCanonicalSHA(
+            asset,
+            jobSourceFingerprint: canonicalFingerprint,
+            currentAudioFingerprint: currentAudioFingerprint
+        ) {
+            return asset
+        }
+        if let asset = try await store.fetchAssetByEpisodeId(
+            episodeId,
+            weakFingerprint: currentWeakFingerprint
+        ), Self.canUpgradeWeakAssetToCanonicalSHA(
+            asset,
+            jobSourceFingerprint: canonicalFingerprint,
+            currentAudioFingerprint: currentAudioFingerprint
+        ) {
+            return asset
+        }
+        return nil
+    }
+
     private static func retiredStaleCanonicalWorkKey(for job: AnalysisJob) -> String {
         "\(job.workKey):staleFingerprint:\(job.jobId)"
     }
@@ -4416,6 +4485,9 @@ actor AnalysisWorkScheduler {
     ) -> Bool {
         guard let currentAudioFingerprint,
               currentAudioFingerprint.strong == jobSourceFingerprint else {
+            return false
+        }
+        guard !CrossUserAnalysisShareKey.isCanonicalFullFileSHA(asset.assetFingerprint) else {
             return false
         }
         let currentWeakFingerprint = currentAudioFingerprint.weak

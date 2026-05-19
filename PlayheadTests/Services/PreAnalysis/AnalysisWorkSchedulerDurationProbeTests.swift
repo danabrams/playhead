@@ -378,20 +378,8 @@ struct AnalysisWorkSchedulerDurationProbeTests {
             strong: replacementSHA
         )
 
-        try await store.insertAsset(AnalysisAsset(
-            id: "asset-stale-upgradeable-old-sha",
-            episodeId: "ep-stale-upgradeable-weak-duration",
-            assetFingerprint: oldSHA,
-            weakFingerprint: nil,
-            sourceURL: originalURL.absoluteString,
-            featureCoverageEndTime: nil,
-            fastTranscriptCoverageEndTime: nil,
-            confirmedAdCoverageEndTime: nil,
-            analysisState: "queued",
-            analysisVersion: 1,
-            capabilitySnapshot: nil,
-            episodeDurationSec: 111
-        ))
+        // Insert the weak current asset first and the stale canonical asset
+        // second so a latest-asset lookup would pick the wrong row.
         try await store.insertAsset(AnalysisAsset(
             id: "asset-stale-upgradeable-weak",
             episodeId: "ep-stale-upgradeable-weak-duration",
@@ -405,6 +393,20 @@ struct AnalysisWorkSchedulerDurationProbeTests {
             analysisVersion: 1,
             capabilitySnapshot: nil,
             episodeDurationSec: nil
+        ))
+        try await store.insertAsset(AnalysisAsset(
+            id: "asset-stale-upgradeable-old-sha",
+            episodeId: "ep-stale-upgradeable-weak-duration",
+            assetFingerprint: oldSHA,
+            weakFingerprint: nil,
+            sourceURL: originalURL.absoluteString,
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 111
         ))
 
         await scheduler.enqueue(
