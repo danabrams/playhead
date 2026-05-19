@@ -7648,6 +7648,20 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    func updateJobWorkKey(jobId: String, workKey: String) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET workKey = ?, updatedAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, workKey)
+        bind(stmt, 2, Date().timeIntervalSince1970)
+        bind(stmt, 3, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     /// playhead-yqax: persist a new `desiredCoverageSec` on an
     /// `analysis_jobs` row. Used by the foreground catch-up bypass in
     /// `AnalysisWorkScheduler.dispatchForegroundCatchup` so the runner
@@ -8204,6 +8218,10 @@ actor AnalysisStore {
         /// If non-nil, runs `insertJob` for the next-tier child row
         /// (only used by the tier-advance arm).
         var insertNextJob: AnalysisJob?
+        /// If non-nil, rewrites the unique work key before the terminal
+        /// state update. Used only for stale canonical-SHA tombstones so a
+        /// later re-download of the same bytes can enqueue fresh work.
+        var workKeyUpdate: String?
         /// If non-nil, runs `updateJobState` (the terminal/transition
         /// write).
         var stateUpdate: StateUpdate?
@@ -8257,6 +8275,10 @@ actor AnalysisStore {
 
             if let nextJob = commit.insertNextJob {
                 _ = try insertJob(nextJob)
+            }
+
+            if let workKeyUpdate = commit.workKeyUpdate {
+                try updateJobWorkKey(jobId: commit.jobId, workKey: workKeyUpdate)
             }
 
             if let stateUpdate = commit.stateUpdate {

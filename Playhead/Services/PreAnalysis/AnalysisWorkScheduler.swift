@@ -2828,6 +2828,7 @@ actor AnalysisWorkScheduler {
                 "staleCanonicalFingerprint.supersede",
                 AnalysisStore.ProcessJobOutcomeArmCommit(
                     jobId: job.jobId,
+                    workKeyUpdate: Self.retiredStaleCanonicalWorkKey(for: job),
                     stateUpdate: .init(
                         state: "superseded",
                         nextEligibleAt: nil,
@@ -4232,6 +4233,10 @@ actor AnalysisWorkScheduler {
             logger.warning("Could not hash cached audio for stale canonical-SHA check on job \(job.jobId): \(error)")
             return false
         }
+    }
+
+    private static func retiredStaleCanonicalWorkKey(for job: AnalysisJob) -> String {
+        "\(job.workKey):staleFingerprint:\(job.jobId)"
     }
 
     private struct DurationStashKey: Hashable {

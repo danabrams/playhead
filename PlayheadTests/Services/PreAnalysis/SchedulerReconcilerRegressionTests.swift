@@ -1321,6 +1321,67 @@ struct SchedulerBugFixRegressionTests {
             .filter { $0.episodeId == "ep-sha-stale-cold" }
         #expect(assets.count == 1)
     }
+
+    @Test("stale canonical supersede frees the original work key for a later matching re-download")
+    func testStaleCanonicalSupersedeRetiresWorkKeySoReturnedBytesCanReenqueue() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let originalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preanalysis-sha-returned-original-\(UUID().uuidString).mp3")
+        let replacementURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preanalysis-sha-returned-replacement-\(UUID().uuidString).mp3")
+        try Data("original audio bytes that later return".utf8).write(to: originalURL)
+        try Data("replacement audio bytes".utf8).write(to: replacementURL)
+        defer {
+            try? FileManager.default.removeItem(at: originalURL)
+            try? FileManager.default.removeItem(at: replacementURL)
+        }
+
+        let originalSHA = try FileHasher.sha256(fileURL: originalURL)
+        let replacementSHA = try FileHasher.sha256(fileURL: replacementURL)
+        #expect(originalSHA != replacementSHA)
+        let originalWorkKey = "\(originalSHA):1:preAnalysis"
+        downloads.cachedURLs["ep-sha-returned"] = replacementURL
+
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "sha-returned-stale-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-returned",
+            analysisAssetId: nil,
+            workKey: originalWorkKey,
+            sourceFingerprint: originalSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        ))
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-returned-stale-job")
+        let staleJob = try #require(await store.fetchJob(byId: "sha-returned-stale-job"))
+        #expect(staleJob.state == "superseded")
+        #expect(staleJob.lastErrorCode == "staleFingerprint:cachedAudioMismatch")
+        #expect(staleJob.workKey != originalWorkKey)
+
+        downloads.cachedURLs["ep-sha-returned"] = originalURL
+        downloads.fingerprints["ep-sha-returned"] = AudioFingerprint(
+            weak: "returned-weak-fingerprint",
+            strong: originalSHA
+        )
+        await scheduler.enqueue(
+            episodeId: "ep-sha-returned",
+            podcastId: "pod-returned",
+            downloadId: "dl-returned",
+            sourceFingerprint: originalSHA,
+            isExplicitDownload: true
+        )
+
+        let queuedJobs = try await store.fetchJobsByState("queued")
+            .filter { $0.episodeId == "ep-sha-returned" }
+        #expect(queuedJobs.count == 1)
+        #expect(queuedJobs.first?.workKey == originalWorkKey)
+    }
 }
 
 // MARK: - Reconciler Bug-Fix Regression Tests
