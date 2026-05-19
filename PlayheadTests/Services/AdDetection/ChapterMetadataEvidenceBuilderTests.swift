@@ -319,4 +319,96 @@ struct ChapterMetadataEvidenceBuilderTests {
 
         #expect(builder.buildEntries(chapters: [cover], for: pointSpan).count == 1)
     }
+
+    // MARK: - playhead-rxuv: creator-chapter subSource tagging
+
+    @Test("rxuv: default (flag-off) — no subSource is stamped (byte-identical to pre-rxuv)")
+    func subSourceFlagOffPreservesPreRxuvOutput() {
+        let builder = ChapterMetadataEvidenceBuilder()
+        let span = makeSpan(start: 100, end: 200)
+        let chapter = makeChapter(start: 120, end: 180, source: .pc20)
+
+        // Default call (no `tagCreatorChapterSubSource:` argument) ⇒ flag-off path.
+        let entries = builder.buildEntries(chapters: [chapter], for: span)
+        #expect(entries.count == 1)
+        #expect(entries[0].subSource == nil,
+                "Default builder call MUST NOT set subSource — preserves pre-rxuv byte-identity")
+    }
+
+    @Test("rxuv: flag-on stamps subSource = .creatorChapter on creator-source chapters")
+    func subSourceFlagOnStampsCreatorSourceChapters() {
+        let builder = ChapterMetadataEvidenceBuilder()
+        let span = makeSpan(start: 100, end: 200)
+
+        for source: ChapterSource in [.pc20, .rssInline, .id3] {
+            let chapter = makeChapter(start: 120, end: 180, source: source)
+            let entries = builder.buildEntries(
+                chapters: [chapter],
+                for: span,
+                tagCreatorChapterSubSource: true
+            )
+            #expect(entries.count == 1)
+            #expect(entries[0].subSource == .creatorChapter,
+                    "source \(source.rawValue) should be tagged as creatorChapter when flag is on")
+        }
+    }
+
+    @Test("rxuv: flag-on does NOT tag inferred chapters (out of scope per bead)")
+    func subSourceFlagOnLeavesInferredChaptersUntagged() {
+        // The rxuv bead is scoped to creator-supplied chapters; the
+        // follow-on playhead-w7oi bead handles LLM-inferred chapters.
+        let builder = ChapterMetadataEvidenceBuilder()
+        let span = makeSpan(start: 100, end: 200)
+        let inferred = makeChapter(start: 120, end: 180, source: .inferred)
+
+        let entries = builder.buildEntries(
+            chapters: [inferred],
+            for: span,
+            tagCreatorChapterSubSource: true
+        )
+        #expect(entries.count == 1)
+        #expect(entries[0].subSource == nil,
+                "Inferred chapters MUST NOT carry the creatorChapter sub-source")
+    }
+
+    @Test("rxuv: flag-on with mixed sources — best-quality picks the tagging source")
+    func subSourceFlagOnMixedSourcesPicksBestQuality() {
+        // Two overlapping adBreak chapters: a high-quality inferred and a
+        // lower-quality creator (PC20). The builder picks the higher-
+        // quality one and so the emitted entry is UN-tagged in this
+        // scenario, because the bestChapter is .inferred.
+        let builder = ChapterMetadataEvidenceBuilder()
+        let span = makeSpan(start: 100, end: 200)
+
+        let inferredHigh = makeChapter(start: 120, end: 180, qualityScore: 0.95, source: .inferred)
+        let pc20Low = makeChapter(start: 130, end: 170, qualityScore: 0.5, source: .pc20)
+
+        let entries = builder.buildEntries(
+            chapters: [inferredHigh, pc20Low],
+            for: span,
+            tagCreatorChapterSubSource: true
+        )
+        #expect(entries.count == 1)
+        // bestChapter is inferredHigh (0.95 > 0.5), so the weight reflects
+        // the inferred quality and the tag is suppressed.
+        #expect(entries[0].subSource == nil,
+                "When the highest-quality overlapping chapter is .inferred the tag must be suppressed — w7oi will own inferred tagging")
+        #expect(abs(entries[0].weight - 0.10 * 0.95) < 1e-6)
+    }
+
+    @Test("rxuv: flag-on with creator-only chapters — entry is tagged")
+    func subSourceFlagOnAllCreatorTags() {
+        let builder = ChapterMetadataEvidenceBuilder()
+        let span = makeSpan(start: 100, end: 200)
+        let strong = makeChapter(start: 120, end: 180, qualityScore: 0.9, source: .pc20)
+        let weak = makeChapter(start: 130, end: 170, qualityScore: 0.5, source: .rssInline)
+
+        let entries = builder.buildEntries(
+            chapters: [strong, weak],
+            for: span,
+            tagCreatorChapterSubSource: true
+        )
+        #expect(entries.count == 1)
+        #expect(entries[0].subSource == .creatorChapter)
+    }
 }

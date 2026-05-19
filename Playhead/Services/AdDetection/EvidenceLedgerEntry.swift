@@ -118,6 +118,15 @@ enum EvidenceSubSource: String, Sendable, Codable, Equatable, Hashable, CaseIter
     /// `AdCatalogStore` cross-episode fingerprint match. The label NARL
     /// replay should attribute to the cumulative correction-loop signal.
     case fingerprintStore
+    /// playhead-rxuv: Creator-supplied (Podcasting 2.0 / RSS inline /
+    /// ID3 CHAP) chapter marker. Distinguishes a `.metadata` entry whose
+    /// `sourceField == .chapter` and whose underlying `ChapterEvidence`
+    /// came from a creator source (`ChapterSource.isCreatorSource == true`),
+    /// versus an inferred (FM-labeled) chapter — only creator-supplied
+    /// chapters get this tag. Stamped by `ChapterMetadataEvidenceBuilder`
+    /// when `PreAnalysisConfig.creatorChapterFusionEnabled` is on; absent
+    /// (flag-off path) means byte-identical to pre-rxuv output.
+    case creatorChapter
 }
 
 // MARK: - EvidenceLedgerEntry

@@ -2210,6 +2210,14 @@ actor AdDetectionService {
             showMusicBedSnapshot = nil
         }
 
+        // playhead-rxuv: snapshot the creator-chapter-fusion flag once
+        // at the top of the backfill so every per-span iteration sees a
+        // stable value. The flag controls both the evidence builder's
+        // `subSource = .creatorChapter` stamp (recall side) and the
+        // content-chapter suppression gate (precision side, primary value
+        // of the bead). Flag-OFF is the byte-identical pre-rxuv path.
+        let creatorChapterFusionEnabled = preAnalysisConfig.creatorChapterFusionEnabled
+
         // playhead-h6a6 (read path): resolve the per-show capability
         // profile ONCE per backfill so every consumer sees the same
         // adjustment snapshot. Flag-off, missing-store, missing-podcastId,
@@ -2417,9 +2425,16 @@ actor AdDetectionService {
             // — chapters cannot exceed the metadata family budget, and
             // the corroboration gate still requires an in-audio signal
             // before the metadata family can trigger a skip.
+            //
+            // playhead-rxuv: thread the creator-chapter-fusion flag so
+            // entries from creator-source chapters carry the
+            // `EvidenceSubSource.creatorChapter` tag when the flag is on.
+            // Flag-OFF keeps the byte-identical pre-rxuv output (no
+            // subSource on the emitted entry).
             let chapterMetadataEntries = chapterEvidenceBuilder.buildEntries(
                 chapters: assetChapterEvidence,
-                for: refinedSpan
+                for: refinedSpan,
+                tagCreatorChapterSubSource: creatorChapterFusionEnabled
             )
             metadataEntries.append(contentsOf: chapterMetadataEntries)
 
@@ -2494,7 +2509,7 @@ actor AdDetectionService {
             // playhead-fqc8: preserve `promotionTrack` from the raw mapper
             // output; the FM-suppression cap only changes the eligibility
             // gate, not the threshold-selection track.
-            let decision: DecisionResult
+            var decision: DecisionResult
             if suppressionResult.cappedToMarkOnly {
                 decision = DecisionResult(
                     proposalConfidence: rawDecision.proposalConfidence,
@@ -2504,6 +2519,38 @@ actor AdDetectionService {
                 )
             } else {
                 decision = rawDecision
+            }
+
+            // playhead-rxuv: content-chapter suppression (primary value of
+            // the bead). When a candidate ad span lies substantially
+            // inside a creator-labeled `.content` chapter (interview /
+            // Q&A / discussion / etc. per `ChapterDispositionClassifier`),
+            // demote the gate to `.blockedByPolicy` so the proposal cannot
+            // auto-skip. Scoring stays honest — only the gate moves.
+            //
+            // Flag-OFF and "no chapter evidence" both short-circuit
+            // inside `shouldSuppress(...)`, making this a zero-cost no-op
+            // for episodes the bead doesn't apply to. Existing gates of
+            // equal or higher severity (`.blockedByPolicy`,
+            // `.blockedByUserCorrection`) are preserved so a content-
+            // chapter signal cannot UNDO an existing block; the
+            // demotion only fires when the current gate is structurally
+            // weaker than `.blockedByPolicy` (severity < 2).
+            if creatorChapterFusionEnabled,
+               decision.eligibilityGate.severity < SkipEligibilityGate.blockedByPolicy.severity,
+               CreatorChapterSuppressionEvaluator.shouldSuppress(
+                   span: refinedSpan,
+                   chapters: assetChapterEvidence
+               ) {
+                logger.info(
+                    "Backfill: [rxuv] content-chapter suppression demoting span=\(refinedSpan.id, privacy: .public) from gate=\(decision.eligibilityGate.rawValue, privacy: .public) → blockedByPolicy"
+                )
+                decision = DecisionResult(
+                    proposalConfidence: decision.proposalConfidence,
+                    skipConfidence: decision.skipConfidence,
+                    eligibilityGate: .blockedByPolicy,
+                    promotionTrack: decision.promotionTrack
+                )
             }
 
             // Step 14: SkipPolicyMatrix + confidence promotion.
