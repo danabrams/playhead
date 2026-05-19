@@ -112,6 +112,36 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// profile kind itself.
     var showCapabilityProfilesEnabled: Bool = false
 
+    /// playhead-rxuv feature flag: when `true`, the ad-detection
+    /// fusion path activates creator-supplied chapter evidence
+    /// (Podcasting 2.0 / RSS inline / ID3 CHAP) as a first-class
+    /// proposal source. The wiring is twofold:
+    ///   * Recall side — `ChapterMetadataEvidenceBuilder` stamps
+    ///     emitted `.metadata` entries with
+    ///     `EvidenceSubSource.creatorChapter` so the existing
+    ///     publisher "Sponsor"/"Ad break" chapters carry a distinct
+    ///     provenance tag through fusion + persistence + diagnostics.
+    ///   * Precision side (primary value of the bead) — when a
+    ///     candidate ad span lies inside a `.content` chapter
+    ///     (interview/Q&A/discussion/etc. per `ChapterDispositionClassifier`),
+    ///     the eligibility gate is demoted to `.blockedByPolicy`
+    ///     so the proposal cannot auto-skip while honest fusion
+    ///     scoring is preserved.
+    ///
+    /// When `false` (the default), both paths are byte-identical
+    /// no-ops — entries are emitted without `creatorChapter` sub-source
+    /// (matching pre-rxuv output), and no content-chapter suppression
+    /// runs. Inferred (FM-labeled) chapters are out of scope for this
+    /// bead; the follow-on `playhead-w7oi` bead will wire those.
+    ///
+    /// Rollback latency: same "next `AdDetectionService` init takes
+    /// effect" contract as `2hpn` / `h6a6` — the service caches the
+    /// config snapshot at init time, so flipping via Settings persists
+    /// to `UserDefaults` immediately but the running detector keeps
+    /// its current state until the next backfill run that constructs
+    /// a fresh `AdDetectionService`.
+    var creatorChapterFusionEnabled: Bool = false
+
     static let analysisVersion: Int = 1
 
     private static let key = "PreAnalysisConfig"
@@ -129,7 +159,8 @@ struct PreAnalysisConfig: Codable, Sendable {
         scopedMusicBedGeneralization: Bool = false,
         useAdaptiveDeviceProfile: Bool = true,
         b4RevalidationFromFeaturesEnabled: Bool = true,
-        showCapabilityProfilesEnabled: Bool = false
+        showCapabilityProfilesEnabled: Bool = false,
+        creatorChapterFusionEnabled: Bool = false
     ) {
         self.isEnabled = isEnabled
         self.defaultT0DepthSeconds = defaultT0DepthSeconds
@@ -144,6 +175,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.useAdaptiveDeviceProfile = useAdaptiveDeviceProfile
         self.b4RevalidationFromFeaturesEnabled = b4RevalidationFromFeaturesEnabled
         self.showCapabilityProfilesEnabled = showCapabilityProfilesEnabled
+        self.creatorChapterFusionEnabled = creatorChapterFusionEnabled
     }
 
     // Custom decoder so configs persisted before 24cm (which lack the
@@ -186,6 +218,12 @@ struct PreAnalysisConfig: Codable, Sendable {
         // observation + modulation paths stay OFF on upgrade
         // (rollback-friendly default; identical to 2hpn rationale).
         self.showCapabilityProfilesEnabled = try container.decodeIfPresent(Bool.self, forKey: .showCapabilityProfilesEnabled) ?? false
+        // playhead-rxuv: configs persisted before this bead omit the
+        // creator-chapter-fusion flag; default to `false` so the
+        // provenance-tagging + content-chapter-suppression paths stay
+        // OFF on upgrade (rollback-friendly default; identical to 2hpn /
+        // h6a6 rationale).
+        self.creatorChapterFusionEnabled = try container.decodeIfPresent(Bool.self, forKey: .creatorChapterFusionEnabled) ?? false
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -202,6 +240,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         case useAdaptiveDeviceProfile
         case b4RevalidationFromFeaturesEnabled
         case showCapabilityProfilesEnabled
+        case creatorChapterFusionEnabled
     }
 
     static func load() -> PreAnalysisConfig {

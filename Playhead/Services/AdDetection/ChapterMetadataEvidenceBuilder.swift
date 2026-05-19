@@ -64,7 +64,25 @@ struct ChapterMetadataEvidenceBuilder: Sendable {
     /// Quality-score floor below which the chapter is dropped entirely.
     /// Untitled / ambiguous chapters with no end time score near 0 and
     /// would just add noise; this filter trims them.
-    private static let qualityFloor: Float = 0.30
+    ///
+    /// playhead-rxuv: exposed at module visibility (no longer `private`)
+    /// so the precision-side `CreatorChapterSuppressionEvaluator` can
+    /// reference the same canonical value. Keeping it on this type — the
+    /// originator of the recall-side filter — makes the rxuv suppression
+    /// evaluator silently track any future change here rather than
+    /// diverging via a duplicated `0.30` literal.
+    static let qualityFloor: Float = 0.30
+
+    /// Fallback duration (seconds) for chapters with no `endTime`.
+    /// Mirrors typical mid-roll length and ensures the overlap test still
+    /// has a meaningful upper bound — without this, a "Sponsor" chapter
+    /// at 600 s with no end would only match spans starting at or after
+    /// 600 s, missing the very region the publisher labeled.
+    ///
+    /// playhead-rxuv: exposed at module visibility so the precision-side
+    /// `CreatorChapterSuppressionEvaluator` can reference the same
+    /// canonical value rather than restating the literal.
+    static let openEndedFallbackDuration: TimeInterval = 60.0
 
     init() {}
 
@@ -76,6 +94,17 @@ struct ChapterMetadataEvidenceBuilder: Sendable {
     ///     (RSS inline) and/or PC20 JSON (opt-in path) and/or ID3 CHAP.
     ///   - span: The decoded span to score evidence against. Only
     ///     chapters that *overlap* the span's interval contribute.
+    ///   - tagCreatorChapterSubSource: playhead-rxuv flag. When `true`,
+    ///     an entry whose best-overlapping chapter has a creator source
+    ///     (`ChapterSource.isCreatorSource == true` — PC20 / RSS inline /
+    ///     ID3) is stamped with `subSource = .creatorChapter` so the
+    ///     fusion ledger + persistence + diagnostics can attribute the
+    ///     contribution to publisher-supplied chapters specifically.
+    ///     Defaults to `false` — flag-off path is byte-identical to
+    ///     pre-rxuv output (no `subSource` is set on the emitted entry).
+    ///     Inferred (`ChapterSource.inferred`) chapters never receive
+    ///     this tag — they are out of scope for the rxuv bead; the
+    ///     follow-on `playhead-w7oi` bead handles LLM-inferred chapters.
     /// - Returns: Zero or more `EvidenceLedgerEntry` items with
     ///   `source: .metadata`. Returned entries are emitted as their
     ///   honest pre-clamp weights — the family clamp at
@@ -83,7 +112,8 @@ struct ChapterMetadataEvidenceBuilder: Sendable {
     ///   `BackfillEvidenceFusion.buildLedger()` via `FusionBudgetClamp`.
     func buildEntries(
         chapters: [ChapterEvidence],
-        for span: DecodedSpan
+        for span: DecodedSpan,
+        tagCreatorChapterSubSource: Bool = false
     ) -> [EvidenceLedgerEntry] {
         guard !chapters.isEmpty else { return [] }
 
@@ -115,6 +145,18 @@ struct ChapterMetadataEvidenceBuilder: Sendable {
         let weight = Self.baseWeight * Double(bestChapter.qualityScore)
         guard weight > 0 else { return [] }
 
+        // playhead-rxuv: stamp `subSource = .creatorChapter` only when
+        // the flag is on AND the best-overlapping chapter actually
+        // originated from a creator source (PC20 / RSS inline / ID3).
+        // The bead is scoped to creator-supplied chapters; inferred
+        // chapters (FM-labeled, source `.inferred`) are explicitly out
+        // of scope and stay untagged so a future `playhead-w7oi`
+        // implementation can carve out its own sub-source label
+        // without colliding with this one.
+        let subSource: EvidenceSubSource? = (
+            tagCreatorChapterSubSource && bestChapter.source.isCreatorSource
+        ) ? .creatorChapter : nil
+
         let entry = EvidenceLedgerEntry(
             source: .metadata,
             weight: weight,
@@ -125,7 +167,8 @@ struct ChapterMetadataEvidenceBuilder: Sendable {
                 // semantic — chapter markers labeled "Sponsor"/"Ad break"
                 // are a structured form of publisher disclosure.
                 dominantCueType: .disclosure
-            )
+            ),
+            subSource: subSource
         )
 
         Self.logger.debug(
@@ -139,18 +182,16 @@ struct ChapterMetadataEvidenceBuilder: Sendable {
 
     /// Interval-overlap test: chapter `[chStart, chEnd]` overlaps span
     /// `[spanStart, spanEnd]` when `chStart <= spanEnd && chEnd >= spanStart`.
-    /// Chapters with no end time fall back to a 60-second default duration
-    /// (typical mid-roll length) so the overlap test still has a meaningful
-    /// upper bound — without this, a "Sponsor" chapter at 600 s with no end
-    /// would only match spans starting at or after 600 s, missing the very
-    /// region the publisher labeled.
+    /// Chapters with no end time fall back to
+    /// `openEndedFallbackDuration` so the overlap test still has a
+    /// meaningful upper bound.
     private func chapterOverlapsSpan(
         chapter: ChapterEvidence,
         spanStart: TimeInterval,
         spanEnd: TimeInterval
     ) -> Bool {
         let chStart = chapter.startTime
-        let chEnd = chapter.endTime ?? (chStart + 60.0)
+        let chEnd = chapter.endTime ?? (chStart + Self.openEndedFallbackDuration)
         return chStart <= spanEnd && chEnd >= spanStart
     }
 }

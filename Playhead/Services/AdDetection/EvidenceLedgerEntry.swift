@@ -87,8 +87,8 @@ enum EvidenceLedgerDetail: Sendable {
 // MARK: - EvidenceSubSource
 
 /// Disambiguates the producer of an `EvidenceLedgerEntry` whose
-/// `source` is shared by multiple subsystems. Today only one source type
-/// uses sub-source labels:
+/// `source` is shared by multiple subsystems. Two source types currently
+/// use sub-source labels:
 ///
 /// **Catalog (`source == .catalog`) — playhead-epfk:**
 ///   - `.transcriptCatalog` — `EvidenceCatalogBuilder` extracts sponsor
@@ -99,6 +99,15 @@ enum EvidenceLedgerDetail: Sendable {
 ///     fingerprint against the cross-episode SQLite store accumulated
 ///     from prior auto-skips and user corrections. Per-span similarity
 ///     in `[0, 1]`.
+///
+/// **Metadata (`source == .metadata`) — playhead-rxuv:**
+///   - `.creatorChapter` — `ChapterMetadataEvidenceBuilder` stamps a
+///     `.metadata` entry whose underlying `ChapterEvidence` came from a
+///     creator source (PC20 / RSS inline / ID3 — i.e.
+///     `ChapterSource.isCreatorSource == true`). Inferred (FM-labeled)
+///     chapters remain untagged; the follow-on `playhead-w7oi` bead will
+///     own that label. Only stamped when
+///     `PreAnalysisConfig.creatorChapterFusionEnabled` is on.
 ///
 /// playhead-fqc8 history: an earlier draft used `subSource ==
 /// .breakAlignment` on an `.acoustic` entry to mark the
@@ -118,6 +127,15 @@ enum EvidenceSubSource: String, Sendable, Codable, Equatable, Hashable, CaseIter
     /// `AdCatalogStore` cross-episode fingerprint match. The label NARL
     /// replay should attribute to the cumulative correction-loop signal.
     case fingerprintStore
+    /// playhead-rxuv: Creator-supplied (Podcasting 2.0 / RSS inline /
+    /// ID3 CHAP) chapter marker. Distinguishes a `.metadata` entry whose
+    /// `sourceField == .chapter` and whose underlying `ChapterEvidence`
+    /// came from a creator source (`ChapterSource.isCreatorSource == true`),
+    /// versus an inferred (FM-labeled) chapter — only creator-supplied
+    /// chapters get this tag. Stamped by `ChapterMetadataEvidenceBuilder`
+    /// when `PreAnalysisConfig.creatorChapterFusionEnabled` is on; absent
+    /// (flag-off path) means byte-identical to pre-rxuv output.
+    case creatorChapter
 }
 
 // MARK: - EvidenceLedgerEntry
@@ -139,12 +157,14 @@ struct EvidenceLedgerEntry: Sendable {
     /// Default of 1.0 means no modulation (backward compatible with pre-ef2.4.5 entries).
     let classificationTrust: Double
     /// playhead-epfk: Optional disambiguator for sources that have multiple
-    /// distinct producers under one umbrella label. Today only `.catalog`
-    /// uses this — the in-pipeline transcript sponsor catalog versus the
-    /// cross-episode `AdCatalogStore` fingerprint match. `nil` for every
-    /// other source (and pre-epfk callers) so adding the field is purely
-    /// additive: existing constructors compile unchanged and the JSONL
-    /// schema gains an optional key.
+    /// distinct producers under one umbrella label. Currently used by
+    /// `.catalog` (transcript sponsor catalog vs. `AdCatalogStore`
+    /// fingerprint match — playhead-epfk) and by `.metadata`
+    /// (`.creatorChapter` for PC20 / RSS inline / ID3 chapter markers —
+    /// playhead-rxuv). See `EvidenceSubSource` for the per-source
+    /// breakdown. `nil` for every other source (and pre-epfk callers) so
+    /// adding the field is purely additive: existing constructors compile
+    /// unchanged and the JSONL schema gains an optional key.
     let subSource: EvidenceSubSource?
 
     init(
