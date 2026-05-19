@@ -799,42 +799,58 @@ actor AnalysisWorkScheduler {
         //     asset; the probed duration belongs to the new SHA row.
         if let cachedURL = await downloadManager.cachedFileURL(for: episodeId),
            let probedDuration = await AudioFileDurationProbe.probeDuration(at: cachedURL) {
-            do {
-                let sourceIsCanonicalSHA = CrossUserAnalysisShareKey
-                    .isCanonicalFullFileSHA(sourceFingerprint)
-                let currentAudioFingerprint = sourceIsCanonicalSHA
-                    ? await downloadManager.fingerprint(for: episodeId)
-                    : nil
-                if sourceIsCanonicalSHA,
-                   let exactAsset = try await store.fetchAssetByEpisodeId(
-                       episodeId,
-                       assetFingerprint: sourceFingerprint
-                   ) {
-                    try await store.updateEpisodeDuration(
-                        id: exactAsset.id,
-                        episodeDurationSec: probedDuration
+            let sourceIsCanonicalSHA = CrossUserAnalysisShareKey
+                .isCanonicalFullFileSHA(sourceFingerprint)
+            let cachedAudioFingerprint = sourceIsCanonicalSHA
+                ? cachedAudioCanonicalFingerprint(cachedURL: cachedURL, episodeId: episodeId)
+                : nil
+            if sourceIsCanonicalSHA, cachedAudioFingerprint == nil {
+                logger.warning("Skipping probed duration for canonical-SHA enqueue on episode \(episodeId): cached audio could not be hashed")
+            } else if let cachedAudioFingerprint,
+                      cachedAudioFingerprint != sourceFingerprint {
+                pendingProbedEpisodeDurations[
+                    Self.durationStashKey(
+                        episodeId: episodeId,
+                        sourceFingerprint: cachedAudioFingerprint
                     )
-                } else if let asset = try await store.fetchAssetByEpisodeId(episodeId),
-                          !Self.shouldStashProbedDurationForDifferentCanonicalSource(
-                              existing: asset,
-                              sourceFingerprint: sourceFingerprint,
-                              sourceIsCanonicalSHA: sourceIsCanonicalSHA,
-                              currentAudioFingerprint: currentAudioFingerprint
-                          ) {
-                    try await store.updateEpisodeDuration(
-                        id: asset.id,
-                        episodeDurationSec: probedDuration
-                    )
-                } else {
-                    pendingProbedEpisodeDurations[
-                        Self.durationStashKey(
-                            episodeId: episodeId,
-                            sourceFingerprint: sourceFingerprint
+                ] = probedDuration
+                logger.warning("Stashing probed duration for current canonical SHA on stale enqueue for episode \(episodeId): cached audio \(cachedAudioFingerprint) does not match stale job \(sourceFingerprint)")
+            } else {
+                do {
+                    let currentAudioFingerprint = sourceIsCanonicalSHA
+                        ? await downloadManager.fingerprint(for: episodeId)
+                        : nil
+                    if sourceIsCanonicalSHA,
+                       let exactAsset = try await store.fetchAssetByEpisodeId(
+                           episodeId,
+                           assetFingerprint: sourceFingerprint
+                       ) {
+                        try await store.updateEpisodeDuration(
+                            id: exactAsset.id,
+                            episodeDurationSec: probedDuration
                         )
-                    ] = probedDuration
+                    } else if let asset = try await store.fetchAssetByEpisodeId(episodeId),
+                              !Self.shouldStashProbedDurationForDifferentCanonicalSource(
+                                  existing: asset,
+                                  sourceFingerprint: sourceFingerprint,
+                                  sourceIsCanonicalSHA: sourceIsCanonicalSHA,
+                                  currentAudioFingerprint: currentAudioFingerprint
+                              ) {
+                        try await store.updateEpisodeDuration(
+                            id: asset.id,
+                            episodeDurationSec: probedDuration
+                        )
+                    } else {
+                        pendingProbedEpisodeDurations[
+                            Self.durationStashKey(
+                                episodeId: episodeId,
+                                sourceFingerprint: sourceFingerprint
+                            )
+                        ] = probedDuration
+                    }
+                } catch {
+                    logger.warning("Failed to persist probed duration for \(episodeId): \(error)")
                 }
-            } catch {
-                logger.warning("Failed to persist probed duration for \(episodeId): \(error)")
             }
         }
 
@@ -2816,18 +2832,41 @@ actor AnalysisWorkScheduler {
             pendingCancelCause = nil
         }
 
-        if await cachedCanonicalFingerprintChanged(for: job, localAudioURL: localAudioURL) {
+        if case .changed(let currentFingerprint) = await cachedCanonicalFingerprintStatus(
+            for: job,
+            localAudioURL: localAudioURL
+        ) {
             pendingProbedEpisodeDurations.removeValue(
                 forKey: Self.durationStashKey(
                     episodeId: job.episodeId,
                     sourceFingerprint: job.sourceFingerprint
                 )
             )
+            let journalJobSnapshot = try? await store.fetchJob(byId: job.jobId)
+            let replacementJob = replacementJobForCurrentCanonicalAudio(
+                replacing: job,
+                currentFingerprint: currentFingerprint
+            )
+            let staleMetadata = SliceCompletionInstrumentation
+                .buildMetadata(
+                    sliceDurationMs: 0,
+                    bytesProcessed: 0,
+                    shardsCompleted: 0,
+                    deviceClass: DeviceClass.detect(),
+                    extras: [
+                        "stage": "analysisWorkScheduler.staleCanonicalFingerprintSupersede",
+                        "job_id": job.jobId,
+                        "stale_fingerprint": job.sourceFingerprint,
+                        "current_fingerprint": currentFingerprint,
+                    ]
+                )
+                .encodeJSON()
             logger.warning("Superseding stale canonical-SHA job \(job.jobId): cached audio for episode \(job.episodeId) no longer matches \(job.sourceFingerprint)")
             await commitOutcomeArm(
                 "staleCanonicalFingerprint.supersede",
                 AnalysisStore.ProcessJobOutcomeArmCommit(
                     jobId: job.jobId,
+                    insertNextJob: replacementJob,
                     workKeyUpdate: Self.retiredStaleCanonicalWorkKey(for: job),
                     stateUpdate: .init(
                         state: "superseded",
@@ -2835,6 +2874,12 @@ actor AnalysisWorkScheduler {
                         lastErrorCode: "staleFingerprint:cachedAudioMismatch"
                     )
                 )
+            )
+            await emitJournalFailedForJobSnapshot(
+                episodeId: job.episodeId,
+                jobSnapshot: journalJobSnapshot,
+                cause: .pipelineError,
+                metadataJSON: staleMetadata
             )
             return
         }
@@ -3942,6 +3987,42 @@ actor AnalysisWorkScheduler {
         )
     }
 
+    /// Emit a `.failed` row pinned to a specific leased job generation.
+    /// The stale-canonical branch inserts a replacement job for the same
+    /// episode before emitting its journal tail; an episode-only recorder
+    /// backed by `fetchLatestJobForEpisode` would otherwise attach the
+    /// terminal row to that replacement job. Use the production recorder's
+    /// explicit-generation seam when available, while preserving the no-op
+    /// behavior of `NoopWorkJournalRecorder` and lightweight test recorders.
+    private func emitJournalFailedForJobSnapshot(
+        episodeId: String,
+        jobSnapshot: AnalysisJob?,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {
+        guard !lostOwnership else { return }
+        let recorder = workJournalRecorder
+        if let storeRecorder = recorder as? AnalysisStoreWorkJournalRecorder {
+            guard let jobSnapshot else {
+                logger.warning("Skipping WorkJournal failed row for \(episodeId): missing leased job snapshot")
+                return
+            }
+            await storeRecorder.recordFailed(
+                episodeId: episodeId,
+                generationID: jobSnapshot.generationID,
+                schedulerEpoch: jobSnapshot.schedulerEpoch,
+                cause: cause,
+                metadataJSON: metadataJSON
+            )
+        } else {
+            await recorder.recordFailed(
+                episodeId: episodeId,
+                cause: cause,
+                metadataJSON: metadataJSON
+            )
+        }
+    }
+
     /// Emit a `.preempted` row for `episodeId`. Called from the
     /// recoverable-pause arms: `cancelRace.releaseLease`,
     /// `cancelCatch.revertQueued` (the cancel-mid-decode requeue),
@@ -4213,25 +4294,79 @@ actor AnalysisWorkScheduler {
         return assetId
     }
 
-    private func cachedCanonicalFingerprintChanged(
+    private enum CachedCanonicalFingerprintStatus {
+        case unchangedOrUnknown
+        case changed(currentFingerprint: String)
+    }
+
+    private func cachedCanonicalFingerprintStatus(
         for job: AnalysisJob,
         localAudioURL: LocalAudioURL
-    ) async -> Bool {
+    ) async -> CachedCanonicalFingerprintStatus {
         guard CrossUserAnalysisShareKey.isCanonicalFullFileSHA(job.sourceFingerprint) else {
-            return false
+            return .unchangedOrUnknown
         }
         do {
             // The file on disk is the binding source of truth. The
             // fingerprint cache is only a fallback because it can lag a
             // feed correction or cache rewrite in tests and recovery paths.
-            return try FileHasher.sha256(fileURL: localAudioURL.url) != job.sourceFingerprint
+            let currentFingerprint = try FileHasher.sha256(fileURL: localAudioURL.url)
+            return currentFingerprint == job.sourceFingerprint
+                ? .unchangedOrUnknown
+                : .changed(currentFingerprint: currentFingerprint)
         } catch {
             if let currentStrongFingerprint = await downloadManager.fingerprint(for: job.episodeId)?.strong,
                CrossUserAnalysisShareKey.isCanonicalFullFileSHA(currentStrongFingerprint) {
-                return currentStrongFingerprint != job.sourceFingerprint
+                return currentStrongFingerprint == job.sourceFingerprint
+                    ? .unchangedOrUnknown
+                    : .changed(currentFingerprint: currentStrongFingerprint)
             }
             logger.warning("Could not hash cached audio for stale canonical-SHA check on job \(job.jobId): \(error)")
-            return false
+            return .unchangedOrUnknown
+        }
+    }
+
+    private func replacementJobForCurrentCanonicalAudio(
+        replacing staleJob: AnalysisJob,
+        currentFingerprint: String
+    ) -> AnalysisJob {
+        let now = clock().timeIntervalSince1970
+        let workKey = AnalysisJob.computeWorkKey(
+            fingerprint: currentFingerprint,
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            jobType: staleJob.jobType
+        )
+        return AnalysisJob(
+            jobId: UUID().uuidString,
+            jobType: staleJob.jobType,
+            episodeId: staleJob.episodeId,
+            podcastId: staleJob.podcastId,
+            analysisAssetId: nil,
+            workKey: workKey,
+            sourceFingerprint: currentFingerprint,
+            downloadId: staleJob.downloadId,
+            priority: staleJob.priority,
+            desiredCoverageSec: config.defaultT0DepthSeconds,
+            featureCoverageSec: 0,
+            transcriptCoverageSec: 0,
+            cueCoverageSec: 0,
+            state: "queued",
+            attemptCount: 0,
+            nextEligibleAt: nil,
+            leaseOwner: nil,
+            leaseExpiresAt: nil,
+            lastErrorCode: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    private func cachedAudioCanonicalFingerprint(cachedURL: URL, episodeId: String) -> String? {
+        do {
+            return try FileHasher.sha256(fileURL: cachedURL)
+        } catch {
+            logger.warning("Could not hash cached audio for canonical-SHA duration persistence on episode \(episodeId): \(error)")
+            return nil
         }
     }
 

@@ -100,6 +100,26 @@ final class AnalysisStoreWorkJournalRecorder: WorkJournalRecording, Sendable {
         )
     }
 
+    /// Records a failure row against an already-resolved lease generation.
+    /// Use this when the caller's state transition may insert or update a
+    /// newer job for the same episode before the journal tail is emitted.
+    func recordFailed(
+        episodeId: String,
+        generationID: String,
+        schedulerEpoch: Int,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {
+        await persist(
+            episodeId: episodeId,
+            generationID: generationID,
+            schedulerEpoch: schedulerEpoch,
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON
+        )
+    }
+
     func recordPreempted(
         episodeId: String,
         cause: InternalMissCause,
@@ -152,6 +172,40 @@ final class AnalysisStoreWorkJournalRecorder: WorkJournalRecording, Sendable {
                 episodeId: episodeId,
                 generationID: generationUUID,
                 schedulerEpoch: job.schedulerEpoch,
+                timestamp: Date().timeIntervalSince1970,
+                eventType: eventType,
+                cause: cause,
+                metadata: metadataJSON,
+                artifactClass: .scratch
+            )
+            try await store.appendWorkJournalEntry(entry)
+        } catch {
+            logger.error(
+                "WorkJournal append failed for episode=\(episodeId, privacy: .public) event=\(eventType.rawValue, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+        }
+    }
+
+    private func persist(
+        episodeId: String,
+        generationID: String,
+        schedulerEpoch: Int,
+        eventType: WorkJournalEntry.EventType,
+        cause: InternalMissCause?,
+        metadataJSON: String
+    ) async {
+        do {
+            guard let generationUUID = UUID(uuidString: generationID) else {
+                logger.warning(
+                    "WorkJournal append skipped: non-UUID generationID=\(generationID, privacy: .public) for episode=\(episodeId, privacy: .public) event=\(eventType.rawValue, privacy: .public)"
+                )
+                return
+            }
+            let entry = WorkJournalEntry(
+                id: UUID().uuidString,
+                episodeId: episodeId,
+                generationID: generationUUID,
+                schedulerEpoch: schedulerEpoch,
                 timestamp: Date().timeIntervalSince1970,
                 eventType: eventType,
                 cause: cause,

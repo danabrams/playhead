@@ -1322,6 +1322,103 @@ struct SchedulerBugFixRegressionTests {
         #expect(assets.count == 1)
     }
 
+    @Test("stale canonical supersede enqueues fresh work for the current cached SHA even when the fingerprint cache is cold")
+    func testStaleCanonicalSupersedeEnqueuesCurrentSHAWhenFingerprintCacheIsCold() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let currentURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preanalysis-sha-stale-cold-replacement-\(UUID().uuidString).mp3")
+        try Data("current replacement bytes that must be analyzed".utf8).write(to: currentURL)
+        defer { try? FileManager.default.removeItem(at: currentURL) }
+        downloads.cachedURLs["ep-sha-cold-replacement"] = currentURL
+
+        let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let currentSHA = try FileHasher.sha256(fileURL: currentURL)
+        #expect(currentSHA != oldSHA)
+        let currentWorkKey = AnalysisJob.computeWorkKey(
+            fingerprint: currentSHA,
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            jobType: "preAnalysis"
+        )
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "sha-cold-replacement-stale-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-cold-replacement",
+            analysisAssetId: nil,
+            workKey: "\(oldSHA):1:preAnalysis",
+            sourceFingerprint: oldSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        ))
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-cold-replacement-stale-job")
+        let staleJob = try #require(await store.fetchJob(byId: "sha-cold-replacement-stale-job"))
+        #expect(staleJob.state == "superseded")
+        #expect(staleJob.workKey != "\(oldSHA):1:preAnalysis")
+
+        let queuedJobs = try await store.fetchJobsByState("queued")
+            .filter { $0.episodeId == "ep-sha-cold-replacement" }
+        #expect(queuedJobs.count == 1)
+        let replacement = try #require(queuedJobs.first)
+        #expect(replacement.sourceFingerprint == currentSHA)
+        #expect(replacement.workKey == currentWorkKey)
+        #expect(replacement.priority == 10)
+        #expect(replacement.analysisAssetId == nil)
+    }
+
+    @Test("stale canonical supersede writes its terminal journal row to the stale job generation")
+    func testStaleCanonicalSupersedeEmitsJournalForStaleGenerationWhenReplacementIsInserted() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let currentURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preanalysis-sha-stale-journal-\(UUID().uuidString).mp3")
+        try Data("current bytes for stale journal test".utf8).write(to: currentURL)
+        defer { try? FileManager.default.removeItem(at: currentURL) }
+        downloads.cachedURLs["ep-sha-stale-journal"] = currentURL
+
+        let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let currentSHA = try FileHasher.sha256(fileURL: currentURL)
+        #expect(currentSHA != oldSHA)
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "sha-stale-journal-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-stale-journal",
+            analysisAssetId: nil,
+            workKey: "\(oldSHA):1:preAnalysis",
+            sourceFingerprint: oldSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        ))
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        await scheduler.setWorkJournalRecorder(
+            AnalysisStoreWorkJournalRecorder(store: store)
+        )
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-stale-journal-job")
+        let staleJob = try #require(await store.fetchJob(byId: "sha-stale-journal-job"))
+        let replacement = try #require(
+            try await store.fetchJobsByState("queued")
+                .first { $0.episodeId == "ep-sha-stale-journal" }
+        )
+        #expect(replacement.sourceFingerprint == currentSHA)
+        #expect(replacement.generationID.isEmpty)
+
+        let staleRows = try await store.fetchWorkJournalEntries(
+            episodeId: "ep-sha-stale-journal",
+            generationID: staleJob.generationID
+        )
+        #expect(staleRows.map(\.eventType) == [.acquired, .failed])
+        #expect(staleRows.last?.cause == .pipelineError)
+        #expect(staleRows.last?.metadata.contains("staleCanonicalFingerprintSupersede") == true)
+    }
+
     @Test("stale canonical supersede frees the original work key for a later matching re-download")
     func testStaleCanonicalSupersedeRetiresWorkKeySoReturnedBytesCanReenqueue() async throws {
         let store = try await makeTestStore()
@@ -1341,6 +1438,7 @@ struct SchedulerBugFixRegressionTests {
         let replacementSHA = try FileHasher.sha256(fileURL: replacementURL)
         #expect(originalSHA != replacementSHA)
         let originalWorkKey = "\(originalSHA):1:preAnalysis"
+        let replacementWorkKey = "\(replacementSHA):1:preAnalysis"
         downloads.cachedURLs["ep-sha-returned"] = replacementURL
 
         try await store.insertJob(makeAnalysisJob(
@@ -1379,8 +1477,8 @@ struct SchedulerBugFixRegressionTests {
 
         let queuedJobs = try await store.fetchJobsByState("queued")
             .filter { $0.episodeId == "ep-sha-returned" }
-        #expect(queuedJobs.count == 1)
-        #expect(queuedJobs.first?.workKey == originalWorkKey)
+        #expect(queuedJobs.contains { $0.workKey == replacementWorkKey })
+        #expect(queuedJobs.contains { $0.workKey == originalWorkKey })
     }
 }
 
