@@ -4452,14 +4452,16 @@ actor AnalysisWorkScheduler {
         ) {
             return asset
         }
-        if let asset = try await store.fetchAssetByEpisodeId(
+        let weakFingerprintMatches = try await store.fetchAssetsByEpisodeId(
             episodeId,
             weakFingerprint: currentWeakFingerprint
-        ), Self.canUpgradeWeakAssetToCanonicalSHA(
-            asset,
-            jobSourceFingerprint: canonicalFingerprint,
-            currentAudioFingerprint: currentAudioFingerprint
-        ) {
+        )
+        for asset in weakFingerprintMatches
+            where Self.canUpgradeWeakAssetToCanonicalSHA(
+                asset,
+                jobSourceFingerprint: canonicalFingerprint,
+                currentAudioFingerprint: currentAudioFingerprint
+            ) {
             return asset
         }
         return nil

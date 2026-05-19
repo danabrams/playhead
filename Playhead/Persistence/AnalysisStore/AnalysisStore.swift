@@ -5282,23 +5282,25 @@ actor AnalysisStore {
         return readAsset(stmt)
     }
 
-    func fetchAssetByEpisodeId(
+    func fetchAssetsByEpisodeId(
         _ episodeId: String,
         weakFingerprint: String
-    ) throws -> AnalysisAsset? {
+    ) throws -> [AnalysisAsset] {
         let sql = """
             SELECT \(assetSelectColumns)
             FROM analysis_assets
             WHERE episodeId = ? AND weakFingerprint = ?
             ORDER BY createdAt DESC, rowid DESC
-            LIMIT 1
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, episodeId)
         bind(stmt, 2, weakFingerprint)
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
-        return readAsset(stmt)
+        var results: [AnalysisAsset] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(readAsset(stmt))
+        }
+        return results
     }
 
     func updateAssetFingerprint(
@@ -5306,9 +5308,25 @@ actor AnalysisStore {
         assetFingerprint: String,
         weakFingerprint: String?
     ) throws {
+        // `fetchAssetByEpisodeId` treats `createdAt` as the latest-row
+        // ordering key. Canonicalizing an older weak row must therefore make
+        // it newer than any stale asset rows for the same episode.
         let sql = """
             UPDATE analysis_assets
-            SET assetFingerprint = ?, weakFingerprint = ?
+            SET assetFingerprint = ?,
+                weakFingerprint = ?,
+                createdAt = max(
+                    (
+                        SELECT COALESCE(MAX(createdAt), 0)
+                        FROM analysis_assets
+                        WHERE episodeId = (
+                            SELECT episodeId
+                            FROM analysis_assets
+                            WHERE id = ?
+                        )
+                    ),
+                    CAST(strftime('%s', 'now') AS REAL)
+                ) + 0.001
             WHERE id = ?
             """
         let stmt = try prepare(sql)
@@ -5316,6 +5334,7 @@ actor AnalysisStore {
         bind(stmt, 1, assetFingerprint)
         bind(stmt, 2, weakFingerprint)
         bind(stmt, 3, id)
+        bind(stmt, 4, id)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
