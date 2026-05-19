@@ -2531,11 +2531,13 @@ actor AdDetectionService {
             // Flag-OFF and "no chapter evidence" both short-circuit
             // inside `shouldSuppress(...)`, making this a zero-cost no-op
             // for episodes the bead doesn't apply to. Existing gates of
-            // equal or higher severity (`.blockedByPolicy`,
-            // `.blockedByUserCorrection`) are preserved so a content-
+            // equal or higher severity (`.blockedByEvidenceQuorum`,
+            // `.blockedByPolicy`, `.blockedByUserCorrection` — see
+            // `SkipEligibilityGate.severity`) are preserved so a content-
             // chapter signal cannot UNDO an existing block; the
             // demotion only fires when the current gate is structurally
-            // weaker than `.blockedByPolicy` (severity < 2).
+            // weaker than `.blockedByPolicy` (severity < 2 — i.e.
+            // `.eligible`, `.markOnly`, or `.cappedByFMSuppression`).
             if creatorChapterFusionEnabled,
                decision.eligibilityGate.severity < SkipEligibilityGate.blockedByPolicy.severity,
                CreatorChapterSuppressionEvaluator.shouldSuppress(

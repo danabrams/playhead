@@ -89,11 +89,24 @@ struct CreatorChapterSuppressionEvaluatorTests {
         #expect(CreatorChapterSuppressionEvaluator.shouldSuppress(span: span, chapters: [chapter]) == true)
     }
 
-    @Test("span 49% covered does not suppress")
+    @Test("span 25% covered does not suppress (below 50% floor)")
     func spanBelowFractionDoesNotSuppress() {
-        // 40s span, content chapter overlaps only 15s (37.5%).
+        // 40s span [100, 140]. The chapter is [95, 110] (a 15s chapter)
+        // but only the [100, 110] subinterval overlaps the span — 10s
+        // of overlap divided by 40s of span = 0.25 fraction, well under
+        // the `minSpanOverlapFraction = 0.50` floor.
         let span = makeSpan(start: 100, end: 140)
         let chapter = makeChapter(start: 95, end: 110, qualityScore: 0.8)
+        #expect(CreatorChapterSuppressionEvaluator.shouldSuppress(span: span, chapters: [chapter]) == false)
+    }
+
+    @Test("span exactly 49% covered does not suppress (just under the floor)")
+    func spanJustBelowBoundaryDoesNotSuppress() {
+        // 100s span [0, 100]; chapter overlaps [0, 49] → 49s / 100s = 0.49.
+        // Strict-`<`-on-the-floor would still suppress (0.49 > 0.50 == false),
+        // but the inclusive `>=` boundary at 0.50 means 0.49 does not.
+        let span = makeSpan(start: 0, end: 100)
+        let chapter = makeChapter(start: 0, end: 49, qualityScore: 0.8)
         #expect(CreatorChapterSuppressionEvaluator.shouldSuppress(span: span, chapters: [chapter]) == false)
     }
 
