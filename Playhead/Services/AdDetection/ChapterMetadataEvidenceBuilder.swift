@@ -64,7 +64,25 @@ struct ChapterMetadataEvidenceBuilder: Sendable {
     /// Quality-score floor below which the chapter is dropped entirely.
     /// Untitled / ambiguous chapters with no end time score near 0 and
     /// would just add noise; this filter trims them.
-    private static let qualityFloor: Float = 0.30
+    ///
+    /// playhead-rxuv: exposed at module visibility (no longer `private`)
+    /// so the precision-side `CreatorChapterSuppressionEvaluator` can
+    /// reference the same canonical value. Keeping it on this type — the
+    /// originator of the recall-side filter — makes the rxuv suppression
+    /// evaluator silently track any future change here rather than
+    /// diverging via a duplicated `0.30` literal.
+    static let qualityFloor: Float = 0.30
+
+    /// Fallback duration (seconds) for chapters with no `endTime`.
+    /// Mirrors typical mid-roll length and ensures the overlap test still
+    /// has a meaningful upper bound — without this, a "Sponsor" chapter
+    /// at 600 s with no end would only match spans starting at or after
+    /// 600 s, missing the very region the publisher labeled.
+    ///
+    /// playhead-rxuv: exposed at module visibility so the precision-side
+    /// `CreatorChapterSuppressionEvaluator` can reference the same
+    /// canonical value rather than restating the literal.
+    static let openEndedFallbackDuration: TimeInterval = 60.0
 
     init() {}
 
@@ -164,18 +182,16 @@ struct ChapterMetadataEvidenceBuilder: Sendable {
 
     /// Interval-overlap test: chapter `[chStart, chEnd]` overlaps span
     /// `[spanStart, spanEnd]` when `chStart <= spanEnd && chEnd >= spanStart`.
-    /// Chapters with no end time fall back to a 60-second default duration
-    /// (typical mid-roll length) so the overlap test still has a meaningful
-    /// upper bound — without this, a "Sponsor" chapter at 600 s with no end
-    /// would only match spans starting at or after 600 s, missing the very
-    /// region the publisher labeled.
+    /// Chapters with no end time fall back to
+    /// `openEndedFallbackDuration` so the overlap test still has a
+    /// meaningful upper bound.
     private func chapterOverlapsSpan(
         chapter: ChapterEvidence,
         spanStart: TimeInterval,
         spanEnd: TimeInterval
     ) -> Bool {
         let chStart = chapter.startTime
-        let chEnd = chapter.endTime ?? (chStart + 60.0)
+        let chEnd = chapter.endTime ?? (chStart + Self.openEndedFallbackDuration)
         return chStart <= spanEnd && chEnd >= spanStart
     }
 }

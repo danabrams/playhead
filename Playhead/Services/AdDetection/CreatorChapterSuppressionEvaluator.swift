@@ -55,11 +55,14 @@ import Foundation
 enum CreatorChapterSuppressionEvaluator {
 
     /// Minimum chapter quality score for a `.content` chapter to be
-    /// trusted as a suppression signal. Matches
-    /// `ChapterMetadataEvidenceBuilder.qualityFloor` (`0.30`) so the
-    /// recall and precision sides agree on which chapters are
-    /// trustworthy enough to influence fusion.
-    static let qualityFloor: Float = 0.30
+    /// trusted as a suppression signal. Sourced from the recall-side
+    /// builder so the recall and precision sides agree on which
+    /// chapters are trustworthy enough to influence fusion — if the
+    /// canonical floor ever moves, both sides shift together
+    /// automatically.
+    static var qualityFloor: Float {
+        ChapterMetadataEvidenceBuilder.qualityFloor
+    }
 
     /// Minimum fraction of the span's duration that must lie inside
     /// the content chapter for suppression to fire. `0.50` (≥ half)
@@ -71,15 +74,13 @@ enum CreatorChapterSuppressionEvaluator {
     static let minSpanOverlapFraction: Double = 0.50
 
     /// Fallback duration (seconds) used when a content chapter has no
-    /// `endTime`. Mirrors the positive-evidence builder's open-ended
-    /// chapter rule (`ChapterMetadataEvidenceBuilder.chapterOverlapsSpan`
-    /// uses the same 60s fallback). The open-ended-content-chapter case
-    /// is genuinely rare — the parser only leaves `endTime == nil` on
-    /// the final chapter, and a final chapter spans the rest of the
-    /// episode by definition — but keeping the fallback consistent
-    /// across the two builders avoids a "ad-chapters use 60s, content
-    /// chapters use ∞" surprise.
-    static let openEndedFallbackDuration: TimeInterval = 60.0
+    /// `endTime`. Sourced from the recall-side builder so the open-
+    /// ended-chapter rule stays consistent across the recall and
+    /// precision paths — a future change to one immediately flows to
+    /// the other.
+    static var openEndedFallbackDuration: TimeInterval {
+        ChapterMetadataEvidenceBuilder.openEndedFallbackDuration
+    }
 
     // MARK: - Public API
 
