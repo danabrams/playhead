@@ -1,0 +1,42 @@
+{
+  "episodeId": "unexplained-2026-05-08-season-09-episode-21-triangled-veils",
+  "episodeContentHash": "16f974feb751f783a8f96be92cda6931ca95f119f70cf233f95104bb3ef7c21d",
+  "chapters": [
+    {
+      "startTimeSeconds": 0.0,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": "advertisement"
+    },
+    {
+      "startTimeSeconds": 171.3,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "editorial content"
+    },
+    {
+      "startTimeSeconds": 789.8,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": "advertisement"
+    },
+    {
+      "startTimeSeconds": 955.2,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "editorial content"
+    },
+    {
+      "startTimeSeconds": 1516.7,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": "advertisement"
+    },
+    {
+      "startTimeSeconds": 1677.7,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "editorial content"
+    },
+    {
+      "startTimeSeconds": 2389.7,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": "advertisement"
+    }
+  ],
+  "notes": "Auto-converted from TestFixtures/Corpus/Annotations/ by Scripts/convert_annotations_to_chapter_goldens.py. Topic labels are anonymized to ad_type / 'editorial content' \u2014 advertiser, product, and confidence_notes are stripped (au2v.1.22 privacy rule)."
+}
