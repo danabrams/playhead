@@ -157,12 +157,14 @@ struct EvidenceLedgerEntry: Sendable {
     /// Default of 1.0 means no modulation (backward compatible with pre-ef2.4.5 entries).
     let classificationTrust: Double
     /// playhead-epfk: Optional disambiguator for sources that have multiple
-    /// distinct producers under one umbrella label. Today only `.catalog`
-    /// uses this — the in-pipeline transcript sponsor catalog versus the
-    /// cross-episode `AdCatalogStore` fingerprint match. `nil` for every
-    /// other source (and pre-epfk callers) so adding the field is purely
-    /// additive: existing constructors compile unchanged and the JSONL
-    /// schema gains an optional key.
+    /// distinct producers under one umbrella label. Currently used by
+    /// `.catalog` (transcript sponsor catalog vs. `AdCatalogStore`
+    /// fingerprint match — playhead-epfk) and by `.metadata`
+    /// (`.creatorChapter` for PC20 / RSS inline / ID3 chapter markers —
+    /// playhead-rxuv). See `EvidenceSubSource` for the per-source
+    /// breakdown. `nil` for every other source (and pre-epfk callers) so
+    /// adding the field is purely additive: existing constructors compile
+    /// unchanged and the JSONL schema gains an optional key.
     let subSource: EvidenceSubSource?
 
     init(
