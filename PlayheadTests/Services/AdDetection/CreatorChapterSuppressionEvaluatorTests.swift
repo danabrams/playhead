@@ -103,8 +103,12 @@ struct CreatorChapterSuppressionEvaluatorTests {
     @Test("span exactly 49% covered does not suppress (just under the floor)")
     func spanJustBelowBoundaryDoesNotSuppress() {
         // 100s span [0, 100]; chapter overlaps [0, 49] → 49s / 100s = 0.49.
-        // Strict-`<`-on-the-floor would still suppress (0.49 > 0.50 == false),
-        // but the inclusive `>=` boundary at 0.50 means 0.49 does not.
+        // The evaluator uses `fraction >= minSpanOverlapFraction`, so a
+        // fraction of 0.49 (just under the 0.50 floor) must NOT suppress.
+        // Paired with `spanHalfCoveredBoundarySuppresses` above (which
+        // pins 0.50 → suppresses), this nails the inclusive-`>=` boundary
+        // shape from both sides and guards against an off-by-floating-
+        // point regression near the floor.
         let span = makeSpan(start: 0, end: 100)
         let chapter = makeChapter(start: 0, end: 49, qualityScore: 0.8)
         #expect(CreatorChapterSuppressionEvaluator.shouldSuppress(span: span, chapters: [chapter]) == false)

@@ -87,8 +87,8 @@ enum EvidenceLedgerDetail: Sendable {
 // MARK: - EvidenceSubSource
 
 /// Disambiguates the producer of an `EvidenceLedgerEntry` whose
-/// `source` is shared by multiple subsystems. Today only one source type
-/// uses sub-source labels:
+/// `source` is shared by multiple subsystems. Two source types currently
+/// use sub-source labels:
 ///
 /// **Catalog (`source == .catalog`) — playhead-epfk:**
 ///   - `.transcriptCatalog` — `EvidenceCatalogBuilder` extracts sponsor
@@ -99,6 +99,15 @@ enum EvidenceLedgerDetail: Sendable {
 ///     fingerprint against the cross-episode SQLite store accumulated
 ///     from prior auto-skips and user corrections. Per-span similarity
 ///     in `[0, 1]`.
+///
+/// **Metadata (`source == .metadata`) — playhead-rxuv:**
+///   - `.creatorChapter` — `ChapterMetadataEvidenceBuilder` stamps a
+///     `.metadata` entry whose underlying `ChapterEvidence` came from a
+///     creator source (PC20 / RSS inline / ID3 — i.e.
+///     `ChapterSource.isCreatorSource == true`). Inferred (FM-labeled)
+///     chapters remain untagged; the follow-on `playhead-w7oi` bead will
+///     own that label. Only stamped when
+///     `PreAnalysisConfig.creatorChapterFusionEnabled` is on.
 ///
 /// playhead-fqc8 history: an earlier draft used `subSource ==
 /// .breakAlignment` on an `.acoustic` entry to mark the
