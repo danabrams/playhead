@@ -292,6 +292,139 @@ struct AnalysisWorkSchedulerDurationProbeTests {
         #expect(abs(replacementDuration - 8.75) < 0.5, "replacement SHA asset should receive the current file's probed duration")
     }
 
+    @Test("stale canonical SHA enqueue writes the current file duration to an existing current SHA asset")
+    func staleCanonicalEnqueueUpdatesExistingCurrentSHAAssetDuration() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloadProvider: provider)
+
+        let originalURL = try writeSynthAudio(seconds: 2.5)
+        let replacementURL = try writeSynthAudio(seconds: 10.25)
+        defer {
+            try? FileManager.default.removeItem(at: originalURL)
+            try? FileManager.default.removeItem(at: replacementURL)
+        }
+        let oldSHA = try FileHasher.sha256(fileURL: originalURL)
+        let replacementSHA = try FileHasher.sha256(fileURL: replacementURL)
+        #expect(oldSHA != replacementSHA)
+        provider.cachedURLs["ep-stale-existing-current-duration"] = replacementURL
+
+        try await store.insertAsset(AnalysisAsset(
+            id: "asset-stale-existing-old-sha",
+            episodeId: "ep-stale-existing-current-duration",
+            assetFingerprint: oldSHA,
+            weakFingerprint: nil,
+            sourceURL: originalURL.absoluteString,
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 111
+        ))
+        try await store.insertAsset(AnalysisAsset(
+            id: "asset-stale-existing-current-sha",
+            episodeId: "ep-stale-existing-current-duration",
+            assetFingerprint: replacementSHA,
+            weakFingerprint: nil,
+            sourceURL: replacementURL.absoluteString,
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: nil
+        ))
+
+        await scheduler.enqueue(
+            episodeId: "ep-stale-existing-current-duration",
+            podcastId: "pod-stale-existing-current-duration",
+            downloadId: "dl-stale-existing-current-duration",
+            sourceFingerprint: oldSHA,
+            isExplicitDownload: true
+        )
+
+        let oldAfterEnqueue = try await store.fetchAsset(id: "asset-stale-existing-old-sha")
+        #expect(oldAfterEnqueue?.episodeDurationSec == 111)
+
+        let currentAfterEnqueue = try #require(
+            try await store.fetchAsset(id: "asset-stale-existing-current-sha")
+        )
+        let currentDuration = try #require(currentAfterEnqueue.episodeDurationSec)
+        #expect(abs(currentDuration - 10.25) < 0.5, "current SHA asset should receive the current file's probed duration")
+    }
+
+    @Test("stale canonical SHA enqueue writes the current file duration to an upgradeable weak asset")
+    func staleCanonicalEnqueueUpdatesUpgradeableWeakAssetDuration() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloadProvider: provider)
+
+        let originalURL = try writeSynthAudio(seconds: 2.75)
+        let replacementURL = try writeSynthAudio(seconds: 11.5)
+        defer {
+            try? FileManager.default.removeItem(at: originalURL)
+            try? FileManager.default.removeItem(at: replacementURL)
+        }
+        let oldSHA = try FileHasher.sha256(fileURL: originalURL)
+        let replacementSHA = try FileHasher.sha256(fileURL: replacementURL)
+        let replacementWeak = "https://example.com/current.mp3|etag-current|12345|Tue, 19 May 2026 00:00:00 GMT"
+        #expect(oldSHA != replacementSHA)
+        provider.cachedURLs["ep-stale-upgradeable-weak-duration"] = replacementURL
+        provider.fingerprints["ep-stale-upgradeable-weak-duration"] = AudioFingerprint(
+            weak: replacementWeak,
+            strong: replacementSHA
+        )
+
+        try await store.insertAsset(AnalysisAsset(
+            id: "asset-stale-upgradeable-old-sha",
+            episodeId: "ep-stale-upgradeable-weak-duration",
+            assetFingerprint: oldSHA,
+            weakFingerprint: nil,
+            sourceURL: originalURL.absoluteString,
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 111
+        ))
+        try await store.insertAsset(AnalysisAsset(
+            id: "asset-stale-upgradeable-weak",
+            episodeId: "ep-stale-upgradeable-weak-duration",
+            assetFingerprint: replacementWeak,
+            weakFingerprint: nil,
+            sourceURL: replacementURL.absoluteString,
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: nil
+        ))
+
+        await scheduler.enqueue(
+            episodeId: "ep-stale-upgradeable-weak-duration",
+            podcastId: "pod-stale-upgradeable-weak-duration",
+            downloadId: "dl-stale-upgradeable-weak-duration",
+            sourceFingerprint: oldSHA,
+            isExplicitDownload: true
+        )
+
+        let oldAfterEnqueue = try await store.fetchAsset(id: "asset-stale-upgradeable-old-sha")
+        #expect(oldAfterEnqueue?.episodeDurationSec == 111)
+
+        let weakAfterEnqueue = try #require(
+            try await store.fetchAsset(id: "asset-stale-upgradeable-weak")
+        )
+        let weakDuration = try #require(weakAfterEnqueue.episodeDurationSec)
+        #expect(abs(weakDuration - 11.5) < 0.5, "upgradeable weak asset should receive the current file's probed duration")
+    }
+
     @Test("stale canonical SHA jobs do not clear a probed duration stashed for the current SHA")
     func staleCanonicalJobDoesNotClearCurrentSHAStashedDuration() async throws {
         let store = try await makeTestStore()

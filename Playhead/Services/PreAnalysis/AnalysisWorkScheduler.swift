@@ -808,13 +808,39 @@ actor AnalysisWorkScheduler {
                 logger.warning("Skipping probed duration for canonical-SHA enqueue on episode \(episodeId): cached audio could not be hashed")
             } else if let cachedAudioFingerprint,
                       cachedAudioFingerprint != sourceFingerprint {
-                pendingProbedEpisodeDurations[
-                    Self.durationStashKey(
-                        episodeId: episodeId,
-                        sourceFingerprint: cachedAudioFingerprint
+                do {
+                    let currentAudioFingerprint = await downloadManager.fingerprint(for: episodeId)
+                    if let currentAsset = try await store.fetchAssetByEpisodeId(
+                        episodeId,
+                        assetFingerprint: cachedAudioFingerprint
+                    ) {
+                        try await store.updateEpisodeDuration(
+                            id: currentAsset.id,
+                            episodeDurationSec: probedDuration
+                        )
+                    } else if let asset = try await store.fetchAssetByEpisodeId(episodeId),
+                              Self.canUpgradeWeakAssetToCanonicalSHA(
+                                  asset,
+                                  jobSourceFingerprint: cachedAudioFingerprint,
+                                  currentAudioFingerprint: currentAudioFingerprint
+                              ) {
+                        try await store.updateEpisodeDuration(
+                            id: asset.id,
+                            episodeDurationSec: probedDuration
+                        )
+                    } else {
+                        pendingProbedEpisodeDurations[
+                            Self.durationStashKey(
+                                episodeId: episodeId,
+                                sourceFingerprint: cachedAudioFingerprint
+                            )
+                        ] = probedDuration
+                    }
+                } catch {
+                    logger.warning(
+                        "Failed to persist probed duration for current cached SHA on stale enqueue for \(episodeId): \(error)"
                     )
-                ] = probedDuration
-                logger.warning("Stashing probed duration for current canonical SHA on stale enqueue for episode \(episodeId): cached audio \(cachedAudioFingerprint) does not match stale job \(sourceFingerprint)")
+                }
             } else {
                 do {
                     let currentAudioFingerprint = sourceIsCanonicalSHA
