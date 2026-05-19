@@ -1371,6 +1371,48 @@ struct SchedulerBugFixRegressionTests {
         #expect(replacement.analysisAssetId == nil)
     }
 
+    @Test("stale canonical supersede preserves tier work-key suffix on replacement")
+    func testStaleCanonicalSupersedePreservesTierWorkKeySuffix() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let currentURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("preanalysis-sha-stale-tier-replacement-\(UUID().uuidString).mp3")
+        try Data("current replacement bytes for a deeper tier".utf8).write(to: currentURL)
+        defer { try? FileManager.default.removeItem(at: currentURL) }
+        downloads.cachedURLs["ep-sha-tier-replacement"] = currentURL
+
+        let oldSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let currentSHA = try FileHasher.sha256(fileURL: currentURL)
+        #expect(currentSHA != oldSHA)
+        let replacementWorkKey = "\(currentSHA):1:preAnalysis:300"
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "sha-tier-replacement-stale-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-tier-replacement",
+            analysisAssetId: nil,
+            workKey: "\(oldSHA):1:preAnalysis:300",
+            sourceFingerprint: oldSHA,
+            priority: 0,
+            desiredCoverageSec: 300,
+            state: "queued"
+        ))
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-tier-replacement-stale-job")
+        let staleJob = try #require(await store.fetchJob(byId: "sha-tier-replacement-stale-job"))
+        #expect(staleJob.state == "superseded")
+
+        let queuedJobs = try await store.fetchJobsByState("queued")
+            .filter { $0.episodeId == "ep-sha-tier-replacement" }
+        #expect(queuedJobs.count == 1)
+        let replacement = try #require(queuedJobs.first)
+        #expect(replacement.sourceFingerprint == currentSHA)
+        #expect(replacement.workKey == replacementWorkKey)
+        #expect(replacement.desiredCoverageSec == 300)
+    }
+
     @Test("scheduler upgrades an older weak asset when a newer stale canonical asset exists")
     func testSchedulerUpgradesOlderWeakAssetWhenNewerStaleCanonicalAssetExists() async throws {
         let store = try await makeTestStore()
@@ -1438,6 +1480,62 @@ struct SchedulerBugFixRegressionTests {
 
         let staleAsset = try #require(await store.fetchAsset(id: "newer-stale-sha-asset"))
         #expect(staleAsset.assetFingerprint == oldSHA)
+    }
+
+    @Test("scheduler preserves the verified current weak fingerprint when upgrading by asset fingerprint")
+    func testSchedulerPreservesCurrentWeakFingerprintWhenUpgradingWeakAsset() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let localURL = missingTemporaryAudioURL(named: "preanalysis-sha-current-weak-preserve")
+        downloads.cachedURLs["ep-sha-current-weak-preserve"] = localURL
+
+        let currentWeakFingerprint = "https://current.example.com/audio.mp3|etag-current|123|Tue, 19 May 2026 00:00:00 GMT"
+        let staleSecondaryWeak = "https://old.example.com/audio.mp3|etag-old|123|Tue, 19 May 2026 00:00:00 GMT"
+        let currentSHA = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        downloads.fingerprints["ep-sha-current-weak-preserve"] = AudioFingerprint(
+            weak: currentWeakFingerprint,
+            strong: currentSHA
+        )
+
+        try await store.insertAsset(AnalysisAsset(
+            id: "current-weak-with-stale-secondary",
+            episodeId: "ep-sha-current-weak-preserve",
+            assetFingerprint: currentWeakFingerprint,
+            weakFingerprint: staleSecondaryWeak,
+            sourceURL: "current-weak.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: SessionState.queued.rawValue,
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        ))
+
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "sha-current-weak-preserve-job",
+            jobType: "preAnalysis",
+            episodeId: "ep-sha-current-weak-preserve",
+            analysisAssetId: nil,
+            workKey: "\(currentSHA):1:preAnalysis",
+            sourceFingerprint: currentSHA,
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        ))
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+
+        #expect(processed, "Scheduler test hook should process sha-current-weak-preserve-job")
+        let upgraded = try #require(await store.fetchAsset(id: "current-weak-with-stale-secondary"))
+        #expect(upgraded.assetFingerprint == currentSHA)
+        #expect(upgraded.weakFingerprint == currentWeakFingerprint)
+
+        let weakMatches = try await store.fetchAssetsByEpisodeId(
+            "ep-sha-current-weak-preserve",
+            weakFingerprint: currentWeakFingerprint
+        )
+        #expect(weakMatches.map(\.id).contains("current-weak-with-stale-secondary"))
     }
 
     @Test("scheduler does not upgrade a stale canonical asset that only shares the current weak fingerprint")

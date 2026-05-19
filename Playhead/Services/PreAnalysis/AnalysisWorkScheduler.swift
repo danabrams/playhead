@@ -4253,7 +4253,9 @@ actor AnalysisWorkScheduler {
                currentAudioFingerprint: currentAudioFingerprint
            ) {
             guard !lostOwnership else { throw CancellationError() }
-            let preservedWeakFingerprint = weakMatch.weakFingerprint ?? weakMatch.assetFingerprint
+            let preservedWeakFingerprint = currentAudioFingerprint?.weak
+                ?? weakMatch.weakFingerprint
+                ?? weakMatch.assetFingerprint
             try await store.updateAssetFingerprint(
                 id: weakMatch.id,
                 assetFingerprint: job.sourceFingerprint,
@@ -4281,7 +4283,9 @@ actor AnalysisWorkScheduler {
                         jobSourceFingerprint: job.sourceFingerprint,
                         currentAudioFingerprint: currentAudioFingerprint
                     ) {
-                        let preservedWeakFingerprint = existing.weakFingerprint ?? existing.assetFingerprint
+                        let preservedWeakFingerprint = currentAudioFingerprint?.weak
+                            ?? existing.weakFingerprint
+                            ?? existing.assetFingerprint
                         try await store.updateAssetFingerprint(
                             id: existing.id,
                             assetFingerprint: job.sourceFingerprint,
@@ -4390,10 +4394,9 @@ actor AnalysisWorkScheduler {
         currentFingerprint: String
     ) -> AnalysisJob {
         let now = clock().timeIntervalSince1970
-        let workKey = AnalysisJob.computeWorkKey(
-            fingerprint: currentFingerprint,
-            analysisVersion: PreAnalysisConfig.analysisVersion,
-            jobType: staleJob.jobType
+        let workKey = replacementWorkKeyForCurrentCanonicalAudio(
+            replacing: staleJob,
+            currentFingerprint: currentFingerprint
         )
         return AnalysisJob(
             jobId: UUID().uuidString,
@@ -4418,6 +4421,29 @@ actor AnalysisWorkScheduler {
             createdAt: now,
             updatedAt: now
         )
+    }
+
+    private func replacementWorkKeyForCurrentCanonicalAudio(
+        replacing staleJob: AnalysisJob,
+        currentFingerprint: String
+    ) -> String {
+        let baseWorkKey = AnalysisJob.computeWorkKey(
+            fingerprint: currentFingerprint,
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            jobType: staleJob.jobType
+        )
+        let components = staleJob.workKey.split(separator: ":", omittingEmptySubsequences: false)
+        guard let jobTypeIndex = components.firstIndex(of: Substring(staleJob.jobType)) else {
+            return baseWorkKey
+        }
+        let suffixStart = components.index(after: jobTypeIndex)
+        guard suffixStart < components.endIndex else {
+            return baseWorkKey
+        }
+        let suffix = components[suffixStart...]
+            .map(String.init)
+            .joined(separator: ":")
+        return "\(baseWorkKey):\(suffix)"
     }
 
     private func cachedAudioCanonicalFingerprint(cachedURL: URL, episodeId: String) -> String? {
