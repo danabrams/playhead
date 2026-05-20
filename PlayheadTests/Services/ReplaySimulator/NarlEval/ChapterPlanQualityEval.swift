@@ -855,6 +855,123 @@ enum ChapterPlanGoldenSetLoader {
         return try loadFixtures(in: dir)
     }
 
+    // MARK: - Pipeline-snapshot directory (au2v.1.23)
+    //
+    // `pipeline-snapshot/` is the third sibling of `synthetic/` and
+    // `dogfood/`. Each file is a JSON-encoded `ChapterPlan` captured
+    // from running `ChapterGenerationPhase` end-to-end against the
+    // corresponding dogfood-corpus episode's audio. The filename stem
+    // matches the episode_id, identical to the `dogfood/` golden file.
+    //
+    // These snapshots are produced by `ChapterPlanPipelineSnapshotCaptureTests`
+    // (gated on `PLAYHEAD_CHAPTER_SNAPSHOT_CAPTURE=1`) and consumed by
+    // the threshold-mode assertions in
+    // `ChapterPlanQualityRealCorpusHarnessTests`. The capture test
+    // requires:
+    //   1. Apple Intelligence-enabled iOS 26+ device (FM labeler is live).
+    //   2. Audio files at `TestFixtures/Corpus/Audio/<episode_id>.<ext>`.
+    //   3. Production wiring of `ChapterFeatureSnapshot` from the
+    //      feature-extraction pipeline (currently NOT wired — see
+    //      capture-test docstring for details).
+    //
+    // When a snapshot is absent for an episode, the harness falls back
+    // to the empty-plan zero-contract assertions for that one episode,
+    // so checkouts without committed snapshots still run the harness.
+
+    /// `PlayheadTests/Fixtures/ChapterPlanGoldenSet/pipeline-snapshot/` —
+    /// sibling of `dogfood/` and `synthetic/`.
+    static func pipelineSnapshotDirectory(_ filePath: String = #filePath) -> URL {
+        URL(fileURLWithPath: filePath)
+            .deletingLastPathComponent() // NarlEval
+            .deletingLastPathComponent() // ReplaySimulator
+            .deletingLastPathComponent() // Services
+            .deletingLastPathComponent() // PlayheadTests
+            .appendingPathComponent("Fixtures", isDirectory: true)
+            .appendingPathComponent("ChapterPlanGoldenSet", isDirectory: true)
+            .appendingPathComponent("pipeline-snapshot", isDirectory: true)
+    }
+
+    /// Load a single dogfood pipeline-snapshot `ChapterPlan` by basename
+    /// (the episode_id, without `.json`). Returns `nil` when the file is
+    /// not present so callers can fall back to the empty-plan contract
+    /// for that episode without throwing.
+    static func loadDogfoodPipelineSnapshot(
+        named name: String,
+        filePath: String = #filePath
+    ) throws -> ChapterPlan? {
+        let url = pipelineSnapshotDirectory(filePath)
+            .appendingPathComponent("\(name).json", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        // Default JSON date strategy (seconds-since-2001 reference) —
+        // matches `ChapterPlanCache`'s on-disk format so a captured
+        // snapshot produced via the cache encoder round-trips here.
+        return try JSONDecoder().decode(ChapterPlan.self, from: data)
+    }
+
+    /// Paired golden + optional pipeline-snapshot loader. For each
+    /// dogfood golden, returns the golden plus a snapshot if one has
+    /// been captured. The episode_id is the bind point — the golden's
+    /// filename stem and the snapshot's filename stem are identical.
+    /// Snapshots whose `episodeContentHash` does not match the golden's
+    /// are returned as `nil` (defensive: a stale snapshot from a
+    /// re-converted golden must not silently feed into threshold
+    /// assertions). The mismatch is surfaced to the caller via the
+    /// `snapshotPresentButMismatched` flag so a harness can report it.
+    static func allDogfoodFixturesWithSnapshots(
+        _ filePath: String = #filePath
+    ) throws -> [DogfoodFixtureWithSnapshot] {
+        let fixtures = try allDogfoodFixtures(filePath)
+        let snapshotDir = pipelineSnapshotDirectory(filePath)
+        return try pairFixturesWithSnapshots(fixtures: fixtures, snapshotDir: snapshotDir)
+    }
+
+    /// Pair an already-loaded set of goldens against snapshots that live
+    /// in `snapshotDir`. Extracted from `allDogfoodFixturesWithSnapshots`
+    /// so unit tests can exercise the three-way (missing / present-matched
+    /// / present-mismatched) dispatch against a temp directory without
+    /// having to commit fake snapshots to `Fixtures/`. Visible inside the
+    /// test target only.
+    static func pairFixturesWithSnapshots(
+        fixtures: [(url: URL, set: GoldenChapterSet)],
+        snapshotDir: URL
+    ) throws -> [DogfoodFixtureWithSnapshot] {
+        try fixtures.map { entry in
+            let stem = entry.url.deletingPathExtension().lastPathComponent
+            let snapshotURL = snapshotDir
+                .appendingPathComponent("\(stem).json", isDirectory: false)
+            let snapshotExists = FileManager.default.fileExists(atPath: snapshotURL.path)
+            guard snapshotExists else {
+                return DogfoodFixtureWithSnapshot(
+                    goldenURL: entry.url,
+                    golden: entry.set,
+                    snapshotURL: snapshotURL,
+                    snapshot: nil,
+                    snapshotPresentButMismatched: false
+                )
+            }
+            // Default JSON date strategy matches `ChapterPlanCache`'s
+            // on-disk format, so snapshots produced via the cache
+            // encoder round-trip here.
+            let data = try Data(contentsOf: snapshotURL)
+            let plan = try JSONDecoder().decode(ChapterPlan.self, from: data)
+            // Defensive content-hash check. A snapshot whose hash
+            // disagrees with the golden's hash points at a re-converted
+            // golden against a captured-but-stale snapshot — silently
+            // running the evaluator would score the wrong pair and
+            // erode trust in the threshold gate. Treat as "present but
+            // unusable" and let the caller report it.
+            let mismatched = plan.episodeContentHash != entry.set.episodeContentHash
+            return DogfoodFixtureWithSnapshot(
+                goldenURL: entry.url,
+                golden: entry.set,
+                snapshotURL: snapshotURL,
+                snapshot: mismatched ? nil : plan,
+                snapshotPresentButMismatched: mismatched
+            )
+        }
+    }
+
     private static func loadFixtures(
         in dir: URL
     ) throws -> [(url: URL, set: GoldenChapterSet)] {
@@ -872,4 +989,28 @@ enum ChapterPlanGoldenSetLoader {
                 return (url: url, set: try decoder.decode(GoldenChapterSet.self, from: data))
             }
     }
+}
+
+// MARK: - Paired-fixture record (au2v.1.23)
+
+/// A dogfood golden plus the captured pipeline-output `ChapterPlan` for
+/// the same episode (or `nil` when no snapshot has been captured yet).
+///
+/// Why a struct (rather than a tuple): the snapshot-present-but-stale
+/// case needs a dedicated bool — `snapshot == nil` alone is ambiguous
+/// (could mean "not captured" or "captured but content-hash mismatch").
+/// A struct makes both states observable so harness failure output can
+/// distinguish "user hasn't run the capture yet" from "user has a stale
+/// snapshot they need to recapture."
+struct DogfoodFixtureWithSnapshot: Sendable {
+    let goldenURL: URL
+    let golden: GoldenChapterSet
+    let snapshotURL: URL
+    /// `nil` when either the snapshot file is missing OR present but
+    /// `episodeContentHash` disagrees with the golden's.
+    let snapshot: ChapterPlan?
+    /// `true` only when the snapshot file exists on disk but its content
+    /// hash mismatches the golden's. Mutually exclusive with the
+    /// "snapshot is nil because it has not been captured" case.
+    let snapshotPresentButMismatched: Bool
 }
