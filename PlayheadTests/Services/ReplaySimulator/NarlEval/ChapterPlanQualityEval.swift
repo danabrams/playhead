@@ -810,6 +810,54 @@ enum ChapterPlanGoldenSetLoader {
         _ filePath: String = #filePath
     ) throws -> [(url: URL, set: GoldenChapterSet)] {
         let dir = syntheticDirectory(filePath)
+        return try loadFixtures(in: dir)
+    }
+
+    /// `PlayheadTests/Fixtures/ChapterPlanGoldenSet/dogfood/` — sibling
+    /// of `synthetic/`. Holds golden sets auto-converted from the
+    /// hand-labeled real-podcast annotations under
+    /// `TestFixtures/Corpus/Annotations/` (see
+    /// `Scripts/convert_annotations_to_chapter_goldens.py`). Topic
+    /// labels are anonymized to ad_type / "editorial content"; no
+    /// advertiser, product, or confidence-note text is committed
+    /// (au2v.1.22 privacy rule).
+    static func dogfoodDirectory(_ filePath: String = #filePath) -> URL {
+        URL(fileURLWithPath: filePath)
+            .deletingLastPathComponent() // NarlEval
+            .deletingLastPathComponent() // ReplaySimulator
+            .deletingLastPathComponent() // Services
+            .deletingLastPathComponent() // PlayheadTests
+            .appendingPathComponent("Fixtures", isDirectory: true)
+            .appendingPathComponent("ChapterPlanGoldenSet", isDirectory: true)
+            .appendingPathComponent("dogfood", isDirectory: true)
+    }
+
+    /// Load a single dogfood golden-set fixture by basename (without `.json`).
+    static func loadDogfood(
+        named name: String,
+        filePath: String = #filePath
+    ) throws -> GoldenChapterSet {
+        let url = dogfoodDirectory(filePath)
+            .appendingPathComponent("\(name).json", isDirectory: false)
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(GoldenChapterSet.self, from: data)
+    }
+
+    /// Enumerate every `.json` file in the dogfood fixtures directory,
+    /// sorted by filename for determinism. Returns an empty array when
+    /// the directory does not yet exist (so tests can run in checkouts
+    /// where the converter has not been executed locally).
+    static func allDogfoodFixtures(
+        _ filePath: String = #filePath
+    ) throws -> [(url: URL, set: GoldenChapterSet)] {
+        let dir = dogfoodDirectory(filePath)
+        guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
+        return try loadFixtures(in: dir)
+    }
+
+    private static func loadFixtures(
+        in dir: URL
+    ) throws -> [(url: URL, set: GoldenChapterSet)] {
         let entries = try FileManager.default.contentsOfDirectory(
             at: dir,
             includingPropertiesForKeys: nil,

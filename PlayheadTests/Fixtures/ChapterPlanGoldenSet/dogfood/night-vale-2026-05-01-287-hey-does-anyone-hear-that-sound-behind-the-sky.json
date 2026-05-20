@@ -1,0 +1,37 @@
+{
+  "episodeId": "night-vale-2026-05-01-287-hey-does-anyone-hear-that-sound-behind-the-sky",
+  "episodeContentHash": "452103dd0805d73a306eb7cd4bc540404e17baa3895c5cfe6732c3b35b55e67a",
+  "chapters": [
+    {
+      "startTimeSeconds": 0.0,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": "advertisement"
+    },
+    {
+      "startTimeSeconds": 107.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "editorial content"
+    },
+    {
+      "startTimeSeconds": 108.7,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": "host-read sponsor"
+    },
+    {
+      "startTimeSeconds": 240.2,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "editorial content"
+    },
+    {
+      "startTimeSeconds": 1293.3,
+      "expectedDisposition": "adBreak",
+      "expectedTopicLabel": "host-read sponsor"
+    },
+    {
+      "startTimeSeconds": 1462.7,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "editorial content"
+    }
+  ],
+  "notes": "Auto-converted from TestFixtures/Corpus/Annotations/ by Scripts/convert_annotations_to_chapter_goldens.py. Topic labels are anonymized to ad_type / 'editorial content' \u2014 advertiser, product, and confidence_notes are stripped (au2v.1.22 privacy rule)."
+}

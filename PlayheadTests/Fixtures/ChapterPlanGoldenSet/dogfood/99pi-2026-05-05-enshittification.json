@@ -1,0 +1,12 @@
+{
+  "episodeId": "99pi-2026-05-05-enshittification",
+  "episodeContentHash": "18349b985b9f4d2aa5336d5ce1cafed9abfeaec5703406367dbdd63937b7d325",
+  "chapters": [
+    {
+      "startTimeSeconds": 0.0,
+      "expectedDisposition": "content",
+      "expectedTopicLabel": "editorial content"
+    }
+  ],
+  "notes": "Auto-converted from TestFixtures/Corpus/Annotations/ by Scripts/convert_annotations_to_chapter_goldens.py. Topic labels are anonymized to ad_type / 'editorial content' \u2014 advertiser, product, and confidence_notes are stripped (au2v.1.22 privacy rule)."
+}
