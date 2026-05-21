@@ -667,6 +667,88 @@ actor FeatureExtractionService {
         ).windows
     }
 
+    /// Extract features across a sequence of analysis shards without
+    /// persisting anything. Mirrors the per-shard loop body of
+    /// `extractAndPersist(...)` (same DSP, same per-shard state carry,
+    /// same smoothing fix-up) but skips coverage repair, checkpoint
+    /// load, and SQLite I/O — useful for callers that only need an
+    /// in-memory `[FeatureWindow]` derived from raw audio (e.g. the
+    /// `ChapterFeatureSnapshotBuilder` helper).
+    ///
+    /// Shards MUST be in non-decreasing `startTime` order. State carries
+    /// across shards so prior-window smoothing, running-mean RMS, and
+    /// previous-magnitude FFT references are continuous — matching the
+    /// production hot path's behavior.
+    ///
+    /// - Parameters:
+    ///   - shards: Decoded audio shards (16 kHz mono Float32). Empty is
+    ///     valid and returns `[]`.
+    ///   - analysisAssetId: The analysis-asset id stamped onto every
+    ///     returned `FeatureWindow.analysisAssetId`. Callers that have
+    ///     no real asset row (e.g. the chapter-snapshot builder running
+    ///     against a corpus audio file) may pass any stable string —
+    ///     the field is informational here because no rows are written.
+    /// - Returns: All feature windows produced across the shard set,
+    ///   in non-decreasing `startTime` order, with speaker-change-proxy
+    ///   scores already smoothed across shard seams.
+    func extract(
+        shards: [AnalysisShard],
+        analysisAssetId: String
+    ) -> [FeatureWindow] {
+        guard !shards.isEmpty else { return [] }
+
+        var allWindows: [FeatureWindow] = []
+        var state = ExtractionState()
+
+        for shard in shards {
+            // Non-throwing cancellation check: long capture runs over
+            // full episodes can sit in this loop for tens of seconds.
+            // We don't escalate to a `throws` signature (the helper is
+            // intentionally non-throwing, matching the
+            // `extract(from:startTime:analysisAssetId:)` sibling) but a
+            // cancelled Task should be able to bail. `Task.isCancelled`
+            // is a non-suspending atomic read so this stays cheap on
+            // the hot path. Returns the partial set computed so far,
+            // which is fine for the helper's callers (capture writes
+            // are atomic per-episode and a cancelled run produces no
+            // snapshot for the in-progress episode).
+            if Task.isCancelled { break }
+
+            // Run the same private extraction path the persisting
+            // call uses. Shard inputs that are shorter than a single
+            // window short-circuit inside `extractWindows` and leave
+            // state untouched — identical to `extractAndPersist`.
+            let result = extractWindows(
+                from: shard.samples,
+                shardStartTime: shard.startTime,
+                analysisAssetId: analysisAssetId,
+                initialState: state
+            )
+
+            // Apply the prior-window smoothing fix-up to the tail of
+            // `allWindows` if the inner pass produced one. This is the
+            // in-memory equivalent of `persistFeatureExtractionBatch`'s
+            // `priorWindowUpdate` path: the most recent window from
+            // the previous shard gets its smoothed
+            // `speakerChangeProxyScore` rewritten now that we know the
+            // first raw score of the current shard.
+            if let update = result.priorWindowUpdate,
+               let tailIndex = allWindows.lastIndex(where: {
+                   $0.startTime == update.startTime && $0.endTime == update.endTime
+               }) {
+                allWindows[tailIndex] = rebuildWindow(
+                    allWindows[tailIndex],
+                    speakerChangeProxyScore: update.speakerChangeProxyScore
+                )
+            }
+
+            allWindows.append(contentsOf: result.windows)
+            state = result.state
+        }
+
+        return allWindows
+    }
+
     // MARK: - Window Extraction
 
     /// Slice samples into windows and compute features for each.
