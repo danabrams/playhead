@@ -324,6 +324,85 @@ struct FeatureExtractionSignalTests {
         assertMatchesWholeBufferReference(extracted: extracted, reference: reference)
     }
 
+    /// playhead-nbmj (au2v.1.24): the new non-persisting
+    /// `extract(shards:analysisAssetId:)` batch entry drives the same
+    /// private `extractWindows(...)` path as `extractAndPersist`. The
+    /// cross-shard prior-window-smoothing fix-up is mirrored in memory
+    /// (`allWindows[tailIndex] = rebuildWindow(...)`) instead of via a
+    /// SQL UPDATE; this regression pin proves the mirror produces the
+    /// same per-window results as the whole-buffer reference, so a
+    /// future change that drifts the in-memory rewrite away from the
+    /// SQL `priorWindowUpdate` semantics surfaces here.
+    @Test("extract(shards:) carries seam cues across shard boundaries like extractAndPersist")
+    func extractShardsCarriesSeamCuesAcrossShardBoundaries() async throws {
+        let store = try await makeTestStore()
+
+        let firstShardSamples = Array(repeating: Float(0.001), count: 32)
+        let secondShardSamples = Array(repeating: Float(0.45), count: 32)
+        let config = makeFeatureExtractionConfig()
+        let timelineBuilder = makeShardAwareTimelineBuilder(
+            firstShardSamples: firstShardSamples,
+            secondShardSamples: secondShardSamples
+        )
+        let service = FeatureExtractionService(
+            store: store,
+            config: config,
+            musicProbabilityTimelineBuilder: timelineBuilder
+        )
+
+        // Whole-buffer reference: identical to the
+        // extractAndPersistCarriesSeamCuesAcrossShardBoundaries setup so
+        // any drift in the new batch path is visible as a per-window
+        // diff against the same DSP-true baseline.
+        let reference = await service.extract(
+            from: firstShardSamples + secondShardSamples,
+            startTime: 0,
+            analysisAssetId: "asset-1"
+        )
+
+        let shardWindows = await service.extract(
+            shards: [
+                AnalysisShard(
+                    id: 0,
+                    episodeID: "ep-1",
+                    startTime: 0,
+                    duration: 4,
+                    samples: firstShardSamples
+                ),
+                AnalysisShard(
+                    id: 1,
+                    episodeID: "ep-1",
+                    startTime: 4,
+                    duration: 4,
+                    samples: secondShardSamples
+                )
+            ],
+            analysisAssetId: "asset-1"
+        )
+
+        assertMatchesWholeBufferReference(extracted: shardWindows, reference: reference)
+    }
+
+    /// playhead-nbmj (au2v.1.24): empty shard set is the trivial
+    /// degenerate input — the helper accepts it (matches the
+    /// `ChapterFeatureSnapshotBuilder` contract: empty audio produces an
+    /// empty snapshot) and must not crash or allocate windows.
+    @Test("extract(shards:) returns an empty array for an empty shard set")
+    func extractShardsHandlesEmptyInput() async throws {
+        let store = try await makeTestStore()
+        let service = FeatureExtractionService(
+            store: store,
+            config: makeFeatureExtractionConfig()
+        )
+
+        let windows = await service.extract(
+            shards: [],
+            analysisAssetId: "asset-1"
+        )
+
+        #expect(windows.isEmpty)
+    }
+
     @Test("extractAndPersist keeps seam smoothing when shards arrive in separate calls")
     func extractAndPersistPreservesSeamStateAcrossCalls() async throws {
         let store = try await makeTestStore()

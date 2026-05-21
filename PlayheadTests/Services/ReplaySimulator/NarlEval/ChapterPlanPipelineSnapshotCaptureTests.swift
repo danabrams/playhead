@@ -43,28 +43,28 @@
 //            -only-testing:'PlayheadTests/ChapterPlanPipelineSnapshotCaptureTests'
 //          # plus PLAYHEAD_CHAPTER_SNAPSHOT_CAPTURE=1 in the scheme env vars
 //
-// Production wiring status (au2v.1.23 LIMITATION — surfaced for review):
-//   `ChapterGenerationPhase` end-to-end requires a populated
-//   `ChapterFeatureSnapshot` (music windows + speaker windows +
-//   lexical hits + pause windows) that drives the boundary detector.
-//   In production, that snapshot is sourced from the feature-extraction
-//   pipeline (`FeatureExtraction.swift`) running against the audio
-//   asset; the chapter-phase factory in `AdDetectionService` is not
-//   yet wired to a live `ChapterBoundaryDetecting` implementation
-//   that consumes raw audio (`chapterGenerationPhaseFactory: nil` is
-//   the default and no production constructor exists today).
-//
-//   Until that wiring lands, this capture test cannot produce real
-//   snapshots from raw audio in a self-contained step. The follow-up
-//   bead `playhead-nbmj` (logical name au2v.1.24) will expose a
-//   raw-audio → `ChapterFeatureSnapshot` helper so this test can drop
-//   in the missing piece without surprises; the audio + golden
-//   plumbing here is already in place.
-//
-//   When invoked in this state with the env var set, the test fails
-//   with a clear diagnostic naming the missing wiring AND the
-//   follow-up bead (`playhead-nbmj` / au2v.1.24) rather than
-//   producing an empty / synthetic snapshot.
+// Production wiring status (au2v.1.24 update):
+//   * Raw-audio → `ChapterFeatureSnapshot` is now exposed via
+//     `ChapterFeatureSnapshotBuilder.build(audioURL:transcript:fmAvailable:)`
+//     (bead playhead-nbmj). This test drives that helper to produce
+//     the snapshot the boundary detector consumes.
+//   * Transcript-input gap: `CorpusAnnotation` does not currently carry
+//     transcript chunks. We pass an empty transcript here, so the
+//     snapshot's lexical/speaker arrays are empty and the captured
+//     plan is driven only by music transitions and long-pause
+//     signals. The capture is still useful as a smoke proof that the
+//     phase wiring composes end-to-end against real audio; a
+//     follow-up bead can thread a transcript sidecar (or a live ASR
+//     pass) through this entry to enrich the captured plans.
+//   * `ChapterGenerationPhase` is constructed in-test with stub
+//     admission / creator-chapter / hash providers and an in-memory
+//     `ChapterPlanCache`. The boundary detector is a live
+//     `ChapterBoundaryDetector` adapter; the labeler is a live
+//     `ChapterLabelingService.live` adapter that requires
+//     `FoundationModels` (iOS 26+ device, Apple Intelligence on).
+//   * The test still gates on `PLAYHEAD_CHAPTER_SNAPSHOT_CAPTURE=1`
+//     so a vanilla `PlayheadFastTests` run remains a no-op (matches
+//     `PLAYHEAD_FM_SMOKE`).
 
 import Foundation
 import XCTest
@@ -109,6 +109,24 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
 
         let snapshotDir = ChapterPlanGoldenSetLoader.pipelineSnapshotDirectory()
         try ensureDirectoryExists(snapshotDir)
+
+        // Shared per-run cache directory under `tmp/`. Each captured plan
+        // is keyed by its episode content hash, so all 12 episodes can
+        // safely share one cache directory without collisions. Sharing
+        // also means we create + remove ONE directory per run rather than
+        // 12 (one-per-episode was wasteful and never cleaned up).
+        let cacheRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "ChapterSnapshotCapture-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer {
+            // tmp/ is OS-managed but we still tidy up explicitly: capture
+            // runs commonly happen on a developer machine where the temp
+            // dir lingers across reboots, and leaving stale directories
+            // around obscures which run produced what.
+            try? FileManager.default.removeItem(at: cacheRoot)
+        }
 
         let corpusLoader = CorpusAnnotationLoader()
 
@@ -156,7 +174,8 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
                 let plan = try await captureSnapshot(
                     for: golden,
                     episodeId: episodeId,
-                    audioURL: audioURL
+                    audioURL: audioURL,
+                    cacheRoot: cacheRoot
                 )
                 let outURL = snapshotDir
                     .appendingPathComponent("\(episodeId).json", isDirectory: false)
@@ -182,12 +201,9 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
         // tells the operator exactly which to re-investigate.
         //
         // We fail-loud in three cases (in this order):
-        //   1. Any episode hit a hard `failed` path (capture wiring
-        //      missing, annotation decode error, etc.). Until follow-up
-        //      bead `playhead-nbmj` (au2v.1.24) lands the raw-audio →
-        //      ChapterFeatureSnapshot helper, every audio-present
-        //      episode will hit `CaptureUnavailable` here; this is the
-        //      "fails loud" contract the spec requires.
+        //   1. Any episode hit a hard `failed` path (annotation decode
+        //      error, audio fingerprint mismatch, snapshot-builder
+        //      decode failure, phase outcome != .cached, etc.).
         //   2. Zero episodes produced ANY snapshot and zero were
         //      hard-failed. That means the operator set the env var
         //      but every episode landed in `skipped` (audio not staged
@@ -219,11 +235,7 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
                 snapshots were produced. Every dogfood episode landed \
                 in `skipped` because its audio file is not staged \
                 under TestFixtures/Corpus/Audio/. See the file header \
-                for the staging recipe. (Follow-up bead `playhead-nbmj` \
-                / au2v.1.24 will land the raw-audio → \
-                ChapterFeatureSnapshot helper required to actually \
-                capture; until then this path is unreachable even \
-                with audio staged.)
+                for the staging recipe.
 
                 \(summary)
                 """
@@ -237,30 +249,35 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
 
     // MARK: - Snapshot wire-up
 
-    /// Run the production chapter-generation phase against one
+    /// Run the chapter-generation phase end-to-end against one
     /// episode's audio and return its `ChapterPlan`.
     ///
-    /// LIMITATION (au2v.1.23): Building the `ChapterFeatureSnapshot`
-    /// the boundary detector consumes requires the feature-extraction
-    /// pipeline to have run against this audio file and persisted its
-    /// outputs into the analysis store. That wiring is not yet
-    /// available in a callable form outside `AdDetectionService.runBackfill`
-    /// (which itself takes a fully-populated `AnalysisAsset` row and
-    /// upstream service graph). Follow-up bead `playhead-nbmj`
-    /// (au2v.1.24) exposes a "build ChapterFeatureSnapshot for this
-    /// audio URL" helper; until that lands, this function throws
-    /// `CaptureUnavailable` with a precise reason and the operator
-    /// follow-up steps.
+    /// Steps:
+    ///   1. Build a populated `ChapterFeatureSnapshot` from the raw
+    ///      audio via `ChapterFeatureSnapshotBuilder.build(...)`
+    ///      (bead playhead-nbmj / au2v.1.24). Transcript chunks are
+    ///      not currently available in `CorpusAnnotation`, so we pass
+    ///      `[]`; lexical / speaker arrays in the snapshot are empty,
+    ///      music / pause arrays are populated by feature extraction.
+    ///   2. Construct `ChapterGenerationPhase` with the snapshot
+    ///      wrapped in a live `ChapterBoundaryDetector` adapter, the
+    ///      live `ChapterLabelingService` (iOS 26+ + Apple
+    ///      Intelligence required), stub admission / creator-chapter /
+    ///      hash providers, and an in-memory `ChapterPlanCache`.
+    ///   3. Run the phase and read the plan from the cache. The phase
+    ///      uses the golden's `episodeContentHash` as the cache key
+    ///      (the same hash the `ChapterPlanQualityRealCorpusHarnessTests`
+    ///      consume).
     private func captureSnapshot(
         for golden: GoldenChapterSet,
         episodeId: String,
-        audioURL: URL
+        audioURL: URL,
+        cacheRoot: URL
     ) async throws -> ChapterPlan {
         // Defense in depth: confirm the audio exists and is readable
-        // before reporting "wiring not available". A missing audio
-        // file should already have been caught by the
-        // `audioFileURL(for:)` resolver, but a half-staged copy could
-        // slip through.
+        // before doing any decode work. A missing audio file should
+        // already have been caught by the `audioFileURL(for:)`
+        // resolver, but a half-staged copy could slip through.
         guard FileManager.default.isReadableFile(atPath: audioURL.path) else {
             throw CaptureUnavailable(
                 reason: "audio at \(audioURL.path) is not readable"
@@ -283,54 +300,102 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
             )
         }
 
-        // ── MISSING WIRING ─────────────────────────────────────────
-        // To produce a real `ChapterPlan` we need to:
-        //   1. Run the upstream feature-extraction pipeline against
-        //      this audio file (music probability windows, speaker
-        //      clustering, lexical hits, pause windows) into a
-        //      populated `ChapterFeatureSnapshot`.
-        //   2. Construct `ChapterGenerationPhase` with:
-        //        - `boundaryDetector`: a `ChapterBoundaryDetector`
-        //          (live; pure function over the snapshot).
-        //        - `labeler`: `ChapterLabelingService.live(...)`
-        //          (FM-backed, on-device — requires iOS 26+ +
-        //          Apple Intelligence).
-        //        - `creatorChapterProvider`: a stub that returns
-        //          empty so the FM path actually runs.
-        //        - `transcriptHashProvider`: a stub that returns
-        //          the golden's `episodeContentHash` (entry == recheck
-        //          so no race fires).
-        //        - `cache`: an in-memory `ChapterPlanCache` to capture
-        //          the plan post-assembly.
-        //        - admission policy: stub `.admit`.
-        //   3. Call `phase.run(mode: .enabled, episodeId:, installID:)`
-        //      and read the resulting plan from the cache via
-        //      `cache.get(contentHash:)`.
-        //
-        // Step 1 is the blocker. No production constructor presently
-        // takes raw audio → `ChapterFeatureSnapshot`. The closest
-        // surface is `AdDetectionService.runBackfill`, which expects
-        // a populated `AnalysisAsset` row and upstream services that
-        // are not safe to invoke from a test-only capture entry
-        // point.
-        //
-        // This stub fails loud so the follow-up bead
-        // `playhead-nbmj` (au2v.1.24), which lands the raw-audio →
-        // feature-snapshot helper, can drop the implementation in
-        // here without surprises.
-        throw CaptureUnavailable(
-            reason: """
-            ChapterFeatureSnapshot construction from raw audio is not \
-            yet exposed in a callable form for episode '\(episodeId)'. \
-            Follow-up bead `playhead-nbmj` (au2v.1.24) will expose the \
-            raw-audio → ChapterFeatureSnapshot helper this capture \
-            depends on; see ChapterPlanPipelineSnapshotCaptureTests \
-            file header for the production-wiring gap. Audio at \
-            \(audioURL.path) is present and matches the golden \
-            fingerprint; the test infrastructure is otherwise ready \
-            to capture.
-            """
+        // Live FM labeler requires iOS 26+. The capture is gated by
+        // env var to a real device build, so this is the right place
+        // to fail loud if we're somehow running on an older SDK.
+        guard #available(iOS 26.0, *) else {
+            throw CaptureUnavailable(
+                reason: """
+                ChapterLabelingService.live requires iOS 26.0+ \
+                (FoundationModels). Current runtime is older; rerun on \
+                a supported device.
+                """
+            )
+        }
+
+        // 1. Snapshot.
+        let snapshot = try await ChapterFeatureSnapshotBuilder.build(
+            audioURL: audioURL,
+            transcript: [],
+            fmAvailable: true
         )
+
+        // 2. Phase wiring. Everything below is a small, in-test
+        //    composition mirroring the doubles used by
+        //    `ChapterGenerationPhaseIntegrationTests` — admission,
+        //    creator-chapter, hash, event-sink doubles — paired with
+        //    the LIVE boundary detector + labeler adapters.
+        //
+        //    Cache uses the per-run `cacheRoot` (one directory shared
+        //    across all 12 episodes in this run). Cache keys are
+        //    content-hashed so there is no key collision between
+        //    episodes; sharing keeps the on-disk footprint to one
+        //    directory per capture run with `defer`-driven cleanup at
+        //    the outer entry.
+        let cache = ChapterPlanCache(directory: cacheRoot)
+
+        let boundaryDetector = LiveBoundaryDetector(snapshot: snapshot)
+        let labeler = LiveLabelerAdapter(service: .live())
+        let admissionPolicy = StubAdmissionPolicy()
+        let creatorProvider = StubCreatorChapterProvider()
+        let hashProvider = StickyHashProvider(hash: golden.episodeContentHash)
+        let eventSink = NoopEventSink()
+
+        let phase = ChapterGenerationPhase(
+            admissionPolicy: admissionPolicy,
+            creatorChapterProvider: creatorProvider,
+            boundaryDetector: boundaryDetector,
+            labeler: labeler,
+            transcriptHashProvider: hashProvider,
+            cache: cache,
+            eventSink: eventSink
+        )
+
+        // 3. Run + read plan.
+        let outcome = await phase.run(
+            mode: .enabled,
+            episodeId: episodeId,
+            installID: UUID()
+        )
+
+        switch outcome {
+        case .cached:
+            // Drop through to the cache read.
+            break
+        case .modeOff,
+             .admissionDenied,
+             .skippedCreatorChapters,
+             .noCandidates,
+             .transcriptUnavailable,
+             .raceAborted,
+             .preempted,
+             .operationalRateExceeded:
+            throw CaptureUnavailable(
+                reason: """
+                ChapterGenerationPhase did not produce a cached plan \
+                for episode '\(episodeId)'. Outcome: \(outcome). The \
+                snapshot's empty transcript may have starved the \
+                detector of lexical/speaker signals; this is expected \
+                for episodes whose music+pause cues alone are too \
+                sparse to clear the boundary-confidence gate. Stage a \
+                transcript sidecar or land a transcript-loading bead \
+                to enrich the capture for this episode.
+                """
+            )
+        }
+
+        guard let plan = await cache.get(contentHash: golden.episodeContentHash) else {
+            throw CaptureUnavailable(
+                reason: """
+                ChapterGenerationPhase reported `.cached` but \
+                ChapterPlanCache.get(contentHash:) returned nil for \
+                episode '\(episodeId)'. This indicates a cache-write \
+                regression — the phase claimed a successful write but \
+                the entry is not retrievable.
+                """
+            )
+        }
+        return plan
     }
 
     // MARK: - On-disk write
@@ -356,12 +421,108 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
 
 // MARK: - Capture-unavailable error
 
-/// Raised when the capture wiring is incomplete for the requested
+/// Raised when the capture cannot complete for the requested
 /// episode. Carries a one-line operator-facing reason that flows into
 /// the test's failure summary. NOT an XCTest assertion failure on its
 /// own — the outer loop accumulates these and reports them together so
 /// a partial capture run produces one actionable summary rather than
 /// N individual failures.
+///
+/// Cases this surfaces (post au2v.1.24):
+///   * Audio file present but unreadable.
+///   * Audio fingerprint does not match the golden's contentHash.
+///   * iOS runtime is older than 26.0 (FoundationModels missing).
+///   * `ChapterGenerationPhase` returned a non-`.cached` outcome —
+///     typically because the empty-transcript snapshot starved the
+///     detector of signals (see the `captureSnapshot` reason text for
+///     details).
+///   * Phase reported `.cached` but the cache read returned `nil`
+///     (cache-write regression).
 private struct CaptureUnavailable: Error {
     let reason: String
+}
+
+// MARK: - In-test adapters and stubs (au2v.1.24)
+
+/// Boundary-detection adapter for the capture test. Wraps the LIVE
+/// `ChapterBoundaryDetector` (pure function over a snapshot) so the
+/// phase can call `detect() async throws -> [ChapterBoundaryCandidate]`
+/// without us pre-computing candidates in the test body.
+///
+/// The mapping `ChapterCandidate → ChapterBoundaryCandidate` is
+/// intentionally lossy: the phase only consumes `startTime` and an
+/// optional `endTime`. The detector emits `startTime` per boundary;
+/// `endTime` is left `nil` so the labeler treats each candidate as
+/// "open-ended until the next boundary or episode end" (matches the
+/// detector's contract — boundaries describe transitions, not regions).
+private struct LiveBoundaryDetector: ChapterBoundaryDetecting {
+    let snapshot: ChapterFeatureSnapshot
+    let detector: ChapterBoundaryDetector
+
+    init(snapshot: ChapterFeatureSnapshot) {
+        self.snapshot = snapshot
+        self.detector = ChapterBoundaryDetector()
+    }
+
+    func detect() async throws -> [ChapterBoundaryCandidate] {
+        detector.detect(features: snapshot)
+            .map { ChapterBoundaryCandidate(startTime: $0.startTime, endTime: nil) }
+    }
+}
+
+/// Adapter wrapping the live `ChapterLabelingService` (FM-backed) as a
+/// `ChapterLabeling` conformance. The capture has no transcript on
+/// hand, so `regionText` is empty — the FM still produces a label, but
+/// the disposition tends toward operational-unclear. That is exactly
+/// what the capture should record so a downstream eval can see the
+/// effect of running with no transcript context.
+///
+/// `chapterIndex` and `totalChapters` are filled with `1` and `1`
+/// respectively because the phase calls the labeler per-candidate and
+/// the test has no plan-level context to thread through. The labeling
+/// prompt uses these for context only; they do not affect the output
+/// schema.
+@available(iOS 26.0, *)
+private struct LiveLabelerAdapter: ChapterLabeling {
+    let service: ChapterLabelingService
+
+    func label(
+        candidate: ChapterBoundaryCandidate
+    ) async throws -> LabelingResult? {
+        let labelingCandidate = ChapterLabelingCandidate(
+            startTime: candidate.startTime,
+            endTime: candidate.endTime,
+            regionText: "",
+            chapterIndex: 1,
+            totalChapters: 1,
+            previousDisposition: nil
+        )
+        return await service.label(labelingCandidate)
+    }
+}
+
+/// Admission stub that always admits — the capture is opt-in via env
+/// var, so the operator has already accepted the cost.
+private struct StubAdmissionPolicy: ChapterPhaseAdmissionPolicy {
+    func decide() async -> ChapterPhaseAdmissionDecision { .admit }
+}
+
+/// Creator-chapter stub that returns no creator chapters — we want the
+/// FM path to run so the captured plan exercises the inference
+/// pipeline.
+private struct StubCreatorChapterProvider: CreatorChapterProviding {
+    func creatorChapters(episodeId: String) async -> [ChapterEvidence] { [] }
+}
+
+/// Hash stub that returns the same hash on entry and recheck so the
+/// race-abort path does not fire.
+private struct StickyHashProvider: TranscriptHashProviding {
+    let hash: String
+    func currentTranscriptHash() async -> String? { hash }
+}
+
+/// Event sink that drops everything — the capture test does not need
+/// to assert phase events, only the produced plan.
+private struct NoopEventSink: ChapterPhaseEventSink {
+    func record(_ event: ChapterPhaseEvent) async {}
 }
