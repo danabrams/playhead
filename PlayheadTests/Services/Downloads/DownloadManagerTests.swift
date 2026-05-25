@@ -353,6 +353,13 @@ struct DownloadManagerForegroundAssistHandoffTests {
                 "A complete progress event must clear the foreground-assist slot")
     }
 
+    // `BGContinuedProcessingTaskRequest` is iOS-26-only and unavailable
+    // in Mac Catalyst. Production (`DownloadManager.submitContinuedProcessing`)
+    // returns early on Catalyst, so this iOS-only behavior cannot be
+    // exercised there. Guarding the whole method keeps the test target
+    // compiling for Catalyst (needed by the env-gated ChapterPlan
+    // snapshot capture, which runs as a Catalyst process).
+    #if !targetEnvironment(macCatalyst)
     @Test("willResignActive submits BGContinuedProcessingTaskRequest when transfer is far from done")
     func willResignActiveSubmitsBGRequest() async throws {
         // Transfer is only 10% complete at 50 KB/s throughput → ETA
@@ -387,6 +394,7 @@ struct DownloadManagerForegroundAssistHandoffTests {
         #expect(scheduler.submitted.first is BGContinuedProcessingTaskRequest,
                 "Submitted request must be a BGContinuedProcessingTaskRequest")
     }
+    #endif
 
     @Test("willResignActive keeps foreground-assist alive when transfer is near done")
     func willResignActiveKeepsAliveOnHighFraction() async throws {

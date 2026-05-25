@@ -169,12 +169,30 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
                 continue
             }
 
+            // Load the corpus ASR transcript sidecar. Absent → empty
+            // (the snapshot will be transcript-starved for that one
+            // episode, which the downstream eval surfaces).
+            let transcript: [TranscriptChunk]
+            do {
+                transcript = try CorpusTranscriptLoader.load(
+                    episodeId: episodeId,
+                    repoRoot: corpusLoader.repoRoot
+                )
+            } catch {
+                failed.append((
+                    episodeId,
+                    "transcript decode failed: \(error.localizedDescription)"
+                ))
+                continue
+            }
+
             // Drive the pipeline and write the snapshot.
             do {
                 let plan = try await captureSnapshot(
                     for: golden,
                     episodeId: episodeId,
                     audioURL: audioURL,
+                    transcript: transcript,
                     cacheRoot: cacheRoot
                 )
                 let outURL = snapshotDir
@@ -272,6 +290,7 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
         for golden: GoldenChapterSet,
         episodeId: String,
         audioURL: URL,
+        transcript: [TranscriptChunk],
         cacheRoot: URL
     ) async throws -> ChapterPlan {
         // Defense in depth: confirm the audio exists and is readable
@@ -313,10 +332,13 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
             )
         }
 
-        // 1. Snapshot.
+        // 1. Snapshot. The transcript populates lexical hits + speaker
+        //    windows (speaker is empty for whisper — no diarization), so
+        //    the boundary detector sees lexical-category signals in
+        //    addition to music + pause.
         let snapshot = try await ChapterFeatureSnapshotBuilder.build(
             audioURL: audioURL,
-            transcript: [],
+            transcript: transcript,
             fmAvailable: true
         )
 
@@ -335,7 +357,7 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
         let cache = ChapterPlanCache(directory: cacheRoot)
 
         let boundaryDetector = LiveBoundaryDetector(snapshot: snapshot)
-        let labeler = LiveLabelerAdapter(service: .live())
+        let labeler = LiveLabelerAdapter(service: .live(), transcript: transcript)
         let admissionPolicy = StubAdmissionPolicy()
         let creatorProvider = StubCreatorChapterProvider()
         let hashProvider = StickyHashProvider(hash: golden.episodeContentHash)
@@ -419,6 +441,82 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
     }
 }
 
+// MARK: - Corpus transcript loading (au2v.1.25)
+
+/// Decodes a whisper.cpp transcript JSON
+/// (`TestFixtures/Corpus/Transcripts/<episode_id>.json`) into the
+/// `[TranscriptChunk]` shape the chapter pipeline consumes. The corpus
+/// transcripts are the local ASR sidecar referenced by
+/// `TestFixtures/Corpus/README.md` (git-ignored, large). Threading them
+/// through the capture replaces the earlier empty-transcript shortcut
+/// that starved the boundary detector (no lexical/speaker signals) and
+/// the FM labeler (empty `regionText` → every chapter labeled
+/// `content`).
+enum CorpusTranscriptLoader {
+
+    /// whisper.cpp `--output-json-full` envelope. We only need the
+    /// `transcription` array; each segment carries millisecond
+    /// `offsets` and the recognized `text`. Token-level detail is
+    /// ignored — the chapter pipeline scans segment text, not tokens.
+    private struct WhisperTranscript: Decodable {
+        let transcription: [Segment]
+
+        struct Segment: Decodable {
+            let text: String
+            let offsets: Offsets
+
+            struct Offsets: Decodable {
+                let from: Int // milliseconds
+                let to: Int   // milliseconds
+            }
+        }
+    }
+
+    /// Load + map the corpus transcript for `episodeId`. Returns `[]`
+    /// when the sidecar is absent so an operator capturing a subset of
+    /// episodes still gets a (transcript-starved) snapshot rather than a
+    /// hard failure — the capture summary already distinguishes starved
+    /// from rich plans via the downstream eval.
+    static func load(episodeId: String, repoRoot: URL) throws -> [TranscriptChunk] {
+        let url = repoRoot
+            .appendingPathComponent("TestFixtures/Corpus/Transcripts", isDirectory: true)
+            .appendingPathComponent("\(episodeId).json", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+
+        let data = try Data(contentsOf: url)
+        let whisper = try JSONDecoder().decode(WhisperTranscript.self, from: data)
+
+        return whisper.transcription.enumerated().map { index, segment in
+            // `normalizedText` uses the same normalizer the production
+            // ingest path applies (AdDetectionService /
+            // TargetedWindowNarrower both call
+            // `TranscriptEngineService.normalizeText`), so the lexical
+            // hits the boundary detector sees match production behavior.
+            // whisper has no diarization, so `speakerId` is nil — that
+            // leaves speaker-shift signals empty (same as production for
+            // a show without speaker labels), and the captured plan is
+            // driven by music + pause + lexical signals.
+            TranscriptChunk(
+                id: "\(episodeId)-\(index)",
+                analysisAssetId: episodeId,
+                segmentFingerprint: "",
+                chunkIndex: index,
+                startTime: Double(segment.offsets.from) / 1000.0,
+                endTime: Double(segment.offsets.to) / 1000.0,
+                text: segment.text,
+                normalizedText: TranscriptEngineService.normalizeText(segment.text),
+                pass: "final",
+                modelVersion: "whisper-corpus",
+                transcriptVersion: nil,
+                atomOrdinal: index,
+                weakAnchorMetadata: nil,
+                speakerId: nil,
+                avgConfidence: nil
+            )
+        }
+    }
+}
+
 // MARK: - Capture-unavailable error
 
 /// Raised when the capture cannot complete for the requested
@@ -465,8 +563,21 @@ private struct LiveBoundaryDetector: ChapterBoundaryDetecting {
     }
 
     func detect() async throws -> [ChapterBoundaryCandidate] {
-        detector.detect(features: snapshot)
-            .map { ChapterBoundaryCandidate(startTime: $0.startTime, endTime: nil) }
+        // Each detector boundary describes a transition. To give the
+        // labeler a region to read, we close each candidate at the next
+        // boundary's start (the last candidate runs to episode end).
+        // This mirrors how production regions span [thisStart, nextStart)
+        // and lets `LiveLabelerAdapter` slice transcript text per region
+        // instead of passing an empty `regionText`.
+        let starts = detector.detect(features: snapshot)
+            .map(\.startTime)
+            .sorted()
+        return starts.enumerated().map { index, start in
+            let end = index + 1 < starts.count
+                ? starts[index + 1]
+                : snapshot.episodeDuration
+            return ChapterBoundaryCandidate(startTime: start, endTime: end)
+        }
     }
 }
 
@@ -485,6 +596,7 @@ private struct LiveBoundaryDetector: ChapterBoundaryDetecting {
 @available(iOS 26.0, *)
 private struct LiveLabelerAdapter: ChapterLabeling {
     let service: ChapterLabelingService
+    let transcript: [TranscriptChunk]
 
     func label(
         candidate: ChapterBoundaryCandidate
@@ -492,12 +604,35 @@ private struct LiveLabelerAdapter: ChapterLabeling {
         let labelingCandidate = ChapterLabelingCandidate(
             startTime: candidate.startTime,
             endTime: candidate.endTime,
-            regionText: "",
+            regionText: Self.regionText(
+                transcript: transcript,
+                start: candidate.startTime,
+                end: candidate.endTime
+            ),
             chapterIndex: 1,
             totalChapters: 1,
             previousDisposition: nil
         )
         return await service.label(labelingCandidate)
+    }
+
+    /// Join the text of every transcript chunk whose start falls in
+    /// `[start, end)` (open-ended when `end` is nil). Mirrors
+    /// production's `RegionFeatureExtractor`, which joins region-atom
+    /// text with a single space; `ChapterLabelingService` truncates to
+    /// `regionTextCharacterCap` internally, so very long regions are
+    /// capped the same way the production labeler caps them.
+    static func regionText(
+        transcript: [TranscriptChunk],
+        start: TimeInterval,
+        end: TimeInterval?
+    ) -> String {
+        let upper = end ?? .greatestFiniteMagnitude
+        return transcript
+            .filter { $0.startTime >= start && $0.startTime < upper }
+            .sorted { $0.startTime < $1.startTime }
+            .map(\.text)
+            .joined(separator: " ")
     }
 }
 
