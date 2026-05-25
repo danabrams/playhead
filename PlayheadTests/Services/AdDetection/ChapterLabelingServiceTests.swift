@@ -254,6 +254,72 @@ struct ChapterLabelingServicePromptTests {
         let count = prompt.filter { $0 == "@" }.count
         #expect(count == ChapterLabelingService.regionTextCharacterCap)
     }
+
+    /// au2v.1.25: the prompt MUST teach the model what an ad looks like.
+    /// Empirically (ChapterLabelingDiagnosticTests on the dogfood corpus),
+    /// the unguided prompt labelled blatant host-read sponsor copy as
+    /// `content`. These assertions pin that the prompt now names the ad
+    /// dispositions and the sponsor-read cues that route a region there.
+    @Test("Prompt names both ad dispositions so the model can route sponsor reads")
+    func promptNamesAdDispositions() {
+        let candidate = makeCandidate()
+        let prompt = ChapterLabelingService.buildPrompt(for: candidate)
+        #expect(prompt.contains("hostReadAd"))
+        #expect(prompt.contains("programmaticAd"))
+    }
+
+    @Test("Prompt enumerates the full disposition taxonomy")
+    func promptListsTaxonomy() {
+        let candidate = makeCandidate()
+        let prompt = ChapterLabelingService.buildPrompt(for: candidate)
+        for disposition in ChapterDispositionRaw.allCases {
+            #expect(
+                prompt.contains(disposition.rawValue),
+                "prompt is missing taxonomy case \(disposition.rawValue)"
+            )
+        }
+    }
+
+    @Test("Prompt lists sponsor-read cues that signal an ad")
+    func promptListsSponsorReadCues() {
+        let candidate = makeCandidate()
+        let prompt = ChapterLabelingService.buildPrompt(for: candidate)
+        // Generic, non-branded cue language (privacy: no real advertisers).
+        #expect(prompt.contains("sponsor"))
+        #expect(prompt.contains("promo code"))
+        #expect(prompt.contains("brought to you by"))
+    }
+
+    /// The fixed instruction scaffold (everything except the variable
+    /// context line and the region body) must stay terse so the
+    /// ad-classification guidance does not crowd the per-call token
+    /// budget. We measure the scaffold directly — an EMPTY-region prompt
+    /// is the scaffold plus a minimal context line — using the project's
+    /// own conservative `ChapterPromptContext.estimateTokens` model
+    /// (`ceil(chars / 3)`). The bound has headroom for the current
+    /// guidance but would fail if a future edit roughly doubled it.
+    /// (The whole-prompt `regionTextCharacterCap + 1024` char bound used
+    /// elsewhere cannot catch a scaffold blowup — the 1200-char body
+    /// dominates it — so this token-model check is the real guard.)
+    @Test("Prompt instruction scaffold stays within the documented token budget")
+    func promptScaffoldStaysWithinTokenBudget() {
+        // Empty region text isolates the fixed instruction + minimal
+        // context from the variable transcript body.
+        let candidate = makeCandidate(
+            chapterIndex: 1,
+            totalChapters: 5,
+            previousDisposition: nil,
+            regionText: ""
+        )
+        let scaffold = ChapterLabelingService.buildPrompt(for: candidate)
+        let scaffoldTokens = ChapterPromptContext.estimateTokens(of: scaffold)
+        // Current scaffold is ~158 tokens under ceil(chars/3); 180 leaves
+        // headroom for minor wording tweaks while failing on a doubling.
+        #expect(
+            scaffoldTokens <= 180,
+            "instruction scaffold token estimate \(scaffoldTokens) exceeds the per-call budget; trim the guidance"
+        )
+    }
 }
 
 // MARK: - label() — happy path
@@ -265,7 +331,7 @@ struct ChapterLabelingServiceHappyPathTests {
     func successfulLabel() async {
         let counter = CallCounter()
         let script = OutcomeScript([
-            .label(makeLabel(.hostReadAd, confidence: 0.85, topic: "BetterHelp"))
+            .label(makeLabel(.hostReadAd, confidence: 0.85, topic: "AcmeWidgets"))
         ])
         let service = makeService(counter: counter, script: script)
 
@@ -278,13 +344,13 @@ struct ChapterLabelingServiceHappyPathTests {
         #expect(result.attempts == 1)
         #expect(result.failureMode == nil)
         #expect(result.labelDisposition == .hostReadAd)
-        #expect(result.topicDescriptor == "BetterHelp")
+        #expect(result.topicDescriptor == "AcmeWidgets")
         #expect(result.chapter.source == .inferred)
         #expect(result.chapter.disposition == .adBreak)
         #expect(result.chapter.qualityScore == 0.85)
         #expect(result.chapter.startTime == 60)
         #expect(result.chapter.endTime == 130)
-        #expect(result.chapter.title == "BetterHelp")
+        #expect(result.chapter.title == "AcmeWidgets")
     }
 
     @Test("Confidence above 1.0 is clamped to 1.0")
@@ -699,7 +765,7 @@ struct ChapterLabelCodableTests {
         let original = ChapterLabel(
             disposition: .hostReadAd,
             confidence: 0.92,
-            topicDescriptor: "BetterHelp"
+            topicDescriptor: "AcmeWidgets"
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(ChapterLabel.self, from: data)
@@ -880,11 +946,13 @@ struct ChapterLabelingServiceTokenBudgetTests {
 
     /// Loose upper bound on the entire prompt, including schema /
     /// scaffold overhead. The prompt body is capped at
-    /// `regionTextCharacterCap`; the scaffold around it (chapter
-    /// header, "Region transcript:" prefix, etc.) adds ~250 chars.
-    /// Pinning a generous bound here surfaces a regression where the
-    /// cap is removed entirely without locking the exact scaffold
-    /// length, which is documentation-not-contract.
+    /// `regionTextCharacterCap`; the fixed instruction scaffold around
+    /// it (taxonomy + sponsor-read guidance, chapter header, "Region
+    /// transcript:" prefix, etc.) adds ~470 chars. The `+1024` margin
+    /// stays comfortably above that. Pinning a generous bound here
+    /// surfaces a regression where the cap is removed entirely without
+    /// locking the exact scaffold length, which is
+    /// documentation-not-contract.
     private static let promptUpperBoundChars = ChapterLabelingService.regionTextCharacterCap + 1024
 
     @Test("Huge region text → labeler still succeeds; prompt observed by the FM stays within cap+scaffold")

@@ -11,9 +11,14 @@
 // Token budget: this schema is deliberately small. Every `@Guide`
 // description string in an `@Generable` schema gets serialized to the
 // per-call token budget (see `FoundationModelClassifier` "bd-34e schema
-// trim" comment). The descriptions here are short, omit examples, and
-// rely on the per-call prompt for orientation. The schema itself
-// occupies ~150 tokens against the FM's per-call budget.
+// trim" comment). Most descriptions are short and rely on the per-call
+// prompt for orientation. The one exception is `disposition`
+// (au2v.1.25): its guide carries terse ad-classification cues because
+// the model otherwise mislabels blatant host-read sponsor copy as
+// `content`; that guidance is load-bearing and intentionally kept on
+// both the prompt and the guide. The enriched `disposition` guide adds
+// roughly 50 tokens over the prior one-line form, so the schema now
+// occupies on the order of ~200 tokens against the FM's per-call budget.
 //
 // Off-device build (Mac Catalyst / non-FM simulator): the raw enum
 // stays available; the `@Generable` `ChapterLabel` is gated behind
@@ -101,7 +106,7 @@ struct ChapterLabel: Sendable, Codable, Equatable {
     /// out-of-taxonomy literal (e.g. `"music"`) surfaces as a
     /// `LanguageModelSession.GenerationError.decodingFailure` and the
     /// caller coerces to `.unclear` with `LabelFailureMode.operational`.
-    @Guide(description: "Chapter disposition: intro|content|hostReadAd|programmaticAd|outro|recap|unclear.")
+    @Guide(description: "Chapter disposition. hostReadAd: host reads a sponsor/ad (brand mention, call-to-action, promo code, URL, 'brought to you by'). programmaticAd: inserted ad, often different production. intro/outro/recap/content: editorial. unclear: cannot tell.")
     var disposition: ChapterDispositionRaw
 
     /// Caller clamps to [0, 1].
