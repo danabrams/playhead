@@ -441,6 +441,288 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
     }
 }
 
+// MARK: - Labeling diagnostic (au2v.1.24)
+
+/// Env-gated diagnostic (`PLAYHEAD_CHAPTER_LABEL_DIAGNOSE=1`) that runs
+/// the boundary detector + live FM labeler **directly** (no phase, no
+/// assembler) across the dogfood corpus and records, per candidate
+/// region: the FM raw disposition (the rich 7-way taxonomy, before it
+/// is mapped down to adBreak/content/ambiguous), the failure mode
+/// (success / semantic / operational), a sample of the region text, and
+/// whether the region overlaps a golden `adBreak` span.
+///
+/// Purpose (playhead-au2v.1.24): the captured plans never emit
+/// `adBreak`. Three hypotheses, each pointing at a different fix layer:
+///   A. **Boundary misalignment** — ads are not inside any detected
+///      region (fix lives in `ChapterBoundaryDetector`).
+///   B. **FM misread** — ad regions are labeled `content` on a
+///      successful call (fix lives in the prompt / labeler).
+///   C. **Guardrail refusal** — ad regions fail operationally (the FM
+///      safety guardrails refuse the ad/topic text).
+/// The per-candidate cross-tab of {golden-ad-overlap} × {disposition,
+/// failureMode} distinguishes A/B/C directly.
+///
+/// Output: `playhead-dogfood-diagnostics-chapter-label-<episode_id>.json`
+/// at the repo root. That glob is git-ignored — the region-text samples
+/// contain raw transcript (possibly advertiser names verbatim), so the
+/// dump is LOCAL-ONLY and must never be committed (mirrors the
+/// au2v.1.22 corpus privacy rule for committed fixtures).
+///
+/// Runs on Mac Catalyst exactly like the capture test (FM is live).
+final class ChapterLabelingDiagnosticTests: XCTestCase {
+
+    private static var diagnoseEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYHEAD_CHAPTER_LABEL_DIAGNOSE"] == "1"
+    }
+
+    override func setUp() async throws {
+        try await super.setUp()
+        try XCTSkipUnless(
+            Self.diagnoseEnabled,
+            """
+            Chapter-label diagnosis is opt-in. Set \
+            PLAYHEAD_CHAPTER_LABEL_DIAGNOSE=1 in the test plan env vars \
+            and run on Mac Catalyst (or an iOS 26 device) with Apple \
+            Intelligence enabled and corpus audio + transcripts staged.
+            """
+        )
+    }
+
+    /// One row per detected candidate region.
+    private struct CandidateDiagnostic: Encodable {
+        let startTime: Double
+        let endTime: Double?
+        let regionTextLength: Int
+        let regionTextSample: String
+        /// Raw FM taxonomy (`hostReadAd`, `programmaticAd`, `content`,
+        /// …) or `"nil-result"` when the labeler returned nil.
+        let rawDisposition: String
+        /// `success` / `semantic` / `operational`.
+        let outcome: String
+        /// Golden disposition of the span containing `startTime`.
+        let goldenDispositionAtStart: String?
+        /// True when `[startTime, endTime)` intersects any golden
+        /// `adBreak` span.
+        let overlapsGoldenAdBreak: Bool
+    }
+
+    private struct EpisodeDiagnostic: Encodable {
+        let episodeId: String
+        let episodeDuration: TimeInterval
+        let candidateCount: Int
+        let goldenAdBreakSpanCount: Int
+        /// Golden adBreak spans that had ≥1 overlapping candidate.
+        let goldenAdBreakSpansCovered: Int
+        let candidates: [CandidateDiagnostic]
+    }
+
+    func testDiagnoseLabelingAcrossDogfoodCorpus() async throws {
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("ChapterLabelingService.live requires iOS 26+ / FoundationModels.")
+        }
+
+        let goldens = try ChapterPlanGoldenSetLoader.allDogfoodFixtures()
+        try XCTSkipIf(goldens.isEmpty, "no dogfood goldens to diagnose")
+
+        let corpusLoader = CorpusAnnotationLoader()
+        let labelService = ChapterLabelingService.live()
+
+        // Aggregate cross-tab: among candidates overlapping a golden
+        // adBreak span, how many landed in each outcome bucket? This is
+        // the headline result.
+        var adOverlapSuccess = 0
+        var adOverlapSemantic = 0
+        var adOverlapOperational = 0
+        var adOverlapLabeledAdBreak = 0
+        var totalGoldenAdSpans = 0
+        var totalGoldenAdSpansCovered = 0
+        var episodesDiagnosed: [String] = []
+
+        for (goldenURL, golden) in goldens {
+            let episodeId = goldenURL.deletingPathExtension().lastPathComponent
+
+            // Resolve audio + transcript (soft-skip when unavailable).
+            let annotation: CorpusAnnotation
+            do {
+                annotation = try corpusLoader.decode(
+                    at: corpusLoader.annotationsDirectoryURL
+                        .appendingPathComponent("\(episodeId).json", isDirectory: false)
+                )
+            } catch { continue }
+            guard let audioURL = try? corpusLoader.audioFileURL(for: annotation) else { continue }
+            let transcript = (try? CorpusTranscriptLoader.load(
+                episodeId: episodeId,
+                repoRoot: corpusLoader.repoRoot
+            )) ?? []
+
+            let snapshot = try await ChapterFeatureSnapshotBuilder.build(
+                audioURL: audioURL,
+                transcript: transcript,
+                fmAvailable: true
+            )
+            let detector = LiveBoundaryDetector(snapshot: snapshot)
+            let candidates = try await detector.detect()
+            let labeler = LiveLabelerAdapter(service: labelService, transcript: transcript)
+
+            // Golden adBreak spans: [chapter.start, nextChapter.start),
+            // last running to episode end.
+            let adSpans = Self.goldenAdBreakSpans(
+                golden: golden,
+                episodeDuration: snapshot.episodeDuration
+            )
+            totalGoldenAdSpans += adSpans.count
+            var coveredSpanIndices: Set<Int> = []
+
+            var rows: [CandidateDiagnostic] = []
+            for candidate in candidates {
+                let result = try await labeler.label(candidate: candidate)
+                let regionText = LiveLabelerAdapter.regionText(
+                    transcript: transcript,
+                    start: candidate.startTime,
+                    end: candidate.endTime
+                )
+                let overlaps = adSpans.enumerated().contains { index, span in
+                    let hit = Self.overlaps(
+                        start: candidate.startTime,
+                        end: candidate.endTime ?? snapshot.episodeDuration,
+                        spanStart: span.start,
+                        spanEnd: span.end
+                    )
+                    if hit { coveredSpanIndices.insert(index) }
+                    return hit
+                }
+
+                let rawDisposition = result?.labelDisposition.rawValue ?? "nil-result"
+                let outcome = Self.outcomeString(result)
+
+                if overlaps {
+                    switch outcome {
+                    case "success": adOverlapSuccess += 1
+                    case "semantic": adOverlapSemantic += 1
+                    case "operational": adOverlapOperational += 1
+                    default: break
+                    }
+                    if result?.labelDisposition.mappedDisposition == .adBreak {
+                        adOverlapLabeledAdBreak += 1
+                    }
+                }
+
+                rows.append(CandidateDiagnostic(
+                    startTime: candidate.startTime,
+                    endTime: candidate.endTime,
+                    regionTextLength: regionText.count,
+                    regionTextSample: String(regionText.prefix(300)),
+                    rawDisposition: rawDisposition,
+                    outcome: outcome,
+                    goldenDispositionAtStart: Self.goldenDisposition(
+                        at: candidate.startTime,
+                        golden: golden,
+                        episodeDuration: snapshot.episodeDuration
+                    ),
+                    overlapsGoldenAdBreak: overlaps
+                ))
+            }
+
+            totalGoldenAdSpansCovered += coveredSpanIndices.count
+
+            let episodeDiag = EpisodeDiagnostic(
+                episodeId: episodeId,
+                episodeDuration: snapshot.episodeDuration,
+                candidateCount: candidates.count,
+                goldenAdBreakSpanCount: adSpans.count,
+                goldenAdBreakSpansCovered: coveredSpanIndices.count,
+                candidates: rows
+            )
+
+            let outURL = corpusLoader.repoRoot.appendingPathComponent(
+                "playhead-dogfood-diagnostics-chapter-label-\(episodeId).json",
+                isDirectory: false
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(episodeDiag).write(to: outURL, options: .atomic)
+            episodesDiagnosed.append(episodeId)
+        }
+
+        // Headline cross-tab. This is what answers A/B/C.
+        let adOverlapTotal = adOverlapSuccess + adOverlapSemantic + adOverlapOperational
+        print(
+            """
+            === Chapter-label diagnosis ===
+            episodes diagnosed: \(episodesDiagnosed.count) [\(episodesDiagnosed.sorted().joined(separator: ", "))]
+            golden adBreak spans: \(totalGoldenAdSpans), covered by ≥1 candidate: \(totalGoldenAdSpansCovered) \
+            (\(totalGoldenAdSpans == 0 ? "n/a" : String(format: "%.0f%%", 100 * Double(totalGoldenAdSpansCovered) / Double(totalGoldenAdSpans))))
+              → if coverage is low, hypothesis A (boundary misalignment).
+            candidates overlapping a golden adBreak span: \(adOverlapTotal)
+              success: \(adOverlapSuccess)  (of those, mapped→adBreak: \(adOverlapLabeledAdBreak))
+                → if success is high but adBreak is ~0, hypothesis B (FM misread).
+              semantic-unclear: \(adOverlapSemantic)
+              operational: \(adOverlapOperational)
+                → if operational is high, hypothesis C (guardrail refusal).
+            Per-candidate detail: playhead-dogfood-diagnostics-chapter-label-<episode_id>.json (git-ignored)
+            """
+        )
+    }
+
+    // MARK: - Golden span helpers
+
+    private struct GoldenSpan { let start: Double; let end: Double }
+
+    /// Build `[start, nextStart)` spans for every golden chapter whose
+    /// `expectedDisposition` is `.adBreak`. The last chapter runs to
+    /// `episodeDuration`.
+    private static func goldenAdBreakSpans(
+        golden: GoldenChapterSet,
+        episodeDuration: TimeInterval
+    ) -> [GoldenSpan] {
+        let sorted = golden.chapters.sorted { $0.startTimeSeconds < $1.startTimeSeconds }
+        var spans: [GoldenSpan] = []
+        for (index, chapter) in sorted.enumerated() {
+            guard chapter.expectedDisposition == .adBreak else { continue }
+            let end = index + 1 < sorted.count
+                ? sorted[index + 1].startTimeSeconds
+                : episodeDuration
+            spans.append(GoldenSpan(start: chapter.startTimeSeconds, end: end))
+        }
+        return spans
+    }
+
+    /// The `expectedDisposition` of the golden span containing `time`.
+    private static func goldenDisposition(
+        at time: Double,
+        golden: GoldenChapterSet,
+        episodeDuration: TimeInterval
+    ) -> String? {
+        let sorted = golden.chapters.sorted { $0.startTimeSeconds < $1.startTimeSeconds }
+        for (index, chapter) in sorted.enumerated() {
+            let end = index + 1 < sorted.count
+                ? sorted[index + 1].startTimeSeconds
+                : episodeDuration
+            if time >= chapter.startTimeSeconds && time < end {
+                return String(describing: chapter.expectedDisposition)
+            }
+        }
+        return nil
+    }
+
+    private static func overlaps(
+        start: Double, end: Double,
+        spanStart: Double, spanEnd: Double
+    ) -> Bool {
+        start < spanEnd && spanStart < end
+    }
+
+    @available(iOS 26.0, *)
+    private static func outcomeString(_ result: LabelingResult?) -> String {
+        guard let result else { return "nil-result" }
+        switch result.failureMode {
+        case .none: return "success"
+        case .some(.semantic): return "semantic"
+        case .some(.operational): return "operational"
+        }
+    }
+}
+
 // MARK: - Corpus transcript loading (au2v.1.25)
 
 /// Decodes a whisper.cpp transcript JSON
