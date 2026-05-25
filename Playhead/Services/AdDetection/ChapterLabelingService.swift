@@ -521,14 +521,27 @@ struct ChapterLabelingService: Sendable {
 
     // MARK: - Prompt builder
 
-    /// Build the per-call prompt. Token budget: ≤80 content tokens
-    /// after the schema overhead. The prompt structure is locked by
-    /// `ChapterLabelingServiceTests.testPromptShape...`.
+    /// Build the per-call prompt. The fixed instruction scaffold
+    /// (everything except the variable context line and region body) is
+    /// kept terse; its size is pinned by
+    /// `ChapterLabelingServicePromptTests.promptScaffoldStaysWithinTokenBudget`
+    /// using the project's conservative `ChapterPromptContext.estimateTokens`
+    /// (`ceil(chars / 3)`) model. The runaway-body guard is the
+    /// `regionTextCharacterCap` truncation in `truncateRegionText`.
+    /// The overall prompt structure is locked by
+    /// `ChapterLabelingServicePromptTests`.
+    ///
+    /// au2v.1.25: the disposition guidance is the load-bearing fix.
+    /// Without it the model labelled blatant host-read sponsor copy as
+    /// `content` (ChapterLabelingDiagnosticTests, dogfood corpus). The
+    /// taxonomy + sponsor-read cues are kept terse to respect the budget.
     static func buildPrompt(for candidate: ChapterLabelingCandidate) -> String {
         let prev: String = candidate.previousDisposition?.rawValue ?? "none"
         let body = truncateRegionText(candidate.regionText)
         return """
             Classify this podcast chapter region. Output disposition, confidence, brief topic descriptor.
+            Disposition: intro, content, hostReadAd, programmaticAd, outro, recap, unclear.
+            Sponsor reads are ads: a sponsor name, a call-to-action, a promo code, a URL, or "brought to you by". Use hostReadAd when the host reads it in their own voice, programmaticAd for an inserted ad (often different production). Else content.
             Context: chapter \(candidate.chapterIndex) of \(candidate.totalChapters). Previous: \(prev).
             Region transcript: \(body)
             """
