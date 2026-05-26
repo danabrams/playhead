@@ -4164,16 +4164,21 @@ actor AdDetectionService {
             logger.warning("bd-m8k: planner state fetch failed (defaulting to cold start): \(error.localizedDescription)")
             plannerState = nil
         }
-        let plannerContext = CoveragePlannerContext(
-            observedEpisodeCount: plannerState?.observedEpisodeCount ?? 0,
-            // historical: stored as "stablePrecisionFlag"; semantically recall
-            stableRecall: plannerState?.stableRecallFlag ?? false,
-            isFirstEpisodeAfterCohortInvalidation: false,
-            recallDegrading: false,
-            sponsorDriftDetected: false,
-            auditMissDetected: false,
-            episodesSinceLastFullRescan: plannerState?.episodesSinceLastFullRescan ?? 0,
-            periodicFullRescanIntervalEpisodes: 10
+        // playhead-au2v.1.27 (Phase B): thread the cached inferred
+        // `ChapterPlan` into the planner context — but ONLY under
+        // `chapterSignalMode == .enabled`. The resolver returns `nil` for
+        // `.off` (production default) and `.shadow`, which makes the
+        // context byte-identical to the pre-au2v.1.27 construction in those
+        // modes (see `makeShadowPhaseCoveragePlannerContext`). This is the
+        // last-mile wire-in that makes the CoveragePlanner chapter-informed
+        // branch (au2v.1.14) reachable from live backfill, gated safely.
+        let chapterEvidence = await resolveChapterEvidenceForShadowPhase(
+            transcriptVersion: version.transcriptVersion
+        )
+        let plannerContext = Self.makeShadowPhaseCoveragePlannerContext(
+            plannerState: plannerState,
+            chapterSignalMode: config.chapterSignalMode,
+            chapterEvidence: chapterEvidence
         )
         // playhead-7q3 (Phase 4): compute acoustic breaks from the episode
         // feature windows and thread them into `TargetedWindowNarrower` via
@@ -4239,6 +4244,127 @@ actor AdDetectionService {
             return wrap(.ranFailed)
         }
     }
+
+    // MARK: - Chapter-signal wire-in (playhead-au2v.1.27 Phase B)
+
+    /// Resolve the chapter evidence to thread into the shadow-phase
+    /// `CoveragePlannerContext`, gated on the chapter-signal mode.
+    ///
+    /// CRITICAL SAFETY CONTRACT: this returns `nil` for every mode except
+    /// `.enabled`. `consumersReadChapterPlan` is `true` ONLY for `.enabled`
+    /// (`.off` and `.shadow` both return `false` — see `ChapterSignalMode`),
+    /// so in the production default (`.off`) and in shadow mode the planner
+    /// context never carries chapter evidence and behaves byte-identically
+    /// to the pre-au2v.1.27 pipeline.
+    ///
+    /// When `.enabled`:
+    ///   - With no cache wired, or a cache miss (no plan on disk for this
+    ///     content hash, schema mismatch, or decode failure — all surfaced
+    ///     as `nil` by `ChapterPlanCache.get`), returns `nil`. The planner
+    ///     then falls back to today's random audit selection (no crash, no
+    ///     behaviour change vs. a missing plan).
+    ///   - With a cache hit whose plan has at least one chapter, returns
+    ///     the plan's `[ChapterEvidence]` (already `source == .inferred`).
+    ///   - A plan with zero chapters resolves to `nil` so the planner's
+    ///     own "empty evidence ⇒ skip chapter-informed path" guard is not
+    ///     even reached with an empty array (equivalent outcome, fewer
+    ///     downstream branches exercised).
+    ///
+    /// The cache key is `transcriptVersion` — the same `version.transcriptVersion`
+    /// the chapter generation phase writes the plan under in
+    /// `runChapterGenerationPhaseIfWired`, so an `.enabled` run reads back
+    /// the plan its own earlier phase produced.
+    private func resolveChapterEvidenceForShadowPhase(
+        transcriptVersion: String
+    ) async -> [ChapterEvidence]? {
+        guard config.chapterSignalMode.consumersReadChapterPlan else {
+            return nil
+        }
+        guard let cache = chapterPlanCache else {
+            return nil
+        }
+        guard !transcriptVersion.isEmpty else {
+            return nil
+        }
+        guard let plan = await cache.get(contentHash: transcriptVersion),
+              !plan.chapters.isEmpty else {
+            return nil
+        }
+        logger.debug(
+            "chaptersignal.shadowphase: threading \(plan.chapters.count, privacy: .public) inferred chapters into CoveragePlannerContext (mode=\(self.config.chapterSignalMode.rawValue, privacy: .public))"
+        )
+        return plan.chapters
+    }
+
+    /// Pure builder for the shadow-phase `CoveragePlannerContext`.
+    ///
+    /// Extracted so the `.off`/`.shadow` byte-identical contract is
+    /// provable in isolation (no store, no FM): the planner-state fields
+    /// are mapped exactly as the pre-au2v.1.27 inline construction did, and
+    /// the two chapter fields default to `.off` / `nil` UNLESS the caller
+    /// resolved chapter evidence under `.enabled`.
+    ///
+    /// Contract:
+    ///   - `chapterEvidence == nil` ⇒ `chapterSignalMode: .off`,
+    ///     `chapterEvidence: nil` (the `CoveragePlannerContext` defaults).
+    ///     This is the path taken for `.off`, `.shadow`, and `.enabled`
+    ///     cache-miss, and it is byte-identical to the old construction.
+    ///   - `chapterEvidence != nil` ⇒ `chapterSignalMode: mode`
+    ///     (only `.enabled` ever supplies non-nil evidence, by the
+    ///     resolver's gate), `chapterEvidence:` threaded through.
+    static func makeShadowPhaseCoveragePlannerContext(
+        plannerState: PodcastPlannerState?,
+        chapterSignalMode: ChapterSignalMode,
+        chapterEvidence: [ChapterEvidence]?
+    ) -> CoveragePlannerContext {
+        // Only carry the mode downstream when evidence actually resolved.
+        // The resolver only returns non-nil evidence under `.enabled`, so
+        // `.off`/`.shadow` always fall to the `.off` default here, keeping
+        // the context byte-identical to the pre-au2v.1.27 construction.
+        let effectiveMode: ChapterSignalMode = chapterEvidence == nil ? .off : chapterSignalMode
+        return CoveragePlannerContext(
+            observedEpisodeCount: plannerState?.observedEpisodeCount ?? 0,
+            // historical: stored as "stablePrecisionFlag"; semantically recall
+            stableRecall: plannerState?.stableRecallFlag ?? false,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: plannerState?.episodesSinceLastFullRescan ?? 0,
+            periodicFullRescanIntervalEpisodes: 10,
+            chapterSignalMode: effectiveMode,
+            chapterEvidence: chapterEvidence
+        )
+    }
+
+    #if DEBUG
+    /// playhead-au2v.1.27 (Phase B) test seam: run the exact
+    /// resolve-then-build sequence `runShadowFMPhase` uses to construct its
+    /// `CoveragePlannerContext`, so a test can assert the chapter wire-in
+    /// without standing up the full FM backfill pipeline (which requires a
+    /// runner factory + FM availability). Shares the production helpers
+    /// (`resolveChapterEvidenceForShadowPhase` + the static builder)
+    /// verbatim — there is no test-only decision branch.
+    func shadowPhaseCoveragePlannerContextForTesting(
+        podcastId: String,
+        transcriptVersion: String
+    ) async -> CoveragePlannerContext {
+        let plannerState: PodcastPlannerState?
+        do {
+            plannerState = try await store.fetchPodcastPlannerState(podcastId: podcastId)
+        } catch {
+            plannerState = nil
+        }
+        let evidence = await resolveChapterEvidenceForShadowPhase(
+            transcriptVersion: transcriptVersion
+        )
+        return Self.makeShadowPhaseCoveragePlannerContext(
+            plannerState: plannerState,
+            chapterSignalMode: config.chapterSignalMode,
+            chapterEvidence: evidence
+        )
+    }
+    #endif
 
     /// playhead-4my.10.1: post-fusion materialization hook. Called from
     /// `runShadowFMPhase` after a backfill run completes (regardless of
