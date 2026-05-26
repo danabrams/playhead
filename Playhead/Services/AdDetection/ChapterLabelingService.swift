@@ -42,12 +42,22 @@
 //   would cause spurious retries here.
 //
 // Failure-mode distinction:
-// - `.operational` — FM did not produce a usable answer. Plan-level
-//   gate (au2v.1.8) drops the WHOLE plan when the operational rate
-//   exceeds 30 % (system-distrust signal).
+// - `.operational` — FM did not produce a usable answer (timeout,
+//   rate-limit, decoding failure, transient unavailability, assets
+//   unavailable, unsupported locale, unknown error). Retried once.
+//   Plan-level gate (au2v.1.8) drops the WHOLE plan when the operational
+//   rate exceeds 30 % (system-distrust signal).
 // - `.semantic`    — FM produced a usable answer of `.unclear`. The
 //   chapter is still emitted with `disposition = .ambiguous` and the
 //   raw `.unclear` is preserved; the plan is NOT dropped.
+// - `.guardrail`   — FM reached the model but it declined to classify
+//   the region via a safety guardrail (`GenerationError.refusal` /
+//   `.guardrailViolation`), typically sensitive editorial content.
+//   This is content refusal, NOT an infra failure: NOT retried (the
+//   content trips the same guardrail again) and EXCLUDED from the
+//   plan-level operational-rate abort numerator (au2v.1.24), so a
+//   guardrail-heavy episode still assembles a sparser plan instead of
+//   aborting. The chapter drops the same way an operational row does.
 
 import Foundation
 import OSLog
@@ -111,7 +121,15 @@ enum ChapterLabelingError: Error, Sendable, Equatable {
     case decodingFailure
     /// FM ran out of context window mid-call.
     case exceededContextWindow
-    /// Catch-all for any other operational failure (refusal, transient
+    /// The model declined to classify the region via a safety guardrail
+    /// (`LanguageModelSession.GenerationError.refusal` /
+    /// `.guardrailViolation`). The FM call reached the model — this is
+    /// content the model won't label, NOT an infra failure — so it is
+    /// NOT retried (re-calling trips the same guardrail) and maps to
+    /// `LabelFailureMode.guardrail`, which the plan-level gate excludes
+    /// from the operational-rate abort numerator (au2v.1.24).
+    case guardrail(String)
+    /// Catch-all for any other operational failure (transient
     /// unavailability, unknown error type). The service does not
     /// distinguish these because the retry policy is identical.
     case operational(String)
@@ -264,6 +282,17 @@ struct ChapterLabelingService: Sendable {
                     attempts: attempts
                 )
             } catch let error as ChapterLabelingError {
+                // Guardrail refusals are content refusals, not infra
+                // failures: the model reached us and declined. Retrying
+                // re-trips the same guardrail, so short-circuit with a
+                // `.guardrail` result instead of looping (au2v.1.24).
+                if case let .guardrail(cause) = error {
+                    return self.guardrailResult(
+                        for: candidate,
+                        attempts: attempts,
+                        cause: cause
+                    )
+                }
                 lastError = error
                 logger.debug(
                     "chapter_label_attempt_failed attempt=\(attempts, privacy: .public) error=\(String(describing: error), privacy: .public)"
@@ -367,9 +396,11 @@ struct ChapterLabelingService: Sendable {
 
     // MARK: - Error classification
 
-    /// Project an arbitrary `Error` into a `ChapterLabelingError`. All
-    /// FoundationModels-framework errors are folded into operational
-    /// buckets; everything else becomes `.operational(...)`.
+    /// Project an arbitrary `Error` into a `ChapterLabelingError`.
+    /// FoundationModels safety refusals (`.refusal` / `.guardrailViolation`)
+    /// map to `.guardrail` (content the model declines — not retried);
+    /// all other FoundationModels-framework errors and any unknown error
+    /// type fold into the retryable operational buckets.
     static func classify(_ error: Error) -> ChapterLabelingError {
         if let labelingError = error as? ChapterLabelingError {
             return labelingError
@@ -385,7 +416,13 @@ struct ChapterLabelingService: Sendable {
                 return .decodingFailure
             case .exceededContextWindowSize:
                 return .exceededContextWindow
-            case .refusal, .guardrailViolation, .assetsUnavailable, .unsupportedLanguageOrLocale:
+            case .refusal, .guardrailViolation:
+                // Content refusal — the model reached us and declined.
+                // NOT operational; NOT retried (see `label(...)`).
+                return .guardrail(String(describing: generationError))
+            case .assetsUnavailable, .unsupportedLanguageOrLocale:
+                // Genuine infra/operational issues (model assets missing,
+                // unsupported locale) — retried like any operational error.
                 return .operational(String(describing: generationError))
             @unknown default:
                 return .operational(String(describing: generationError))
@@ -485,6 +522,38 @@ struct ChapterLabelingService: Sendable {
         logger.debug(
             "chapter_label_operational_result attempts=\(attempts, privacy: .public) cause=\(cause, privacy: .public)"
         )
+        return Self.droppedResult(for: candidate, failureMode: .operational, attempts: attempts)
+    }
+
+    /// Build a `LabelingResult` for a guardrail refusal. Same dropped
+    /// shape as `operationalResult` (chapter emitted with `.ambiguous`
+    /// mapped disposition, `qualityScore = 0`, `labelDisposition =
+    /// .unclear`) but `failureMode == .guardrail`, so the plan-level
+    /// gate (au2v.1.24) excludes it from the operational-rate abort
+    /// numerator. Like operational rows, the chapter is dropped during
+    /// assembly. The `cause` is logged at debug level for dogfood
+    /// diagnostics without exposing it on the public shape.
+    private func guardrailResult(
+        for candidate: ChapterLabelingCandidate,
+        attempts: Int,
+        cause: String
+    ) -> LabelingResult {
+        logger.debug(
+            "chapter_label_guardrail_result attempts=\(attempts, privacy: .public) cause=\(cause, privacy: .public)"
+        )
+        return Self.droppedResult(for: candidate, failureMode: .guardrail, attempts: attempts)
+    }
+
+    /// Shared construction for the two "dropped" failure modes
+    /// (`.operational`, `.guardrail`). Both emit a placeholder chapter
+    /// (`.ambiguous` mapped disposition, `qualityScore = 0`, no title,
+    /// `labelDisposition = .unclear`) that the assembler drops; only the
+    /// `failureMode` distinguishes them at the plan level.
+    private static func droppedResult(
+        for candidate: ChapterLabelingCandidate,
+        failureMode: LabelFailureMode,
+        attempts: Int
+    ) -> LabelingResult {
         let chapter = ChapterEvidence(
             startTime: candidate.startTime,
             endTime: candidate.endTime,
@@ -497,7 +566,7 @@ struct ChapterLabelingService: Sendable {
             chapter: chapter,
             labelDisposition: .unclear,
             topicDescriptor: nil,
-            failureMode: .operational,
+            failureMode: failureMode,
             attempts: attempts
         )
     }

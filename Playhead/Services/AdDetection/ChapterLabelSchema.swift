@@ -153,6 +153,24 @@ enum LabelFailureMode: String, Codable, Sendable, Equatable {
     /// chapter, and we do NOT retry (a second call is overwhelmingly
     /// likely to return the same answer).
     case semantic
+    /// The FM call reached the model (transport-level success) but the
+    /// model declined to classify the region via a safety guardrail —
+    /// `LanguageModelSession.GenerationError.refusal` /
+    /// `.guardrailViolation`, typically triggered by sensitive editorial
+    /// content (war, violence, true-crime, paranormal). This is NOT an
+    /// operational/infra failure of our pipeline: the model is healthy,
+    /// it just won't label this particular content. We do NOT retry
+    /// (re-calling trips the same guardrail) and — critically — the
+    /// plan-level gate (au2v.1.24) EXCLUDES these from the
+    /// operational-rate abort numerator, so a guardrail-heavy episode
+    /// still assembles a (sparser) plan instead of aborting wholesale.
+    ///
+    /// Codable note: the rawValue is `"guardrail"`, distinct from
+    /// `"operational"` / `"semantic"`. Old persisted plans only ever
+    /// carry `operational` / `semantic`, so decoding existing data is
+    /// unaffected; new data carrying `guardrail` only appears in plans
+    /// written after this bead.
+    case guardrail
 }
 
 // MARK: - LabelingResult
@@ -171,14 +189,17 @@ struct LabelingResult: Sendable, Equatable {
     /// `startTime` / `endTime` — they come from the candidate region.
     let chapter: ChapterEvidence
     /// The 7-case raw taxonomy. Equals `.unclear` whenever
-    /// `failureMode != nil` (operational coercion AND semantic .unclear).
+    /// `failureMode != nil` (operational coercion, guardrail refusal, AND
+    /// semantic .unclear).
     let labelDisposition: ChapterDispositionRaw
     /// Optional topic descriptor from the FM. Nil for `.unclear` /
-    /// operational-failure rows; may be nil for `.adBreak` rows.
+    /// operational-failure / guardrail rows; may be nil for `.adBreak` rows.
     let topicDescriptor: String?
     /// `nil` on confident success; `.semantic` when the FM returned
     /// `.unclear`; `.operational` when the FM call (including the one
-    /// retry) failed for any operational reason.
+    /// retry) failed for any operational reason; `.guardrail` when the
+    /// model declined to classify via a safety guardrail (not retried —
+    /// see `LabelFailureMode.guardrail`).
     let failureMode: LabelFailureMode?
     /// Number of FM calls made. Always `1` on success, semantic
     /// `.unclear`, or non-retryable failure; `2` when the first call

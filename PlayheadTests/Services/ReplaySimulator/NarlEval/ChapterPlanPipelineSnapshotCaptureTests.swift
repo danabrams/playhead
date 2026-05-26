@@ -719,6 +719,7 @@ final class ChapterLabelingDiagnosticTests: XCTestCase {
         case .none: return "success"
         case .some(.semantic): return "semantic"
         case .some(.operational): return "operational"
+        case .some(.guardrail): return "guardrail"
         }
     }
 }

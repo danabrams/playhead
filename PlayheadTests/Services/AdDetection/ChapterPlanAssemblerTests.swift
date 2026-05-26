@@ -109,6 +109,31 @@ struct ChapterPlanAssemblerTests {
         )
     }
 
+    /// Build a guardrail-refusal `LabelingResult` (au2v.1.24). Same shape
+    /// as `operationalFailure` (`.ambiguous`, qualityScore 0) but
+    /// `failureMode = .guardrail`. `attempts == 1` because guardrail
+    /// refusals are not retried.
+    private static func guardrailRefusal(
+        start: TimeInterval,
+        end: TimeInterval?
+    ) -> LabelingResult {
+        let evidence = ChapterEvidence(
+            startTime: start,
+            endTime: end,
+            title: nil,
+            source: .inferred,
+            disposition: .ambiguous,
+            qualityScore: 0.0
+        )
+        return LabelingResult(
+            chapter: evidence,
+            labelDisposition: .unclear,
+            topicDescriptor: nil,
+            failureMode: .guardrail,
+            attempts: 1
+        )
+    }
+
     private static let assembler = ChapterPlanAssembler()
     private static let testHash = "test-content-hash"
     private static let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
@@ -895,6 +920,194 @@ struct ChapterPlanAssemblerTests {
             #expect(titles == ["c0", "c2", "c3", "c5", "c6", "c8", "c9", "c10", "c11"])
         case .aborted:
             Issue.record("25% operational must not abort")
+        }
+    }
+
+    // MARK: - Guardrail refusals excluded from the abort gate (au2v.1.24)
+
+    @Test("guardrail-heavy (>30% guardrail, low operational) → ASSEMBLES, not aborts; guardrail rows dropped")
+    func guardrailHeavyAssembles() {
+        // 6 guardrail (60%) + 4 confident + 0 operational. Pre-au2v.1.24
+        // this would have been 6/10 = 60% operational → ABORT. Now the
+        // numerator excludes guardrail → operational rate is 0/10 = 0% →
+        // ASSEMBLE. Guardrail rows drop like operational rows, so only
+        // the 4 confident chapters survive.
+        let guardrails = (0..<6).map { i in
+            Self.guardrailRefusal(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60)
+            )
+        }
+        let confidents = (6..<10).map { i in
+            Self.confident(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60),
+                confidence: 0.8
+            )
+        }
+        let result = Self.assembler.assemble(
+            results: guardrails + confidents,
+            episodeContentHash: Self.testHash,
+            candidatesDetected: 10,
+            candidatesKept: 10,
+            generatedAt: Self.fixedDate
+        )
+        switch result {
+        case .assembled(let plan, _):
+            #expect(plan.chapters.count == 4)
+            #expect(abs(plan.planConfidence - 0.8) < 1e-6)
+            // Guardrail rows are NOT operational; the diagnostics
+            // operational count stays 0.
+            #expect(plan.generationDiagnostics.operationalUnclearCount == 0)
+        case .aborted:
+            Issue.record("60% guardrail / 0% operational must ASSEMBLE, not abort")
+        }
+    }
+
+    @Test("all-guardrail result set → ASSEMBLES with an empty plan (never aborts)")
+    func allGuardrailAssemblesEmpty() {
+        // 100% guardrail. Operational numerator is 0 → never aborts.
+        // Every guardrail row drops → empty plan, zero confidence.
+        let guardrails = (0..<5).map { i in
+            Self.guardrailRefusal(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60)
+            )
+        }
+        let result = Self.assembler.assemble(
+            results: guardrails,
+            episodeContentHash: Self.testHash,
+            candidatesDetected: 5,
+            candidatesKept: 5,
+            generatedAt: Self.fixedDate
+        )
+        switch result {
+        case .assembled(let plan, _):
+            #expect(plan.chapters.isEmpty)
+            #expect(plan.planConfidence == 0.0)
+            #expect(plan.generationDiagnostics.operationalUnclearCount == 0)
+        case .aborted:
+            Issue.record("all-guardrail must ASSEMBLE (empty plan), not abort")
+        }
+    }
+
+    @Test("operational-heavy set STILL aborts exactly as before (guardrail change is orthogonal)")
+    func operationalHeavyStillAborts() {
+        // 5 operational (50%) + 5 confident, zero guardrail. Operational
+        // rate 5/10 = 50% > 30% → ABORT, unchanged from pre-au2v.1.24.
+        let operationals = (0..<5).map { i in
+            Self.operationalFailure(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60)
+            )
+        }
+        let confidents = (5..<10).map { i in
+            Self.confident(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60),
+                confidence: 0.8
+            )
+        }
+        let result = Self.assembler.assemble(
+            results: operationals + confidents,
+            episodeContentHash: Self.testHash,
+            candidatesDetected: 10,
+            candidatesKept: 10,
+            generatedAt: Self.fixedDate
+        )
+        switch result {
+        case .aborted(let info):
+            #expect(info.labeledCount == 10)
+            #expect(info.operationalUnclearCount == 5)
+            #expect(info.guardrailCount == 0)
+            #expect(abs(info.operationalUnclearRate - 0.5) < 1e-9)
+        case .assembled:
+            Issue.record("50% operational must STILL abort")
+        }
+    }
+
+    @Test("mix where operational ≤30% alone but operational+guardrail >30% → ASSEMBLES (the regression this bead fixes)")
+    func mixedOperationalBelowButCombinedAboveAssembles() {
+        // 2 operational (20%) + 3 guardrail (30%) + 5 confident = 10.
+        // Operational ALONE = 2/10 = 20% ≤ 30% → must NOT abort.
+        // Operational + guardrail = 5/10 = 50% — if guardrail leaked into
+        // the numerator (the pre-fix behavior) this would ABORT. Pinning
+        // ASSEMBLE here kills the leak mutant.
+        let operationals = (0..<2).map { i in
+            Self.operationalFailure(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60)
+            )
+        }
+        let guardrails = (2..<5).map { i in
+            Self.guardrailRefusal(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60)
+            )
+        }
+        let confidents = (5..<10).map { i in
+            Self.confident(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60),
+                confidence: 0.7
+            )
+        }
+        let result = Self.assembler.assemble(
+            results: operationals + guardrails + confidents,
+            episodeContentHash: Self.testHash,
+            candidatesDetected: 10,
+            candidatesKept: 10,
+            generatedAt: Self.fixedDate
+        )
+        switch result {
+        case .assembled(let plan, _):
+            // 2 operational + 3 guardrail dropped → 5 confident survive.
+            #expect(plan.chapters.count == 5)
+            #expect(plan.generationDiagnostics.operationalUnclearCount == 2)
+            #expect(abs(plan.planConfidence - 0.7) < 1e-6)
+        case .aborted:
+            Issue.record("operational alone is 20% (≤30%) — must ASSEMBLE; guardrail must not poison the numerator")
+        }
+    }
+
+    @Test("guardrail-only failures keep the denominator full: 4 op + 6 guardrail (op 40% of total) still aborts")
+    func operationalRateUsesFullDenominator() {
+        // Pin the denominator decision: numerator = operational ONLY,
+        // denominator = TOTAL (including guardrail). 4 operational + 6
+        // guardrail = 10 rows. Operational rate = 4/10 = 40% > 30% →
+        // ABORT. If the denominator had instead excluded guardrail
+        // (4/4 = 100% — still abort) OR if guardrail were added to the
+        // numerator (10/10) the result would still be abort, so this
+        // case alone can't distinguish; the discriminating assertion is
+        // the rate VALUE below (0.4, proving denominator == total).
+        let operationals = (0..<4).map { i in
+            Self.operationalFailure(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60)
+            )
+        }
+        let guardrails = (4..<10).map { i in
+            Self.guardrailRefusal(
+                start: TimeInterval(i * 60),
+                end: TimeInterval((i + 1) * 60)
+            )
+        }
+        let result = Self.assembler.assemble(
+            results: operationals + guardrails,
+            episodeContentHash: Self.testHash,
+            candidatesDetected: 10,
+            candidatesKept: 10,
+            generatedAt: Self.fixedDate
+        )
+        switch result {
+        case .aborted(let info):
+            #expect(info.labeledCount == 10)
+            #expect(info.operationalUnclearCount == 4)
+            #expect(info.guardrailCount == 6)
+            // 4/10, NOT 4/4: denominator is the full labeled count.
+            #expect(abs(info.operationalUnclearRate - 0.4) < 1e-9)
+        case .assembled:
+            Issue.record("40% operational (of the full denominator) must abort")
         }
     }
 }
