@@ -107,11 +107,33 @@ struct ChapterPlanAssembler: Sendable {
     struct AbortInfo: Sendable, Equatable {
         let labeledCount: Int
         let operationalUnclearCount: Int
-        /// Fraction in `[0, 1]`.
+        /// Guardrail-refusal rows present at the abort decision
+        /// (au2v.1.24). Recorded for diagnostic completeness; these are
+        /// EXCLUDED from `operationalUnclearRate`'s numerator and never
+        /// cause an abort on their own. Defaults to `0` so existing
+        /// construction sites and tests stay source-compatible.
+        let guardrailCount: Int
+        /// Fraction in `[0, 1]`. Numerator is `operationalUnclearCount`
+        /// only (guardrail rows excluded); denominator is the full
+        /// labeled count.
         let operationalUnclearRate: Double
         /// Threshold value that was used (always
         /// `operationalUnclearRateThreshold` at the time of the call).
         let threshold: Double
+
+        init(
+            labeledCount: Int,
+            operationalUnclearCount: Int,
+            guardrailCount: Int = 0,
+            operationalUnclearRate: Double,
+            threshold: Double
+        ) {
+            self.labeledCount = labeledCount
+            self.operationalUnclearCount = operationalUnclearCount
+            self.guardrailCount = guardrailCount
+            self.operationalUnclearRate = operationalUnclearRate
+            self.threshold = threshold
+        }
     }
 
     /// Information the caller may use to emit the high-unclear
@@ -186,21 +208,44 @@ struct ChapterPlanAssembler: Sendable {
         let semanticCount = results.reduce(0) { acc, r in
             acc + (r.failureMode == .semantic ? 1 : 0)
         }
+        // au2v.1.24: guardrail refusals are content the model declined
+        // to classify, NOT operational failures of our pipeline. They
+        // are counted (for diagnostics) but EXCLUDED from the
+        // operational-rate abort numerator below.
+        let guardrailCount = results.reduce(0) { acc, r in
+            acc + (r.failureMode == .guardrail ? 1 : 0)
+        }
 
         // Operational-rate gate. Strict `>` — exactly 30% does NOT
         // abort. Empty input never aborts: `total == 0` makes the
         // rate computation moot and we return an empty assembled
         // plan instead.
+        //
+        // au2v.1.24 arithmetic: numerator = `operationalCount` ONLY
+        // (guardrail rows excluded). Denominator = `total` (ALL rows,
+        // including guardrail). Keeping the full denominator is the
+        // conservative choice: it can only make the operational rate
+        // SMALLER, never larger, so adding guardrail rows can never
+        // spuriously trip the abort — and when there are zero guardrail
+        // rows the arithmetic is byte-for-byte the pre-au2v.1.24
+        // behavior. (Using `total - guardrailCount` would push the rate
+        // UP and risk aborting a guardrail-heavy episode that has only a
+        // moderate number of genuine operational failures — the exact
+        // regression this bead removes.) Consequence: an all-guardrail
+        // or guardrail-heavy result set has `operationalCount == 0` (or
+        // low), rate ≤ threshold, and ASSEMBLES; a genuinely
+        // operational-heavy set still aborts exactly as before.
         if total > 0 {
             let operationalRate = Double(operationalCount) / Double(total)
             if operationalRate > Self.operationalUnclearRateThreshold {
                 logger.notice(
-                    "chapterplan.assemble.aborted operational=\(operationalCount, privacy: .public) total=\(total, privacy: .public) rate=\(operationalRate, privacy: .public) threshold=\(Self.operationalUnclearRateThreshold, privacy: .public)"
+                    "chapterplan.assemble.aborted operational=\(operationalCount, privacy: .public) guardrail=\(guardrailCount, privacy: .public) total=\(total, privacy: .public) rate=\(operationalRate, privacy: .public) threshold=\(Self.operationalUnclearRateThreshold, privacy: .public)"
                 )
                 return .aborted(
                     AbortInfo(
                         labeledCount: total,
                         operationalUnclearCount: operationalCount,
+                        guardrailCount: guardrailCount,
                         operationalUnclearRate: operationalRate,
                         threshold: Self.operationalUnclearRateThreshold
                     )
@@ -208,12 +253,15 @@ struct ChapterPlanAssembler: Sendable {
             }
         }
 
-        // Drop operational rows; keep semantic + confident in their
-        // original relative order. `ChapterEvidence` is positional —
-        // there is no explicit index field — so removing rows is the
-        // entire "re-index" operation.
+        // Drop operational AND guardrail rows; keep semantic + confident
+        // in their original relative order. Guardrail rows carry no
+        // usable label (qualityScore 0, `.ambiguous`) exactly like
+        // operational rows, so they drop the same way — the difference
+        // is purely at the abort gate above (au2v.1.24). `ChapterEvidence`
+        // is positional — there is no explicit index field — so removing
+        // rows is the entire "re-index" operation.
         let keptChapters = results
-            .filter { $0.failureMode != .operational }
+            .filter { $0.failureMode != .operational && $0.failureMode != .guardrail }
             .map { $0.chapter }
 
         let planConfidence = ChapterPlan.computePlanConfidence(keptChapters)

@@ -207,13 +207,37 @@ struct ChapterDispositionRawMappingTests {
 @Suite("LabelFailureMode round-trip")
 struct LabelFailureModeTests {
 
-    @Test("Codable round-trip preserves both cases")
+    @Test("Codable round-trip preserves all cases")
     func roundTrip() throws {
-        for mode in [LabelFailureMode.operational, .semantic] {
+        for mode in [LabelFailureMode.operational, .semantic, .guardrail] {
             let data = try JSONEncoder().encode(mode)
             let decoded = try JSONDecoder().decode(LabelFailureMode.self, from: data)
             #expect(decoded == mode)
         }
+    }
+
+    @Test("rawValue strings are stable for cache compatibility")
+    func rawValuesStable() {
+        // Old persisted plans only ever carry operational / semantic;
+        // pinning the rawValues guards against an accidental rename that
+        // would make existing cached plans undecodable. `guardrail`
+        // (au2v.1.24) is the only addition.
+        #expect(LabelFailureMode.operational.rawValue == "operational")
+        #expect(LabelFailureMode.semantic.rawValue == "semantic")
+        #expect(LabelFailureMode.guardrail.rawValue == "guardrail")
+    }
+
+    @Test("decoding legacy operational / semantic rawValues is unaffected by the new case")
+    func decodesLegacyRawValues() throws {
+        // Simulate JSON written before `guardrail` existed.
+        let operational = try JSONDecoder().decode(
+            LabelFailureMode.self, from: Data("\"operational\"".utf8)
+        )
+        let semantic = try JSONDecoder().decode(
+            LabelFailureMode.self, from: Data("\"semantic\"".utf8)
+        )
+        #expect(operational == .operational)
+        #expect(semantic == .semantic)
     }
 }
 
@@ -549,6 +573,74 @@ struct ChapterLabelingServiceOperationalFailureTests {
         #expect(result.attempts == 2)
         #expect(result.failureMode == nil)
     }
+
+    // MARK: - Guardrail refusals (au2v.1.24)
+
+    /// A guardrail refusal is content the model declines to classify, not
+    /// an infra failure. It must (a) be `failureMode == .guardrail` (NOT
+    /// `.operational`), (b) NOT be retried (`attempts == 1`), and (c) yield
+    /// a dropped/ambiguous chapter (qualityScore 0, labelDisposition
+    /// .unclear). This is the cross-platform path: injecting a
+    /// `ChapterLabelingError.guardrail` directly (which `classify` passes
+    /// through unchanged) so the test runs on iOS Simulator AND Catalyst.
+    @Test("Guardrail error is .guardrail (not .operational), not retried, drops the chapter")
+    func guardrailNotRetried() async {
+        let counter = CallCounter()
+        // Script a guardrail error TWICE; a correct impl stops after the
+        // first (no retry), so it must observe exactly one call. A wrong
+        // impl that treats guardrail as operational would retry and the
+        // counter would read 2 — that is the mutant this test kills.
+        let script = OutcomeScript([
+            .error(ChapterLabelingError.guardrail("refusal")),
+            .error(ChapterLabelingError.guardrail("refusal"))
+        ])
+        let service = makeService(counter: counter, script: script)
+        let result = await service.label(makeCandidate())
+
+        #expect(counter.value == 1)
+        #expect(result.attempts == 1)
+        #expect(result.failureMode == .guardrail)
+        #expect(result.failureMode != .operational)
+        #expect(result.labelDisposition == .unclear)
+        #expect(result.chapter.disposition == .ambiguous)
+        #expect(result.chapter.qualityScore == 0.0)
+        #expect(result.chapter.title == nil)
+    }
+
+    #if canImport(FoundationModels)
+    /// Verify the real `classify` mapping: Apple's
+    /// `GenerationError.refusal` and `.guardrailViolation` BOTH route to
+    /// `.guardrail` through the production error-classification path
+    /// (not a hand-rolled `ChapterLabelingError`). FoundationModels-gated
+    /// because the GenerationError cases only exist on that platform.
+    @available(iOS 26.0, *)
+    @Test("GenerationError.refusal and .guardrailViolation classify to guardrail and are not retried")
+    func generationRefusalClassifiesAsGuardrail() async {
+        let context = LanguageModelSession.GenerationError.Context(
+            debugDescription: "chapter-guardrail-test"
+        )
+        let refusal = LanguageModelSession.GenerationError.Refusal(transcriptEntries: [])
+        let cases: [LanguageModelSession.GenerationError] = [
+            .refusal(refusal, context),
+            .guardrailViolation(context)
+        ]
+        for generationError in cases {
+            let counter = CallCounter()
+            let script = OutcomeScript([
+                .error(generationError),
+                .error(generationError)
+            ])
+            let service = makeService(counter: counter, script: script)
+            let result = await service.label(makeCandidate())
+
+            #expect(counter.value == 1)
+            #expect(result.attempts == 1)
+            #expect(result.failureMode == .guardrail)
+            #expect(result.chapter.disposition == .ambiguous)
+            #expect(result.chapter.qualityScore == 0.0)
+        }
+    }
+    #endif
 }
 
 // MARK: - label() — cancellation
