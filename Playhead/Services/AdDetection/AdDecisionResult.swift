@@ -193,6 +193,7 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
         case .audioForensics: return config.audioForensicsCap  // playhead-xsdz.8: composite boundary-discontinuity channel; one modest corroborative cap.
         case .crossEpisodeMemory: return config.crossEpisodeMemoryCap  // playhead-xsdz.9: cross-episode positive copy-alignment boost; modest corroborative cap, no qualified track.
         case .rhetoricalGrammar: return config.rhetoricalGrammarCap  // playhead-xsdz.12: rhetorical act-sequence grammar; modest text-derived corroborative cap, no qualified track.
+        case .crossShowSyndication: return config.crossShowSyndicationCap  // playhead-xsdz.13: cross-show syndication footprint; modest cross-library corroborative cap, no qualified track.
         case .fusedScore: return 1.0  // Fused score is post-aggregation; no per-source cap applies.
         case .audit, .operational: return 0.0  // Phase 11 observability rows are not fusion inputs.
         }

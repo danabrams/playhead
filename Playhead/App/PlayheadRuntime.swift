@@ -846,6 +846,31 @@ final class PlayheadRuntime {
             negativeFingerprintBank = nil
         }
 
+        // playhead-xsdz.13: construct the cross-show syndication observation
+        // store ONLY when the cross-show syndication feature is enabled. The
+        // ENTIRE feature — construction, SQLite migration, the sponsor-entity
+        // WRITE path, and the spread-ratio READ — rides the ONE off-by-default
+        // `crossShowSyndicationEnabled` flag. With the flag off (the production
+        // default) there is NO store, NO new DB file, NO migration, and NO
+        // writes/reads: production behavior stays byte-identical to pre-xsdz.13,
+        // honoring the same flag-OFF ⇒ zero-new-side-effects invariant every
+        // other off-by-default channel (xsdz.6/.7/.8/.9) holds. When the flag is
+        // later flipped on we accept a cold-start store. Like the negative bank,
+        // init failure degrades to `nil` — no reads, no writes, no crash.
+        let crossShowSyndicationStore: CrossShowSyndicationStore?
+        if AdDetectionConfig.default.crossShowSyndicationEnabled {
+            do {
+                let dir = try CrossShowSyndicationStore.defaultDirectory()
+                crossShowSyndicationStore = try CrossShowSyndicationStore(directoryURL: dir)
+            } catch {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .warning("CrossShowSyndicationStore init failed — cross-show syndication disabled: \(error.localizedDescription, privacy: .public)")
+                crossShowSyndicationStore = nil
+            }
+        } else {
+            crossShowSyndicationStore = nil
+        }
+
         // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
         // adDetectionService so it can be injected for step-17 forwarding.
         // The orchestrator is otherwise wired identically to before this change.
@@ -1026,6 +1051,13 @@ final class PlayheadRuntime {
             // intentionally left nil for now (see report); the negative-bank
             // suppression channel is the prioritized lever.
             negativeFingerprintBank: negativeFingerprintBank,
+            // playhead-xsdz.13: cross-show syndication observation store for the
+            // sponsor-entity WRITE + spread-ratio READ paths. `nil` in the
+            // flag-OFF production default (the store is only constructed when
+            // `crossShowSyndicationEnabled` is on), so the service performs no
+            // store read/write and emits no `.crossShowSyndication` entry —
+            // byte-identical to pre-xsdz.13.
+            crossShowSyndicationStore: crossShowSyndicationStore,
             decisionLogger: preBuiltDecisionLogger,
             // playhead-43ed (B3): per-show RepeatedAdCache. Lookup runs
             // before the classifier in the hot path; store runs after a
@@ -1680,6 +1712,20 @@ final class PlayheadRuntime {
                         .warning("NegativeFingerprintBank deferred migrate failed — first real op will retry: \(error.localizedDescription, privacy: .public)")
                 }
                 await skipOrchestrator.setNegativeFingerprintBank(negativeFingerprintBank)
+            }
+
+            // playhead-xsdz.13: migrate the cross-show syndication store off-main.
+            // Only reached when the feature flag is ON — the store is `nil` (and
+            // this block a no-op) in the flag-OFF production default, so no
+            // migration happens there. Failure is non-fatal — the store's own
+            // lazy `ensureOpen()` retries on the first real op.
+            if let crossShowSyndicationStore {
+                do {
+                    try await crossShowSyndicationStore.migrate()
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .warning("CrossShowSyndicationStore deferred migrate failed — first real op will retry: \(error.localizedDescription, privacy: .public)")
+                }
             }
 
             // playhead-jncn: warm the five sync-loggers off-main now that

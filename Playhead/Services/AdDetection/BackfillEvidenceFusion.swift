@@ -176,6 +176,19 @@ struct FusionWeightConfig: Sendable {
     /// `.audioForensics` / `.crossEpisodeMemory` per-source carve-outs.
     let rhetoricalGrammarCap: Double
 
+    /// playhead-xsdz.13: Maximum weight contribution from a single
+    /// `.crossShowSyndication` entry — the cross-show syndication channel (a
+    /// normalized sponsor entity that recurs across MANY of the user's UNRELATED
+    /// shows AND has persisted across time, aggregated purely from the user's own
+    /// local library). Default 0.20 is deliberately MODEST (peer of `acousticCap`
+    /// / `audioForensicsCap` / `crossEpisodeMemoryCap` / `rhetoricalGrammarCap`):
+    /// network-syndication footprint is corroborative, not decisive, and this
+    /// channel has NO qualified promotion track, so it can never drive a skip
+    /// alone — it only adds honest cross-library reference mass and bumps
+    /// `distinctKinds.count` for the corroboration quorum. Mirrors the
+    /// `.crossEpisodeMemory` / `.rhetoricalGrammar` per-source carve-outs.
+    let crossShowSyndicationCap: Double
+
     init(
         fmCap: Double = 0.4,
         classifierCap: Double = 0.3,
@@ -189,7 +202,8 @@ struct FusionWeightConfig: Sendable {
         lexicalAutoAdCap: Double = 0.55,
         audioForensicsCap: Double = 0.2,
         crossEpisodeMemoryCap: Double = 0.2,
-        rhetoricalGrammarCap: Double = 0.2
+        rhetoricalGrammarCap: Double = 0.2,
+        crossShowSyndicationCap: Double = 0.2
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
@@ -204,6 +218,7 @@ struct FusionWeightConfig: Sendable {
         self.audioForensicsCap = audioForensicsCap
         self.crossEpisodeMemoryCap = crossEpisodeMemoryCap
         self.rhetoricalGrammarCap = rhetoricalGrammarCap
+        self.crossShowSyndicationCap = crossShowSyndicationCap
 
         // playhead-2hpn R4 (+R5): enforce the musicBedCap >=
         // musicBedConfirmedJingleWeight invariant at construction time, not
@@ -322,6 +337,13 @@ struct BackfillEvidenceFusion: Sendable {
     /// inside `buildLedger()`. Defaults to empty so every existing call site
     /// stays byte-compatible and the flag-OFF path emits nothing.
     let rhetoricalGrammarEntries: [EvidenceLedgerEntry]
+    /// playhead-xsdz.13: Pre-constructed `.crossShowSyndication` ledger entries —
+    /// the cross-show syndication channel (a normalized sponsor entity that
+    /// recurs across MANY of the user's UNRELATED shows AND has persisted across
+    /// time). Each entry is capped to `config.crossShowSyndicationCap` inside
+    /// `buildLedger()`. Defaults to empty so every existing call site stays
+    /// byte-compatible and the flag-OFF path emits nothing.
+    let crossShowSyndicationEntries: [EvidenceLedgerEntry]
     let mode: FMBackfillMode
     let config: FusionWeightConfig
 
@@ -339,6 +361,7 @@ struct BackfillEvidenceFusion: Sendable {
         audioForensicsEntries: [EvidenceLedgerEntry] = [],
         crossEpisodeMemoryEntries: [EvidenceLedgerEntry] = [],
         rhetoricalGrammarEntries: [EvidenceLedgerEntry] = [],
+        crossShowSyndicationEntries: [EvidenceLedgerEntry] = [],
         mode: FMBackfillMode,
         config: FusionWeightConfig
     ) {
@@ -355,6 +378,7 @@ struct BackfillEvidenceFusion: Sendable {
         self.audioForensicsEntries = audioForensicsEntries
         self.crossEpisodeMemoryEntries = crossEpisodeMemoryEntries
         self.rhetoricalGrammarEntries = rhetoricalGrammarEntries
+        self.crossShowSyndicationEntries = crossShowSyndicationEntries
         self.mode = mode
         self.config = config
     }
@@ -548,6 +572,26 @@ struct BackfillEvidenceFusion: Sendable {
             let capped = EvidenceLedgerEntry(
                 source: .rhetoricalGrammar,
                 weight: min(entry.weight, config.rhetoricalGrammarCap),
+                detail: entry.detail,
+                subSource: entry.subSource
+            )
+            ledger.append(capped)
+        }
+
+        // playhead-xsdz.13: CrossShowSyndication entries — a normalized sponsor
+        // entity that recurs across MANY of the user's UNRELATED shows AND has
+        // persisted across time (a paid network campaign vs. a show-specific
+        // editorial mention). ONE kind, ONE cap (`crossShowSyndicationCap`,
+        // default 0.20). Empty for every flag-OFF / non-firing call site, so the
+        // loop is a no-op and the ledger is byte-identical to pre-xsdz.13. The
+        // channel is a cross-library REFERENCE-match signal (shares the
+        // `.reference` family with `.fingerprint` / `.catalog` /
+        // `.crossEpisodeMemory`) and corroborative only — no qualified promotion
+        // track — so it can never drive a skip on its own.
+        for entry in crossShowSyndicationEntries {
+            let capped = EvidenceLedgerEntry(
+                source: .crossShowSyndication,
+                weight: min(entry.weight, config.crossShowSyndicationCap),
                 detail: entry.detail,
                 subSource: entry.subSource
             )
