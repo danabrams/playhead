@@ -417,6 +417,303 @@ struct TargetedWindowNarrowerTests {
         #expect(lineRefs == Array(3...35))
     }
 
+    // MARK: - playhead-xsdz.2: lexical-cue-cluster tightening
+
+    /// Build a synthetic episode where specific segment indices carry real
+    /// ad-cue text (so `LexicalScanner.collectHits` fires inside them) and the
+    /// rest is neutral. One anchor at `anchorIndex` seeds the harvester window.
+    /// Each segment is one second long, so segment index == start time.
+    private func makeLexicalClusterInputs(
+        segmentCount: Int,
+        anchorIndex: Int,
+        adCueSegments: [Int: String]
+    ) -> TargetedWindowNarrower.Inputs {
+        let assetId = "asset-lexcluster-\(segmentCount)-\(anchorIndex)"
+        let transcriptVersion = "tx-lexcluster-v1"
+        let lines: [(start: Double, end: Double, text: String)] =
+            (0..<segmentCount).map { idx in
+                let text = adCueSegments[idx] ?? "neutral conversation line \(idx) about the topic"
+                return (Double(idx), Double(idx + 1), text)
+            }
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion,
+            lines: lines
+        )
+        // Seed exactly one evidence anchor at `anchorIndex` so the harvester
+        // phase builds a padded window around it, independent of where the
+        // ad-cue text lands. (We test the SNAP, not the anchor seeding.)
+        let segment = segments[anchorIndex]
+        let entries: [EvidenceEntry] = [
+            EvidenceEntry(
+                evidenceRef: anchorIndex,
+                category: .brandSpan,
+                matchedText: "synthetic-\(anchorIndex)",
+                normalizedText: "synthetic-\(anchorIndex)",
+                atomOrdinal: segment.atoms.first?.atomKey.atomOrdinal ?? 0,
+                startTime: segment.startTime,
+                endTime: segment.endTime
+            )
+        ]
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion,
+            entries: entries
+        )
+        return TargetedWindowNarrower.Inputs(
+            analysisAssetId: assetId,
+            podcastId: "podcast-lexcluster",
+            transcriptVersion: transcriptVersion,
+            segments: segments,
+            evidenceCatalog: evidenceCatalog,
+            auditWindowSampleRate: CoveragePlanner.defaultAuditWindowSampleRate
+        )
+    }
+
+    @Test("xsdz.2: a dense ad-cue cluster tightens both edges inward toward the cluster")
+    func lexicalClusterTightensBothEdges() {
+        // 30-segment episode, anchor at 10 (default lookback would give window
+        // [0..15]). Place a tight cluster of ad cues in segments 8..12.
+        // With a 1-segment ad-body margin the tightened window is the cluster
+        // [8..12] widened by 1 each side → [7..13], intersected with [0..15].
+        let inputs = makeLexicalClusterInputs(
+            segmentCount: 30,
+            anchorIndex: 10,
+            adCueSegments: [
+                8: "this episode is brought to you by acme tools",
+                9: "use code SAVE at checkout for a free trial",
+                10: "visit acmetools.com for this special offer",
+                11: "promo code SAVE gets you a money back guarantee",
+                12: "sign up now at acmetools.com slash deal"
+            ]
+        )
+        // Use a tight 1-segment margin so the snap is crisp on 1s segments.
+        let snapConfig = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 60,
+            lexicalClusterMarginSegments: 1
+        )
+        let withSnap = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: inputs,
+            config: snapConfig
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+
+        // Baseline: acoustic-only shaping (lexical cluster snap disabled).
+        let baselineConfig = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 60,
+            lexicalClusterSnapEnabled: false
+        )
+        let baseline = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: inputs,
+            config: baselineConfig
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+
+        // Baseline window is the default-padded [0..15].
+        #expect(baseline == Array(0...15))
+        // Tightened window is strictly narrower and keeps the cue core + margin.
+        #expect(withSnap.count < baseline.count, "lexical snap must tighten the window")
+        #expect(withSnap.first == 7, "left edge should tighten up to cluster start (8) minus 1-seg margin → 7")
+        #expect(withSnap.last == 13, "right edge should tighten down to cluster end (12) plus 1-seg margin → 13")
+        #expect(withSnap.contains(10), "the ad core must remain covered")
+        #expect(withSnap.contains(11), "the ad core must remain covered")
+    }
+
+    @Test("xsdz.2: ad-body margin keeps spoken ad seconds around the literal cues")
+    func lexicalClusterMarginKeepsAdBody() {
+        // Same cluster (8..12) but with the DEFAULT margin (corpus-tuned to 3).
+        // The window must NOT collapse to the bare cue cluster; it keeps a
+        // 3-segment ad-body margin so the pre-CTA pitch / post-disclosure
+        // wind-down survive. [8-3, 12+3] = [5,15] ∩ [0..15] = [5..15].
+        let inputs = makeLexicalClusterInputs(
+            segmentCount: 30,
+            anchorIndex: 10,
+            adCueSegments: [
+                8: "this episode is brought to you by acme tools",
+                9: "use code SAVE at checkout for a free trial",
+                10: "visit acmetools.com for this special offer",
+                11: "promo code SAVE gets you a money back guarantee",
+                12: "sign up now at acmetools.com slash deal"
+            ]
+        )
+        let withSnap = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: inputs // default config: margin == 3
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+        #expect(withSnap == Array(5...15), "default margin (3) keeps ad-body seconds; only the far-left editorial padding (0..4) is trimmed")
+        #expect(withSnap.count < 16, "must tighten vs the [0..15] baseline")
+    }
+
+    @Test("xsdz.2: no ad-cue cluster leaves the window at its acoustic-shaped edges")
+    func noClusterLeavesWindowUnchanged() {
+        // Neutral text everywhere → no ad-cue hits → no cluster → no snap.
+        let inputs = makeLexicalClusterInputs(
+            segmentCount: 30,
+            anchorIndex: 10,
+            adCueSegments: [:]
+        )
+        let withSnap = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: inputs
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+        let baselineConfig = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 60,
+            lexicalClusterSnapEnabled: false
+        )
+        let baseline = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: inputs,
+            config: baselineConfig
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+        #expect(withSnap == baseline, "no cluster ⇒ tightening must be a no-op")
+        #expect(withSnap == Array(0...15))
+    }
+
+    @Test("xsdz.2: with multiple clusters the densest one inside the window wins")
+    func multipleClustersDensestWins() {
+        // Two clusters inside a window: a sparse 1-hit cluster near the left
+        // edge and a dense multi-hit cluster near the right. The densest
+        // (right) cluster should drive the tightening, NOT the sparse one.
+        // Anchor at 20 → default lookback window [0..25] in a 40-seg episode.
+        // Sparse cluster: a single sponsor hit at segment 3 (isolated).
+        // Dense cluster: segments 18..23 (5 hits, > gap apart from seg 3).
+        let inputs = makeLexicalClusterInputs(
+            segmentCount: 40,
+            anchorIndex: 20,
+            adCueSegments: [
+                3: "this episode is brought to you by globex",
+                18: "use code DEAL at checkout today",
+                19: "visit globex.com for a free trial",
+                20: "promo code DEAL gives a money back guarantee",
+                21: "sign up now for this special offer",
+                22: "head to globex.com slash save",
+                23: "use code DEAL for first month free"
+            ]
+        )
+        let snapConfig = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 60,
+            lexicalClusterMarginSegments: 1
+        )
+        let withSnap = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: inputs,
+            config: snapConfig
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+        // The dense right cluster (18..23) wins: the window re-centers on it
+        // (with a 1-seg margin → [17..24]), not on the lone seg-3 hit.
+        #expect(withSnap.first == 17, "densest (right) cluster (start 18) minus 1-seg margin → 17; the lone seg-3 hit must NOT drive tightening")
+        #expect(withSnap.last == 24, "dense cluster end (23) plus 1-seg margin → 24")
+        #expect(withSnap.contains(20))
+        #expect(withSnap.contains(22))
+    }
+
+    @Test("xsdz.2: a cluster at the window's edge does not push the edge outward")
+    func clusterAtEdgeDoesNotWiden() {
+        // Cluster sits flush against the LEFT edge of the padded window.
+        // Anchor at 5 → 20-atom lookback caps at 0 → window [0..10].
+        // Ad cues in segments 0..3 (a cluster pinned to the left edge).
+        // Inward-only tightening means the LEFT edge cannot move past 0, and
+        // the RIGHT edge should pull DOWN to the cluster end (~3), never out.
+        let inputs = makeLexicalClusterInputs(
+            segmentCount: 30,
+            anchorIndex: 5,
+            adCueSegments: [
+                0: "this episode is brought to you by initech",
+                1: "use code BOSS at checkout for a free trial",
+                2: "visit initech.com slash offer today",
+                3: "promo code BOSS for a money back guarantee"
+            ]
+        )
+        let snapConfig = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 60,
+            lexicalClusterMarginSegments: 1
+        )
+        let withSnap = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: inputs,
+            config: snapConfig
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+        let baselineConfig = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 60,
+            lexicalClusterSnapEnabled: false
+        )
+        let baseline = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: inputs,
+            config: baselineConfig
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+
+        #expect(baseline == Array(0...10))
+        // Cluster segs 0..3, margin 1 → [-1,4] ∩ [0..10] = [0..4]. Left edge
+        // can't move outward below 0; right tightens down to 4.
+        #expect(withSnap.first == 0, "inward-only snap must not push the left edge below 0")
+        #expect(withSnap.last == 4, "right edge tightens to cluster end (3) plus 1-seg margin → 4")
+        #expect(withSnap.count <= baseline.count, "tightening must never widen the window")
+    }
+
+    @Test("xsdz.2: lexical-cluster tightening is deterministic across repeated calls")
+    func lexicalClusterTighteningIsDeterministic() {
+        let inputs = makeLexicalClusterInputs(
+            segmentCount: 30,
+            anchorIndex: 10,
+            adCueSegments: [
+                8: "this episode is brought to you by acme",
+                9: "use code SAVE at checkout",
+                10: "visit acme.com for a free trial",
+                11: "promo code SAVE for a special offer"
+            ]
+        )
+        let first = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: inputs
+        ).narrowedSegments?.map(\.segmentIndex) ?? []
+        let second = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: inputs
+        ).narrowedSegments?.map(\.segmentIndex) ?? []
+        #expect(first == second)
+        #expect(!first.isEmpty)
+    }
+
+    @Test("xsdz.2: tightening never widens — covered set is a subset of the acoustic baseline")
+    func lexicalClusterIsAlwaysSubsetOfBaseline() {
+        // Property check across several anchor placements: the lexical-cluster
+        // snap is inward-only, so for any input its covered segment set must be
+        // a subset of (or equal to) the acoustic-only baseline's covered set.
+        for anchor in [4, 10, 18, 25] {
+            let inputs = makeLexicalClusterInputs(
+                segmentCount: 40,
+                anchorIndex: anchor,
+                adCueSegments: [
+                    max(0, anchor - 2): "this episode is brought to you by widgetco",
+                    anchor: "use code WIDGET at checkout for a free trial",
+                    min(39, anchor + 2): "visit widgetco.com slash deal special offer"
+                ]
+            )
+            let baselineConfig = NarrowingConfig(
+                perAnchorPaddingSegments: 5,
+                maxNarrowedSegmentsPerPhase: 60,
+                lexicalClusterSnapEnabled: false
+            )
+            let baseline = Set(TargetedWindowNarrower.narrow(
+                phase: .scanHarvesterProposals,
+                inputs: inputs,
+                config: baselineConfig
+            ).narrowedSegments?.map(\.segmentIndex) ?? [])
+            let withSnap = Set(TargetedWindowNarrower.narrow(
+                phase: .scanHarvesterProposals,
+                inputs: inputs
+            ).narrowedSegments?.map(\.segmentIndex) ?? [])
+            #expect(withSnap.isSubset(of: baseline), "anchor \(anchor): lexical snap must never add segments")
+        }
+    }
+
     // MARK: - Cycle 2 H13: empty / wasEmpty
 
     @Test("Cycle 2 H13: harvester with no evidence anchors returns wasEmpty")

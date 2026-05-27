@@ -31,20 +31,92 @@ struct NarrowingConfig: Sendable, Equatable {
     /// the feature-window width and is not per-show tuned.
     let acousticBreakSnapMaxDistanceSeconds: Double
 
+    /// playhead-xsdz.2: when true, after the acoustic-break snap the narrower
+    /// additionally tightens each merged per-anchor window's outer edges
+    /// *inward* toward the bounds of the dense lexical-cue cluster the edge
+    /// surrounds. This extends — does not replace — the acoustic-break snap:
+    /// both run, in sequence, over the same merged intervals. Set false to
+    /// recover the pre-xsdz.2 (acoustic-only) shaping, which the corpus eval
+    /// uses as its A/B baseline. Default true so the tightening is live.
+    let lexicalClusterSnapEnabled: Bool
+
+    /// playhead-xsdz.2: maximum gap, in seconds, between two adjacent
+    /// ad-relevant lexical hits for them to belong to the same cluster.
+    /// Chosen as 8.0s from first principles: a coherent ad read keeps its
+    /// sponsor / promo-code / URL cues close together (a sponsor disclosure,
+    /// the product pitch, then the CTA all land inside a single ~30-60s ad),
+    /// whereas two genuinely separate ad pods are tens of seconds apart. A
+    /// gap larger than this is treated as a cluster boundary so the narrower
+    /// does not fuse two distinct ads into one over-wide cluster. This is
+    /// deliberately tighter than `LexicalScannerConfig.default.mergeGapThreshold`
+    /// (30s) because that threshold governs candidate *promotion* (it wants to
+    /// keep a whole ad together), whereas this governs *tightening toward the
+    /// ad-dense core* (it wants to find the densest sub-run). Not per-show
+    /// tuned.
+    let lexicalClusterGapSeconds: Double
+
+    /// playhead-xsdz.2: number of segments of ad-body margin kept on each
+    /// side of the lexical-cue cluster when tightening. The literal lexical
+    /// cues (a sponsor disclosure, a CTA URL, a promo code) sit INSIDE a
+    /// longer spoken ad — the pre-CTA product pitch and the post-disclosure
+    /// wind-down carry no regex-matchable token, so snapping flush to the
+    /// cue cluster would amputate the ad body and DROP true ad coverage (a
+    /// regression the bead explicitly forbids). Keeping a margin re-centers
+    /// the padded window on the ad-dense core while preserving the
+    /// surrounding ad seconds. Defaults to `perAnchorPaddingSegments` so the
+    /// tightened window is "the same width of padding, but around the cluster
+    /// instead of around the bare anchor". The tightening is still strictly
+    /// inward — the margined window is intersected with the original, so it
+    /// can only shrink (or leave unchanged) the covered set. `NarrowingConfig.default`
+    /// sets this to `defaultLexicalClusterMarginSegments` (3, corpus-tuned).
+    /// A nil value falls back to `perAnchorPaddingSegments`.
+    let lexicalClusterMarginSegments: Int?
+
+    /// playhead-xsdz.2: minimum number of ad-relevant lexical hits a cluster
+    /// must contain before it is allowed to reshape a candidate window.
+    /// Clusters below this count are ignored (the window is left at its
+    /// acoustic-shaped edges). Default 1 — the real-corpus sweep showed lone
+    /// strong cues (a sponsor disclosure, a literal-TLD URL) ARE reliable
+    /// extent markers when combined with the ad-body margin, so gating them
+    /// out (minHits=2) gave back coverage with no precision benefit. The knob
+    /// exists so a future show-class that emits noisy single hits can raise
+    /// the bar without a code change.
+    let lexicalClusterMinHits: Int
+
+    /// playhead-xsdz.2: production-default ad-body margin (segments) kept on
+    /// each side of a lexical-cue cluster when tightening. Resolved to 3 from
+    /// the real-corpus sweep (12 dogfood episodes, 24 golden ad windows): of
+    /// the margins tried, 3 segments maximized SECONDS-level coverage —
+    /// coverage recall 0.174 → 0.227 and coverage precision 0.494 → 0.623,
+    /// both improving — without introducing false-positive ad seconds
+    /// (precision rose, so trimmed seconds were editorial, not ad). Larger
+    /// margins (>=7) preserve median per-span IoU but recover almost none of
+    /// the coverage gain. See `RegionTighteningCorpusEvalTests`.
+    static let defaultLexicalClusterMarginSegments = 3
+
     static let `default` = NarrowingConfig(
         perAnchorPaddingSegments: 5,
         maxNarrowedSegmentsPerPhase: 60,
-        acousticBreakSnapMaxDistanceSeconds: 2.0
+        acousticBreakSnapMaxDistanceSeconds: 2.0,
+        lexicalClusterMarginSegments: defaultLexicalClusterMarginSegments
     )
 
     init(
         perAnchorPaddingSegments: Int,
         maxNarrowedSegmentsPerPhase: Int,
-        acousticBreakSnapMaxDistanceSeconds: Double = 2.0
+        acousticBreakSnapMaxDistanceSeconds: Double = 2.0,
+        lexicalClusterSnapEnabled: Bool = true,
+        lexicalClusterGapSeconds: Double = 8.0,
+        lexicalClusterMarginSegments: Int? = nil,
+        lexicalClusterMinHits: Int = 1
     ) {
         self.perAnchorPaddingSegments = perAnchorPaddingSegments
         self.maxNarrowedSegmentsPerPhase = maxNarrowedSegmentsPerPhase
         self.acousticBreakSnapMaxDistanceSeconds = acousticBreakSnapMaxDistanceSeconds
+        self.lexicalClusterSnapEnabled = lexicalClusterSnapEnabled
+        self.lexicalClusterGapSeconds = lexicalClusterGapSeconds
+        self.lexicalClusterMarginSegments = lexicalClusterMarginSegments
+        self.lexicalClusterMinHits = lexicalClusterMinHits
     }
 }
 
@@ -153,6 +225,19 @@ enum TargetedWindowNarrower {
         let ordered = orderedSegments(inputs.segments)
         guard !ordered.isEmpty else { return .empty }
 
+        // playhead-xsdz.2: detect dense lexical-cue clusters for the inward
+        // cluster-tightening step in `narrowedResult`. Computed lazily and
+        // only by the narrowing phases that actually consume it: the full-
+        // episode scan and the random-audit phase return early WITHOUT
+        // building clusters, so they never pay for the (full-episode) lexical
+        // scan. `lexicalCueClusters` itself returns `[]` when the feature is
+        // disabled, so the acoustic-only A/B baseline pays nothing either.
+        // Each `narrow()` call drives exactly one phase, so the closure runs
+        // at most once.
+        func clusters() -> [LexicalCueCluster] {
+            lexicalCueClusters(orderedSegments: ordered, inputs: inputs, config: config)
+        }
+
         switch phase {
         case .fullEpisodeScan:
             return .narrowed(ordered)
@@ -161,6 +246,7 @@ enum TargetedWindowNarrower {
                 lineRefs: evidenceLineRefs(inputs: inputs),
                 orderedSegments: ordered,
                 acousticBreaks: inputs.acousticBreaks,
+                lexicalClusters: clusters(),
                 config: config,
                 phaseLabel: "scanHarvesterProposals"
             )
@@ -169,6 +255,7 @@ enum TargetedWindowNarrower {
                 lineRefs: lexicalCandidateLineRefs(inputs: inputs),
                 orderedSegments: ordered,
                 acousticBreaks: inputs.acousticBreaks,
+                lexicalClusters: clusters(),
                 config: config,
                 phaseLabel: "scanLikelyAdSlots"
             )
@@ -181,6 +268,7 @@ enum TargetedWindowNarrower {
                 lineRefs: evidenceLineRefs(inputs: inputs),
                 orderedSegments: ordered,
                 acousticBreaks: inputs.acousticBreaks,
+                lexicalClusters: clusters(),
                 config: config,
                 phaseLabel: "metadataSeededRegion"
             )
@@ -301,22 +389,7 @@ enum TargetedWindowNarrower {
     }
 
     private static func lexicalCandidateLineRefs(inputs: Inputs) -> Set<Int> {
-        let chunks = orderedSegments(inputs.segments).map { segment in
-            TranscriptChunk(
-                id: "targeted-\(inputs.analysisAssetId)-\(segment.segmentIndex)",
-                analysisAssetId: inputs.analysisAssetId,
-                segmentFingerprint: "targeted-\(segment.segmentIndex)",
-                chunkIndex: segment.segmentIndex,
-                startTime: segment.startTime,
-                endTime: segment.endTime,
-                text: segment.text,
-                normalizedText: TranscriptEngineService.normalizeText(segment.text),
-                pass: "final",
-                modelVersion: "targeted-window-narrower",
-                transcriptVersion: inputs.transcriptVersion,
-                atomOrdinal: segment.firstAtomOrdinal
-            )
-        }
+        let chunks = narrowerChunks(orderedSegments: orderedSegments(inputs.segments), inputs: inputs)
 
         let scanner = LexicalScanner()
         let candidates = scanner.scan(
@@ -337,6 +410,33 @@ enum TargetedWindowNarrower {
         )
     }
 
+    /// Build the `TranscriptChunk` list the lexical scanner consumes from the
+    /// narrower's ordered segments. Shared by `lexicalCandidateLineRefs`
+    /// (anchor seeding) and `lexicalCueClusters` (boundary tightening) so the
+    /// two paths scan identical text with identical timing. One chunk per
+    /// segment, normalized with the production normalizer.
+    private static func narrowerChunks(
+        orderedSegments: [AdTranscriptSegment],
+        inputs: Inputs
+    ) -> [TranscriptChunk] {
+        orderedSegments.map { segment in
+            TranscriptChunk(
+                id: "targeted-\(inputs.analysisAssetId)-\(segment.segmentIndex)",
+                analysisAssetId: inputs.analysisAssetId,
+                segmentFingerprint: "targeted-\(segment.segmentIndex)",
+                chunkIndex: segment.segmentIndex,
+                startTime: segment.startTime,
+                endTime: segment.endTime,
+                text: segment.text,
+                normalizedText: TranscriptEngineService.normalizeText(segment.text),
+                pass: "final",
+                modelVersion: "targeted-window-narrower",
+                transcriptVersion: inputs.transcriptVersion,
+                atomOrdinal: segment.firstAtomOrdinal
+            )
+        }
+    }
+
     private static func overlaps(
         startTime: Double,
         endTime: Double,
@@ -344,6 +444,186 @@ enum TargetedWindowNarrower {
         end otherEnd: Double
     ) -> Bool {
         startTime <= otherEnd && endTime >= otherStart
+    }
+
+    // MARK: - playhead-xsdz.2: lexical-cue-cluster tightening
+
+    /// A contiguous run of ad-relevant lexical cues whose adjacent hits are
+    /// no more than `config.lexicalClusterGapSeconds` apart. The cluster's
+    /// `[startTime, endTime]` spans from the first hit's start to the last
+    /// hit's end — the ad-dense core the narrower tightens candidate windows
+    /// toward. `hitCount` is carried for observability and for the
+    /// minimum-density guard.
+    struct LexicalCueCluster: Sendable, Equatable {
+        let startTime: Double
+        let endTime: Double
+        let hitCount: Int
+    }
+
+    /// Categories that count as "ad-relevant" for cluster detection. These
+    /// mirror `TimeBoundaryResolver.adLexicalCategories` (the resolver's own
+    /// notion of an ad-density cue) so the two boundary-shaping signals agree
+    /// on what an ad cue is. `transitionMarker` is intentionally excluded:
+    /// transition markers ("back to the show") sit at the EDGE of an ad, not
+    /// in its dense core, so including them would pull a cluster boundary
+    /// outward — the opposite of tightening.
+    private static let adClusterCategories: Set<LexicalPatternCategory> = [
+        .sponsor,
+        .promoCode,
+        .urlCTA,
+        .purchaseLanguage,
+    ]
+
+    /// Detect dense clusters of ad-relevant lexical cues across the episode.
+    ///
+    /// Reuses `LexicalScanner.collectHits` — the same raw hit stream the
+    /// scanner builds before its lossy candidate-merge (and the same stream
+    /// the xsdz.1 auto-ad rule consumes) — so no parallel pattern set is
+    /// introduced. Hits are filtered to `adClusterCategories`, sorted by
+    /// start time, and single-linked into clusters: a hit joins the current
+    /// cluster when it starts within `lexicalClusterGapSeconds` of the
+    /// cluster's running end, else it opens a new cluster.
+    ///
+    /// Deterministic: `collectHits` returns time-sorted hits and the linking
+    /// pass is a single forward sweep.
+    private static func lexicalCueClusters(
+        orderedSegments: [AdTranscriptSegment],
+        inputs: Inputs,
+        config: NarrowingConfig
+    ) -> [LexicalCueCluster] {
+        guard config.lexicalClusterSnapEnabled, !orderedSegments.isEmpty else {
+            return []
+        }
+        let chunks = narrowerChunks(orderedSegments: orderedSegments, inputs: inputs)
+        let scanner = LexicalScanner()
+        let hits = scanner.collectHits(chunks: chunks)
+            .filter { adClusterCategories.contains($0.category) && !$0.isMetadataOrigin && !$0.isNegativePattern }
+            .sorted { $0.startTime < $1.startTime }
+        guard let first = hits.first else { return [] }
+
+        let gap = config.lexicalClusterGapSeconds
+        var clusters: [LexicalCueCluster] = []
+        var clusterStart = first.startTime
+        var clusterEnd = first.endTime
+        var clusterHits = 1
+
+        for hit in hits.dropFirst() {
+            if hit.startTime <= clusterEnd + gap {
+                clusterEnd = max(clusterEnd, hit.endTime)
+                clusterHits += 1
+            } else {
+                clusters.append(LexicalCueCluster(
+                    startTime: clusterStart,
+                    endTime: clusterEnd,
+                    hitCount: clusterHits
+                ))
+                clusterStart = hit.startTime
+                clusterEnd = hit.endTime
+                clusterHits = 1
+            }
+        }
+        clusters.append(LexicalCueCluster(
+            startTime: clusterStart,
+            endTime: clusterEnd,
+            hitCount: clusterHits
+        ))
+        return clusters
+    }
+
+    /// Tighten each merged per-anchor interval's outer edges INWARD toward the
+    /// bounds of the densest lexical-cue cluster the interval surrounds.
+    ///
+    /// Algorithm (per interval `[loIdx, hiIdx]`, conservative throughout):
+    ///   1. Compute the interval's time bounds from its endpoint segments.
+    ///   2. Select the cluster with the most hits among those that OVERLAP the
+    ///      interval's time span. Ties broken by earliest start so the choice
+    ///      is deterministic. If none overlaps, leave the interval untouched.
+    ///   3. Map the cluster's time span to its covering segment indices
+    ///      `[clusterLoSeg, clusterHiSeg]` (first segment reaching the cluster
+    ///      start, last segment reaching its end).
+    ///   4. Build the MARGINED window `[clusterLoSeg - margin,
+    ///      clusterHiSeg + margin]` and INTERSECT it with the original
+    ///      `[loIdx, hiIdx]`. The margin (default `perAnchorPaddingSegments`)
+    ///      preserves the spoken ad body around the literal cues — the pre-CTA
+    ///      pitch and post-disclosure wind-down carry no regex-matchable token,
+    ///      so snapping flush to the cue cluster would amputate the ad and drop
+    ///      true coverage. Re-centering the same padding width on the ad-dense
+    ///      core trims only the FAR editorial padding.
+    ///
+    /// Inward-only by construction: the result is `[loIdx, hiIdx] ∩
+    /// marginedWindow`, so an edge is never pushed outward and the interval can
+    /// never invert. It can only shrink (or leave unchanged) the covered
+    /// segment set — it can never blow the per-phase cap, and it can never
+    /// widen a window to pull editorial content in. Deterministic: cluster
+    /// selection and segment scans are stable.
+    private static func snapIntervalsToLexicalClusters(
+        _ merged: [(Int, Int)],
+        orderedSegments: [AdTranscriptSegment],
+        lexicalClusters: [LexicalCueCluster],
+        config: NarrowingConfig
+    ) -> [(Int, Int)] {
+        guard config.lexicalClusterSnapEnabled,
+              !lexicalClusters.isEmpty,
+              !orderedSegments.isEmpty else {
+            return merged
+        }
+
+        var segmentByIndex: [Int: AdTranscriptSegment] = [:]
+        segmentByIndex.reserveCapacity(orderedSegments.count)
+        for segment in orderedSegments {
+            segmentByIndex[segment.segmentIndex] = segment
+        }
+        let margin = max(0, config.lexicalClusterMarginSegments ?? config.perAnchorPaddingSegments)
+
+        return merged.map { interval -> (Int, Int) in
+            let (lo, hi) = interval
+            guard let loSegment = segmentByIndex[lo],
+                  let hiSegment = segmentByIndex[hi] else {
+                return interval
+            }
+            let intervalStart = loSegment.startTime
+            let intervalEnd = hiSegment.endTime
+
+            // Densest cluster overlapping this interval and meeting the
+            // minimum-hit gate (deterministic tiebreak). A lone-hit cluster is
+            // too weak a signal of ad EXTENT to reshape the window.
+            let overlapping = lexicalClusters.filter { cluster in
+                cluster.hitCount >= config.lexicalClusterMinHits
+                    && cluster.startTime <= intervalEnd
+                    && cluster.endTime >= intervalStart
+            }
+            guard let cluster = overlapping.max(by: { lhs, rhs in
+                if lhs.hitCount != rhs.hitCount {
+                    return lhs.hitCount < rhs.hitCount
+                }
+                return lhs.startTime > rhs.startTime
+            }) else {
+                return interval
+            }
+
+            // Map the cluster span to its covering segment indices.
+            guard let clusterLoSeg = orderedSegments.first(where: { $0.endTime > cluster.startTime })?.segmentIndex,
+                  let clusterHiSeg = orderedSegments.last(where: { $0.startTime < cluster.endTime })?.segmentIndex,
+                  clusterLoSeg <= clusterHiSeg else {
+                return interval
+            }
+
+            // Margined window around the ad-dense core, intersected with the
+            // original interval (inward-only).
+            let newLo = max(lo, clusterLoSeg - margin)
+            let newHi = min(hi, clusterHiSeg + margin)
+            guard newLo <= newHi else {
+                // Degenerate layout (cluster outside the interval after the
+                // margin) — leave the interval untouched.
+                return interval
+            }
+            if newLo != lo || newHi != hi {
+                narrowerLogger.debug(
+                    "lexical-cluster snap: interval [\(lo, privacy: .public), \(hi, privacy: .public)] → [\(newLo, privacy: .public), \(newHi, privacy: .public)] (cluster segs [\(clusterLoSeg, privacy: .public), \(clusterHiSeg, privacy: .public)], margin \(margin, privacy: .public), \(cluster.hitCount, privacy: .public) hits)"
+                )
+            }
+            return (newLo, newHi)
+        }
     }
 
     /// Cycle 2 C5: per-anchor windows + interval merge + cap.
@@ -357,6 +637,7 @@ enum TargetedWindowNarrower {
         lineRefs: Set<Int>,
         orderedSegments: [AdTranscriptSegment],
         acousticBreaks: [AcousticBreak],
+        lexicalClusters: [LexicalCueCluster],
         config: NarrowingConfig,
         phaseLabel: String
     ) -> PhaseNarrowingResult {
@@ -426,6 +707,26 @@ enum TargetedWindowNarrower {
             orderedSegments: orderedSegments,
             availableLineRefs: availableLineRefs,
             acousticBreaks: acousticBreaks,
+            config: config
+        )
+
+        // playhead-xsdz.2: lexical-cue-cluster tightening. Extends the
+        // acoustic-break snap above with a SECOND, lexically-driven signal
+        // that runs over the same merged intervals. Where a window's outer
+        // padding extends past the dense run of ad-relevant lexical cues
+        // (sponsor / promo-code / URL CTA / purchase language) inside it,
+        // pull the edge INWARD toward the cluster boundary so the FM (or any
+        // downstream span decoder) sees an ad-dense window instead of one
+        // diluted by surrounding editorial padding. Inward-only by design:
+        // tightening toward the ad-dense core is the bead's goal, and
+        // widening from a lexical cue would risk pulling editorial content in.
+        // Additive: if no cluster covers the window (or the feature is
+        // disabled), the interval is left exactly as the acoustic snap
+        // produced it.
+        merged = snapIntervalsToLexicalClusters(
+            merged,
+            orderedSegments: orderedSegments,
+            lexicalClusters: lexicalClusters,
             config: config
         )
 
