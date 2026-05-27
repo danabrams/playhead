@@ -136,6 +136,21 @@ struct FusionWeightConfig: Sendable {
     /// this cap — a misfire would be a builder bug, not a weight-budget bug.
     let lexicalAutoAdCap: Double
 
+    /// playhead-xsdz.8: Maximum weight contribution from a single
+    /// `.audioForensics` entry — the composite boundary-discontinuity channel
+    /// (loudness/RMS jump + spectral-flux shift + noise-floor change +
+    /// production/environment change at the span edges, all merged into ONE
+    /// sigma-normalized score). Default 0.20 is deliberately MODEST and equal
+    /// to `acousticCap`: this channel fires CONSERVATIVELY as a corroborator,
+    /// never as the sole promoter. Unlike `.lexicalAutoAd` (0.55, can drive a
+    /// skip alone via its qualified track), audio-forensics has NO qualified
+    /// promotion track — its only job is to add honest in-audio mass and bump
+    /// `distinctKinds.count` for the corroboration quorum. The merged-channel
+    /// design (one cap, not three) is the cross-model duel's explicit
+    /// recommendation; per-sub-signal caps were rejected. Mirrors the
+    /// `.breakAlignment` / `.musicBed` per-source carve-outs.
+    let audioForensicsCap: Double
+
     init(
         fmCap: Double = 0.4,
         classifierCap: Double = 0.3,
@@ -146,7 +161,8 @@ struct FusionWeightConfig: Sendable {
         fingerprintCap: Double = 0.25,
         metadataCap: Double = 0.15,
         musicBedCap: Double = 0.25,
-        lexicalAutoAdCap: Double = 0.55
+        lexicalAutoAdCap: Double = 0.55,
+        audioForensicsCap: Double = 0.2
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
@@ -158,6 +174,7 @@ struct FusionWeightConfig: Sendable {
         self.metadataCap = metadataCap
         self.musicBedCap = musicBedCap
         self.lexicalAutoAdCap = lexicalAutoAdCap
+        self.audioForensicsCap = audioForensicsCap
 
         // playhead-2hpn R4 (+R5): enforce the musicBedCap >=
         // musicBedConfirmedJingleWeight invariant at construction time, not
@@ -256,6 +273,14 @@ struct BackfillEvidenceFusion: Sendable {
     /// via `FusionBudgetClamp` inside `buildLedger()`. Defaults to empty
     /// to keep all existing call sites byte-compatible.
     let metadataEntries: [EvidenceLedgerEntry]
+    /// playhead-xsdz.8: Pre-constructed `.audioForensics` ledger entries —
+    /// the composite boundary-discontinuity channel. Each entry is capped
+    /// against `config.audioForensicsCap` inside `buildLedger()`. Defaults to
+    /// empty so every existing call site stays byte-compatible (additive
+    /// parameter); the producer (`AudioForensicsBoundaryDetector`) only emits
+    /// when the OFF-by-default `AdDetectionConfig.audioForensicsEnabled` flag
+    /// is on AND a significant boundary discontinuity is measured.
+    let audioForensicsEntries: [EvidenceLedgerEntry]
     let mode: FMBackfillMode
     let config: FusionWeightConfig
 
@@ -270,6 +295,7 @@ struct BackfillEvidenceFusion: Sendable {
         metadataEntries: [EvidenceLedgerEntry] = [],
         breakAlignmentEntries: [EvidenceLedgerEntry] = [],
         lexicalAutoAdEntries: [EvidenceLedgerEntry] = [],
+        audioForensicsEntries: [EvidenceLedgerEntry] = [],
         mode: FMBackfillMode,
         config: FusionWeightConfig
     ) {
@@ -283,6 +309,7 @@ struct BackfillEvidenceFusion: Sendable {
         self.metadataEntries = metadataEntries
         self.breakAlignmentEntries = breakAlignmentEntries
         self.lexicalAutoAdEntries = lexicalAutoAdEntries
+        self.audioForensicsEntries = audioForensicsEntries
         self.mode = mode
         self.config = config
     }
@@ -420,6 +447,26 @@ struct BackfillEvidenceFusion: Sendable {
             let capped = EvidenceLedgerEntry(
                 source: .breakAlignment,
                 weight: min(entry.weight, config.breakAlignmentCap),
+                detail: entry.detail,
+                subSource: entry.subSource
+            )
+            ledger.append(capped)
+        }
+
+        // playhead-xsdz.8: AudioForensics entries — the composite
+        // boundary-discontinuity channel. ONE merged kind, ONE cap
+        // (`audioForensicsCap`, default 0.20). The producer
+        // (`AudioForensicsBoundaryDetector`) has already merged the four
+        // sigma-normalized sub-signals (loudness / spectral / noise-floor /
+        // environment) into a single boundary score before emitting, so the
+        // family budget is honest with a single cap here — exactly the
+        // cross-model duel's recommendation (no three separate caps). Empty
+        // for every flag-OFF / non-firing call site, so the loop is a no-op
+        // and the ledger is byte-identical to pre-xsdz.8.
+        for entry in audioForensicsEntries {
+            let capped = EvidenceLedgerEntry(
+                source: .audioForensics,
+                weight: min(entry.weight, config.audioForensicsCap),
                 detail: entry.detail,
                 subSource: entry.subSource
             )
@@ -836,8 +883,17 @@ struct DecisionMapper: Sendable {
         // derived) corroborator — the high-precision auto-ad rule fired on a
         // vetted strong co-occurrence. Include it so a span that carries both
         // a metadata cue AND a lexical-auto-ad hit clears this gate.
+        // playhead-xsdz.8: `.audioForensics` is real in-audio signal — a
+        // measured physical boundary discontinuity. Include it on the same
+        // footing as its acoustic-family peers (`.acoustic` / `.breakAlignment`
+        // / `.musicBed`): the "never the sole promoter" guard is its modest
+        // CAP plus the absence of any qualified promotion track, NOT exclusion
+        // from corroboration. Omitting it would make a STRONGER boundary
+        // measurement count for less than the weaker RMS-drop `.acoustic`
+        // entry — the exact inconsistency the fqc8 cycle-2 review fixed for
+        // `.breakAlignment`.
         let inAudioCorroboratingSources: Set<EvidenceSourceType> = [
-            .lexical, .lexicalAutoAd, .acoustic, .musicBed, .catalog, .fingerprint, .fm, .breakAlignment
+            .lexical, .lexicalAutoAd, .acoustic, .musicBed, .catalog, .fingerprint, .fm, .breakAlignment, .audioForensics
         ]
         let hasInAudioCorroboration = scoringLedger.contains { entry in
             if inAudioCorroboratingSources.contains(entry.source) {
@@ -896,7 +952,13 @@ struct DecisionMapper: Sendable {
         // a span anchored by `.fmAcousticCorroborated` whose only non-FM evidence
         // is the boundary-alignment entry would silently regress to
         // `.blockedByEvidenceQuorum` where it previously cleared.
-        let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .lexicalAutoAd, .catalog, .acoustic, .musicBed, .fingerprint, .breakAlignment]
+        // playhead-xsdz.8: `.audioForensics` is in-audio boundary signal —
+        // same rationale as the cycle-2 `.breakAlignment` addition. A span
+        // anchored by `.fmAcousticCorroborated` whose only non-FM evidence is
+        // the boundary-discontinuity entry is corroborated by a real measured
+        // signal; excluding it would make audio-forensics count for less than
+        // its weaker acoustic-family peers.
+        let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .lexicalAutoAd, .catalog, .acoustic, .musicBed, .fingerprint, .breakAlignment, .audioForensics]
         let hasExternalCorroboration = scoringLedger.contains { entry in
             if nonClassifierExternal.contains(entry.source) {
                 return true

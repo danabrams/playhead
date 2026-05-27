@@ -161,6 +161,7 @@ enum CausalInference {
         case .acoustic:    return .acoustic
         case .musicBed:    return .acoustic  // music-bed coverage is an acoustic-family signal
         case .breakAlignment: return .acoustic  // playhead-fqc8: break-alignment is an acoustic-family corroborator
+        case .audioForensics: return .acoustic  // playhead-xsdz.8: composite boundary discontinuity is an audio-derived corroborator
         case .catalog:     return .lexical  // catalog entries are lexical matches
         case .classifier:  return .foundationModel  // legacy classifier ≈ FM
         case .fingerprint: return .fingerprint

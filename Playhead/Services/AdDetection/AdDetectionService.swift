@@ -207,6 +207,23 @@ struct AdDetectionConfig: Sendable {
     ///     same `consumersReadChapterPlan` predicate.
     let chapterSignalMode: ChapterSignalMode
 
+    /// playhead-xsdz.8: master kill switch for the composite audio-forensics
+    /// boundary evidence channel (`AudioForensicsBoundaryDetector`). When
+    /// `false` (the production default), `buildEvidenceLedger` builds NO
+    /// `.audioForensics` entry — removing the channel's fusion mass entirely
+    /// and restoring byte-identical pre-xsdz.8 behaviour. Flip to `true` to
+    /// enable: the detector then measures the physical boundary discontinuity
+    /// (loudness / spectral-flux / noise-floor / production-environment step)
+    /// at each candidate span edge from the already-available per-window
+    /// acoustic features and emits a single capped corroborative entry when
+    /// the merged boundary score is significant.
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate: main stays
+    /// behavior-neutral and the channel is never wired into a production
+    /// config or A/B arm until a corpus eval shows lift. The detector stays
+    /// fully built and unit-tested, just inert in production.
+    let audioForensicsEnabled: Bool
+
     /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
     /// Requires candidate < markOnly < confirmation < autoSkip (asserted in debug).
     var bandThresholds: ConfidenceBandThresholds {
@@ -242,7 +259,8 @@ struct AdDetectionConfig: Sendable {
         evidenceFragilityPenaltyEnabled: Bool = false,
         fragilityThreshold: Double = 2.0,
         fragilityPenalty: Double = 0.85,
-        chapterSignalMode: ChapterSignalMode = .off
+        chapterSignalMode: ChapterSignalMode = .off,
+        audioForensicsEnabled: Bool = false
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -268,6 +286,7 @@ struct AdDetectionConfig: Sendable {
         self.fragilityThreshold = fragilityThreshold
         self.fragilityPenalty = fragilityPenalty
         self.chapterSignalMode = chapterSignalMode
+        self.audioForensicsEnabled = audioForensicsEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -294,7 +313,8 @@ struct AdDetectionConfig: Sendable {
         evidenceFragilityPenaltyEnabled: false,
         fragilityThreshold: 2.0,
         fragilityPenalty: 0.85,
-        chapterSignalMode: .off
+        chapterSignalMode: .off,
+        audioForensicsEnabled: false
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -806,6 +826,11 @@ actor AdDetectionService {
     /// per-show), so unlike `scanner` it never needs recreation when the
     /// podcast profile changes. Constructed once.
     private let lexicalAutoAdBuilder = LexicalAutoAdEvidenceBuilder()
+    /// playhead-xsdz.8: Composite audio-forensics boundary detector.
+    /// Stateless, show-agnostic, and gated OFF by default
+    /// (`config.audioForensicsEnabled`), so it is constructed once and only
+    /// invoked when the flag is on.
+    private let audioForensicsDetector = AudioForensicsBoundaryDetector()
     /// Per-show priors parsed from the current PodcastProfile.
     private var showPriors: ShowPriors
     /// playhead-8n1: cache the current PodcastProfile so the Phase 4
@@ -3584,6 +3609,23 @@ actor AdDetectionService {
             ? lexicalAutoAdBuilder.buildEntries(hits: lexicalHits, for: span)
             : []
 
+        // playhead-xsdz.8: Composite audio-forensics boundary entries. The
+        // detector measures the PHYSICAL discontinuity (loudness / spectral-
+        // flux / noise-floor / production-environment step) across the span's
+        // start and end edges from the per-window acoustic features that are
+        // ALREADY available here, merges the sigma-normalized sub-signals into
+        // ONE boundary score, and emits a single capped `.audioForensics`
+        // entry when that score is significant. Gated OFF by default: when
+        // `audioForensicsEnabled` is false the detector is never called, so
+        // NO entry is built and the ledger is byte-identical to pre-xsdz.8.
+        let audioForensicsEntries = config.audioForensicsEnabled
+            ? audioForensicsDetector.buildEntries(
+                span: span,
+                episodeWindows: featureWindows,
+                fusionConfig: fusionConfig
+            )
+            : []
+
         // Acoustic entries: from FeatureWindows in the span range.
         // playhead-fqc8: pass `acousticBreaks` so a `.classifierSeed`-anchored
         // span with an aligned break also gets a `.breakAlignment` entry,
@@ -3679,6 +3721,7 @@ actor AdDetectionService {
             metadataEntries: metadataEntries,
             breakAlignmentEntries: breakAlignmentEntries,
             lexicalAutoAdEntries: lexicalAutoAdEntries,
+            audioForensicsEntries: audioForensicsEntries,
             // Cycle 1 H2: effective mode so fusion's `contributesToExistingCandidateLedger`
             // gate honors the registry's decision for this cohort.
             mode: effectiveFMBackfillMode,

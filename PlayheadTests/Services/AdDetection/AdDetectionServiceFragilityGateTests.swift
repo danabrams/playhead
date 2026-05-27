@@ -73,6 +73,8 @@ struct AdDetectionServiceFragilityGateTests {
             return .metadata(cueCount: 1, sourceField: .description, dominantCueType: .disclosure)
         case .musicBed:
             return .musicBed(presenceFraction: 0.5, foregroundCount: 1)
+        case .audioForensics:
+            return .audioForensics(boundaryScore: 0.5, dominantSignal: "loudnessJump", contributingSignalCount: 1)
         case .audit, .operational:
             // Observability-only rows are filtered out before scoring; the
             // detail shape is irrelevant. Use a benign classifier payload.

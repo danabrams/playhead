@@ -82,6 +82,20 @@ enum EvidenceLedgerDetail: Sendable {
     /// `.foreground` (jingles/stingers) vs. `.background` (production
     /// beds under voice). Emitted by `MusicBedLedgerEvaluator`.
     case musicBed(presenceFraction: Double, foregroundCount: Int)
+    /// playhead-xsdz.8: Composite audio-forensics boundary evidence.
+    /// `boundaryScore` is the merged, sigma-normalized boundary-discontinuity
+    /// score in `[0, 1]` (loudness jump + spectral-flux shift + noise-floor
+    /// change + production/environment change across the span edges).
+    /// `dominantSignal` records which sub-signal contributed the most mass
+    /// (for diagnostics / NARL replay — e.g. `"loudnessJump"`,
+    /// `"spectralShift"`, `"noiseFloor"`, `"environment"`).
+    /// `contributingSignalCount` is how many sub-signals cleared their
+    /// per-signal floor. Emitted by `AudioForensicsBoundaryDetector`.
+    case audioForensics(
+        boundaryScore: Double,
+        dominantSignal: String,
+        contributingSignalCount: Int
+    )
 }
 
 // MARK: - EvidenceSubSource

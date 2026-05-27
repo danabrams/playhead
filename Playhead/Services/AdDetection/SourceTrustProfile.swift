@@ -101,7 +101,7 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
             // corroboration, so the rule cannot self-corroborate against the
             // raw lexical channel it derives from.
             return .textual
-        case .acoustic, .musicBed, .breakAlignment:
+        case .acoustic, .musicBed, .breakAlignment, .audioForensics:
             // musicBed is a peer of acoustic: same modality (audio
             // features), different trigger geometry (interior coverage
             // vs. boundary RMS drop). Same family keeps the orthogonal-
@@ -111,6 +111,13 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
             // signal, so it shares the acoustic family for trust-update
             // orthogonality even though it has a distinct per-source
             // weight cap (`breakAlignmentCap`).
+            // playhead-xsdz.8: audioForensics is the composite boundary-
+            // discontinuity channel — also audio-derived, so it shares the
+            // acoustic family. Critically, this keeps the duel's "never the
+            // sole promoter" intent: an `.audioForensics` decision still
+            // requires a DIFFERENT-family signal to count as cross-family
+            // corroboration, so it cannot self-corroborate against the
+            // acoustic / break-alignment channels it shares a modality with.
             return .acoustic
         case .fm:
             return .model
@@ -267,6 +274,10 @@ struct SourceTrustProfile: Sendable, Equatable {
         // Mirror its acoustic-family peer prior (Beta(5,5) → 0.50)
         // until replay-corpus evidence is available to update it.
         .breakAlignment: BetaPosterior(alpha: 5, beta: 5), // 0.50 — boundary alignment
+        // playhead-xsdz.8: composite boundary-discontinuity channel is an
+        // acoustic-family peer. Mirror its acoustic-family priors
+        // (Beta(5,5) → 0.50) until replay-corpus evidence is available.
+        .audioForensics: BetaPosterior(alpha: 5, beta: 5), // 0.50 — boundary discontinuity
         .audit:          BetaPosterior(alpha: 1, beta: 1),  // 0.50 — observability-only
         .operational:    BetaPosterior(alpha: 1, beta: 1),  // 0.50 — observability-only
     ]

@@ -343,6 +343,24 @@ extension DecisionLogEntry.LedgerEntry.Detail {
                 matchCount: nil, averageSimilarity: nil,
                 cueCount: nil, sourceField: nil, dominantCueType: nil
             )
+        case .audioForensics(let boundaryScore, let dominantSignal, let contributingSignalCount):
+            // playhead-xsdz.8: composite boundary-discontinuity detail.
+            // Reuses the acoustic-shaped fields so the decision-log schema
+            // stays purely additive — `score` holds the merged boundary
+            // score, `entryCount` holds the contributing sub-signal count,
+            // and `sourceField` records the dominant sub-signal label for
+            // NARL replay. Older corpus builders that read only `source` /
+            // `weight` are unaffected.
+            self.init(
+                kind: "audioForensics",
+                score: boundaryScore,
+                disposition: nil, band: nil, cohortPromptLabel: nil,
+                matchedCategories: nil,
+                breakStrength: nil,
+                entryCount: contributingSignalCount,
+                matchCount: nil, averageSimilarity: nil,
+                cueCount: nil, sourceField: dominantSignal, dominantCueType: nil
+            )
         }
     }
 }
