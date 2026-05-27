@@ -470,6 +470,42 @@ struct TargetedWindowNarrowerTests {
         )
     }
 
+    /// xsdz.3 audit-selection builder: `segmentCount` 1-second segments with
+    /// ad-cue text at the keys of `adCueSegments` and neutral text elsewhere.
+    /// Unlike `makeLexicalClusterInputs`, this seeds NO evidence anchor — the
+    /// `.scanRandomAuditWindows` phase ignores the evidence catalog and drives
+    /// its selection purely from the lexical scan + audit seed, so leaving the
+    /// catalog empty keeps the test focused on the nomination/random logic.
+    private func makeAuditClusterInputs(
+        segmentCount: Int,
+        adCueSegments: [Int: String]
+    ) -> TargetedWindowNarrower.Inputs {
+        let assetId = "asset-audit-\(segmentCount)-\(adCueSegments.count)"
+        let transcriptVersion = "tx-audit-v1"
+        let lines: [(start: Double, end: Double, text: String)] =
+            (0..<segmentCount).map { idx in
+                let text = adCueSegments[idx] ?? "neutral conversation line \(idx) about the topic"
+                return (Double(idx), Double(idx + 1), text)
+            }
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion,
+            lines: lines
+        )
+        return TargetedWindowNarrower.Inputs(
+            analysisAssetId: assetId,
+            podcastId: "podcast-audit",
+            transcriptVersion: transcriptVersion,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: assetId,
+                transcriptVersion: transcriptVersion,
+                entries: []
+            ),
+            auditWindowSampleRate: CoveragePlanner.defaultAuditWindowSampleRate
+        )
+    }
+
     @Test("xsdz.2: a dense ad-cue cluster tightens both edges inward toward the cluster")
     func lexicalClusterTightensBothEdges() {
         // 30-segment episode, anchor at 10 (default lookback would give window
@@ -714,6 +750,200 @@ struct TargetedWindowNarrowerTests {
         }
     }
 
+    // MARK: - playhead-xsdz.3: lexically-nominated audit-window selection
+
+    @Test("xsdz.3: audit budget is pointed at the ad-likely cluster, not a random block")
+    func auditNominatesAdLikelyCluster() {
+        // 60-segment episode (1s each). Default audit sample rate ~0.12 →
+        // budget ~7 segments. Plant a dense ad-cue cluster late in the episode
+        // (segments 50..55). The pure-random block lands elsewhere (seed-driven);
+        // the nominated selection MUST cover the ad-cue segments.
+        let inputs = makeAuditClusterInputs(
+            segmentCount: 60,
+            adCueSegments: [
+                50: "this episode is brought to you by acme tools",
+                51: "use code SAVE at checkout for a free trial",
+                52: "visit acmetools.com for this special offer",
+                53: "promo code SAVE gets you a money back guarantee",
+                54: "sign up now at acmetools.com slash deal",
+                55: "that offer again is acmetools.com slash deal"
+            ]
+        )
+        let nominated = TargetedWindowNarrower.narrow(
+            phase: .scanRandomAuditWindows,
+            inputs: inputs // default config: lexicalClusterSnapEnabled == true
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+
+        // The ad-cue core must be inside the audited set.
+        for cue in 50...55 {
+            #expect(nominated.contains(cue), "nominated audit must cover ad-cue segment \(cue)")
+        }
+    }
+
+    @Test("xsdz.3: nomination never exceeds the same budget as the random baseline")
+    func auditNominationRespectsBudget() {
+        // Two dense clusters whose combined segment span far exceeds the budget;
+        // the selection must still cap at `targetCount` (no-FP-widening).
+        let inputs = makeAuditClusterInputs(
+            segmentCount: 80,
+            adCueSegments: [
+                10: "brought to you by globex",
+                11: "use code DEAL for a free trial",
+                12: "visit globex.com slash offer",
+                13: "promo code DEAL money back guarantee",
+                60: "brought to you by initech",
+                61: "use code BOSS for a free trial",
+                62: "visit initech.com slash deal",
+                63: "promo code BOSS special offer"
+            ]
+        )
+        let nominated = TargetedWindowNarrower.narrow(
+            phase: .scanRandomAuditWindows,
+            inputs: inputs
+        ).narrowedSegments?.map(\.segmentIndex) ?? []
+
+        // Budget == round(80 * 0.12) = 10 (clamped sample rate is 0.12).
+        let budget = Int((Double(80) * CoveragePlanner.defaultAuditWindowSampleRate).rounded())
+        #expect(!nominated.isEmpty)
+        #expect(nominated.count <= budget, "nomination must not exceed the audit budget (\(nominated.count) > \(budget))")
+    }
+
+    @Test("xsdz.3: densest cluster is audited first under a tight budget")
+    func auditPrefersDensestCluster() {
+        // A sparse 1-hit cluster early, a dense 5-hit cluster late, separated by
+        // far more than the cluster gap. The budget is tight enough that the
+        // dense cluster's segments must be chosen ahead of the sparse one's.
+        let inputs = makeAuditClusterInputs(
+            segmentCount: 50,
+            adCueSegments: [
+                3: "this episode is brought to you by widgetco",
+                40: "use code DENSE for a free trial",
+                41: "visit dense.com slash offer",
+                42: "promo code DENSE money back guarantee",
+                43: "sign up now at dense.com slash deal",
+                44: "that offer again is dense.com slash deal"
+            ]
+        )
+        let nominated = TargetedWindowNarrower.narrow(
+            phase: .scanRandomAuditWindows,
+            inputs: inputs
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+
+        // The dense cluster (40..44) is the strongest ad signal; its segments
+        // must be audited. (The sparse seg-3 hit may or may not make the cut,
+        // but the dense core is non-negotiable.)
+        for cue in 40...44 {
+            #expect(nominated.contains(cue), "densest cluster segment \(cue) must be audited first")
+        }
+    }
+
+    @Test("xsdz.3: no ad-cue hits ⇒ falls back to the pure-random block (unchanged)")
+    func auditFallsBackToRandomWithNoCues() {
+        // All-neutral text → no lexical clusters → nomination empty → the
+        // selection must be bit-identical to the pre-xsdz.3 random block, which
+        // is what the snap-disabled baseline computes.
+        let inputs = makeAuditClusterInputs(segmentCount: 60, adCueSegments: [:])
+        let nominated = TargetedWindowNarrower.narrow(
+            phase: .scanRandomAuditWindows,
+            inputs: inputs
+        ).narrowedSegments?.map(\.segmentIndex) ?? []
+
+        let baselineConfig = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 60,
+            lexicalClusterSnapEnabled: false
+        )
+        let random = TargetedWindowNarrower.narrow(
+            phase: .scanRandomAuditWindows,
+            inputs: inputs,
+            config: baselineConfig
+        ).narrowedSegments?.map(\.segmentIndex) ?? []
+
+        #expect(nominated == random, "no cluster ⇒ nomination must reproduce the random block exactly")
+        // The random block is contiguous of the budgeted length.
+        let budget = Int((Double(60) * CoveragePlanner.defaultAuditWindowSampleRate).rounded())
+        #expect(nominated.count == budget)
+    }
+
+    @Test("xsdz.3: snap-disabled config audits the pure-random block (A/B baseline path)")
+    func auditDisabledFeatureUsesRandom() {
+        // Even WITH a dense ad-cue cluster present, the snap-disabled config
+        // (the acoustic-only A/B baseline) must ignore lexical nomination and
+        // pick the random block — so the A/B can isolate the nomination effect.
+        let inputs = makeAuditClusterInputs(
+            segmentCount: 60,
+            adCueSegments: [
+                50: "this episode is brought to you by acme tools",
+                51: "use code SAVE at checkout for a free trial",
+                52: "visit acmetools.com for this special offer",
+                53: "promo code SAVE gets you a money back guarantee"
+            ]
+        )
+        let baselineConfig = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 60,
+            lexicalClusterSnapEnabled: false
+        )
+        let segments = TargetedWindowNarrower.narrow(
+            phase: .scanRandomAuditWindows,
+            inputs: inputs,
+            config: baselineConfig
+        ).narrowedSegments?.map(\.segmentIndex).sorted() ?? []
+
+        // The random block is one contiguous run; a nominated selection over the
+        // 50..53 cluster would NOT be contiguous from the block start. Assert
+        // contiguity to prove the disabled path took the random branch.
+        #expect(!segments.isEmpty)
+        let isContiguous = zip(segments, segments.dropFirst()).allSatisfy { $0 + 1 == $1 }
+        #expect(isContiguous, "snap-disabled config must return the contiguous random block")
+    }
+
+    @Test("xsdz.3: nominated audit selection is deterministic across repeated calls")
+    func auditNominationIsDeterministic() {
+        let inputs = makeAuditClusterInputs(
+            segmentCount: 60,
+            adCueSegments: [
+                30: "this episode is brought to you by acme",
+                31: "use code SAVE at checkout",
+                32: "visit acme.com for a free trial",
+                33: "promo code SAVE for a special offer"
+            ]
+        )
+        let first = TargetedWindowNarrower.narrow(
+            phase: .scanRandomAuditWindows,
+            inputs: inputs
+        ).narrowedSegments?.map(\.segmentIndex) ?? []
+        let second = TargetedWindowNarrower.narrow(
+            phase: .scanRandomAuditWindows,
+            inputs: inputs
+        ).narrowedSegments?.map(\.segmentIndex) ?? []
+        #expect(first == second)
+        #expect(!first.isEmpty)
+    }
+
+    @Test("xsdz.3: sparse-cluster budget surplus is topped up with the random block")
+    func auditUnionsWithRandomWhenLexicalSparse() {
+        // A single tiny 1-segment cue cluster in a long episode: nomination
+        // covers only ~1 segment, far under the budget. The union-with-random
+        // top-up must spend the rest of the budget so coverage never drops below
+        // the pure-random baseline's segment COUNT.
+        let inputs = makeAuditClusterInputs(
+            segmentCount: 80,
+            adCueSegments: [
+                40: "visit loneoffer.com slash deal" // single isolated urlCTA hit
+            ]
+        )
+        let nominated = Set(TargetedWindowNarrower.narrow(
+            phase: .scanRandomAuditWindows,
+            inputs: inputs
+        ).narrowedSegments?.map(\.segmentIndex) ?? [])
+
+        let budget = Int((Double(80) * CoveragePlanner.defaultAuditWindowSampleRate).rounded())
+        // Must cover the lone cue AND fill the budget via the random top-up.
+        #expect(nominated.contains(40), "the lone ad cue must be nominated")
+        #expect(nominated.count == budget, "leftover budget must be filled by the random block (\(nominated.count) != \(budget))")
+    }
+
     // MARK: - Cycle 2 H13: empty / wasEmpty
 
     @Test("Cycle 2 H13: harvester with no evidence anchors returns wasEmpty")
@@ -782,6 +1012,20 @@ struct TargetedWindowNarrowerTests {
 
     @Test("Cycle 2 Rev3-M3: audit seed rotates with episodesSinceLastFullRescan")
     func auditSeedRotatesAcrossObservations() {
+        // playhead-xsdz.3: this test pins the seed-ROTATION property of the
+        // RANDOM audit-block path (`randomAuditBlock` / `auditSeed`), which is
+        // unchanged by xsdz.3. With lexical nomination ON (the default),
+        // `makeInputs`'s ad-cue segments form a cluster the audit deterministically
+        // pins to — so nomination intentionally does NOT rotate (targeting the
+        // ad-dense core is the point). To keep this test on its actual subject —
+        // the random fallback's seed rotation — drive it through the snap-DISABLED
+        // config (the pure-random path that nomination falls back to when there are
+        // no ad cues, and tops up with when the budget exceeds the cluster).
+        let snapDisabled = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 60,
+            lexicalClusterSnapEnabled: false
+        )
         let baseInputs = makeInputs()
         let zero = TargetedWindowNarrower.Inputs(
             analysisAssetId: baseInputs.analysisAssetId,
@@ -801,9 +1045,9 @@ struct TargetedWindowNarrowerTests {
             auditWindowSampleRate: baseInputs.auditWindowSampleRate,
             episodesSinceLastFullRescan: 1
         )
-        let segs0 = TargetedWindowNarrower.narrow(phase: .scanRandomAuditWindows, inputs: zero)
+        let segs0 = TargetedWindowNarrower.narrow(phase: .scanRandomAuditWindows, inputs: zero, config: snapDisabled)
             .narrowedSegments?.map(\.segmentIndex) ?? []
-        let segs1 = TargetedWindowNarrower.narrow(phase: .scanRandomAuditWindows, inputs: one)
+        let segs1 = TargetedWindowNarrower.narrow(phase: .scanRandomAuditWindows, inputs: one, config: snapDisabled)
             .narrowedSegments?.map(\.segmentIndex) ?? []
         // Different seed material → different audit window picks at least
         // once across a small batch of consecutive observations.
@@ -818,7 +1062,7 @@ struct TargetedWindowNarrowerTests {
                 auditWindowSampleRate: baseInputs.auditWindowSampleRate,
                 episodesSinceLastFullRescan: tick
             )
-            let nextSegs = TargetedWindowNarrower.narrow(phase: .scanRandomAuditWindows, inputs: candidate)
+            let nextSegs = TargetedWindowNarrower.narrow(phase: .scanRandomAuditWindows, inputs: candidate, config: snapDisabled)
                 .narrowedSegments?.map(\.segmentIndex) ?? []
             if nextSegs != segs0 {
                 sawDifferent = true

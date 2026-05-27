@@ -239,10 +239,25 @@ struct BackfillJobRunnerTests {
             #expect(!refs.isEmpty)
             #expect(scannedSet.isSubset(of: fullLineRefs))
             #expect(scannedSet.count < fullLineRefs.count, "targeted phase should submit a strict subset of transcript lines")
-            let sorted = refs.sorted()
-            let contiguous = Array((sorted.first ?? 0)...(sorted.last ?? -1))
-            #expect(sorted == contiguous, "targeted phase should submit a contiguous envelope, got \(sorted)")
         }
+        // playhead-xsdz.3: the audit phase (`.scanRandomAuditWindows`) is no
+        // longer guaranteed contiguous. It now points its budget at the
+        // lexically-nominated ad-likely regions (here the segment-12/13 sponsor
+        // cluster) and tops up any remaining budget with a random block — a
+        // UNION that is intentionally non-contiguous (e.g. [4, 12, 13, 14]).
+        // The harvester / likely-ad-slot phases still produce contiguous
+        // per-window envelopes for this fixture, so assert that AT LEAST the
+        // two anchor-driven phases submit a contiguous envelope while leaving
+        // the audit phase free to be the nominated union.
+        let contiguousCount = submittedLineRefs.filter { refs in
+            let sorted = refs.sorted()
+            guard let lo = sorted.first, let hi = sorted.last else { return false }
+            return sorted == Array(lo...hi)
+        }.count
+        #expect(
+            contiguousCount >= 2,
+            "the anchor-driven phases should submit contiguous envelopes; the audit phase may be a nominated union, got submissions \(submittedLineRefs.map { $0.sorted() })"
+        )
 
         for row in passA {
             #expect(row.windowFirstAtomOrdinal >= fullFirst)
