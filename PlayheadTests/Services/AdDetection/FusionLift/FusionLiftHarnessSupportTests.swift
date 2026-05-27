@@ -354,21 +354,22 @@ struct FusionLiftHarnessSupportTests {
         #expect(LexicalScorerArm.xsdz23only.programOn == false)
     }
 
-    @Test("each arm's AdDetectionConfig threshold matches its xsdz.1 toggle exactly")
-    func lexicalArm_thresholdPerArm() {
-        let onValue = AdDetectionConfig.default.lexicalAutoAdQualifiedThreshold
-        let offValue = LexicalScorerArmConfig.disabledQualifiedThreshold
+    @Test("each arm's lexicalAutoAdEnabled flag matches its xsdz.1 toggle exactly")
+    func lexicalArm_autoAdFlagPerArm() {
         for (arm, xsdz1On, _) in Self.expectedArmMatrix {
             let config = LexicalScorerArmConfig.adDetectionConfig(for: arm)
-            let expected = xsdz1On ? onValue : offValue
             #expect(
-                config.lexicalAutoAdQualifiedThreshold == expected,
-                "arm \(arm.rawValue): threshold should be \(expected) (xsdz1On=\(xsdz1On))"
+                config.lexicalAutoAdEnabled == xsdz1On,
+                "arm \(arm.rawValue): lexicalAutoAdEnabled should be \(xsdz1On)"
+            )
+            // The threshold is held at the production default across ALL arms —
+            // post-xsdz.6 the boolean is the toggle, not the threshold, so the
+            // threshold must NOT vary per arm.
+            #expect(
+                config.lexicalAutoAdQualifiedThreshold == AdDetectionConfig.default.lexicalAutoAdQualifiedThreshold,
+                "arm \(arm.rawValue): lexicalAutoAdQualifiedThreshold must stay at the production default"
             )
         }
-        // The OFF value must clear the auto-skip gate so the track is a true
-        // no-op (it can never promote alone), not merely "a higher threshold".
-        #expect(offValue >= AdDetectionConfig.default.autoSkipConfidenceThreshold)
     }
 
     @Test("each arm's NarrowingConfig snap flag matches its xsdz.2/.3 toggle exactly")
@@ -395,11 +396,15 @@ struct FusionLiftHarnessSupportTests {
     @Test("arms differ ONLY in the two program gates — every other field is held constant")
     func lexicalArm_isolation_onlyTwoTogglesVary() {
         // The two reference configs: an xsdz.1-off arm and an xsdz.1-on arm.
-        // Threshold is the ONLY field allowed to vary across the AdDetection
-        // configs; a re-stamp proves no other field drifted.
+        // lexicalAutoAdEnabled is the ONLY field allowed to vary across the
+        // AdDetection configs; a re-stamp proves no other field drifted.
         let off = LexicalScorerArmConfig.adDetectionConfig(xsdz1On: false)
         let on = LexicalScorerArmConfig.adDetectionConfig(xsdz1On: true)
-        #expect(off.lexicalAutoAdQualifiedThreshold != on.lexicalAutoAdQualifiedThreshold)
+        #expect(off.lexicalAutoAdEnabled != on.lexicalAutoAdEnabled)
+        #expect(off.lexicalAutoAdEnabled == false)
+        #expect(on.lexicalAutoAdEnabled == true)
+        // The threshold is held constant — it is no longer the xsdz.1 toggle.
+        #expect(off.lexicalAutoAdQualifiedThreshold == on.lexicalAutoAdQualifiedThreshold)
         #expect(off.fmBackfillMode == on.fmBackfillMode)
         #expect(off.fmBackfillMode == .full)
         #expect(off.chapterSignalMode == on.chapterSignalMode)
@@ -435,19 +440,31 @@ struct FusionLiftHarnessSupportTests {
         #expect(reEnabled == def)
     }
 
-    @Test("alon arm reproduces production defaults on both gates (cumulative-treatment endpoint)")
-    func lexicalArm_alonMatchesProductionDefaults() {
+    @Test("alon arm enables BOTH gates (cumulative-treatment endpoint = production defaults + xsdz.1)")
+    func lexicalArm_alonEnablesBothGates() {
+        // Post-xsdz.6, the production default is xsdz.1 OFF, so alon = production
+        // defaults PLUS the xsdz.1 rule enabled. The xsdz.2/.3 gate (snap) and
+        // the held-constant fields still equal `.default`.
         let config = LexicalScorerArmConfig.adDetectionConfig(for: .alon)
+        #expect(config.lexicalAutoAdEnabled == true)
         #expect(config.lexicalAutoAdQualifiedThreshold == AdDetectionConfig.default.lexicalAutoAdQualifiedThreshold)
         #expect(LexicalScorerArmConfig.narrowingConfig(for: .alon) == NarrowingConfig.default)
         #expect(config.fmBackfillMode == .full)
         #expect(config.chapterSignalMode == .off)
     }
 
+    @Test("xsdz23only arm IS the production default (xsdz.1 off + snap on) post-xsdz.6")
+    func lexicalArm_xsdz23onlyMatchesProductionDefaults() {
+        let config = LexicalScorerArmConfig.adDetectionConfig(for: .xsdz23only)
+        #expect(config.lexicalAutoAdEnabled == AdDetectionConfig.default.lexicalAutoAdEnabled)
+        #expect(config.lexicalAutoAdEnabled == false)
+        #expect(LexicalScorerArmConfig.narrowingConfig(for: .xsdz23only) == NarrowingConfig.default)
+    }
+
     @Test("baseline arm disables BOTH gates (cumulative-baseline endpoint)")
     func lexicalArm_baselineDisablesBothGates() {
         let config = LexicalScorerArmConfig.adDetectionConfig(for: .baseline)
-        #expect(config.lexicalAutoAdQualifiedThreshold == LexicalScorerArmConfig.disabledQualifiedThreshold)
+        #expect(config.lexicalAutoAdEnabled == false)
         #expect(LexicalScorerArmConfig.narrowingConfig(for: .baseline).lexicalClusterSnapEnabled == false)
     }
 

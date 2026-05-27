@@ -109,11 +109,13 @@ enum FusionLiftArm: String, Sendable, CaseIterable {
 /// Unlike the chapter A/B above, every arm here keeps `chapterSignalMode:
 /// .off` and `fmBackfillMode: .full`; the program under test is the shipped
 /// lexical-scorer trio:
-///   * xsdz.1 — the lexical-auto-ad qualified track, gated by
-///     `AdDetectionConfig.lexicalAutoAdQualifiedThreshold` (0.50 = on; a
-///     value `>= autoSkipConfidenceThreshold`, here 2.0, makes the track a
-///     no-op — the rule still contributes fusion mass but never promotes
-///     alone).
+///   * xsdz.1 — the lexical-auto-ad rule, gated post-xsdz.6 by the
+///     `AdDetectionConfig.lexicalAutoAdEnabled` BOOLEAN (`true` = on builds
+///     the `.lexicalAutoAd` ledger entry; `false` = off, the production
+///     default, skips it entirely — removing both the auto-skip track and the
+///     entry's fusion mass). NOTE: raising `lexicalAutoAdQualifiedThreshold`
+///     no longer disables the rule (the entry would still be built), so the
+///     threshold is held at the production default across every arm.
 ///   * xsdz.2 — inward lexical-cluster region tightening in
 ///     `TargetedWindowNarrower`, gated by
 ///     `NarrowingConfig.lexicalClusterSnapEnabled`.
@@ -121,7 +123,7 @@ enum FusionLiftArm: String, Sendable, CaseIterable {
 ///     gated by the SAME `lexicalClusterSnapEnabled` flag.
 ///
 /// Each arm is defined by exactly TWO orthogonal toggles:
-///   * `xsdz1On` → the `lexicalAutoAdQualifiedThreshold` (on = 0.50, off = 2.0).
+///   * `xsdz1On` → the `lexicalAutoAdEnabled` flag (on = true, off = false).
 ///   * `xsdz23On` → the `lexicalClusterSnapEnabled` flag (on = true, off =
 ///     false). xsdz.2 and xsdz.3 share this one flag and CANNOT be separated
 ///     without new production plumbing, so they always move together as a
@@ -130,27 +132,30 @@ enum FusionLiftArm: String, Sendable, CaseIterable {
 /// The two endpoints (`baseline` = both off, `alon` = both on) are the
 /// cumulative A/B; the two singletons (`xsdz1only`, `xsdz23only`) isolate
 /// which feature regresses live ad detection in a single Catalyst run.
+/// Post-xsdz.6 the production default is `xsdz23only` (xsdz.1 off, snap on).
 enum LexicalScorerArm: String, Sendable, CaseIterable {
-    /// Program OFF: xsdz.1 disabled (threshold 2.0) AND xsdz.2/.3 disabled
-    /// (`lexicalClusterSnapEnabled: false`). The acoustic-only, no-auto-ad
-    /// A/B baseline — the reference every other arm's delta is measured from.
+    /// Program OFF: xsdz.1 disabled (`lexicalAutoAdEnabled: false`) AND
+    /// xsdz.2/.3 disabled (`lexicalClusterSnapEnabled: false`). The
+    /// acoustic-only, no-auto-ad A/B baseline — the reference every other
+    /// arm's delta is measured from.
     case baseline
-    /// xsdz.1 ONLY: lexical-auto-ad qualified track on (threshold 0.50),
+    /// xsdz.1 ONLY: lexical-auto-ad rule on (`lexicalAutoAdEnabled: true`),
     /// region-tighten + audit-nominate off (`lexicalClusterSnapEnabled:
-    /// false`). Isolates the auto-ad track's contribution.
+    /// false`). Isolates the auto-ad rule's contribution.
     case xsdz1only
     /// xsdz.2+xsdz.3 ONLY: region-tighten + audit-nominate on
-    /// (`lexicalClusterSnapEnabled: true`), auto-ad track off (threshold 2.0).
-    /// Isolates the narrower's contribution. The two share one flag so they
-    /// move together.
+    /// (`lexicalClusterSnapEnabled: true`), auto-ad rule off
+    /// (`lexicalAutoAdEnabled: false`). Isolates the narrower's contribution.
+    /// The two share one flag so they move together. Post-xsdz.6 this arm IS
+    /// the production default.
     case xsdz23only
-    /// All on: production defaults (threshold 0.50,
-    /// `lexicalClusterSnapEnabled: true`) — the current main default and the
+    /// All on: production defaults PLUS the xsdz.1 rule re-enabled
+    /// (`lexicalAutoAdEnabled: true`, `lexicalClusterSnapEnabled: true`) — the
     /// cumulative-treatment endpoint.
     case alon
 
-    /// Whether the xsdz.1 lexical-auto-ad qualified track is enabled in this
-    /// arm (drives the `lexicalAutoAdQualifiedThreshold`).
+    /// Whether the xsdz.1 lexical-auto-ad rule is enabled in this arm (drives
+    /// the `lexicalAutoAdEnabled` flag).
     var xsdz1On: Bool {
         switch self {
         case .baseline, .xsdz23only: return false
@@ -181,7 +186,7 @@ enum LexicalScorerArm: String, Sendable, CaseIterable {
 /// config helper, plus the per-arm isolation guard). The harness then
 /// injects:
 ///   * `adDetectionConfig(...)` into `AdDetectionService` (the
-///     `lexicalAutoAdQualifiedThreshold` toggles xsdz.1), and
+///     `lexicalAutoAdEnabled` flag toggles xsdz.1), and
 ///   * `narrowingConfig(...)` into the `BackfillJobRunner` it constructs in
 ///     its live runner factory (the `lexicalClusterSnapEnabled` flag toggles
 ///     xsdz.2/.3).
@@ -192,29 +197,31 @@ enum LexicalScorerArm: String, Sendable, CaseIterable {
 /// are thin shims for the cumulative-endpoint (both-on / both-off) view used by
 /// the back-compat helpers and the chapter A/B.
 ///
-/// CRITICAL invariant (asserted by the unit tests): the all-on arm
-/// (`xsdz1On && xsdz23On`) is byte-identical to production defaults — its
-/// threshold == `AdDetectionConfig.default.lexicalAutoAdQualifiedThreshold`
-/// and its `NarrowingConfig` == `NarrowingConfig.default`. The other arms
-/// deviate ONLY in those two program gates: each toggle moves exactly one
-/// field, and every non-gate field stays equal to `.default` across all arms.
+/// CRITICAL invariant (asserted by the unit tests): each arm deviates from
+/// `.default` ONLY in its two program gates — the xsdz.1 gate
+/// (`AdDetectionConfig.lexicalAutoAdEnabled`) and the xsdz.2/.3 gate
+/// (`NarrowingConfig.lexicalClusterSnapEnabled`). Each toggle moves exactly
+/// one field; every non-gate field stays equal to `.default` across all arms.
 /// A mislabeled arm (a toggle wired to the wrong field) would attribute a
 /// regression to the wrong feature — so the isolation is the load-bearing
 /// correctness property the hermetic tests pin.
+///
+/// Post-playhead-xsdz.6 the production default is xsdz.1 OFF
+/// (`lexicalAutoAdEnabled == false`) + xsdz.2/.3 ON
+/// (`lexicalClusterSnapEnabled == true`), so the arm that matches production
+/// is `xsdz23only`, NOT `alon`. The xsdz.1 gate is the `lexicalAutoAdEnabled`
+/// BOOLEAN — not a threshold: after xsdz.6 the rule's ledger entry is only
+/// built when the flag is `true`, so raising `lexicalAutoAdQualifiedThreshold`
+/// no longer disables the rule (the entry, and its fusion mass, would still be
+/// built). The harness therefore holds `lexicalAutoAdQualifiedThreshold` at the
+/// production default (0.50) across every arm and toggles the boolean alone.
 enum LexicalScorerArmConfig {
 
-    /// The threshold value that DISABLES the xsdz.1 qualified track. Any
-    /// value `>= AdDetectionConfig.autoSkipConfidenceThreshold` (default
-    /// 0.80) works; 2.0 is unmistakably "off" and matches the bead text.
-    static let disabledQualifiedThreshold: Double = 2.0
-
-    /// The `lexicalAutoAdQualifiedThreshold` for the xsdz.1 toggle: production
-    /// default (0.50) when on, `disabledQualifiedThreshold` (2.0) when off.
-    static func lexicalAutoAdQualifiedThreshold(xsdz1On: Bool) -> Double {
-        xsdz1On
-            ? AdDetectionConfig.default.lexicalAutoAdQualifiedThreshold
-            : disabledQualifiedThreshold
-    }
+    /// The `lexicalAutoAdEnabled` flag for the xsdz.1 toggle: `true` builds the
+    /// high-precision `.lexicalAutoAd` ledger entry (rule active), `false` (the
+    /// production default since xsdz.6) skips it entirely — removing both the
+    /// `lexicalAutoAdQualified` auto-skip track and the entry's fusion mass.
+    static func lexicalAutoAdEnabled(xsdz1On: Bool) -> Bool { xsdz1On }
 
     /// The `NarrowingConfig` for the xsdz.2/.3 toggle. ON is
     /// `NarrowingConfig.default` verbatim. OFF is the same shape with ONLY
@@ -239,8 +246,9 @@ enum LexicalScorerArmConfig {
     }
 
     /// Build the full `AdDetectionConfig` for an arm. Every field other than
-    /// `lexicalAutoAdQualifiedThreshold` is held identical across arms (and to
-    /// the values the chapter A/B uses), with `fmBackfillMode: .full` and
+    /// `lexicalAutoAdEnabled` is held identical across arms (and to the values
+    /// the chapter A/B uses) — including `lexicalAutoAdQualifiedThreshold` at
+    /// its production default — with `fmBackfillMode: .full` and
     /// `chapterSignalMode: .off` so the FM scan runs and feeds the fusion
     /// ledger but the chapter signal stays out of the way.
     static func adDetectionConfig(xsdz1On: Bool) -> AdDetectionConfig {
@@ -251,7 +259,7 @@ enum LexicalScorerArmConfig {
             hotPathLookahead: 90.0,
             detectorVersion: "xsdz.liveab",
             fmBackfillMode: .full,
-            lexicalAutoAdQualifiedThreshold: lexicalAutoAdQualifiedThreshold(xsdz1On: xsdz1On),
+            lexicalAutoAdEnabled: lexicalAutoAdEnabled(xsdz1On: xsdz1On),
             chapterSignalMode: .off
         )
     }
@@ -270,9 +278,9 @@ enum LexicalScorerArmConfig {
 
     // MARK: Cumulative-endpoint shims (back-compat)
 
-    /// Cumulative-endpoint threshold: both gates move together off `programOn`.
-    static func lexicalAutoAdQualifiedThreshold(programOn: Bool) -> Double {
-        lexicalAutoAdQualifiedThreshold(xsdz1On: programOn)
+    /// Cumulative-endpoint xsdz.1 gate: both gates move together off `programOn`.
+    static func lexicalAutoAdEnabled(programOn: Bool) -> Bool {
+        lexicalAutoAdEnabled(xsdz1On: programOn)
     }
 
     /// Cumulative-endpoint `NarrowingConfig`: both gates move together off

@@ -13,14 +13,13 @@
 // What this measures (and why it is not a meaningless zero)
 // ---------------------------------------------------------
 // The "lexical-scorer program" is the trio shipped under epic xsdz:
-//   * xsdz.1 — the lexical-auto-ad qualified track. A vetted strong
-//     co-occurrence (sponsor + promo code / URL CTA, negative guardrails
-//     cleared) can auto-skip on its own through
-//     `PromotionTrack.lexicalAutoAdQualified`. Gated by
-//     `AdDetectionConfig.lexicalAutoAdQualifiedThreshold` (0.50 = on; a
-//     value >= `autoSkipConfidenceThreshold` (0.80), here 2.0, makes the
-//     track a no-op — it still contributes fusion mass but never promotes
-//     alone).
+//   * xsdz.1 — the lexical-auto-ad rule. A vetted strong co-occurrence
+//     (sponsor + promo code / URL CTA, negative guardrails cleared) can
+//     auto-skip on its own through `PromotionTrack.lexicalAutoAdQualified`.
+//     Gated post-xsdz.6 by the `AdDetectionConfig.lexicalAutoAdEnabled`
+//     BOOLEAN (true = on builds the `.lexicalAutoAd` ledger entry; false =
+//     off, the production default, skips it — removing both the auto-skip
+//     track and the entry's fusion mass).
 //   * xsdz.2 — inward lexical-cue-cluster REGION TIGHTENING in
 //     `TargetedWindowNarrower`: pull each targeted-phase window's outer
 //     padding inward toward the ad-dense lexical core. Gated by
@@ -36,11 +35,11 @@
 // `fmBackfillMode: .full` (real FM ad scanning feeding the fusion ledger);
 // the ONLY things that vary are the two independent gates. There are two
 // toggles, hence four arms (`LexicalScorerArm`):
-//   * baseline   — threshold 2.0 (xsdz.1 off), snap false (xsdz.2/.3 off).
-//   * xsdz1only  — threshold 0.50 (xsdz.1 on),  snap false (xsdz.2/.3 off).
-//   * xsdz23only — threshold 2.0 (xsdz.1 off),  snap true  (xsdz.2/.3 on).
-//   * alon       — threshold 0.50 (xsdz.1 on),  snap true  (xsdz.2/.3 on),
-//                  i.e. the current main production defaults.
+//   * baseline   — lexicalAutoAdEnabled false (xsdz.1 off), snap false.
+//   * xsdz1only  — lexicalAutoAdEnabled true  (xsdz.1 on),  snap false.
+//   * xsdz23only — lexicalAutoAdEnabled false (xsdz.1 off), snap true,
+//                  i.e. the production default post-xsdz.6.
+//   * alon       — lexicalAutoAdEnabled true  (xsdz.1 on),  snap true.
 // xsdz.2 and xsdz.3 SHARE the `lexicalClusterSnapEnabled` flag and cannot be
 // separated without new production plumbing, so they always move together as
 // one arm leg. Everything else (store / asset / feature windows / transcript
@@ -62,8 +61,8 @@
 //   plan, so the seeding is conservative, not load-bearing, for that leg.
 //
 // How the toggle reaches the pipeline
-//   * xsdz.1: `lexicalAutoAdQualifiedThreshold` on the per-arm
-//     `AdDetectionConfig` (no production change — already togglable).
+//   * xsdz.1: `lexicalAutoAdEnabled` on the per-arm `AdDetectionConfig`
+//     (no production change — already togglable; xsdz.6 added the flag).
 //   * xsdz.2/.3: a per-arm `NarrowingConfig` injected into the
 //     `BackfillJobRunner` this harness constructs in its live runner factory.
 //     The runner threads it into every `TargetedWindowNarrower.narrow(...)`
