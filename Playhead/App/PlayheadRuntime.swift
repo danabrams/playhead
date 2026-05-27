@@ -871,6 +871,34 @@ final class PlayheadRuntime {
             crossShowSyndicationStore = nil
         }
 
+        // playhead-xsdz.11: construct the per-show auto-skip threshold
+        // controller store ONLY when the feature is enabled. The ENTIRE
+        // feature — construction, SQLite migration, the correction-signal WRITE
+        // path (SkipOrchestrator), and the per-show offset READ at the detection
+        // gate (AdDetectionService) — rides the ONE off-by-default
+        // `perShowThresholdControlEnabled` flag. With the flag off (the
+        // production default) there is NO store, NO new DB file, NO migration,
+        // and NO writes/reads: the auto-skip gate uses the unmodified global
+        // threshold, byte-identical to pre-xsdz.11. When the flag is later
+        // flipped on we accept a cold-start store. Like the negative bank, init
+        // failure degrades to `nil` — no reads, no writes, no crash.
+        let perShowThresholdControllerStore: PerShowThresholdControllerStore?
+        if AdDetectionConfig.default.perShowThresholdControlEnabled {
+            do {
+                let dir = try PerShowThresholdControllerStore.defaultDirectory()
+                perShowThresholdControllerStore = try PerShowThresholdControllerStore(
+                    directoryURL: dir,
+                    parameters: AdDetectionConfig.default.perShowThresholdControllerParameters
+                )
+            } catch {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .warning("PerShowThresholdControllerStore init failed — per-show threshold control disabled: \(error.localizedDescription, privacy: .public)")
+                perShowThresholdControllerStore = nil
+            }
+        } else {
+            perShowThresholdControllerStore = nil
+        }
+
         // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
         // adDetectionService so it can be injected for step-17 forwarding.
         // The orchestrator is otherwise wired identically to before this change.
@@ -1058,6 +1086,13 @@ final class PlayheadRuntime {
             // store read/write and emits no `.crossShowSyndication` entry —
             // byte-identical to pre-xsdz.13.
             crossShowSyndicationStore: crossShowSyndicationStore,
+            // playhead-xsdz.11: per-show auto-skip threshold controller store for
+            // the per-show offset READ at the detection gate. `nil` in the
+            // flag-OFF production default (the store is only constructed when
+            // `perShowThresholdControlEnabled` is on), so the service reads no
+            // offset and the gate uses the unmodified global threshold —
+            // byte-identical to pre-xsdz.11.
+            perShowThresholdControllerStore: perShowThresholdControllerStore,
             decisionLogger: preBuiltDecisionLogger,
             // playhead-43ed (B3): per-show RepeatedAdCache. Lookup runs
             // before the classifier in the hot path; store runs after a
@@ -1726,6 +1761,24 @@ final class PlayheadRuntime {
                     Logger(subsystem: "com.playhead", category: "Runtime")
                         .warning("CrossShowSyndicationStore deferred migrate failed — first real op will retry: \(error.localizedDescription, privacy: .public)")
                 }
+            }
+
+            // playhead-xsdz.11: migrate the per-show threshold controller store
+            // off-main and wire it into the orchestrator (the correction-signal
+            // WRITE trigger). Only reached when the feature flag is ON — the
+            // store is `nil` (and this block a no-op) in the flag-OFF production
+            // default, so no migration and no orchestrator wiring happen there.
+            // The orchestrator is an actor, so the setter is awaited here rather
+            // than in `init`. Failure is non-fatal — the store's own lazy
+            // `ensureOpen()` retries on the first real op.
+            if let perShowThresholdControllerStore {
+                do {
+                    try await perShowThresholdControllerStore.migrate()
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .warning("PerShowThresholdControllerStore deferred migrate failed — first real op will retry: \(error.localizedDescription, privacy: .public)")
+                }
+                await skipOrchestrator.setPerShowThresholdControllerStore(perShowThresholdControllerStore)
             }
 
             // playhead-jncn: warm the five sync-loggers off-main now that

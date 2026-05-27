@@ -350,6 +350,64 @@ struct AdDetectionConfig: Sendable {
     /// Only consulted when `temporalRegularizationEnabled` is `true`.
     let temporalMinDwellPenaltyFactor: Double
 
+    /// playhead-xsdz.11: master kill switch for PER-SHOW auto-skip threshold
+    /// control from user feedback. When `false` (the production default),
+    /// `runBackfill` never reads a per-show offset, the orchestrator never
+    /// writes controller state, and the runtime constructs NO
+    /// `PerShowThresholdControllerStore` — so the auto-skip gate uses the
+    /// unmodified global threshold and behaviour is byte-identical to
+    /// pre-xsdz.11.
+    ///
+    /// The insight (cross-model idea duel): adapt the per-show threshold to each
+    /// user's corrections via a bounded scalar PI controller (NOT a learned
+    /// model). A user listening THROUGH an auto-skipped section is a
+    /// false-positive signal (raise that show's threshold = be more
+    /// conservative); a user scrubbing through undetected content is a miss
+    /// signal (lower the threshold = be more aggressive). Per-show adaptation
+    /// handles heterogeneity a single global threshold can't.
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate: not enabled in any
+    /// production config or A/B arm. The controller + store stay fully built and
+    /// unit-tested, just inert in production. Cold-start accepted when enabled.
+    let perShowThresholdControlEnabled: Bool
+
+    /// playhead-xsdz.11: PI controller proportional gain. Small so a single
+    /// correction nudges, never lurches. Only consulted when
+    /// `perShowThresholdControlEnabled` is `true`.
+    let perShowThresholdProportionalGain: Double
+
+    /// playhead-xsdz.11: PI controller integral gain. Applied to the running sum
+    /// of correction errors so a persistent one-sided stream slowly accumulates
+    /// a larger offset. Only consulted when `perShowThresholdControlEnabled`.
+    let perShowThresholdIntegralGain: Double
+
+    /// playhead-xsdz.11: maximum absolute per-show threshold offset, in
+    /// confidence units. Bounds the personalization. Only consulted when
+    /// `perShowThresholdControlEnabled` is `true`.
+    let perShowThresholdMaxOffset: Double
+
+    /// playhead-xsdz.11: minimum corrections before the controller emits any
+    /// non-zero offset (cold-start until corrections accumulate). Only consulted
+    /// when `perShowThresholdControlEnabled` is `true`.
+    let perShowThresholdMinSamples: Int
+
+    /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
+    /// the per-knob config fields. The effective-threshold clamp is fixed at the
+    /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
+    /// move the threshold outside this band). Pure derivation (no actor state);
+    /// exposed so the service, the store, and unit tests build the same
+    /// parameter set.
+    var perShowThresholdControllerParameters: PerShowThresholdControllerParameters {
+        PerShowThresholdControllerParameters(
+            proportionalGain: perShowThresholdProportionalGain,
+            integralGain: perShowThresholdIntegralGain,
+            maxOffset: perShowThresholdMaxOffset,
+            minSamples: perShowThresholdMinSamples,
+            effectiveMin: 0.55,
+            effectiveMax: 0.95
+        )
+    }
+
     /// playhead-xsdz.10: assemble the `TemporalRegularizer.Parameters` from the
     /// per-knob config fields. Pure derivation (no actor state); exposed so the
     /// service and unit tests build the same parameter set.
@@ -408,7 +466,12 @@ struct AdDetectionConfig: Sendable {
         temporalHighConfidenceNeighborThreshold: Double = 0.80,
         temporalIsolationPenaltyFactor: Double = 0.85,
         temporalMinDwellSeconds: TimeInterval = 10.0,
-        temporalMinDwellPenaltyFactor: Double = 0.90
+        temporalMinDwellPenaltyFactor: Double = 0.90,
+        perShowThresholdControlEnabled: Bool = false,
+        perShowThresholdProportionalGain: Double = 0.02,
+        perShowThresholdIntegralGain: Double = 0.005,
+        perShowThresholdMaxOffset: Double = 0.15,
+        perShowThresholdMinSamples: Int = 5
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -444,6 +507,11 @@ struct AdDetectionConfig: Sendable {
         self.temporalIsolationPenaltyFactor = temporalIsolationPenaltyFactor
         self.temporalMinDwellSeconds = temporalMinDwellSeconds
         self.temporalMinDwellPenaltyFactor = temporalMinDwellPenaltyFactor
+        self.perShowThresholdControlEnabled = perShowThresholdControlEnabled
+        self.perShowThresholdProportionalGain = perShowThresholdProportionalGain
+        self.perShowThresholdIntegralGain = perShowThresholdIntegralGain
+        self.perShowThresholdMaxOffset = perShowThresholdMaxOffset
+        self.perShowThresholdMinSamples = perShowThresholdMinSamples
     }
 
     static let `default` = AdDetectionConfig(
@@ -480,7 +548,12 @@ struct AdDetectionConfig: Sendable {
         temporalHighConfidenceNeighborThreshold: 0.80,
         temporalIsolationPenaltyFactor: 0.85,
         temporalMinDwellSeconds: 10.0,
-        temporalMinDwellPenaltyFactor: 0.90
+        temporalMinDwellPenaltyFactor: 0.90,
+        perShowThresholdControlEnabled: false,
+        perShowThresholdProportionalGain: 0.02,
+        perShowThresholdIntegralGain: 0.005,
+        perShowThresholdMaxOffset: 0.15,
+        perShowThresholdMinSamples: 5
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -928,6 +1001,18 @@ actor AdDetectionService {
     /// Stateless; constructed once. Inert unless the store reads above feed it.
     private let crossShowSyndicationEvaluator = CrossShowSyndicationEvaluator()
 
+    /// playhead-xsdz.11: optional per-show auto-skip threshold controller store.
+    /// When non-nil AND `config.perShowThresholdControlEnabled` is true,
+    /// `runBackfill` reads the show's current PI-controller offset ONCE at the
+    /// top of the run and adds it to the global auto-skip threshold at the hard
+    /// gate (clamped to [0.55, 0.95]). `nil` OR flag-off ⇒ NO store read and the
+    /// gate uses the unmodified global threshold (byte-identical pre-xsdz.11).
+    /// The WRITE path lives in `SkipOrchestrator` (folds correction signals into
+    /// the same store). Production wires a real store ONLY when the flag is on;
+    /// tests inject a temp-dir store or leave nil. Mutable so the runtime can
+    /// install it post-init (mirrors the `setUserCorrectionStore` pattern).
+    private(set) var perShowThresholdControllerStore: PerShowThresholdControllerStore?
+
     /// playhead-xsdz.13: minimum confidence for a sponsor-entity observation to
     /// be recorded into the cross-show store. Mirrors
     /// `KnowledgePromotionThresholds.minCandidateConfidence` (0.5) so the
@@ -1247,6 +1332,7 @@ actor AdDetectionService {
         negativeFingerprintBank: NegativeFingerprintBank? = nil,
         adCopyFingerprintStore: AdCopyFingerprintStore? = nil,
         crossShowSyndicationStore: CrossShowSyndicationStore? = nil,
+        perShowThresholdControllerStore: PerShowThresholdControllerStore? = nil,
         episodeMetadataProvider: EpisodeMetadataProvider = NullEpisodeMetadataProvider(),
         decisionLogger: DecisionLoggerProtocol? = nil,
         classifierCalibrationProfile: ClassifierCalibrationProfile = .production,
@@ -1274,6 +1360,7 @@ actor AdDetectionService {
         self.negativeFingerprintBank = negativeFingerprintBank
         self.adCopyFingerprintStore = adCopyFingerprintStore
         self.crossShowSyndicationStore = crossShowSyndicationStore
+        self.perShowThresholdControllerStore = perShowThresholdControllerStore
         self.episodeMetadataProvider = episodeMetadataProvider
         // playhead-8em9 (narL): allow the logger to be installed at init
         // time so there is no race with the first backfill. PlayheadRuntime
@@ -1345,6 +1432,58 @@ actor AdDetectionService {
     func setUserCorrectionStore(_ store: any UserCorrectionStore) {
         self.correctionStore = store
     }
+
+    /// playhead-xsdz.11: install the per-show threshold controller store
+    /// post-init. Mirrors `setUserCorrectionStore`. The flag-off path NEVER
+    /// reads from this store, so installing it is safe whether or not the
+    /// `perShowThresholdControlEnabled` flag is on. Production wires this ONLY
+    /// when the flag is on (see `PlayheadRuntime`); tests call it directly.
+    func setPerShowThresholdControllerStore(_ store: PerShowThresholdControllerStore?) {
+        self.perShowThresholdControllerStore = store
+    }
+
+    /// playhead-xsdz.11: resolve the per-show auto-skip threshold OFFSET for a
+    /// show. Returns `0` (no adjustment) UNLESS all three conditions hold: the
+    /// `perShowThresholdControlEnabled` flag is on, a controller store is wired,
+    /// and a non-empty showId is supplied. This is the SINGLE read seam — both
+    /// `runBackfill` and the DEBUG test accessor go through it, so a regression
+    /// that bypasses the flag gate fails the test at the real call site. With
+    /// the feature off this never touches the store (no read), which is the
+    /// load-bearing flag-OFF invariant.
+    private func resolvePerShowThresholdOffset(showId: String?) async -> Double {
+        guard config.perShowThresholdControlEnabled,
+              let controllerStore = perShowThresholdControllerStore,
+              let showId, !showId.isEmpty else {
+            return 0
+        }
+        return await controllerStore.offset(forShow: showId)
+    }
+
+    #if DEBUG
+    /// playhead-xsdz.11: DEBUG accessor for the EFFECTIVE auto-skip threshold a
+    /// `runBackfill` would use for a given show + promotion track. Resolves the
+    /// per-show offset through the exact production read seam
+    /// (`resolvePerShowThresholdOffset`) and applies it through the same
+    /// `PerShowThresholdController.effectiveThreshold` clamp the gate uses, so
+    /// the test asserts the live read path — not a parallel reimplementation.
+    /// Flag-off ⇒ returns `config.effectiveAutoSkipThreshold(for:)` unchanged.
+    func effectiveAutoSkipThresholdForTesting(
+        showId: String?,
+        track: PromotionTrack
+    ) async -> Double {
+        let base = config.effectiveAutoSkipThreshold(for: track)
+        let offset = await resolvePerShowThresholdOffset(showId: showId)
+        // Mirror the gate's scoping: the offset applies ONLY to `.standard`.
+        guard config.perShowThresholdControlEnabled, offset != 0, track == .standard else {
+            return base
+        }
+        return PerShowThresholdController.effectiveThreshold(
+            globalThreshold: base,
+            offset: offset,
+            parameters: config.perShowThresholdControllerParameters
+        )
+    }
+    #endif
 
     /// playhead-q45f: install the TrustScoringService post-init.
     /// Mirrors `setUserCorrectionStore`. PlayheadRuntime calls this in
@@ -2676,6 +2815,16 @@ actor AdDetectionService {
         // supplied (rare — matches the analogous priors-update guard above).
         let catalogShowId: String? = podcastId.isEmpty ? nil : podcastId
 
+        // playhead-xsdz.11: resolve the per-show auto-skip threshold OFFSET
+        // ONCE per backfill so every span's gate decision uses the same
+        // snapshot. The flag-off path skips the lookup entirely (the store is
+        // never read), leaving `perShowThresholdOffset == 0` — so the gate adds
+        // nothing and behaviour is byte-identical to pre-xsdz.11. The offset is
+        // applied (and clamped to [0.55, 0.95]) at the hard auto-skip gate in
+        // the emission loop below. The WRITE path that grows this offset from
+        // user corrections lives in `SkipOrchestrator`; here we only READ.
+        let perShowThresholdOffset = await resolvePerShowThresholdOffset(showId: catalogShowId)
+
         // playhead-2hpn: resolve the per-show music-bed profile ONCE per
         // backfill so every span sees the same snapshot. The flag-off
         // path skips the lookup entirely (byte-identical to pre-2hpn).
@@ -3357,7 +3506,36 @@ actor AdDetectionService {
             // looser `classifierSeedQualifiedThreshold` (0.50 default) so a
             // classifier-only span backed by `breakAlignment` corroboration
             // can clear the gate despite the structural ledger ceiling.
-            let autoSkipThreshold = config.effectiveAutoSkipThreshold(for: decision.promotionTrack)
+            let baseAutoSkipThreshold = config.effectiveAutoSkipThreshold(for: decision.promotionTrack)
+            // playhead-xsdz.11: apply the per-show PI-controller OFFSET resolved
+            // once at the top of this run, then clamp the EFFECTIVE threshold to
+            // [0.55, 0.95]. With the feature off (or no controller store wired)
+            // `perShowThresholdOffset` is exactly 0, so this resolves to
+            // `baseAutoSkipThreshold` unchanged — byte-identical to pre-xsdz.11.
+            // The offset can RAISE (FP corrections → more conservative) or LOWER
+            // (miss corrections → more aggressive) the threshold, bounded both by
+            // the controller's own offset cap and this effective clamp.
+            //
+            // SCOPE: only the `.standard` track (the global auto-skip threshold,
+            // 0.80 by default — exactly the "per-show auto-skip confidence
+            // threshold" the controller personalizes). The qualified precision
+            // lanes (`.classifierSeedQualified`, `.lexicalAutoAdQualified`)
+            // intentionally use a sub-0.55 floor (0.50) for a structurally
+            // different reason and must NOT be pulled up to 0.55 by this clamp —
+            // they are left untouched so their byte-identical behaviour is
+            // preserved on every track but `.standard`.
+            let autoSkipThreshold: Double
+            if config.perShowThresholdControlEnabled,
+               perShowThresholdOffset != 0,
+               decision.promotionTrack == .standard {
+                autoSkipThreshold = PerShowThresholdController.effectiveThreshold(
+                    globalThreshold: baseAutoSkipThreshold,
+                    offset: perShowThresholdOffset,
+                    parameters: config.perShowThresholdControllerParameters
+                )
+            } else {
+                autoSkipThreshold = baseAutoSkipThreshold
+            }
             let policyAction: SkipPolicyAction
             if (rawPolicyAction == .detectOnly || rawPolicyAction == .logOnly),
                decision.eligibilityGate == .eligible,
