@@ -103,6 +103,199 @@ enum FusionLiftArm: String, Sendable, CaseIterable {
     case enabled
 }
 
+// MARK: - Lexical-scorer A/B arm configuration (playhead-xsdz.liveab)
+
+/// The arms of the lexical-scorer live A/B (`LexicalScorerLiveABTests`).
+/// Unlike the chapter A/B above, every arm here keeps `chapterSignalMode:
+/// .off` and `fmBackfillMode: .full`; the program under test is the shipped
+/// lexical-scorer trio:
+///   * xsdz.1 — the lexical-auto-ad rule, gated post-xsdz.6 by the
+///     `AdDetectionConfig.lexicalAutoAdEnabled` BOOLEAN (`true` = on builds
+///     the `.lexicalAutoAd` ledger entry; `false` = off, the production
+///     default, skips it entirely — removing both the auto-skip track and the
+///     entry's fusion mass). NOTE: raising `lexicalAutoAdQualifiedThreshold`
+///     no longer disables the rule (the entry would still be built), so the
+///     threshold is held at the production default across every arm.
+///   * xsdz.2 — inward lexical-cluster region tightening in
+///     `TargetedWindowNarrower`, gated by
+///     `NarrowingConfig.lexicalClusterSnapEnabled`.
+///   * xsdz.3 — lexically-nominated audit windows in the same narrower,
+///     gated by the SAME `lexicalClusterSnapEnabled` flag.
+///
+/// Each arm is defined by exactly TWO orthogonal toggles:
+///   * `xsdz1On` → the `lexicalAutoAdEnabled` flag (on = true, off = false).
+///   * `xsdz23On` → the `lexicalClusterSnapEnabled` flag (on = true, off =
+///     false). xsdz.2 and xsdz.3 share this one flag and CANNOT be separated
+///     without new production plumbing, so they always move together as a
+///     single arm leg.
+///
+/// The two endpoints (`baseline` = both off, `alon` = both on) are the
+/// cumulative A/B; the two singletons (`xsdz1only`, `xsdz23only`) isolate
+/// which feature regresses live ad detection in a single Catalyst run.
+/// Post-xsdz.6 the production default is `xsdz23only` (xsdz.1 off, snap on).
+enum LexicalScorerArm: String, Sendable, CaseIterable {
+    /// Program OFF: xsdz.1 disabled (`lexicalAutoAdEnabled: false`) AND
+    /// xsdz.2/.3 disabled (`lexicalClusterSnapEnabled: false`). The
+    /// acoustic-only, no-auto-ad A/B baseline — the reference every other
+    /// arm's delta is measured from.
+    case baseline
+    /// xsdz.1 ONLY: lexical-auto-ad rule on (`lexicalAutoAdEnabled: true`),
+    /// region-tighten + audit-nominate off (`lexicalClusterSnapEnabled:
+    /// false`). Isolates the auto-ad rule's contribution.
+    case xsdz1only
+    /// xsdz.2+xsdz.3 ONLY: region-tighten + audit-nominate on
+    /// (`lexicalClusterSnapEnabled: true`), auto-ad rule off
+    /// (`lexicalAutoAdEnabled: false`). Isolates the narrower's contribution.
+    /// The two share one flag so they move together. Post-xsdz.6 this arm IS
+    /// the production default.
+    case xsdz23only
+    /// All on: production defaults PLUS the xsdz.1 rule re-enabled
+    /// (`lexicalAutoAdEnabled: true`, `lexicalClusterSnapEnabled: true`) — the
+    /// cumulative-treatment endpoint.
+    case alon
+
+    /// Whether the xsdz.1 lexical-auto-ad rule is enabled in this arm (drives
+    /// the `lexicalAutoAdEnabled` flag).
+    var xsdz1On: Bool {
+        switch self {
+        case .baseline, .xsdz23only: return false
+        case .xsdz1only, .alon: return true
+        }
+    }
+
+    /// Whether the xsdz.2/.3 lexical-cluster snap (region-tighten +
+    /// audit-nominate) is enabled in this arm (drives
+    /// `lexicalClusterSnapEnabled`).
+    var xsdz23On: Bool {
+        switch self {
+        case .baseline, .xsdz1only: return false
+        case .xsdz23only, .alon: return true
+        }
+    }
+
+    /// Back-compat: the single-boolean "program on" used by the cumulative
+    /// (2-endpoint) view. Only the two endpoints map to a single program
+    /// state; the singletons are mixed, so `programOn` is intentionally
+    /// undefined for them (they are not "the program", they are one leg).
+    var programOn: Bool { xsdz1On && xsdz23On }
+}
+
+/// Pure, hermetic builder for the arms' configs. Extracted from the harness
+/// so the arm construction is unit-testable on the simulator with no audio /
+/// FM / pipeline (acceptance criterion: a hermetic test for the non-trivial
+/// config helper, plus the per-arm isolation guard). The harness then
+/// injects:
+///   * `adDetectionConfig(...)` into `AdDetectionService` (the
+///     `lexicalAutoAdEnabled` flag toggles xsdz.1), and
+///   * `narrowingConfig(...)` into the `BackfillJobRunner` it constructs in
+///     its live runner factory (the `lexicalClusterSnapEnabled` flag toggles
+///     xsdz.2/.3).
+///
+/// Each arm is defined by exactly TWO orthogonal toggles — `xsdz1On` (the
+/// auto-ad threshold) and `xsdz23On` (the cluster-snap flag). The primitive
+/// builders below take those two booleans directly; the `programOn:` overloads
+/// are thin shims for the cumulative-endpoint (both-on / both-off) view used by
+/// the back-compat helpers and the chapter A/B.
+///
+/// CRITICAL invariant (asserted by the unit tests): each arm deviates from
+/// `.default` ONLY in its two program gates — the xsdz.1 gate
+/// (`AdDetectionConfig.lexicalAutoAdEnabled`) and the xsdz.2/.3 gate
+/// (`NarrowingConfig.lexicalClusterSnapEnabled`). Each toggle moves exactly
+/// one field; every non-gate field stays equal to `.default` across all arms.
+/// A mislabeled arm (a toggle wired to the wrong field) would attribute a
+/// regression to the wrong feature — so the isolation is the load-bearing
+/// correctness property the hermetic tests pin.
+///
+/// Post-playhead-xsdz.6 the production default is xsdz.1 OFF
+/// (`lexicalAutoAdEnabled == false`) + xsdz.2/.3 ON
+/// (`lexicalClusterSnapEnabled == true`), so the arm that matches production
+/// is `xsdz23only`, NOT `alon`. The xsdz.1 gate is the `lexicalAutoAdEnabled`
+/// BOOLEAN — not a threshold: after xsdz.6 the rule's ledger entry is only
+/// built when the flag is `true`, so raising `lexicalAutoAdQualifiedThreshold`
+/// no longer disables the rule (the entry, and its fusion mass, would still be
+/// built). The harness therefore holds `lexicalAutoAdQualifiedThreshold` at the
+/// production default (0.50) across every arm and toggles the boolean alone.
+enum LexicalScorerArmConfig {
+
+    /// The `lexicalAutoAdEnabled` flag for the xsdz.1 toggle: `true` builds the
+    /// high-precision `.lexicalAutoAd` ledger entry (rule active), `false` (the
+    /// production default since xsdz.6) skips it entirely — removing both the
+    /// `lexicalAutoAdQualified` auto-skip track and the entry's fusion mass.
+    static func lexicalAutoAdEnabled(xsdz1On: Bool) -> Bool { xsdz1On }
+
+    /// The `NarrowingConfig` for the xsdz.2/.3 toggle. ON is
+    /// `NarrowingConfig.default` verbatim. OFF is the same shape with ONLY
+    /// `lexicalClusterSnapEnabled` flipped to `false` — mirrors the baseline
+    /// config `RegionTighteningCorpusEvalTests` uses, and the per-anchor /
+    /// cap / acoustic-snap fields are kept equal to `.default` so the ONLY
+    /// difference this toggle makes is the lexical-cluster gate.
+    static func narrowingConfig(xsdz23On: Bool) -> NarrowingConfig {
+        if xsdz23On {
+            return .default
+        }
+        let base = NarrowingConfig.default
+        return NarrowingConfig(
+            perAnchorPaddingSegments: base.perAnchorPaddingSegments,
+            maxNarrowedSegmentsPerPhase: base.maxNarrowedSegmentsPerPhase,
+            acousticBreakSnapMaxDistanceSeconds: base.acousticBreakSnapMaxDistanceSeconds,
+            lexicalClusterSnapEnabled: false,
+            lexicalClusterGapSeconds: base.lexicalClusterGapSeconds,
+            lexicalClusterMarginSegments: base.lexicalClusterMarginSegments,
+            lexicalClusterMinHits: base.lexicalClusterMinHits
+        )
+    }
+
+    /// Build the full `AdDetectionConfig` for an arm. Every field other than
+    /// `lexicalAutoAdEnabled` is held identical across arms (and to the values
+    /// the chapter A/B uses) — including `lexicalAutoAdQualifiedThreshold` at
+    /// its production default — with `fmBackfillMode: .full` and
+    /// `chapterSignalMode: .off` so the FM scan runs and feeds the fusion
+    /// ledger but the chapter signal stays out of the way.
+    static func adDetectionConfig(xsdz1On: Bool) -> AdDetectionConfig {
+        AdDetectionConfig(
+            candidateThreshold: 0.40,
+            confirmationThreshold: 0.70,
+            suppressionThreshold: 0.25,
+            hotPathLookahead: 90.0,
+            detectorVersion: "xsdz.liveab",
+            fmBackfillMode: .full,
+            lexicalAutoAdEnabled: lexicalAutoAdEnabled(xsdz1On: xsdz1On),
+            chapterSignalMode: .off
+        )
+    }
+
+    // MARK: Per-arm builders
+
+    /// The `AdDetectionConfig` for a sweep arm — reads the arm's xsdz.1 toggle.
+    static func adDetectionConfig(for arm: LexicalScorerArm) -> AdDetectionConfig {
+        adDetectionConfig(xsdz1On: arm.xsdz1On)
+    }
+
+    /// The `NarrowingConfig` for a sweep arm — reads the arm's xsdz.2/.3 toggle.
+    static func narrowingConfig(for arm: LexicalScorerArm) -> NarrowingConfig {
+        narrowingConfig(xsdz23On: arm.xsdz23On)
+    }
+
+    // MARK: Cumulative-endpoint shims (back-compat)
+
+    /// Cumulative-endpoint xsdz.1 gate: both gates move together off `programOn`.
+    static func lexicalAutoAdEnabled(programOn: Bool) -> Bool {
+        lexicalAutoAdEnabled(xsdz1On: programOn)
+    }
+
+    /// Cumulative-endpoint `NarrowingConfig`: both gates move together off
+    /// `programOn`.
+    static func narrowingConfig(programOn: Bool) -> NarrowingConfig {
+        narrowingConfig(xsdz23On: programOn)
+    }
+
+    /// Cumulative-endpoint `AdDetectionConfig`: both gates move together off
+    /// `programOn`.
+    static func adDetectionConfig(programOn: Bool) -> AdDetectionConfig {
+        adDetectionConfig(xsdz1On: programOn)
+    }
+}
+
 /// Accumulates ground-truth and detected ad spans across episodes for ONE
 /// arm, then folds them into a single `MetricsBatch` using Phase A's greedy
 /// IoU pairing (which buckets by `(podcastId, episodeId)`, so cross-episode
@@ -277,6 +470,157 @@ struct FusionLiftReport: Sendable, Codable, Equatable {
         span:     precisionΔ=\(signed(spanPrecisionDelta))  recallΔ=\(signed(spanRecallDelta))  f1Δ=\(signed(spanF1Delta))
         coverage: precisionΔ=\(signed(coveragePrecisionDelta))  recallΔ=\(signed(coverageRecallDelta))  f1Δ=\(signed(coverageF1Delta))
         """
+    }
+
+    private func pad(_ value: Int, _ width: Int) -> String {
+        let s = String(value)
+        return String(repeating: " ", count: max(0, width - s.count)) + s
+    }
+
+    private func col(_ s: String) -> String {
+        // 9-char column (8 content + 1 separator space).
+        (s + String(repeating: " ", count: 9)).prefix(9).description
+    }
+
+    /// Encode the report to pretty-printed, sorted-key JSON for the
+    /// git-ignored repo-root dump.
+    func jsonData() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(self)
+    }
+}
+
+// MARK: - Lexical-scorer per-feature SWEEP report (playhead-xsdz.liveab)
+
+/// A readable, serializable summary of the 4-arm per-feature sweep. Pure
+/// value type. Generalizes the earlier 2-arm cumulative lift report (baseline
+/// / treatment) to N arms (baseline, xsdz1only, xsdz23only, alon) so a single
+/// Catalyst run isolates which lexical-scorer feature regresses live ad
+/// detection. Structurally a per-arm sibling of the chapter A/B's
+/// `FusionLiftReport`. Each arm reports its raw counts + metrics; the deltas
+/// are always measured vs the `baseline` arm (both gates off). Reuses Phase
+/// A's `SpanF1` / `FusionLiftResult` scorers verbatim — no reimplementation.
+///
+/// "Delta" is `arm − baseline`; positive means that feature HELPED the
+/// metric. Undefined metrics propagate to `nil` (never a misleading 0.0),
+/// matching the Phase-A contract. The baseline arm's own deltas are zero (it
+/// is measured against itself).
+struct LexicalScorerSweepReport: Sendable, Codable, Equatable {
+
+    /// One arm's raw counts + metrics + its delta-vs-baseline. The arm label
+    /// is the `LexicalScorerArm.rawValue` so the JSON dump is self-describing.
+    struct ArmRow: Sendable, Codable, Equatable {
+        let arm: String
+        let xsdz1On: Bool
+        let xsdz23On: Bool
+        let groundTruthSpans: Int
+        let detectedSpans: Int
+        let truePositives: Int
+        let falsePositives: Int
+        let misses: Int
+        let spanPrecision: Double?
+        let spanRecall: Double?
+        let spanF1: Double?
+        let coveragePrecision: Double?
+        let coverageRecall: Double?
+        // Deltas vs baseline (count-based span lens).
+        let spanPrecisionDelta: Double?
+        let spanRecallDelta: Double?
+        let spanF1Delta: Double?
+        // Deltas vs baseline (seconds-based coverage lens).
+        let coveragePrecisionDelta: Double?
+        let coverageRecallDelta: Double?
+        let coverageF1Delta: Double?
+    }
+
+    let episodeCount: Int
+    /// Rows in `LexicalScorerArm.allCases` order, baseline first.
+    let rows: [ArmRow]
+
+    /// Build the sweep report from one accumulator per arm. The dictionary
+    /// MUST contain every `LexicalScorerArm` case (the harness scores all 4);
+    /// arms are emitted in `allCases` order so the table and JSON are stable.
+    /// The baseline arm anchors every delta.
+    init(
+        episodeCount: Int,
+        accumulators: [LexicalScorerArm: FusionLiftModeAccumulator]
+    ) {
+        self.episodeCount = episodeCount
+
+        let baselineAcc = accumulators[.baseline] ?? FusionLiftModeAccumulator()
+        let baselineSpan = baselineAcc.spanF1()
+        let baselineSummary = baselineAcc.summary()
+
+        self.rows = LexicalScorerArm.allCases.map { arm in
+            let acc = accumulators[arm] ?? FusionLiftModeAccumulator()
+            let span = acc.spanF1()
+            let summary = acc.summary()
+
+            // FusionLiftResult names its sides `off`/`enabled`; here `off` is
+            // the baseline arm and `enabled` is this arm, so the delta reads
+            // `arm − baseline`.
+            let spanLift = FusionLiftResult(off: baselineSpan, enabled: span)
+            let coverageLift = FusionLiftResult(off: baselineSummary, enabled: summary)
+
+            return ArmRow(
+                arm: arm.rawValue,
+                xsdz1On: arm.xsdz1On,
+                xsdz23On: arm.xsdz23On,
+                groundTruthSpans: acc.groundTruth.count,
+                detectedSpans: acc.detections.count,
+                truePositives: span.truePositives,
+                falsePositives: span.falsePositives,
+                misses: span.misses,
+                spanPrecision: span.precision,
+                spanRecall: span.recall,
+                spanF1: span.f1,
+                coveragePrecision: summary.coveragePrecision,
+                coverageRecall: summary.coverageRecall,
+                spanPrecisionDelta: spanLift.precisionDelta,
+                spanRecallDelta: spanLift.recallDelta,
+                spanF1Delta: spanLift.f1Delta,
+                coveragePrecisionDelta: coverageLift.precisionDelta,
+                coverageRecallDelta: coverageLift.recallDelta,
+                coverageF1Delta: coverageLift.f1Delta
+            )
+        }
+    }
+
+    /// Render a fixed-width, human-readable sweep table for the test log.
+    /// One row per arm + a per-arm delta-vs-baseline block. Undefined metrics
+    /// render as `n/a`; defined values to 4 decimals.
+    func table() -> String {
+        func fmt(_ value: Double?) -> String {
+            guard let value else { return "n/a" }
+            return String(format: "%.4f", value)
+        }
+        func signed(_ value: Double?) -> String {
+            guard let value else { return "n/a" }
+            return String(format: "%+.4f", value)
+        }
+
+        var lines: [String] = [
+            "=== Lexical-Scorer Per-Feature Sweep A/B (xsdz.1 / xsdz.2+.3) ===",
+            "episodes scored: \(episodeCount)",
+            "arm          GT  det   TP  FP  miss   spanP    spanR   spanF1   covP     covR",
+        ]
+        for row in rows {
+            lines.append(
+                "\(armLabel(row.arm))\(pad(row.groundTruthSpans, 4))\(pad(row.detectedSpans, 5))\(pad(row.truePositives, 5))\(pad(row.falsePositives, 4))\(pad(row.misses, 6))  \(col(fmt(row.spanPrecision)))\(col(fmt(row.spanRecall)))\(col(fmt(row.spanF1)))\(col(fmt(row.coveragePrecision)))\(col(fmt(row.coverageRecall)))"
+            )
+        }
+        lines.append("--- per-arm lift (arm − baseline) ---")
+        for row in rows where row.arm != LexicalScorerArm.baseline.rawValue {
+            lines.append(
+                "\(armLabel(row.arm)) span pΔ=\(signed(row.spanPrecisionDelta)) rΔ=\(signed(row.spanRecallDelta)) f1Δ=\(signed(row.spanF1Delta)) | cov pΔ=\(signed(row.coveragePrecisionDelta)) rΔ=\(signed(row.coverageRecallDelta))"
+            )
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func armLabel(_ arm: String) -> String {
+        (arm + String(repeating: " ", count: 10)).prefix(10).description
     }
 
     private func pad(_ value: Int, _ width: Int) -> String {

@@ -85,6 +85,18 @@ actor BackfillJobRunner {
     private let classifier: FoundationModelClassifier
     private let coveragePlanner: CoveragePlanner
     private let mode: FMBackfillMode
+
+    /// playhead-xsdz.liveab: per-phase narrowing config threaded into every
+    /// `TargetedWindowNarrower.narrow(...)` / `.predictedTargetedLineRefs(...)`
+    /// call site below. Defaults to `.default`, so production wiring (which
+    /// does not pass this argument — see `PlayheadRuntime`) is byte-identical
+    /// to the pre-xsdz.liveab path: every call site previously relied on the
+    /// `config: NarrowingConfig = .default` parameter default, and a stored
+    /// `.default` reproduces that exactly. The seam exists ONLY so the
+    /// lexical-scorer live-A/B harness can inject a `.default`-shaped config
+    /// with `lexicalClusterSnapEnabled: false` to disable xsdz.2/.3 for the
+    /// baseline arm. This is behavior-neutral plumbing (cf. au2v.1.27 Phase B).
+    private let narrowingConfig: NarrowingConfig
     private let capabilitySnapshotProvider: @Sendable () async -> CapabilitySnapshot
     private let batteryLevelProvider: @Sendable () async -> Float
     private let scanCohortJSON: String
@@ -270,7 +282,8 @@ actor BackfillJobRunner {
         scanCohortJSON: String,
         clock: @escaping @Sendable () -> Date = { Date() },
         sensitiveRouter: SensitiveWindowRouter? = nil,
-        permissiveClassifier: PermissiveClassifierBox? = nil
+        permissiveClassifier: PermissiveClassifierBox? = nil,
+        narrowingConfig: NarrowingConfig = .default
     ) {
         self.store = store
         self.admissionController = admissionController
@@ -283,6 +296,7 @@ actor BackfillJobRunner {
         self.clock = clock
         self.sensitiveRouter = sensitiveRouter
         self.permissiveClassifierBox = permissiveClassifier
+        self.narrowingConfig = narrowingConfig
     }
 
     // MARK: - Entry Point
@@ -850,7 +864,7 @@ actor BackfillJobRunner {
                     // came back empty, contribute no recall sample.
                     let phaseResults = BackfillJobPhase.allCases
                         .filter { $0 != .fullEpisodeScan }
-                        .map { TargetedWindowNarrower.narrow(phase: $0, inputs: narrowerInputs) }
+                        .map { TargetedWindowNarrower.narrow(phase: $0, inputs: narrowerInputs, config: narrowingConfig) }
                     let nonEmptyPhases = phaseResults.filter { !$0.wasEmpty }
                     if nonEmptyPhases.isEmpty {
                         narrowingAllPhasesEmptyCount += 1
@@ -858,7 +872,8 @@ actor BackfillJobRunner {
                         recallSample = nil
                     } else {
                         let predicted = TargetedWindowNarrower.predictedTargetedLineRefs(
-                            inputs: narrowerInputs
+                            inputs: narrowerInputs,
+                            config: narrowingConfig
                         )
                         recallSample = TargetedWindowNarrower.recallSample(
                             predictedTargetedLineRefs: predicted,
@@ -2370,7 +2385,8 @@ actor BackfillJobRunner {
                 auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate,
                 episodesSinceLastFullRescan: rootInputs.plannerContext.episodesSinceLastFullRescan,
                 acousticBreaks: rootInputs.acousticBreaks
-            )
+            ),
+            config: narrowingConfig
         )
         if result.wasEmpty {
             // Cycle 2 H13: empty phase. Skip without dispatching FM work.
@@ -2848,7 +2864,8 @@ actor BackfillJobRunner {
                 auditWindowSampleRate: plan.auditWindowSampleRate ?? coveragePlanner.auditWindowSampleRate,
                 episodesSinceLastFullRescan: inputs.plannerContext.episodesSinceLastFullRescan,
                 acousticBreaks: inputs.acousticBreaks
-            )
+            ),
+            config: narrowingConfig
         )
         guard let segments = narrowing.narrowedSegments, !segments.isEmpty else {
             return RandomAuditPersistenceResult(

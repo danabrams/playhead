@@ -300,4 +300,300 @@ struct FusionLiftHarnessSupportTests {
         let decoded = try JSONDecoder().decode(FusionLiftReport.self, from: data)
         #expect(decoded == report)
     }
+
+    // MARK: - Lexical-scorer per-feature sweep arm config (playhead-xsdz.liveab)
+    //
+    // The LOAD-BEARING correctness property of the 4-arm sweep: each arm must
+    // set EXACTLY the intended (threshold, snapEnabled) combo, and the arms
+    // must differ from each other ONLY in those two toggles. A mislabeled arm
+    // — a toggle wired to the wrong field, or a non-gate field drifting between
+    // arms — would attribute a live regression to the WRONG feature and send
+    // the culprit hunt down a false trail. These hermetic tests pin the
+    // isolation on the sim before the (expensive, Catalyst-only) live sweep
+    // ever runs.
+    //
+    // The intended sweep matrix (xsdz.1 = auto-ad threshold gate; xsdz.2/.3 =
+    // the shared lexicalClusterSnapEnabled gate):
+    //   arm         | xsdz.1 | xsdz.2/.3
+    //   baseline    | off    | off
+    //   xsdz1only   | on     | off
+    //   xsdz23only  | off    | on
+    //   alon        | on     | on
+
+    /// The four arms in `allCases` order with their intended toggle states —
+    /// the single source of truth the matrix tests below assert against.
+    private static let expectedArmMatrix: [(arm: LexicalScorerArm, xsdz1On: Bool, xsdz23On: Bool)] = [
+        (.baseline, false, false),
+        (.xsdz1only, true, false),
+        (.xsdz23only, false, true),
+        (.alon, true, true),
+    ]
+
+    @Test("sweep enumerates exactly the four intended arms in baseline-first order")
+    func lexicalArm_fourArmsInOrder() {
+        #expect(LexicalScorerArm.allCases == [.baseline, .xsdz1only, .xsdz23only, .alon])
+    }
+
+    @Test("each arm's xsdz1On / xsdz23On flags match the intended sweep matrix")
+    func lexicalArm_toggleMatrix() {
+        for (arm, xsdz1On, xsdz23On) in Self.expectedArmMatrix {
+            #expect(arm.xsdz1On == xsdz1On, "arm \(arm.rawValue): xsdz1On should be \(xsdz1On)")
+            #expect(arm.xsdz23On == xsdz23On, "arm \(arm.rawValue): xsdz23On should be \(xsdz23On)")
+        }
+        // The four arms are the four distinct points of the 2×2 toggle grid —
+        // no two arms share the same (xsdz1On, xsdz23On) pair.
+        let pairs = LexicalScorerArm.allCases.map { [$0.xsdz1On, $0.xsdz23On] }
+        #expect(Set(pairs.map { "\($0)" }).count == LexicalScorerArm.allCases.count)
+    }
+
+    @Test("programOn is true only for the all-on endpoint, false for every other arm")
+    func lexicalArm_programOnIsAllOnEndpoint() {
+        #expect(LexicalScorerArm.alon.programOn == true)
+        #expect(LexicalScorerArm.baseline.programOn == false)
+        #expect(LexicalScorerArm.xsdz1only.programOn == false)
+        #expect(LexicalScorerArm.xsdz23only.programOn == false)
+    }
+
+    @Test("each arm's lexicalAutoAdEnabled flag matches its xsdz.1 toggle exactly")
+    func lexicalArm_autoAdFlagPerArm() {
+        for (arm, xsdz1On, _) in Self.expectedArmMatrix {
+            let config = LexicalScorerArmConfig.adDetectionConfig(for: arm)
+            #expect(
+                config.lexicalAutoAdEnabled == xsdz1On,
+                "arm \(arm.rawValue): lexicalAutoAdEnabled should be \(xsdz1On)"
+            )
+            // The threshold is held at the production default across ALL arms —
+            // post-xsdz.6 the boolean is the toggle, not the threshold, so the
+            // threshold must NOT vary per arm.
+            #expect(
+                config.lexicalAutoAdQualifiedThreshold == AdDetectionConfig.default.lexicalAutoAdQualifiedThreshold,
+                "arm \(arm.rawValue): lexicalAutoAdQualifiedThreshold must stay at the production default"
+            )
+        }
+    }
+
+    @Test("each arm's NarrowingConfig snap flag matches its xsdz.2/.3 toggle exactly")
+    func lexicalArm_snapFlagPerArm() {
+        for (arm, _, xsdz23On) in Self.expectedArmMatrix {
+            let narrowing = LexicalScorerArmConfig.narrowingConfig(for: arm)
+            #expect(
+                narrowing.lexicalClusterSnapEnabled == xsdz23On,
+                "arm \(arm.rawValue): lexicalClusterSnapEnabled should be \(xsdz23On)"
+            )
+        }
+    }
+
+    @Test("xsdz.2/.3-on arms produce NarrowingConfig byte-identical to .default")
+    func lexicalArm_snapOnMatchesDefault() {
+        for (arm, _, xsdz23On) in Self.expectedArmMatrix where xsdz23On {
+            #expect(
+                LexicalScorerArmConfig.narrowingConfig(for: arm) == NarrowingConfig.default,
+                "arm \(arm.rawValue): snap-on NarrowingConfig must equal .default"
+            )
+        }
+    }
+
+    @Test("arms differ ONLY in the two program gates — every other field is held constant")
+    func lexicalArm_isolation_onlyTwoTogglesVary() {
+        // The two reference configs: an xsdz.1-off arm and an xsdz.1-on arm.
+        // lexicalAutoAdEnabled is the ONLY field allowed to vary across the
+        // AdDetection configs; a re-stamp proves no other field drifted.
+        let off = LexicalScorerArmConfig.adDetectionConfig(xsdz1On: false)
+        let on = LexicalScorerArmConfig.adDetectionConfig(xsdz1On: true)
+        #expect(off.lexicalAutoAdEnabled != on.lexicalAutoAdEnabled)
+        #expect(off.lexicalAutoAdEnabled == false)
+        #expect(on.lexicalAutoAdEnabled == true)
+        // The threshold is held constant — it is no longer the xsdz.1 toggle.
+        #expect(off.lexicalAutoAdQualifiedThreshold == on.lexicalAutoAdQualifiedThreshold)
+        #expect(off.fmBackfillMode == on.fmBackfillMode)
+        #expect(off.fmBackfillMode == .full)
+        #expect(off.chapterSignalMode == on.chapterSignalMode)
+        #expect(off.chapterSignalMode == .off)
+        #expect(off.candidateThreshold == on.candidateThreshold)
+        #expect(off.confirmationThreshold == on.confirmationThreshold)
+        #expect(off.suppressionThreshold == on.suppressionThreshold)
+        #expect(off.autoSkipConfidenceThreshold == on.autoSkipConfidenceThreshold)
+
+        // The xsdz.2/.3-off NarrowingConfig must differ from .default in the
+        // snap flag ALONE: re-enabling the flag (and nothing else) recovers
+        // .default exactly, which proves no sibling field drifted.
+        let snapOff = LexicalScorerArmConfig.narrowingConfig(xsdz23On: false)
+        let def = NarrowingConfig.default
+        #expect(snapOff.lexicalClusterSnapEnabled == false)
+        #expect(def.lexicalClusterSnapEnabled == true)
+        #expect(snapOff != def)
+        #expect(snapOff.perAnchorPaddingSegments == def.perAnchorPaddingSegments)
+        #expect(snapOff.maxNarrowedSegmentsPerPhase == def.maxNarrowedSegmentsPerPhase)
+        #expect(snapOff.acousticBreakSnapMaxDistanceSeconds == def.acousticBreakSnapMaxDistanceSeconds)
+        #expect(snapOff.lexicalClusterGapSeconds == def.lexicalClusterGapSeconds)
+        #expect(snapOff.lexicalClusterMarginSegments == def.lexicalClusterMarginSegments)
+        #expect(snapOff.lexicalClusterMinHits == def.lexicalClusterMinHits)
+        let reEnabled = NarrowingConfig(
+            perAnchorPaddingSegments: snapOff.perAnchorPaddingSegments,
+            maxNarrowedSegmentsPerPhase: snapOff.maxNarrowedSegmentsPerPhase,
+            acousticBreakSnapMaxDistanceSeconds: snapOff.acousticBreakSnapMaxDistanceSeconds,
+            lexicalClusterSnapEnabled: true,
+            lexicalClusterGapSeconds: snapOff.lexicalClusterGapSeconds,
+            lexicalClusterMarginSegments: snapOff.lexicalClusterMarginSegments,
+            lexicalClusterMinHits: snapOff.lexicalClusterMinHits
+        )
+        #expect(reEnabled == def)
+    }
+
+    @Test("alon arm enables BOTH gates (cumulative-treatment endpoint = production defaults + xsdz.1)")
+    func lexicalArm_alonEnablesBothGates() {
+        // Post-xsdz.6, the production default is xsdz.1 OFF, so alon = production
+        // defaults PLUS the xsdz.1 rule enabled. The xsdz.2/.3 gate (snap) and
+        // the held-constant fields still equal `.default`.
+        let config = LexicalScorerArmConfig.adDetectionConfig(for: .alon)
+        #expect(config.lexicalAutoAdEnabled == true)
+        #expect(config.lexicalAutoAdQualifiedThreshold == AdDetectionConfig.default.lexicalAutoAdQualifiedThreshold)
+        #expect(LexicalScorerArmConfig.narrowingConfig(for: .alon) == NarrowingConfig.default)
+        #expect(config.fmBackfillMode == .full)
+        #expect(config.chapterSignalMode == .off)
+    }
+
+    @Test("xsdz23only arm IS the production default (xsdz.1 off + snap on) post-xsdz.6")
+    func lexicalArm_xsdz23onlyMatchesProductionDefaults() {
+        let config = LexicalScorerArmConfig.adDetectionConfig(for: .xsdz23only)
+        #expect(config.lexicalAutoAdEnabled == AdDetectionConfig.default.lexicalAutoAdEnabled)
+        #expect(config.lexicalAutoAdEnabled == false)
+        #expect(LexicalScorerArmConfig.narrowingConfig(for: .xsdz23only) == NarrowingConfig.default)
+    }
+
+    @Test("baseline arm disables BOTH gates (cumulative-baseline endpoint)")
+    func lexicalArm_baselineDisablesBothGates() {
+        let config = LexicalScorerArmConfig.adDetectionConfig(for: .baseline)
+        #expect(config.lexicalAutoAdEnabled == false)
+        #expect(LexicalScorerArmConfig.narrowingConfig(for: .baseline).lexicalClusterSnapEnabled == false)
+    }
+
+    // MARK: - Lexical-scorer per-feature sweep report
+
+    /// Build an accumulator that catches `caught` of the two GT ads in `ep-1`.
+    private static func sweepArmAccumulator(caught: Int) -> FusionLiftModeAccumulator {
+        var acc = FusionLiftModeAccumulator()
+        var windows: [AdWindow] = []
+        if caught >= 1 {
+            windows.append(Self.storeAdWindow(id: "d1", start: 105, end: 158, decisionState: AdDecisionState.confirmed.rawValue))
+        }
+        if caught >= 2 {
+            windows.append(Self.storeAdWindow(id: "d2", start: 405, end: 448, decisionState: AdDecisionState.confirmed.rawValue))
+        }
+        acc.addEpisode(
+            annotationWindows: [
+                Self.annotationWindow(start: 100, end: 160),
+                Self.annotationWindow(start: 400, end: 450),
+            ],
+            adWindows: windows,
+            podcastId: "show-A",
+            episodeId: "ep-1"
+        )
+        return acc
+    }
+
+    @Test("sweep report emits one row per arm, baseline first, with the arm's toggle flags")
+    func lexicalSweep_rowsPerArm() {
+        let report = LexicalScorerSweepReport(
+            episodeCount: 1,
+            accumulators: [
+                .baseline: Self.sweepArmAccumulator(caught: 1),
+                .xsdz1only: Self.sweepArmAccumulator(caught: 2),
+                .xsdz23only: Self.sweepArmAccumulator(caught: 1),
+                .alon: Self.sweepArmAccumulator(caught: 2),
+            ]
+        )
+        #expect(report.rows.map(\.arm) == ["baseline", "xsdz1only", "xsdz23only", "alon"])
+        // Each row carries the arm's intended toggle flags (so the JSON dump is
+        // self-describing about which feature each row isolates).
+        for (arm, xsdz1On, xsdz23On) in Self.expectedArmMatrix {
+            let row = report.rows.first { $0.arm == arm.rawValue }
+            #expect(row?.xsdz1On == xsdz1On)
+            #expect(row?.xsdz23On == xsdz23On)
+        }
+    }
+
+    @Test("sweep deltas are measured vs baseline; baseline's own deltas are zero")
+    func lexicalSweep_deltasVsBaseline() {
+        // baseline catches 1 of 2 (recall 0.5); xsdz1only catches 2 (recall
+        // 1.0) → +0.5 recall lift; xsdz23only catches 1 (recall 0.5) → 0 lift.
+        let report = LexicalScorerSweepReport(
+            episodeCount: 1,
+            accumulators: [
+                .baseline: Self.sweepArmAccumulator(caught: 1),
+                .xsdz1only: Self.sweepArmAccumulator(caught: 2),
+                .xsdz23only: Self.sweepArmAccumulator(caught: 1),
+                .alon: Self.sweepArmAccumulator(caught: 2),
+            ]
+        )
+        func row(_ name: String) -> LexicalScorerSweepReport.ArmRow {
+            report.rows.first { $0.arm == name }!
+        }
+        #expect(row("baseline").spanRecall == 0.5)
+        #expect(row("baseline").spanRecallDelta == 0.0, "baseline measured against itself ⇒ zero delta")
+        #expect(row("xsdz1only").spanRecall == 1.0)
+        #expect(row("xsdz1only").spanRecallDelta == 0.5)
+        #expect((row("xsdz1only").spanF1Delta ?? 0) > 0)
+        #expect(row("xsdz23only").spanRecall == 0.5)
+        #expect(row("xsdz23only").spanRecallDelta == 0.0)
+        #expect(row("alon").spanRecallDelta == 0.5)
+    }
+
+    @Test("sweep deltas are nil when an arm metric is undefined (no detections)")
+    func lexicalSweep_nilDeltaPropagation() {
+        // baseline has a GT but no detections ⇒ spanPrecision undefined ⇒ every
+        // arm's precision delta-vs-baseline propagates to nil (never 0.0).
+        let report = LexicalScorerSweepReport(
+            episodeCount: 1,
+            accumulators: [
+                .baseline: Self.sweepArmAccumulator(caught: 0),
+                .xsdz1only: Self.sweepArmAccumulator(caught: 1),
+                .xsdz23only: Self.sweepArmAccumulator(caught: 0),
+                .alon: Self.sweepArmAccumulator(caught: 1),
+            ]
+        )
+        let baseline = report.rows.first { $0.arm == "baseline" }!
+        let xsdz1 = report.rows.first { $0.arm == "xsdz1only" }!
+        #expect(baseline.spanPrecision == nil, "no detections ⇒ precision undefined")
+        #expect(xsdz1.spanPrecisionDelta == nil, "undefined baseline precision ⇒ nil delta")
+    }
+
+    @Test("sweep report table renders all four arms and JSON round-trips")
+    func lexicalSweep_tableAndJSON() throws {
+        let report = LexicalScorerSweepReport(
+            episodeCount: 1,
+            accumulators: [
+                .baseline: Self.sweepArmAccumulator(caught: 1),
+                .xsdz1only: Self.sweepArmAccumulator(caught: 2),
+                .xsdz23only: Self.sweepArmAccumulator(caught: 1),
+                .alon: Self.sweepArmAccumulator(caught: 2),
+            ]
+        )
+        let table = report.table()
+        #expect(table.contains("Lexical-Scorer Per-Feature Sweep"))
+        #expect(table.contains("baseline"))
+        #expect(table.contains("xsdz1only"))
+        #expect(table.contains("xsdz23only"))
+        #expect(table.contains("alon"))
+        #expect(table.contains("per-arm lift (arm − baseline)"))
+
+        let data = try report.jsonData()
+        let decoded = try JSONDecoder().decode(LexicalScorerSweepReport.self, from: data)
+        #expect(decoded == report)
+    }
+
+    @Test("sweep report tolerates a missing arm accumulator (empty arm ⇒ zero counts)")
+    func lexicalSweep_missingArmIsEmpty() {
+        // Only baseline supplied; the other three default to empty
+        // accumulators rather than crashing — defensive against a harness that
+        // skips an arm.
+        let report = LexicalScorerSweepReport(
+            episodeCount: 0,
+            accumulators: [.baseline: Self.sweepArmAccumulator(caught: 1)]
+        )
+        #expect(report.rows.count == 4)
+        let alon = report.rows.first { $0.arm == "alon" }!
+        #expect(alon.groundTruthSpans == 0)
+        #expect(alon.detectedSpans == 0)
+    }
 }
