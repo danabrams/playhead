@@ -131,13 +131,19 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
             // Phase 11 audit/operational rows are persisted alongside
             // evidence for observability, not as fusion/trust signals.
             return .observability
-        case .fingerprint, .catalog, .crossEpisodeMemory:
+        case .fingerprint, .catalog, .crossEpisodeMemory, .crossShowSyndication:
             // playhead-xsdz.9: cross-episode copy-alignment is an external
             // reference-match signal (it compares against a stored bank of
             // confirmed-ad sequences), same family as fingerprint / catalog.
             // Same-family membership keeps the orthogonal-corroboration rule
             // honest — a `.crossEpisodeMemory` boost still needs a DIFFERENT-
             // family signal to count as cross-family corroboration.
+            // playhead-xsdz.13: cross-show syndication is also a cross-library
+            // reference-match signal (it compares the candidate's sponsor entity
+            // against a stored aggregate of the user's own library), so it shares
+            // the `.reference` family. Same orthogonality guarantee: a
+            // `.crossShowSyndication` boost cannot self-corroborate against the
+            // reference channels it sits alongside.
             return .reference
         case .fusedScore:
             return .model

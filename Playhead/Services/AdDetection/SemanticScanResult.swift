@@ -284,6 +284,24 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// Persistence note: additive case; no migration required. Forward-only,
     /// matching `.crossEpisodeMemory` / `.audioForensics`.
     case rhetoricalGrammar
+    /// playhead-xsdz.13: Cross-show syndication POSITIVE boost. Emitted when a
+    /// candidate span's NORMALIZED sponsor entity (extracted by
+    /// `EvidenceCatalogBuilder`) recurs across MANY of the user's UNRELATED
+    /// subscribed shows AND has persisted across time — overwhelming evidence of
+    /// a paid NETWORK ad campaign (ads are sold across show networks), as opposed
+    /// to a show-specific editorial brand mention. Aggregated PURELY from the
+    /// user's OWN local library by `CrossShowSyndicationStore` — no network, no
+    /// cross-user data. A MODEST corroborator capped at
+    /// `FusionWeightConfig.crossShowSyndicationCap` with NO qualified promotion
+    /// track — it never drives a skip on its own, only adds honest mass and bumps
+    /// `distinctKinds.count`. It is a cross-library REFERENCE-match signal (shares
+    /// the `.reference` family with `.fingerprint` / `.catalog` /
+    /// `.crossEpisodeMemory`), so — like `.crossEpisodeMemory` — it is
+    /// deliberately NOT counted as in-audio corroboration. Gated OFF by default
+    /// (`AdDetectionConfig.crossShowSyndicationEnabled`).
+    /// Persistence note: additive case; no migration required. Forward-only,
+    /// matching `.crossEpisodeMemory` / `.rhetoricalGrammar`.
+    case crossShowSyndication
     /// Phase 11 random negative-audit marker. These rows are persisted in
     /// `evidence_events` for miss-rate estimation, but they are not positive
     /// FM evidence for training or fusion.
@@ -299,7 +317,8 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
             return true
         case .fm, .lexical, .acoustic, .catalog, .classifier, .fingerprint,
              .fusedScore, .metadata, .musicBed, .breakAlignment, .lexicalAutoAd,
-             .audioForensics, .crossEpisodeMemory, .rhetoricalGrammar:
+             .audioForensics, .crossEpisodeMemory, .rhetoricalGrammar,
+             .crossShowSyndication:
             return false
         }
     }

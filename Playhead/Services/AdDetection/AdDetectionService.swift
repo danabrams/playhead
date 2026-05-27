@@ -270,6 +270,33 @@ struct AdDetectionConfig: Sendable {
     /// and unit-tested, just inert in production.
     let rhetoricalGrammarEnabled: Bool
 
+    /// playhead-xsdz.13: master kill switch for the cross-show syndication
+    /// evidence channel (`CrossShowSyndicationStore` +
+    /// `CrossShowSyndicationEvaluator`). When `false` (the production default),
+    /// the ENTIRE feature is inert: `PlayheadRuntime` constructs / migrates NO
+    /// store, the WRITE path records NO sponsor-entity observations, and
+    /// `buildEvidenceLedger` builds NO `.crossShowSyndication` entry AND performs
+    /// NO store read — so the output is byte-identical to pre-xsdz.13 behaviour
+    /// and there are ZERO new production side-effects (no store, no SQLite file,
+    /// no migration, no writes, no reads). This is the load-bearing xsdz.9
+    /// full-gating lesson applied to a NEW store.
+    ///
+    /// When flipped to `true`: the WRITE path records each above-min-confidence
+    /// sponsor ENTITY (normalized via `EvidenceCatalogBuilder.normalize`,
+    /// matching `SponsorKnowledgeEntry.normalizedValue`) keyed by show, and the
+    /// READ path emits a single capped corroborative `.crossShowSyndication`
+    /// entry when that entity has high cross-show SPREAD (distinct-show count /
+    /// spread-ratio over a threshold) AND temporal persistence (seen across time,
+    /// not a one-week burst). A one-show / one-episode entity gets no boost.
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate: main stays
+    /// behavior-neutral and the channel is never wired into a production config
+    /// or A/B arm until a corpus eval shows lift. The store / evaluator stay
+    /// fully built and unit-tested, just inert in production. When the flag is
+    /// later flipped on we accept a cold-start store (consistent with the other
+    /// off-by-default channels).
+    let crossShowSyndicationEnabled: Bool
+
     /// playhead-xsdz.10: master kill switch for lightweight temporal
     /// regularization. When `false` (the production default), `runBackfill`
     /// never invokes `TemporalRegularizer` — so the per-span decisions are
@@ -375,6 +402,7 @@ struct AdDetectionConfig: Sendable {
         audioForensicsEnabled: Bool = false,
         crossEpisodeMemoryEnabled: Bool = false,
         rhetoricalGrammarEnabled: Bool = false,
+        crossShowSyndicationEnabled: Bool = false,
         temporalRegularizationEnabled: Bool = false,
         temporalNeighborWindowSeconds: TimeInterval = 120.0,
         temporalHighConfidenceNeighborThreshold: Double = 0.80,
@@ -409,6 +437,7 @@ struct AdDetectionConfig: Sendable {
         self.audioForensicsEnabled = audioForensicsEnabled
         self.crossEpisodeMemoryEnabled = crossEpisodeMemoryEnabled
         self.rhetoricalGrammarEnabled = rhetoricalGrammarEnabled
+        self.crossShowSyndicationEnabled = crossShowSyndicationEnabled
         self.temporalRegularizationEnabled = temporalRegularizationEnabled
         self.temporalNeighborWindowSeconds = temporalNeighborWindowSeconds
         self.temporalHighConfidenceNeighborThreshold = temporalHighConfidenceNeighborThreshold
@@ -445,6 +474,7 @@ struct AdDetectionConfig: Sendable {
         audioForensicsEnabled: false,
         crossEpisodeMemoryEnabled: false,
         rhetoricalGrammarEnabled: false,
+        crossShowSyndicationEnabled: false,
         temporalRegularizationEnabled: false,
         temporalNeighborWindowSeconds: 120.0,
         temporalHighConfidenceNeighborThreshold: 0.80,
@@ -883,6 +913,29 @@ actor AdDetectionService {
     /// constructed once. Inert unless the bank/store reads above feed it.
     private let crossEpisodeMemoryEvaluator = CrossEpisodeMemoryEvaluator()
 
+    /// playhead-xsdz.13: optional cross-show syndication observation store. When
+    /// non-nil AND `config.crossShowSyndicationEnabled` is true, `runBackfill`
+    /// records each above-min-confidence sponsor ENTITY (keyed by show) and reads
+    /// the cross-show spread profile to emit a capped `.crossShowSyndication`
+    /// boost entry when an entity has high cross-show spread AND temporal
+    /// persistence. `nil` OR flag-off ⇒ no store read/write and no boost entry
+    /// (byte-identical pre-xsdz.13). Production wires a real store ONLY when the
+    /// flag is on; tests inject a temp-dir store or leave nil.
+    private let crossShowSyndicationStore: CrossShowSyndicationStore?
+
+    /// playhead-xsdz.13: pure evaluator that turns a `CrossShowSpreadProfile`
+    /// into the (at most one) capped `.crossShowSyndication` boost entry.
+    /// Stateless; constructed once. Inert unless the store reads above feed it.
+    private let crossShowSyndicationEvaluator = CrossShowSyndicationEvaluator()
+
+    /// playhead-xsdz.13: minimum confidence for a sponsor-entity observation to
+    /// be recorded into the cross-show store. Mirrors
+    /// `KnowledgePromotionThresholds.minCandidateConfidence` (0.5) so the
+    /// syndication store ingests the same vetted-quality entities the per-show
+    /// knowledge store does — a low-confidence brand-span guess never pollutes
+    /// the cross-show aggregate.
+    private static let crossShowSyndicationMinWriteConfidence: Double = 0.5
+
     /// Phase 7.2: optional correction store. When non-nil, `runBackfill` pre-computes
     /// a per-span correction factor by querying the store's weighted corrections for
     /// the asset. The factor is passed to `DecisionMapper` so correction-suppressed
@@ -1193,6 +1246,7 @@ actor AdDetectionService {
         adCatalogStore: AdCatalogStore? = nil,
         negativeFingerprintBank: NegativeFingerprintBank? = nil,
         adCopyFingerprintStore: AdCopyFingerprintStore? = nil,
+        crossShowSyndicationStore: CrossShowSyndicationStore? = nil,
         episodeMetadataProvider: EpisodeMetadataProvider = NullEpisodeMetadataProvider(),
         decisionLogger: DecisionLoggerProtocol? = nil,
         classifierCalibrationProfile: ClassifierCalibrationProfile = .production,
@@ -1219,6 +1273,7 @@ actor AdDetectionService {
         self.adCatalogStore = adCatalogStore
         self.negativeFingerprintBank = negativeFingerprintBank
         self.adCopyFingerprintStore = adCopyFingerprintStore
+        self.crossShowSyndicationStore = crossShowSyndicationStore
         self.episodeMetadataProvider = episodeMetadataProvider
         // playhead-8em9 (narL): allow the logger to be installed at init
         // time so there is no race with the first backfill. PlayheadRuntime
@@ -2764,6 +2819,46 @@ actor AdDetectionService {
             ? []
             : AcousticBreakDetector.detectBreaks(in: featureWindows)
 
+        // playhead-xsdz.13: cross-show syndication WRITE + denominator hoist.
+        // Gated by the OFF-by-default `crossShowSyndicationEnabled` flag AND a
+        // wired store AND a known show; when any is absent, NO store read/write
+        // happens and the decision path is byte-identical to pre-xsdz.13.
+        //
+        // WRITE: record THIS episode's distinct sponsor ENTITIES (brand spans
+        // extracted by `EvidenceCatalogBuilder`, normalized with the same
+        // `normalize` that backs `SponsorKnowledgeEntry.normalizedValue`) keyed
+        // by show. Done ONCE per backfill (not per span) so an entity that
+        // appears in several spans is recorded as ONE observation for this
+        // episode — the cross-show signal counts DISTINCT shows, not span
+        // multiplicity. Only entities above the min-write confidence are
+        // recorded, so a weak one-off brand-span guess never pollutes the
+        // aggregate.
+        //
+        // DENOMINATOR: resolve the library's distinct-observed-show count ONCE
+        // AFTER the write so every span's read in this backfill shares the same
+        // stable denominator (deterministic, no within-loop drift).
+        var crossShowTotalObservedShows = 0
+        if config.crossShowSyndicationEnabled,
+           let syndicationStore = crossShowSyndicationStore,
+           let show = catalogShowId {
+            let sponsorEntities = Self.crossShowSponsorObservations(
+                from: evidenceCatalog.entries
+            )
+            for (normalizedEntity, confidence) in sponsorEntities
+            where confidence >= Self.crossShowSyndicationMinWriteConfidence {
+                do {
+                    try await syndicationStore.recordObservation(
+                        normalizedEntity: normalizedEntity,
+                        podcastId: show,
+                        confidence: confidence
+                    )
+                } catch {
+                    logger.debug("crossShowSyndication: recordObservation failed (non-fatal): \(String(describing: error), privacy: .public)")
+                }
+            }
+            crossShowTotalObservedShows = await syndicationStore.totalObservedShowCount()
+        }
+
         for span in decodedSpans {
             try Task.checkCancellation()
 
@@ -2945,6 +3040,43 @@ actor AdDetectionService {
                 }
             }
 
+            // playhead-xsdz.13: cross-show syndication READ. Gated by the same
+            // OFF-by-default `crossShowSyndicationEnabled` flag AND a wired store
+            // AND a known show; when the flag is off OR the store is nil, NO read
+            // happens and `crossShowSyndicationEntries` stays empty — so the
+            // ledger is byte-identical to pre-xsdz.13. For each NORMALIZED sponsor
+            // entity overlapping this span, look up its cross-show spread profile
+            // (using the denominator hoisted once above) and let the pure
+            // evaluator emit a capped boost entry IFF the entity has high spread
+            // AND temporal persistence. The single strongest qualifying entry is
+            // kept so the channel contributes at most one entry per span (one
+            // kind, one cap).
+            var crossShowSyndicationEntries: [EvidenceLedgerEntry] = []
+            if config.crossShowSyndicationEnabled,
+               let syndicationStore = crossShowSyndicationStore,
+               catalogShowId != nil {
+                let spanEntities = Self.crossShowSponsorEntities(
+                    from: evidenceCatalog.entries,
+                    overlapping: refinedSpan
+                )
+                var best: EvidenceLedgerEntry?
+                for entity in spanEntities {
+                    guard let profile = await syndicationStore.spreadProfile(
+                        forEntity: entity,
+                        totalObservedShows: crossShowTotalObservedShows
+                    ) else { continue }
+                    let entries = crossShowSyndicationEvaluator.buildBoostEntries(
+                        profile: profile,
+                        cap: fusionConfig.crossShowSyndicationCap
+                    )
+                    if let candidate = entries.first,
+                       candidate.weight > (best?.weight ?? -1) {
+                        best = candidate
+                    }
+                }
+                if let best { crossShowSyndicationEntries = [best] }
+            }
+
             // playhead-xsdz.12: assemble the span's joined transcript prose for
             // the rhetorical act-sequence grammar detector. Gated on the
             // OFF-by-default `rhetoricalGrammarEnabled` flag: with the flag off
@@ -2986,6 +3118,10 @@ actor AdDetectionService {
                 // playhead-xsdz.12: span prose for the grammar detector; "" when
                 // the OFF-by-default flag is off, so behaviour is byte-identical.
                 spanText: rhetoricalGrammarSpanText,
+                // playhead-xsdz.13: cross-show syndication boost entries built
+                // above. Empty for the flag-OFF / no-store / non-firing path, so
+                // the ledger is byte-identical to pre-xsdz.13.
+                crossShowSyndicationEntries: crossShowSyndicationEntries,
                 episodeDuration: episodeDuration
             )
 
@@ -3964,6 +4100,65 @@ actor AdDetectionService {
         }
     }
 
+    // MARK: - playhead-xsdz.13: cross-show sponsor-entity extraction
+
+    /// Extract the distinct NORMALIZED sponsor entities for the whole episode
+    /// (the WRITE set), each paired with a derived confidence in `[0, 1]`.
+    ///
+    /// The sponsor ENTITY is the `.brandSpan` evidence category — the brand-like
+    /// proper-noun span `EvidenceCatalogBuilder` only extracts inside COMMERCIAL
+    /// CONTEXT (within ±2 atoms of a URL / promo code / disclosure anchor), so a
+    /// brand span is already a vetted "a sponsor was detected here" signal. Its
+    /// `normalizedText` IS the same normalization (`EvidenceCatalogBuilder.normalize`,
+    /// lowercased + NFKC + control/format-stripped + trimmed) that backs
+    /// `SponsorKnowledgeEntry.normalizedValue`, so "BetterHelp" / "better help"
+    /// collapse to one cross-show key.
+    ///
+    /// Confidence is derived deterministically from repetition: a single mention
+    /// just clears the write bar (0.5); each additional repeat raises it,
+    /// clamped to 1.0. When an entity appears under multiple refs, the strongest
+    /// (highest-count) is kept. Pure / static so tests can exercise it directly.
+    static func crossShowSponsorObservations(
+        from entries: [EvidenceEntry]
+    ) -> [(normalizedEntity: String, confidence: Double)] {
+        var bestConfidenceByEntity: [String: Double] = [:]
+        var order: [String] = []
+        for entry in entries where entry.category == .brandSpan {
+            let entity = entry.normalizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard entity.count >= CrossShowSyndicationStore.minEntityLength else { continue }
+            let confidence = Swift.min(1.0, 0.5 + 0.1 * Double(Swift.max(0, entry.count - 1)))
+            if let existing = bestConfidenceByEntity[entity] {
+                if confidence > existing { bestConfidenceByEntity[entity] = confidence }
+            } else {
+                bestConfidenceByEntity[entity] = confidence
+                order.append(entity)
+            }
+        }
+        // Deterministic order: first appearance in the catalog's ref ordering.
+        return order.map { ($0, bestConfidenceByEntity[$0] ?? 0.5) }
+    }
+
+    /// Extract the distinct NORMALIZED sponsor entities whose catalog coverage
+    /// window OVERLAPS `span` (the per-span READ set). Same `.brandSpan` source
+    /// and normalization as the write set; deterministically ordered by first
+    /// appearance. Pure / static for direct unit testing.
+    static func crossShowSponsorEntities(
+        from entries: [EvidenceEntry],
+        overlapping span: DecodedSpan
+    ) -> [String] {
+        var seen: Set<String> = []
+        var out: [String] = []
+        for entry in entries where entry.category == .brandSpan {
+            // Time-window overlap against the refined span bounds (half-open).
+            guard entry.coverageStartTime < span.endTime,
+                  entry.coverageEndTime > span.startTime else { continue }
+            let entity = entry.normalizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard entity.count >= CrossShowSyndicationStore.minEntityLength else { continue }
+            if seen.insert(entity).inserted { out.append(entity) }
+        }
+        return out
+    }
+
     private func buildEvidenceLedger(
         span: DecodedSpan,
         classifierResults: [ClassifierResult],
@@ -3993,6 +4188,11 @@ actor AdDetectionService {
         // off) and for every existing caller that does not thread it, so the
         // ledger is byte-identical to pre-xsdz.12 in those cases.
         spanText: String = "",
+        // playhead-xsdz.13: pre-built `.crossShowSyndication` boost entries (a
+        // normalized sponsor entity with high cross-show spread + temporal
+        // persistence). Empty for the flag-OFF / no-store / non-firing path, so
+        // the ledger is byte-identical to pre-xsdz.13 in those cases.
+        crossShowSyndicationEntries: [EvidenceLedgerEntry] = [],
         episodeDuration: Double = 0
     ) -> [EvidenceLedgerEntry] {
         // Classifier entry: find the best-matching ClassifierResult for this span.
@@ -4166,6 +4366,7 @@ actor AdDetectionService {
             audioForensicsEntries: audioForensicsEntries,
             crossEpisodeMemoryEntries: crossEpisodeMemoryEntries,
             rhetoricalGrammarEntries: rhetoricalGrammarEntries,
+            crossShowSyndicationEntries: crossShowSyndicationEntries,
             // Cycle 1 H2: effective mode so fusion's `contributesToExistingCandidateLedger`
             // gate honors the registry's decision for this cohort.
             mode: effectiveFMBackfillMode,
