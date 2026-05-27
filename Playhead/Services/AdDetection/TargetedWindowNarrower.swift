@@ -225,12 +225,13 @@ enum TargetedWindowNarrower {
         let ordered = orderedSegments(inputs.segments)
         guard !ordered.isEmpty else { return .empty }
 
-        // playhead-xsdz.2: detect dense lexical-cue clusters for the inward
-        // cluster-tightening step in `narrowedResult`. Computed lazily and
-        // only by the narrowing phases that actually consume it: the full-
-        // episode scan and the random-audit phase return early WITHOUT
-        // building clusters, so they never pay for the (full-episode) lexical
-        // scan. `lexicalCueClusters` itself returns `[]` when the feature is
+        // playhead-xsdz.2 / xsdz.3: detect dense lexical-cue clusters. Two
+        // consumers: the inward cluster-tightening step in `narrowedResult`
+        // (xsdz.2) and lexically-nominated audit-window selection in
+        // `auditSegments` (xsdz.3). Computed lazily and only by the phases that
+        // consume it: the full-episode scan returns early WITHOUT building
+        // clusters, so it never pays for the (full-episode) lexical scan.
+        // `lexicalCueClusters` itself returns `[]` when the feature is
         // disabled, so the acoustic-only A/B baseline pays nothing either.
         // Each `narrow()` call drives exactly one phase, so the closure runs
         // at most once.
@@ -260,7 +261,19 @@ enum TargetedWindowNarrower {
                 phaseLabel: "scanLikelyAdSlots"
             )
         case .scanRandomAuditWindows:
-            return .narrowed(auditSegments(orderedSegments: ordered, inputs: inputs))
+            // playhead-xsdz.3: two-stage "lexical nominates, FM confirms" at
+            // the scan-SELECTION layer. The FM's limited audit budget used to
+            // be spent on a single RANDOM contiguous block; instead point it
+            // at the regions the lexical scanner flags as ad-likely (the same
+            // sponsor/promoCode/urlCTA/purchaseLanguage clusters xsdz.2 built),
+            // densest-first, at the SAME budget. Falls back to / unions with
+            // the random block so coverage never regresses vs pure random.
+            return .narrowed(auditSegments(
+                orderedSegments: ordered,
+                inputs: inputs,
+                lexicalClusters: clusters(),
+                config: config
+            ))
         case .metadataSeededRegion:
             // ef2.4.7: metadata-seeded regions use the same narrowing as harvester
             // proposals — evidence line refs define the window around seeded regions.
@@ -994,14 +1007,141 @@ enum TargetedWindowNarrower {
         )
     }
 
+    /// Select the FM audit-scan budget for `.scanRandomAuditWindows`.
+    ///
+    /// playhead-xsdz.3 — "lexical nominates, FM confirms" at the scan-SELECTION
+    /// layer. The audit budget (`auditWindowSampleRate * segmentCount` segments)
+    /// historically went to a single RANDOM contiguous block, which spent the
+    /// FM's scarce audit tokens on whatever region the seed happened to land on.
+    /// Instead we NOMINATE the regions the lexical scanner already flagged as
+    /// ad-likely (the same sponsor / promoCode / urlCTA / purchaseLanguage
+    /// `LexicalCueCluster`s xsdz.2 built) and point the SAME budget at them,
+    /// densest-cluster-first.
+    ///
+    /// Conservative by construction (the bead forbids reducing ad-span coverage
+    /// vs the random baseline):
+    ///   * If `lexicalClusterSnapEnabled` is false, or the lexical scan finds no
+    ///     ad-likely clusters, we fall back to the EXACT pre-xsdz.3 random
+    ///     contiguous block — bit-identical, no behaviour change. This is the
+    ///     acoustic-only A/B baseline path.
+    ///   * Otherwise we fill the budget with cluster-covering segments first
+    ///     (densest cluster, then next, …), and if budget REMAINS after the
+    ///     clusters are exhausted we top it up with the random contiguous block
+    ///     (skipping segments already nominated). So the nominated selection is
+    ///     a UNION with random when lexical is sparse — it can only ADD ad-likely
+    ///     coverage, never remove the random coverage it would otherwise have.
+    ///
+    /// The budget (`targetCount`) is identical in both paths, so nomination
+    /// never widens the FM's audit token spend (no-FP-widening property).
+    ///
+    /// Determinism: clusters arrive time-sorted from `lexicalCueClusters`; the
+    /// densest-first ordering uses a stable tiebreak (earliest start), the
+    /// per-cluster segment scan is a stable forward sweep, and the random
+    /// top-up reuses the existing `auditSeed`. Identical inputs → identical
+    /// output.
     private static func auditSegments(
         orderedSegments: [AdTranscriptSegment],
-        inputs: Inputs
+        inputs: Inputs,
+        lexicalClusters: [LexicalCueCluster],
+        config: NarrowingConfig
     ) -> [AdTranscriptSegment] {
         guard orderedSegments.count > 1 else { return orderedSegments }
 
         let requestedCount = Int(round(Double(orderedSegments.count) * inputs.auditWindowSampleRate))
         let targetCount = max(1, min(orderedSegments.count - 1, requestedCount))
+
+        // Nominated indices, densest-cluster-first, deduped and capped at the
+        // budget. Empty when the feature is off or no ad-likely cluster exists.
+        let nominated = nominatedAuditIndices(
+            orderedSegments: orderedSegments,
+            lexicalClusters: lexicalClusters,
+            budget: targetCount,
+            config: config
+        )
+
+        // Pure-random fallback: pre-xsdz.3 behaviour, bit-identical.
+        guard !nominated.isEmpty else {
+            return randomAuditBlock(
+                orderedSegments: orderedSegments,
+                targetCount: targetCount,
+                inputs: inputs
+            )
+        }
+
+        // Union with the random block to spend any leftover budget. The
+        // nominated clusters are the priority; the random top-up guarantees we
+        // never cover FEWER segments than the pure-random baseline would.
+        var selected = nominated
+        if selected.count < targetCount {
+            let randomBlock = randomAuditBlock(
+                orderedSegments: orderedSegments,
+                targetCount: targetCount,
+                inputs: inputs
+            )
+            for segment in randomBlock where selected.count < targetCount {
+                selected.insert(segment.segmentIndex)
+            }
+        }
+
+        // Emit the selected segments in episode order. `selected.count` is
+        // capped at `targetCount`, so the budget is never exceeded.
+        return orderedSegments.filter { selected.contains($0.segmentIndex) }
+    }
+
+    /// Map ad-likely lexical clusters to the segment indices the FM should
+    /// audit, densest cluster first, capped at `budget`. Returns an empty set
+    /// when the feature is disabled, no clusters clear the minimum-hit gate, or
+    /// the budget is non-positive — the caller then falls back to random.
+    ///
+    /// A cluster contributes the segments whose timespan overlaps the cluster
+    /// span (the same overlap rule the lexical-slot anchor seeding uses), so a
+    /// nominated window is centred on the ad-dense core. Clusters are consumed
+    /// densest-first (ties → earliest start) so that under a tight budget the
+    /// strongest ad signal is audited first.
+    private static func nominatedAuditIndices(
+        orderedSegments: [AdTranscriptSegment],
+        lexicalClusters: [LexicalCueCluster],
+        budget: Int,
+        config: NarrowingConfig
+    ) -> Set<Int> {
+        guard config.lexicalClusterSnapEnabled, budget > 0 else { return [] }
+
+        let eligible = lexicalClusters
+            .filter { $0.hitCount >= config.lexicalClusterMinHits }
+            .sorted { lhs, rhs in
+                if lhs.hitCount != rhs.hitCount {
+                    return lhs.hitCount > rhs.hitCount
+                }
+                return lhs.startTime < rhs.startTime
+            }
+        guard !eligible.isEmpty else { return [] }
+
+        var selected = Set<Int>()
+        for cluster in eligible {
+            guard selected.count < budget else { break }
+            for segment in orderedSegments where selected.count < budget {
+                if overlaps(
+                    startTime: segment.startTime,
+                    endTime: segment.endTime,
+                    withStart: cluster.startTime,
+                    end: cluster.endTime
+                ) {
+                    selected.insert(segment.segmentIndex)
+                }
+            }
+        }
+        return selected
+    }
+
+    /// The pre-xsdz.3 random audit selection: one contiguous block of
+    /// `targetCount` segments starting at a seed-derived offset. Extracted
+    /// unchanged so the lexical-nomination path can reuse it for the
+    /// budget top-up and the disabled/no-cluster fallback.
+    private static func randomAuditBlock(
+        orderedSegments: [AdTranscriptSegment],
+        targetCount: Int,
+        inputs: Inputs
+    ) -> [AdTranscriptSegment] {
         let maxStart = orderedSegments.count - targetCount
         let startIndex = maxStart == 0 ? 0 : Int(auditSeed(inputs: inputs) % UInt64(maxStart + 1))
         return Array(orderedSegments[startIndex..<(startIndex + targetCount)])
