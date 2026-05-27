@@ -414,11 +414,17 @@ final class ChapterFusionLiftABTests: XCTestCase {
                 transcript: chunks,
                 fmAvailable: true
             )
+            let boundaryDetector = LiveBoundaryDetector(snapshot: snapshot)
+            let candidates = try await boundaryDetector.detect()
             let phase = ChapterGenerationPhase(
                 admissionPolicy: StubAdmissionPolicy(),
                 creatorChapterProvider: StubCreatorChapterProvider(),
-                boundaryDetector: LiveBoundaryDetector(snapshot: snapshot),
-                labeler: LiveLabelerAdapter(service: .live(), transcript: chunks),
+                boundaryDetector: boundaryDetector,
+                labeler: LiveLabelerAdapter(
+                    service: .live(),
+                    transcript: chunks,
+                    candidates: candidates
+                ),
                 // The plan is written under whatever hash this provider
                 // returns; pin it to the wire-in's read key so the round-trip
                 // lands (churn risk #1).
@@ -653,73 +659,13 @@ private struct ABRunError: Error {
 
 // MARK: - In-test phase doubles
 //
-// These mirror the LIVE adapters in
-// `ChapterPlanPipelineSnapshotCaptureTests` (those are `private` to that
-// file, so we re-declare ours here) — the boundary detector + FM labeler
-// are LIVE; admission / creator-chapter / hash / event sink are minimal
-// doubles. The event sink RECORDS so the harness can assert `.completed`.
-
-/// Boundary-detection adapter wrapping the LIVE `ChapterBoundaryDetector`
-/// over a `ChapterFeatureSnapshot`. Closes each detected boundary at the
-/// next boundary's start (last runs to episode end) so the labeler gets a
-/// region to read — identical to the capture test's adapter.
-private struct LiveBoundaryDetector: ChapterBoundaryDetecting {
-    let snapshot: ChapterFeatureSnapshot
-    let detector: ChapterBoundaryDetector
-
-    init(snapshot: ChapterFeatureSnapshot) {
-        self.snapshot = snapshot
-        self.detector = ChapterBoundaryDetector()
-    }
-
-    func detect() async throws -> [ChapterBoundaryCandidate] {
-        let starts = detector.detect(features: snapshot)
-            .map(\.startTime)
-            .sorted()
-        return starts.enumerated().map { index, start in
-            let end = index + 1 < starts.count ? starts[index + 1] : snapshot.episodeDuration
-            return ChapterBoundaryCandidate(startTime: start, endTime: end)
-        }
-    }
-}
-
-/// Adapter wrapping the LIVE FM `ChapterLabelingService` as a
-/// `ChapterLabeling` conformance. Slices region text from the transcript
-/// per candidate (same as the capture test) so the FM has real context.
-@available(iOS 26.0, *)
-private struct LiveLabelerAdapter: ChapterLabeling {
-    let service: ChapterLabelingService
-    let transcript: [TranscriptChunk]
-
-    func label(candidate: ChapterBoundaryCandidate) async throws -> LabelingResult? {
-        let labelingCandidate = ChapterLabelingCandidate(
-            startTime: candidate.startTime,
-            endTime: candidate.endTime,
-            regionText: Self.regionText(
-                transcript: transcript,
-                start: candidate.startTime,
-                end: candidate.endTime
-            ),
-            chapterIndex: 1,
-            totalChapters: 1,
-            previousDisposition: nil
-        )
-        return await service.label(labelingCandidate)
-    }
-
-    static func regionText(
-        transcript: [TranscriptChunk],
-        start: TimeInterval,
-        end: TimeInterval?
-    ) -> String {
-        let upper = end ?? .greatestFiniteMagnitude
-        return transcript
-            .filter { $0.startTime >= start && $0.startTime < upper }
-            .sorted { $0.startTime < $1.startTime }
-            .map(\.text)
-            .joined(separator: " ")
-    }
-}
+// The LIVE `LiveBoundaryDetector` and `LiveLabelerAdapter` adapters are
+// shared with the capture harness and live in
+// `ChapterLabelingContextSequencer.swift`; that file also unit-tests the
+// bookkeeping that threads the real chapter index / total / previous
+// disposition into each FM call (playhead-bahc). The admission /
+// creator-chapter / hash / event-sink doubles below are minimal; the event
+// sink RECORDS so the harness can assert `.completed`.
 
 /// Always admits — the A/B is opt-in via env var, so the operator has
 /// already accepted the FM cost.

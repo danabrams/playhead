@@ -357,7 +357,12 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
         let cache = ChapterPlanCache(directory: cacheRoot)
 
         let boundaryDetector = LiveBoundaryDetector(snapshot: snapshot)
-        let labeler = LiveLabelerAdapter(service: .live(), transcript: transcript)
+        let candidates = try await boundaryDetector.detect()
+        let labeler = LiveLabelerAdapter(
+            service: .live(),
+            transcript: transcript,
+            candidates: candidates
+        )
         let admissionPolicy = StubAdmissionPolicy()
         let creatorProvider = StubCreatorChapterProvider()
         let hashProvider = StickyHashProvider(hash: golden.episodeContentHash)
@@ -562,7 +567,11 @@ final class ChapterLabelingDiagnosticTests: XCTestCase {
             )
             let detector = LiveBoundaryDetector(snapshot: snapshot)
             let candidates = try await detector.detect()
-            let labeler = LiveLabelerAdapter(service: labelService, transcript: transcript)
+            let labeler = LiveLabelerAdapter(
+                service: labelService,
+                transcript: transcript,
+                candidates: candidates
+            )
 
             // Golden adBreak spans: [chapter.start, nextChapter.start),
             // last running to episode end.
@@ -576,7 +585,7 @@ final class ChapterLabelingDiagnosticTests: XCTestCase {
             var rows: [CandidateDiagnostic] = []
             for candidate in candidates {
                 let result = try await labeler.label(candidate: candidate)
-                let regionText = LiveLabelerAdapter.regionText(
+                let regionText = ChapterRegionText.regionText(
                     transcript: transcript,
                     start: candidate.startTime,
                     end: candidate.endTime
@@ -823,101 +832,13 @@ private struct CaptureUnavailable: Error {
     let reason: String
 }
 
-// MARK: - In-test adapters and stubs (au2v.1.24)
-
-/// Boundary-detection adapter for the capture test. Wraps the LIVE
-/// `ChapterBoundaryDetector` (pure function over a snapshot) so the
-/// phase can call `detect() async throws -> [ChapterBoundaryCandidate]`
-/// without us pre-computing candidates in the test body.
-///
-/// The mapping `ChapterCandidate → ChapterBoundaryCandidate` is
-/// intentionally lossy: the phase only consumes `startTime` and an
-/// optional `endTime`. The detector emits `startTime` per boundary;
-/// `endTime` is left `nil` so the labeler treats each candidate as
-/// "open-ended until the next boundary or episode end" (matches the
-/// detector's contract — boundaries describe transitions, not regions).
-private struct LiveBoundaryDetector: ChapterBoundaryDetecting {
-    let snapshot: ChapterFeatureSnapshot
-    let detector: ChapterBoundaryDetector
-
-    init(snapshot: ChapterFeatureSnapshot) {
-        self.snapshot = snapshot
-        self.detector = ChapterBoundaryDetector()
-    }
-
-    func detect() async throws -> [ChapterBoundaryCandidate] {
-        // Each detector boundary describes a transition. To give the
-        // labeler a region to read, we close each candidate at the next
-        // boundary's start (the last candidate runs to episode end).
-        // This mirrors how production regions span [thisStart, nextStart)
-        // and lets `LiveLabelerAdapter` slice transcript text per region
-        // instead of passing an empty `regionText`.
-        let starts = detector.detect(features: snapshot)
-            .map(\.startTime)
-            .sorted()
-        return starts.enumerated().map { index, start in
-            let end = index + 1 < starts.count
-                ? starts[index + 1]
-                : snapshot.episodeDuration
-            return ChapterBoundaryCandidate(startTime: start, endTime: end)
-        }
-    }
-}
-
-/// Adapter wrapping the live `ChapterLabelingService` (FM-backed) as a
-/// `ChapterLabeling` conformance. The capture has no transcript on
-/// hand, so `regionText` is empty — the FM still produces a label, but
-/// the disposition tends toward operational-unclear. That is exactly
-/// what the capture should record so a downstream eval can see the
-/// effect of running with no transcript context.
-///
-/// `chapterIndex` and `totalChapters` are filled with `1` and `1`
-/// respectively because the phase calls the labeler per-candidate and
-/// the test has no plan-level context to thread through. The labeling
-/// prompt uses these for context only; they do not affect the output
-/// schema.
-@available(iOS 26.0, *)
-private struct LiveLabelerAdapter: ChapterLabeling {
-    let service: ChapterLabelingService
-    let transcript: [TranscriptChunk]
-
-    func label(
-        candidate: ChapterBoundaryCandidate
-    ) async throws -> LabelingResult? {
-        let labelingCandidate = ChapterLabelingCandidate(
-            startTime: candidate.startTime,
-            endTime: candidate.endTime,
-            regionText: Self.regionText(
-                transcript: transcript,
-                start: candidate.startTime,
-                end: candidate.endTime
-            ),
-            chapterIndex: 1,
-            totalChapters: 1,
-            previousDisposition: nil
-        )
-        return await service.label(labelingCandidate)
-    }
-
-    /// Join the text of every transcript chunk whose start falls in
-    /// `[start, end)` (open-ended when `end` is nil). Mirrors
-    /// production's `RegionFeatureExtractor`, which joins region-atom
-    /// text with a single space; `ChapterLabelingService` truncates to
-    /// `regionTextCharacterCap` internally, so very long regions are
-    /// capped the same way the production labeler caps them.
-    static func regionText(
-        transcript: [TranscriptChunk],
-        start: TimeInterval,
-        end: TimeInterval?
-    ) -> String {
-        let upper = end ?? .greatestFiniteMagnitude
-        return transcript
-            .filter { $0.startTime >= start && $0.startTime < upper }
-            .sorted { $0.startTime < $1.startTime }
-            .map(\.text)
-            .joined(separator: " ")
-    }
-}
+// MARK: - In-test stubs (au2v.1.24)
+//
+// The live `LiveBoundaryDetector` and `LiveLabelerAdapter` adapters are
+// shared with the fusion-lift harness and live in
+// `ChapterLabelingContextSequencer.swift`; the bookkeeping that threads the
+// real chapter index / total / previous disposition is unit-tested there
+// (playhead-bahc).
 
 /// Admission stub that always admits — the capture is opt-in via env
 /// var, so the operator has already accepted the cost.
