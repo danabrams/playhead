@@ -270,6 +270,72 @@ struct AdDetectionConfig: Sendable {
     /// and unit-tested, just inert in production.
     let rhetoricalGrammarEnabled: Bool
 
+    /// playhead-xsdz.10: master kill switch for lightweight temporal
+    /// regularization. When `false` (the production default), `runBackfill`
+    /// never invokes `TemporalRegularizer` — so the per-span decisions are
+    /// byte-identical to pre-xsdz.10 behaviour. Flip to `true` to enable the
+    /// deterministic, post-fusion isolation-penalty + min-dwell pass described
+    /// on `TemporalRegularizer`.
+    ///
+    /// The insight (cross-model idea duel): real ads are CONTIGUOUS and
+    /// CLUSTERED (2-4 back-to-back in a break) while false positives are
+    /// typically ISOLATED one-off editorial mentions. The pass softly penalizes
+    /// the `skipConfidence` of a detection with NO high-confidence neighbor in a
+    /// time window, and additionally down-weights a too-short uncorroborated
+    /// "island". The neighbor-support signal is HIGH-CONFIDENCE-GATED and
+    /// ONE-SIDED (anti-contagion): a neighbor only counts as support if its own
+    /// `skipConfidence >= temporalHighConfidenceNeighborThreshold`, and the pass
+    /// can only LOWER a confidence, never raise it. Applied across the episode's
+    /// collected decisions BEFORE the hard auto-skip gate; never hard-blocks.
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate: not enabled in any
+    /// production config or A/B arm. The regularizer stays fully built and
+    /// unit-tested, just inert in production.
+    let temporalRegularizationEnabled: Bool
+
+    /// playhead-xsdz.10: edge-to-edge neighbor window (seconds) for temporal
+    /// regularization. A neighbor within this gap of a detection can lend
+    /// support. Default 120s. Only consulted when
+    /// `temporalRegularizationEnabled` is `true`.
+    let temporalNeighborWindowSeconds: TimeInterval
+
+    /// playhead-xsdz.10: the anti-contagion gate. A neighbor counts as SUPPORT
+    /// only when its own `skipConfidence` is at or above this threshold. Default
+    /// 0.80 (the production auto-skip floor) so only a confident detection lends
+    /// support and two weak FPs cannot prop each other up. Only consulted when
+    /// `temporalRegularizationEnabled` is `true`.
+    let temporalHighConfidenceNeighborThreshold: Double
+
+    /// playhead-xsdz.10: multiplicative penalty applied to an ISOLATED
+    /// detection's `skipConfidence` (no high-confidence neighbor in the window).
+    /// Default 0.85; clamped to [0, 1]; never boosts. Only consulted when
+    /// `temporalRegularizationEnabled` is `true`.
+    let temporalIsolationPenaltyFactor: Double
+
+    /// playhead-xsdz.10: a detection shorter than this (seconds) AND
+    /// uncorroborated is treated as a too-short island and additionally
+    /// down-weighted by `temporalMinDwellPenaltyFactor`. Default 10s. Only
+    /// consulted when `temporalRegularizationEnabled` is `true`.
+    let temporalMinDwellSeconds: TimeInterval
+
+    /// playhead-xsdz.10: multiplicative penalty applied to a too-short,
+    /// uncorroborated island. Default 0.90; clamped to [0, 1]; never boosts.
+    /// Only consulted when `temporalRegularizationEnabled` is `true`.
+    let temporalMinDwellPenaltyFactor: Double
+
+    /// playhead-xsdz.10: assemble the `TemporalRegularizer.Parameters` from the
+    /// per-knob config fields. Pure derivation (no actor state); exposed so the
+    /// service and unit tests build the same parameter set.
+    var temporalRegularizerParameters: TemporalRegularizer.Parameters {
+        TemporalRegularizer.Parameters(
+            neighborWindowSeconds: temporalNeighborWindowSeconds,
+            highConfidenceNeighborThreshold: temporalHighConfidenceNeighborThreshold,
+            isolationPenaltyFactor: temporalIsolationPenaltyFactor,
+            minDwellSeconds: temporalMinDwellSeconds,
+            minDwellPenaltyFactor: temporalMinDwellPenaltyFactor
+        )
+    }
+
     /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
     /// Requires candidate < markOnly < confirmation < autoSkip (asserted in debug).
     var bandThresholds: ConfidenceBandThresholds {
@@ -308,7 +374,13 @@ struct AdDetectionConfig: Sendable {
         chapterSignalMode: ChapterSignalMode = .off,
         audioForensicsEnabled: Bool = false,
         crossEpisodeMemoryEnabled: Bool = false,
-        rhetoricalGrammarEnabled: Bool = false
+        rhetoricalGrammarEnabled: Bool = false,
+        temporalRegularizationEnabled: Bool = false,
+        temporalNeighborWindowSeconds: TimeInterval = 120.0,
+        temporalHighConfidenceNeighborThreshold: Double = 0.80,
+        temporalIsolationPenaltyFactor: Double = 0.85,
+        temporalMinDwellSeconds: TimeInterval = 10.0,
+        temporalMinDwellPenaltyFactor: Double = 0.90
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -337,6 +409,12 @@ struct AdDetectionConfig: Sendable {
         self.audioForensicsEnabled = audioForensicsEnabled
         self.crossEpisodeMemoryEnabled = crossEpisodeMemoryEnabled
         self.rhetoricalGrammarEnabled = rhetoricalGrammarEnabled
+        self.temporalRegularizationEnabled = temporalRegularizationEnabled
+        self.temporalNeighborWindowSeconds = temporalNeighborWindowSeconds
+        self.temporalHighConfidenceNeighborThreshold = temporalHighConfidenceNeighborThreshold
+        self.temporalIsolationPenaltyFactor = temporalIsolationPenaltyFactor
+        self.temporalMinDwellSeconds = temporalMinDwellSeconds
+        self.temporalMinDwellPenaltyFactor = temporalMinDwellPenaltyFactor
     }
 
     static let `default` = AdDetectionConfig(
@@ -366,7 +444,13 @@ struct AdDetectionConfig: Sendable {
         chapterSignalMode: .off,
         audioForensicsEnabled: false,
         crossEpisodeMemoryEnabled: false,
-        rhetoricalGrammarEnabled: false
+        rhetoricalGrammarEnabled: false,
+        temporalRegularizationEnabled: false,
+        temporalNeighborWindowSeconds: 120.0,
+        temporalHighConfidenceNeighborThreshold: 0.80,
+        temporalIsolationPenaltyFactor: 0.85,
+        temporalMinDwellSeconds: 10.0,
+        temporalMinDwellPenaltyFactor: 0.90
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -513,6 +597,31 @@ struct BracketRefinementCounts: Sendable, Equatable {
     /// Spans where the bracket path was bypassed by configuration
     /// (master flag off, or not enough feature windows).
     var legacyBypass: Int = 0
+}
+
+// MARK: - Pending Backfill Decision
+
+/// playhead-xsdz.10: a per-span decision captured AFTER the per-span scoring
+/// (DecisionMapper → FM-suppression → content-chapter demotion → xsdz.7
+/// fragility penalty → xsdz.9 negative-bank suppression) but BEFORE the hard
+/// auto-skip gate and the side-effect emission (window build, catalog /
+/// RepeatedAdCache ingress, decision events / log).
+///
+/// The backfill loop collects these so the lightweight temporal-regularization
+/// pass can see ALL of an episode's candidate detections together — neighbor
+/// context is required to tell a clustered ad break from a lonely false
+/// positive. With `temporalRegularizationEnabled == false` the collected
+/// `decision` is passed through to the emission loop UNCHANGED, so the output
+/// is byte-identical to pre-xsdz.10. The two-loop shape is the only structural
+/// change; each emission step is verbatim the code that previously ran inline.
+private struct PendingBackfillDecision {
+    let refinedSpan: DecodedSpan
+    var decision: DecisionResult
+    let ledger: [EvidenceLedgerEntry]
+    let effectiveLedger: [EvidenceLedgerEntry]
+    let spanFingerprint: AcousticFingerprint
+    let spanFeatureWindows: [FeatureWindow]
+    let spanTopCatalogSimilarity: Float
 }
 
 // MARK: - Decision State
@@ -2484,6 +2593,11 @@ actor AdDetectionService {
         var decisionEvents: [DecisionEvent] = []
         // Phase 6.5 (playhead-4my.16): accumulate AdDecisionResult for step 17 forwarding.
         var fusionDecisionResults: [AdDecisionResult] = []
+        // playhead-xsdz.10: collect each span's scored decision (post fragility /
+        // negative-bank, pre hard-gate) so the temporal-regularization pass can
+        // see the whole episode's candidate detections together before the
+        // side-effect emission loop below.
+        var pendingDecisions: [PendingBackfillDecision] = []
 
         // Phase 7.2: pre-compute correction factor for this asset (actor-context query).
         // Combines passthrough (false-positive suppression, [0.0, 1.0]) and boost
@@ -3006,6 +3120,90 @@ actor AdDetectionService {
                     )
                 }
             }
+
+            // playhead-xsdz.10: STOP per-span processing here and collect the
+            // scored decision. The hard auto-skip gate and all side effects run
+            // in the second loop below, AFTER the temporal-regularization pass
+            // has had a chance to see every candidate detection together. The
+            // collected `decision` is the value the gate would have seen at this
+            // point pre-xsdz.10; when the temporal flag is off it is emitted
+            // unchanged, preserving byte-identical behaviour.
+            pendingDecisions.append(PendingBackfillDecision(
+                refinedSpan: refinedSpan,
+                decision: decision,
+                ledger: ledger,
+                effectiveLedger: effectiveLedger,
+                spanFingerprint: spanFingerprint,
+                spanFeatureWindows: spanFeatureWindows,
+                spanTopCatalogSimilarity: spanTopCatalogSimilarity
+            ))
+        }
+
+        // playhead-xsdz.10: lightweight temporal regularization. Real ads are
+        // CONTIGUOUS / CLUSTERED; false positives are typically ISOLATED. This
+        // deterministic, post-fusion pass softly penalizes a detection with NO
+        // high-confidence neighbor in a time window (isolation penalty) and
+        // additionally down-weights a too-short, uncorroborated island
+        // (min-dwell). The neighbor-support signal is HIGH-CONFIDENCE-GATED and
+        // ONE-SIDED (anti-contagion): the pass can only LOWER a confidence,
+        // never raise it, so two adjacent WEAK false positives do NOT rescue
+        // each other. Applied to `decision.skipConfidence` BEFORE the hard
+        // auto-skip gate; the eligibility gate and promotion track are preserved
+        // verbatim. OFF by default — when `temporalRegularizationEnabled` is
+        // false the pass is never invoked and `pendingDecisions` is emitted
+        // unchanged (byte-identical to pre-xsdz.10).
+        if config.temporalRegularizationEnabled, pendingDecisions.count > 1 {
+            let detections = pendingDecisions.map { pending in
+                TemporalRegularizer.Detection(
+                    id: pending.refinedSpan.id,
+                    startTime: pending.refinedSpan.startTime,
+                    endTime: pending.refinedSpan.endTime,
+                    skipConfidence: pending.decision.skipConfidence
+                )
+            }
+            let adjustments = TemporalRegularizer.regularize(
+                detections: detections,
+                parameters: config.temporalRegularizerParameters
+            )
+            // The regularizer keys adjustments by detection id; map them back so
+            // the result is independent of the (sorted) order the pass returns.
+            var adjustedById: [String: Double] = [:]
+            for adjustment in adjustments where adjustment.changed {
+                adjustedById[adjustment.id] = adjustment.adjustedSkipConfidence
+            }
+            if !adjustedById.isEmpty {
+                for index in pendingDecisions.indices {
+                    let span = pendingDecisions[index].refinedSpan
+                    guard let adjusted = adjustedById[span.id] else { continue }
+                    let before = pendingDecisions[index].decision.skipConfidence
+                    logger.debug(
+                        "Backfill: [xsdz.10] temporal regularization span=\(span.id, privacy: .public) skipConfidence \(before, format: .fixed(precision: 3)) → \(adjusted, format: .fixed(precision: 3))"
+                    )
+                    let current = pendingDecisions[index].decision
+                    pendingDecisions[index].decision = DecisionResult(
+                        proposalConfidence: current.proposalConfidence,
+                        skipConfidence: adjusted,
+                        eligibilityGate: current.eligibilityGate,
+                        promotionTrack: current.promotionTrack
+                    )
+                }
+            }
+        }
+
+        // playhead-xsdz.10: emission loop. Each step below is verbatim the code
+        // that previously ran inline at the tail of the per-span loop; the only
+        // change is that it now reads the (possibly temporally-regularized)
+        // `decision` from the collected `pendingDecisions` record.
+        for pending in pendingDecisions {
+            try Task.checkCancellation()
+
+            let refinedSpan = pending.refinedSpan
+            let decision = pending.decision
+            let ledger = pending.ledger
+            let effectiveLedger = pending.effectiveLedger
+            let spanFingerprint = pending.spanFingerprint
+            let spanFeatureWindows = pending.spanFeatureWindows
+            let spanTopCatalogSimilarity = pending.spanTopCatalogSimilarity
 
             // Step 14: SkipPolicyMatrix + confidence promotion.
             // Phase 6.5 (playhead-4my.16): (.unknown, .unknown) → .detectOnly so Phase 7
