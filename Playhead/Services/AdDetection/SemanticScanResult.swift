@@ -221,6 +221,21 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// `queryFailed("Unknown evidence source type 'breakAlignment'")`); acceptable
     /// for an additive enum and matches existing behavior for `.musicBed` etc.
     case breakAlignment
+    /// playhead-xsdz.1: High-precision lexical auto-ad rule. Distinct from
+    /// `.lexical` (the per-candidate confidence signal capped at the modest
+    /// `lexicalCap = 0.20`) because this kind represents a strong, *vetted*
+    /// co-occurrence of ad-copy signals (a sponsor disclosure PLUS a promo
+    /// code and/or URL CTA) inside a tight time window, with negative-
+    /// evidence guardrails already applied. It carries its own larger budget
+    /// (`FusionWeightConfig.lexicalAutoAdCap`) and gates a dedicated
+    /// `PromotionTrack.lexicalAutoAdQualified` so a confirmed combo can clear
+    /// the auto-skip threshold on its own — which the structurally-capped
+    /// `.lexical` family can never do. The separate kind also lets the
+    /// quorum / corroboration gates count it as an independent in-audio
+    /// evidence family without inflating the `.lexical` family cap.
+    /// Persistence note: additive case; no migration required. Forward-only,
+    /// matching `.breakAlignment` / `.musicBed`.
+    case lexicalAutoAd
     /// Phase 11 random negative-audit marker. These rows are persisted in
     /// `evidence_events` for miss-rate estimation, but they are not positive
     /// FM evidence for training or fusion.
@@ -235,7 +250,7 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
         case .audit, .operational:
             return true
         case .fm, .lexical, .acoustic, .catalog, .classifier, .fingerprint,
-             .fusedScore, .metadata, .musicBed, .breakAlignment:
+             .fusedScore, .metadata, .musicBed, .breakAlignment, .lexicalAutoAd:
             return false
         }
     }

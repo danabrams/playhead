@@ -262,6 +262,27 @@ struct LexicalScanner: Sendable {
         return candidates
     }
 
+    /// Collect every raw `LexicalHit` across a batch of chunks, time-sorted.
+    ///
+    /// This is the same hit stream `scan(...)` builds internally *before* it
+    /// merges hits into `LexicalCandidate` regions — exposed so the
+    /// high-precision lexical auto-ad rule (`LexicalAutoAdEvidenceBuilder`,
+    /// playhead-xsdz.1) can reason about hit-level *co-occurrence timing*
+    /// (sponsor + promo code / URL CTA within a tight window) and about
+    /// negative-pattern hits, neither of which survive the lossy
+    /// candidate-merge step. Pure: no persistence, no memoization.
+    func collectHits(
+        chunks: [TranscriptChunk],
+        metadataEntries: [MetadataLexiconEntry] = []
+    ) -> [LexicalHit] {
+        var allHits: [LexicalHit] = []
+        for chunk in chunks {
+            allHits.append(contentsOf: scanChunk(chunk, metadataEntries: metadataEntries))
+        }
+        allHits.sort { $0.startTime < $1.startTime }
+        return allHits
+    }
+
     /// Scan a single chunk. Useful for streaming hot-path processing
     /// where chunks arrive one at a time.
     ///

@@ -151,6 +151,7 @@ struct ScoreCalibrationProfile: Sendable {
         case .fm: return fmCalibrator
         case .classifier: return classifierCalibrator
         case .lexical: return lexicalCalibrator
+        case .lexicalAutoAd: return lexicalCalibrator  // playhead-xsdz.1: share the lexical calibrator — same text-derived modality.
         case .acoustic: return acousticCalibrator
         case .catalog: return catalogCalibrator
         case .fingerprint: return fingerprintCalibrator

@@ -268,6 +268,17 @@ struct FMSuppressionApplicator: Sendable {
             return false
         case .fingerprint:
             return true
+        case .lexicalAutoAd:
+            // playhead-xsdz.1: the high-precision lexical auto-ad rule is
+            // STRONG positive evidence and is preserved through FM noAds
+            // suppression. The bead's premise is precisely that the FM
+            // mislabels blatant ad copy as `content`; letting an FM noAds
+            // consensus erase a vetted sponsor + promo-code/URL co-occurrence
+            // (negative-evidence guardrails already cleared) would re-open
+            // the exact recall hole this rule closes. Note this is the
+            // VETTED auto-ad entry, NOT the raw `.lexical` channel — that
+            // stays a soft signal below.
+            return true
         case .classifier, .lexical, .acoustic, .musicBed, .breakAlignment, .catalog, .fusedScore, .metadata, .audit, .operational:
             // playhead-z3ch: metadata is a coarse pre-seed prior, not strong
             // evidence. It must yield to FM noAds suppression like the other

@@ -119,6 +119,23 @@ struct FusionWeightConfig: Sendable {
     ///     without re-running the runtime path.
     let musicBedCap: Double
 
+    /// playhead-xsdz.1: Maximum weight contribution from a single
+    /// `.lexicalAutoAd` entry — the high-precision lexical auto-ad rule.
+    /// Distinct from `lexicalCap` (0.20) because the auto-ad rule represents
+    /// a *vetted* strong co-occurrence (sponsor disclosure + promo code /
+    /// URL CTA inside a tight window, negative-evidence guardrails already
+    /// applied), which is a far stronger ad signal than a single lexical
+    /// candidate's confidence. The default 0.55 is deliberately large enough
+    /// that a confirmed combo, combined with the `.lexicalAutoAdQualified`
+    /// promotion track (whose default threshold is 0.50), can drive an
+    /// auto-skip on its own — which the structurally-capped `.lexical`
+    /// channel (max 0.20) can never do. It does NOT inflate the `.lexical`
+    /// family: `.lexicalAutoAd` is its own evidence kind with its own cap,
+    /// mirroring the `.breakAlignment` / `.musicBed` carve-outs. Precision is
+    /// guarded UP-stream (in `LexicalAutoAdEvidenceBuilder`), not by shrinking
+    /// this cap — a misfire would be a builder bug, not a weight-budget bug.
+    let lexicalAutoAdCap: Double
+
     init(
         fmCap: Double = 0.4,
         classifierCap: Double = 0.3,
@@ -128,7 +145,8 @@ struct FusionWeightConfig: Sendable {
         catalogCap: Double = 0.2,
         fingerprintCap: Double = 0.25,
         metadataCap: Double = 0.15,
-        musicBedCap: Double = 0.25
+        musicBedCap: Double = 0.25,
+        lexicalAutoAdCap: Double = 0.55
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
@@ -139,6 +157,7 @@ struct FusionWeightConfig: Sendable {
         self.fingerprintCap = fingerprintCap
         self.metadataCap = metadataCap
         self.musicBedCap = musicBedCap
+        self.lexicalAutoAdCap = lexicalAutoAdCap
 
         // playhead-2hpn R4 (+R5): enforce the musicBedCap >=
         // musicBedConfirmedJingleWeight invariant at construction time, not
@@ -210,6 +229,14 @@ struct BackfillEvidenceFusion: Sendable {
     let fmEntries: [EvidenceLedgerEntry]
     /// Pre-constructed lexical ledger entries.
     let lexicalEntries: [EvidenceLedgerEntry]
+    /// playhead-xsdz.1: Pre-constructed high-precision lexical auto-ad
+    /// ledger entries (`source == .lexicalAutoAd`). Each entry is capped to
+    /// `config.lexicalAutoAdCap` inside `buildLedger()` — a much larger
+    /// budget than `lexicalCap` so a confirmed strong co-occurrence can,
+    /// together with the `.lexicalAutoAdQualified` promotion track, drive an
+    /// auto-skip on its own. Defaults to empty so every existing call site
+    /// stays byte-compatible (flag-free additive parameter).
+    let lexicalAutoAdEntries: [EvidenceLedgerEntry]
     /// Pre-constructed acoustic ledger entries.
     let acousticEntries: [EvidenceLedgerEntry]
     /// playhead-fqc8: Pre-constructed `.breakAlignment` ledger entries.
@@ -242,6 +269,7 @@ struct BackfillEvidenceFusion: Sendable {
         fingerprintEntries: [EvidenceLedgerEntry] = [],
         metadataEntries: [EvidenceLedgerEntry] = [],
         breakAlignmentEntries: [EvidenceLedgerEntry] = [],
+        lexicalAutoAdEntries: [EvidenceLedgerEntry] = [],
         mode: FMBackfillMode,
         config: FusionWeightConfig
     ) {
@@ -254,6 +282,7 @@ struct BackfillEvidenceFusion: Sendable {
         self.fingerprintEntries = fingerprintEntries
         self.metadataEntries = metadataEntries
         self.breakAlignmentEntries = breakAlignmentEntries
+        self.lexicalAutoAdEntries = lexicalAutoAdEntries
         self.mode = mode
         self.config = config
     }
@@ -318,6 +347,26 @@ struct BackfillEvidenceFusion: Sendable {
             let capped = EvidenceLedgerEntry(
                 source: .lexical,
                 weight: min(entry.weight, config.lexicalCap),
+                detail: entry.detail,
+                subSource: entry.subSource
+            )
+            ledger.append(capped)
+        }
+
+        // playhead-xsdz.1: High-precision lexical auto-ad entries. Always
+        // included, capped against the dedicated `lexicalAutoAdCap` (0.55
+        // default) — NOT `lexicalCap` — so a confirmed strong co-occurrence
+        // (vetted by `LexicalAutoAdEvidenceBuilder`, negative-evidence
+        // guardrails already applied) carries enough mass to clear the
+        // `.lexicalAutoAdQualified` promotion track's auto-skip threshold on
+        // its own. Routing this through its own kind + cap keeps the
+        // `.lexical` family budget unchanged (mirrors the `.breakAlignment` /
+        // `.musicBed` carve-outs). `subSource` is preserved per the uniform
+        // family-cap invariant.
+        for entry in lexicalAutoAdEntries {
+            let capped = EvidenceLedgerEntry(
+                source: .lexicalAutoAd,
+                weight: min(entry.weight, config.lexicalAutoAdCap),
                 detail: entry.detail,
                 subSource: entry.subSource
             )
@@ -454,6 +503,19 @@ struct BackfillEvidenceFusion: Sendable {
 enum PromotionTrack: String, Sendable, Equatable, Hashable {
     case standard
     case classifierSeedQualified
+    /// playhead-xsdz.1: A span carrying a high-precision `.lexicalAutoAd`
+    /// entry. Mirrors `.classifierSeedQualified`: the `.lexical` family is
+    /// structurally capped at `lexicalCap = 0.20`, so even a perfect ad-copy
+    /// match cannot reach the standard `0.80` auto-skip threshold through the
+    /// `.lexical` channel. The auto-ad rule emits a `.lexicalAutoAd` entry
+    /// (own kind, own larger cap) only after a vetted strong co-occurrence
+    /// (sponsor + promo code / URL CTA in a tight window) with negative-
+    /// evidence guardrails already cleared; this track gives that vetted
+    /// span a separate, lower eligibility floor
+    /// (`lexicalAutoAdQualifiedThreshold`, default `0.50`). Scores stay
+    /// honest — the track only selects the threshold, never modifies
+    /// `proposalConfidence` / `skipConfidence`.
+    case lexicalAutoAdQualified
 }
 
 // MARK: - DecisionResult
@@ -619,9 +681,55 @@ struct DecisionMapper: Sendable {
         return calibrationProfile.calibrator(for: .fusedScore).calibrate(clamped)
     }
 
-    /// playhead-fqc8: Compute the promotion track for this span.
+    /// Compute the promotion track for this span.
     ///
-    /// Returns `.classifierSeedQualified` IFF all four of:
+    /// Two qualified tracks exist; both NEVER modify `proposalConfidence` /
+    /// `skipConfidence` — they are pure threshold-selectors consumed by the
+    /// AdDetectionService auto-skip gate. The `.lexicalAutoAd` track is
+    /// checked FIRST: it is the highest-precision track (the producing rule
+    /// in `LexicalAutoAdEvidenceBuilder` already required a vetted strong
+    /// co-occurrence and cleared negative-evidence guardrails), so when both
+    /// would qualify, the lexical-auto-ad track wins. Otherwise we fall
+    /// through to the classifier-seed track, then `.standard`.
+    private func computePromotionTrack() -> PromotionTrack {
+        if qualifiesForLexicalAutoAdTrack() {
+            return .lexicalAutoAdQualified
+        }
+        if qualifiesForClassifierSeedTrack() {
+            return .classifierSeedQualified
+        }
+        return .standard
+    }
+
+    /// playhead-xsdz.1: Returns `true` IFF this span qualifies for the
+    /// high-precision lexical-auto-ad promotion track:
+    ///   1. The ledger contains at least one `.lexicalAutoAd` entry (the
+    ///      auto-ad rule already vetted the strong co-occurrence and cleared
+    ///      negative-evidence guardrails before emitting it).
+    ///   2. `span.anchorProvenance` contains NO FM-class anchor
+    ///      (`.fmConsensus` / `.fmAcousticCorroborated`). Mirrors the
+    ///      classifier-seed track's M-2 carve-out: an FM-corroborated span
+    ///      has independent FM evidence and clears the standard 0.80 gate on
+    ///      its own merits, so it stays on `.standard`. Keeping the qualified
+    ///      track exclusively for non-FM spans avoids broadening it beyond
+    ///      the bead's framing.
+    private func qualifiesForLexicalAutoAdTrack() -> Bool {
+        let hasLexicalAutoAd = scoringLedger.contains { $0.source == .lexicalAutoAd }
+        guard hasLexicalAutoAd else { return false }
+
+        let hasFMAnchor = span.anchorProvenance.contains { ref in
+            switch ref {
+            case .fmConsensus, .fmAcousticCorroborated:
+                return true
+            default:
+                return false
+            }
+        }
+        return !hasFMAnchor
+    }
+
+    /// playhead-fqc8: Returns `true` IFF this span qualifies for the
+    /// classifier-seed promotion track. See `PromotionTrack` for the rules:
     ///   1. `span.anchorProvenance` contains a `.classifierSeed` case.
     ///   2. `span.anchorProvenance` contains NO FM-class anchor
     ///      (`.fmConsensus` or `.fmAcousticCorroborated`). The qualified
@@ -634,18 +742,12 @@ struct DecisionMapper: Sendable {
     ///   4. The ledger contains an entry with `source == .breakAlignment`
     ///      (the dedicated alignment evidence kind introduced in cycle-1
     ///      to honor the acoustic family budget).
-    ///
-    /// Otherwise returns `.standard`.
-    ///
-    /// This decision NEVER modifies `proposalConfidence` or `skipConfidence`.
-    /// It is a pure threshold-selector consumed by the AdDetectionService
-    /// auto-skip gate.
-    private func computePromotionTrack() -> PromotionTrack {
+    private func qualifiesForClassifierSeedTrack() -> Bool {
         let hasClassifierSeed = span.anchorProvenance.contains {
             if case .classifierSeed = $0 { return true }
             return false
         }
-        guard hasClassifierSeed else { return .standard }
+        guard hasClassifierSeed else { return false }
 
         // playhead-fqc8 cycle-1 M-2: the qualified track is exclusively
         // for classifier-only candidates. A span carrying an FM-class
@@ -659,7 +761,7 @@ struct DecisionMapper: Sendable {
                 return false
             }
         }
-        guard !hasFMAnchor else { return .standard }
+        guard !hasFMAnchor else { return false }
 
         let hasStrongClassifier = scoringLedger.contains { entry in
             if case .classifier(let score) = entry.detail, score >= 0.70 {
@@ -667,14 +769,12 @@ struct DecisionMapper: Sendable {
             }
             return false
         }
-        guard hasStrongClassifier else { return .standard }
+        guard hasStrongClassifier else { return false }
 
         let hasBreakAlignment = scoringLedger.contains { entry in
             entry.source == .breakAlignment
         }
-        guard hasBreakAlignment else { return .standard }
-
-        return .classifierSeedQualified
+        return hasBreakAlignment
     }
 
     /// Determine the eligibility gate by reading `anchorProvenance` directly.
@@ -732,8 +832,12 @@ struct DecisionMapper: Sendable {
         // fix promoted alignment to its own kind, and any gate that
         // previously accepted the alignment corroborator under `.acoustic`
         // must explicitly accept `.breakAlignment` now.
+        // playhead-xsdz.1: `.lexicalAutoAd` is a strong in-audio (transcript-
+        // derived) corroborator — the high-precision auto-ad rule fired on a
+        // vetted strong co-occurrence. Include it so a span that carries both
+        // a metadata cue AND a lexical-auto-ad hit clears this gate.
         let inAudioCorroboratingSources: Set<EvidenceSourceType> = [
-            .lexical, .acoustic, .musicBed, .catalog, .fingerprint, .fm, .breakAlignment
+            .lexical, .lexicalAutoAd, .acoustic, .musicBed, .catalog, .fingerprint, .fm, .breakAlignment
         ]
         let hasInAudioCorroboration = scoringLedger.contains { entry in
             if inAudioCorroboratingSources.contains(entry.source) {
@@ -792,7 +896,7 @@ struct DecisionMapper: Sendable {
         // a span anchored by `.fmAcousticCorroborated` whose only non-FM evidence
         // is the boundary-alignment entry would silently regress to
         // `.blockedByEvidenceQuorum` where it previously cleared.
-        let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .catalog, .acoustic, .musicBed, .fingerprint, .breakAlignment]
+        let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .lexicalAutoAd, .catalog, .acoustic, .musicBed, .fingerprint, .breakAlignment]
         let hasExternalCorroboration = scoringLedger.contains { entry in
             if nonClassifierExternal.contains(entry.source) {
                 return true
