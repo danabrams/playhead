@@ -75,6 +75,8 @@ struct AdDetectionServiceFragilityGateTests {
             return .musicBed(presenceFraction: 0.5, foregroundCount: 1)
         case .audioForensics:
             return .audioForensics(boundaryScore: 0.5, dominantSignal: "loudnessJump", contributingSignalCount: 1)
+        case .crossEpisodeMemory:
+            return .fingerprint(matchCount: 1, averageSimilarity: 0.5)
         case .audit, .operational:
             // Observability-only rows are filtered out before scoring; the
             // detail shape is irrelevant. Use a benign classifier payload.

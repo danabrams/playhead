@@ -165,6 +165,7 @@ enum CausalInference {
         case .catalog:     return .lexical  // catalog entries are lexical matches
         case .classifier:  return .foundationModel  // legacy classifier ≈ FM
         case .fingerprint: return .fingerprint
+        case .crossEpisodeMemory: return .fingerprint  // playhead-xsdz.9: cross-episode copy-alignment is a reference-match signal, same causal source as fingerprint
         case .fusedScore:  return .foundationModel  // fused aggregate ≈ FM pipeline
         case .metadata:    return .lexical  // playhead-z3ch: metadata cues are lexical-family pre-seeds
         case .audit:       return .foundationModel  // Phase 11 audit metadata, not a skip signal

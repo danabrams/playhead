@@ -151,6 +151,19 @@ struct FusionWeightConfig: Sendable {
     /// `.breakAlignment` / `.musicBed` per-source carve-outs.
     let audioForensicsCap: Double
 
+    /// playhead-xsdz.9: Maximum weight contribution from a single
+    /// `.crossEpisodeMemory` POSITIVE boost entry — a candidate that aligns
+    /// (Smith-Waterman local alignment) to a CONFIRMED-AD bank sequence. Default
+    /// 0.20 is deliberately MODEST (peer of `acousticCap` / `audioForensicsCap`):
+    /// repeating known ad copy is corroborative, not decisive, and this channel
+    /// has NO qualified promotion track, so it can never drive a skip alone — it
+    /// only adds honest mass and bumps `distinctKinds.count`. The HARD-NEGATIVE
+    /// half of the feature does NOT use this cap (it suppresses via a post-fusion
+    /// multiplicative factor, not a ledger entry — a negative weight would be
+    /// clamped to 0 by the v0 identity calibrator). Mirrors the
+    /// `.breakAlignment` / `.musicBed` / `.audioForensics` per-source carve-outs.
+    let crossEpisodeMemoryCap: Double
+
     init(
         fmCap: Double = 0.4,
         classifierCap: Double = 0.3,
@@ -162,7 +175,8 @@ struct FusionWeightConfig: Sendable {
         metadataCap: Double = 0.15,
         musicBedCap: Double = 0.25,
         lexicalAutoAdCap: Double = 0.55,
-        audioForensicsCap: Double = 0.2
+        audioForensicsCap: Double = 0.2,
+        crossEpisodeMemoryCap: Double = 0.2
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
@@ -175,6 +189,7 @@ struct FusionWeightConfig: Sendable {
         self.musicBedCap = musicBedCap
         self.lexicalAutoAdCap = lexicalAutoAdCap
         self.audioForensicsCap = audioForensicsCap
+        self.crossEpisodeMemoryCap = crossEpisodeMemoryCap
 
         // playhead-2hpn R4 (+R5): enforce the musicBedCap >=
         // musicBedConfirmedJingleWeight invariant at construction time, not
@@ -281,6 +296,12 @@ struct BackfillEvidenceFusion: Sendable {
     /// when the OFF-by-default `AdDetectionConfig.audioForensicsEnabled` flag
     /// is on AND a significant boundary discontinuity is measured.
     let audioForensicsEntries: [EvidenceLedgerEntry]
+    /// playhead-xsdz.9: Pre-constructed `.crossEpisodeMemory` POSITIVE boost
+    /// entries (candidate aligned to a confirmed-ad bank sequence). Each entry
+    /// is capped to `config.crossEpisodeMemoryCap` inside `buildLedger()`.
+    /// Defaults to empty so every existing call site stays byte-compatible and
+    /// the flag-OFF path emits nothing.
+    let crossEpisodeMemoryEntries: [EvidenceLedgerEntry]
     let mode: FMBackfillMode
     let config: FusionWeightConfig
 
@@ -296,6 +317,7 @@ struct BackfillEvidenceFusion: Sendable {
         breakAlignmentEntries: [EvidenceLedgerEntry] = [],
         lexicalAutoAdEntries: [EvidenceLedgerEntry] = [],
         audioForensicsEntries: [EvidenceLedgerEntry] = [],
+        crossEpisodeMemoryEntries: [EvidenceLedgerEntry] = [],
         mode: FMBackfillMode,
         config: FusionWeightConfig
     ) {
@@ -310,6 +332,7 @@ struct BackfillEvidenceFusion: Sendable {
         self.breakAlignmentEntries = breakAlignmentEntries
         self.lexicalAutoAdEntries = lexicalAutoAdEntries
         self.audioForensicsEntries = audioForensicsEntries
+        self.crossEpisodeMemoryEntries = crossEpisodeMemoryEntries
         self.mode = mode
         self.config = config
     }
@@ -467,6 +490,24 @@ struct BackfillEvidenceFusion: Sendable {
             let capped = EvidenceLedgerEntry(
                 source: .audioForensics,
                 weight: min(entry.weight, config.audioForensicsCap),
+                detail: entry.detail,
+                subSource: entry.subSource
+            )
+            ledger.append(capped)
+        }
+
+        // playhead-xsdz.9: CrossEpisodeMemory POSITIVE boost entries — a
+        // candidate whose transcript tokens align (Smith-Waterman local
+        // alignment) to a CONFIRMED-AD bank sequence. ONE kind, ONE cap
+        // (`crossEpisodeMemoryCap`, default 0.20). Empty for every flag-OFF /
+        // non-firing call site, so the loop is a no-op and the ledger is
+        // byte-identical to pre-xsdz.9. The HARD-NEGATIVE suppression half of
+        // the feature is applied OUTSIDE the ledger (post-fusion multiplicative
+        // factor in `AdDetectionService`), not here.
+        for entry in crossEpisodeMemoryEntries {
+            let capped = EvidenceLedgerEntry(
+                source: .crossEpisodeMemory,
+                weight: min(entry.weight, config.crossEpisodeMemoryCap),
                 detail: entry.detail,
                 subSource: entry.subSource
             )

@@ -818,6 +818,34 @@ final class PlayheadRuntime {
             surfaceStatusLogger.hashEpisodeId(episodeId)
         }
 
+        // playhead-xsdz.9: construct the HARD-NEGATIVE fingerprint bank ONLY
+        // when the cross-episode "memory" feature is enabled. The entire feature
+        // — construction, SQLite migration, the confirmed-FP WRITE trigger, and
+        // the suppression READ — rides the ONE off-by-default
+        // `crossEpisodeMemoryEnabled` flag. With the flag off (the production
+        // default) there is NO bank, NO new DB file, NO migration, and NO writes:
+        // production behavior stays byte-identical to pre-xsdz.9, honoring the
+        // same flag-OFF ⇒ zero-new-side-effects invariant every other
+        // off-by-default channel (xsdz.6/.7/.8) holds. When the flag is later
+        // flipped on we accept a cold-start bank (consistent with those
+        // channels) rather than warming a store the feature can't read.
+        //
+        // Like `AdCatalogStore`, init failure (e.g. broken filesystem) degrades
+        // to `nil` — no reads, no writes, no crash.
+        let negativeFingerprintBank: NegativeFingerprintBank?
+        if AdDetectionConfig.default.crossEpisodeMemoryEnabled {
+            do {
+                let dir = try NegativeFingerprintBank.defaultDirectory()
+                negativeFingerprintBank = try NegativeFingerprintBank(directoryURL: dir)
+            } catch {
+                Logger(subsystem: "com.playhead", category: "Runtime")
+                    .warning("NegativeFingerprintBank init failed — cross-episode memory disabled: \(error.localizedDescription, privacy: .public)")
+                negativeFingerprintBank = nil
+            }
+        } else {
+            negativeFingerprintBank = nil
+        }
+
         // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
         // adDetectionService so it can be injected for step-17 forwarding.
         // The orchestrator is otherwise wired identically to before this change.
@@ -990,6 +1018,14 @@ final class PlayheadRuntime {
             // playhead-gtt9.17: on-device catalog for catalog ingress
             // (autoSkipEligible → insert) and egress (fingerprint → match).
             adCatalogStore: adCatalogStore,
+            // playhead-xsdz.9: hard-negative bank for the cross-episode memory
+            // READ path (suppression). `nil` in the flag-OFF production default
+            // (the bank is only constructed when `crossEpisodeMemoryEnabled` is
+            // on), so the service performs no bank read and no suppression —
+            // byte-identical to pre-xsdz.9. The POSITIVE boost store is
+            // intentionally left nil for now (see report); the negative-bank
+            // suppression channel is the prioritized lever.
+            negativeFingerprintBank: negativeFingerprintBank,
             decisionLogger: preBuiltDecisionLogger,
             // playhead-43ed (B3): per-show RepeatedAdCache. Lookup runs
             // before the classifier in the hot path; store runs after a
@@ -1510,7 +1546,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [weak self, analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp, shadowRetryObserver, finalPassThermalRecoveryObserver, finalPassSweepInFlightFlag] in
+        Task { [weak self, analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, negativeFingerprintBank, skipOrchestrator, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp, shadowRetryObserver, finalPassThermalRecoveryObserver, finalPassSweepInFlightFlag] in
             // skeptical-review-cycle-9 L-4: pin the implicit MainActor
             // isolation that cycle-8 M1 relies on. PlayheadRuntime is
             // declared `@MainActor` (file:line 19), and an unannotated
@@ -1625,6 +1661,25 @@ final class PlayheadRuntime {
                     Logger(subsystem: "com.playhead", category: "Runtime")
                         .warning("AdCatalogStore deferred migrate failed — first real op will retry: \(error.localizedDescription, privacy: .public)")
                 }
+            }
+
+            // playhead-xsdz.9: migrate the hard-negative bank off-main and wire
+            // it into the orchestrator (the confirmed-FP WRITE trigger). Only
+            // reached when the feature flag is ON — the bank is `nil` (and this
+            // block a no-op) in the flag-OFF production default, so no migration
+            // and no orchestrator wiring happen there. The orchestrator is an
+            // actor, so the setter is awaited here rather than in `init`.
+            // Failure is non-fatal — the bank's own lazy `ensureOpen()` retries
+            // on the first real op; the worst case is no negative-bank
+            // writes/reads until then.
+            if let negativeFingerprintBank {
+                do {
+                    try await negativeFingerprintBank.migrate()
+                } catch {
+                    Logger(subsystem: "com.playhead", category: "Runtime")
+                        .warning("NegativeFingerprintBank deferred migrate failed — first real op will retry: \(error.localizedDescription, privacy: .public)")
+                }
+                await skipOrchestrator.setNegativeFingerprintBank(negativeFingerprintBank)
             }
 
             // playhead-jncn: warm the five sync-loggers off-main now that
