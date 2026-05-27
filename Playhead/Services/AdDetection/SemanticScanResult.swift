@@ -254,6 +254,20 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// Persistence note: additive case; no migration required. Forward-only,
     /// matching `.breakAlignment` / `.musicBed` / `.lexicalAutoAd`.
     case audioForensics
+    /// playhead-xsdz.9: Cross-episode "memory" POSITIVE boost. Emitted when a
+    /// candidate's transcript tokens align strongly (Smith-Waterman local
+    /// alignment) to a CONFIRMED-AD bank sequence — i.e. the same ad copy was
+    /// already confirmed on a prior episode. A modest corroborator capped at
+    /// `FusionWeightConfig.crossEpisodeMemoryCap`; it never drives a skip on its
+    /// own (no qualified promotion track). Distinct from `.fingerprint` (MinHash
+    /// Jaccard, order-insensitive) because this is order-SENSITIVE local
+    /// alignment. The HARD-NEGATIVE half of the same feature is NOT a ledger
+    /// entry — it is a post-fusion multiplicative suppression (a negative ledger
+    /// weight would be clamped to 0 by the v0 identity calibrator), so only the
+    /// positive boost rides this source kind. Gated OFF by default
+    /// (`AdDetectionConfig.crossEpisodeMemoryEnabled`).
+    /// Persistence note: additive case; no migration required. Forward-only.
+    case crossEpisodeMemory
     /// Phase 11 random negative-audit marker. These rows are persisted in
     /// `evidence_events` for miss-rate estimation, but they are not positive
     /// FM evidence for training or fusion.
@@ -269,7 +283,7 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
             return true
         case .fm, .lexical, .acoustic, .catalog, .classifier, .fingerprint,
              .fusedScore, .metadata, .musicBed, .breakAlignment, .lexicalAutoAd,
-             .audioForensics:
+             .audioForensics, .crossEpisodeMemory:
             return false
         }
     }

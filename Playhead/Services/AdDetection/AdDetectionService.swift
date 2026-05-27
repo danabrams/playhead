@@ -224,6 +224,34 @@ struct AdDetectionConfig: Sendable {
     /// fully built and unit-tested, just inert in production.
     let audioForensicsEnabled: Bool
 
+    /// playhead-xsdz.9: master kill switch for the cross-episode "memory"
+    /// precision signal (`NegativeFingerprintBank` HARD-NEGATIVE suppression +
+    /// `AdCopyFingerprintStore` POSITIVE Smith-Waterman boost). When `false`
+    /// (the production default), `buildEvidenceLedger` builds NO
+    /// `.crossEpisodeMemory` entry AND the decision path performs NO
+    /// negative-bank read and NO suppression — so the output is byte-identical
+    /// to pre-xsdz.9 behaviour and no new store reads/writes occur on the
+    /// decision path.
+    ///
+    /// Two halves ride this ONE flag:
+    ///   1. Negative-bank SUPPRESSION (the novel lever): a candidate whose
+    ///      transcript tokens align (Smith-Waterman) to a CONFIRMED false
+    ///      positive is multiplicatively suppressed (post-fusion, before the
+    ///      hard auto-skip gate — same idiom as the xsdz.7 fragility penalty).
+    ///   2. Positive copy-alignment BOOST: a candidate aligning to a confirmed-
+    ///      ad bank sequence gets one capped `.crossEpisodeMemory` ledger entry.
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate: main stays behavior-
+    /// neutral and the feature is never wired into a production config or A/B
+    /// arm until a corpus eval shows lift. The stores / evaluator stay fully
+    /// built and unit-tested, just inert in production. The ENTIRE feature rides
+    /// this ONE flag: `PlayheadRuntime` constructs / migrates the bank and wires
+    /// the confirmed-FP WRITE trigger ONLY when the flag is on. With the flag off
+    /// there is no bank, no DB file, no migration, no write, and no read — zero
+    /// new production side-effects (same invariant xsdz.6/.7/.8 hold). When the
+    /// flag is later flipped on we accept a cold-start bank.
+    let crossEpisodeMemoryEnabled: Bool
+
     /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
     /// Requires candidate < markOnly < confirmation < autoSkip (asserted in debug).
     var bandThresholds: ConfidenceBandThresholds {
@@ -260,7 +288,8 @@ struct AdDetectionConfig: Sendable {
         fragilityThreshold: Double = 2.0,
         fragilityPenalty: Double = 0.85,
         chapterSignalMode: ChapterSignalMode = .off,
-        audioForensicsEnabled: Bool = false
+        audioForensicsEnabled: Bool = false,
+        crossEpisodeMemoryEnabled: Bool = false
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -287,6 +316,7 @@ struct AdDetectionConfig: Sendable {
         self.fragilityPenalty = fragilityPenalty
         self.chapterSignalMode = chapterSignalMode
         self.audioForensicsEnabled = audioForensicsEnabled
+        self.crossEpisodeMemoryEnabled = crossEpisodeMemoryEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -314,7 +344,8 @@ struct AdDetectionConfig: Sendable {
         fragilityThreshold: 2.0,
         fragilityPenalty: 0.85,
         chapterSignalMode: .off,
-        audioForensicsEnabled: false
+        audioForensicsEnabled: false,
+        crossEpisodeMemoryEnabled: false
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -700,6 +731,28 @@ actor AdDetectionService {
     /// temp-dir store or leave nil to exercise the back-compat path.
     private let adCatalogStore: AdCatalogStore?
 
+    /// playhead-xsdz.9: optional HARD-NEGATIVE fingerprint bank. When non-nil
+    /// AND `config.crossEpisodeMemoryEnabled` is true, `runBackfill` queries the
+    /// bank for each candidate span and multiplicatively suppresses its skip
+    /// confidence when the span's transcript tokens align (Smith-Waterman) to a
+    /// confirmed false positive. `nil` OR flag-off ⇒ no bank read and no
+    /// suppression (byte-identical pre-xsdz.9). Production wires a real bank;
+    /// tests inject a temp-dir bank or leave nil.
+    private let negativeFingerprintBank: NegativeFingerprintBank?
+
+    /// playhead-xsdz.9: optional CONFIRMED-AD (positive) fingerprint store,
+    /// reused from Phase 9. When non-nil AND `config.crossEpisodeMemoryEnabled`
+    /// is true, `buildEvidenceLedger` reads the active confirmed-ad sequences
+    /// for the show and emits a capped `.crossEpisodeMemory` boost entry when a
+    /// candidate aligns (Smith-Waterman) to one. `nil` OR flag-off ⇒ no boost
+    /// entry (byte-identical pre-xsdz.9).
+    private let adCopyFingerprintStore: AdCopyFingerprintStore?
+
+    /// playhead-xsdz.9: pure evaluator that turns Smith-Waterman alignment
+    /// results into the suppression factor + positive boost entries. Stateless;
+    /// constructed once. Inert unless the bank/store reads above feed it.
+    private let crossEpisodeMemoryEvaluator = CrossEpisodeMemoryEvaluator()
+
     /// Phase 7.2: optional correction store. When non-nil, `runBackfill` pre-computes
     /// a per-span correction factor by querying the store's weighted corrections for
     /// the asset. The factor is passed to `DecisionMapper` so correction-suppressed
@@ -1002,6 +1055,8 @@ actor AdDetectionService {
         phase5ProjectorObserver: Phase5ProjectorObserver? = nil,
         skipOrchestrator: SkipOrchestrator? = nil,
         adCatalogStore: AdCatalogStore? = nil,
+        negativeFingerprintBank: NegativeFingerprintBank? = nil,
+        adCopyFingerprintStore: AdCopyFingerprintStore? = nil,
         episodeMetadataProvider: EpisodeMetadataProvider = NullEpisodeMetadataProvider(),
         decisionLogger: DecisionLoggerProtocol? = nil,
         classifierCalibrationProfile: ClassifierCalibrationProfile = .production,
@@ -1026,6 +1081,8 @@ actor AdDetectionService {
         self.phase5ProjectorObserver = phase5ProjectorObserver
         self.skipOrchestrator = skipOrchestrator
         self.adCatalogStore = adCatalogStore
+        self.negativeFingerprintBank = negativeFingerprintBank
+        self.adCopyFingerprintStore = adCopyFingerprintStore
         self.episodeMetadataProvider = episodeMetadataProvider
         // playhead-8em9 (narL): allow the logger to be installed at init
         // time so there is no race with the first backfill. PlayheadRuntime
@@ -2691,6 +2748,62 @@ actor AdDetectionService {
                 lastCatalogMatchSimilarity = spanTopCatalogSimilarity
             }
 
+            // playhead-xsdz.9: cross-episode "memory" reads. Gated by the
+            // OFF-by-default `crossEpisodeMemoryEnabled` flag AND a wired bank /
+            // store; when the flag is off OR neither is wired, NO bank read
+            // happens and the candidate token sequence is never computed —
+            // keeping the decision path byte-identical to pre-xsdz.9.
+            //
+            //   • Negative bank → `negativeMatch` (drives post-fusion
+            //     suppression after the fragility penalty below).
+            //   • Positive bank → `crossEpisodePositiveEntries` (a capped
+            //     `.crossEpisodeMemory` ledger boost, built in
+            //     `buildEvidenceLedger`).
+            var negativeMatch: NegativeFingerprintMatch?
+            var crossEpisodePositiveEntries: [EvidenceLedgerEntry] = []
+            if config.crossEpisodeMemoryEnabled,
+               negativeFingerprintBank != nil || adCopyFingerprintStore != nil {
+                let spanAtomText = atoms
+                    .filter {
+                        $0.atomKey.atomOrdinal >= refinedSpan.firstAtomOrdinal
+                            && $0.atomKey.atomOrdinal <= refinedSpan.lastAtomOrdinal
+                    }
+                    .sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
+                    .map(\.text)
+                    .joined(separator: " ")
+                // Clamp the candidate to the same `maxTokenCount` ceiling the
+                // bank applies to stored sequences, so BOTH the negative
+                // (`bestMatch`) and positive (`buildPositiveBoostEntries`)
+                // alignments are bounded at O(maxTokenCount × stored-len). The
+                // negative bank clamps internally regardless; doing it once here
+                // keeps the positive path (whose evaluator does not clamp)
+                // equally bounded.
+                let rawCandidateTokens = SmithWatermanAligner.tokenize(spanAtomText)
+                let candidateTokens = rawCandidateTokens.count > NegativeFingerprintBank.maxTokenCount
+                    ? Array(rawCandidateTokens.prefix(NegativeFingerprintBank.maxTokenCount))
+                    : rawCandidateTokens
+                if !candidateTokens.isEmpty {
+                    if let bank = negativeFingerprintBank {
+                        negativeMatch = await bank.bestMatch(
+                            candidateTokens: candidateTokens,
+                            show: catalogShowId
+                        )
+                    }
+                    if let store = adCopyFingerprintStore {
+                        let positiveSequences = await loadConfirmedAdSequences(
+                            store: store,
+                            podcastId: catalogShowId
+                        )
+                        crossEpisodePositiveEntries = crossEpisodeMemoryEvaluator
+                            .buildPositiveBoostEntries(
+                                candidateTokens: candidateTokens,
+                                positiveSequences: positiveSequences,
+                                cap: fusionConfig.crossEpisodeMemoryCap
+                            )
+                    }
+                }
+            }
+
             let ledger = buildEvidenceLedger(
                 span: refinedSpan,
                 classifierResults: classifierResults,
@@ -2708,6 +2821,9 @@ actor AdDetectionService {
                 // once above; `nil` when the flag is off, the podcast
                 // is unknown, or no profile exists yet for this show.
                 showMusicBedSnapshot: showMusicBedSnapshot,
+                // playhead-xsdz.9: positive cross-episode boost entries built
+                // above. Empty for the flag-OFF / no-store / non-firing path.
+                crossEpisodeMemoryEntries: crossEpisodePositiveEntries,
                 episodeDuration: episodeDuration
             )
 
@@ -2812,6 +2928,35 @@ actor AdDetectionService {
                     eligibilityGate: decision.eligibilityGate,
                     promotionTrack: decision.promotionTrack
                 )
+            }
+
+            // playhead-xsdz.9: HARD-NEGATIVE suppression (the novel lever).
+            // When a candidate aligns (Smith-Waterman) to a CONFIRMED false
+            // positive in the negative bank, multiplicatively reduce its
+            // skipConfidence — we have direct evidence this exact copy is NOT an
+            // ad on this show. SOFT (a multiplicative factor, never a hard
+            // block) and applied AFTER the fragility penalty, BEFORE the hard
+            // auto-skip gate — the same idiom as xsdz.7. `negativeMatch` is nil
+            // (⇒ factor 1.0, no-op) whenever the flag is off, no bank is wired,
+            // or nothing aligned above threshold, so this is byte-identical to
+            // pre-xsdz.9 in those cases. The eligibility gate and promotion
+            // track are preserved verbatim — scores stay honest.
+            if let negativeMatch {
+                let suppressed = crossEpisodeMemoryEvaluator.suppress(
+                    skipConfidence: decision.skipConfidence,
+                    with: negativeMatch
+                )
+                if suppressed != decision.skipConfidence {
+                    logger.debug(
+                        "Backfill: [xsdz.9] negative-bank suppression span=\(refinedSpan.id, privacy: .public) sim=\(negativeMatch.similarity, format: .fixed(precision: 3)) skipConfidence \(decision.skipConfidence, format: .fixed(precision: 3)) → \(suppressed, format: .fixed(precision: 3))"
+                    )
+                    decision = DecisionResult(
+                        proposalConfidence: decision.proposalConfidence,
+                        skipConfidence: suppressed,
+                        eligibilityGate: decision.eligibilityGate,
+                        promotionTrack: decision.promotionTrack
+                    )
+                }
             }
 
             // Step 14: SkipPolicyMatrix + confidence promotion.
@@ -3548,6 +3693,31 @@ actor AdDetectionService {
     ///   - lexical: LexicalCandidates overlapping the span
     ///   - acoustic: FeatureWindows in the span with energy-transition signals
     ///   - catalog: EvidenceCatalog entries overlapping the span
+    /// playhead-xsdz.9: load the normalized token sequences of ACTIVE
+    /// confirmed-ad fingerprint entries for a show, for Smith-Waterman positive
+    /// alignment. Only `active` entries (the matcher-eligible set) are read, and
+    /// only sequences long enough to align meaningfully are kept. Bounded cost:
+    /// active entries per show are LRU-capped by `AdCopyFingerprintStore`. Read
+    /// failures are logged and swallowed (returns `[]`) so a store hiccup never
+    /// breaks the hot-path decision — same defensive posture as the catalog
+    /// egress read.
+    private func loadConfirmedAdSequences(
+        store: AdCopyFingerprintStore,
+        podcastId: String?
+    ) async -> [[String]] {
+        guard let podcastId, !podcastId.isEmpty else { return [] }
+        do {
+            let entries = try await store.activeEntries(forPodcast: podcastId)
+            return entries.compactMap { entry -> [String]? in
+                let tokens = SmithWatermanAligner.tokenize(entry.normalizedText)
+                return tokens.count >= NegativeFingerprintBank.minTokenCount ? tokens : nil
+            }
+        } catch {
+            logger.debug("loadConfirmedAdSequences: read failed (non-fatal): \(String(describing: error), privacy: .public)")
+            return []
+        }
+    }
+
     private func buildEvidenceLedger(
         span: DecodedSpan,
         classifierResults: [ClassifierResult],
@@ -3566,6 +3736,11 @@ actor AdDetectionService {
         // (0.10 baseline / 0.25 jingle-overlap). `nil` when the flag is
         // off — preserves byte-identical pre-2hpn fusion output.
         showMusicBedSnapshot: ShowMusicBedProfileSnapshot? = nil,
+        // playhead-xsdz.9: pre-built `.crossEpisodeMemory` POSITIVE boost
+        // entries (candidate aligned to a confirmed-ad bank sequence). Empty for
+        // the flag-OFF / no-store / non-firing path, so the ledger is
+        // byte-identical to pre-xsdz.9 in those cases.
+        crossEpisodeMemoryEntries: [EvidenceLedgerEntry] = [],
         episodeDuration: Double = 0
     ) -> [EvidenceLedgerEntry] {
         // Classifier entry: find the best-matching ClassifierResult for this span.
@@ -3722,6 +3897,7 @@ actor AdDetectionService {
             breakAlignmentEntries: breakAlignmentEntries,
             lexicalAutoAdEntries: lexicalAutoAdEntries,
             audioForensicsEntries: audioForensicsEntries,
+            crossEpisodeMemoryEntries: crossEpisodeMemoryEntries,
             // Cycle 1 H2: effective mode so fusion's `contributesToExistingCandidateLedger`
             // gate honors the registry's decision for this cohort.
             mode: effectiveFMBackfillMode,

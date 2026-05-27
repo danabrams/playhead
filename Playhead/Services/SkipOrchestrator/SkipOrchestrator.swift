@@ -195,6 +195,29 @@ actor SkipOrchestrator {
     /// Optional so existing test setups that don't inject the store remain unaffected.
     private(set) var correctionStore: (any UserCorrectionStore)?
 
+    // MARK: - playhead-xsdz.9: Hard-negative fingerprint bank
+
+    /// Optional HARD-NEGATIVE fingerprint bank. When wired, a user "Listen"
+    /// revert / "not an ad" veto of an auto-skipped (or markOnly) window is the
+    /// confirmed-FP WRITE TRIGGER: the reverted window's `evidenceText` is
+    /// ingested as a hard-negative via `recordConfirmedFalsePositive`. A bank is
+    /// wired ONLY when the `AdDetectionConfig.crossEpisodeMemoryEnabled` feature
+    /// flag is on (PlayheadRuntime constructs and injects it behind that flag),
+    /// so the WHOLE feature — construction, migration, this write trigger, and
+    /// the suppression read — rides the one off-by-default flag. `nil` (the
+    /// default for all existing call sites AND the flag-OFF production default)
+    /// ⇒ no negative-bank writes, byte-identical to pre-xsdz.9.
+    ///
+    /// MEMORY-POLLUTION GUARD: only reversions (confirmed FPs) write here. The
+    /// auto-skip-eligible / catalog-ingress path NEVER writes to this bank.
+    private(set) var negativeFingerprintBank: NegativeFingerprintBank?
+
+    /// Install (or replace) the hard-negative bank post-init. Mirrors the
+    /// runtime's post-init wiring of other optional dependencies.
+    func setNegativeFingerprintBank(_ bank: NegativeFingerprintBank?) {
+        self.negativeFingerprintBank = bank
+    }
+
     // MARK: - State
 
     /// All managed windows for the current episode, keyed by adWindowId.
@@ -1300,6 +1323,17 @@ actor SkipOrchestrator {
             source: .listenRevert
         )
 
+        // playhead-xsdz.9: a Listen revert is a CONFIRMED false positive —
+        // ingest the wrongly-flagged window's ad-copy text as a hard negative
+        // so future episodes with the same copy are suppressed. No-op when no
+        // bank is wired — and a bank is wired ONLY when the
+        // `crossEpisodeMemoryEnabled` feature flag is on (see PlayheadRuntime),
+        // so this is inert in the flag-OFF production default.
+        ingestNegativeFingerprint(
+            text: managed.adWindow.evidenceText,
+            podcastId: podcastId
+        )
+
         // Remove the cue and re-push.
         evaluateAndPush()
     }
@@ -1545,6 +1579,30 @@ actor SkipOrchestrator {
                 podcastId: pid,
                 source: source
             )
+        }
+    }
+
+    /// playhead-xsdz.9: confirmed-FP WRITE TRIGGER for the hard-negative bank.
+    /// Called from the user-reversion seams (Listen revert / "not an ad")
+    /// with the wrongly-flagged window's ad-copy text. Fire-and-forget; never
+    /// throws (a bank-write failure must not break playback). No-op when no
+    /// bank is wired or the text is empty.
+    ///
+    /// MEMORY-POLLUTION GUARD: this is the ONLY orchestrator seam that writes to
+    /// the negative bank, and it is reached ONLY from reversion paths — never
+    /// from the auto-skip-eligible path. The bank therefore ingests confirmed
+    /// FPs exclusively.
+    private func ingestNegativeFingerprint(text: String?, podcastId: String?) {
+        guard let bank = negativeFingerprintBank else { return }
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let pid = podcastId
+        Task {
+            do {
+                _ = try await bank.recordConfirmedFalsePositive(text: text, showId: pid)
+            } catch {
+                // Non-fatal: a hard-negative we failed to record just means a
+                // future near-match isn't suppressed. Playback is unaffected.
+            }
         }
     }
 
