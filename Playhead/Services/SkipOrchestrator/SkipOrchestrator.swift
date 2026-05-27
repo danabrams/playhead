@@ -218,6 +218,34 @@ actor SkipOrchestrator {
         self.negativeFingerprintBank = bank
     }
 
+    // MARK: - playhead-xsdz.11: Per-show auto-skip threshold controller
+
+    /// Optional per-show auto-skip threshold controller store. This is the
+    /// WRITE path for the PI controller: a user "Listen" revert / "not an ad"
+    /// veto of an auto-skipped (or markOnly) window is a FALSE-POSITIVE signal
+    /// that RAISES the show's threshold (be more conservative). A store is wired
+    /// ONLY when the `AdDetectionConfig.perShowThresholdControlEnabled` feature
+    /// flag is on (PlayheadRuntime constructs and injects it behind that flag),
+    /// so the WHOLE feature — construction, migration, this write trigger, and
+    /// the offset read at the detection gate — rides the one off-by-default
+    /// flag. `nil` (the default for all existing call sites AND the flag-OFF
+    /// production default) ⇒ no controller writes, byte-identical to pre-xsdz.11.
+    ///
+    /// Miss-side note: the symmetric MISS signal (the user scrubbed through
+    /// undetected ad content → LOWER the threshold) has no clean, distinct
+    /// gesture at this orchestration layer today — the only "missed ad" signal
+    /// is the explicit false-negative correction routed through the
+    /// `UserCorrectionStore`, not a scrub-through. `recordThresholdControlMiss`
+    /// is the defined miss-side API; it is wired at the false-negative seam
+    /// where `podcastId` is available. The FP side (below) is fully wired.
+    private(set) var perShowThresholdControllerStore: PerShowThresholdControllerStore?
+
+    /// Install (or replace) the per-show threshold controller store post-init.
+    /// Mirrors `setNegativeFingerprintBank`.
+    func setPerShowThresholdControllerStore(_ store: PerShowThresholdControllerStore?) {
+        self.perShowThresholdControllerStore = store
+    }
+
     // MARK: - State
 
     /// All managed windows for the current episode, keyed by adWindowId.
@@ -1334,6 +1362,12 @@ actor SkipOrchestrator {
             podcastId: podcastId
         )
 
+        // playhead-xsdz.11: a Listen revert of an auto-skip is the canonical
+        // FALSE-POSITIVE signal — RAISE this show's auto-skip threshold (be more
+        // conservative). No-op when no controller store is wired (flag-OFF
+        // production default).
+        recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+
         // Remove the cue and re-push.
         evaluateAndPush()
     }
@@ -1487,6 +1521,17 @@ actor SkipOrchestrator {
                     await trustService.recordWeakFalseSkipSignal(podcastId: podcastId)
                 }
             }
+
+            // playhead-xsdz.11: feed the per-show threshold controller a
+            // FALSE-POSITIVE signal ONLY when a MANAGED auto-skip window was
+            // reverted — that is the "listened through an auto-skip" event the
+            // bead names. A suggest-tier-only revert never altered playback, so
+            // it is too weak to RAISE the auto-skip threshold (mirrors the
+            // full-vs-weak trust-signal routing above). No-op when no store is
+            // wired (flag-OFF production default).
+            if revertedManagedAny {
+                recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+            }
             evaluateAndPush()
         }
     }
@@ -1534,6 +1579,11 @@ actor SkipOrchestrator {
             podcastId: podcastId,
             source: .manualVeto
         )
+
+        // playhead-xsdz.11: a manual "not an ad" veto of a managed auto-skip
+        // window is a confirmed FALSE POSITIVE — RAISE this show's threshold.
+        // No-op when no controller store is wired (flag-OFF production default).
+        recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
 
         evaluateAndPush()
     }
@@ -1604,6 +1654,43 @@ actor SkipOrchestrator {
                 // future near-match isn't suppressed. Playback is unaffected.
             }
         }
+    }
+
+    /// playhead-xsdz.11: per-show PI-controller WRITE TRIGGER.
+    ///
+    /// Folds one correction signal into the show's threshold-controller state:
+    ///   • `.falsePositive` — the user listened through / reverted an
+    ///     auto-skipped (or markOnly) window → RAISE the show's threshold.
+    ///   • `.miss` — the user accepted a suggested skip we did NOT auto-skip
+    ///     ("this WAS an ad") → LOWER the show's threshold.
+    ///
+    /// Fire-and-forget; never throws (a controller-write failure must not break
+    /// playback). No-op when no store is wired (the flag-OFF production default)
+    /// or `podcastId` is absent — the controller is per-show, so an anonymous
+    /// correction has nowhere to land.
+    private func recordThresholdControlSignal(
+        _ signal: ThresholdControlSignal,
+        podcastId: String?
+    ) {
+        guard let store = perShowThresholdControllerStore else { return }
+        guard let podcastId, !podcastId.isEmpty else { return }
+        Task {
+            do {
+                _ = try await store.record(signal: signal, forShow: podcastId)
+            } catch {
+                // Non-fatal: a missed controller update just means this show's
+                // threshold doesn't move this once. Playback is unaffected.
+            }
+        }
+    }
+
+    /// playhead-xsdz.11: the defined MISS-side API. The user scrubbed through /
+    /// reported undetected ad content on this show — LOWER the threshold (be
+    /// more aggressive). Currently wired at the `acceptSuggestedSkip` seam (the
+    /// only "we missed an ad" gesture that reaches this layer). Public so the
+    /// false-negative-report UI path can call it directly when wired.
+    func recordThresholdControlMiss(podcastId: String?) {
+        recordThresholdControlSignal(.miss, podcastId: podcastId)
     }
 
     /// playhead-gtt9.23: User tapped "Skip" on a suggest-tier banner.
@@ -1685,6 +1772,14 @@ actor SkipOrchestrator {
         if let podcastId = activePodcastId, let trustService {
             await trustService.recordFalseNegativeSignal(podcastId: podcastId)
         }
+
+        // playhead-xsdz.11: accepting a suggested skip we did NOT auto-skip is a
+        // MISS signal ("this WAS an ad") — LOWER this show's auto-skip threshold
+        // (be more aggressive). This is the cleanest miss-side gesture that
+        // reaches the orchestrator; a literal "scrubbed through undetected
+        // content" signal does not exist at this layer. No-op when no controller
+        // store is wired (flag-OFF production default).
+        recordThresholdControlMiss(podcastId: activePodcastId)
 
         evaluateAndPush()
     }
