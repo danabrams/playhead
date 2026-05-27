@@ -74,6 +74,23 @@ struct AdDetectionConfig: Sendable {
     /// (the rule still contributes fusion mass, just never promotes alone).
     let lexicalAutoAdQualifiedThreshold: Double
 
+    /// playhead-xsdz.6: master kill switch for the high-precision lexical
+    /// auto-ad rule (`LexicalAutoAdEvidenceBuilder`). When `false` (the
+    /// default), `buildEvidenceLedger` builds no `.lexicalAutoAd` entry —
+    /// removing BOTH the `PromotionTrack.lexicalAutoAdQualified` auto-skip
+    /// AND the entry's fusion mass, restoring pre-xsdz.1 behavior. This is
+    /// strictly more conservative than raising `lexicalAutoAdQualifiedThreshold`
+    /// (which no-ops the auto-skip but leaves the fusion mass in play).
+    ///
+    /// Gated OFF by default per the 2026-05-27 per-feature live A/B
+    /// (`LexicalScorerLiveABTests`, playhead-xsdz.5): with region tightening
+    /// (xsdz.2+3) active, enabling this rule net-added one false positive at
+    /// no recall gain (all-on 18 FP vs region-only / baseline 17 FP; span
+    /// recall flat at 0.833 = 20/24 across every arm). Flip to `true` to
+    /// re-enable — a one-line rollback; the rule stays fully built and
+    /// unit-tested, just inert in production until a larger corpus shows lift.
+    let lexicalAutoAdEnabled: Bool
+
     /// playhead-gtt9.11: Segment-level UI-candidate threshold. A segment-
     /// aggregated score at or above this value qualifies as a "possible ad"
     /// marker in the UI; below it the segment is telemetry-only. Distinct
@@ -179,6 +196,7 @@ struct AdDetectionConfig: Sendable {
         autoSkipConfidenceThreshold: Double = 0.80,
         classifierSeedQualifiedThreshold: Double = 0.50,
         lexicalAutoAdQualifiedThreshold: Double = 0.50,
+        lexicalAutoAdEnabled: Bool = false,
         segmentUICandidateThreshold: Double = 0.40,
         segmentAutoSkipThreshold: Double = 0.55,
         bracketRefinementEnabled: Bool = true,
@@ -200,6 +218,7 @@ struct AdDetectionConfig: Sendable {
         self.autoSkipConfidenceThreshold = autoSkipConfidenceThreshold
         self.classifierSeedQualifiedThreshold = classifierSeedQualifiedThreshold
         self.lexicalAutoAdQualifiedThreshold = lexicalAutoAdQualifiedThreshold
+        self.lexicalAutoAdEnabled = lexicalAutoAdEnabled
         self.segmentUICandidateThreshold = segmentUICandidateThreshold
         self.segmentAutoSkipThreshold = segmentAutoSkipThreshold
         self.bracketRefinementEnabled = bracketRefinementEnabled
@@ -223,6 +242,7 @@ struct AdDetectionConfig: Sendable {
         autoSkipConfidenceThreshold: 0.80,
         classifierSeedQualifiedThreshold: 0.50,
         lexicalAutoAdQualifiedThreshold: 0.50,
+        lexicalAutoAdEnabled: false,
         segmentUICandidateThreshold: 0.40,
         segmentAutoSkipThreshold: 0.55,
         bracketRefinementEnabled: true,
@@ -3383,10 +3403,15 @@ actor AdDetectionService {
         // context) fires. Empty when `lexicalHits` is empty (every existing
         // caller that does not thread hits, e.g. tests) or the rule does not
         // fire, preserving prior behavior for those paths.
-        let lexicalAutoAdEntries = lexicalAutoAdBuilder.buildEntries(
-            hits: lexicalHits,
-            for: span
-        )
+        //
+        // playhead-xsdz.6: also empty when the master kill switch is off (the
+        // production default). Skipping construction — rather than just
+        // raising `lexicalAutoAdQualifiedThreshold` — removes the entry's
+        // fusion mass too, which is what eliminates the all-on interaction FP
+        // the per-feature A/B surfaced (see `lexicalAutoAdEnabled`).
+        let lexicalAutoAdEntries = config.lexicalAutoAdEnabled
+            ? lexicalAutoAdBuilder.buildEntries(hits: lexicalHits, for: span)
+            : []
 
         // Acoustic entries: from FeatureWindows in the span range.
         // playhead-fqc8: pass `acousticBreaks` so a `.classifierSeed`-anchored
