@@ -57,6 +57,23 @@ struct AdDetectionConfig: Sendable {
     /// autoSkipConfidenceThreshold` makes the qualified track no-op.
     let classifierSeedQualifiedThreshold: Double
 
+    /// playhead-xsdz.1: Auto-skip threshold for spans on the
+    /// `PromotionTrack.lexicalAutoAdQualified` track — spans whose ledger
+    /// carries a high-precision `.lexicalAutoAd` entry (a vetted strong
+    /// co-occurrence of sponsor + promo code / URL CTA in a tight window,
+    /// negative-evidence guardrails already cleared) and which carry no
+    /// FM-class anchor. The `.lexical` family is structurally capped at
+    /// `lexicalCap = 0.20`, so the standard `0.80` gate is unreachable
+    /// through the lexical channel no matter how blatant the ad copy is.
+    /// This separate floor (default `0.50`) lets a confirmed combo
+    /// auto-skip on its own while respecting the same eligibility-gate /
+    /// policy guards as every other path. The default `lexicalAutoAdCap`
+    /// (0.55) sits just above this floor so a single confirmed entry
+    /// clears it; corroborating signals push further past it. Setting this
+    /// `>= autoSkipConfidenceThreshold` makes the qualified track a no-op
+    /// (the rule still contributes fusion mass, just never promotes alone).
+    let lexicalAutoAdQualifiedThreshold: Double
+
     /// playhead-gtt9.11: Segment-level UI-candidate threshold. A segment-
     /// aggregated score at or above this value qualifies as a "possible ad"
     /// marker in the UI; below it the segment is telemetry-only. Distinct
@@ -161,6 +178,7 @@ struct AdDetectionConfig: Sendable {
         markOnlyThreshold: Double = 0.60,
         autoSkipConfidenceThreshold: Double = 0.80,
         classifierSeedQualifiedThreshold: Double = 0.50,
+        lexicalAutoAdQualifiedThreshold: Double = 0.50,
         segmentUICandidateThreshold: Double = 0.40,
         segmentAutoSkipThreshold: Double = 0.55,
         bracketRefinementEnabled: Bool = true,
@@ -181,6 +199,7 @@ struct AdDetectionConfig: Sendable {
         self.markOnlyThreshold = markOnlyThreshold
         self.autoSkipConfidenceThreshold = autoSkipConfidenceThreshold
         self.classifierSeedQualifiedThreshold = classifierSeedQualifiedThreshold
+        self.lexicalAutoAdQualifiedThreshold = lexicalAutoAdQualifiedThreshold
         self.segmentUICandidateThreshold = segmentUICandidateThreshold
         self.segmentAutoSkipThreshold = segmentAutoSkipThreshold
         self.bracketRefinementEnabled = bracketRefinementEnabled
@@ -203,6 +222,7 @@ struct AdDetectionConfig: Sendable {
         markOnlyThreshold: 0.60,
         autoSkipConfidenceThreshold: 0.80,
         classifierSeedQualifiedThreshold: 0.50,
+        lexicalAutoAdQualifiedThreshold: 0.50,
         segmentUICandidateThreshold: 0.40,
         segmentAutoSkipThreshold: 0.55,
         bracketRefinementEnabled: true,
@@ -223,6 +243,12 @@ struct AdDetectionConfig: Sendable {
             return autoSkipConfidenceThreshold
         case .classifierSeedQualified:
             return classifierSeedQualifiedThreshold
+        case .lexicalAutoAdQualified:
+            // playhead-xsdz.1: the high-precision lexical auto-ad track. See
+            // `lexicalAutoAdQualifiedThreshold` for the rationale (the
+            // `.lexical` family is capped at 0.20, so the standard 0.80 gate
+            // is structurally unreachable through the lexical channel).
+            return lexicalAutoAdQualifiedThreshold
         }
     }
 }
@@ -612,6 +638,11 @@ actor AdDetectionService {
 
     /// Scanner is recreated per-episode when profile changes.
     private var scanner: LexicalScanner
+    /// playhead-xsdz.1: High-precision lexical auto-ad rule. Stateless and
+    /// show-agnostic (its negative-context patterns are built-in, not
+    /// per-show), so unlike `scanner` it never needs recreation when the
+    /// podcast profile changes. Constructed once.
+    private let lexicalAutoAdBuilder = LexicalAutoAdEvidenceBuilder()
     /// Per-show priors parsed from the current PodcastProfile.
     private var showPriors: ShowPriors
     /// playhead-8n1: cache the current PodcastProfile so the Phase 4
@@ -1946,6 +1977,17 @@ actor AdDetectionService {
             metadataEntries: metadataLexiconEntries
         )
 
+        // playhead-xsdz.1: Collect the raw, time-sorted hit stream ONCE for
+        // the whole episode. `LexicalAutoAdEvidenceBuilder` needs hit-level
+        // co-occurrence timing + negative-pattern hits, neither of which
+        // survives the lossy `LexicalCandidate` merge. Reuses the same
+        // metadata-lexicon entries the candidate scan saw so the auto-ad
+        // rule sees an identical hit population.
+        let lexicalHits = scanner.collectHits(
+            chunks: chunks,
+            metadataEntries: metadataLexiconEntries
+        )
+
         logger.info("Backfill: \(lexicalCandidates.count) lexical candidates from \(chunks.count) final chunks")
 
         let classifierResults: [ClassifierResult]
@@ -2465,6 +2507,7 @@ actor AdDetectionService {
                 span: refinedSpan,
                 classifierResults: classifierResults,
                 lexicalCandidates: lexicalCandidates,
+                lexicalHits: lexicalHits,
                 featureWindows: featureWindows,
                 catalogEntries: evidenceCatalog.entries,
                 semanticScanResults: semanticScanResults,
@@ -3293,6 +3336,7 @@ actor AdDetectionService {
         span: DecodedSpan,
         classifierResults: [ClassifierResult],
         lexicalCandidates: [LexicalCandidate],
+        lexicalHits: [LexicalHit] = [],
         featureWindows: [FeatureWindow],
         catalogEntries: [EvidenceEntry],
         semanticScanResults: [SemanticScanResult],
@@ -3329,6 +3373,19 @@ actor AdDetectionService {
             span: span,
             candidates: lexicalCandidates,
             fusionConfig: fusionConfig
+        )
+
+        // playhead-xsdz.1: High-precision lexical auto-ad entries. The
+        // builder inspects the raw hit stream for a vetted strong
+        // co-occurrence (sponsor + promo code / URL CTA in a tight window)
+        // and emits a high-weight `.lexicalAutoAd` entry — UNLESS a
+        // negative-evidence guardrail (show-owned domain / news/review
+        // context) fires. Empty when `lexicalHits` is empty (every existing
+        // caller that does not thread hits, e.g. tests) or the rule does not
+        // fire, preserving prior behavior for those paths.
+        let lexicalAutoAdEntries = lexicalAutoAdBuilder.buildEntries(
+            hits: lexicalHits,
+            for: span
         )
 
         // Acoustic entries: from FeatureWindows in the span range.
@@ -3425,6 +3482,7 @@ actor AdDetectionService {
             catalogEntries: catalogLedgerEntries,
             metadataEntries: metadataEntries,
             breakAlignmentEntries: breakAlignmentEntries,
+            lexicalAutoAdEntries: lexicalAutoAdEntries,
             // Cycle 1 H2: effective mode so fusion's `contributesToExistingCandidateLedger`
             // gate honors the registry's decision for this cohort.
             mode: effectiveFMBackfillMode,

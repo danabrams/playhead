@@ -157,6 +157,7 @@ enum CausalInference {
         switch source {
         case .fm:          return .foundationModel
         case .lexical:     return .lexical
+        case .lexicalAutoAd: return .lexical  // playhead-xsdz.1: high-precision lexical auto-ad rule is a lexical-family signal
         case .acoustic:    return .acoustic
         case .musicBed:    return .acoustic  // music-bed coverage is an acoustic-family signal
         case .breakAlignment: return .acoustic  // playhead-fqc8: break-alignment is an acoustic-family corroborator
