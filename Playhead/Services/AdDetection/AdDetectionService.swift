@@ -157,6 +157,41 @@ struct AdDetectionConfig: Sendable {
     /// identical to pre-kgby behaviour.
     let transcriptBoundaryCueEnabled: Bool
 
+    /// playhead-xsdz.7: master kill switch for the Evidence-Fragility
+    /// precision gate. When `false` (the default), `applyFragilityPenalty`
+    /// returns the input `skipConfidence` UNCHANGED — the decision output is
+    /// byte-identical to pre-xsdz.7 behavior. Flip to `true` to enable the
+    /// soft false-positive-suppression penalty described below.
+    ///
+    /// The insight (cross-model idea duel): false positives clear the
+    /// auto-skip threshold on THIN, BRITTLE evidence — one dominant channel,
+    /// a narrow margin over the (track-specific) threshold, few distinct
+    /// evidence families — whereas true positives are supported robustly by
+    /// many independent channels. The fragility score is computed purely from
+    /// the EXISTING ledger geometry (no new evidence source / channel) and
+    /// applied as a SOFT multiplicative penalty on `skipConfidence` BEFORE the
+    /// hard eligibility / auto-skip gates. It never hard-blocks.
+    let evidenceFragilityPenaltyEnabled: Bool
+
+    /// playhead-xsdz.7: fragility score above which the soft penalty is
+    /// applied. The score (see `applyFragilityPenalty`) is
+    /// `concentration / max(margin, ε) / max(depth, 1)`; it grows when a
+    /// single channel dominates, the margin over threshold is thin, and few
+    /// evidence families fired. Default `2.0` is deliberately conservative —
+    /// a span needs to look clearly brittle before the penalty bites. Raising
+    /// this makes the gate fire on fewer spans; lowering it penalizes more.
+    /// Only consulted when `evidenceFragilityPenaltyEnabled` is `true`.
+    let fragilityThreshold: Double
+
+    /// playhead-xsdz.7: multiplicative penalty applied to `skipConfidence`
+    /// when `fragility > fragilityThreshold`. Default `0.85` shaves 15% off
+    /// the confidence of a brittle span — enough to drop a span that *just*
+    /// cleared its threshold back below it, without nuking a strong-but-
+    /// brittle span outright (the SOFT contract). Must be in `[0, 1]`; values
+    /// outside that range are clamped in `applyFragilityPenalty`. Only
+    /// consulted when `evidenceFragilityPenaltyEnabled` is `true`.
+    let fragilityPenalty: Double
+
     /// playhead-au2v.1.2: Tri-state gate for the chapter-signal feature
     /// (epic playhead-au2v.1). Defaults to `.off` for production safety
     /// — the chapter-generation phase, CoveragePlanner audit-window read,
@@ -204,6 +239,9 @@ struct AdDetectionConfig: Sendable {
         bracketRefinementMinCoarseScore: Double = 0.30,
         bracketRefinementMinFineConfidence: Double = 0.20,
         transcriptBoundaryCueEnabled: Bool = true,
+        evidenceFragilityPenaltyEnabled: Bool = false,
+        fragilityThreshold: Double = 2.0,
+        fragilityPenalty: Double = 0.85,
         chapterSignalMode: ChapterSignalMode = .off
     ) {
         self.candidateThreshold = candidateThreshold
@@ -226,6 +264,9 @@ struct AdDetectionConfig: Sendable {
         self.bracketRefinementMinCoarseScore = bracketRefinementMinCoarseScore
         self.bracketRefinementMinFineConfidence = bracketRefinementMinFineConfidence
         self.transcriptBoundaryCueEnabled = transcriptBoundaryCueEnabled
+        self.evidenceFragilityPenaltyEnabled = evidenceFragilityPenaltyEnabled
+        self.fragilityThreshold = fragilityThreshold
+        self.fragilityPenalty = fragilityPenalty
         self.chapterSignalMode = chapterSignalMode
     }
 
@@ -250,6 +291,9 @@ struct AdDetectionConfig: Sendable {
         bracketRefinementMinCoarseScore: 0.30,
         bracketRefinementMinFineConfidence: 0.20,
         transcriptBoundaryCueEnabled: true,
+        evidenceFragilityPenaltyEnabled: false,
+        fragilityThreshold: 2.0,
+        fragilityPenalty: 0.85,
         chapterSignalMode: .off
     )
 
@@ -270,6 +314,105 @@ struct AdDetectionConfig: Sendable {
             // is structurally unreachable through the lexical channel).
             return lexicalAutoAdQualifiedThreshold
         }
+    }
+
+    /// playhead-xsdz.7: Evidence-Fragility precision gate. A pure,
+    /// deterministic post-fusion scoring adjustment that softly penalizes a
+    /// span's `skipConfidence` when its evidence geometry looks BRITTLE — the
+    /// hallmark of a false positive that cleared the auto-skip threshold on
+    /// thin support rather than robust, independent corroboration.
+    ///
+    /// This is NOT a new evidence channel: it reads only the EXISTING ledger
+    /// geometry and the decision's own confidence / track. It is applied
+    /// BEFORE the hard eligibility / auto-skip gates and NEVER hard-blocks —
+    /// the worst it can do is multiply `skipConfidence` by `fragilityPenalty`.
+    ///
+    /// Formula (ε = `Self.fragilityEpsilon`):
+    ///   - `margin        = proposalConfidence − effectiveAutoSkipThreshold(track)`
+    ///   - `concentration = maxSingleEntryWeight / max(proposalConfidence, ε)`
+    ///   - `depth         = #distinct SourceEvidenceFamily with weight > 0`
+    ///   - `fragility      = concentration / max(margin, ε) / max(depth, 1)`
+    ///
+    /// High fragility ⇒ likely false positive. When
+    /// `evidenceFragilityPenaltyEnabled` is `false` the input `skipConfidence`
+    /// is returned unchanged (byte-identical to pre-xsdz.7). When `true` and
+    /// `fragility > fragilityThreshold`, the returned value is
+    /// `skipConfidence * clamp(fragilityPenalty, 0, 1)`.
+    ///
+    /// - Parameters:
+    ///   - skipConfidence: the decision's current skip/proposal confidence
+    ///     (the value the hard gate would compare against the threshold).
+    ///   - proposalConfidence: the span's fused proposal confidence (used for
+    ///     the margin and concentration terms).
+    ///   - promotionTrack: selects the effective threshold for the margin.
+    ///   - ledger: the (post-suppression) evidence ledger for the span.
+    /// - Returns: the possibly-penalized skip confidence, clamped to [0, 1].
+    func applyFragilityPenalty(
+        skipConfidence: Double,
+        proposalConfidence: Double,
+        promotionTrack: PromotionTrack,
+        ledger: [EvidenceLedgerEntry]
+    ) -> Double {
+        guard evidenceFragilityPenaltyEnabled else { return skipConfidence }
+        // Non-finite confidence is a data-integrity error; leave it untouched
+        // so the existing non-finite guards downstream stay in control.
+        guard skipConfidence.isFinite else { return skipConfidence }
+
+        let fragility = fragilityScore(
+            proposalConfidence: proposalConfidence,
+            promotionTrack: promotionTrack,
+            ledger: ledger
+        )
+        guard fragility.isFinite, fragility > fragilityThreshold else {
+            return skipConfidence
+        }
+
+        let penalty = max(0.0, min(1.0, fragilityPenalty))
+        return max(0.0, min(1.0, skipConfidence * penalty))
+    }
+
+    /// playhead-xsdz.7: epsilon guarding the divisions in the fragility
+    /// formula so a zero margin / zero proposal confidence cannot produce a
+    /// NaN or `+inf`. Small relative to any real threshold or confidence.
+    static let fragilityEpsilon: Double = 1e-6
+
+    /// playhead-xsdz.7: pure fragility score from the ledger geometry. Exposed
+    /// (internal) so unit tests can assert the formula's edge cases directly
+    /// without exercising the enable/threshold branching in
+    /// `applyFragilityPenalty`. See that method's doc comment for the formula.
+    ///
+    /// "Evidence families" are the canonical `SourceEvidenceFamily` buckets —
+    /// the SAME taxonomy the orthogonal-corroboration rule uses
+    /// (`SourceEvidenceFamily.for(_:)`) — restricted to scoring sources
+    /// (observability-only rows are excluded) with strictly positive weight.
+    /// Using the family taxonomy (not the raw `EvidenceSourceType`) keeps the
+    /// depth term honest: `.acoustic` + `.musicBed` + `.breakAlignment` are
+    /// one family (shared modality), so a span supported only by audio-derived
+    /// signals is correctly treated as shallow.
+    func fragilityScore(
+        proposalConfidence: Double,
+        promotionTrack: PromotionTrack,
+        ledger: [EvidenceLedgerEntry]
+    ) -> Double {
+        let eps = Self.fragilityEpsilon
+
+        // Scoring entries with strictly-positive weight. Observability-only
+        // rows (audit / operational) never enter fusion and must not count
+        // toward concentration or depth.
+        let scoringEntries = ledger.filter {
+            !$0.source.isObservabilityOnly && $0.weight > 0
+        }
+
+        let maxSingleEntryWeight = scoringEntries.map(\.weight).max() ?? 0.0
+        let concentration = maxSingleEntryWeight / max(proposalConfidence, eps)
+
+        let distinctFamilies = Set(scoringEntries.map { SourceEvidenceFamily.for($0.source) })
+        let depth = distinctFamilies.count
+
+        let threshold = effectiveAutoSkipThreshold(for: promotionTrack)
+        let margin = proposalConfidence - threshold
+
+        return concentration / max(margin, eps) / Double(max(depth, 1))
     }
 }
 
@@ -2614,6 +2757,34 @@ actor AdDetectionService {
                     proposalConfidence: decision.proposalConfidence,
                     skipConfidence: decision.skipConfidence,
                     eligibilityGate: .blockedByPolicy,
+                    promotionTrack: decision.promotionTrack
+                )
+            }
+
+            // playhead-xsdz.7: Evidence-Fragility precision gate. SOFT
+            // multiplicative penalty on `skipConfidence` for brittle spans
+            // (one dominant channel, narrow margin over the track threshold,
+            // few distinct evidence families) — the FP signature. Computed
+            // from the post-suppression ledger geometry that fed the mapper,
+            // applied BEFORE the hard auto-skip gate below, and never
+            // hard-blocks. OFF by default: when
+            // `evidenceFragilityPenaltyEnabled == false` this returns the same
+            // `skipConfidence`, so `decision` is byte-identical to pre-xsdz.7.
+            // The eligibility gate and promotion track are preserved verbatim.
+            let penalizedSkipConfidence = config.applyFragilityPenalty(
+                skipConfidence: decision.skipConfidence,
+                proposalConfidence: decision.proposalConfidence,
+                promotionTrack: decision.promotionTrack,
+                ledger: effectiveLedger
+            )
+            if penalizedSkipConfidence != decision.skipConfidence {
+                logger.debug(
+                    "Backfill: [xsdz.7] fragility penalty span=\(refinedSpan.id, privacy: .public) skipConfidence \(decision.skipConfidence, format: .fixed(precision: 3)) → \(penalizedSkipConfidence, format: .fixed(precision: 3))"
+                )
+                decision = DecisionResult(
+                    proposalConfidence: decision.proposalConfidence,
+                    skipConfidence: penalizedSkipConfidence,
+                    eligibilityGate: decision.eligibilityGate,
                     promotionTrack: decision.promotionTrack
                 )
             }
