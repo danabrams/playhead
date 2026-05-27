@@ -160,6 +160,7 @@ struct ScoreCalibrationProfile: Sendable {
         case .breakAlignment: return acousticCalibrator  // playhead-fqc8: share acoustic calibrator until we have break-alignment-specific replay-corpus data.
         case .audioForensics: return acousticCalibrator  // playhead-xsdz.8: composite boundary discontinuity is an audio-derived signal; share the acoustic calibrator until we have audio-forensics-specific replay-corpus data.
         case .crossEpisodeMemory: return fingerprintCalibrator  // playhead-xsdz.9: cross-episode copy-alignment is a reference-match signal like fingerprint; share its calibrator until we have alignment-specific replay-corpus data.
+        case .rhetoricalGrammar: return lexicalCalibrator  // playhead-xsdz.12: rhetorical act-sequence grammar is a text-derived signal; share the lexical calibrator until we have grammar-specific replay-corpus data.
         case .fusedScore: return .identity
         case .audit, .operational: return .identity
         }

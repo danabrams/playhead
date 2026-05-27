@@ -192,6 +192,7 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
         case .lexicalAutoAd: return config.lexicalAutoAdCap  // playhead-xsdz.1: high-precision lexical auto-ad rule; own larger budget so a vetted combo can clear the qualified auto-skip threshold.
         case .audioForensics: return config.audioForensicsCap  // playhead-xsdz.8: composite boundary-discontinuity channel; one modest corroborative cap.
         case .crossEpisodeMemory: return config.crossEpisodeMemoryCap  // playhead-xsdz.9: cross-episode positive copy-alignment boost; modest corroborative cap, no qualified track.
+        case .rhetoricalGrammar: return config.rhetoricalGrammarCap  // playhead-xsdz.12: rhetorical act-sequence grammar; modest text-derived corroborative cap, no qualified track.
         case .fusedScore: return 1.0  // Fused score is post-aggregation; no per-source cap applies.
         case .audit, .operational: return 0.0  // Phase 11 observability rows are not fusion inputs.
         }

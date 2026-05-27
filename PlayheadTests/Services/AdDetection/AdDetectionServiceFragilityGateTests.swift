@@ -59,7 +59,7 @@ struct AdDetectionServiceFragilityGateTests {
             return .classifier(score: 0.5)
         case .fm:
             return .fm(disposition: .containsAd, band: .strong, cohortPromptLabel: "t")
-        case .lexical, .lexicalAutoAd:
+        case .lexical, .lexicalAutoAd, .rhetoricalGrammar:
             return .lexical(matchedCategories: ["url"])
         case .acoustic:
             return .acoustic(breakStrength: 0.5)

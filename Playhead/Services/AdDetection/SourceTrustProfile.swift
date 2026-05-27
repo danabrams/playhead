@@ -92,7 +92,7 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
     /// Map an evidence source type to its family.
     static func `for`(_ source: EvidenceSourceType) -> SourceEvidenceFamily {
         switch source {
-        case .lexical, .classifier, .lexicalAutoAd:
+        case .lexical, .classifier, .lexicalAutoAd, .rhetoricalGrammar:
             // playhead-xsdz.1: the high-precision lexical auto-ad rule is a
             // text-derived signal, same family as `.lexical`. Keeping it in
             // `.textual` preserves the orthogonal-corroboration rule — a
@@ -100,6 +100,12 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
             // (acoustic / model / reference) to count as cross-family
             // corroboration, so the rule cannot self-corroborate against the
             // raw lexical channel it derives from.
+            // playhead-xsdz.12: the rhetorical act-sequence grammar is also a
+            // text-derived signal (it classifies persuasion roles in the span's
+            // transcript prose), so it shares the `.textual` family. Same
+            // orthogonality guarantee: a `.rhetoricalGrammar` corroborator
+            // cannot self-corroborate against the lexical channels it sits
+            // alongside in the same family.
             return .textual
         case .acoustic, .musicBed, .breakAlignment, .audioForensics:
             // musicBed is a peer of acoustic: same modality (audio
