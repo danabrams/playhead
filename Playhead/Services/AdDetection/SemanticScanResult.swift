@@ -236,6 +236,24 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// Persistence note: additive case; no migration required. Forward-only,
     /// matching `.breakAlignment` / `.musicBed`.
     case lexicalAutoAd
+    /// playhead-xsdz.8: Composite audio-forensics boundary channel. ONE merged
+    /// evidence kind carrying the PHYSICAL signature of audio insertion at a
+    /// candidate ad boundary — discontinuities that ad TEXT cannot fake:
+    /// loudness/RMS jump, spectral-character (flux) shift, noise-floor change,
+    /// and recording-environment (production/music) change measured ACROSS the
+    /// span's start and end edges relative to the span interior.
+    ///
+    /// Why ONE kind (not three caps): the cross-model idea duel explicitly
+    /// recommended a single capped channel. Each sub-signal is sigma-normalized
+    /// against the episode's own distribution and the strongest few are merged
+    /// into one boundary-forensics score before it ever becomes a ledger entry,
+    /// so the family budget is a single `FusionWeightConfig.audioForensicsCap`
+    /// (mirrors the `.breakAlignment` / `.musicBed` carve-outs). It fires
+    /// CONSERVATIVELY (corroborative only) and is OFF by default
+    /// (`AdDetectionConfig.audioForensicsEnabled`).
+    /// Persistence note: additive case; no migration required. Forward-only,
+    /// matching `.breakAlignment` / `.musicBed` / `.lexicalAutoAd`.
+    case audioForensics
     /// Phase 11 random negative-audit marker. These rows are persisted in
     /// `evidence_events` for miss-rate estimation, but they are not positive
     /// FM evidence for training or fusion.
@@ -250,7 +268,8 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
         case .audit, .operational:
             return true
         case .fm, .lexical, .acoustic, .catalog, .classifier, .fingerprint,
-             .fusedScore, .metadata, .musicBed, .breakAlignment, .lexicalAutoAd:
+             .fusedScore, .metadata, .musicBed, .breakAlignment, .lexicalAutoAd,
+             .audioForensics:
             return false
         }
     }

@@ -158,6 +158,7 @@ struct ScoreCalibrationProfile: Sendable {
         case .metadata: return .identity  // playhead-z3ch: metadata is pre-clamped at fusion ingress; identity is the v0 default.
         case .musicBed: return acousticCalibrator  // Share the acoustic calibrator until we have music-bed-specific replay-corpus data.
         case .breakAlignment: return acousticCalibrator  // playhead-fqc8: share acoustic calibrator until we have break-alignment-specific replay-corpus data.
+        case .audioForensics: return acousticCalibrator  // playhead-xsdz.8: composite boundary discontinuity is an audio-derived signal; share the acoustic calibrator until we have audio-forensics-specific replay-corpus data.
         case .fusedScore: return .identity
         case .audit, .operational: return .identity
         }

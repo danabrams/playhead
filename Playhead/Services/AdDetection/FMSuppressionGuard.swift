@@ -279,11 +279,14 @@ struct FMSuppressionApplicator: Sendable {
             // VETTED auto-ad entry, NOT the raw `.lexical` channel — that
             // stays a soft signal below.
             return true
-        case .classifier, .lexical, .acoustic, .musicBed, .breakAlignment, .catalog, .fusedScore, .metadata, .audit, .operational:
+        case .classifier, .lexical, .acoustic, .musicBed, .breakAlignment, .audioForensics, .catalog, .fusedScore, .metadata, .audit, .operational:
             // playhead-z3ch: metadata is a coarse pre-seed prior, not strong
             // evidence. It must yield to FM noAds suppression like the other
             // soft signals. musicBed is the 2026-04-23 acoustic peer — same
             // soft-signal tier as .acoustic for suppression purposes.
+            // playhead-xsdz.8: audioForensics is a CONSERVATIVE corroborator
+            // (never the sole promoter); it is a soft signal that yields to FM
+            // noAds suppression like .acoustic / .breakAlignment / .musicBed.
             return false
         }
     }
