@@ -268,6 +268,22 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// (`AdDetectionConfig.crossEpisodeMemoryEnabled`).
     /// Persistence note: additive case; no migration required. Forward-only.
     case crossEpisodeMemory
+    /// playhead-xsdz.12: Rhetorical act-sequence grammar. Emitted when a
+    /// candidate span's transcript prose exhibits the canonical persuasion
+    /// PROGRAM — HOOK → PROBLEM → SOLUTION → EVIDENCE → OFFER → CTA — with
+    /// THREE OR MORE distinct rhetorical roles co-occurring in (roughly) that
+    /// order. No single role is ad-specific (content can ask questions, cite
+    /// stats, give URLs); the ORDERED CO-OCCURRENCE of 3+ roles is what is
+    /// almost exclusively an ad, and it fires even when the lexical
+    /// sponsor/promo/URL cues do not. Text-derived, so it shares the `.textual`
+    /// evidence family with `.lexical` / `.lexicalAutoAd`. A MODEST corroborator
+    /// capped at `FusionWeightConfig.rhetoricalGrammarCap` with NO qualified
+    /// promotion track — it never drives a skip on its own, only adds honest
+    /// in-audio (transcript) mass and bumps `distinctKinds.count`. Gated OFF by
+    /// default (`AdDetectionConfig.rhetoricalGrammarEnabled`).
+    /// Persistence note: additive case; no migration required. Forward-only,
+    /// matching `.crossEpisodeMemory` / `.audioForensics`.
+    case rhetoricalGrammar
     /// Phase 11 random negative-audit marker. These rows are persisted in
     /// `evidence_events` for miss-rate estimation, but they are not positive
     /// FM evidence for training or fusion.
@@ -283,7 +299,7 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
             return true
         case .fm, .lexical, .acoustic, .catalog, .classifier, .fingerprint,
              .fusedScore, .metadata, .musicBed, .breakAlignment, .lexicalAutoAd,
-             .audioForensics, .crossEpisodeMemory:
+             .audioForensics, .crossEpisodeMemory, .rhetoricalGrammar:
             return false
         }
     }

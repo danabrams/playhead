@@ -164,6 +164,18 @@ struct FusionWeightConfig: Sendable {
     /// `.breakAlignment` / `.musicBed` / `.audioForensics` per-source carve-outs.
     let crossEpisodeMemoryCap: Double
 
+    /// playhead-xsdz.12: Maximum weight contribution from a single
+    /// `.rhetoricalGrammar` entry — the rhetorical act-sequence grammar channel
+    /// (3+ distinct persuasion roles co-occurring in canonical order across a
+    /// span's transcript prose). Default 0.20 is deliberately MODEST (peer of
+    /// `acousticCap` / `audioForensicsCap` / `crossEpisodeMemoryCap`): an ad-
+    /// shaped rhetorical arc is corroborative, not decisive, and this channel
+    /// has NO qualified promotion track, so it can never drive a skip alone — it
+    /// only adds honest text-derived mass and bumps `distinctKinds.count` for
+    /// the corroboration quorum. Mirrors the `.breakAlignment` / `.musicBed` /
+    /// `.audioForensics` / `.crossEpisodeMemory` per-source carve-outs.
+    let rhetoricalGrammarCap: Double
+
     init(
         fmCap: Double = 0.4,
         classifierCap: Double = 0.3,
@@ -176,7 +188,8 @@ struct FusionWeightConfig: Sendable {
         musicBedCap: Double = 0.25,
         lexicalAutoAdCap: Double = 0.55,
         audioForensicsCap: Double = 0.2,
-        crossEpisodeMemoryCap: Double = 0.2
+        crossEpisodeMemoryCap: Double = 0.2,
+        rhetoricalGrammarCap: Double = 0.2
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
@@ -190,6 +203,7 @@ struct FusionWeightConfig: Sendable {
         self.lexicalAutoAdCap = lexicalAutoAdCap
         self.audioForensicsCap = audioForensicsCap
         self.crossEpisodeMemoryCap = crossEpisodeMemoryCap
+        self.rhetoricalGrammarCap = rhetoricalGrammarCap
 
         // playhead-2hpn R4 (+R5): enforce the musicBedCap >=
         // musicBedConfirmedJingleWeight invariant at construction time, not
@@ -302,6 +316,12 @@ struct BackfillEvidenceFusion: Sendable {
     /// Defaults to empty so every existing call site stays byte-compatible and
     /// the flag-OFF path emits nothing.
     let crossEpisodeMemoryEntries: [EvidenceLedgerEntry]
+    /// playhead-xsdz.12: Pre-constructed `.rhetoricalGrammar` ledger entries —
+    /// the rhetorical act-sequence grammar channel (3+ persuasion roles in
+    /// canonical order). Each entry is capped to `config.rhetoricalGrammarCap`
+    /// inside `buildLedger()`. Defaults to empty so every existing call site
+    /// stays byte-compatible and the flag-OFF path emits nothing.
+    let rhetoricalGrammarEntries: [EvidenceLedgerEntry]
     let mode: FMBackfillMode
     let config: FusionWeightConfig
 
@@ -318,6 +338,7 @@ struct BackfillEvidenceFusion: Sendable {
         lexicalAutoAdEntries: [EvidenceLedgerEntry] = [],
         audioForensicsEntries: [EvidenceLedgerEntry] = [],
         crossEpisodeMemoryEntries: [EvidenceLedgerEntry] = [],
+        rhetoricalGrammarEntries: [EvidenceLedgerEntry] = [],
         mode: FMBackfillMode,
         config: FusionWeightConfig
     ) {
@@ -333,6 +354,7 @@ struct BackfillEvidenceFusion: Sendable {
         self.lexicalAutoAdEntries = lexicalAutoAdEntries
         self.audioForensicsEntries = audioForensicsEntries
         self.crossEpisodeMemoryEntries = crossEpisodeMemoryEntries
+        self.rhetoricalGrammarEntries = rhetoricalGrammarEntries
         self.mode = mode
         self.config = config
     }
@@ -508,6 +530,24 @@ struct BackfillEvidenceFusion: Sendable {
             let capped = EvidenceLedgerEntry(
                 source: .crossEpisodeMemory,
                 weight: min(entry.weight, config.crossEpisodeMemoryCap),
+                detail: entry.detail,
+                subSource: entry.subSource
+            )
+            ledger.append(capped)
+        }
+
+        // playhead-xsdz.12: RhetoricalGrammar entries — the rhetorical
+        // act-sequence grammar channel (3+ distinct persuasion roles in
+        // canonical order across the span's transcript prose). ONE kind, ONE
+        // cap (`rhetoricalGrammarCap`, default 0.20). Empty for every flag-OFF /
+        // non-firing call site, so the loop is a no-op and the ledger is
+        // byte-identical to pre-xsdz.12. The channel is text-derived (shares the
+        // `.textual` family with `.lexical`) and corroborative only — no
+        // qualified promotion track — so it can never drive a skip on its own.
+        for entry in rhetoricalGrammarEntries {
+            let capped = EvidenceLedgerEntry(
+                source: .rhetoricalGrammar,
+                weight: min(entry.weight, config.rhetoricalGrammarCap),
                 detail: entry.detail,
                 subSource: entry.subSource
             )
@@ -933,8 +973,14 @@ struct DecisionMapper: Sendable {
         // measurement count for less than the weaker RMS-drop `.acoustic`
         // entry — the exact inconsistency the fqc8 cycle-2 review fixed for
         // `.breakAlignment`.
+        // playhead-xsdz.12: `.rhetoricalGrammar` is a text-derived in-audio
+        // corroborator (the persuasion-arc grammar fired on the span's
+        // transcript prose). Include it on the same footing as `.lexical` /
+        // `.lexicalAutoAd`: its "never the sole promoter" guard is its modest
+        // CAP plus the absence of any qualified promotion track, NOT exclusion
+        // from corroboration — mirroring the xsdz.8 `.audioForensics` rationale.
         let inAudioCorroboratingSources: Set<EvidenceSourceType> = [
-            .lexical, .lexicalAutoAd, .acoustic, .musicBed, .catalog, .fingerprint, .fm, .breakAlignment, .audioForensics
+            .lexical, .lexicalAutoAd, .acoustic, .musicBed, .catalog, .fingerprint, .fm, .breakAlignment, .audioForensics, .rhetoricalGrammar
         ]
         let hasInAudioCorroboration = scoringLedger.contains { entry in
             if inAudioCorroboratingSources.contains(entry.source) {
@@ -999,7 +1045,11 @@ struct DecisionMapper: Sendable {
         // the boundary-discontinuity entry is corroborated by a real measured
         // signal; excluding it would make audio-forensics count for less than
         // its weaker acoustic-family peers.
-        let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .lexicalAutoAd, .catalog, .acoustic, .musicBed, .fingerprint, .breakAlignment, .audioForensics]
+        // playhead-xsdz.12: include `.rhetoricalGrammar` — a text-derived
+        // in-audio corroborator (the persuasion-arc grammar on the span's
+        // transcript prose). Same rationale as `.lexical` / `.audioForensics`:
+        // it is real non-FM signal corroborating an fmAcoustic-anchored span.
+        let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .lexicalAutoAd, .catalog, .acoustic, .musicBed, .fingerprint, .breakAlignment, .audioForensics, .rhetoricalGrammar]
         let hasExternalCorroboration = scoringLedger.contains { entry in
             if nonClassifierExternal.contains(entry.source) {
                 return true

@@ -252,6 +252,24 @@ struct AdDetectionConfig: Sendable {
     /// flag is later flipped on we accept a cold-start bank.
     let crossEpisodeMemoryEnabled: Bool
 
+    /// playhead-xsdz.12: master kill switch for the rhetorical act-sequence
+    /// grammar evidence channel (`RhetoricalGrammarEvidenceBuilder`). When
+    /// `false` (the production default), `buildEvidenceLedger` builds NO
+    /// `.rhetoricalGrammar` entry AND the per-span transcript prose is never
+    /// assembled for the grammar detector — so the output is byte-identical to
+    /// pre-xsdz.12 behaviour and no new work occurs on the decision path. Flip
+    /// to `true` to enable: the detector then classifies each sentence of the
+    /// span's transcript into zero or more rhetorical roles (HOOK / PROBLEM /
+    /// SOLUTION / EVIDENCE / OFFER / CTA), and emits a single capped
+    /// corroborative entry when >= 3 distinct roles co-occur in (roughly) the
+    /// canonical persuasion order.
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate: main stays
+    /// behavior-neutral and the channel is never wired into a production config
+    /// or A/B arm until a corpus eval shows lift. The detector stays fully built
+    /// and unit-tested, just inert in production.
+    let rhetoricalGrammarEnabled: Bool
+
     /// ef2.6.3: Derive ConfidenceBandThresholds from config fields for band classification.
     /// Requires candidate < markOnly < confirmation < autoSkip (asserted in debug).
     var bandThresholds: ConfidenceBandThresholds {
@@ -289,7 +307,8 @@ struct AdDetectionConfig: Sendable {
         fragilityPenalty: Double = 0.85,
         chapterSignalMode: ChapterSignalMode = .off,
         audioForensicsEnabled: Bool = false,
-        crossEpisodeMemoryEnabled: Bool = false
+        crossEpisodeMemoryEnabled: Bool = false,
+        rhetoricalGrammarEnabled: Bool = false
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -317,6 +336,7 @@ struct AdDetectionConfig: Sendable {
         self.chapterSignalMode = chapterSignalMode
         self.audioForensicsEnabled = audioForensicsEnabled
         self.crossEpisodeMemoryEnabled = crossEpisodeMemoryEnabled
+        self.rhetoricalGrammarEnabled = rhetoricalGrammarEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -345,7 +365,8 @@ struct AdDetectionConfig: Sendable {
         fragilityPenalty: 0.85,
         chapterSignalMode: .off,
         audioForensicsEnabled: false,
-        crossEpisodeMemoryEnabled: false
+        crossEpisodeMemoryEnabled: false,
+        rhetoricalGrammarEnabled: false
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -879,6 +900,12 @@ actor AdDetectionService {
     /// per-show), so unlike `scanner` it never needs recreation when the
     /// podcast profile changes. Constructed once.
     private let lexicalAutoAdBuilder = LexicalAutoAdEvidenceBuilder()
+
+    /// playhead-xsdz.12: pure rhetorical act-sequence grammar detector. Built
+    /// once per service; stateless and `Sendable`. Only consulted when
+    /// `config.rhetoricalGrammarEnabled` is true (off by default), so its mere
+    /// existence is inert on the production path.
+    private let rhetoricalGrammarBuilder = RhetoricalGrammarEvidenceBuilder()
     /// playhead-xsdz.8: Composite audio-forensics boundary detector.
     /// Stateless, show-agnostic, and gated OFF by default
     /// (`config.audioForensicsEnabled`), so it is constructed once and only
@@ -2804,6 +2831,24 @@ actor AdDetectionService {
                 }
             }
 
+            // playhead-xsdz.12: assemble the span's joined transcript prose for
+            // the rhetorical act-sequence grammar detector. Gated on the
+            // OFF-by-default `rhetoricalGrammarEnabled` flag: with the flag off
+            // this stays "" and the detector is never called, so the decision
+            // path is byte-identical to pre-xsdz.12 and no per-span text join
+            // occurs. Built from the same ordinal-filtered atom slice the
+            // xsdz.9 cross-episode read uses.
+            let rhetoricalGrammarSpanText: String = config.rhetoricalGrammarEnabled
+                ? atoms
+                    .filter {
+                        $0.atomKey.atomOrdinal >= refinedSpan.firstAtomOrdinal
+                            && $0.atomKey.atomOrdinal <= refinedSpan.lastAtomOrdinal
+                    }
+                    .sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
+                    .map(\.text)
+                    .joined(separator: " ")
+                : ""
+
             let ledger = buildEvidenceLedger(
                 span: refinedSpan,
                 classifierResults: classifierResults,
@@ -2824,6 +2869,9 @@ actor AdDetectionService {
                 // playhead-xsdz.9: positive cross-episode boost entries built
                 // above. Empty for the flag-OFF / no-store / non-firing path.
                 crossEpisodeMemoryEntries: crossEpisodePositiveEntries,
+                // playhead-xsdz.12: span prose for the grammar detector; "" when
+                // the OFF-by-default flag is off, so behaviour is byte-identical.
+                spanText: rhetoricalGrammarSpanText,
                 episodeDuration: episodeDuration
             )
 
@@ -3741,6 +3789,12 @@ actor AdDetectionService {
         // the flag-OFF / no-store / non-firing path, so the ledger is
         // byte-identical to pre-xsdz.9 in those cases.
         crossEpisodeMemoryEntries: [EvidenceLedgerEntry] = [],
+        // playhead-xsdz.12: the span's joined transcript prose, used ONLY by
+        // the rhetorical act-sequence grammar detector. Empty string for the
+        // flag-OFF path (the call site never assembles it when the flag is
+        // off) and for every existing caller that does not thread it, so the
+        // ledger is byte-identical to pre-xsdz.12 in those cases.
+        spanText: String = "",
         episodeDuration: Double = 0
     ) -> [EvidenceLedgerEntry] {
         // Classifier entry: find the best-matching ClassifierResult for this span.
@@ -3799,6 +3853,21 @@ actor AdDetectionService {
                 episodeWindows: featureWindows,
                 fusionConfig: fusionConfig
             )
+            : []
+
+        // playhead-xsdz.12: Rhetorical act-sequence grammar entries. The
+        // builder classifies each sentence of the span's transcript prose into
+        // zero or more rhetorical roles (HOOK / PROBLEM / SOLUTION / EVIDENCE /
+        // OFFER / CTA) and emits a single capped corroborative `.rhetoricalGrammar`
+        // entry when >= 3 distinct roles co-occur in (roughly) the canonical
+        // persuasion order. Gated OFF by default: when `rhetoricalGrammarEnabled`
+        // is false the builder is never called (and the call site never even
+        // assembles `spanText`), so NO entry is built and the ledger is
+        // byte-identical to pre-xsdz.12. Also empty when `spanText` is empty
+        // (every existing caller that does not thread it) or the grammar does
+        // not fire.
+        let rhetoricalGrammarEntries = config.rhetoricalGrammarEnabled
+            ? rhetoricalGrammarBuilder.buildEntries(text: spanText, for: span)
             : []
 
         // Acoustic entries: from FeatureWindows in the span range.
@@ -3898,6 +3967,7 @@ actor AdDetectionService {
             lexicalAutoAdEntries: lexicalAutoAdEntries,
             audioForensicsEntries: audioForensicsEntries,
             crossEpisodeMemoryEntries: crossEpisodeMemoryEntries,
+            rhetoricalGrammarEntries: rhetoricalGrammarEntries,
             // Cycle 1 H2: effective mode so fusion's `contributesToExistingCandidateLedger`
             // gate honors the registry's decision for this cohort.
             mode: effectiveFMBackfillMode,
