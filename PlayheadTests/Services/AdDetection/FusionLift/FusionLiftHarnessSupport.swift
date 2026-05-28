@@ -296,6 +296,182 @@ enum LexicalScorerArmConfig {
     }
 }
 
+// MARK: - Evidence-Fragility gate A/B arm configuration (playhead-xsdz.7 live A/B)
+
+/// The two arms of the Evidence-Fragility live A/B (`FragilityGateLiveABTests`).
+/// Both arms run the REAL `AdDetectionService.runBackfill` with
+/// `fmBackfillMode: .full` (FM ad scan → fusion ledger → `insertAdWindows`),
+/// `chapterSignalMode: .off`, ALL off-by-default evidence channels FALSE, and
+/// `NarrowingConfig.default` (xsdz.2/.3 cluster-snap ON — production state).
+/// The ONLY field that differs between the arms is the xsdz.7
+/// `AdDetectionConfig.evidenceFragilityPenaltyEnabled` boolean:
+///   * `baseline`  — current main PRODUCTION state. `evidenceFragilityPenaltyEnabled:
+///     false`, so `applyFragilityPenalty` returns `skipConfidence` UNCHANGED.
+///   * `treatment` — identical to baseline EXCEPT `evidenceFragilityPenaltyEnabled:
+///     true`, with the production-default `fragilityThreshold` (2.0) and
+///     `fragilityPenalty` (0.85). The soft, post-fusion precision gate is live.
+///
+/// This is the load-bearing correctness property of the A/B: the two arms must
+/// differ in EXACTLY one field. A second field drifting between arms would
+/// attribute a precision/recall change to the fragility gate that some other
+/// flag actually caused, making the measurement meaningless. The hermetic
+/// `FragilityGateArmConfigTests` pin the one-field isolation on the simulator
+/// before the (expensive, Catalyst-only) live A/B ever runs.
+enum FragilityGateArm: String, Sendable, CaseIterable {
+    /// Current main production state: fragility gate OFF.
+    case baseline
+    /// Production state PLUS the xsdz.7 fragility gate enabled.
+    case treatment
+
+    /// Whether `evidenceFragilityPenaltyEnabled` is set in this arm — the ONLY
+    /// `AdDetectionConfig` field that distinguishes the two arms.
+    var fragilityEnabled: Bool {
+        switch self {
+        case .baseline: return false
+        case .treatment: return true
+        }
+    }
+}
+
+/// Pure, hermetic builder for the fragility A/B's per-arm configs. Extracted
+/// from the harness so the arm construction is unit-testable on the simulator
+/// with no audio / FM / pipeline (acceptance criterion: a hermetic test that
+/// pins the one-field isolation).
+///
+/// CRITICAL invariant (asserted by `FragilityGateArmConfigTests`): the two arms
+/// deviate from each other ONLY in `evidenceFragilityPenaltyEnabled`; every
+/// other `AdDetectionConfig` field is byte-identical and equal to the PRODUCTION
+/// default (`AdDetectionConfig.default`) — including `fmBackfillMode: .full`,
+/// `chapterSignalMode: .off`, every off-by-default evidence-channel flag FALSE,
+/// and `lexicalAutoAdQualifiedThreshold` at its production default. Both arms
+/// also use `NarrowingConfig.default` (snap ON — xsdz.2/.3 are KEPT ON in
+/// production, so the baseline MUST have snap on). The fragility tuning knobs
+/// (`fragilityThreshold` / `fragilityPenalty`) stay at their production defaults
+/// in BOTH arms; the treatment arm differs only by flipping the master flag on.
+enum FragilityGateArmConfig {
+
+    /// Build the full `AdDetectionConfig` for the fragility A/B given the single
+    /// `evidenceFragilityPenaltyEnabled` toggle. Every other field is copied
+    /// VERBATIM from `AdDetectionConfig.default` (the production state), so the
+    /// only thing this builder can vary is the fragility master flag. Sourcing
+    /// every non-toggle field from `.default` (rather than re-typing literals)
+    /// means the baseline arm tracks production automatically if a default ever
+    /// changes — the harness can never silently drift from production.
+    static func adDetectionConfig(fragilityEnabled: Bool) -> AdDetectionConfig {
+        let p = AdDetectionConfig.default
+        return AdDetectionConfig(
+            candidateThreshold: p.candidateThreshold,
+            confirmationThreshold: p.confirmationThreshold,
+            suppressionThreshold: p.suppressionThreshold,
+            hotPathLookahead: p.hotPathLookahead,
+            detectorVersion: p.detectorVersion,
+            fmBackfillMode: p.fmBackfillMode,
+            fmScanBudgetSeconds: p.fmScanBudgetSeconds,
+            fmConsensusThreshold: p.fmConsensusThreshold,
+            markOnlyThreshold: p.markOnlyThreshold,
+            autoSkipConfidenceThreshold: p.autoSkipConfidenceThreshold,
+            classifierSeedQualifiedThreshold: p.classifierSeedQualifiedThreshold,
+            lexicalAutoAdQualifiedThreshold: p.lexicalAutoAdQualifiedThreshold,
+            lexicalAutoAdEnabled: p.lexicalAutoAdEnabled,
+            segmentUICandidateThreshold: p.segmentUICandidateThreshold,
+            segmentAutoSkipThreshold: p.segmentAutoSkipThreshold,
+            bracketRefinementEnabled: p.bracketRefinementEnabled,
+            bracketRefinementMinTrust: p.bracketRefinementMinTrust,
+            bracketRefinementMinCoarseScore: p.bracketRefinementMinCoarseScore,
+            bracketRefinementMinFineConfidence: p.bracketRefinementMinFineConfidence,
+            transcriptBoundaryCueEnabled: p.transcriptBoundaryCueEnabled,
+            // THE ONLY between-arm difference.
+            evidenceFragilityPenaltyEnabled: fragilityEnabled,
+            // Tuning knobs held at the production default in BOTH arms.
+            fragilityThreshold: p.fragilityThreshold,
+            fragilityPenalty: p.fragilityPenalty,
+            chapterSignalMode: p.chapterSignalMode,
+            audioForensicsEnabled: p.audioForensicsEnabled,
+            crossEpisodeMemoryEnabled: p.crossEpisodeMemoryEnabled,
+            rhetoricalGrammarEnabled: p.rhetoricalGrammarEnabled,
+            crossShowSyndicationEnabled: p.crossShowSyndicationEnabled,
+            temporalRegularizationEnabled: p.temporalRegularizationEnabled,
+            temporalNeighborWindowSeconds: p.temporalNeighborWindowSeconds,
+            temporalHighConfidenceNeighborThreshold: p.temporalHighConfidenceNeighborThreshold,
+            temporalIsolationPenaltyFactor: p.temporalIsolationPenaltyFactor,
+            temporalMinDwellSeconds: p.temporalMinDwellSeconds,
+            temporalMinDwellPenaltyFactor: p.temporalMinDwellPenaltyFactor,
+            perShowThresholdControlEnabled: p.perShowThresholdControlEnabled,
+            perShowThresholdProportionalGain: p.perShowThresholdProportionalGain,
+            perShowThresholdIntegralGain: p.perShowThresholdIntegralGain,
+            perShowThresholdMaxOffset: p.perShowThresholdMaxOffset,
+            perShowThresholdMinSamples: p.perShowThresholdMinSamples
+        )
+    }
+
+    /// The `AdDetectionConfig` for a fragility A/B arm — reads the arm's single
+    /// `fragilityEnabled` toggle.
+    static func adDetectionConfig(for arm: FragilityGateArm) -> AdDetectionConfig {
+        adDetectionConfig(fragilityEnabled: arm.fragilityEnabled)
+    }
+
+    /// The `NarrowingConfig` for BOTH arms: `NarrowingConfig.default` (snap ON).
+    /// xsdz.2/.3 are KEPT ON in production, so the baseline keeps snap on too —
+    /// the fragility flag is the only difference, NOT the narrowing config.
+    /// Identical across arms; exposed so the harness wires the same value into
+    /// both arms' live runner factories and the isolation test can assert it.
+    static func narrowingConfig(for arm: FragilityGateArm) -> NarrowingConfig {
+        _ = arm // both arms use the production default — narrowing does not vary
+        return .default
+    }
+
+    /// The exhaustive list of the `AdDetectionConfig` fields the isolation test
+    /// compares pairwise across the two arms. `AdDetectionConfig` is not
+    /// `Equatable`, so the isolation test enumerates fields explicitly; this
+    /// closure-keyed approach keeps that enumeration in ONE place. Each entry is
+    /// `(field name, extractor)`; the test asserts every NON-fragility field is
+    /// equal across arms. Returning `String(describing:)` lets a single helper
+    /// compare heterogeneous field types without per-type boilerplate. The
+    /// extractors are `@Sendable` so the static array is concurrency-safe.
+    static let comparableFields: [(name: String, value: @Sendable (AdDetectionConfig) -> String)] = [
+        ("candidateThreshold", { String(describing: $0.candidateThreshold) }),
+        ("confirmationThreshold", { String(describing: $0.confirmationThreshold) }),
+        ("suppressionThreshold", { String(describing: $0.suppressionThreshold) }),
+        ("hotPathLookahead", { String(describing: $0.hotPathLookahead) }),
+        ("detectorVersion", { $0.detectorVersion }),
+        ("fmBackfillMode", { String(describing: $0.fmBackfillMode) }),
+        ("fmScanBudgetSeconds", { String(describing: $0.fmScanBudgetSeconds) }),
+        ("fmConsensusThreshold", { String(describing: $0.fmConsensusThreshold) }),
+        ("markOnlyThreshold", { String(describing: $0.markOnlyThreshold) }),
+        ("autoSkipConfidenceThreshold", { String(describing: $0.autoSkipConfidenceThreshold) }),
+        ("classifierSeedQualifiedThreshold", { String(describing: $0.classifierSeedQualifiedThreshold) }),
+        ("lexicalAutoAdQualifiedThreshold", { String(describing: $0.lexicalAutoAdQualifiedThreshold) }),
+        ("lexicalAutoAdEnabled", { String(describing: $0.lexicalAutoAdEnabled) }),
+        ("segmentUICandidateThreshold", { String(describing: $0.segmentUICandidateThreshold) }),
+        ("segmentAutoSkipThreshold", { String(describing: $0.segmentAutoSkipThreshold) }),
+        ("bracketRefinementEnabled", { String(describing: $0.bracketRefinementEnabled) }),
+        ("bracketRefinementMinTrust", { String(describing: $0.bracketRefinementMinTrust) }),
+        ("bracketRefinementMinCoarseScore", { String(describing: $0.bracketRefinementMinCoarseScore) }),
+        ("bracketRefinementMinFineConfidence", { String(describing: $0.bracketRefinementMinFineConfidence) }),
+        ("transcriptBoundaryCueEnabled", { String(describing: $0.transcriptBoundaryCueEnabled) }),
+        // evidenceFragilityPenaltyEnabled is INTENTIONALLY excluded — it is the
+        // one field allowed to differ across arms.
+        ("fragilityThreshold", { String(describing: $0.fragilityThreshold) }),
+        ("fragilityPenalty", { String(describing: $0.fragilityPenalty) }),
+        ("chapterSignalMode", { String(describing: $0.chapterSignalMode) }),
+        ("audioForensicsEnabled", { String(describing: $0.audioForensicsEnabled) }),
+        ("crossEpisodeMemoryEnabled", { String(describing: $0.crossEpisodeMemoryEnabled) }),
+        ("rhetoricalGrammarEnabled", { String(describing: $0.rhetoricalGrammarEnabled) }),
+        ("crossShowSyndicationEnabled", { String(describing: $0.crossShowSyndicationEnabled) }),
+        ("temporalRegularizationEnabled", { String(describing: $0.temporalRegularizationEnabled) }),
+        ("temporalNeighborWindowSeconds", { String(describing: $0.temporalNeighborWindowSeconds) }),
+        ("temporalHighConfidenceNeighborThreshold", { String(describing: $0.temporalHighConfidenceNeighborThreshold) }),
+        ("temporalIsolationPenaltyFactor", { String(describing: $0.temporalIsolationPenaltyFactor) }),
+        ("temporalMinDwellSeconds", { String(describing: $0.temporalMinDwellSeconds) }),
+        ("temporalMinDwellPenaltyFactor", { String(describing: $0.temporalMinDwellPenaltyFactor) }),
+        ("perShowThresholdControlEnabled", { String(describing: $0.perShowThresholdControlEnabled) }),
+        ("perShowThresholdProportionalGain", { String(describing: $0.perShowThresholdProportionalGain) }),
+        ("perShowThresholdIntegralGain", { String(describing: $0.perShowThresholdIntegralGain) }),
+        ("perShowThresholdMaxOffset", { String(describing: $0.perShowThresholdMaxOffset) }),
+        ("perShowThresholdMinSamples", { String(describing: $0.perShowThresholdMinSamples) }),
+    ]
+}
+
 /// Accumulates ground-truth and detected ad spans across episodes for ONE
 /// arm, then folds them into a single `MetricsBatch` using Phase A's greedy
 /// IoU pairing (which buckets by `(podcastId, episodeId)`, so cross-episode
