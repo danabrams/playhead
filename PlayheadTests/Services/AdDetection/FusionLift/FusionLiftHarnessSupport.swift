@@ -296,6 +296,314 @@ enum LexicalScorerArmConfig {
     }
 }
 
+// MARK: - Evidence-Fragility gate A/B arm configuration (playhead-xsdz.7 live A/B)
+
+/// The two arms of the Evidence-Fragility live A/B (`FragilityGateLiveABTests`).
+/// Both arms run the REAL `AdDetectionService.runBackfill` with
+/// `fmBackfillMode: .full` (FM ad scan → fusion ledger → `insertAdWindows`),
+/// `chapterSignalMode: .off`, ALL off-by-default evidence channels FALSE, and
+/// `NarrowingConfig.default` (xsdz.2/.3 cluster-snap ON — production state).
+/// The ONLY field that differs between the arms is the xsdz.7
+/// `AdDetectionConfig.evidenceFragilityPenaltyEnabled` boolean:
+///   * `baseline`  — current main PRODUCTION state. `evidenceFragilityPenaltyEnabled:
+///     false`, so `applyFragilityPenalty` returns `skipConfidence` UNCHANGED.
+///   * `treatment` — identical to baseline EXCEPT `evidenceFragilityPenaltyEnabled:
+///     true`, with the production-default `fragilityThreshold` (2.0) and
+///     `fragilityPenalty` (0.85). The soft, post-fusion precision gate is live.
+///
+/// This is the load-bearing correctness property of the A/B: the two arms must
+/// differ in EXACTLY one field. A second field drifting between arms would
+/// attribute a precision/recall change to the fragility gate that some other
+/// flag actually caused, making the measurement meaningless. The hermetic
+/// `FragilityGateArmConfigTests` pin the one-field isolation on the simulator
+/// before the (expensive, Catalyst-only) live A/B ever runs.
+enum FragilityGateArm: String, Sendable, CaseIterable {
+    /// Current main production state: fragility gate OFF.
+    case baseline
+    /// Production state PLUS the xsdz.7 fragility gate enabled.
+    case treatment
+
+    /// Whether `evidenceFragilityPenaltyEnabled` is set in this arm — the ONLY
+    /// `AdDetectionConfig` field that distinguishes the two arms.
+    var fragilityEnabled: Bool {
+        switch self {
+        case .baseline: return false
+        case .treatment: return true
+        }
+    }
+}
+
+/// Pure, hermetic builder for the fragility A/B's per-arm configs. Extracted
+/// from the harness so the arm construction is unit-testable on the simulator
+/// with no audio / FM / pipeline (acceptance criterion: a hermetic test that
+/// pins the one-field isolation).
+///
+/// CRITICAL invariant (asserted by `FragilityGateArmConfigTests`): the two arms
+/// deviate from each other ONLY in `evidenceFragilityPenaltyEnabled`; every
+/// other `AdDetectionConfig` field is byte-identical and equal to the PRODUCTION
+/// default (`AdDetectionConfig.default`) — including `fmBackfillMode: .full`,
+/// `chapterSignalMode: .off`, every off-by-default evidence-channel flag FALSE,
+/// and `lexicalAutoAdQualifiedThreshold` at its production default. Both arms
+/// also use `NarrowingConfig.default` (snap ON — xsdz.2/.3 are KEPT ON in
+/// production, so the baseline MUST have snap on). The fragility tuning knobs
+/// (`fragilityThreshold` / `fragilityPenalty`) stay at their production defaults
+/// in BOTH arms; the treatment arm differs only by flipping the master flag on.
+enum FragilityGateArmConfig {
+
+    /// Build the full `AdDetectionConfig` for the fragility A/B given the single
+    /// `evidenceFragilityPenaltyEnabled` toggle. Every other field is copied
+    /// VERBATIM from `AdDetectionConfig.default` (the production state), so the
+    /// only thing this builder can vary is the fragility master flag. Sourcing
+    /// every non-toggle field from `.default` (rather than re-typing literals)
+    /// means the baseline arm tracks production automatically if a default ever
+    /// changes — the harness can never silently drift from production.
+    static func adDetectionConfig(fragilityEnabled: Bool) -> AdDetectionConfig {
+        // The 2-arm A/B holds the tuning knobs at the production default; the
+        // parameterized variant below is what the SWEEP uses to probe operating
+        // points. Both arms of the original A/B keep the default tuning.
+        adDetectionConfig(
+            fragilityEnabled: fragilityEnabled,
+            fragilityThreshold: AdDetectionConfig.default.fragilityThreshold,
+            fragilityPenalty: AdDetectionConfig.default.fragilityPenalty
+        )
+    }
+
+    /// playhead-xsdz.7 SWEEP: build the full `AdDetectionConfig` varying ONLY
+    /// the three fragility-tuning fields (`evidenceFragilityPenaltyEnabled`,
+    /// `fragilityThreshold`, `fragilityPenalty`). EVERY other field is copied
+    /// VERBATIM from `AdDetectionConfig.default`, so a sweep arm can never drift
+    /// from production on any non-tuning axis — the hermetic isolation test pins
+    /// exactly this property. This is the single source of the sweep's per-arm
+    /// `AdDetectionConfig`; the baseline arm passes `fragilityEnabled: false`
+    /// (tuning values are then inert because the gate is off, but they are still
+    /// held at the default so the off arm == the production `.default`).
+    static func adDetectionConfig(
+        fragilityEnabled: Bool,
+        fragilityThreshold: Double,
+        fragilityPenalty: Double
+    ) -> AdDetectionConfig {
+        let p = AdDetectionConfig.default
+        return AdDetectionConfig(
+            candidateThreshold: p.candidateThreshold,
+            confirmationThreshold: p.confirmationThreshold,
+            suppressionThreshold: p.suppressionThreshold,
+            hotPathLookahead: p.hotPathLookahead,
+            detectorVersion: p.detectorVersion,
+            fmBackfillMode: p.fmBackfillMode,
+            fmScanBudgetSeconds: p.fmScanBudgetSeconds,
+            fmConsensusThreshold: p.fmConsensusThreshold,
+            markOnlyThreshold: p.markOnlyThreshold,
+            autoSkipConfidenceThreshold: p.autoSkipConfidenceThreshold,
+            classifierSeedQualifiedThreshold: p.classifierSeedQualifiedThreshold,
+            lexicalAutoAdQualifiedThreshold: p.lexicalAutoAdQualifiedThreshold,
+            lexicalAutoAdEnabled: p.lexicalAutoAdEnabled,
+            segmentUICandidateThreshold: p.segmentUICandidateThreshold,
+            segmentAutoSkipThreshold: p.segmentAutoSkipThreshold,
+            bracketRefinementEnabled: p.bracketRefinementEnabled,
+            bracketRefinementMinTrust: p.bracketRefinementMinTrust,
+            bracketRefinementMinCoarseScore: p.bracketRefinementMinCoarseScore,
+            bracketRefinementMinFineConfidence: p.bracketRefinementMinFineConfidence,
+            transcriptBoundaryCueEnabled: p.transcriptBoundaryCueEnabled,
+            // THE between-arm differences: the master flag plus (for the sweep)
+            // the two tuning knobs. The 2-arm A/B passes the production-default
+            // tuning so only the flag varies; the sweep varies all three.
+            evidenceFragilityPenaltyEnabled: fragilityEnabled,
+            fragilityThreshold: fragilityThreshold,
+            fragilityPenalty: fragilityPenalty,
+            chapterSignalMode: p.chapterSignalMode,
+            audioForensicsEnabled: p.audioForensicsEnabled,
+            crossEpisodeMemoryEnabled: p.crossEpisodeMemoryEnabled,
+            rhetoricalGrammarEnabled: p.rhetoricalGrammarEnabled,
+            crossShowSyndicationEnabled: p.crossShowSyndicationEnabled,
+            temporalRegularizationEnabled: p.temporalRegularizationEnabled,
+            temporalNeighborWindowSeconds: p.temporalNeighborWindowSeconds,
+            temporalHighConfidenceNeighborThreshold: p.temporalHighConfidenceNeighborThreshold,
+            temporalIsolationPenaltyFactor: p.temporalIsolationPenaltyFactor,
+            temporalMinDwellSeconds: p.temporalMinDwellSeconds,
+            temporalMinDwellPenaltyFactor: p.temporalMinDwellPenaltyFactor,
+            perShowThresholdControlEnabled: p.perShowThresholdControlEnabled,
+            perShowThresholdProportionalGain: p.perShowThresholdProportionalGain,
+            perShowThresholdIntegralGain: p.perShowThresholdIntegralGain,
+            perShowThresholdMaxOffset: p.perShowThresholdMaxOffset,
+            perShowThresholdMinSamples: p.perShowThresholdMinSamples
+        )
+    }
+
+    /// The `AdDetectionConfig` for a fragility A/B arm — reads the arm's single
+    /// `fragilityEnabled` toggle.
+    static func adDetectionConfig(for arm: FragilityGateArm) -> AdDetectionConfig {
+        adDetectionConfig(fragilityEnabled: arm.fragilityEnabled)
+    }
+
+    /// The `NarrowingConfig` for BOTH arms: `NarrowingConfig.default` (snap ON).
+    /// xsdz.2/.3 are KEPT ON in production, so the baseline keeps snap on too —
+    /// the fragility flag is the only difference, NOT the narrowing config.
+    /// Identical across arms; exposed so the harness wires the same value into
+    /// both arms' live runner factories and the isolation test can assert it.
+    static func narrowingConfig(for arm: FragilityGateArm) -> NarrowingConfig {
+        _ = arm // both arms use the production default — narrowing does not vary
+        return .default
+    }
+
+    /// The exhaustive list of the `AdDetectionConfig` fields the isolation test
+    /// compares pairwise across the two arms. `AdDetectionConfig` is not
+    /// `Equatable`, so the isolation test enumerates fields explicitly; this
+    /// closure-keyed approach keeps that enumeration in ONE place. Each entry is
+    /// `(field name, extractor)`; the test asserts every NON-fragility field is
+    /// equal across arms. Returning `String(describing:)` lets a single helper
+    /// compare heterogeneous field types without per-type boilerplate. The
+    /// extractors are `@Sendable` so the static array is concurrency-safe.
+    static let comparableFields: [(name: String, value: @Sendable (AdDetectionConfig) -> String)] = [
+        ("candidateThreshold", { String(describing: $0.candidateThreshold) }),
+        ("confirmationThreshold", { String(describing: $0.confirmationThreshold) }),
+        ("suppressionThreshold", { String(describing: $0.suppressionThreshold) }),
+        ("hotPathLookahead", { String(describing: $0.hotPathLookahead) }),
+        ("detectorVersion", { $0.detectorVersion }),
+        ("fmBackfillMode", { String(describing: $0.fmBackfillMode) }),
+        ("fmScanBudgetSeconds", { String(describing: $0.fmScanBudgetSeconds) }),
+        ("fmConsensusThreshold", { String(describing: $0.fmConsensusThreshold) }),
+        ("markOnlyThreshold", { String(describing: $0.markOnlyThreshold) }),
+        ("autoSkipConfidenceThreshold", { String(describing: $0.autoSkipConfidenceThreshold) }),
+        ("classifierSeedQualifiedThreshold", { String(describing: $0.classifierSeedQualifiedThreshold) }),
+        ("lexicalAutoAdQualifiedThreshold", { String(describing: $0.lexicalAutoAdQualifiedThreshold) }),
+        ("lexicalAutoAdEnabled", { String(describing: $0.lexicalAutoAdEnabled) }),
+        ("segmentUICandidateThreshold", { String(describing: $0.segmentUICandidateThreshold) }),
+        ("segmentAutoSkipThreshold", { String(describing: $0.segmentAutoSkipThreshold) }),
+        ("bracketRefinementEnabled", { String(describing: $0.bracketRefinementEnabled) }),
+        ("bracketRefinementMinTrust", { String(describing: $0.bracketRefinementMinTrust) }),
+        ("bracketRefinementMinCoarseScore", { String(describing: $0.bracketRefinementMinCoarseScore) }),
+        ("bracketRefinementMinFineConfidence", { String(describing: $0.bracketRefinementMinFineConfidence) }),
+        ("transcriptBoundaryCueEnabled", { String(describing: $0.transcriptBoundaryCueEnabled) }),
+        // evidenceFragilityPenaltyEnabled is INTENTIONALLY excluded — it is the
+        // one field allowed to differ across arms.
+        ("fragilityThreshold", { String(describing: $0.fragilityThreshold) }),
+        ("fragilityPenalty", { String(describing: $0.fragilityPenalty) }),
+        ("chapterSignalMode", { String(describing: $0.chapterSignalMode) }),
+        ("audioForensicsEnabled", { String(describing: $0.audioForensicsEnabled) }),
+        ("crossEpisodeMemoryEnabled", { String(describing: $0.crossEpisodeMemoryEnabled) }),
+        ("rhetoricalGrammarEnabled", { String(describing: $0.rhetoricalGrammarEnabled) }),
+        ("crossShowSyndicationEnabled", { String(describing: $0.crossShowSyndicationEnabled) }),
+        ("temporalRegularizationEnabled", { String(describing: $0.temporalRegularizationEnabled) }),
+        ("temporalNeighborWindowSeconds", { String(describing: $0.temporalNeighborWindowSeconds) }),
+        ("temporalHighConfidenceNeighborThreshold", { String(describing: $0.temporalHighConfidenceNeighborThreshold) }),
+        ("temporalIsolationPenaltyFactor", { String(describing: $0.temporalIsolationPenaltyFactor) }),
+        ("temporalMinDwellSeconds", { String(describing: $0.temporalMinDwellSeconds) }),
+        ("temporalMinDwellPenaltyFactor", { String(describing: $0.temporalMinDwellPenaltyFactor) }),
+        ("perShowThresholdControlEnabled", { String(describing: $0.perShowThresholdControlEnabled) }),
+        ("perShowThresholdProportionalGain", { String(describing: $0.perShowThresholdProportionalGain) }),
+        ("perShowThresholdIntegralGain", { String(describing: $0.perShowThresholdIntegralGain) }),
+        ("perShowThresholdMaxOffset", { String(describing: $0.perShowThresholdMaxOffset) }),
+        ("perShowThresholdMinSamples", { String(describing: $0.perShowThresholdMinSamples) }),
+    ]
+
+    // MARK: - Sweep operating points (playhead-xsdz.7 sweep)
+
+    /// playhead-xsdz.7 SWEEP: the fields the sweep's isolation test compares
+    /// across arms. The sweep deliberately VARIES three fields —
+    /// `evidenceFragilityPenaltyEnabled`, `fragilityThreshold`,
+    /// `fragilityPenalty` — so they must be EXCLUDED from the pairwise-equal
+    /// check (unlike the 2-arm A/B, which holds the two tuning knobs fixed and
+    /// therefore keeps them in `comparableFields`). Derived from
+    /// `comparableFields` by dropping the two tuning fields, so the sweep's
+    /// "every other field is equal" guarantee automatically tracks any field
+    /// added to the canonical list.
+    static let sweepVaryingFieldNames: Set<String> = [
+        "evidenceFragilityPenaltyEnabled", // already absent from comparableFields
+        "fragilityThreshold",
+        "fragilityPenalty",
+    ]
+
+    /// The fields the SWEEP isolation test asserts are byte-identical across all
+    /// sweep arms — `comparableFields` minus the two tuning knobs the sweep is
+    /// allowed to vary. (`evidenceFragilityPenaltyEnabled` is already excluded
+    /// from `comparableFields`.)
+    static let sweepComparableFields: [(name: String, value: @Sendable (AdDetectionConfig) -> String)] =
+        comparableFields.filter { !sweepVaryingFieldNames.contains($0.name) }
+
+    /// The `AdDetectionConfig` for a sweep arm — varies ONLY the three fragility
+    /// tuning fields (flag/threshold/penalty); every other field is `.default`.
+    static func adDetectionConfig(for arm: FragilitySweepArm) -> AdDetectionConfig {
+        adDetectionConfig(
+            fragilityEnabled: arm.fragilityEnabled,
+            fragilityThreshold: arm.fragilityThreshold,
+            fragilityPenalty: arm.fragilityPenalty
+        )
+    }
+
+    /// The `NarrowingConfig` for a sweep arm: `.default` (snap ON) for EVERY
+    /// arm — the narrowing config never varies in the sweep, only the fragility
+    /// tuning does. Exposed so the harness wires the same value into every arm's
+    /// live runner factory and the isolation test can assert it.
+    static func narrowingConfig(for arm: FragilitySweepArm) -> NarrowingConfig {
+        _ = arm
+        return .default
+    }
+}
+
+// MARK: - Evidence-Fragility threshold/penalty SWEEP arms (playhead-xsdz.7)
+
+/// The arms of the Evidence-Fragility threshold/penalty SWEEP
+/// (`FragilityGateLiveABTests`'s Part B). The `baseline` arm is the production
+/// state with the gate OFF — the SAME arm the per-span diagnostic runs on, so
+/// the single Catalyst pass never runs the baseline twice. The four treatment
+/// arms each turn the gate ON at a distinct (threshold, penalty) operating
+/// point, chosen to probe whether a LOWER threshold and/or STRONGER penalty
+/// drops false positives without hurting recall (the prior live A/B found the
+/// DEFAULT 2.0/0.85 point fires only on already-correct spans).
+///
+/// LOAD-BEARING isolation property (pinned hermetically by
+/// `FragilityGateArmConfigTests`): every arm deviates from
+/// `AdDetectionConfig.default` ONLY in the three fragility tuning fields
+/// (`evidenceFragilityPenaltyEnabled` / `fragilityThreshold` /
+/// `fragilityPenalty`). A drift on any OTHER field would attribute a sweep
+/// delta to the tuning that some other flag actually caused.
+enum FragilitySweepArm: String, Sendable, CaseIterable {
+    /// Gate OFF — production state. Doubles as the sweep's baseline AND the
+    /// per-span diagnostic arm (run once).
+    case baseline
+    /// Gate ON at threshold 1.5 / penalty 0.85 (lower the firing bar; same
+    /// penalty as default).
+    case t15p85
+    /// Gate ON at threshold 1.0 / penalty 0.85 (lower the firing bar further).
+    case t10p85
+    /// Gate ON at threshold 0.7 / penalty 0.70 (broader firing + stronger cut).
+    case t07p70
+    /// Gate ON at threshold 0.5 / penalty 0.50 (broadest firing + harshest cut).
+    case t05p50
+
+    /// Whether the fragility gate is enabled in this arm.
+    var fragilityEnabled: Bool {
+        switch self {
+        case .baseline: return false
+        case .t15p85, .t10p85, .t07p70, .t05p50: return true
+        }
+    }
+
+    /// The `fragilityThreshold` operating point for this arm. The baseline keeps
+    /// the production default (inert — the gate is off), so the off arm is
+    /// byte-identical to production `.default`.
+    var fragilityThreshold: Double {
+        switch self {
+        case .baseline: return AdDetectionConfig.default.fragilityThreshold
+        case .t15p85: return 1.5
+        case .t10p85: return 1.0
+        case .t07p70: return 0.7
+        case .t05p50: return 0.5
+        }
+    }
+
+    /// The `fragilityPenalty` operating point for this arm. Baseline keeps the
+    /// production default (inert — the gate is off).
+    var fragilityPenalty: Double {
+        switch self {
+        case .baseline: return AdDetectionConfig.default.fragilityPenalty
+        case .t15p85, .t10p85: return 0.85
+        case .t07p70: return 0.70
+        case .t05p50: return 0.50
+        }
+    }
+}
+
 /// Accumulates ground-truth and detected ad spans across episodes for ONE
 /// arm, then folds them into a single `MetricsBatch` using Phase A's greedy
 /// IoU pairing (which buckets by `(podcastId, episodeId)`, so cross-episode
@@ -484,6 +792,441 @@ struct FusionLiftReport: Sendable, Codable, Equatable {
 
     /// Encode the report to pretty-printed, sorted-key JSON for the
     /// git-ignored repo-root dump.
+    func jsonData() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(self)
+    }
+}
+
+// MARK: - Evidence-Fragility threshold/penalty SWEEP report (playhead-xsdz.7)
+
+/// A readable, serializable summary of the N-arm fragility tuning SWEEP. Pure
+/// value type, structurally a sibling of `LexicalScorerSweepReport`: one row
+/// per `FragilitySweepArm`, baseline first, with every treatment arm's deltas
+/// measured vs the baseline (gate OFF) arm. Reuses Phase A's `SpanF1` /
+/// `FusionLiftResult` scorers verbatim — no reimplementation.
+///
+/// "Delta" is `arm − baseline`; a NEGATIVE `falsePositives`-style movement is
+/// the goal (fewer FPs), and the deltas surface whether dropping FPs cost any
+/// recall. The baseline row's deltas are zero (measured against itself).
+struct FragilitySweepReport: Sendable, Codable, Equatable {
+
+    /// One sweep arm's raw counts + metrics + tuning point + delta-vs-baseline.
+    struct ArmRow: Sendable, Codable, Equatable {
+        let arm: String
+        let fragilityEnabled: Bool
+        let fragilityThreshold: Double
+        let fragilityPenalty: Double
+        let groundTruthSpans: Int
+        let detectedSpans: Int
+        let truePositives: Int
+        let falsePositives: Int
+        let misses: Int
+        let spanPrecision: Double?
+        let spanRecall: Double?
+        let spanF1: Double?
+        let coveragePrecision: Double?
+        let coverageRecall: Double?
+        // Deltas vs baseline (count-based span lens).
+        let truePositivesDelta: Int
+        let falsePositivesDelta: Int
+        let missesDelta: Int
+        let spanPrecisionDelta: Double?
+        let spanRecallDelta: Double?
+        let spanF1Delta: Double?
+        // Deltas vs baseline (seconds-based coverage lens).
+        let coveragePrecisionDelta: Double?
+        let coverageRecallDelta: Double?
+        let coverageF1Delta: Double?
+    }
+
+    let episodeCount: Int
+    /// Rows in `FragilitySweepArm.allCases` order, baseline first.
+    let rows: [ArmRow]
+
+    /// Build the sweep report from one accumulator per arm. The dictionary MUST
+    /// contain every `FragilitySweepArm` case; arms emit in `allCases` order so
+    /// the table and JSON are stable. The baseline arm anchors every delta.
+    init(
+        episodeCount: Int,
+        accumulators: [FragilitySweepArm: FusionLiftModeAccumulator]
+    ) {
+        self.episodeCount = episodeCount
+
+        let baselineAcc = accumulators[.baseline] ?? FusionLiftModeAccumulator()
+        let baselineSpan = baselineAcc.spanF1()
+        let baselineSummary = baselineAcc.summary()
+
+        self.rows = FragilitySweepArm.allCases.map { arm in
+            let acc = accumulators[arm] ?? FusionLiftModeAccumulator()
+            let span = acc.spanF1()
+            let summary = acc.summary()
+
+            // `FusionLiftResult` names its sides off/enabled; off = baseline,
+            // enabled = this arm, so the delta reads `arm − baseline`.
+            let spanLift = FusionLiftResult(off: baselineSpan, enabled: span)
+            let coverageLift = FusionLiftResult(off: baselineSummary, enabled: summary)
+
+            return ArmRow(
+                arm: arm.rawValue,
+                fragilityEnabled: arm.fragilityEnabled,
+                fragilityThreshold: arm.fragilityThreshold,
+                fragilityPenalty: arm.fragilityPenalty,
+                groundTruthSpans: acc.groundTruth.count,
+                detectedSpans: acc.detections.count,
+                truePositives: span.truePositives,
+                falsePositives: span.falsePositives,
+                misses: span.misses,
+                spanPrecision: span.precision,
+                spanRecall: span.recall,
+                spanF1: span.f1,
+                coveragePrecision: summary.coveragePrecision,
+                coverageRecall: summary.coverageRecall,
+                truePositivesDelta: span.truePositives - baselineSpan.truePositives,
+                falsePositivesDelta: span.falsePositives - baselineSpan.falsePositives,
+                missesDelta: span.misses - baselineSpan.misses,
+                spanPrecisionDelta: spanLift.precisionDelta,
+                spanRecallDelta: spanLift.recallDelta,
+                spanF1Delta: spanLift.f1Delta,
+                coveragePrecisionDelta: coverageLift.precisionDelta,
+                coverageRecallDelta: coverageLift.recallDelta,
+                coverageF1Delta: coverageLift.f1Delta
+            )
+        }
+    }
+
+    /// Render a fixed-width sweep table for the test log.
+    func table() -> String {
+        func fmt(_ value: Double?) -> String {
+            guard let value else { return "n/a" }
+            return String(format: "%.4f", value)
+        }
+        func signed(_ value: Double?) -> String {
+            guard let value else { return "n/a" }
+            return String(format: "%+.4f", value)
+        }
+        func signedInt(_ value: Int) -> String { String(format: "%+d", value) }
+
+        var lines: [String] = [
+            "=== Evidence-Fragility Threshold/Penalty Sweep (xsdz.7 Part B) ===",
+            "episodes scored: \(episodeCount)",
+            "arm          thr   pen    GT  det   TP  FP  miss   spanP    spanR   spanF1   covP     covR",
+        ]
+        for row in rows {
+            let thr = row.fragilityEnabled ? String(format: "%.2f", row.fragilityThreshold) : "  -"
+            let pen = row.fragilityEnabled ? String(format: "%.2f", row.fragilityPenalty) : "  -"
+            lines.append(
+                "\(armLabel(row.arm))\(col6(thr))\(col6(pen)) \(pad(row.groundTruthSpans, 4))\(pad(row.detectedSpans, 5))\(pad(row.truePositives, 5))\(pad(row.falsePositives, 4))\(pad(row.misses, 6))  \(col(fmt(row.spanPrecision)))\(col(fmt(row.spanRecall)))\(col(fmt(row.spanF1)))\(col(fmt(row.coveragePrecision)))\(col(fmt(row.coverageRecall)))"
+            )
+        }
+        lines.append("--- per-arm delta (arm − baseline) ---")
+        for row in rows where row.arm != FragilitySweepArm.baseline.rawValue {
+            lines.append(
+                "\(armLabel(row.arm)) TPΔ=\(signedInt(row.truePositivesDelta)) FPΔ=\(signedInt(row.falsePositivesDelta)) missΔ=\(signedInt(row.missesDelta)) | span pΔ=\(signed(row.spanPrecisionDelta)) rΔ=\(signed(row.spanRecallDelta)) f1Δ=\(signed(row.spanF1Delta)) | cov pΔ=\(signed(row.coveragePrecisionDelta)) rΔ=\(signed(row.coverageRecallDelta))"
+            )
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func armLabel(_ arm: String) -> String {
+        (arm + String(repeating: " ", count: 10)).prefix(10).description
+    }
+
+    private func pad(_ value: Int, _ width: Int) -> String {
+        let s = String(value)
+        return String(repeating: " ", count: max(0, width - s.count)) + s
+    }
+
+    private func col(_ s: String) -> String {
+        (s + String(repeating: " ", count: 9)).prefix(9).description
+    }
+
+    private func col6(_ s: String) -> String {
+        let padded = String(repeating: " ", count: max(0, 6 - s.count)) + s
+        return padded
+    }
+
+    /// Encode the report to pretty-printed, sorted-key JSON for the git-ignored
+    /// repo-root dump.
+    func jsonData() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(self)
+    }
+}
+
+// MARK: - Per-span fragility DIAGNOSTIC (playhead-xsdz.7 Part A)
+
+/// The label a per-span diagnostic row gets after joining it to the scorer's
+/// greedy-IoU pairing. EXACTLY the four mutually-exclusive outcomes the scorer
+/// produces, attributed to the span the diagnostic recorded.
+enum FragilitySpanLabel: String, Sendable, Codable, Equatable {
+    /// The span became a skip-eligible detection that paired with a GT ad.
+    case truePositive
+    /// The span became a skip-eligible detection that paired with NO GT ad.
+    case falsePositive
+    /// The span did NOT become a skip-eligible detection (suppressed / not
+    /// promoted) — i.e. the pipeline correctly declined to skip it. There is no
+    /// detection row for it in the scorer batch.
+    case correctlyRejected
+}
+
+/// One labeled per-span diagnostic row: the recorded fragility geometry plus
+/// the episode it came from and the TP/FP/correctly-rejected label assigned by
+/// the SAME greedy-IoU pairing the metrics scorer uses. Pure value type → safe
+/// to serialize directly into the per-span JSON dump.
+struct LabeledFragilitySpanRow: Sendable, Codable, Equatable {
+    let episodeId: String
+    let podcastId: String
+    let spanId: String
+    let spanStart: Double
+    let spanEnd: Double
+    let proposalConfidence: Double
+    let skipConfidence: Double
+    let maxSingleEntryWeight: Double
+    let distinctEvidenceFamilyDepth: Int
+    let margin: Double
+    let fragilityScore: Double
+    let label: String
+}
+
+/// Pure, hermetic joiner: labels each recorded `FragilitySpanDiagnostic` for an
+/// episode by running the SAME `MetricsBatch.pair` greedy-IoU pairing the scorer
+/// uses, then attributing TP/FP via the SAME detection-row identity the scorer
+/// scores.
+///
+/// CORRECTNESS (the load-bearing part): the diagnostic fires for EVERY decoded
+/// span, but the scorer only scores SKIP-ELIGIBLE detections (the persisted
+/// `AdWindow`s whose `decisionState` is candidate/confirmed/applied). A persisted
+/// fusion `AdWindow` is built (`buildFusionAdWindow`) with `startTime`/`endTime`
+/// copied VERBATIM from the decoded span's refined boundaries, so each
+/// skip-eligible detection's `(startTime, endTime)` equals exactly one
+/// diagnostic row's `(spanStart, spanEnd)`. We therefore:
+///   1. Bridge GT + skip-eligible detections and run `MetricsBatch.pair`
+///      (IDENTICAL inputs to the accumulator the metrics come from).
+///   2. For each TP pair, mark its detection's `(start, end)` as a TP key; for
+///      each FP pair, mark it as an FP key.
+///   3. Walk the diagnostic rows: a row whose `(spanStart, spanEnd)` matches a
+///      TP key → `.truePositive`; an FP key → `.falsePositive`; neither (the
+///      span never became a skip-eligible detection) → `.correctlyRejected`.
+/// Keying on the rounded `(start, end)` pair (not on `AdWindow.id`, which is a
+/// fresh UUID unrelated to the span id) is exact because the fusion window
+/// inherits the span boundaries unmodified.
+enum FragilityPerSpanLabeler {
+
+    /// Rounding granularity for the `(start, end)` join key. The fusion window
+    /// copies the span boundaries verbatim (same `Double` bits), so rounding is
+    /// belt-and-suspenders against any future float reformat; 1e-3 s (1 ms) is
+    /// far finer than the ±0.5 s corpus precision and far coarser than any
+    /// float noise.
+    static let keyQuantum: Double = 1e-3
+
+    private struct SpanKey: Hashable {
+        let start: Int
+        let end: Int
+        init(start: Double, end: Double, quantum: Double) {
+            self.start = Int((start / quantum).rounded())
+            self.end = Int((end / quantum).rounded())
+        }
+    }
+
+    /// Label one episode's diagnostic rows against its golden + detected windows.
+    ///
+    /// - Parameters:
+    ///   - rows: the per-span diagnostic rows recorded by the observer for this
+    ///     episode (one per decoded span).
+    ///   - annotationWindows: the corpus golden ad windows.
+    ///   - adWindows: the persisted store rows produced by the same scored run.
+    ///   - podcastId / episodeId: the SAME ids the metrics accumulator buckets
+    ///     on (so the pairing is identical).
+    static func label(
+        rows: [FragilitySpanDiagnostic],
+        annotationWindows: [CorpusAnnotation.AdWindow],
+        adWindows: [AdWindow],
+        podcastId: String,
+        episodeId: String
+    ) -> [LabeledFragilitySpanRow] {
+        // Bridge GT + skip-eligible detections EXACTLY as the accumulator does.
+        let groundTruth = annotationWindows.enumerated().map { index, window in
+            MetricGroundTruthAd(
+                annotationWindow: window,
+                id: "\(episodeId)-gt-\(index)",
+                podcastId: podcastId,
+                episodeId: episodeId
+            )
+        }
+        let detections = MetricsBatch.skipEligibleDetections(
+            from: adWindows,
+            podcastId: podcastId,
+            episodeId: episodeId
+        )
+
+        // Same greedy-IoU pairing the scorer uses.
+        let batch = MetricsBatch.pair(groundTruth: groundTruth, detections: detections)
+
+        // Build TP/FP keys off the DETECTION side of each pair (the side whose
+        // (start, end) equals a diagnostic row's span boundaries).
+        var tpKeys = Set<SpanKey>()
+        var fpKeys = Set<SpanKey>()
+        for pair in batch.pairs {
+            guard let detected = pair.detected else { continue } // misses have no detection row
+            let key = SpanKey(start: detected.startTime, end: detected.endTime, quantum: keyQuantum)
+            if pair.isTruePositive {
+                tpKeys.insert(key)
+            } else if pair.isFalsePositive {
+                fpKeys.insert(key)
+            }
+        }
+
+        return rows.map { row in
+            let key = SpanKey(start: row.spanStart, end: row.spanEnd, quantum: keyQuantum)
+            let label: FragilitySpanLabel
+            if tpKeys.contains(key) {
+                label = .truePositive
+            } else if fpKeys.contains(key) {
+                label = .falsePositive
+            } else {
+                label = .correctlyRejected
+            }
+            return LabeledFragilitySpanRow(
+                episodeId: episodeId,
+                podcastId: podcastId,
+                spanId: row.spanId,
+                spanStart: row.spanStart,
+                spanEnd: row.spanEnd,
+                proposalConfidence: row.proposalConfidence,
+                skipConfidence: row.skipConfidence,
+                maxSingleEntryWeight: row.maxSingleEntryWeight,
+                distinctEvidenceFamilyDepth: row.distinctEvidenceFamilyDepth,
+                margin: row.margin,
+                fragilityScore: row.fragilityScore,
+                label: label.rawValue
+            )
+        }
+    }
+}
+
+/// The full per-span fragility diagnostic report: every labeled row across all
+/// scored episodes plus a group summary contrasting the FP rows against the TP
+/// rows (mean/median fragility, margin, concentration, depth) and an explicit
+/// verdict on whether FP fragilities are systematically higher than TP. Pure
+/// value type → serialized directly into the per-span JSON dump.
+struct FragilityPerSpanDiagnosticReport: Sendable, Codable, Equatable {
+
+    /// Mean/median of one numeric field over one label group. `nil` when the
+    /// group is empty (never a misleading 0.0).
+    struct GroupStat: Sendable, Codable, Equatable {
+        let count: Int
+        let meanFragility: Double?
+        let medianFragility: Double?
+        let meanMargin: Double?
+        let medianMargin: Double?
+        let meanConcentration: Double?
+        let medianConcentration: Double?
+        let meanDepth: Double?
+        let medianDepth: Double?
+    }
+
+    let episodeCount: Int
+    let rows: [LabeledFragilitySpanRow]
+    let falsePositiveStats: GroupStat
+    let truePositiveStats: GroupStat
+    let correctlyRejectedStats: GroupStat
+    /// `true` iff BOTH groups are non-empty AND mean FP fragility > mean TP
+    /// fragility (the geometry is, on average, discriminative in the expected
+    /// direction). `nil` when either group is empty (the comparison is undefined).
+    let fpFragilitySystematicallyHigherThanTP: Bool?
+    /// Same verdict on the MEDIAN (robust to outliers). `nil` when undefined.
+    let fpFragilityMedianHigherThanTP: Bool?
+
+    init(episodeCount: Int, rows: [LabeledFragilitySpanRow]) {
+        self.episodeCount = episodeCount
+        self.rows = rows
+
+        let fp = rows.filter { $0.label == FragilitySpanLabel.falsePositive.rawValue }
+        let tp = rows.filter { $0.label == FragilitySpanLabel.truePositive.rawValue }
+        let cr = rows.filter { $0.label == FragilitySpanLabel.correctlyRejected.rawValue }
+
+        let fpStat = Self.groupStat(fp)
+        let tpStat = Self.groupStat(tp)
+        self.falsePositiveStats = fpStat
+        self.truePositiveStats = tpStat
+        self.correctlyRejectedStats = Self.groupStat(cr)
+
+        if let fpMean = fpStat.meanFragility, let tpMean = tpStat.meanFragility {
+            self.fpFragilitySystematicallyHigherThanTP = fpMean > tpMean
+        } else {
+            self.fpFragilitySystematicallyHigherThanTP = nil
+        }
+        if let fpMed = fpStat.medianFragility, let tpMed = tpStat.medianFragility {
+            self.fpFragilityMedianHigherThanTP = fpMed > tpMed
+        } else {
+            self.fpFragilityMedianHigherThanTP = nil
+        }
+    }
+
+    /// `concentration = maxSingleEntryWeight / max(proposalConfidence, ε)` — the
+    /// SAME concentration term `AdDetectionConfig.fragilityScore` computes (ε =
+    /// `AdDetectionConfig.fragilityEpsilon`). Derived here only for the group
+    /// summary; the per-row score itself comes from the production helper.
+    private static func concentration(_ row: LabeledFragilitySpanRow) -> Double {
+        let eps = AdDetectionConfig.fragilityEpsilon
+        return row.maxSingleEntryWeight / max(row.proposalConfidence, eps)
+    }
+
+    private static func groupStat(_ group: [LabeledFragilitySpanRow]) -> GroupStat {
+        GroupStat(
+            count: group.count,
+            meanFragility: mean(group.map(\.fragilityScore)),
+            medianFragility: median(group.map(\.fragilityScore)),
+            meanMargin: mean(group.map(\.margin)),
+            medianMargin: median(group.map(\.margin)),
+            meanConcentration: mean(group.map(concentration)),
+            medianConcentration: median(group.map(concentration)),
+            meanDepth: mean(group.map { Double($0.distinctEvidenceFamilyDepth) }),
+            medianDepth: median(group.map { Double($0.distinctEvidenceFamilyDepth) })
+        )
+    }
+
+    private static func mean(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +) / Double(values.count)
+    }
+
+    private static func median(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let n = sorted.count
+        if n % 2 == 1 { return sorted[n / 2] }
+        return (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    }
+
+    /// Human-readable summary for the test log.
+    func table() -> String {
+        func fmt(_ v: Double?) -> String {
+            guard let v else { return "n/a" }
+            return String(format: "%.4f", v)
+        }
+        func verdict(_ b: Bool?) -> String {
+            guard let b else { return "n/a (a group is empty)" }
+            return b ? "YES (FP > TP)" : "NO (FP <= TP)"
+        }
+        func line(_ name: String, _ s: GroupStat) -> String {
+            "\(name): n=\(s.count) fragility(mean=\(fmt(s.meanFragility)) median=\(fmt(s.medianFragility))) margin(mean=\(fmt(s.meanMargin))) concentration(mean=\(fmt(s.meanConcentration))) depth(mean=\(fmt(s.meanDepth)))"
+        }
+        return """
+        === Per-Span Fragility Diagnostic (xsdz.7 Part A) ===
+        episodes scored: \(episodeCount)   labeled spans: \(rows.count)
+        \(line("FP ", falsePositiveStats))
+        \(line("TP ", truePositiveStats))
+        \(line("CR ", correctlyRejectedStats))
+        verdict — FP fragility systematically higher than TP? mean: \(verdict(fpFragilitySystematicallyHigherThanTP))  median: \(verdict(fpFragilityMedianHigherThanTP))
+        """
+    }
+
+    /// Encode to pretty-printed, sorted-key JSON for the git-ignored repo-root
+    /// per-span dump.
     func jsonData() throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
