@@ -1,0 +1,84 @@
+// BrandAppearanceChannelTapObserver.swift
+// playhead-brandab fire instrumentation:
+//
+// Observation-only sink that records, per decoded span, whether the two
+// "brand-appearance" precision channels emitted a ledger entry for that span:
+//   • playhead-xsdz.12 — rhetorical act-sequence grammar (`.rhetoricalGrammar`).
+//   • playhead-xsdz.13 — cross-show syndication (`.crossShowSyndication`).
+//
+// The brand-appearance live A/B (`BrandAppearanceLiveABTests`) needs this so a
+// NULL result is interpretable: "metrics identical to baseline" is ambiguous —
+// did the channel never fire, or fire-but-no-effect? Tallying how many spans
+// actually received each channel's evidence entry disambiguates the two. The
+// fire site reads the SAME pre-suppression `ledger` the decision is built from,
+// so a recorded fire is exactly "this channel produced an entry for this span".
+//
+// Contract (mirrors `FragilityDiagnosticObserver` / `RegionShadowObserver` /
+// `Phase5ProjectorObserver`):
+//   • Compiled in all configurations. The fire site is a no-op when the
+//     observer is `nil`, which is the production wiring: `PlayheadRuntime`
+//     never constructs one (it is not even referenced there), so release builds
+//     have zero footprint and byte-identical decision behavior.
+//   • Behavior-neutral: the observer NEVER feeds back into the decision path.
+//     It only RECORDS the inputs the real decision already computed; the
+//     decision is untouched whether the observer is nil or live.
+//   • Counts accumulate per asset (each `record` tallies one span), so a full
+//     backfill leaves the per-channel fire totals for the asset.
+//   • Actor for safe cross-concurrency-domain access from tests (backfill runs
+//     on an arbitrary task executor; tests read from the main actor).
+
+import Foundation
+import OSLog
+
+/// Per-asset fire tally for the two brand-appearance channels. Pure value type
+/// so tests (and the harness JSON dump) consume it directly.
+struct BrandAppearanceChannelFireCounts: Sendable, Equatable {
+    /// Number of decoded spans whose ledger carried a strictly-positive
+    /// `.rhetoricalGrammar` entry (xsdz.12 fired).
+    var rhetoricalGrammarFiredSpans: Int = 0
+    /// Number of decoded spans whose ledger carried a strictly-positive
+    /// `.crossShowSyndication` entry (xsdz.13 fired).
+    var crossShowSyndicationFiredSpans: Int = 0
+    /// Total decoded spans the observer saw for this asset (the denominator).
+    var observedSpans: Int = 0
+}
+
+actor BrandAppearanceChannelTapObserver {
+
+    private let logger = Logger(
+        subsystem: "com.playhead",
+        category: "BrandAppearanceChannelTapObserver"
+    )
+
+    /// Per-asset accumulated fire counts.
+    private var counts: [String: BrandAppearanceChannelFireCounts] = [:]
+
+    init() {}
+
+    /// Record one decoded span's brand-appearance channel firing for an asset.
+    ///
+    /// The fire site supplies the SAME `ledger` the decision is built from; this
+    /// method tallies whether each channel produced a strictly-positive entry.
+    ///
+    /// - Parameters:
+    ///   - assetId: analysis asset id the span belongs to.
+    ///   - ledger: the evidence ledger that fed this span's decision (the
+    ///     pre-suppression ledger, so the tally reflects whether the channel
+    ///     EMITTED an entry, independent of any later downweight).
+    func record(assetId: String, ledger: [EvidenceLedgerEntry]) {
+        var tally = counts[assetId, default: BrandAppearanceChannelFireCounts()]
+        tally.observedSpans += 1
+        if ledger.contains(where: { $0.source == .rhetoricalGrammar && $0.weight > 0 }) {
+            tally.rhetoricalGrammarFiredSpans += 1
+        }
+        if ledger.contains(where: { $0.source == .crossShowSyndication && $0.weight > 0 }) {
+            tally.crossShowSyndicationFiredSpans += 1
+        }
+        counts[assetId] = tally
+    }
+
+    /// The accumulated fire counts for an asset (zeroed defaults if none seen).
+    func fireCounts(for assetId: String) -> BrandAppearanceChannelFireCounts {
+        counts[assetId, default: BrandAppearanceChannelFireCounts()]
+    }
+}

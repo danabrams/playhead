@@ -1384,3 +1384,430 @@ struct LexicalScorerSweepReport: Sendable, Codable, Equatable {
         return try encoder.encode(self)
     }
 }
+
+// MARK: - Brand-appearance A/B arm configuration (playhead-brandab)
+
+/// The FOUR arms of the brand-appearance precision-signal A/B
+/// (`BrandAppearanceLiveABTests`). Both signals are OFF by default in
+/// production; the A/B isolates each ON its own AND their interaction:
+///   * xsdz.12 — rhetorical act-sequence grammar, gated by the
+///     `AdDetectionConfig.rhetoricalGrammarEnabled` BOOLEAN. A pure per-span
+///     TEXT signal: toggling the flag is sufficient (no store).
+///   * xsdz.13 — cross-show syndication, gated by the
+///     `AdDetectionConfig.crossShowSyndicationEnabled` BOOLEAN. This signal also
+///     needs a WIRED `CrossShowSyndicationStore` shared across episodes — the
+///     flag's production consequence (`PlayheadRuntime` constructs the store iff
+///     the flag is on). The harness therefore wires the shared store ONLY into
+///     the two arms where this flag is on; the store presence is part of the
+///     flag's production meaning, not an extra independent axis.
+///
+/// Each arm is defined by exactly TWO orthogonal toggles:
+///   * `xsdz12On` → the `rhetoricalGrammarEnabled` flag.
+///   * `xsdz13On` → the `crossShowSyndicationEnabled` flag (and, in the harness,
+///     the shared-store wiring).
+///
+/// LOAD-BEARING isolation property (pinned hermetically by
+/// `BrandAppearanceArmConfigTests`): every arm deviates from
+/// `AdDetectionConfig.default` ONLY in these two flags; every other field is
+/// byte-identical and equal to the production default. A drift on any other
+/// field would attribute a precision change to a brand-appearance signal that
+/// some OTHER flag actually caused, making the measurement meaningless.
+enum BrandAppearanceArm: String, Sendable, CaseIterable {
+    /// Production state: both signals OFF. The reference every delta is
+    /// measured from. NO syndication store (gating parity with production).
+    case baseline
+    /// xsdz.12 ONLY: rhetorical grammar on, cross-show syndication off. Isolates
+    /// the rhetorical-grammar signal. NO syndication store.
+    case xsdz12Only
+    /// xsdz.13 ONLY: cross-show syndication on (with the shared store wired),
+    /// rhetorical grammar off. Isolates the syndication signal.
+    case xsdz13Only
+    /// BOTH ON: both signals enabled (with the shared store wired). The
+    /// interaction endpoint.
+    case bothOn
+
+    /// Whether the xsdz.12 rhetorical-grammar signal is enabled in this arm
+    /// (drives `rhetoricalGrammarEnabled`).
+    var xsdz12On: Bool {
+        switch self {
+        case .baseline, .xsdz13Only: return false
+        case .xsdz12Only, .bothOn: return true
+        }
+    }
+
+    /// Whether the xsdz.13 cross-show-syndication signal is enabled in this arm
+    /// (drives `crossShowSyndicationEnabled` AND the shared-store wiring).
+    var xsdz13On: Bool {
+        switch self {
+        case .baseline, .xsdz12Only: return false
+        case .xsdz13Only, .bothOn: return true
+        }
+    }
+
+    /// Whether this arm requires a wired, shared `CrossShowSyndicationStore`.
+    /// IDENTICAL to `xsdz13On` — the store is the flag's production consequence
+    /// (`PlayheadRuntime` builds it iff `crossShowSyndicationEnabled`), so the
+    /// baseline + xsdz12-only arms construct NO store (gating parity).
+    var requiresSyndicationStore: Bool { xsdz13On }
+}
+
+/// Pure, hermetic builder for the brand-appearance arms' configs. Extracted from
+/// the harness so the arm construction is unit-testable on the simulator with no
+/// audio / FM / pipeline. Sources EVERY non-toggle field VERBATIM from
+/// `AdDetectionConfig.default`, so the arms can never silently drift from
+/// production on any axis other than the two flags under test.
+enum BrandAppearanceArmConfig {
+
+    /// Build the full `AdDetectionConfig` for the brand-appearance A/B given the
+    /// two flag toggles. Every field other than `rhetoricalGrammarEnabled` and
+    /// `crossShowSyndicationEnabled` is copied VERBATIM from
+    /// `AdDetectionConfig.default` (the production state), so the only things this
+    /// builder can vary are the two signals under test.
+    static func adDetectionConfig(
+        rhetoricalGrammarEnabled: Bool,
+        crossShowSyndicationEnabled: Bool
+    ) -> AdDetectionConfig {
+        let p = AdDetectionConfig.default
+        return AdDetectionConfig(
+            candidateThreshold: p.candidateThreshold,
+            confirmationThreshold: p.confirmationThreshold,
+            suppressionThreshold: p.suppressionThreshold,
+            hotPathLookahead: p.hotPathLookahead,
+            detectorVersion: p.detectorVersion,
+            fmBackfillMode: p.fmBackfillMode,
+            fmScanBudgetSeconds: p.fmScanBudgetSeconds,
+            fmConsensusThreshold: p.fmConsensusThreshold,
+            markOnlyThreshold: p.markOnlyThreshold,
+            autoSkipConfidenceThreshold: p.autoSkipConfidenceThreshold,
+            classifierSeedQualifiedThreshold: p.classifierSeedQualifiedThreshold,
+            lexicalAutoAdQualifiedThreshold: p.lexicalAutoAdQualifiedThreshold,
+            lexicalAutoAdEnabled: p.lexicalAutoAdEnabled,
+            segmentUICandidateThreshold: p.segmentUICandidateThreshold,
+            segmentAutoSkipThreshold: p.segmentAutoSkipThreshold,
+            bracketRefinementEnabled: p.bracketRefinementEnabled,
+            bracketRefinementMinTrust: p.bracketRefinementMinTrust,
+            bracketRefinementMinCoarseScore: p.bracketRefinementMinCoarseScore,
+            bracketRefinementMinFineConfidence: p.bracketRefinementMinFineConfidence,
+            transcriptBoundaryCueEnabled: p.transcriptBoundaryCueEnabled,
+            evidenceFragilityPenaltyEnabled: p.evidenceFragilityPenaltyEnabled,
+            fragilityThreshold: p.fragilityThreshold,
+            fragilityPenalty: p.fragilityPenalty,
+            chapterSignalMode: p.chapterSignalMode,
+            audioForensicsEnabled: p.audioForensicsEnabled,
+            crossEpisodeMemoryEnabled: p.crossEpisodeMemoryEnabled,
+            // THE between-arm differences: the two brand-appearance flags.
+            rhetoricalGrammarEnabled: rhetoricalGrammarEnabled,
+            crossShowSyndicationEnabled: crossShowSyndicationEnabled,
+            temporalRegularizationEnabled: p.temporalRegularizationEnabled,
+            temporalNeighborWindowSeconds: p.temporalNeighborWindowSeconds,
+            temporalHighConfidenceNeighborThreshold: p.temporalHighConfidenceNeighborThreshold,
+            temporalIsolationPenaltyFactor: p.temporalIsolationPenaltyFactor,
+            temporalMinDwellSeconds: p.temporalMinDwellSeconds,
+            temporalMinDwellPenaltyFactor: p.temporalMinDwellPenaltyFactor,
+            perShowThresholdControlEnabled: p.perShowThresholdControlEnabled,
+            perShowThresholdProportionalGain: p.perShowThresholdProportionalGain,
+            perShowThresholdIntegralGain: p.perShowThresholdIntegralGain,
+            perShowThresholdMaxOffset: p.perShowThresholdMaxOffset,
+            perShowThresholdMinSamples: p.perShowThresholdMinSamples
+        )
+    }
+
+    /// The `AdDetectionConfig` for a brand-appearance arm — reads the arm's two
+    /// flag toggles.
+    static func adDetectionConfig(for arm: BrandAppearanceArm) -> AdDetectionConfig {
+        adDetectionConfig(
+            rhetoricalGrammarEnabled: arm.xsdz12On,
+            crossShowSyndicationEnabled: arm.xsdz13On
+        )
+    }
+
+    /// The `NarrowingConfig` for EVERY arm: `NarrowingConfig.default` (snap ON —
+    /// xsdz.2/.3 are KEPT ON in production, so the baseline keeps snap on too).
+    /// The narrowing config never varies in this A/B — only the two
+    /// brand-appearance flags do. Exposed so the harness wires the same value
+    /// into every arm's live runner factory and the isolation test can assert it.
+    static func narrowingConfig(for arm: BrandAppearanceArm) -> NarrowingConfig {
+        _ = arm
+        return .default
+    }
+
+    /// The names of the two fields the A/B is allowed to vary. Used to derive
+    /// `comparableFields` (every OTHER field, asserted byte-identical across arms
+    /// and equal to `.default`).
+    static let varyingFieldNames: Set<String> = [
+        "rhetoricalGrammarEnabled",
+        "crossShowSyndicationEnabled",
+    ]
+
+    /// The fields the isolation test asserts are byte-identical across all four
+    /// arms (and equal to `AdDetectionConfig.default`). Derived from the canonical
+    /// `FragilityGateArmConfig.comparableFields` list MINUS the two brand-appearance
+    /// flags, so it automatically tracks any field added to the canonical list.
+    /// (`FragilityGateArmConfig.comparableFields` already EXCLUDES
+    /// `evidenceFragilityPenaltyEnabled`, which this A/B holds at `.default` — that
+    /// is handled by the parallel named-invariant assertions in the tests.)
+    static let comparableFields: [(name: String, value: @Sendable (AdDetectionConfig) -> String)] =
+        FragilityGateArmConfig.comparableFields.filter { !varyingFieldNames.contains($0.name) }
+}
+
+// MARK: - Brand-appearance publish date
+
+/// Parses the publish date encoded in a corpus episode id of the shape
+/// `<show>-YYYY-MM-DD-<slug>` (e.g. `doac-2026-05-07-ww3-expert-...`). The
+/// dogfood corpus encodes each episode's real publish date in its id; the
+/// brand-appearance harness uses it to (a) PROCESS episodes in publish-date order
+/// and (b) STAMP each episode's cross-show syndication observations at its real
+/// publish date, so the xsdz.13 ≥14-day temporal-persistence gate can be
+/// satisfied within one Catalyst pass if the corpus spans ≥14 days. Pure / static
+/// so it is unit-testable on the simulator.
+enum BrandAppearancePublishDate {
+
+    /// Extract the publish date (UTC midday) from an episode id by finding the
+    /// first `YYYY-MM-DD` token. Returns `nil` when no date token is present.
+    static func parse(fromEpisodeId episodeId: String) -> Date? {
+        // Scan hyphen-delimited tokens for the first `YYYY-MM-DD` triple.
+        let tokens = episodeId.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+        guard tokens.count >= 3 else { return nil }
+        for i in 0...(tokens.count - 3) {
+            guard let year = fourDigitYear(tokens[i]),
+                  let month = twoDigit(tokens[i + 1], range: 1...12),
+                  let day = twoDigit(tokens[i + 2], range: 1...31) else { continue }
+            var components = DateComponents()
+            components.year = year
+            components.month = month
+            components.day = day
+            components.hour = 12 // midday UTC — avoids DST/midnight edge ambiguity
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "UTC") ?? .current
+            return calendar.date(from: components)
+        }
+        return nil
+    }
+
+    private static func fourDigitYear(_ s: String) -> Int? {
+        guard s.count == 4, let v = Int(s), (1900...2999).contains(v) else { return nil }
+        return v
+    }
+
+    private static func twoDigit(_ s: String, range: ClosedRange<Int>) -> Int? {
+        guard s.count == 2, let v = Int(s), range.contains(v) else { return nil }
+        return v
+    }
+}
+
+// MARK: - Brand-appearance per-arm fire counts
+
+/// Per-arm accumulated brand-appearance channel fire counts across all scored
+/// episodes plus the xsdz.13 syndication-gate-reached entity count. Pure value
+/// type so the harness can accumulate it and serialize it into the JSON dump.
+/// Without these, a null A/B result is ambiguous (did the channel never fire, or
+/// fire-but-no-effect?); the counts disambiguate.
+struct BrandAppearanceFireTally: Sendable, Codable, Equatable {
+    /// Spans whose ledger carried a positive `.rhetoricalGrammar` entry (xsdz.12).
+    var rhetoricalGrammarFiredSpans: Int = 0
+    /// Spans whose ledger carried a positive `.crossShowSyndication` entry (xsdz.13).
+    var crossShowSyndicationFiredSpans: Int = 0
+    /// Total decoded spans the tap observer saw across this arm's episodes.
+    var observedSpans: Int = 0
+    /// Distinct sponsor ENTITIES that reached the xsdz.13 spread+persistence gate
+    /// in this arm's SHARED store (measured directly via the production evaluator
+    /// over the shared store after all episodes processed). `0` for arms with no
+    /// store. This is the decisive "did xsdz.13 reach its gate at all?" number.
+    var syndicationGatedEntities: Int = 0
+
+    /// Fold one episode's tap counts into the arm total.
+    mutating func add(_ counts: BrandAppearanceChannelFireCounts) {
+        rhetoricalGrammarFiredSpans += counts.rhetoricalGrammarFiredSpans
+        crossShowSyndicationFiredSpans += counts.crossShowSyndicationFiredSpans
+        observedSpans += counts.observedSpans
+    }
+}
+
+// MARK: - Brand-appearance per-feature SWEEP report (playhead-brandab)
+
+/// A readable, serializable summary of the 4-arm brand-appearance A/B. Pure
+/// value type, structurally a sibling of `LexicalScorerSweepReport`: one row per
+/// `BrandAppearanceArm`, baseline first, with every treatment arm's deltas
+/// measured vs the baseline. Reuses Phase A's `SpanF1` / `FusionLiftResult`
+/// scorers verbatim — no reimplementation. Each row also carries the per-channel
+/// FIRE counts so a null lift is interpretable.
+///
+/// "Delta" is `arm − baseline`; positive means that signal HELPED the metric.
+/// Undefined metrics propagate to `nil` (never a misleading 0.0). The baseline
+/// arm's own deltas are zero (measured against itself).
+struct BrandAppearanceSweepReport: Sendable, Codable, Equatable {
+
+    /// One arm's raw counts + metrics + fire tally + delta-vs-baseline.
+    struct ArmRow: Sendable, Codable, Equatable {
+        let arm: String
+        let xsdz12On: Bool
+        let xsdz13On: Bool
+        let groundTruthSpans: Int
+        let detectedSpans: Int
+        let truePositives: Int
+        let falsePositives: Int
+        let misses: Int
+        let spanPrecision: Double?
+        let spanRecall: Double?
+        let spanF1: Double?
+        let coveragePrecision: Double?
+        let coverageRecall: Double?
+        // Per-channel fire instrumentation (so a null lift is interpretable).
+        let rhetoricalGrammarFiredSpans: Int
+        let crossShowSyndicationFiredSpans: Int
+        let observedSpans: Int
+        let syndicationGatedEntities: Int
+        // Deltas vs baseline (count-based span lens).
+        let truePositivesDelta: Int
+        let falsePositivesDelta: Int
+        let missesDelta: Int
+        let spanPrecisionDelta: Double?
+        let spanRecallDelta: Double?
+        let spanF1Delta: Double?
+        // Deltas vs baseline (seconds-based coverage lens).
+        let coveragePrecisionDelta: Double?
+        let coverageRecallDelta: Double?
+        let coverageF1Delta: Double?
+    }
+
+    let episodeCount: Int
+    /// Rows in the order the arms were RUN, baseline first.
+    let rows: [ArmRow]
+
+    /// Build the report from one accumulator + fire tally per arm. The
+    /// dictionaries MUST contain every `BrandAppearanceArm` case; arms emit in
+    /// `allCases` order so the table and JSON are stable. The baseline arm anchors
+    /// every delta. Convenience for the full 4-arm sweep.
+    init(
+        episodeCount: Int,
+        accumulators: [BrandAppearanceArm: FusionLiftModeAccumulator],
+        fireTallies: [BrandAppearanceArm: BrandAppearanceFireTally]
+    ) {
+        self.init(
+            episodeCount: episodeCount,
+            arms: BrandAppearanceArm.allCases,
+            accumulators: accumulators,
+            fireTallies: fireTallies
+        )
+    }
+
+    /// Build the report over EXACTLY the arms in `arms`, in the order given
+    /// (baseline first). The split single-signal A/B passes run only
+    /// `[.baseline, <one treatment>]`, so the report must emit only those rows —
+    /// not phantom zero rows for arms the pass never ran. `arms` MUST start with
+    /// `.baseline` (it anchors every delta) and the dictionaries MUST contain an
+    /// entry for each arm in `arms`. Arms emit in the given order so the table and
+    /// JSON are stable.
+    init(
+        episodeCount: Int,
+        arms: [BrandAppearanceArm],
+        accumulators: [BrandAppearanceArm: FusionLiftModeAccumulator],
+        fireTallies: [BrandAppearanceArm: BrandAppearanceFireTally]
+    ) {
+        self.episodeCount = episodeCount
+
+        let baselineAcc = accumulators[.baseline] ?? FusionLiftModeAccumulator()
+        let baselineSpan = baselineAcc.spanF1()
+        let baselineSummary = baselineAcc.summary()
+
+        self.rows = arms.map { arm in
+            let acc = accumulators[arm] ?? FusionLiftModeAccumulator()
+            let span = acc.spanF1()
+            let summary = acc.summary()
+            let fire = fireTallies[arm] ?? BrandAppearanceFireTally()
+
+            // FusionLiftResult names its sides off/enabled; off = baseline,
+            // enabled = this arm, so the delta reads `arm − baseline`.
+            let spanLift = FusionLiftResult(off: baselineSpan, enabled: span)
+            let coverageLift = FusionLiftResult(off: baselineSummary, enabled: summary)
+
+            return ArmRow(
+                arm: arm.rawValue,
+                xsdz12On: arm.xsdz12On,
+                xsdz13On: arm.xsdz13On,
+                groundTruthSpans: acc.groundTruth.count,
+                detectedSpans: acc.detections.count,
+                truePositives: span.truePositives,
+                falsePositives: span.falsePositives,
+                misses: span.misses,
+                spanPrecision: span.precision,
+                spanRecall: span.recall,
+                spanF1: span.f1,
+                coveragePrecision: summary.coveragePrecision,
+                coverageRecall: summary.coverageRecall,
+                rhetoricalGrammarFiredSpans: fire.rhetoricalGrammarFiredSpans,
+                crossShowSyndicationFiredSpans: fire.crossShowSyndicationFiredSpans,
+                observedSpans: fire.observedSpans,
+                syndicationGatedEntities: fire.syndicationGatedEntities,
+                truePositivesDelta: span.truePositives - baselineSpan.truePositives,
+                falsePositivesDelta: span.falsePositives - baselineSpan.falsePositives,
+                missesDelta: span.misses - baselineSpan.misses,
+                spanPrecisionDelta: spanLift.precisionDelta,
+                spanRecallDelta: spanLift.recallDelta,
+                spanF1Delta: spanLift.f1Delta,
+                coveragePrecisionDelta: coverageLift.precisionDelta,
+                coverageRecallDelta: coverageLift.recallDelta,
+                coverageF1Delta: coverageLift.f1Delta
+            )
+        }
+    }
+
+    /// Render a fixed-width, human-readable table for the test log, including a
+    /// per-channel fire-count block so a null lift is interpretable.
+    func table() -> String {
+        func fmt(_ value: Double?) -> String {
+            guard let value else { return "n/a" }
+            return String(format: "%.4f", value)
+        }
+        func signed(_ value: Double?) -> String {
+            guard let value else { return "n/a" }
+            return String(format: "%+.4f", value)
+        }
+        func signedInt(_ value: Int) -> String { String(format: "%+d", value) }
+
+        var lines: [String] = [
+            "=== Brand-Appearance Precision-Signal A/B (xsdz.12 / xsdz.13) ===",
+            "episodes scored: \(episodeCount)",
+            "arm          GT  det   TP  FP  miss   spanP    spanR   spanF1   covP     covR",
+        ]
+        for row in rows {
+            lines.append(
+                "\(armLabel(row.arm))\(pad(row.groundTruthSpans, 4))\(pad(row.detectedSpans, 5))\(pad(row.truePositives, 5))\(pad(row.falsePositives, 4))\(pad(row.misses, 6))  \(col(fmt(row.spanPrecision)))\(col(fmt(row.spanRecall)))\(col(fmt(row.spanF1)))\(col(fmt(row.coveragePrecision)))\(col(fmt(row.coverageRecall)))"
+            )
+        }
+        lines.append("--- per-arm lift (arm − baseline) ---")
+        for row in rows where row.arm != BrandAppearanceArm.baseline.rawValue {
+            lines.append(
+                "\(armLabel(row.arm)) TPΔ=\(signedInt(row.truePositivesDelta)) FPΔ=\(signedInt(row.falsePositivesDelta)) missΔ=\(signedInt(row.missesDelta)) | span pΔ=\(signed(row.spanPrecisionDelta)) rΔ=\(signed(row.spanRecallDelta)) f1Δ=\(signed(row.spanF1Delta)) | cov pΔ=\(signed(row.coveragePrecisionDelta)) rΔ=\(signed(row.coverageRecallDelta))"
+            )
+        }
+        lines.append("--- fire instrumentation (did each channel fire?) ---")
+        for row in rows {
+            lines.append(
+                "\(armLabel(row.arm)) spans=\(row.observedSpans) | xsdz.12 grammar fired=\(row.rhetoricalGrammarFiredSpans) | xsdz.13 syndication fired=\(row.crossShowSyndicationFiredSpans) gatedEntities=\(row.syndicationGatedEntities)"
+            )
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func armLabel(_ arm: String) -> String {
+        (arm + String(repeating: " ", count: 11)).prefix(11).description
+    }
+
+    private func pad(_ value: Int, _ width: Int) -> String {
+        let s = String(value)
+        return String(repeating: " ", count: max(0, width - s.count)) + s
+    }
+
+    private func col(_ s: String) -> String {
+        (s + String(repeating: " ", count: 9)).prefix(9).description
+    }
+
+    /// Encode the report to pretty-printed, sorted-key JSON for the git-ignored
+    /// repo-root dump.
+    func jsonData() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(self)
+    }
+}
