@@ -41,7 +41,7 @@ struct FragilityGateArmConfigTests {
 
     @Test("baseline arm has the fragility gate OFF (= production default)")
     func config_baselineFragilityOff() {
-        let config = FragilityGateArmConfig.adDetectionConfig(for: .baseline)
+        let config = FragilityGateArmConfig.adDetectionConfig(for: FragilityGateArm.baseline)
         #expect(config.evidenceFragilityPenaltyEnabled == false)
         #expect(
             config.evidenceFragilityPenaltyEnabled == AdDetectionConfig.default.evidenceFragilityPenaltyEnabled,
@@ -59,7 +59,7 @@ struct FragilityGateArmConfigTests {
 
     @Test("the two arms differ ONLY in evidenceFragilityPenaltyEnabled — every other field is equal")
     func config_isolation_onlyFragilityFlagVaries() {
-        let baseline = FragilityGateArmConfig.adDetectionConfig(for: .baseline)
+        let baseline = FragilityGateArmConfig.adDetectionConfig(for: FragilityGateArm.baseline)
         let treatment = FragilityGateArmConfig.adDetectionConfig(for: .treatment)
 
         // The one field that IS allowed to differ does differ.
@@ -102,7 +102,7 @@ struct FragilityGateArmConfigTests {
         // harness can never silently diverge from what ships. (The fragility
         // flag is checked separately above; baseline's value equals the default
         // there too.)
-        let baseline = FragilityGateArmConfig.adDetectionConfig(for: .baseline)
+        let baseline = FragilityGateArmConfig.adDetectionConfig(for: FragilityGateArm.baseline)
         let prod = AdDetectionConfig.default
         for field in FragilityGateArmConfig.comparableFields {
             #expect(
@@ -115,7 +115,7 @@ struct FragilityGateArmConfigTests {
 
     @Test("baseline pins the explicit production flag/mode invariants the bead names")
     func config_baselineNamedInvariants() {
-        let baseline = FragilityGateArmConfig.adDetectionConfig(for: .baseline)
+        let baseline = FragilityGateArmConfig.adDetectionConfig(for: FragilityGateArm.baseline)
         // fmBackfillMode .full → real FM scan feeds the fusion ledger.
         #expect(baseline.fmBackfillMode == .full)
         // chapterSignalMode .off.
@@ -155,9 +155,120 @@ struct FragilityGateArmConfigTests {
         }
         // The narrowing config does NOT vary across arms.
         #expect(
-            FragilityGateArmConfig.narrowingConfig(for: .baseline)
+            FragilityGateArmConfig.narrowingConfig(for: FragilityGateArm.baseline)
                 == FragilityGateArmConfig.narrowingConfig(for: .treatment),
             "narrowing config must be identical across arms — only the fragility flag varies"
         )
+    }
+}
+
+// MARK: - Sweep arm config (playhead-xsdz.7 Part B)
+
+@Suite("Fragility threshold/penalty sweep arm config (xsdz.7 Part B)")
+struct FragilitySweepArmConfigTests {
+
+    @Test("sweep enumerates baseline + 4 treatments, baseline first")
+    func arm_fiveArmsBaselineFirst() {
+        #expect(FragilitySweepArm.allCases == [.baseline, .t15p85, .t10p85, .t07p70, .t05p50])
+    }
+
+    @Test("baseline arm is the gate-OFF production state")
+    func arm_baselineGateOff() {
+        #expect(FragilitySweepArm.baseline.fragilityEnabled == false)
+        // Off-arm tuning equals production default (inert, but pinned so the off
+        // arm == AdDetectionConfig.default everywhere).
+        #expect(FragilitySweepArm.baseline.fragilityThreshold == AdDetectionConfig.default.fragilityThreshold)
+        #expect(FragilitySweepArm.baseline.fragilityPenalty == AdDetectionConfig.default.fragilityPenalty)
+    }
+
+    @Test("each treatment arm has the gate ON at its named operating point")
+    func arm_treatmentOperatingPoints() {
+        let expected: [(FragilitySweepArm, Double, Double)] = [
+            (.t15p85, 1.5, 0.85),
+            (.t10p85, 1.0, 0.85),
+            (.t07p70, 0.7, 0.70),
+            (.t05p50, 0.5, 0.50),
+        ]
+        for (arm, thr, pen) in expected {
+            #expect(arm.fragilityEnabled == true, "arm \(arm.rawValue) must enable the gate")
+            #expect(arm.fragilityThreshold == thr, "arm \(arm.rawValue) threshold")
+            #expect(arm.fragilityPenalty == pen, "arm \(arm.rawValue) penalty")
+        }
+    }
+
+    // MARK: The load-bearing sweep isolation property
+
+    @Test("every sweep arm differs from .default ONLY in the three fragility tuning fields")
+    func config_sweepIsolation_onlyTuningVaries() {
+        let prod = AdDetectionConfig.default
+        for arm in FragilitySweepArm.allCases {
+            let config = FragilityGateArmConfig.adDetectionConfig(for: arm)
+
+            // The three fields the sweep is ALLOWED to vary land at the arm's
+            // operating point.
+            #expect(config.evidenceFragilityPenaltyEnabled == arm.fragilityEnabled)
+            #expect(config.fragilityThreshold == arm.fragilityThreshold)
+            #expect(config.fragilityPenalty == arm.fragilityPenalty)
+
+            // EVERY other field equals the production default.
+            for field in FragilityGateArmConfig.sweepComparableFields {
+                #expect(
+                    field.value(config) == field.value(prod),
+                    "arm \(arm.rawValue): field \(field.name) drifted from .default: arm=\(field.value(config)) default=\(field.value(prod))"
+                )
+            }
+        }
+    }
+
+    @Test("any two sweep arms agree on every non-tuning field")
+    func config_sweepIsolation_pairwiseEqualOffTuning() {
+        let configs = FragilitySweepArm.allCases.map {
+            (arm: $0, config: FragilityGateArmConfig.adDetectionConfig(for: $0))
+        }
+        for i in configs.indices {
+            for j in configs.indices where j > i {
+                for field in FragilityGateArmConfig.sweepComparableFields {
+                    #expect(
+                        field.value(configs[i].config) == field.value(configs[j].config),
+                        "arms \(configs[i].arm.rawValue)/\(configs[j].arm.rawValue): field \(field.name) drifted"
+                    )
+                }
+            }
+        }
+    }
+
+    @Test("sweepComparableFields EXCLUDES exactly the three varying fields")
+    func config_sweepComparableFieldsExcludesTuning() {
+        let names = Set(FragilityGateArmConfig.sweepComparableFields.map(\.name))
+        #expect(!names.contains("evidenceFragilityPenaltyEnabled"))
+        #expect(!names.contains("fragilityThreshold"))
+        #expect(!names.contains("fragilityPenalty"))
+        // It must still include a representative non-tuning field so the
+        // isolation check is not vacuously empty.
+        #expect(names.contains("fmBackfillMode"))
+        #expect(names.contains("autoSkipConfidenceThreshold"))
+    }
+
+    @Test("every sweep arm uses NarrowingConfig.default (snap ON)")
+    func narrowing_everyArmDefaultSnapOn() {
+        for arm in FragilitySweepArm.allCases {
+            #expect(FragilityGateArmConfig.narrowingConfig(for: arm) == NarrowingConfig.default)
+        }
+    }
+
+    @Test("the sweep baseline AdDetectionConfig is byte-identical to the 2-arm A/B baseline")
+    func config_sweepBaselineMatchesABBaseline() {
+        // The single Catalyst pass uses the sweep `.baseline` arm AS the
+        // per-span diagnostic + sweep baseline; it must equal the production
+        // state the original A/B baseline pins, so the two harnesses never drift.
+        let sweepBaseline = FragilityGateArmConfig.adDetectionConfig(for: FragilitySweepArm.baseline)
+        let abBaseline = FragilityGateArmConfig.adDetectionConfig(for: FragilityGateArm.baseline)
+        #expect(sweepBaseline.evidenceFragilityPenaltyEnabled == abBaseline.evidenceFragilityPenaltyEnabled)
+        for field in FragilityGateArmConfig.comparableFields {
+            #expect(
+                field.value(sweepBaseline) == field.value(abBaseline),
+                "sweep baseline field \(field.name) diverged from A/B baseline"
+            )
+        }
     }
 }

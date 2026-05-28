@@ -948,6 +948,16 @@ actor AdDetectionService {
     /// output without affecting live AdWindow or skip-cue decisions.
     private let phase5ProjectorObserver: Phase5ProjectorObserver?
 
+    /// playhead-xsdz.7 fragility diagnostic: optional observation-only sink for
+    /// the per-span Evidence-Fragility geometry. When nil (the production
+    /// default — PlayheadRuntime never constructs one), the per-span diagnostic
+    /// fire site in the decision path is a no-op, so the decision output is
+    /// byte-identical and there is zero footprint. Tests inject a live observer
+    /// to dump the per-span fragility-score distribution. Mirrors the
+    /// `regionShadowObserver` / `phase5ProjectorObserver` nil-default pattern;
+    /// it NEVER feeds back into the decision, so it cannot change any gate.
+    private let fragilityDiagnosticObserver: FragilityDiagnosticObserver?
+
     /// Phase 6.5 (playhead-4my.16): optional skip orchestrator. When non-nil, eligible
     /// fusion decisions are forwarded after each backfill run, enabling Phase 7
     /// (UserCorrections) to have banner impressions to correct against.
@@ -1327,6 +1337,7 @@ actor AdDetectionService {
         shadowSkipMarker: @escaping @Sendable (_ sessionId: String, _ podcastId: String) async -> Void = { _, _ in },
         regionShadowObserver: RegionShadowObserver? = nil,
         phase5ProjectorObserver: Phase5ProjectorObserver? = nil,
+        fragilityDiagnosticObserver: FragilityDiagnosticObserver? = nil,
         skipOrchestrator: SkipOrchestrator? = nil,
         adCatalogStore: AdCatalogStore? = nil,
         negativeFingerprintBank: NegativeFingerprintBank? = nil,
@@ -1355,6 +1366,7 @@ actor AdDetectionService {
         self.shadowSkipMarker = shadowSkipMarker
         self.regionShadowObserver = regionShadowObserver
         self.phase5ProjectorObserver = phase5ProjectorObserver
+        self.fragilityDiagnosticObserver = fragilityDiagnosticObserver
         self.skipOrchestrator = skipOrchestrator
         self.adCatalogStore = adCatalogStore
         self.negativeFingerprintBank = negativeFingerprintBank
@@ -3359,6 +3371,34 @@ actor AdDetectionService {
             // `evidenceFragilityPenaltyEnabled == false` this returns the same
             // `skipConfidence`, so `decision` is byte-identical to pre-xsdz.7.
             // The eligibility gate and promotion track are preserved verbatim.
+            //
+            // playhead-xsdz.7 fragility DIAGNOSTIC (behavior-neutral): fire the
+            // optional diagnostic observer for EVERY span — regardless of
+            // whether the penalty is enabled — using the SAME post-suppression
+            // `effectiveLedger` and the SAME `decision` confidences/track the
+            // real gate reads, BEFORE the penalty mutates `decision`. The score
+            // comes from the existing `config.fragilityScore(...)` helper (not
+            // reimplemented). `nil` in production ⇒ no-op (no score computed, no
+            // record), so this is byte-identical to pre-diagnostic behavior.
+            if let fragilityDiagnosticObserver {
+                let diagnosticFragilityScore = config.fragilityScore(
+                    proposalConfidence: decision.proposalConfidence,
+                    promotionTrack: decision.promotionTrack,
+                    ledger: effectiveLedger
+                )
+                await fragilityDiagnosticObserver.record(
+                    assetId: analysisAssetId,
+                    spanId: refinedSpan.id,
+                    spanStart: refinedSpan.startTime,
+                    spanEnd: refinedSpan.endTime,
+                    proposalConfidence: decision.proposalConfidence,
+                    skipConfidence: decision.skipConfidence,
+                    standardAutoSkipThreshold: config.effectiveAutoSkipThreshold(for: .standard),
+                    fragilityScore: diagnosticFragilityScore,
+                    ledger: effectiveLedger
+                )
+            }
+
             let penalizedSkipConfidence = config.applyFragilityPenalty(
                 skipConfidence: decision.skipConfidence,
                 proposalConfidence: decision.proposalConfidence,

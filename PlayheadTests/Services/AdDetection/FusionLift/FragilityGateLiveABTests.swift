@@ -1,72 +1,64 @@
 // FragilityGateLiveABTests.swift
-// playhead-xsdz.7 live A/B — env-gated Mac Catalyst A/B test that runs a 2-arm
-// comparison of the Evidence-Fragility PRECISION GATE through the REAL
-// `AdDetectionService.runBackfill` (fmBackfillMode: .full), scored against the
-// 12-episode dogfood golden corpus, so a single Catalyst run measures whether
-// the xsdz.7 fragility gate actually buys precision live (and at what recall
-// cost) end-to-end.
+// playhead-xsdz.7 live measurement — env-gated Mac Catalyst test that runs, in
+// ONE Catalyst pass over the 12-episode dogfood golden corpus, BOTH halves of
+// the fragility investigation:
 //
-// Sibling of `LexicalScorerLiveABTests`: same live runner factory, same
-// planner seeding, same store/feature/transcript setup, same scoring helpers.
-// The difference is the program under test — here the ONLY toggle is the
-// xsdz.7 `AdDetectionConfig.evidenceFragilityPenaltyEnabled` boolean.
+//   Part A — per-span fragility DIAGNOSTIC. The BASELINE (production, gate-OFF)
+//   arm runs ONCE with a `FragilityDiagnosticObserver` attached. The observer
+//   fires inside the real decision path for EVERY decoded span and records that
+//   span's fragility geometry (proposal/skip confidence, maxSingleEntryWeight,
+//   distinct evidence-family depth, margin, and the `fragilityScore` from the
+//   PRODUCTION helper) computed from the SAME post-suppression ledger the
+//   decision used. After the run, each recorded span is labeled TP / FP /
+//   correctly-rejected by joining it to the SAME greedy-IoU pairing the metrics
+//   scorer uses (`FragilityPerSpanLabeler`). The labeled rows + a FP-vs-TP group
+//   summary (mean & median fragility / margin / concentration / depth, plus an
+//   explicit "are FP fragilities systematically higher than TP?" verdict) dump
+//   to `playhead-dogfood-diagnostics-fragility-perspan.json`.
 //
-// What this measures (and why it is not a meaningless zero)
-// ---------------------------------------------------------
-// xsdz.7 is the Evidence-Fragility precision gate (`applyFragilityPenalty`): a
-// pure, deterministic, post-fusion SOFT penalty on `skipConfidence` for spans
-// whose evidence geometry looks BRITTLE (one dominant channel, a thin margin
-// over the auto-skip threshold, few distinct evidence families) — the hallmark
-// of a false positive that cleared the auto-skip threshold on thin support.
-// When `evidenceFragilityPenaltyEnabled` is `false` (the production default),
-// `applyFragilityPenalty` returns `skipConfidence` UNCHANGED; when `true` and a
-// span is fragile, the confidence is multiplied by `fragilityPenalty` (0.85),
-// which can drop a span that *just* cleared its threshold back below it.
+//   Part B — threshold/penalty SWEEP. In addition to the baseline (gate OFF),
+//   four TREATMENT arms run the gate ON at distinct operating points
+//   ((1.5,0.85), (1.0,0.85), (0.7,0.70), (0.5,0.50)) to probe whether a lower
+//   threshold / stronger penalty drops false positives without hurting recall.
+//   Every arm = real `runBackfill` (fmBackfillMode .full) scored vs the golden;
+//   per-arm TP/FP/miss + span P/R/F1 + coverage P/R + treatment−baseline deltas
+//   dump to `playhead-dogfood-diagnostics-fragility-sweep.json`.
 //
-// The penalty only changes the PERSISTED ad windows through the real FM
-// scan → fusion ledger → decision path → `store.insertAdWindows` pipeline, and
-// that path only runs when `effectiveFMBackfillMode != .off`. THEREFORE both
-// arms run with `fmBackfillMode: .full` (real FM ad scanning feeding the fusion
-// ledger); the ONLY thing that varies is the one fragility flag. The two arms
-// (`FragilityGateArm`):
-//   * baseline  — current main PRODUCTION state. `evidenceFragilityPenaltyEnabled:
-//                 false`. Snap (xsdz.2/.3) ON (`NarrowingConfig.default`), every
-//                 off-by-default evidence channel FALSE, chapter signal OFF.
-//   * treatment — identical to baseline EXCEPT `evidenceFragilityPenaltyEnabled:
-//                 true` (production-default `fragilityThreshold` 2.0 /
-//                 `fragilityPenalty` 0.85).
-// Everything else (store / asset / feature windows / transcript chunks /
-// planner state / FM runner / NarrowingConfig) is IDENTICAL across the two
-// arms. The one-field isolation is pinned hermetically by
-// `FragilityGateArmConfigTests` (runs on the sim, no env var).
+// The BASELINE arm is run ONCE and serves BOTH halves — it is the diagnostic
+// source AND the sweep's baseline. No double-run.
+//
+// Each arm differs ONLY in the three fragility-tuning fields
+// (`evidenceFragilityPenaltyEnabled` / `fragilityThreshold` /
+// `fragilityPenalty`); every other `AdDetectionConfig` field equals production
+// `.default`, and every arm uses `NarrowingConfig.default` (snap ON). The
+// one-axis isolation is pinned hermetically on the sim by
+// `FragilitySweepArmConfigTests` (no env var needed). The per-span TP/FP join
+// is pinned hermetically by `FragilityPerSpanLabelerTests`.
+//
+// Sibling of `LexicalScorerLiveABTests` / the original 2-arm fragility A/B:
+// same live runner factory, same planner seeding, same store/feature/transcript
+// setup, same scoring helpers (`CorpusAnnotationLoader`, `FusionLiftScoring`,
+// `FusionLiftModeAccumulator`).
 //
 // PRECONDITION (the FM narrowing path must run like production): the live
 // targeted-phase narrowing inside `BackfillJobRunner` is guarded by
 // `plan.policy == .targetedWithAudit`. A fresh store is cold-start
 // (`observedEpisodeCount == 0`) ⇒ `fullCoverage` ⇒ the targeted phases never
 // narrow. So each arm SEEDS the planner state into the warmed
-// `targetedWithAudit` regime before the scored run (identical to the lexical
-// harness). This is symmetric across arms (same podcastId per arm store), so it
-// cannot bias the comparison; the only between-arm difference remains the
-// fragility flag. The fragility gate itself is policy-independent (it runs on
-// the post-fusion decision path regardless of coverage policy), so the seeding
-// is conservative for that gate — it exists to keep the FM scan production-like.
-//
-// How the toggle reaches the pipeline
-//   * `evidenceFragilityPenaltyEnabled` on the per-arm `AdDetectionConfig`
-//     (no production change — already togglable; xsdz.7 added the flag, OFF by
-//     default). The decision path reads it via `config.applyFragilityPenalty`.
+// `targetedWithAudit` regime before the scored run. This is symmetric across
+// arms (same podcastId per arm store), so it cannot bias the comparison; the
+// only between-arm difference remains the fragility tuning. The fragility gate
+// itself is policy-independent, so the seeding is conservative for that gate.
 //
 // Gating (mirrors `LexicalScorerLiveABTests`):
 //   `PLAYHEAD_FRAGILITY_AB=1` MUST be set in the test process environment. The
 //   default `PlayheadFastTests` plan does NOT set it, so the test body is a
-//   no-op on Cmd-U (via `XCTSkipUnless`) — no FM, no audio dependency. The live
-//   FM `BackfillJobRunner` also requires iOS 26+ (`#available`), so an older
-//   runtime skips too.
+//   no-op on Cmd-U (via `XCTSkipUnless`). The live FM `BackfillJobRunner` also
+//   requires iOS 26+ (`#available`), so an older runtime skips too.
 //
 // Cost (READ before running): this runs the REAL `runBackfill` with full FM ad
-// scanning once per arm × 2 arms × N dogfood episodes (~24 full-FM passes for
-// the 12-episode dogfood set) — on the order of an hour on Mac Catalyst. It is
+// scanning once per arm × 5 arms × N dogfood episodes (~60 full-FM passes for
+// the 12-episode dogfood set) — on the order of two hours on Mac Catalyst. It is
 // an ORCHESTRATOR-run step, NOT a green gate. To invoke:
 //
 //   1. Stage corpus audio under `TestFixtures/Corpus/Audio/<episode_id>.<ext>`
@@ -78,16 +70,11 @@
 //          -destination 'platform=macOS,variant=Mac Catalyst' \
 //          -only-testing:'PlayheadTests/FragilityGateLiveABTests' \
 //          PLAYHEAD_FRAGILITY_AB=1
-//   4. Read the printed lift table; the per-run JSON dump lands at the repo
-//      root as `playhead-dogfood-diagnostics-fragility-ab.json` (git-ignored —
-//      matches the `playhead-dogfood-diagnostics-*.json` pattern in
-//      `.gitignore`).
-//
-// Hermetic helpers (`FragilityGateArm`, `FragilityGateArmConfig`,
-// `FusionLiftModeAccumulator`, `FusionLiftReport`) live in
-// `FusionLiftHarnessSupport.swift` and are unit-tested on the simulator by
-// `FragilityGateArmConfigTests` + `FusionLiftHarnessSupportTests`. Scoring
-// reuses Phase A's `FusionLiftScoring.swift` (no reimplementation).
+//   4. Read the printed tables; the two per-run JSON dumps land at the repo root
+//      (both git-ignored — they match the `playhead-dogfood-diagnostics-*.json`
+//      pattern in `.gitignore`):
+//        - playhead-dogfood-diagnostics-fragility-perspan.json (Part A)
+//        - playhead-dogfood-diagnostics-fragility-sweep.json   (Part B)
 
 import AVFoundation
 import Foundation
@@ -107,19 +94,19 @@ final class FragilityGateLiveABTests: XCTestCase {
         try XCTSkipUnless(
             Self.abEnabled,
             """
-            Evidence-Fragility gate A/B is opt-in and SLOW (~24 full-FM passes: \
-            1 scored pass × 2 arms × 12 episodes). Set PLAYHEAD_FRAGILITY_AB=1 \
-            in the test plan env vars and run on Mac Catalyst (or an iOS 26 \
-            device) with Apple Intelligence enabled and corpus audio + \
-            transcripts staged. See the file header for the full invocation \
-            recipe.
+            Evidence-Fragility diagnostic + sweep is opt-in and SLOW (~60 \
+            full-FM passes: 1 scored pass × 5 arms × 12 episodes). Set \
+            PLAYHEAD_FRAGILITY_AB=1 in the test plan env vars and run on Mac \
+            Catalyst (or an iOS 26 device) with Apple Intelligence enabled and \
+            corpus audio + transcripts staged. See the file header for the full \
+            invocation recipe.
             """
         )
     }
 
-    // MARK: - A/B entry
+    // MARK: - Entry: ONE pass, BOTH the per-span diagnostic and the sweep
 
-    func testFragilityGateAcrossDogfoodCorpus() async throws {
+    func testFragilityDiagnosticAndSweepAcrossDogfoodCorpus() async throws {
         guard #available(iOS 26.0, *) else {
             throw XCTSkip("Live FM BackfillJobRunner requires iOS 26+ / FoundationModels.")
         }
@@ -134,12 +121,16 @@ final class FragilityGateLiveABTests: XCTestCase {
         }
         try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
 
-        // One accumulator per arm. Each arm runs the SAME
-        // store/features/transcripts/planner-seeding/FM-mode `.full` per
-        // episode; only the fragility flag varies.
-        var accumulators: [FragilityGateArm: FusionLiftModeAccumulator] = Dictionary(
-            uniqueKeysWithValues: FragilityGateArm.allCases.map { ($0, FusionLiftModeAccumulator()) }
+        // One accumulator per sweep arm (baseline + 4 treatments). Each arm runs
+        // the SAME store/features/transcripts/planner-seeding/FM-mode `.full` per
+        // episode; only the fragility tuning varies.
+        var accumulators: [FragilitySweepArm: FusionLiftModeAccumulator] = Dictionary(
+            uniqueKeysWithValues: FragilitySweepArm.allCases.map { ($0, FusionLiftModeAccumulator()) }
         )
+
+        // Part A: labeled per-span diagnostic rows accumulated across episodes,
+        // produced ONLY from the baseline arm (run once below).
+        var perSpanRows: [LabeledFragilitySpanRow] = []
 
         var scored: [String] = []
         var skipped: [(episodeId: String, reason: String)] = []
@@ -196,19 +187,25 @@ final class FragilityGateLiveABTests: XCTestCase {
                 continue
             }
 
-            // Run BOTH arms for this episode. Each arm gets its own fresh
+            // Run ALL FIVE arms for this episode. Each arm gets its own fresh
             // store / asset / features / transcript / seeded planner state, so
-            // the only between-arm difference is the fragility flag. An arm
-            // failure aborts the whole episode (so no arm is scored on a
-            // partial episode that would bias the comparison).
+            // the only between-arm difference is the fragility tuning. The
+            // BASELINE arm additionally attaches the diagnostic observer (Part A);
+            // it is run exactly ONCE and reused for both the diagnostic and the
+            // sweep's baseline. An arm failure aborts the whole episode (so no arm
+            // is scored on a partial episode that would bias the comparison).
             do {
-                for arm in FragilityGateArm.allCases {
+                for arm in FragilitySweepArm.allCases {
+                    let observer: FragilityDiagnosticObserver? =
+                        arm == .baseline ? FragilityDiagnosticObserver() : nil
+
                     let windows = try await runArm(
                         arm: arm,
                         episodeId: episodeId,
                         annotation: annotation,
                         audioURL: audioURL,
-                        transcript: transcript
+                        transcript: transcript,
+                        diagnosticObserver: observer
                     )
                     accumulators[arm]?.addEpisode(
                         annotationWindows: annotation.adWindows,
@@ -216,6 +213,20 @@ final class FragilityGateLiveABTests: XCTestCase {
                         podcastId: annotation.showName,
                         episodeId: episodeId
                     )
+
+                    // Part A: for the baseline arm only, label the recorded
+                    // per-span rows against THIS arm's persisted windows + the
+                    // golden, using the SAME pairing the scorer uses.
+                    if arm == .baseline, let observer {
+                        let recorded = await observer.spanRows(for: episodeId) ?? []
+                        perSpanRows.append(contentsOf: FragilityPerSpanLabeler.label(
+                            rows: recorded,
+                            annotationWindows: annotation.adWindows,
+                            adWindows: windows,
+                            podcastId: annotation.showName,
+                            episodeId: episodeId
+                        ))
+                    }
                 }
                 scored.append(episodeId)
             } catch let error as FragilityABRunError {
@@ -225,35 +236,40 @@ final class FragilityGateLiveABTests: XCTestCase {
             }
         }
 
-        // Build + print + dump the lift report (off = baseline, enabled =
-        // treatment). Reuses the chapter A/B's `FusionLiftReport` verbatim —
-        // same 2-arm shape, same fields the bead asks for.
-        let report = FusionLiftReport(
+        // ── Part A dump: per-span diagnostic ─────────────────────────────────
+        let perSpanReport = FragilityPerSpanDiagnosticReport(
             episodeCount: scored.count,
-            off: accumulators[.baseline] ?? FusionLiftModeAccumulator(),
-            enabled: accumulators[.treatment] ?? FusionLiftModeAccumulator()
+            rows: perSpanRows
         )
-        print("=== Evidence-Fragility Gate Live A/B (xsdz.7) ===")
-        print("(report rows: off = baseline [fragility OFF], enabled = treatment [fragility ON])")
-        print(report.table())
+        print(perSpanReport.table())
+        let perSpanURL = loader.repoRoot.appendingPathComponent(
+            "playhead-dogfood-diagnostics-fragility-perspan.json",
+            isDirectory: false
+        )
+        try perSpanReport.jsonData().write(to: perSpanURL, options: .atomic)
+        print("Per-span fragility diagnostic JSON: \(perSpanURL.path) (git-ignored)")
+
+        // ── Part B dump: threshold/penalty sweep ─────────────────────────────
+        let sweepReport = FragilitySweepReport(
+            episodeCount: scored.count,
+            accumulators: accumulators
+        )
+        print(sweepReport.table())
         print("""
         scored=\(scored.count): \(scored.sorted().joined(separator: ", "))
         skipped (audio/transcript missing)=\(skipped.count): \(skipped.map(\.episodeId).sorted().joined(separator: ", "))
         failed=\(failed.count): \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))
         """)
-
-        // Git-ignored JSON dump at repo root (matches the
-        // `playhead-dogfood-diagnostics-*.json` gitignored pattern).
-        let dumpURL = loader.repoRoot.appendingPathComponent(
-            "playhead-dogfood-diagnostics-fragility-ab.json",
+        let sweepURL = loader.repoRoot.appendingPathComponent(
+            "playhead-dogfood-diagnostics-fragility-sweep.json",
             isDirectory: false
         )
-        try report.jsonData().write(to: dumpURL, options: .atomic)
-        print("Fragility A/B summary JSON: \(dumpURL.path) (git-ignored)")
+        try sweepReport.jsonData().write(to: sweepURL, options: .atomic)
+        print("Fragility sweep JSON: \(sweepURL.path) (git-ignored)")
 
         // Fail loud on hard failures; fail loud if nothing scored (env was set
         // but every episode landed in skipped — audio/transcript not staged).
-        // Otherwise the A/B is informational (no pinned lift number — this is
+        // Otherwise the measurement is informational (no pinned number — this is
         // an orchestrator measurement step, not a green gate).
         if !failed.isEmpty {
             XCTFail("Hard failures: \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))")
@@ -270,33 +286,37 @@ final class FragilityGateLiveABTests: XCTestCase {
 
     // MARK: - One arm
 
-    /// Run the scored backfill once for a single episode in the requested arm
-    /// and return the persisted ad windows. Every arm decodes the same audio,
-    /// persists the same feature windows + transcript chunks, SEEDs the planner
-    /// state into the warmed `targetedWithAudit` regime, and uses
+    /// Run the scored backfill once for a single episode in the requested sweep
+    /// arm and return the persisted ad windows. Every arm decodes the same
+    /// audio, persists the same feature windows + transcript chunks, SEEDs the
+    /// planner state into the warmed `targetedWithAudit` regime, and uses
     /// `NarrowingConfig.default` (snap ON — production state). The ONLY thing
-    /// that differs is the arm's `evidenceFragilityPenaltyEnabled` flag. Always
-    /// uses `fmBackfillMode: .full`.
+    /// that differs is the arm's three fragility-tuning fields. Always uses
+    /// `fmBackfillMode: .full`. When `diagnosticObserver` is non-nil (the
+    /// baseline arm), it is injected into the service so the per-span diagnostic
+    /// fires; it is behavior-neutral (it only records, never feeds back).
     @available(iOS 26.0, *)
     private func runArm(
-        arm: FragilityGateArm,
+        arm: FragilitySweepArm,
         episodeId: String,
         annotation: CorpusAnnotation,
         audioURL: URL,
-        transcript: [TranscriptChunk]
+        transcript: [TranscriptChunk],
+        diagnosticObserver: FragilityDiagnosticObserver?
     ) async throws -> [AdWindow] {
         guard let localURL = LocalAudioURL(audioURL) else {
             throw FragilityABRunError(reason: "audio at \(audioURL.path) is not a file URL")
         }
 
-        // Fresh store per arm so the two runs never observe each other's
-        // persisted windows or planner state.
+        // Fresh store per arm so the runs never observe each other's persisted
+        // windows or planner state.
         let storeDir = try makeTempDir(prefix: "FragilityGateLiveAB-\(arm.rawValue)")
         let store = try AnalysisStore(directory: storeDir)
         try await store.migrate()
 
         // Asset row. `analysisAssetId == episodeId` so the scored ad windows
-        // read back under the id the accumulator buckets on.
+        // read back under the id the accumulator buckets on (and the id the
+        // diagnostic observer records under).
         let assetId = episodeId
         try await store.insertAsset(AnalysisAsset(
             id: assetId,
@@ -348,10 +368,10 @@ final class FragilityGateLiveABTests: XCTestCase {
             podcastId: annotation.showName
         )
 
-        // Per-arm config: the single source of the fragility toggle. Every
-        // other field is held identical to production across both arms.
+        // Per-arm config: the single source of the fragility tuning. Every other
+        // field is held identical (= production `.default`) across all arms.
         let config = FragilityGateArmConfig.adDetectionConfig(for: arm)
-        // Both arms use the production-default NarrowingConfig (snap ON).
+        // Every arm uses the production-default NarrowingConfig (snap ON).
         let narrowingConfig = FragilityGateArmConfig.narrowingConfig(for: arm)
 
         let service = AdDetectionService(
@@ -365,12 +385,16 @@ final class FragilityGateLiveABTests: XCTestCase {
             // nothing for the fragility gate to influence.
             backfillJobRunnerFactory: Self.makeLiveRunnerFactory(narrowingConfig: narrowingConfig),
             canUseFoundationModelsProvider: { true }, // avoid silent FM demotion
+            // Behavior-neutral per-span diagnostic sink. Non-nil ONLY on the
+            // baseline arm; nil everywhere else (and in production). Declared
+            // after canUseFoundationModelsProvider to match the init order.
+            fragilityDiagnosticObserver: diagnosticObserver,
             approvedCohortRegistry: nil // avoid cohort-gated FM demotion
         )
 
         // GUARD #1 (FM-mode gating): confirm cohort/FM gating did not silently
-        // demote `.full` → `.off`. Else the FM phase never runs and the A/B is
-        // a meaningless zero.
+        // demote `.full` → `.off`. Else the FM phase never runs and the
+        // measurement is a meaningless zero.
         let effectiveMode = await service.effectiveFMBackfillModeForTesting()
         XCTAssertEqual(
             effectiveMode,
@@ -379,10 +403,7 @@ final class FragilityGateLiveABTests: XCTestCase {
         )
 
         // GUARD #2 (planner regime): confirm the seeded state lands the planner
-        // in `targetedWithAudit` — the production-like FM regime. If a future
-        // change regresses this to `fullCoverage`, the FM scan stops matching
-        // production and the A/B no longer measures the live behavior.
-        // Reproduce the planner's own decision so the guard fails loud.
+        // in `targetedWithAudit` — the production-like FM regime.
         let seededState = try await store.fetchPodcastPlannerState(podcastId: annotation.showName)
         let seededContext = CoveragePlannerContext(
             observedEpisodeCount: seededState?.observedEpisodeCount ?? 0,
@@ -401,9 +422,9 @@ final class FragilityGateLiveABTests: XCTestCase {
         )
 
         // SCORED RUN: a single backfill. With the planner warmed, the FM scan
-        // runs the targeted phases under the production-default narrowing
-        // config; the persisted ad windows are the scored output, with the
-        // fragility gate active iff this is the treatment arm.
+        // runs the targeted phases under the production-default narrowing config;
+        // the persisted ad windows are the scored output, with the fragility gate
+        // active at this arm's operating point (off for the baseline).
         try await service.runBackfill(
             chunks: chunks,
             analysisAssetId: assetId,
@@ -418,10 +439,8 @@ final class FragilityGateLiveABTests: XCTestCase {
 
     /// Seed `store`'s `PodcastPlannerState` for `podcastId` into the warmed
     /// `targetedWithAudit` regime: `observedEpisodeCount >= 5` and
-    /// `stableRecall == true` (recall ring full with samples >= 0.85). Uses the
-    /// production observation API so the seeded row is byte-identical to one a
-    /// warmed podcast would have accrued. Identical to the lexical / chapter
-    /// A/B's `seedTargetedWithAuditPlannerState` (same regime is required).
+    /// `stableRecall == true`. Uses the production observation API so the seeded
+    /// row is byte-identical to one a warmed podcast would have accrued.
     private func seedTargetedWithAuditPlannerState(
         store: AnalysisStore,
         podcastId: String
@@ -439,10 +458,9 @@ final class FragilityGateLiveABTests: XCTestCase {
     // MARK: - Live FM runner factory
 
     /// Build a `backfillJobRunnerFactory` that constructs a LIVE FM
-    /// `BackfillJobRunner` with `narrowingConfig` baked in (mirrors
-    /// `LexicalScorerLiveABTests.makeLiveRunnerFactory`). For this A/B
-    /// `narrowingConfig` is `NarrowingConfig.default` for BOTH arms — the
-    /// narrowing config does NOT vary; the fragility flag does (and it lives on
+    /// `BackfillJobRunner` with `narrowingConfig` baked in. For this measurement
+    /// `narrowingConfig` is `NarrowingConfig.default` for EVERY arm — the
+    /// narrowing config does NOT vary; the fragility tuning does (and it lives on
     /// the `AdDetectionConfig`, not the runner). The `mode` argument is supplied
     /// by `AdDetectionService` (the effective FM mode, `.full` here).
     private static func makeLiveRunnerFactory(
@@ -470,8 +488,8 @@ final class FragilityGateLiveABTests: XCTestCase {
                 scanCohortJSON: makeTestScanCohortJSON(promptLabel: "fragility-gate-ab"),
                 sensitiveRouter: router,
                 permissiveClassifier: permissiveClassifierBox,
-                // Production-default narrowing for both arms — the narrowing
-                // config does not distinguish the fragility A/B's arms.
+                // Production-default narrowing for every arm — the narrowing
+                // config does not distinguish the sweep's arms.
                 narrowingConfig: narrowingConfig
             )
         }
