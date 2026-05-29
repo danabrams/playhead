@@ -2188,3 +2188,283 @@ struct ActempoSweepReport: Sendable, Codable, Equatable {
         return try encoder.encode(self)
     }
 }
+enum FbsignalsSignal: String, Sendable, CaseIterable {
+    case crossEpisodeMemory   // xsdz.9
+    case perShowThreshold     // xsdz.11
+
+    var label: String {
+        switch self {
+        case .crossEpisodeMemory: return "xsdz.9 cross-episode-memory"
+        case .perShowThreshold: return "xsdz.11 per-show-threshold"
+        }
+    }
+
+    var varyingFieldName: String {
+        switch self {
+        case .crossEpisodeMemory: return "crossEpisodeMemoryEnabled"
+        case .perShowThreshold: return "perShowThresholdControlEnabled"
+        }
+    }
+
+    var requiresNegativeFingerprintBank: Bool { self == .crossEpisodeMemory }
+
+    var requiresPerShowThresholdControllerStore: Bool { self == .perShowThreshold }
+}
+
+enum FbsignalsArm: String, Sendable, CaseIterable {
+    case baseline
+    case treatment
+
+    var signalEnabled: Bool {
+        switch self {
+        case .baseline: return false
+        case .treatment: return true
+        }
+    }
+}
+
+enum FbsignalsArmConfig {
+
+    static func adDetectionConfig(signal: FbsignalsSignal, enabled: Bool) -> AdDetectionConfig {
+        let p = AdDetectionConfig.default
+        let crossEpisodeMemoryEnabled = (signal == .crossEpisodeMemory) ? enabled : p.crossEpisodeMemoryEnabled
+        let perShowThresholdControlEnabled = (signal == .perShowThreshold) ? enabled : p.perShowThresholdControlEnabled
+        return AdDetectionConfig(
+            candidateThreshold: p.candidateThreshold,
+            confirmationThreshold: p.confirmationThreshold,
+            suppressionThreshold: p.suppressionThreshold,
+            hotPathLookahead: p.hotPathLookahead,
+            detectorVersion: p.detectorVersion,
+            fmBackfillMode: p.fmBackfillMode,
+            fmScanBudgetSeconds: p.fmScanBudgetSeconds,
+            fmConsensusThreshold: p.fmConsensusThreshold,
+            markOnlyThreshold: p.markOnlyThreshold,
+            autoSkipConfidenceThreshold: p.autoSkipConfidenceThreshold,
+            classifierSeedQualifiedThreshold: p.classifierSeedQualifiedThreshold,
+            lexicalAutoAdQualifiedThreshold: p.lexicalAutoAdQualifiedThreshold,
+            lexicalAutoAdEnabled: p.lexicalAutoAdEnabled,
+            segmentUICandidateThreshold: p.segmentUICandidateThreshold,
+            segmentAutoSkipThreshold: p.segmentAutoSkipThreshold,
+            bracketRefinementEnabled: p.bracketRefinementEnabled,
+            bracketRefinementMinTrust: p.bracketRefinementMinTrust,
+            bracketRefinementMinCoarseScore: p.bracketRefinementMinCoarseScore,
+            bracketRefinementMinFineConfidence: p.bracketRefinementMinFineConfidence,
+            transcriptBoundaryCueEnabled: p.transcriptBoundaryCueEnabled,
+            evidenceFragilityPenaltyEnabled: p.evidenceFragilityPenaltyEnabled,
+            fragilityThreshold: p.fragilityThreshold,
+            fragilityPenalty: p.fragilityPenalty,
+            chapterSignalMode: p.chapterSignalMode,
+            audioForensicsEnabled: p.audioForensicsEnabled,
+            crossEpisodeMemoryEnabled: crossEpisodeMemoryEnabled,
+            rhetoricalGrammarEnabled: p.rhetoricalGrammarEnabled,
+            crossShowSyndicationEnabled: p.crossShowSyndicationEnabled,
+            temporalRegularizationEnabled: p.temporalRegularizationEnabled,
+            temporalNeighborWindowSeconds: p.temporalNeighborWindowSeconds,
+            temporalHighConfidenceNeighborThreshold: p.temporalHighConfidenceNeighborThreshold,
+            temporalIsolationPenaltyFactor: p.temporalIsolationPenaltyFactor,
+            temporalMinDwellSeconds: p.temporalMinDwellSeconds,
+            temporalMinDwellPenaltyFactor: p.temporalMinDwellPenaltyFactor,
+            perShowThresholdControlEnabled: perShowThresholdControlEnabled,
+            perShowThresholdProportionalGain: p.perShowThresholdProportionalGain,
+            perShowThresholdIntegralGain: p.perShowThresholdIntegralGain,
+            perShowThresholdMaxOffset: p.perShowThresholdMaxOffset,
+            perShowThresholdMinSamples: p.perShowThresholdMinSamples
+        )
+    }
+
+    static func adDetectionConfig(signal: FbsignalsSignal, for arm: FbsignalsArm) -> AdDetectionConfig {
+        adDetectionConfig(signal: signal, enabled: arm.signalEnabled)
+    }
+
+    static func narrowingConfig(for arm: FbsignalsArm) -> NarrowingConfig {
+        _ = arm
+        return .default
+    }
+
+    static let allSignalFlagNames: Set<String> = [
+        "crossEpisodeMemoryEnabled",
+        "perShowThresholdControlEnabled",
+    ]
+
+    static func comparableFields(
+        for signal: FbsignalsSignal
+    ) -> [(name: String, value: @Sendable (AdDetectionConfig) -> String)] {
+        FragilityGateArmConfig.comparableFields.filter { $0.name != signal.varyingFieldName }
+    }
+}
+
+struct FbsignalsFireTally: Sendable, Codable, Equatable {
+    var crossEpisodeMemoryPositiveFiredSpans: Int = 0
+    var crossEpisodeMemorySuppressedSpans: Int = 0
+    var crossEpisodeMemorySuppressionCandidateSpans: Int = 0
+    var observedSpans: Int = 0
+
+    var perShowThresholdShiftedSpans: Int = 0
+    var perShowThresholdCandidateSpans: Int = 0
+    var perShowThresholdOffsetSum: Double = 0
+
+    mutating func addChannelTap(_ counts: BrandAppearanceChannelFireCounts) {
+        crossEpisodeMemoryPositiveFiredSpans += counts.crossEpisodeMemoryFiredSpans
+        observedSpans += counts.observedSpans
+    }
+
+    mutating func addNegativeBankSuppression(_ counts: NegativeBankSuppressionFireCounts) {
+        crossEpisodeMemorySuppressedSpans += counts.suppressedSpans
+        crossEpisodeMemorySuppressionCandidateSpans += counts.candidateSpans
+    }
+
+    mutating func addPerShowThreshold(_ counts: PerShowThresholdOffsetFireCounts) {
+        perShowThresholdShiftedSpans += counts.thresholdShiftedSpans
+        perShowThresholdCandidateSpans += counts.candidateSpans
+        perShowThresholdOffsetSum += counts.resolvedOffset
+    }
+}
+
+struct FbsignalsSweepReport: Sendable, Codable, Equatable {
+
+    struct ArmRow: Sendable, Codable, Equatable {
+        let arm: String
+        let signalEnabled: Bool
+        let groundTruthSpans: Int
+        let detectedSpans: Int
+        let truePositives: Int
+        let falsePositives: Int
+        let misses: Int
+        let spanPrecision: Double?
+        let spanRecall: Double?
+        let spanF1: Double?
+        let coveragePrecision: Double?
+        let coverageRecall: Double?
+        let crossEpisodeMemoryPositiveFiredSpans: Int
+        let crossEpisodeMemorySuppressedSpans: Int
+        let crossEpisodeMemorySuppressionCandidateSpans: Int
+        let perShowThresholdShiftedSpans: Int
+        let perShowThresholdCandidateSpans: Int
+        let perShowThresholdOffsetSum: Double
+        let observedSpans: Int
+        let truePositivesDelta: Int
+        let falsePositivesDelta: Int
+        let missesDelta: Int
+        let spanPrecisionDelta: Double?
+        let spanRecallDelta: Double?
+        let spanF1Delta: Double?
+        let coveragePrecisionDelta: Double?
+        let coverageRecallDelta: Double?
+        let coverageF1Delta: Double?
+    }
+
+    let signal: String
+    let episodeCount: Int
+    let rows: [ArmRow]
+
+    init(
+        signal: FbsignalsSignal,
+        episodeCount: Int,
+        arms: [FbsignalsArm],
+        accumulators: [FbsignalsArm: FusionLiftModeAccumulator],
+        fireTallies: [FbsignalsArm: FbsignalsFireTally]
+    ) {
+        self.signal = signal.rawValue
+        self.episodeCount = episodeCount
+
+        let baselineAcc = accumulators[.baseline] ?? FusionLiftModeAccumulator()
+        let baselineSpan = baselineAcc.spanF1()
+        let baselineSummary = baselineAcc.summary()
+
+        self.rows = arms.map { arm in
+            let acc = accumulators[arm] ?? FusionLiftModeAccumulator()
+            let span = acc.spanF1()
+            let summary = acc.summary()
+            let fire = fireTallies[arm] ?? FbsignalsFireTally()
+
+            let spanLift = FusionLiftResult(off: baselineSpan, enabled: span)
+            let coverageLift = FusionLiftResult(off: baselineSummary, enabled: summary)
+
+            return ArmRow(
+                arm: arm.rawValue,
+                signalEnabled: arm.signalEnabled,
+                groundTruthSpans: acc.groundTruth.count,
+                detectedSpans: acc.detections.count,
+                truePositives: span.truePositives,
+                falsePositives: span.falsePositives,
+                misses: span.misses,
+                spanPrecision: span.precision,
+                spanRecall: span.recall,
+                spanF1: span.f1,
+                coveragePrecision: summary.coveragePrecision,
+                coverageRecall: summary.coverageRecall,
+                crossEpisodeMemoryPositiveFiredSpans: fire.crossEpisodeMemoryPositiveFiredSpans,
+                crossEpisodeMemorySuppressedSpans: fire.crossEpisodeMemorySuppressedSpans,
+                crossEpisodeMemorySuppressionCandidateSpans: fire.crossEpisodeMemorySuppressionCandidateSpans,
+                perShowThresholdShiftedSpans: fire.perShowThresholdShiftedSpans,
+                perShowThresholdCandidateSpans: fire.perShowThresholdCandidateSpans,
+                perShowThresholdOffsetSum: fire.perShowThresholdOffsetSum,
+                observedSpans: fire.observedSpans,
+                truePositivesDelta: span.truePositives - baselineSpan.truePositives,
+                falsePositivesDelta: span.falsePositives - baselineSpan.falsePositives,
+                missesDelta: span.misses - baselineSpan.misses,
+                spanPrecisionDelta: spanLift.precisionDelta,
+                spanRecallDelta: spanLift.recallDelta,
+                spanF1Delta: spanLift.f1Delta,
+                coveragePrecisionDelta: coverageLift.precisionDelta,
+                coverageRecallDelta: coverageLift.recallDelta,
+                coverageF1Delta: coverageLift.f1Delta
+            )
+        }
+    }
+
+    func table() -> String {
+        func fmt(_ value: Double?) -> String {
+            guard let value else { return "n/a" }
+            return String(format: "%.4f", value)
+        }
+        func signed(_ value: Double?) -> String {
+            guard let value else { return "n/a" }
+            return String(format: "%+.4f", value)
+        }
+        func signedInt(_ value: Int) -> String { String(format: "%+d", value) }
+
+        var lines: [String] = [
+            "=== Fbsignals Single-Signal A/B (\(signal)) ===",
+            "episodes scored: \(episodeCount)",
+            "arm          GT  det   TP  FP  miss   spanP    spanR   spanF1   covP     covR",
+        ]
+        for row in rows {
+            lines.append(
+                "\(armLabel(row.arm))\(pad(row.groundTruthSpans, 4))\(pad(row.detectedSpans, 5))\(pad(row.truePositives, 5))\(pad(row.falsePositives, 4))\(pad(row.misses, 6))  \(col(fmt(row.spanPrecision)))\(col(fmt(row.spanRecall)))\(col(fmt(row.spanF1)))\(col(fmt(row.coveragePrecision)))\(col(fmt(row.coverageRecall)))"
+            )
+        }
+        lines.append("--- treatment delta (treatment − baseline) ---")
+        for row in rows where row.arm != FbsignalsArm.baseline.rawValue {
+            lines.append(
+                "\(armLabel(row.arm)) TPΔ=\(signedInt(row.truePositivesDelta)) FPΔ=\(signedInt(row.falsePositivesDelta)) missΔ=\(signedInt(row.missesDelta)) | span pΔ=\(signed(row.spanPrecisionDelta)) rΔ=\(signed(row.spanRecallDelta)) f1Δ=\(signed(row.spanF1Delta)) | cov pΔ=\(signed(row.coveragePrecisionDelta)) rΔ=\(signed(row.coverageRecallDelta))"
+            )
+        }
+        lines.append("--- fire instrumentation (did the signal fire? EXPECTED 0 — cold start) ---")
+        for row in rows {
+            lines.append(
+                "\(armLabel(row.arm)) spans=\(row.observedSpans) | xsdz.9 positiveBoost=\(row.crossEpisodeMemoryPositiveFiredSpans) negSuppress=\(row.crossEpisodeMemorySuppressedSpans)/\(row.crossEpisodeMemorySuppressionCandidateSpans) | xsdz.11 thresholdShifted=\(row.perShowThresholdShiftedSpans)/\(row.perShowThresholdCandidateSpans) offsetSum=\(String(format: "%.4f", row.perShowThresholdOffsetSum))"
+            )
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func armLabel(_ arm: String) -> String {
+        (arm + String(repeating: " ", count: 11)).prefix(11).description
+    }
+
+    private func pad(_ value: Int, _ width: Int) -> String {
+        let s = String(value)
+        return String(repeating: " ", count: max(0, width - s.count)) + s
+    }
+
+    private func col(_ s: String) -> String {
+        (s + String(repeating: " ", count: 9)).prefix(9).description
+    }
+
+    func jsonData() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(self)
+    }
+}
