@@ -1607,6 +1607,8 @@ struct BrandAppearanceFireTally: Sendable, Codable, Equatable {
     var rhetoricalGrammarFiredSpans: Int = 0
     /// Spans whose ledger carried a positive `.crossShowSyndication` entry (xsdz.13).
     var crossShowSyndicationFiredSpans: Int = 0
+    /// Spans whose ledger carried a positive `.audioForensics` entry (xsdz.8).
+    var audioForensicsFiredSpans: Int = 0
     /// Total decoded spans the tap observer saw across this arm's episodes.
     var observedSpans: Int = 0
     /// Distinct sponsor ENTITIES that reached the xsdz.13 spread+persistence gate
@@ -1619,6 +1621,7 @@ struct BrandAppearanceFireTally: Sendable, Codable, Equatable {
     mutating func add(_ counts: BrandAppearanceChannelFireCounts) {
         rhetoricalGrammarFiredSpans += counts.rhetoricalGrammarFiredSpans
         crossShowSyndicationFiredSpans += counts.crossShowSyndicationFiredSpans
+        audioForensicsFiredSpans += counts.audioForensicsFiredSpans
         observedSpans += counts.observedSpans
     }
 }
@@ -1785,6 +1788,380 @@ struct BrandAppearanceSweepReport: Sendable, Codable, Equatable {
         for row in rows {
             lines.append(
                 "\(armLabel(row.arm)) spans=\(row.observedSpans) | xsdz.12 grammar fired=\(row.rhetoricalGrammarFiredSpans) | xsdz.13 syndication fired=\(row.crossShowSyndicationFiredSpans) gatedEntities=\(row.syndicationGatedEntities)"
+            )
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func armLabel(_ arm: String) -> String {
+        (arm + String(repeating: " ", count: 11)).prefix(11).description
+    }
+
+    private func pad(_ value: Int, _ width: Int) -> String {
+        let s = String(value)
+        return String(repeating: " ", count: max(0, width - s.count)) + s
+    }
+
+    private func col(_ s: String) -> String {
+        (s + String(repeating: " ", count: 9)).prefix(9).description
+    }
+
+    /// Encode the report to pretty-printed, sorted-key JSON for the git-ignored
+    /// repo-root dump.
+    func jsonData() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(self)
+    }
+}
+
+// MARK: - Audio-forensics / temporal-reg A/B (playhead-actempo)
+
+/// The two precision signals the actempo live A/B measures, each in its OWN
+/// single-signal 2-arm method (one signal per Catalyst pass). Both are OFF by
+/// default in production; the A/B isolates each ON its own against its OWN
+/// baseline:
+///   * xsdz.8  — composite audio-forensics boundary evidence, gated by the
+///     `AdDetectionConfig.audioForensicsEnabled` BOOLEAN. A LEDGER-ENTRY signal:
+///     the treatment arm emits a `.audioForensics` entry per qualifying span, so
+///     its FIRE count is "spans that received a `.audioForensics` ledger entry"
+///     (tallied via the nil-default `BrandAppearanceChannelTapObserver`, which
+///     reads the SAME pre-suppression ledger the decision is built from).
+///   * xsdz.10 — lightweight temporal regularization, gated by the
+///     `AdDetectionConfig.temporalRegularizationEnabled` BOOLEAN. NOT a ledger
+///     entry: a post-fusion multiplicative penalty on `skipConfidence`, so its
+///     FIRE count is "spans whose confidence the penalty pass actually changed"
+///     (recorded via the nil-default `TemporalRegularizationObserver`, which
+///     captures the EXACT penalty-applied span count the production pass computes).
+enum ActempoSignal: String, Sendable, CaseIterable {
+    case audioForensics   // xsdz.8
+    case temporalRegularization // xsdz.10
+
+    /// Human-facing label for tables / JSON.
+    var label: String {
+        switch self {
+        case .audioForensics: return "xsdz.8 audio-forensics"
+        case .temporalRegularization: return "xsdz.10 temporal-reg"
+        }
+    }
+
+    /// The `AdDetectionConfig` field name this signal's treatment arm flips. Used
+    /// to DERIVE the per-signal `comparableFields` (every OTHER field, asserted
+    /// byte-identical across the two arms and equal to `.default`).
+    var varyingFieldName: String {
+        switch self {
+        case .audioForensics: return "audioForensicsEnabled"
+        case .temporalRegularization: return "temporalRegularizationEnabled"
+        }
+    }
+}
+
+/// The two arms of a single-signal actempo A/B. Generic across both signals: the
+/// `ActempoArmConfig` builder flips the ONE field the signal owns. Every other
+/// `AdDetectionConfig` field is byte-identical and equal to `AdDetectionConfig.default`.
+enum ActempoArm: String, Sendable, CaseIterable {
+    /// Production state for the signal under test: the signal OFF. The reference
+    /// every delta is measured from.
+    case baseline
+    /// Production state PLUS the single signal under test enabled.
+    case treatment
+
+    /// Whether the single signal under test is enabled in this arm.
+    var signalEnabled: Bool {
+        switch self {
+        case .baseline: return false
+        case .treatment: return true
+        }
+    }
+}
+
+/// Pure, hermetic builder for the actempo arms' configs. Extracted from the
+/// harness so the arm construction is unit-testable on the simulator with no
+/// audio / FM / pipeline (acceptance criterion: a hermetic test that pins the
+/// one-field isolation). Sources EVERY non-toggle field VERBATIM from
+/// `AdDetectionConfig.default`, so the arms can never silently drift from
+/// production on any axis other than the ONE flag under test.
+///
+/// CRITICAL invariant (asserted by `ActempoArmConfigTests`): for a given signal
+/// the two arms deviate ONLY in that signal's single boolean
+/// (`audioForensicsEnabled` for xsdz.8, `temporalRegularizationEnabled` for
+/// xsdz.10); every other field is byte-identical and equal to the production
+/// default. A drift on any OTHER field would attribute a precision change to a
+/// signal that some OTHER flag actually caused — so the isolation is the
+/// load-bearing correctness property the hermetic tests pin. The temporal-reg
+/// tuning knobs (`temporalNeighborWindowSeconds` / `…NeighborThreshold` /
+/// `…IsolationPenaltyFactor` / `…MinDwellSeconds` / `…MinDwellPenaltyFactor`)
+/// stay at their production defaults in BOTH arms; only the master flag flips.
+enum ActempoArmConfig {
+
+    /// Build the full `AdDetectionConfig` for the actempo A/B given the single
+    /// signal under test and whether its flag is enabled. Every field other than
+    /// the one this signal owns is copied VERBATIM from `AdDetectionConfig.default`
+    /// (the production state). The OTHER signal's flag is held at `.default`
+    /// (false), so the arms never cross-contaminate.
+    static func adDetectionConfig(signal: ActempoSignal, enabled: Bool) -> AdDetectionConfig {
+        let p = AdDetectionConfig.default
+        let audioForensicsEnabled = (signal == .audioForensics) ? enabled : p.audioForensicsEnabled
+        let temporalRegularizationEnabled = (signal == .temporalRegularization) ? enabled : p.temporalRegularizationEnabled
+        return AdDetectionConfig(
+            candidateThreshold: p.candidateThreshold,
+            confirmationThreshold: p.confirmationThreshold,
+            suppressionThreshold: p.suppressionThreshold,
+            hotPathLookahead: p.hotPathLookahead,
+            detectorVersion: p.detectorVersion,
+            fmBackfillMode: p.fmBackfillMode,
+            fmScanBudgetSeconds: p.fmScanBudgetSeconds,
+            fmConsensusThreshold: p.fmConsensusThreshold,
+            markOnlyThreshold: p.markOnlyThreshold,
+            autoSkipConfidenceThreshold: p.autoSkipConfidenceThreshold,
+            classifierSeedQualifiedThreshold: p.classifierSeedQualifiedThreshold,
+            lexicalAutoAdQualifiedThreshold: p.lexicalAutoAdQualifiedThreshold,
+            lexicalAutoAdEnabled: p.lexicalAutoAdEnabled,
+            segmentUICandidateThreshold: p.segmentUICandidateThreshold,
+            segmentAutoSkipThreshold: p.segmentAutoSkipThreshold,
+            bracketRefinementEnabled: p.bracketRefinementEnabled,
+            bracketRefinementMinTrust: p.bracketRefinementMinTrust,
+            bracketRefinementMinCoarseScore: p.bracketRefinementMinCoarseScore,
+            bracketRefinementMinFineConfidence: p.bracketRefinementMinFineConfidence,
+            transcriptBoundaryCueEnabled: p.transcriptBoundaryCueEnabled,
+            evidenceFragilityPenaltyEnabled: p.evidenceFragilityPenaltyEnabled,
+            fragilityThreshold: p.fragilityThreshold,
+            fragilityPenalty: p.fragilityPenalty,
+            chapterSignalMode: p.chapterSignalMode,
+            // THE between-arm difference: exactly ONE of these flips for the arm.
+            audioForensicsEnabled: audioForensicsEnabled,
+            crossEpisodeMemoryEnabled: p.crossEpisodeMemoryEnabled,
+            rhetoricalGrammarEnabled: p.rhetoricalGrammarEnabled,
+            crossShowSyndicationEnabled: p.crossShowSyndicationEnabled,
+            temporalRegularizationEnabled: temporalRegularizationEnabled,
+            temporalNeighborWindowSeconds: p.temporalNeighborWindowSeconds,
+            temporalHighConfidenceNeighborThreshold: p.temporalHighConfidenceNeighborThreshold,
+            temporalIsolationPenaltyFactor: p.temporalIsolationPenaltyFactor,
+            temporalMinDwellSeconds: p.temporalMinDwellSeconds,
+            temporalMinDwellPenaltyFactor: p.temporalMinDwellPenaltyFactor,
+            perShowThresholdControlEnabled: p.perShowThresholdControlEnabled,
+            perShowThresholdProportionalGain: p.perShowThresholdProportionalGain,
+            perShowThresholdIntegralGain: p.perShowThresholdIntegralGain,
+            perShowThresholdMaxOffset: p.perShowThresholdMaxOffset,
+            perShowThresholdMinSamples: p.perShowThresholdMinSamples
+        )
+    }
+
+    /// The `AdDetectionConfig` for an actempo arm of a given signal.
+    static func adDetectionConfig(signal: ActempoSignal, for arm: ActempoArm) -> AdDetectionConfig {
+        adDetectionConfig(signal: signal, enabled: arm.signalEnabled)
+    }
+
+    /// The `NarrowingConfig` for EVERY arm: `NarrowingConfig.default` (snap ON —
+    /// xsdz.2/.3 are KEPT ON in production, so the baseline keeps snap on too).
+    /// The narrowing config never varies in this A/B — only the one signal flag
+    /// does. Exposed so the harness wires the same value into every arm's live
+    /// runner factory and the isolation test can assert it.
+    static func narrowingConfig(for arm: ActempoArm) -> NarrowingConfig {
+        _ = arm
+        return .default
+    }
+
+    /// The names of the two fields ANY actempo signal can vary across its arms
+    /// (the two master flags). Used to derive each signal's `comparableFields`.
+    static let allSignalFlagNames: Set<String> = [
+        "audioForensicsEnabled",
+        "temporalRegularizationEnabled",
+    ]
+
+    /// The fields the isolation test asserts are byte-identical across a given
+    /// signal's two arms (and equal to `AdDetectionConfig.default`): the canonical
+    /// `FragilityGateArmConfig.comparableFields` list MINUS the ONE flag this
+    /// signal varies. The OTHER signal's flag stays IN the list (it must not move),
+    /// so cross-contamination between the two A/Bs is caught. Derived from the
+    /// canonical list so it automatically tracks any field added there.
+    static func comparableFields(
+        for signal: ActempoSignal
+    ) -> [(name: String, value: @Sendable (AdDetectionConfig) -> String)] {
+        FragilityGateArmConfig.comparableFields.filter { $0.name != signal.varyingFieldName }
+    }
+}
+
+// MARK: - Actempo per-arm fire tally (playhead-actempo)
+
+/// Per-arm accumulated FIRE instrumentation for a single-signal actempo A/B,
+/// across all scored episodes. Carries BOTH signals' fire mechanisms so one type
+/// serves both methods; for any given A/B only the measured signal's counters are
+/// populated (the other stays 0). Pure value type so the harness accumulates it
+/// and serializes it into the JSON dump. Without these, a null A/B result is
+/// ambiguous (a metric delta ≤±2 FP is FM intra-run noise on this corpus), so the
+/// fire count is what makes the result interpretable.
+struct ActempoFireTally: Sendable, Codable, Equatable {
+    /// xsdz.8: spans whose ledger carried a positive `.audioForensics` entry.
+    var audioForensicsFiredSpans: Int = 0
+    /// xsdz.10: candidate detections whose `skipConfidence` the temporal-reg
+    /// penalty pass actually changed (the signal's "fire").
+    var temporalRegPenaltyAppliedSpans: Int = 0
+    /// xsdz.10: candidate detections the temporal-reg pass evaluated for this arm
+    /// (the denominator — only counted when the pass actually ran).
+    var temporalRegCandidateSpans: Int = 0
+    /// Total decoded spans the tap observer saw across this arm's episodes (the
+    /// xsdz.8 denominator; populated for both A/Bs since the tap always runs).
+    var observedSpans: Int = 0
+
+    /// Fold one episode's audio-forensics tap counts into the arm total.
+    mutating func addAudioForensics(_ counts: BrandAppearanceChannelFireCounts) {
+        audioForensicsFiredSpans += counts.audioForensicsFiredSpans
+        observedSpans += counts.observedSpans
+    }
+
+    /// Fold one episode's temporal-reg observer counts into the arm total.
+    mutating func addTemporalReg(_ counts: TemporalRegularizationFireCounts) {
+        temporalRegPenaltyAppliedSpans += counts.penaltyAppliedSpans
+        temporalRegCandidateSpans += counts.candidateSpans
+    }
+}
+
+// MARK: - Actempo single-signal A/B report (playhead-actempo)
+
+/// A readable, serializable summary of a single-signal actempo A/B (2 arms:
+/// baseline + treatment). Pure value type, structurally a sibling of
+/// `BrandAppearanceSweepReport` / `FragilitySweepReport`: one row per
+/// `ActempoArm`, baseline first, the treatment arm's deltas measured vs the
+/// baseline. Reuses Phase A's `SpanF1` / `FusionLiftResult` scorers verbatim — no
+/// reimplementation. Each row carries the per-signal FIRE counts so a null lift
+/// is interpretable.
+///
+/// "Delta" is `treatment − baseline`; a NEGATIVE `falsePositives` movement is the
+/// goal (fewer FPs) for these precision signals. Undefined metrics propagate to
+/// `nil` (never a misleading 0.0). The baseline arm's own deltas are zero.
+struct ActempoSweepReport: Sendable, Codable, Equatable {
+
+    /// One arm's raw counts + metrics + fire tally + delta-vs-baseline.
+    struct ArmRow: Sendable, Codable, Equatable {
+        let arm: String
+        let signalEnabled: Bool
+        let groundTruthSpans: Int
+        let detectedSpans: Int
+        let truePositives: Int
+        let falsePositives: Int
+        let misses: Int
+        let spanPrecision: Double?
+        let spanRecall: Double?
+        let spanF1: Double?
+        let coveragePrecision: Double?
+        let coverageRecall: Double?
+        // Per-signal fire instrumentation (so a null lift is interpretable).
+        let audioForensicsFiredSpans: Int
+        let temporalRegPenaltyAppliedSpans: Int
+        let temporalRegCandidateSpans: Int
+        let observedSpans: Int
+        // Deltas vs baseline (count-based span lens).
+        let truePositivesDelta: Int
+        let falsePositivesDelta: Int
+        let missesDelta: Int
+        let spanPrecisionDelta: Double?
+        let spanRecallDelta: Double?
+        let spanF1Delta: Double?
+        // Deltas vs baseline (seconds-based coverage lens).
+        let coveragePrecisionDelta: Double?
+        let coverageRecallDelta: Double?
+        let coverageF1Delta: Double?
+    }
+
+    /// Which precision signal this A/B measured (so the JSON is self-describing).
+    let signal: String
+    let episodeCount: Int
+    /// Rows in the order the arms were RUN, baseline first.
+    let rows: [ArmRow]
+
+    /// Build the report over EXACTLY the arms in `arms`, in the order given
+    /// (baseline first). The single-signal A/B passes run `[.baseline, .treatment]`.
+    /// `arms` MUST start with `.baseline` (it anchors every delta) and the
+    /// dictionaries MUST contain an entry for each arm in `arms`.
+    init(
+        signal: ActempoSignal,
+        episodeCount: Int,
+        arms: [ActempoArm],
+        accumulators: [ActempoArm: FusionLiftModeAccumulator],
+        fireTallies: [ActempoArm: ActempoFireTally]
+    ) {
+        self.signal = signal.rawValue
+        self.episodeCount = episodeCount
+
+        let baselineAcc = accumulators[.baseline] ?? FusionLiftModeAccumulator()
+        let baselineSpan = baselineAcc.spanF1()
+        let baselineSummary = baselineAcc.summary()
+
+        self.rows = arms.map { arm in
+            let acc = accumulators[arm] ?? FusionLiftModeAccumulator()
+            let span = acc.spanF1()
+            let summary = acc.summary()
+            let fire = fireTallies[arm] ?? ActempoFireTally()
+
+            // FusionLiftResult names its sides off/enabled; off = baseline,
+            // enabled = this arm, so the delta reads `arm − baseline`.
+            let spanLift = FusionLiftResult(off: baselineSpan, enabled: span)
+            let coverageLift = FusionLiftResult(off: baselineSummary, enabled: summary)
+
+            return ArmRow(
+                arm: arm.rawValue,
+                signalEnabled: arm.signalEnabled,
+                groundTruthSpans: acc.groundTruth.count,
+                detectedSpans: acc.detections.count,
+                truePositives: span.truePositives,
+                falsePositives: span.falsePositives,
+                misses: span.misses,
+                spanPrecision: span.precision,
+                spanRecall: span.recall,
+                spanF1: span.f1,
+                coveragePrecision: summary.coveragePrecision,
+                coverageRecall: summary.coverageRecall,
+                audioForensicsFiredSpans: fire.audioForensicsFiredSpans,
+                temporalRegPenaltyAppliedSpans: fire.temporalRegPenaltyAppliedSpans,
+                temporalRegCandidateSpans: fire.temporalRegCandidateSpans,
+                observedSpans: fire.observedSpans,
+                truePositivesDelta: span.truePositives - baselineSpan.truePositives,
+                falsePositivesDelta: span.falsePositives - baselineSpan.falsePositives,
+                missesDelta: span.misses - baselineSpan.misses,
+                spanPrecisionDelta: spanLift.precisionDelta,
+                spanRecallDelta: spanLift.recallDelta,
+                spanF1Delta: spanLift.f1Delta,
+                coveragePrecisionDelta: coverageLift.precisionDelta,
+                coverageRecallDelta: coverageLift.recallDelta,
+                coverageF1Delta: coverageLift.f1Delta
+            )
+        }
+    }
+
+    /// Render a fixed-width, human-readable table for the test log, including a
+    /// fire-count block so a null lift is interpretable.
+    func table() -> String {
+        func fmt(_ value: Double?) -> String {
+            guard let value else { return "n/a" }
+            return String(format: "%.4f", value)
+        }
+        func signed(_ value: Double?) -> String {
+            guard let value else { return "n/a" }
+            return String(format: "%+.4f", value)
+        }
+        func signedInt(_ value: Int) -> String { String(format: "%+d", value) }
+
+        var lines: [String] = [
+            "=== Actempo Single-Signal A/B (\(signal)) ===",
+            "episodes scored: \(episodeCount)",
+            "arm          GT  det   TP  FP  miss   spanP    spanR   spanF1   covP     covR",
+        ]
+        for row in rows {
+            lines.append(
+                "\(armLabel(row.arm))\(pad(row.groundTruthSpans, 4))\(pad(row.detectedSpans, 5))\(pad(row.truePositives, 5))\(pad(row.falsePositives, 4))\(pad(row.misses, 6))  \(col(fmt(row.spanPrecision)))\(col(fmt(row.spanRecall)))\(col(fmt(row.spanF1)))\(col(fmt(row.coveragePrecision)))\(col(fmt(row.coverageRecall)))"
+            )
+        }
+        lines.append("--- treatment delta (treatment − baseline) ---")
+        for row in rows where row.arm != ActempoArm.baseline.rawValue {
+            lines.append(
+                "\(armLabel(row.arm)) TPΔ=\(signedInt(row.truePositivesDelta)) FPΔ=\(signedInt(row.falsePositivesDelta)) missΔ=\(signedInt(row.missesDelta)) | span pΔ=\(signed(row.spanPrecisionDelta)) rΔ=\(signed(row.spanRecallDelta)) f1Δ=\(signed(row.spanF1Delta)) | cov pΔ=\(signed(row.coveragePrecisionDelta)) rΔ=\(signed(row.coverageRecallDelta))"
+            )
+        }
+        lines.append("--- fire instrumentation (did the signal fire?) ---")
+        for row in rows {
+            lines.append(
+                "\(armLabel(row.arm)) spans=\(row.observedSpans) | xsdz.8 audioForensics fired=\(row.audioForensicsFiredSpans) | xsdz.10 penaltyApplied=\(row.temporalRegPenaltyAppliedSpans)/\(row.temporalRegCandidateSpans)"
             )
         }
         return lines.joined(separator: "\n")
