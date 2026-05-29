@@ -983,6 +983,31 @@ actor AdDetectionService {
     /// change any gate.
     private let temporalRegularizationObserver: TemporalRegularizationObserver?
 
+    /// playhead-fbsignals.9 fire instrumentation: optional observation-only sink
+    /// that records, per asset, how many candidate spans the xsdz.9 HARD-NEGATIVE
+    /// suppression actually moved (the NON-ledger half of cross-episode memory; the
+    /// positive `.crossEpisodeMemory` boost is counted by the channel tap instead).
+    /// When nil (the production default — PlayheadRuntime never constructs one), the
+    /// fire site at the suppression step is a no-op, so the decision output is
+    /// byte-identical and there is zero footprint. The cross-episode-memory live A/B
+    /// injects a live observer so a null lift is interpretable (with an EMPTY
+    /// cold-start bank the expected fire count is 0). Mirrors the
+    /// `temporalRegularizationObserver` nil-default pattern; it NEVER feeds back into
+    /// the decision, so it cannot change any gate.
+    private let negativeBankSuppressionObserver: NegativeBankSuppressionObserver?
+
+    /// playhead-fbsignals.11 fire instrumentation: optional observation-only sink
+    /// that records, per asset, the per-show OFFSET the xsdz.11 controller resolved
+    /// for the backfill and how many `.standard`-track spans the offset actually
+    /// shifted the effective auto-skip threshold for. When nil (the production
+    /// default — PlayheadRuntime never constructs one), both fire sites are no-ops,
+    /// so the decision output is byte-identical and there is zero footprint. The
+    /// per-show-threshold live A/B injects a live observer so a null lift is
+    /// interpretable (with an EMPTY cold-start controller the resolved offset is
+    /// always 0). Mirrors the `temporalRegularizationObserver` nil-default pattern;
+    /// it NEVER feeds back into the decision, so it cannot change any gate.
+    private let perShowThresholdOffsetObserver: PerShowThresholdOffsetObserver?
+
     /// Phase 6.5 (playhead-4my.16): optional skip orchestrator. When non-nil, eligible
     /// fusion decisions are forwarded after each backfill run, enabling Phase 7
     /// (UserCorrections) to have banner impressions to correct against.
@@ -1365,6 +1390,8 @@ actor AdDetectionService {
         fragilityDiagnosticObserver: FragilityDiagnosticObserver? = nil,
         brandAppearanceChannelTapObserver: BrandAppearanceChannelTapObserver? = nil,
         temporalRegularizationObserver: TemporalRegularizationObserver? = nil,
+        negativeBankSuppressionObserver: NegativeBankSuppressionObserver? = nil,
+        perShowThresholdOffsetObserver: PerShowThresholdOffsetObserver? = nil,
         skipOrchestrator: SkipOrchestrator? = nil,
         adCatalogStore: AdCatalogStore? = nil,
         negativeFingerprintBank: NegativeFingerprintBank? = nil,
@@ -1396,6 +1423,8 @@ actor AdDetectionService {
         self.fragilityDiagnosticObserver = fragilityDiagnosticObserver
         self.brandAppearanceChannelTapObserver = brandAppearanceChannelTapObserver
         self.temporalRegularizationObserver = temporalRegularizationObserver
+        self.negativeBankSuppressionObserver = negativeBankSuppressionObserver
+        self.perShowThresholdOffsetObserver = perShowThresholdOffsetObserver
         self.skipOrchestrator = skipOrchestrator
         self.adCatalogStore = adCatalogStore
         self.negativeFingerprintBank = negativeFingerprintBank
@@ -2866,6 +2895,19 @@ actor AdDetectionService {
         // user corrections lives in `SkipOrchestrator`; here we only READ.
         let perShowThresholdOffset = await resolvePerShowThresholdOffset(showId: catalogShowId)
 
+        // playhead-fbsignals.11 fire instrumentation (behavior-neutral): record the
+        // per-show OFFSET the controller resolved for this backfill. `nil` in
+        // production ⇒ no-op (no record), so this is byte-identical to
+        // pre-fbsignals behavior. It NEVER feeds back into the decision; the offset
+        // it records is the SAME value the gate below reads. With an EMPTY
+        // cold-start controller store this resolved offset is always 0.
+        if let perShowThresholdOffsetObserver {
+            await perShowThresholdOffsetObserver.recordResolvedOffset(
+                assetId: analysisAssetId,
+                offset: perShowThresholdOffset
+            )
+        }
+
         // playhead-2hpn: resolve the per-show music-bed profile ONCE per
         // backfill so every span sees the same snapshot. The flag-off
         // path skips the lookup entirely (byte-identical to pre-2hpn).
@@ -3470,12 +3512,14 @@ actor AdDetectionService {
             // or nothing aligned above threshold, so this is byte-identical to
             // pre-xsdz.9 in those cases. The eligibility gate and promotion
             // track are preserved verbatim — scores stay honest.
+            var negativeBankDidSuppress = false
             if let negativeMatch {
                 let suppressed = crossEpisodeMemoryEvaluator.suppress(
                     skipConfidence: decision.skipConfidence,
                     with: negativeMatch
                 )
                 if suppressed != decision.skipConfidence {
+                    negativeBankDidSuppress = true
                     logger.debug(
                         "Backfill: [xsdz.9] negative-bank suppression span=\(refinedSpan.id, privacy: .public) sim=\(negativeMatch.similarity, format: .fixed(precision: 3)) skipConfidence \(decision.skipConfidence, format: .fixed(precision: 3)) → \(suppressed, format: .fixed(precision: 3))"
                     )
@@ -3486,6 +3530,23 @@ actor AdDetectionService {
                         promotionTrack: decision.promotionTrack
                     )
                 }
+            }
+
+            // playhead-fbsignals.9 fire instrumentation (behavior-neutral): when a
+            // bank is actually wired for the suppression READ (flag on AND a bank
+            // present — the exact gate the bank read above used), record this span
+            // as a candidate and whether the suppression moved its `skipConfidence`.
+            // `nil` in production ⇒ no-op (no record), so this is byte-identical to
+            // pre-fbsignals behavior. It NEVER feeds back into the decision; it only
+            // records what the suppression step already computed. With an EMPTY
+            // cold-start bank `negativeBankDidSuppress` is always false.
+            if let negativeBankSuppressionObserver,
+               config.crossEpisodeMemoryEnabled,
+               negativeFingerprintBank != nil {
+                await negativeBankSuppressionObserver.record(
+                    assetId: analysisAssetId,
+                    didSuppress: negativeBankDidSuppress
+                )
             }
 
             // playhead-xsdz.10: STOP per-span processing here and collect the
@@ -3632,6 +3693,21 @@ actor AdDetectionService {
                 )
             } else {
                 autoSkipThreshold = baseAutoSkipThreshold
+            }
+
+            // playhead-fbsignals.11 fire instrumentation (behavior-neutral): when the
+            // feature is on, record this span as a gate candidate and whether the
+            // offset actually SHIFTED the effective threshold the gate used
+            // (`autoSkipThreshold != baseAutoSkipThreshold` — the EXACT effect the
+            // gate above applied). `nil` in production ⇒ no-op (no record), so this
+            // is byte-identical to pre-fbsignals behavior. It NEVER feeds back into
+            // the decision; it only records what the gate already computed. With an
+            // EMPTY cold-start controller the resolved offset is 0, so no span shifts.
+            if let perShowThresholdOffsetObserver, config.perShowThresholdControlEnabled {
+                await perShowThresholdOffsetObserver.recordSpan(
+                    assetId: analysisAssetId,
+                    didShiftThreshold: autoSkipThreshold != baseAutoSkipThreshold
+                )
             }
             let policyAction: SkipPolicyAction
             if (rawPolicyAction == .detectOnly || rawPolicyAction == .logOnly),

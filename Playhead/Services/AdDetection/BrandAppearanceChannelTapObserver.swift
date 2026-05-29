@@ -21,6 +21,15 @@
 // pre-suppression `ledger` at the EXACT same fire site. No new fire site or
 // production hook is needed; the channel just adds one more counted source.
 //
+// playhead-fbsignals.9: the same applies to the xsdz.9 cross-episode "memory"
+// POSITIVE boost (`.crossEpisodeMemory`), which is also a ledger entry tallied
+// from the EXACT same pre-suppression `ledger` at the EXACT same fire site. The
+// channel adds one more counted source for that boost. (The HARD-NEGATIVE
+// SUPPRESSION half of xsdz.9 is NOT a ledger entry — it is a post-fusion
+// multiplicative penalty on `skipConfidence`, so its fire is counted by the
+// separate `NegativeBankSuppressionObserver`, mirroring how the xsdz.10
+// temporal-reg penalty uses `TemporalRegularizationObserver`.)
+//
 // Contract (mirrors `FragilityDiagnosticObserver` / `RegionShadowObserver` /
 // `Phase5ProjectorObserver`):
 //   • Compiled in all configurations. The fire site is a no-op when the
@@ -50,6 +59,9 @@ struct BrandAppearanceChannelFireCounts: Sendable, Equatable {
     /// Number of decoded spans whose ledger carried a strictly-positive
     /// `.audioForensics` entry (xsdz.8 fired).
     var audioForensicsFiredSpans: Int = 0
+    /// Number of decoded spans whose ledger carried a strictly-positive
+    /// `.crossEpisodeMemory` entry (xsdz.9 POSITIVE-boost fired).
+    var crossEpisodeMemoryFiredSpans: Int = 0
     /// Total decoded spans the observer saw for this asset (the denominator).
     var observedSpans: Int = 0
 }
@@ -87,6 +99,9 @@ actor BrandAppearanceChannelTapObserver {
         }
         if ledger.contains(where: { $0.source == .audioForensics && $0.weight > 0 }) {
             tally.audioForensicsFiredSpans += 1
+        }
+        if ledger.contains(where: { $0.source == .crossEpisodeMemory && $0.weight > 0 }) {
+            tally.crossEpisodeMemoryFiredSpans += 1
         }
         counts[assetId] = tally
     }
