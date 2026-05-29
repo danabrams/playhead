@@ -1,17 +1,25 @@
 // BrandAppearanceChannelTapObserver.swift
 // playhead-brandab fire instrumentation:
 //
-// Observation-only sink that records, per decoded span, whether the two
-// "brand-appearance" precision channels emitted a ledger entry for that span:
+// Observation-only sink that records, per decoded span, whether a set of
+// LEDGER-ENTRY precision channels emitted an entry for that span:
 //   • playhead-xsdz.12 — rhetorical act-sequence grammar (`.rhetoricalGrammar`).
 //   • playhead-xsdz.13 — cross-show syndication (`.crossShowSyndication`).
+//   • playhead-xsdz.8  — composite audio-forensics boundary (`.audioForensics`).
 //
-// The brand-appearance live A/B (`BrandAppearanceLiveABTests`) needs this so a
-// NULL result is interpretable: "metrics identical to baseline" is ambiguous —
+// The brand-appearance live A/B (`BrandAppearanceLiveABTests`) and the
+// audio-forensics live A/B (`AudioForensicsTemporalRegLiveABTests`) need this so
+// a NULL result is interpretable: "metrics identical to baseline" is ambiguous —
 // did the channel never fire, or fire-but-no-effect? Tallying how many spans
 // actually received each channel's evidence entry disambiguates the two. The
 // fire site reads the SAME pre-suppression `ledger` the decision is built from,
 // so a recorded fire is exactly "this channel produced an entry for this span".
+//
+// playhead-actempo.8: this tap is the cheapest correct fire mechanism for the
+// xsdz.8 audio-forensics channel too, because `.audioForensics` is — like the two
+// brand-appearance signals — a ledger entry tallied from the EXACT same
+// pre-suppression `ledger` at the EXACT same fire site. No new fire site or
+// production hook is needed; the channel just adds one more counted source.
 //
 // Contract (mirrors `FragilityDiagnosticObserver` / `RegionShadowObserver` /
 // `Phase5ProjectorObserver`):
@@ -39,6 +47,9 @@ struct BrandAppearanceChannelFireCounts: Sendable, Equatable {
     /// Number of decoded spans whose ledger carried a strictly-positive
     /// `.crossShowSyndication` entry (xsdz.13 fired).
     var crossShowSyndicationFiredSpans: Int = 0
+    /// Number of decoded spans whose ledger carried a strictly-positive
+    /// `.audioForensics` entry (xsdz.8 fired).
+    var audioForensicsFiredSpans: Int = 0
     /// Total decoded spans the observer saw for this asset (the denominator).
     var observedSpans: Int = 0
 }
@@ -73,6 +84,9 @@ actor BrandAppearanceChannelTapObserver {
         }
         if ledger.contains(where: { $0.source == .crossShowSyndication && $0.weight > 0 }) {
             tally.crossShowSyndicationFiredSpans += 1
+        }
+        if ledger.contains(where: { $0.source == .audioForensics && $0.weight > 0 }) {
+            tally.audioForensicsFiredSpans += 1
         }
         counts[assetId] = tally
     }

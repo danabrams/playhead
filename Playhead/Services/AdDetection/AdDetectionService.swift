@@ -970,6 +970,19 @@ actor AdDetectionService {
     /// the decision, so it cannot change any gate.
     private let brandAppearanceChannelTapObserver: BrandAppearanceChannelTapObserver?
 
+    /// playhead-actempo.10 fire instrumentation: optional observation-only sink
+    /// that records, per asset, how many candidate detections the xsdz.10
+    /// temporal-regularization pass actually changed (penalty applied). When nil
+    /// (the production default — PlayheadRuntime never constructs one), the fire
+    /// site after the regularization pass is a no-op, so the decision output is
+    /// byte-identical and there is zero footprint. The temporal-reg live A/B
+    /// injects a live observer so a null lift is interpretable (did the penalty
+    /// pass move any span, or fire-but-no-net-effect?). Mirrors the
+    /// `fragilityDiagnosticObserver` / `brandAppearanceChannelTapObserver`
+    /// nil-default pattern; it NEVER feeds back into the decision, so it cannot
+    /// change any gate.
+    private let temporalRegularizationObserver: TemporalRegularizationObserver?
+
     /// Phase 6.5 (playhead-4my.16): optional skip orchestrator. When non-nil, eligible
     /// fusion decisions are forwarded after each backfill run, enabling Phase 7
     /// (UserCorrections) to have banner impressions to correct against.
@@ -1351,6 +1364,7 @@ actor AdDetectionService {
         phase5ProjectorObserver: Phase5ProjectorObserver? = nil,
         fragilityDiagnosticObserver: FragilityDiagnosticObserver? = nil,
         brandAppearanceChannelTapObserver: BrandAppearanceChannelTapObserver? = nil,
+        temporalRegularizationObserver: TemporalRegularizationObserver? = nil,
         skipOrchestrator: SkipOrchestrator? = nil,
         adCatalogStore: AdCatalogStore? = nil,
         negativeFingerprintBank: NegativeFingerprintBank? = nil,
@@ -1381,6 +1395,7 @@ actor AdDetectionService {
         self.phase5ProjectorObserver = phase5ProjectorObserver
         self.fragilityDiagnosticObserver = fragilityDiagnosticObserver
         self.brandAppearanceChannelTapObserver = brandAppearanceChannelTapObserver
+        self.temporalRegularizationObserver = temporalRegularizationObserver
         self.skipOrchestrator = skipOrchestrator
         self.adCatalogStore = adCatalogStore
         self.negativeFingerprintBank = negativeFingerprintBank
@@ -3539,6 +3554,21 @@ actor AdDetectionService {
                         promotionTrack: current.promotionTrack
                     )
                 }
+            }
+
+            // playhead-actempo.10 fire instrumentation (behavior-neutral): record
+            // how many candidate detections the pass actually changed
+            // (`adjustedById.count` is exactly the set of spans whose
+            // `Adjustment.changed` was true) out of the candidates it ran over.
+            // `nil` in production ⇒ no-op (no record), so this is byte-identical to
+            // pre-actempo behavior. It NEVER feeds back into the decision; it only
+            // records the count the pass already computed.
+            if let temporalRegularizationObserver {
+                await temporalRegularizationObserver.record(
+                    assetId: analysisAssetId,
+                    candidateSpans: pendingDecisions.count,
+                    penaltyAppliedSpans: adjustedById.count
+                )
             }
         }
 
