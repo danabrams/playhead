@@ -958,6 +958,18 @@ actor AdDetectionService {
     /// it NEVER feeds back into the decision, so it cannot change any gate.
     private let fragilityDiagnosticObserver: FragilityDiagnosticObserver?
 
+    /// playhead-brandab fire instrumentation: optional observation-only sink that
+    /// tallies, per decoded span, whether the two brand-appearance precision
+    /// channels (`.rhetoricalGrammar` / `.crossShowSyndication`) emitted a ledger
+    /// entry. When nil (the production default — PlayheadRuntime never constructs
+    /// one), the tap fire site in the decision path is a no-op, so the decision
+    /// output is byte-identical and there is zero footprint. The brand-appearance
+    /// live A/B injects a live observer so a null lift is interpretable (did the
+    /// channel never fire, or fire-but-no-effect?). Mirrors the
+    /// `fragilityDiagnosticObserver` nil-default pattern; it NEVER feeds back into
+    /// the decision, so it cannot change any gate.
+    private let brandAppearanceChannelTapObserver: BrandAppearanceChannelTapObserver?
+
     /// Phase 6.5 (playhead-4my.16): optional skip orchestrator. When non-nil, eligible
     /// fusion decisions are forwarded after each backfill run, enabling Phase 7
     /// (UserCorrections) to have banner impressions to correct against.
@@ -1338,6 +1350,7 @@ actor AdDetectionService {
         regionShadowObserver: RegionShadowObserver? = nil,
         phase5ProjectorObserver: Phase5ProjectorObserver? = nil,
         fragilityDiagnosticObserver: FragilityDiagnosticObserver? = nil,
+        brandAppearanceChannelTapObserver: BrandAppearanceChannelTapObserver? = nil,
         skipOrchestrator: SkipOrchestrator? = nil,
         adCatalogStore: AdCatalogStore? = nil,
         negativeFingerprintBank: NegativeFingerprintBank? = nil,
@@ -1367,6 +1380,7 @@ actor AdDetectionService {
         self.regionShadowObserver = regionShadowObserver
         self.phase5ProjectorObserver = phase5ProjectorObserver
         self.fragilityDiagnosticObserver = fragilityDiagnosticObserver
+        self.brandAppearanceChannelTapObserver = brandAppearanceChannelTapObserver
         self.skipOrchestrator = skipOrchestrator
         self.adCatalogStore = adCatalogStore
         self.negativeFingerprintBank = negativeFingerprintBank
@@ -3285,6 +3299,19 @@ actor AdDetectionService {
                 crossShowSyndicationEntries: crossShowSyndicationEntries,
                 episodeDuration: episodeDuration
             )
+
+            // playhead-brandab fire instrumentation (behavior-neutral): tally
+            // whether the two brand-appearance channels emitted an entry for this
+            // span, reading the SAME pre-suppression `ledger` the decision builds
+            // from. `nil` in production ⇒ no-op (no tally), so this is
+            // byte-identical to pre-brandab behavior. It NEVER feeds back into the
+            // decision; it only records what the channels already produced.
+            if let brandAppearanceChannelTapObserver {
+                await brandAppearanceChannelTapObserver.record(
+                    assetId: analysisAssetId,
+                    ledger: ledger
+                )
+            }
 
             // Phase ef2.4.6: FM suppression — targeted downweight of weak evidence
             // when FM strongly says noAds with consensus. Applied after ledger build
