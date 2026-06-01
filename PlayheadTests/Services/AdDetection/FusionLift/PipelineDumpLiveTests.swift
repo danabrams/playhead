@@ -75,7 +75,12 @@
 //             "skipConfidence": 0.78,
 //             "decisionState": "...",
 //             "eligibilityGate": "...",
-//             "promotionTrack": null }, ...
+//             "wasSkipped": false,
+//             // promotionTrack / boundaryRefinement* keys appear ONLY
+//             // when non-nil; default JSONEncoder strategy omits nil
+//             // optionals, matching the pre-existing wire shape.
+//             "boundaryRefinementStartAdjustment": -0.75,
+//             "boundaryRefinementEndAdjustment": 1.25 }, ...
 //         ]
 //       }, ...
 //     ],
@@ -89,6 +94,33 @@
 // culprit)? The list mirrors what `FragilityDiagnosticObserver` already
 // records for every span; only the JSON encoding is new. The pre-existing
 // `candidateDecodedSpans` int field is preserved for backward compatibility.
+//
+// `wasSkipped`, `boundaryRefinementStartAdjustment`, and
+// `boundaryRefinementEndAdjustment` were added 2026-06-01 as a SECOND
+// playhead-4xqf extension targeting the FUSION_DROP suspects from PR #207's
+// code-path map.
+//   • `wasSkipped` (Bool) — the AdWindow.wasSkipped flag persisted on the
+//     store row. Captures the real playback signal independent of
+//     `decisionState`: an eligibility-gate demotion to `blockedByEvidenceQuorum`
+//     produces a `.candidate` decisionState, but the actual auto-skip toggle
+//     lives on this flag. Pairing the two answers "did the demotion change
+//     what the user would have heard?".
+//   • `boundaryRefinementStartAdjustment` / `boundaryRefinementEndAdjustment`
+//     (Double?) — the start/end deltas (seconds) that
+//     `BoundaryRefiner.computeAdjustments` (legacy resolver, the same path
+//     `applyBoundaryRefinement` invokes) returns when re-fed the PERSISTED
+//     AdWindow bounds against the same `featureWindows` the production run
+//     used. Under normal flow these are ~0 (the persisted bounds are
+//     post-refinement); a non-zero value here flags that production's
+//     refinement choice diverged from the legacy snap that would otherwise
+//     have applied — the BracketAware path took an alternate snap or further
+//     adjustments are available. OMITTED from the encoded object when both
+//     deltas are zero AND when `featureWindows.count < 3` (BoundaryRefiner's
+//     own guard) — default `JSONEncoder` strategy elides nil optionals,
+//     matching the pre-existing handling of `promotionTrack`. Emitted as a
+//     Double otherwise. Consumers read via `dict.get(key)` so absent and
+//     null are observationally equivalent. This is a TEST-ONLY re-derivation;
+//     production code is untouched.
 //
 // NOTE on `promotionTrack`: `PromotionTrack` is NOT persisted on the
 // `AdWindow` row — it lives on the in-flight `DecisionResult`. The store can
@@ -215,6 +247,25 @@ private struct DumpAdWindow: Encodable {
     /// Always `nil` in this dump — `PromotionTrack` is not persisted on
     /// `AdWindow`. Emitted to keep the schema stable for the orchestrator.
     let promotionTrack: String?
+    /// `AdWindow.wasSkipped` flag on the persisted row. Added 2026-06-01
+    /// for playhead-4xqf eligibility-gate-demotion investigation: this is
+    /// the actual playback signal (auto-skip vs not), independent of
+    /// `decisionState`. Pairing the two answers "did a quorum demotion
+    /// flip what the user would have heard?".
+    let wasSkipped: Bool
+    /// Re-derived legacy `BoundaryRefiner.computeAdjustments` start delta
+    /// (seconds) when fed the PERSISTED AdWindow bounds + the same
+    /// `featureWindows` production used. Added 2026-06-01 for playhead-4xqf
+    /// boundary-refinement suspect. `nil` when both deltas are zero (the
+    /// expected normal case — persisted bounds are already post-refinement)
+    /// AND when `featureWindows.count < 3` (BoundaryRefiner's own guard).
+    /// A non-null value flags that production's refinement choice (likely
+    /// the BracketAware path) diverged from the legacy snap, or that
+    /// further adjustments remain available.
+    let boundaryRefinementStartAdjustment: Double?
+    /// Re-derived legacy `BoundaryRefiner.computeAdjustments` end delta
+    /// (seconds). Same semantics as `boundaryRefinementStartAdjustment`.
+    let boundaryRefinementEndAdjustment: Double?
 }
 
 /// One candidate decoded span observed by the FragilityDiagnosticObserver
@@ -586,14 +637,53 @@ final class PipelineDumpLiveTests: XCTestCase {
 
         let dumpWindows: [DumpAdWindow] = windows
             .sorted { $0.startTime < $1.startTime }
-            .map {
-                DumpAdWindow(
-                    startTime: $0.startTime,
-                    endTime: $0.endTime,
-                    skipConfidence: $0.confidence,
-                    decisionState: $0.decisionState,
-                    eligibilityGate: $0.eligibilityGate,
-                    promotionTrack: nil
+            .map { window in
+                // playhead-4xqf FUSION_DROP probe: re-feed the PERSISTED
+                // AdWindow bounds back into the legacy
+                // `BoundaryRefiner.computeAdjustments` — the same path
+                // `applyBoundaryRefinement` uses — against the same
+                // `featureWindows` production used. Under normal flow
+                // these are ~0 (the persisted bounds are already
+                // post-refinement); a non-zero delta flags that the
+                // BracketAware path took an alternate snap or further
+                // adjustments remain available. Encoded as `null` when
+                // both deltas are zero AND when `featureWindows.count
+                // < 3` (BoundaryRefiner's own guard at the entry point);
+                // a non-nil Double otherwise so downstream consumers can
+                // distinguish "guarded out" / "agreement" from
+                // "divergence".
+                let (startAdj, endAdj): (Double, Double)
+                if featureWindows.count >= 3 {
+                    let result = BoundaryRefiner.computeAdjustments(
+                        windows: featureWindows,
+                        candidateStart: window.startTime,
+                        candidateEnd: window.endTime
+                    )
+                    startAdj = result.startAdjust
+                    endAdj = result.endAdjust
+                } else {
+                    startAdj = 0
+                    endAdj = 0
+                }
+                let dumpStartAdj: Double?
+                let dumpEndAdj: Double?
+                if startAdj == 0 && endAdj == 0 {
+                    dumpStartAdj = nil
+                    dumpEndAdj = nil
+                } else {
+                    dumpStartAdj = startAdj
+                    dumpEndAdj = endAdj
+                }
+                return DumpAdWindow(
+                    startTime: window.startTime,
+                    endTime: window.endTime,
+                    skipConfidence: window.confidence,
+                    decisionState: window.decisionState,
+                    eligibilityGate: window.eligibilityGate,
+                    promotionTrack: nil,
+                    wasSkipped: window.wasSkipped,
+                    boundaryRefinementStartAdjustment: dumpStartAdj,
+                    boundaryRefinementEndAdjustment: dumpEndAdj
                 )
             }
 
@@ -869,5 +959,192 @@ struct PipelineDumpEncodingTests {
         // values to document the EXPECTED invariant downstream readers
         // should assume holds in real dumps.
         #expect(list.count == (parsed["candidateDecodedSpans"] as? Int))
+    }
+
+    // MARK: - playhead-4xqf FUSION_DROP suspect fields
+    //
+    // The next three tests lock the wire shape for the 2026-06-01 extension:
+    // `wasSkipped`, `boundaryRefinementStartAdjustment`,
+    // `boundaryRefinementEndAdjustment`. The `dumpAdWindowRetainsPreExistingFields`
+    // test exists specifically as a regression guard — if a future refactor
+    // drops or renames an existing field (startTime / endTime / skipConfidence
+    // / decisionState / eligibilityGate / promotionTrack), `scripts/
+    // l2f-bd4xqf-analyze.py` and the dogfood-diagnostics consumers on main
+    // would break silently. Lock the schema here so the regression fails on
+    // the simulator before a 90-minute Catalyst run silently dumps an
+    // incompatible shape.
+
+    @Test("DumpAdWindow encodes wasSkipped=true and wasSkipped=false correctly")
+    func dumpAdWindowEncodesWasSkippedBothValues() throws {
+        // True case.
+        let skipped = DumpAdWindow(
+            startTime: 100.0,
+            endTime: 130.5,
+            skipConfidence: 0.92,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: true,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil
+        )
+        let skippedData = try JSONEncoder().encode(skipped)
+        let skippedParsed = try #require(
+            try JSONSerialization.jsonObject(with: skippedData) as? [String: Any]
+        )
+        // JSONSerialization decodes JSON booleans as NSNumber bridged to
+        // Bool — read via Bool? not Int? so the assertion is unambiguous.
+        #expect((skippedParsed["wasSkipped"] as? Bool) == true)
+
+        // False case — independently encoded to exercise both branches of
+        // the Bool encoder path (single-value containers can special-case
+        // either side).
+        let notSkipped = DumpAdWindow(
+            startTime: 200.0,
+            endTime: 230.5,
+            skipConfidence: 0.51,
+            decisionState: "candidate",
+            eligibilityGate: "blockedByEvidenceQuorum",
+            promotionTrack: nil,
+            wasSkipped: false,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil
+        )
+        let notSkippedData = try JSONEncoder().encode(notSkipped)
+        let notSkippedParsed = try #require(
+            try JSONSerialization.jsonObject(with: notSkippedData) as? [String: Any]
+        )
+        #expect((notSkippedParsed["wasSkipped"] as? Bool) == false)
+
+        // Defense in depth: the raw JSON text should literally contain
+        // `"wasSkipped":true` / `"wasSkipped":false`, not a quoted string
+        // or numeric form — downstream Python `json.load(...)` will surface
+        // a Python bool only if the wire form is a JSON bool.
+        let skippedJSON = try #require(String(data: skippedData, encoding: .utf8))
+        let notSkippedJSON = try #require(String(data: notSkippedData, encoding: .utf8))
+        #expect(skippedJSON.contains("\"wasSkipped\":true"))
+        #expect(notSkippedJSON.contains("\"wasSkipped\":false"))
+    }
+
+    @Test("DumpAdWindow omits nil boundary-refinement deltas and encodes non-nil ones as Double")
+    func dumpAdWindowEncodesBoundaryRefinementAdjustments() throws {
+        // Default `JSONEncoder` strategy is to OMIT nil-valued optional
+        // properties from the encoded object (it does NOT emit explicit
+        // `null` keys). This matches the pre-existing handling of
+        // `promotionTrack` and `eligibilityGate` in this dump — the
+        // downstream Python consumers (`scripts/l2f-bd4xqf-analyze.py`
+        // + the dogfood-diagnostics readers) use `dict.get(key)`, which
+        // returns `None` whether the key is absent or maps to `null`.
+        // Both cases are observationally equivalent at the consumer.
+        // Lock that contract here: nil → key absent; non-nil → key
+        // present as a Double.
+
+        // Nil case — the normal-flow shape: persisted bounds are already
+        // post-refinement, so re-feeding them yields zero deltas and the
+        // mapper records `nil`. The encoded object should have NEITHER
+        // key (consistent with how `promotionTrack: nil` is handled in
+        // every dump emitted so far).
+        let nilAdj = DumpAdWindow(
+            startTime: 100.0,
+            endTime: 130.5,
+            skipConfidence: 0.92,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: true,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil
+        )
+        let nilData = try JSONEncoder().encode(nilAdj)
+        let nilParsed = try #require(
+            try JSONSerialization.jsonObject(with: nilData) as? [String: Any]
+        )
+        // Keys must be ABSENT (not present with null), matching the
+        // default-encoder convention this schema has used since day one.
+        #expect(nilParsed["boundaryRefinementStartAdjustment"] == nil)
+        #expect(nilParsed["boundaryRefinementEndAdjustment"] == nil)
+        #expect(!nilParsed.keys.contains("boundaryRefinementStartAdjustment"))
+        #expect(!nilParsed.keys.contains("boundaryRefinementEndAdjustment"))
+
+        // Non-nil case — the divergence shape: production's refinement
+        // choice landed somewhere the legacy refiner thinks could be
+        // further snapped. Both positive (push right) and negative (pull
+        // left) deltas are exercised so a future "abs()" or "clip-to-
+        // positive" regression in the mapper would fail here.
+        let nonNilAdj = DumpAdWindow(
+            startTime: 100.0,
+            endTime: 130.5,
+            skipConfidence: 0.92,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: true,
+            boundaryRefinementStartAdjustment: -0.75,
+            boundaryRefinementEndAdjustment: 1.25
+        )
+        let nonNilData = try JSONEncoder().encode(nonNilAdj)
+        let nonNilParsed = try #require(
+            try JSONSerialization.jsonObject(with: nonNilData) as? [String: Any]
+        )
+        #expect((nonNilParsed["boundaryRefinementStartAdjustment"] as? Double) == -0.75)
+        #expect((nonNilParsed["boundaryRefinementEndAdjustment"] as? Double) == 1.25)
+        // Keys must now be PRESENT — flips the "absent when nil" rule.
+        #expect(nonNilParsed.keys.contains("boundaryRefinementStartAdjustment"))
+        #expect(nonNilParsed.keys.contains("boundaryRefinementEndAdjustment"))
+    }
+
+    @Test("DumpAdWindow preserves all pre-existing fields alongside the new ones")
+    func dumpAdWindowRetainsPreExistingFields() throws {
+        // Regression guard for the playhead-4xqf field-extension. The
+        // `scripts/l2f-bd4xqf-analyze.py` pinpoint script + the broader
+        // dogfood-diagnostics readers on main consume `startTime`,
+        // `endTime`, `skipConfidence`, `decisionState`, `eligibilityGate`,
+        // and `promotionTrack` by string key; if a future schema refactor
+        // drops or renames any of them, those scripts break silently. Lock
+        // the full key set here so the simulator-side hermetic test fails
+        // first.
+        let window = DumpAdWindow(
+            startTime: 123.4,
+            endTime: 234.5,
+            skipConfidence: 0.78,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: true,
+            boundaryRefinementStartAdjustment: 0.5,
+            boundaryRefinementEndAdjustment: nil
+        )
+        let data = try JSONEncoder().encode(window)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        // Non-nil keys are required. (Optional nil keys — `promotionTrack`
+        // and `boundaryRefinementEndAdjustment` here — are intentionally
+        // omitted by the default encoder; see the
+        // `dumpAdWindowEncodesBoundaryRefinementAdjustments` test for the
+        // rationale.) This still locks the wire shape: any drop or rename
+        // of a non-nil-valued field will surface here loudly.
+        let requiredKeys: Set<String> = [
+            "startTime", "endTime", "skipConfidence", "decisionState",
+            "eligibilityGate",
+            "wasSkipped",
+            "boundaryRefinementStartAdjustment",
+        ]
+        #expect(requiredKeys.isSubset(of: Set(parsed.keys)))
+        // Pre-existing values round-trip.
+        #expect((parsed["startTime"] as? Double) == 123.4)
+        #expect((parsed["endTime"] as? Double) == 234.5)
+        #expect((parsed["skipConfidence"] as? Double) == 0.78)
+        #expect((parsed["decisionState"] as? String) == "confirmed")
+        #expect((parsed["eligibilityGate"] as? String) == "autoSkip")
+        // promotionTrack: nil → key absent (matches every dump shipped so
+        // far). Lock the "absent, not null" wire form so a future change
+        // to JSONEncoder strategy (e.g. forced-null encoding) is caught.
+        #expect(!parsed.keys.contains("promotionTrack"))
+        // New values round-trip (mixed nil/non-nil pair — encoded
+        // independently, not as a 2-tuple).
+        #expect((parsed["wasSkipped"] as? Bool) == true)
+        #expect((parsed["boundaryRefinementStartAdjustment"] as? Double) == 0.5)
+        #expect(!parsed.keys.contains("boundaryRefinementEndAdjustment"))
     }
 }
