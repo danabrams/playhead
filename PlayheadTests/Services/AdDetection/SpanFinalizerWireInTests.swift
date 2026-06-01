@@ -210,12 +210,31 @@ struct SpanFinalizerWireInTests {
             "explicit-OFF arm produced \(windowsExplicit.count) windows; default arm produced \(windowsDefault.count) — flag OFF must be byte-identical"
         )
 
-        // Same boundaries (start, end) for each window. Confidence and
-        // decisionState are deterministic from the same inputs too, but
-        // bounds are the acceptance-criteria specific check.
+        // playhead-p56a R1 review: byte-identity OFF was originally
+        // start/end only. Tightened to assert every persisted field that
+        // the wire-in could plausibly mutate when the flag flips to ON —
+        // `confidence` (changes if the finalizer merges spans, taking
+        // max), `decisionState` (changes if the finalizer demotes via
+        // chapter penalty / action cap), `eligibilityGate` (same),
+        // `wasSkipped` (downstream of the policy action). If any of these
+        // diverges under flag OFF, the OFF path is not byte-identical to
+        // shipping behaviour and the gate's "production behaviour is
+        // unchanged" claim collapses. `confidence` is `Double`-typed; we
+        // pin exact equality because the OFF path performs zero floating-
+        // point math the ON path doesn't (it forwards the upstream value
+        // verbatim into `buildFusionAdWindow`).
         for (a, b) in zip(windowsExplicit, windowsDefault) {
             #expect(a.startTime == b.startTime, "startTime mismatch under flag OFF")
             #expect(a.endTime == b.endTime, "endTime mismatch under flag OFF")
+            #expect(a.confidence == b.confidence, "confidence mismatch under flag OFF — finalizer is OFF but the persisted skipConfidence differs")
+            #expect(a.decisionState == b.decisionState, "decisionState mismatch under flag OFF — finalizer is OFF but the persisted decisionState differs")
+            #expect(a.eligibilityGate == b.eligibilityGate, "eligibilityGate mismatch under flag OFF — finalizer is OFF but the persisted gate differs")
+            #expect(a.wasSkipped == b.wasSkipped, "wasSkipped mismatch under flag OFF — finalizer is OFF but the persisted playback signal differs")
+            #expect(a.boundaryState == b.boundaryState, "boundaryState mismatch under flag OFF")
+            #expect(a.detectorVersion == b.detectorVersion, "detectorVersion mismatch under flag OFF")
+            #expect(a.metadataSource == b.metadataSource, "metadataSource mismatch under flag OFF")
+            #expect(a.metadataConfidence == b.metadataConfidence, "metadataConfidence mismatch under flag OFF")
+            #expect(a.evidenceStartTime == b.evidenceStartTime, "evidenceStartTime mismatch under flag OFF")
         }
 
         // The constraint-trace map must be empty under flag OFF — no
@@ -268,6 +287,59 @@ struct SpanFinalizerWireInTests {
             countOn <= countOff,
             "flag ON produced MORE windows (\(countOn)) than flag OFF (\(countOff)) — SpanFinalizer should only keep, drop, or rewrite spans, never invent new ones"
         )
+    }
+
+    /// playhead-p56a R1 review: pins the END-TO-END trace-population
+    /// contract. The hand-crafted `wireInTranslationTripsMergeConstraint`
+    /// test below proves the finalizer fires the right constraints on
+    /// the right inputs; this test proves the runBackfill wire-in
+    /// actually populates `lastSpanFinalizerConstraintsBy{SpanId,WindowId}`
+    /// and that the per-window key resolves to a non-nil trace.
+    /// Constraint #6 (`policyOverrideApplied`) fires on EVERY kept span
+    /// because the wire-in's `(.unknown, .unknown)` translation maps to
+    /// `.detectOnly` and the finalizer's policy step always records the
+    /// override when the action is not `.autoSkipEligible` (residual
+    /// risk #6 from the implementer's self-review). Without this end-to-
+    /// end pin, a future refactor that broke the per-window stamp inside
+    /// the emission loop would only surface in the env-gated Catalyst
+    /// dump path — too late.
+    @Test("Flag ON end-to-end: at least one constraint fires on the clean fixture and stamps both trace maps")
+    func flagOnEndToEndStampsTraceMaps() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-p56a-on-e2e"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let service = makeService(store: store, spanFinalizerEnabled: true)
+
+        let chunks = makeAdSignalChunks(assetId: assetId)
+        try await service.runBackfill(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            podcastId: "podcast-test",
+            episodeDuration: 90.0
+        )
+
+        // The clean fixture produces at least one window (verified by the
+        // OFF baseline test) — flag ON keeps that window AND tracks the
+        // policy-override constraint trace on it. Both contracts must
+        // hold or the wire-in is silently dropping the trace.
+        let windows = try await store.fetchAdWindows(assetId: assetId)
+        try #require(windows.count >= 1, "fixture must produce at least one window for the trace pin to be meaningful")
+
+        let traceBySpan = await service.spanFinalizerConstraintsBySpanIdForTesting()
+        let traceByWindow = await service.spanFinalizerConstraintsByWindowIdForTesting()
+        #expect(!traceBySpan.isEmpty, "flag ON must populate the spanId trace map for kept spans")
+        #expect(!traceByWindow.isEmpty, "flag ON must populate the windowId trace map for emitted windows")
+
+        // Every entry in the spanId map must mirror in the windowId map
+        // (every span that survives finalization produces exactly one
+        // window per emission-loop iteration, modulo splits). The
+        // mirroring is what the dump path consumes.
+        for (_, trace) in traceByWindow {
+            #expect(
+                trace.contains(FinalizerConstraint.policyOverrideApplied.rawValue),
+                "every window stamped with a trace under (.unknown, .unknown) must record policyOverrideApplied — got \(trace)"
+            )
+        }
     }
 
     /// Direct test of the same `SpanFinalizer.finalize(...)` invocation the
