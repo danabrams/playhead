@@ -22,25 +22,33 @@ DecodedSpan(s)         "form runs → merge → split → snap → drop"
   ▼  [ Stage 2 ]  Playhead/Services/AdDetection/BackfillEvidenceFusion.swift
 DecisionResult         per-span ledger, fusion confidence, gate
   │
-  ▼  [ Stage 3 ]  Playhead/Services/AdDetection/AdDetectionService.swift:3467
-FragilityDiagnosticObserver.record(...)   ← captures spanStart/spanEnd recorded in pipeline-dump
+  ▼  [ Stage 3a ]  Playhead/Services/AdDetection/AdDetectionService.swift:3120-3155
+Boundary refinement (LIVE PATH):
+                              BracketAwareBoundaryRefiner.computeAdjustments(...) tried first
+                              → on .bracketRefined path: bracket-aware (startAdj, endAdj)
+                              → otherwise: legacy BoundaryRefiner.computeAdjustments(...) fallback
+                              (uses transcriptBoundaryHits for `[kgby]` snap)
+  │                           Produces `refinedSpan` (= the span recorded in Stage 3b)
+  ▼  [ Stage 3b ]  Playhead/Services/AdDetection/AdDetectionService.swift:3467
+FragilityDiagnosticObserver.record(...)   ← captures refinedSpan.startTime/endTime in pipeline-dump
   │                                          (i.e. `candidateDecodedSpanList[*].startTime/endTime`)
-  │                                          This is the POST-Stage-1, post-fusion REFINED span.
+  │                                          This is POST-decode, POST-boundary-refinement,
+  │                                          POST-fusion-confidence — but PRE-persist.
   ▼  [ Stage 4 ]  Playhead/Services/AdDetection/AdDetectionService.swift:5186
 buildFusionAdWindow → AdWindow              startTime/endTime taken VERBATIM from span (no shrink)
-  │
-  ▼  [ Stage 5, optional ]  Playhead/Services/AdDetection/AdDetectionService.swift:5219
-applyBoundaryRefinement → BoundaryRefiner.computeAdjustments(...)
-                                            CAN shrink or grow ± per acoustic break inside window
   │
   ▼
 store.insertAdWindow → AnalysisStore (SQLite)
                                             ← persisted as `adWindows[*]` in pipeline-dump
 ```
 
-The dump's `candidateDecodedSpanList` is recorded at Stage 3 (= refined span post-decode + post-fusion confidence).
+The dump's `candidateDecodedSpanList` is recorded at Stage 3b (= refined span, post-decode + post-refinement + post-fusion confidence).
 The dump's `adWindows` is the AnalysisStore row at the end.
-**The gap between them is Stages 4 + 5.**
+**The gap between Stage 3b and persist is ONLY confidence/state mapping — boundaries match verbatim.**
+
+The PR-#210 dump additions (`boundaryRefinementStartAdjustment` / `boundaryRefinementEndAdjustment` / `wasSkipped`) probe Stage 3a from the test side by re-running `BoundaryRefiner.computeAdjustments` against the persisted bounds + same `featureWindows`. A non-zero delta there is evidence the live refiner shrunk the span between decode and the recorded `refinedSpan`.
+
+> **Dead-code note** — corrected 2026-06-01: the private helper `applyBoundaryRefinement` at `AdDetectionService.swift:5219` (referenced in the original draft of this map) is itself unreachable. The live refinement path runs inline at 3120-3155 inside `runBackfill`'s per-span loop. `SpanFinalizer.swift` is also unreachable (verified in PR #209). FUSION_DROP investigation should target Stage 3a, not those two dead helpers.
 
 ---
 
@@ -63,21 +71,21 @@ The decoded span itself is already short. Look upstream of Stage 3.
 2. Add a DAI-aware merge policy: increase `mergeGapSeconds` to 6.0 conditionally when the surrounding region scores as a DAI candidate (cross-reference with rediff or acoustic-break density).
 3. Re-examine anchor density inside DAI blocks (separate issue — needs AtomEvidenceProjector trace).
 
-### FUSION_DROP (between Stages 3 and 5)
+### FUSION_DROP (the dump's recorded refined span IS wide enough but persisted AdWindow is narrow)
 
-The decoded span IS wide enough but the persisted AdWindow is narrow. Look at Stages 4–5.
+Since boundaries pass verbatim from refinedSpan → AdWindow (Stage 4 at `:5186` does no shrink), a FUSION_DROP verdict on PR #210's instrumented dump implies one of these is happening BEFORE Stage 3b records the span:
 
 | Suspect | File:Line | What to check |
 |---|---|---|
-| **`applyBoundaryRefinement` shrinks via acoustic snap** | `AdDetectionService.swift:5219` calling `BoundaryRefiner.computeAdjustments(...)` (or `BracketAwareBoundaryRefiner` at `BracketAwareBoundaryRefiner.swift:27`) | If the candidate window has a strong acoustic break a few seconds INSIDE either edge, refinement may pull the boundary inward. Verify by comparing pre/post-refinement bounds in a dump-extension. |
+| **Live boundary refinement shrinks via acoustic snap** | `AdDetectionService.swift:3120-3155` calling `BracketAwareBoundaryRefiner.computeAdjustments(...)` (primary) with `BoundaryRefiner.computeAdjustments(...)` fallback | If a strong acoustic break sits a few seconds INSIDE either edge, refinement may pull the boundary inward. **Already instrumented in PR #210**: `boundaryRefinementStartAdjustment` / `boundaryRefinementEndAdjustment` in the dump capture the delta the test re-derives against the persisted bounds. A non-zero delta directly indicts this stage. |
 | **Eligibility-gate demotion produces a smaller persisted action range** | `BackfillEvidenceFusion.swift:991` `metadataCorroborationGate()` (and lines 1043+ for FM-consensus/FM-acoustic variants) | `blockedByEvidenceQuorum` (`EvidenceLedgerEntry.swift:21`) doesn't shrink the AdWindow's startTime/endTime in `buildFusionAdWindow` (5186 — they're verbatim from `span`). So this isn't a direct boundary shrink, BUT it can demote `decisionState` to `.candidate`, which downstream views may render differently. Verify whether the AnalysisStore row reflects the original wide bounds even when gated. |
 | **`SpanFinalizer` — VERIFIED UNREACHABLE (eliminated as FUSION_DROP suspect 2026-06-01)** | `SpanFinalizer.swift` | Reachability investigation `docs/bd-4xqf-spanfinalizer-reachability-2026-06-01.md` confirms zero direct callers, zero indirect callers (no factory, generic, reflection, or DI path), and zero ever-added/ever-removed call sites in git history since the introducing commit `e5fb5151` (2026-04-15). Only invocations are in `PlayheadTests/.../SpanFinalizerTests.swift`. The file compiles into the Playhead target (`project.pbxproj:4505`) but is never invoked. Cannot be a FUSION_DROP cause. Follow-up: wire it (insertion point: between fusion at `AdDetectionService.swift:~2828` and `buildFusionAdWindow` at `:5186`) or remove it; tracked as a separate bead. |
 | **AdDecisionState recorded → wider window but `wasSkipped` only fires on the inner sub-span** | downstream of persist | If two overlapping ad windows are persisted and the player auto-skips the inner one but not the outer, the user STILL hears the unskipped portion. The boundary is right in the data but wrong in the playback action. Would explain why rediff says 150 s of ad audio plays even though the AdWindow row covers it. |
 
 **First-touch fix sites:**
-1. ~~Confirm SpanFinalizer reachability.~~ **DONE 2026-06-01** — verified UNREACHABLE; see `docs/bd-4xqf-spanfinalizer-reachability-2026-06-01.md`. Eliminated as a FUSION_DROP suspect; focus on (2) and (3).
-2. **Extend the pipeline dump to also record the BoundaryRefiner adjustment.** Same pattern as #201 — add `boundaryRefinementDelta` to `DumpAdWindow` so the analyzer can directly read whether refinement is shrinking.
-3. **Verify the playback action vs the persisted bounds.** This is the most-pernicious failure mode because the data looks right; only listening reveals it.
+1. ~~Confirm SpanFinalizer reachability.~~ **DONE 2026-06-01** — verified UNREACHABLE; see `docs/bd-4xqf-spanfinalizer-reachability-2026-06-01.md`. Eliminated as a FUSION_DROP suspect.
+2. ~~Extend the pipeline dump to record the BoundaryRefiner adjustment.~~ **DONE 2026-06-01** — PR #210 added `boundaryRefinementStartAdjustment` / `boundaryRefinementEndAdjustment` / `wasSkipped` to `DumpAdWindow`. Run the env-gated Catalyst dump to populate them on real data.
+3. **Verify the playback action vs the persisted bounds.** This is the most-pernicious failure mode because the data looks right; only listening reveals it. `wasSkipped: Bool` (also PR #210) is the playback signal; cross-reference with persisted bounds to catch "boundary right, action wrong" cases.
 
 ---
 
@@ -97,8 +105,7 @@ The analyzer's per-pair table will pinpoint episodes for each verdict; cross-ref
 ## Out-of-scope but worth a follow-up bead
 
 - **Atom anchor density inside known DAI ads.** If CAND_NARROW dominates, the boundary problem is partly an upstream coverage problem in `AtomEvidenceProjector` (atoms are only created at scored-lexicon hits). A DAI-aware atom-densification policy might be needed.
-- **`SpanFinalizer` status.** Either kill it or wire it. Limbo code is worse than either.
-- **`BracketAwareBoundaryRefiner`** vs the legacy `BoundaryRefiner` (legacy is referenced at line 5225). If the bracket-aware version is the production path, this map's Stage-5 references are wrong; verify.
+- **`SpanFinalizer` and `applyBoundaryRefinement` dead-code cleanup.** Both verified unreachable. Either wire them (insertion point for SpanFinalizer noted at `AdDetectionService.swift:~2828` per PR #209) or remove. Limbo code is worse than either. Should be a separate bead.
 
 ---
 
@@ -107,6 +114,7 @@ The analyzer's per-pair table will pinpoint episodes for each verdict; cross-ref
 - `AdDetectionService.swift` total: 7700+ lines.
 - `MinimalContiguousSpanDecoder.swift`: 163 lines (well-commented, single-file responsibility).
 - `SpanFinalizer.swift`: 440 lines; VERIFIED UNREACHABLE in production (only callers are tests). See `docs/bd-4xqf-spanfinalizer-reachability-2026-06-01.md`.
-- `FragilityDiagnosticObserver.swift`: 155 lines; production-nil-default, tap fires at 3467 in service file.
+- `applyBoundaryRefinement` at `AdDetectionService.swift:5219`: VERIFIED UNREACHABLE (no in-file callers). Live refinement path is the inline block at 3120-3155 inside `runBackfill`'s per-span loop.
+- `FragilityDiagnosticObserver.swift`: 155 lines; production-nil-default, tap fires at `AdDetectionService.swift:3467` (Stage 3b in the pipeline diagram above).
 
 Re-verify before acting; this file is a snapshot, not live.
