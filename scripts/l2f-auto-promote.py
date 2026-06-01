@@ -130,6 +130,10 @@ DRAFTS = REPO / "TestFixtures/Corpus/Drafts"
 ANNOTATIONS = REPO / "TestFixtures/Corpus/Annotations"
 MANIFEST = REPO / "TestFixtures/Corpus/Snapshots/manifest.json"
 DIAG_OUT = REPO / "playhead-dogfood-diagnostics-auto-promote.json"
+REJECTS_LOG = REPO / "TestFixtures/Corpus/Snapshots/audit-rejects.jsonl"
+REJECT_OVERLAP_TOLERANCE = 5.0  # seconds; a cluster within this margin of a
+                                 # rejected span is treated as the same span
+                                 # (boundary jitter between runs is normal)
 
 # Thresholds — see file docstring for rule definitions.
 # Comparisons use `>=` with a small EPS to absorb float-subtraction noise; a
@@ -183,6 +187,53 @@ def latest_pipeline_dump() -> tuple[pathlib.Path | None, dict[str, dict]]:
         return path, {}
     episodes = obj.get("episodes") or []
     return path, {e["episodeId"]: e for e in episodes if "episodeId" in e}
+
+
+def load_rejects() -> dict[str, list[tuple[float, float]]]:
+    """
+    Load TestFixtures/Corpus/Snapshots/audit-rejects.jsonl into a dict mapping
+    episodeId → list of (start, end) tuples that previous manual audit demoted.
+    Empty dict if file missing or empty. Malformed lines are skipped silently.
+    Records come from scripts/l2f-flag-false-promote.py.
+    """
+    if not REJECTS_LOG.exists():
+        return {}
+    out: dict[str, list[tuple[float, float]]] = {}
+    try:
+        for line in REJECTS_LOG.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            eid = rec.get("episodeId")
+            start = _to_float(rec.get("startSeconds"))
+            end = _to_float(rec.get("endSeconds"))
+            if not eid or start is None or end is None:
+                continue
+            out.setdefault(eid, []).append((start, end))
+    except OSError:
+        return {}
+    return out
+
+
+def _cluster_is_rejected(
+    c: "Cluster",
+    rejects: list[tuple[float, float]],
+) -> tuple[float, float] | None:
+    """
+    Return the matching reject tuple if cluster `c` overlaps any rejected span
+    (with ±REJECT_OVERLAP_TOLERANCE slack on both ends); None otherwise.
+    """
+    for rs, re in rejects:
+        # Inflate the reject window by tolerance, then test plain overlap.
+        rs_lo = rs - REJECT_OVERLAP_TOLERANCE
+        re_hi = re + REJECT_OVERLAP_TOLERANCE
+        if c.start < re_hi and c.end > rs_lo:
+            return (rs, re)
+    return None
 
 
 def find_episode_pairs() -> list[str]:
@@ -702,6 +753,7 @@ def process_episode(
     episode_id: str,
     pipeline_idx: dict[str, dict],
     manifest: dict[str, dict],
+    rejects_idx: dict[str, list[tuple[float, float]]] | None = None,
 ) -> dict:
     drafter = load_drafter_spans(episode_id)
     pipeline = load_pipeline_spans(episode_id, pipeline_idx)
@@ -711,7 +763,28 @@ def process_episode(
     rejected: list[dict] = []
     rule_counts: dict[str, int] = {"R1": 0, "R2": 0, "R3": 0}
     audit_counts: dict[int, int] = {1: 0, 3: 0}
+    rejects = (rejects_idx or {}).get(episode_id, [])
+    audit_rejected_count = 0
     for c in clusters:
+        # Manual-audit veto: if this cluster matches a previously rejected
+        # span (within tolerance), skip evaluation entirely. Keeps demoted
+        # false promotions from being re-promoted on the next loop run.
+        match = _cluster_is_rejected(c, rejects) if rejects else None
+        if match is not None:
+            audit_rejected_count += 1
+            rejected.append(
+                {
+                    "start": round(c.start, 2),
+                    "end": round(c.end, 2),
+                    "notes": (
+                        f"audit-rejected (matches prior demote "
+                        f"{match[0]:.1f}-{match[1]:.1f}s within "
+                        f"±{REJECT_OVERLAP_TOLERANCE:.0f}s tolerance)."
+                    ),
+                    "provenance": ["audit-reject"],
+                }
+            )
+            continue
         ev = evaluate_cluster(c)
         if ev["decision"] == "promote":
             promoted.append((c, ev))
@@ -747,6 +820,7 @@ def process_episode(
         "rejected": rejected,
         "rule_counts": rule_counts,
         "audit_counts": audit_counts,
+        "audit_rejected": audit_rejected_count,
         "_promoted_clusters": promoted,  # internal; stripped before writing summary
     }
 
@@ -795,6 +869,14 @@ def main() -> int:
         return 2
     log(f"candidate episodes: {len(episode_ids)}")
 
+    rejects_idx = load_rejects()
+    if rejects_idx:
+        log(
+            f"audit-rejects: {sum(len(v) for v in rejects_idx.values())} prior "
+            f"demoted span(s) across {len(rejects_idx)} episode(s); these will "
+            f"be vetoed before evaluation."
+        )
+
     started = dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
     per_episode_summary: list[dict] = []
     rule_totals: dict[str, int] = {"R1": 0, "R2": 0, "R3": 0}
@@ -803,9 +885,11 @@ def main() -> int:
     skipped_existing = 0
     written = 0
     rejected_total = 0
+    audit_rejected_total = 0
 
     for ep in episode_ids:
-        result = process_episode(ep, pipeline_idx, manifest)
+        result = process_episode(ep, pipeline_idx, manifest, rejects_idx=rejects_idx)
+        audit_rejected_total += result.get("audit_rejected", 0)
         promoted_clusters = result.pop("_promoted_clusters")
         rejected_total += len(result["rejected"])
         for k, v in result["rule_counts"].items():
@@ -871,6 +955,7 @@ def main() -> int:
             ),
             "skipped_existing": skipped_existing,
             "rejected_clusters": rejected_total,
+            "audit_rejected_clusters": audit_rejected_total,
             "rule_counts": rule_totals,
             "audit_priority_counts": audit_totals,
         },
@@ -880,7 +965,8 @@ def main() -> int:
     log(
         f"\nsummary: episodes={len(episode_ids)} "
         f"written={written} skipped-existing={skipped_existing} "
-        f"rejected-clusters={rejected_total}"
+        f"rejected-clusters={rejected_total} "
+        f"audit-rejected={audit_rejected_total}"
     )
     log(
         f"  rules: R1={rule_totals['R1']} R2={rule_totals['R2']} R3={rule_totals['R3']}"
