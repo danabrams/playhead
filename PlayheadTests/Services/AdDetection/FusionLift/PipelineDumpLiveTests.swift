@@ -874,16 +874,23 @@ struct PipelineDumpHermeticTests {
         // tracked entry under that directory). Without this guard, the
         // test deterministically fails on every developer machine that
         // hasn't run the Catalyst dump locally — masking real signal
-        // and noise-floor-ing the sim test run. Per the
-        // skip-with-reason policy on environment-dependent fixtures,
-        // short-circuit cleanly with `try #require` so the test passes
-        // when the manifest is absent and runs its real assertions when
-        // present.
+        // and noise-floor-ing the sim test run.
+        //
+        // playhead-p56a R5 note: Swift Testing has no XCTSkipUnless
+        // equivalent — `#require(false)` records a failure, it does not
+        // skip. The idiomatic "soft skip" for an absent environment-
+        // dependent fixture is therefore a guard-return with a
+        // human-readable reason in the body. Future maintainers: do NOT
+        // "fix" this by reaching for `try #require(FileManager...)` —
+        // that would flip the test back to a hard failure on every
+        // developer machine without the Catalyst dump output.
         let manifestURL = PipelineDumpManifestLoader.manifestURL(repoRoot: repoRoot)
         guard FileManager.default.fileExists(atPath: manifestURL.path) else {
-            // Manifest absent on this checkout — skip the assertions
-            // cleanly. The Catalyst dump pipeline regenerates it on
-            // demand; on a fresh sim checkout it is simply not present.
+            // Manifest absent on this checkout — short-circuit cleanly.
+            // The Catalyst dump pipeline regenerates it on demand; on a
+            // fresh sim checkout it is simply not present. See the
+            // multi-line rationale above for why this is a guard-return
+            // rather than `try #require`.
             return
         }
         let entries = try PipelineDumpManifestLoader.load(repoRoot: repoRoot)
