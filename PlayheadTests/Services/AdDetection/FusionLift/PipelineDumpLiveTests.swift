@@ -876,21 +876,40 @@ struct PipelineDumpHermeticTests {
         // hasn't run the Catalyst dump locally — masking real signal
         // and noise-floor-ing the sim test run.
         //
-        // playhead-p56a R5 note: Swift Testing has no XCTSkipUnless
-        // equivalent — `#require(false)` records a failure, it does not
-        // skip. The idiomatic "soft skip" for an absent environment-
-        // dependent fixture is therefore a guard-return with a
-        // human-readable reason in the body. Future maintainers: do NOT
-        // "fix" this by reaching for `try #require(FileManager...)` —
-        // that would flip the test back to a hard failure on every
-        // developer machine without the Catalyst dump output.
+        // playhead-p56a R5/R6 note on Swift Testing skip semantics:
+        //   - `try #require(<bool>)` records a failure when the value is
+        //     false. It is NOT a runtime soft-skip primitive; reaching for
+        //     `try #require(FileManager.default.fileExists(...))` would
+        //     flip this test back to a hard failure on every developer
+        //     machine without the Catalyst dump output.
+        //   - Swift Testing DOES have trait-level skip primitives —
+        //     `.enabled(if:)` / `.disabled(if:)` (see
+        //     `NarlEvalCorpusBuilderTests.swift` for an analogous env-gated
+        //     fixture using `.enabled(if: Self.envGateOpen)`), and the
+        //     unconditional `.disabled("reason")` trait. Either could be
+        //     applied here by hoisting `manifestURL` resolution into a
+        //     `static let` (`#filePath` is a compile-time literal, so the
+        //     path is statically computable).
+        //   - We deliberately picked the body-level guard-return form
+        //     because (a) the fail-message stays adjacent to the assertion
+        //     it guards, (b) test discovery still reports the test as
+        //     "passing" (not "skipped") which keeps green/red signal
+        //     legible in PlayheadFastTests aggregate counts, and (c) the
+        //     guard pattern is what the implementer-loop converged on in
+        //     R1 — no behavioral upside justifies a refactor.
+        //   Future maintainers: do NOT "fix" the guard by replacing it with
+        //   `try #require(FileManager...)`. If you want to migrate to a
+        //   trait-level skip via `.enabled(if:)`, that is a defensible
+        //   stylistic change — but verify it preserves the soft-skip on
+        //   manifest-absent machines (xcodebuild should NOT report a
+        //   failure) before landing.
         let manifestURL = PipelineDumpManifestLoader.manifestURL(repoRoot: repoRoot)
         guard FileManager.default.fileExists(atPath: manifestURL.path) else {
             // Manifest absent on this checkout — short-circuit cleanly.
             // The Catalyst dump pipeline regenerates it on demand; on a
             // fresh sim checkout it is simply not present. See the
             // multi-line rationale above for why this is a guard-return
-            // rather than `try #require`.
+            // rather than `try #require` or a trait-level skip.
             return
         }
         let entries = try PipelineDumpManifestLoader.load(repoRoot: repoRoot)
