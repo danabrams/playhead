@@ -391,6 +391,29 @@ struct AdDetectionConfig: Sendable {
     /// when `perShowThresholdControlEnabled` is `true`.
     let perShowThresholdMinSamples: Int
 
+    /// playhead-p56a: master kill switch for the `SpanFinalizer` safety layer.
+    /// When `false` (the production default), `runBackfill` never invokes
+    /// `SpanFinalizer.finalize(...)` — so the per-span decisions, ad-window
+    /// bounds, and persisted rows are byte-identical to pre-p56a behaviour.
+    /// Flip to `true` to enable the deterministic, post-fusion finalizer that
+    /// applies 5 hard constraints (non-overlap resolution, < 3s content-gap
+    /// merge, < 5s/> 180s duration sanity, content-chapter penalty, 50% action
+    /// cap) plus a final skip-policy override pass.
+    ///
+    /// The insertion point is between the temporal-regularization block and
+    /// the side-effect emission loop in `runBackfill`: the finalizer sees the
+    /// fully scored `pendingDecisions` and may shrink, drop, or re-time spans
+    /// before persistence. When the flag is off, `pendingDecisions` is
+    /// forwarded to the emission loop unchanged — no allocations, no log
+    /// lines, no per-span constraint trace.
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate: not enabled in any
+    /// production config or A/B arm. The finalizer stays fully built and
+    /// unit-tested (`SpanFinalizerTests`), just inert in production until the
+    /// bd-4xqf coverage measurement on the live pipeline-dump path confirms
+    /// the change is safe to enable.
+    let spanFinalizerEnabled: Bool
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -471,7 +494,8 @@ struct AdDetectionConfig: Sendable {
         perShowThresholdProportionalGain: Double = 0.02,
         perShowThresholdIntegralGain: Double = 0.005,
         perShowThresholdMaxOffset: Double = 0.15,
-        perShowThresholdMinSamples: Int = 5
+        perShowThresholdMinSamples: Int = 5,
+        spanFinalizerEnabled: Bool = false
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -512,6 +536,7 @@ struct AdDetectionConfig: Sendable {
         self.perShowThresholdIntegralGain = perShowThresholdIntegralGain
         self.perShowThresholdMaxOffset = perShowThresholdMaxOffset
         self.perShowThresholdMinSamples = perShowThresholdMinSamples
+        self.spanFinalizerEnabled = spanFinalizerEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -553,7 +578,8 @@ struct AdDetectionConfig: Sendable {
         perShowThresholdProportionalGain: 0.02,
         perShowThresholdIntegralGain: 0.005,
         perShowThresholdMaxOffset: 0.15,
-        perShowThresholdMinSamples: 5
+        perShowThresholdMinSamples: 5,
+        spanFinalizerEnabled: false
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -718,7 +744,12 @@ struct BracketRefinementCounts: Sendable, Equatable {
 /// is byte-identical to pre-xsdz.10. The two-loop shape is the only structural
 /// change; each emission step is verbatim the code that previously ran inline.
 private struct PendingBackfillDecision {
-    let refinedSpan: DecodedSpan
+    /// playhead-p56a: `var` (was `let`) so the SpanFinalizer wire-in can
+    /// substitute time-adjusted `DecodedSpan`s into the pending record after
+    /// finalizer constraints rewrite span bounds (trim/merge/split). The
+    /// finalizer-off path is unchanged — this field is only reassigned when
+    /// `config.spanFinalizerEnabled == true`.
+    var refinedSpan: DecodedSpan
     var decision: DecisionResult
     let ledger: [EvidenceLedgerEntry]
     let effectiveLedger: [EvidenceLedgerEntry]
@@ -1292,6 +1323,26 @@ actor AdDetectionService {
     /// integration level. Reset at the start of every backfill run.
     private var lastBracketRefinementCounts = BracketRefinementCounts()
 
+    /// playhead-p56a: per-spanId constraint trace from the most recent
+    /// `SpanFinalizer` invocation. Keys are `DecodedSpan.id` for spans the
+    /// finalizer kept; values are the ordered list of
+    /// `FinalizerConstraint.rawValue` strings that fired on each. Empty when
+    /// `config.spanFinalizerEnabled == false` (no allocation, no trace —
+    /// preserves the byte-identical OFF contract). Reset at the start of
+    /// every backfill run so successive runs reflect only the most recent.
+    /// Test-observable via `spanFinalizerConstraintsBySpanIdForTesting()`.
+    private var lastSpanFinalizerConstraintsBySpanId: [String: [String]] = [:]
+
+    /// playhead-p56a: per-AdWindow constraint trace from the most recent
+    /// `SpanFinalizer` invocation. Keys are `AdWindow.id` (the UUID stamped
+    /// at `buildFusionAdWindow` time); values are the same constraint trace
+    /// the spanId-keyed map carries, pre-resolved per window so the live
+    /// pipeline-dump test can correlate directly without a span/window
+    /// lookup. Empty when `config.spanFinalizerEnabled == false`. Reset at
+    /// the start of every backfill run. Test-observable via
+    /// `spanFinalizerConstraintsByWindowIdForTesting()`.
+    private var lastSpanFinalizerConstraintsByWindowId: [String: [String]] = [:]
+
     /// playhead-43ed: optional repeated-ad cache. When non-nil and enabled,
     /// `classifyCandidates` derives a 128-bit perceptual fingerprint from
     /// each candidate's feature windows and looks it up against entries
@@ -1671,6 +1722,32 @@ actor AdDetectionService {
     /// path without log scraping.
     func bracketRefinementCountsForTesting() -> BracketRefinementCounts {
         lastBracketRefinementCounts
+    }
+
+    // MARK: - playhead-p56a: SpanFinalizer constraint-trace telemetry
+
+    /// Test seam: returns the per-spanId list of finalizer constraints that
+    /// fired during the most recent `runBackfill`. Keys are `DecodedSpan.id`;
+    /// values are the ordered `FinalizerConstraint.rawValue` strings from each
+    /// span's `FinalizedSpan.constraintTrace`. Empty when
+    /// `config.spanFinalizerEnabled == false` (the OFF path never invokes the
+    /// finalizer, never allocates a trace) and also empty when the finalizer
+    /// returned no spans with any constraint fired. Pairs with
+    /// `spanFinalizerConstraintsByWindowIdForTesting()`, which carries the
+    /// same data pre-resolved by `AdWindow.id` for the live pipeline-dump path.
+    func spanFinalizerConstraintsBySpanIdForTesting() -> [String: [String]] {
+        lastSpanFinalizerConstraintsBySpanId
+    }
+
+    /// Test seam: returns the per-AdWindow constraint trace from the most
+    /// recent `runBackfill`. Keys are `AdWindow.id` (the UUID stamped by
+    /// `buildFusionAdWindow`); values mirror what
+    /// `spanFinalizerConstraintsBySpanIdForTesting()` carries for the
+    /// underlying spanId. Empty when `config.spanFinalizerEnabled == false`.
+    /// The live pipeline-dump path uses this for direct per-window
+    /// correlation — no span/window lookup, no time-range matching.
+    func spanFinalizerConstraintsByWindowIdForTesting() -> [String: [String]] {
+        lastSpanFinalizerConstraintsByWindowId
     }
 
     /// playhead-hygc.1.8 (R11): test seam exposing the per-asset in-flight
@@ -2980,6 +3057,12 @@ actor AdDetectionService {
         // for the duration of the run — matches the conservative default
         // configured in `AdDetectionConfig`.
         lastBracketRefinementCounts = BracketRefinementCounts()
+        // playhead-p56a: reset both finalizer constraint-trace maps so a
+        // prior run's entries cannot bleed into this one. The OFF path
+        // (`config.spanFinalizerEnabled == false`) leaves them at empty for
+        // the rest of the run — preserves the byte-identical OFF contract.
+        lastSpanFinalizerConstraintsBySpanId = [:]
+        lastSpanFinalizerConstraintsByWindowId = [:]
         let bracketShowTrust: Double
         if config.bracketRefinementEnabled, !podcastId.isEmpty {
             let trustStore = bracketTrustStoreLazy()
@@ -3633,6 +3716,120 @@ actor AdDetectionService {
             }
         }
 
+        // playhead-p56a: SpanFinalizer safety layer. Deterministic, post-
+        // fusion pass that applies five hard constraints to the scored
+        // decisions before persistence:
+        //   1. Non-overlap resolution (higher confidence wins, loser trimmed
+        //      or suppressed).
+        //   2. < 3s content-gap merge (target of the bd-4xqf coverage
+        //      investigation: re-merge candidates the upstream merge-gap
+        //      dropped).
+        //   3. Duration sanity (< 5s dropped, > 180s split).
+        //   4. Chapter penalty (spans crossing `.content` chapters demoted
+        //      to `.markOnly`). Empty `chapters: []` here disables this
+        //      constraint until the structured `ChapterMarker` snapshot is
+        //      threaded through — bd-4xqf's primary target is constraints
+        //      1/2, not 4.
+        //   5. 50% action cap.
+        //   6. Skip-policy override pass (always applies once a candidate is
+        //      kept; trace fires only when the resolved action is not
+        //      `.autoSkipEligible`).
+        //
+        // OFF by default — when `config.spanFinalizerEnabled == false` the
+        // pass is never invoked, `pendingDecisions` is forwarded to the
+        // emission loop unchanged, and `lastSpanFinalizerConstraintsBySpanId`
+        // stays empty. Byte-identical to pre-p56a behaviour.
+        //
+        // Sources of input intent/ownership match what the emission loop
+        // already uses below (`SkipPolicyMatrix.action(for: .unknown,
+        // ownership: .unknown)` → `.detectOnly`) — the upstream pipeline
+        // does not yet classify commercial intent at the per-span level
+        // (Phase 8 work). Using the same `(.unknown, .unknown)` pair keeps
+        // the finalizer's policy step consistent with the existing gate.
+        if config.spanFinalizerEnabled, !pendingDecisions.isEmpty {
+            let candidates: [CandidateSpan] = pendingDecisions.map { pending in
+                CandidateSpan(
+                    span: pending.refinedSpan,
+                    decision: pending.decision,
+                    commercialIntent: .unknown,
+                    adOwnership: .unknown
+                )
+            }
+            // Index pending by spanId so finalized spans can be paired with
+            // their upstream ledger / fingerprint / feature-window context
+            // in O(1). The finalizer preserves `DecodedSpan.id` across
+            // trims, merges, splits, and suppressions (suppressed spans are
+            // simply absent from the returned array); splits reuse the
+            // parent id, so multiple finalized rows may map back to the
+            // same pending record — that's acceptable here because the
+            // per-id ledger / fingerprint context is genuinely the same
+            // for both halves.
+            var pendingByOriginalId: [String: PendingBackfillDecision] = [:]
+            pendingByOriginalId.reserveCapacity(pendingDecisions.count)
+            for pending in pendingDecisions {
+                pendingByOriginalId[pending.refinedSpan.id] = pending
+            }
+
+            let finalizer = SpanFinalizer(
+                episodeDuration: episodeDuration,
+                chapters: []
+            )
+            let finalized = finalizer.finalize(candidates)
+
+            // Rebuild `pendingDecisions` from the finalizer output. Spans
+            // the finalizer suppressed (constraint #1's `.overlapSuppressed`
+            // or constraint #3's `.droppedBelowMinDuration`) are absent from
+            // `finalized` and therefore correctly dropped from emission.
+            var rebuilt: [PendingBackfillDecision] = []
+            rebuilt.reserveCapacity(finalized.count)
+            var traceById: [String: [String]] = [:]
+            for span in finalized {
+                guard let pending = pendingByOriginalId[span.span.id] else {
+                    // Shouldn't happen — finalizer only emits spans whose id
+                    // came from the input candidates. Log and skip rather
+                    // than crash the backfill.
+                    logger.warning("[p56a] finalizer emitted unknown spanId \(span.span.id, privacy: .public); dropping")
+                    continue
+                }
+                var updated = pending
+                updated.refinedSpan = span.span
+                // SpanFinalizer's `WorkingSpan` does NOT retain the upstream
+                // `promotionTrack` (its `toFinalized()` builds a new
+                // `DecisionResult` via the default `.standard` track).
+                // Re-stamp it here from the original pending decision so
+                // qualified-track spans (`.classifierSeedQualified`,
+                // `.lexicalAutoAdQualified`) keep their looser auto-skip
+                // threshold downstream. Without this re-stamp, a finalizer
+                // pass would silently demote every qualified-track span to
+                // the standard 0.80 threshold — a hidden behavioral change
+                // outside the byte-identical-OFF contract's coverage.
+                updated.decision = DecisionResult(
+                    proposalConfidence: span.decision.proposalConfidence,
+                    skipConfidence: span.decision.skipConfidence,
+                    eligibilityGate: span.decision.eligibilityGate,
+                    promotionTrack: pending.decision.promotionTrack
+                )
+                rebuilt.append(updated)
+                // Preserve order across splits / multi-emit by appending to
+                // any existing trace under the same id.
+                let traceRaw = span.constraintTrace.map { $0.rawValue }
+                if !traceRaw.isEmpty {
+                    if var existing = traceById[span.span.id] {
+                        existing.append(contentsOf: traceRaw)
+                        traceById[span.span.id] = existing
+                    } else {
+                        traceById[span.span.id] = traceRaw
+                    }
+                }
+            }
+            pendingDecisions = rebuilt
+            lastSpanFinalizerConstraintsBySpanId = traceById
+
+            logger.info(
+                "[p56a] finalizer ran: candidates=\(candidates.count) finalized=\(finalized.count) spansWithTrace=\(traceById.count)"
+            )
+        }
+
         // playhead-xsdz.10: emission loop. Each step below is verbatim the code
         // that previously ran inline at the tail of the per-span loop; the only
         // change is that it now reads the (possibly temporally-regularized)
@@ -3740,6 +3937,19 @@ actor AdDetectionService {
                 catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
             )
             fusionWindows.append(window)
+
+            // playhead-p56a: resolve the per-window finalizer constraint
+            // trace from the spanId map populated by the wire-in block. The
+            // emission-loop window id is fresh per call, so the only place
+            // this stamp can happen is here — after `buildFusionAdWindow`
+            // and inside the same iteration that knows both the windowId
+            // and the source `refinedSpan.id`. When the flag is off,
+            // `lastSpanFinalizerConstraintsBySpanId` is empty (see top-of-
+            // run reset) so the lookup short-circuits without an allocation
+            // and the window-keyed map stays empty — byte-identical OFF.
+            if let trace = lastSpanFinalizerConstraintsBySpanId[refinedSpan.id], !trace.isEmpty {
+                lastSpanFinalizerConstraintsByWindowId[window.id] = trace
+            }
 
             // playhead-gtt9.17: catalog ingress. When a span gates to
             // `.autoSkipEligible`, store its fingerprint so future episodes
