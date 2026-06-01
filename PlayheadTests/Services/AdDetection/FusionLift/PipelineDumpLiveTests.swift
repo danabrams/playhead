@@ -65,6 +65,11 @@
 //       { "episodeId": "...", "showSlug": "...", "publishDate": "...",
 //         "episodeDurationSeconds": 1234.5,
 //         "candidateDecodedSpans": <int>,
+//         "candidateDecodedSpanList": [
+//           { "spanId": "...", "startTime": 123.4, "endTime": 234.5,
+//             "proposalConfidence": 0.81, "skipConfidence": 0.78,
+//             "fragilityScore": 0.42 }, ...
+//         ],
 //         "adWindows": [
 //           { "startTime": 123.4, "endTime": 234.5,
 //             "skipConfidence": 0.78,
@@ -76,6 +81,14 @@
 //     ],
 //     "summary": { "totalEpisodes": 9, "totalAdWindows": N, "perShow": {...} }
 //   }
+//
+// `candidateDecodedSpanList` was added 2026-06-01 for playhead-4xqf
+// (boundary-undersizing investigation). Pairs with rediff slot boundaries to
+// answer: do the candidate spans cover the full ad slot (→ fusion/merge is
+// the culprit), or are they themselves short (→ candidate gen is the
+// culprit)? The list mirrors what `FragilityDiagnosticObserver` already
+// records for every span; only the JSON encoding is new. The pre-existing
+// `candidateDecodedSpans` int field is preserved for backward compatibility.
 //
 // NOTE on `promotionTrack`: `PromotionTrack` is NOT persisted on the
 // `AdWindow` row — it lives on the in-flight `DecisionResult`. The store can
@@ -204,13 +217,37 @@ private struct DumpAdWindow: Encodable {
     let promotionTrack: String?
 }
 
+/// One candidate decoded span observed by the FragilityDiagnosticObserver
+/// during this episode's backfill. Added for playhead-4xqf (DAI boundary-
+/// undersizing investigation): enables identifying WHICH candidate spans
+/// the candidate generator emitted vs which ones the fusion/AdWindow stage
+/// kept, by comparing this list against `adWindows` and against rediff
+/// slot boundaries. The `fragilityScore` field is "free" — the observer
+/// already records it for every span. JSON field order is deliberate to
+/// match `DumpAdWindow`'s layout for downstream comparison scripts.
+private struct DumpDecodedSpan: Encodable {
+    let spanId: String
+    let startTime: Double
+    let endTime: Double
+    let proposalConfidence: Double
+    let skipConfidence: Double
+    let fragilityScore: Double
+}
+
 /// Per-episode dump row.
 private struct DumpEpisode: Encodable {
     let episodeId: String
     let showSlug: String
     let publishDate: String
     let episodeDurationSeconds: Double
+    /// Count of candidate decoded spans recorded by the observer. Preserved
+    /// for backward compatibility with existing consumers (current dump
+    /// readers only check this int field).
     let candidateDecodedSpans: Int
+    /// Per-candidate decoded-span boundaries + fragility geometry. Added
+    /// 2026-06-01 for playhead-4xqf boundary-undersizing investigation.
+    /// One row per `observer.spanRows(for: assetId)` entry, in record order.
+    let candidateDecodedSpanList: [DumpDecodedSpan]
     let adWindows: [DumpAdWindow]
 }
 
@@ -543,6 +580,9 @@ final class PipelineDumpLiveTests: XCTestCase {
         // `null` in the dump.
         let windows = try await store.fetchAdWindows(assetId: assetId)
         let decodedSpanCount = await observer.recordCount(for: assetId)
+        // Per-candidate boundaries for playhead-4xqf boundary-undersizing
+        // investigation (see DumpDecodedSpan docstring above).
+        let decodedSpanRows = await observer.spanRows(for: assetId) ?? []
 
         let dumpWindows: [DumpAdWindow] = windows
             .sorted { $0.startTime < $1.startTime }
@@ -557,12 +597,26 @@ final class PipelineDumpLiveTests: XCTestCase {
                 )
             }
 
+        let dumpDecodedSpans: [DumpDecodedSpan] = decodedSpanRows
+            .sorted { $0.spanStart < $1.spanStart }
+            .map {
+                DumpDecodedSpan(
+                    spanId: $0.spanId,
+                    startTime: $0.spanStart,
+                    endTime: $0.spanEnd,
+                    proposalConfidence: $0.proposalConfidence,
+                    skipConfidence: $0.skipConfidence,
+                    fragilityScore: $0.fragilityScore
+                )
+            }
+
         return DumpEpisode(
             episodeId: episodeId,
             showSlug: entry.showSlug,
             publishDate: entry.publishDate,
             episodeDurationSeconds: episodeDuration,
             candidateDecodedSpans: decodedSpanCount,
+            candidateDecodedSpanList: dumpDecodedSpans,
             adWindows: dumpWindows
         )
     }
@@ -722,5 +776,98 @@ struct PipelineDumpHermeticTests {
         #expect(cfg.crossShowSyndicationEnabled == false, "crossShowSyndicationEnabled must be off in production .default")
         #expect(cfg.temporalRegularizationEnabled == false, "temporalRegularizationEnabled must be off in production .default")
         #expect(cfg.perShowThresholdControlEnabled == false, "perShowThresholdControlEnabled must be off in production .default")
+    }
+}
+
+// MARK: - Hermetic JSON shape tests for the dump schema
+
+/// Locks the JSON wire shape of `DumpDecodedSpan` + the per-episode
+/// `candidateDecodedSpanList` field added 2026-06-01 for playhead-4xqf.
+/// Lives in this file because the dump structs are intentionally `private`;
+/// keeping the encoding test alongside the schema means any future schema
+/// refactor breaks here first instead of silently in a downstream Python
+/// consumer.
+@Suite("PipelineDump JSON encoding")
+struct PipelineDumpEncodingTests {
+
+    @Test("DumpDecodedSpan encodes all six fields with deterministic key names")
+    func dumpDecodedSpanEncodesAllFields() throws {
+        let span = DumpDecodedSpan(
+            spanId: "span-42",
+            startTime: 123.4,
+            endTime: 234.5,
+            proposalConfidence: 0.81,
+            skipConfidence: 0.78,
+            fragilityScore: 0.42
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(span)
+        let json = try #require(String(data: data, encoding: .utf8))
+        // Lock the wire shape — sortedKeys puts alpha; the downstream Python
+        // analysis (in scripts/l2f-corpus-status.py and the bd-4xqf inline
+        // analysis) reads by string key, so the keys themselves are the
+        // contract.
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(Set(parsed.keys) == Set([
+            "spanId", "startTime", "endTime",
+            "proposalConfidence", "skipConfidence", "fragilityScore",
+        ]))
+        #expect((parsed["spanId"] as? String) == "span-42")
+        #expect((parsed["startTime"] as? Double) == 123.4)
+        #expect((parsed["endTime"] as? Double) == 234.5)
+        #expect((parsed["fragilityScore"] as? Double) == 0.42)
+        // Defense in depth: also assert the keys appear in the raw JSON
+        // text so a future "rename via CodingKeys" can't silently pass.
+        #expect(json.contains("\"spanId\""))
+        #expect(json.contains("\"fragilityScore\""))
+    }
+
+    @Test("DumpEpisode preserves candidateDecodedSpans int alongside the new list")
+    func dumpEpisodeKeepsCountFieldForBackwardCompat() throws {
+        // playhead-4xqf added `candidateDecodedSpanList` next to the
+        // pre-existing `candidateDecodedSpans` int. The pre-existing field
+        // MUST remain — downstream `playhead-dogfood-diagnostics-pipeline-
+        // dump-*.json` readers in scripts/ still read it (and the Tier-A
+        // auto-promote audit-rejects path on main treats it as a stable
+        // integer). If a future refactor removes it, those scripts break
+        // silently. Lock it here.
+        let episode = DumpEpisode(
+            episodeId: "ep-1",
+            showSlug: "show-x",
+            publishDate: "2026-06-01",
+            episodeDurationSeconds: 1800.0,
+            candidateDecodedSpans: 3,
+            candidateDecodedSpanList: [
+                DumpDecodedSpan(spanId: "a", startTime: 10, endTime: 50,
+                                proposalConfidence: 0.6, skipConfidence: 0.5,
+                                fragilityScore: 0.3),
+                DumpDecodedSpan(spanId: "b", startTime: 100, endTime: 130,
+                                proposalConfidence: 0.7, skipConfidence: 0.65,
+                                fragilityScore: 0.2),
+                DumpDecodedSpan(spanId: "c", startTime: 200, endTime: 260,
+                                proposalConfidence: 0.9, skipConfidence: 0.88,
+                                fragilityScore: 0.1),
+            ],
+            adWindows: []
+        )
+        let data = try JSONEncoder().encode(episode)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect((parsed["candidateDecodedSpans"] as? Int) == 3)
+        let list = try #require(parsed["candidateDecodedSpanList"] as? [[String: Any]])
+        #expect(list.count == 3)
+        #expect((list[0]["spanId"] as? String) == "a")
+        #expect((list[1]["startTime"] as? Double) == 100)
+        #expect((list[2]["endTime"] as? Double) == 260)
+        // The list count and the count field are independent at the schema
+        // level (the live runner happens to compute them from the same
+        // observer), so this hermetic test deliberately uses matching
+        // values to document the EXPECTED invariant downstream readers
+        // should assume holds in real dumps.
+        #expect(list.count == (parsed["candidateDecodedSpans"] as? Int))
     }
 }
