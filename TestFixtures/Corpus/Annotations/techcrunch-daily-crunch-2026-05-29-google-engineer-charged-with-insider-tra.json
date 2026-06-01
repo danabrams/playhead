@@ -1,0 +1,35 @@
+{
+  "episode_id": "techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra",
+  "show_name": "TechCrunch Daily Crunch",
+  "duration_seconds": 279.3795625,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 102.99,
+      "advertiser": "Framer",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 0.0-103.0s (len=103.0s). rediff-sec=98.4, drafter-spans=1, pipeline-spans=2 (max-skip-conf=0.96).",
+      "provenance": [
+        "drafter",
+        "pipeline",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 102.99,
+      "end_seconds": 279.3795625,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:5ded646c7ef8a845ad9464199132e207c873ff4230eec061bc0beea557609a38",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-01T17:30:46Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}
