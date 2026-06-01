@@ -1,0 +1,111 @@
+{
+  "episode_id": "the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t",
+  "show_name": "The Nikki Glaser Podcast",
+  "duration_seconds": 4433.7,
+  "ad_windows": [
+    {
+      "start_seconds": 32.21,
+      "end_seconds": 242.81,
+      "advertiser": "Smiletunes",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 32.2-242.8s (len=210.6s). rediff-sec=210.6, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1098.7,
+      "end_seconds": 1543.3,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1098.7-1543.3s (len=444.6s). rediff-sec=444.6, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 1570.8,
+      "end_seconds": 1723.05,
+      "advertiser": "Smiletunes",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 1570.8-1723.0s (len=152.2s). rediff-sec=152.2, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 3200.45,
+      "end_seconds": 3285.68,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 3200.4-3285.7s (len=85.2s). rediff-sec=85.2, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 4517.05,
+      "end_seconds": 4579.49,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 4517.1-4579.5s (len=62.4s). rediff-sec=62.4, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 32.21,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 242.81,
+      "end_seconds": 1098.7,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1543.3,
+      "end_seconds": 1570.8,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1723.05,
+      "end_seconds": 3200.45,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 3285.68,
+      "end_seconds": 4517.05,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-01T19:37:04Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

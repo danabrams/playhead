@@ -197,8 +197,10 @@ def build_report(spans: list[dict[str, Any]], per_episode: dict[str, int]) -> st
     show_counts = Counter(s["show"] for s in spans)
     out.append("## Show concentration")
     out.append("")
+    out.append("| Show | Spans | % of N |")
+    out.append("|------|-------|--------|")
     for show, c in show_counts.most_common():
-        out.append(f"- {show}: {c}")
+        out.append(f"| {show} | {c} | {c / N * 100:.0f}% |")
     out.append("")
 
     # Same-episode clustering
@@ -236,6 +238,9 @@ def build_report(spans: list[dict[str, Any]], per_episode: dict[str, int]) -> st
             )
         out.append("")
 
+    # Past-end spans
+    past_end_count = len(past_end)
+
     # Findings summary + proposal
     out.append("## Findings summary")
     out.append("")
@@ -257,14 +262,32 @@ def build_report(spans: list[dict[str, Any]], per_episode: dict[str, int]) -> st
 
     # F2: Same-episode clustering
     if clustered:
+        n_clustered_eps = len(clustered)
+        clustered_span_total = sum(clustered.values())
         top_ep, top_ec = max(clustered.items(), key=lambda kv: kv[1])
         findings.append(
-            f"**F2. Clustering inside a single episode.** "
-            f"`{top_ep}` alone accounts for {top_ec} of {N} "
-            f"R3 spans ({top_ec / N * 100:.0f}%). Same caveat as F1: "
-            f"could be genuine DAI density, could be a per-episode "
-            f"artifact (e.g. recurring music bed). Worth ear-witnessing "
-            f"this episode first if a human-audit window opens."
+            f"**F2. Strong same-episode clustering.** "
+            f"{n_clustered_eps} of {len(per_episode)} episodes have >1 R3 span, "
+            f"accounting for {clustered_span_total} of {N} spans "
+            f"({clustered_span_total / N * 100:.0f}%). "
+            f"`{top_ep}` has the most with {top_ec} spans. "
+            f"Could be genuine DAI density (multiple ad breaks per episode), "
+            f"or a per-episode artifact (recurring music bed). Worth "
+            f"ear-witnessing the heaviest episode first."
+        )
+
+    # F_PAST: Spans past episode end
+    if past_end_count > 0:
+        findings.append(
+            f"**F_PAST. {past_end_count} of {N} R3 spans ({past_end_count / N * 100:.0f}%) "
+            f"extend past the annotated `duration_seconds`.** "
+            f"These are likely rediff cluster overshoot — the rediff algorithm "
+            f"finds a content-difference region that bleeds past the last audible "
+            f"frame, possibly into the MP3 silence/padding at the tail. "
+            f"All {past_end_count} past-end spans come from Nikki Glaser back-catalog "
+            f"and Casefile. The overshoot amounts range from ~64s to ~204s. "
+            f"Without ground truth, we cannot say whether the *start* of each span "
+            f"is a genuine ad break; the overshoot only disqualifies the end boundary."
         )
 
     # F3: Duration distribution
@@ -365,25 +388,62 @@ def build_report(spans: list[dict[str, Any]], per_episode: dict[str, int]) -> st
     )
     out.append("")
 
+    drop_past_end = past_end_count
+    out.append("### Option D — reject R3 spans whose end_seconds > episode duration_seconds")
+    out.append(
+        f"- Would drop **{drop_past_end} of {N}** current R3 spans "
+        f"({drop_past_end / N * 100:.0f}%)."
+    )
+    out.append(
+        "- Targets the F_PAST pattern: rediff overshoot past last audible "
+        "frame. The end boundary is definitely wrong for these spans; "
+        "whether the start is a real ad break is unknown. Rejecting the "
+        "span entirely is conservative but may discard real ad-break starts."
+    )
+    out.append(
+        "- **Reversibility**: easy — add a guard condition before the R3 "
+        "promotion path in `l2f-auto-promote.py`."
+    )
+    out.append("")
+
     # Recommendation
     out.append("### Recommendation")
     out.append("")
-    out.append(
-        f"**No threshold change is justified by the evidence alone.** "
-        f"With N = {N} and zero ground-truth-listening confirmations, "
-        f"the show/episode concentration (F1, F2) could be signal or "
-        f"could be artifact, and the duration bucket counts are too "
-        f"thin to commit to a permanent change."
+    # Escalating recommendation based on N and pattern strength
+    high_concentration = top_n / N >= 0.6  # dominant show ≥60%
+    strong_clustering = (
+        sum(clustered.values()) / N >= 0.8 if clustered else False
     )
+    notable_past_end = past_end_count / N >= 0.15
+    if high_concentration and strong_clustering and notable_past_end:
+        out.append(
+            f"**Patterns are clearer than at N=8, but still insufficient "
+            f"for a threshold change without ground truth.** The show "
+            f"concentration ({top_n}/{N} = {top_n/N*100:.0f}% from "
+            f"*{top_show}*), near-total clustering ({sum(clustered.values())}/{N} "
+            f"spans in multi-span episodes), and {past_end_count} past-end "
+            f"overshoot cases ({past_end_count/N*100:.0f}%) are consistent "
+            f"with either a genuine DAI-heavy show OR a show-level "
+            f"rediff artifact. We cannot distinguish them without listening."
+        )
+    else:
+        out.append(
+            f"**No threshold change is justified by the evidence alone.** "
+            f"With N = {N} and zero ground-truth-listening confirmations, "
+            f"the show/episode concentration (F1, F2) could be signal or "
+            f"could be artifact, and the duration bucket counts are too "
+            f"thin to commit to a permanent change."
+        )
     out.append("")
     out.append(
-        "Recommended next step is to **ear-witness the 8 current "
-        "audit_priority=1 spans first** (≈10–15 minutes with "
-        "`scripts/l2f-audit-queue.py` and ffplay), classify each as "
-        "ad vs. host, and only THEN decide whether to tighten R3. "
-        "The reject log (`scripts/l2f-flag-false-promote.py`) already "
-        "captures veto decisions, so the cost of one audit pass is "
-        "small and the information gain is high."
+        f"Recommended next step is to **ear-witness a sample of the "
+        f"{N} current audit_priority=1 spans** — prioritizing the "
+        f"heaviest-hit episodes — with `scripts/l2f-audit-queue.py` "
+        f"and ffplay. Classify each as ad vs. host, and only THEN "
+        f"decide whether to tighten R3. The reject log "
+        f"(`scripts/l2f-flag-false-promote.py`) already captures veto "
+        f"decisions, so the cost of one audit pass is small and the "
+        f"information gain is high."
     )
     out.append("")
     span_word = "span" if drop_30 == 1 else "spans"
@@ -393,8 +453,12 @@ def build_report(spans: list[dict[str, Any]], per_episode: dict[str, int]) -> st
         f"**Option A (≥30s)** is the most conservative tightening: it "
         f"would drop only the {drop_30} shortest current {span_word} "
         "while leaving every ≥30s span untouched. Option B (≥40s) "
-        "halves the current R3 yield and is harder to justify without "
-        "audit data."
+        "drops more and is harder to justify without audit data. "
+        "**Option D (reject past-end)** is also low-risk: the end "
+        "boundary is definitively wrong for those spans, and rejecting "
+        "them prevents a known class of malformed windows from "
+        "accumulating in the corpus — but it does not address the "
+        "underlying rediff overshoot."
     )
     out.append("")
 
