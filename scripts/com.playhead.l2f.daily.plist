@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.playhead.l2f.daily.plist — user-level launchd job that runs the Tier-A
+  corpus-growth daily loop once per day at 03:30 local time.
+
+  This file is a TEMPLATE — it lives in scripts/ under version control so the
+  schedule is reproducible. To install:
+
+      launchctl bootstrap gui/$(id -u) \
+        /Users/dabrams/playhead/scripts/com.playhead.l2f.daily.plist
+
+  To uninstall:
+
+      launchctl bootout gui/$(id -u)/com.playhead.l2f.daily
+
+  To trigger an immediate one-off run (useful when first installing):
+
+      launchctl kickstart -k gui/$(id -u)/com.playhead.l2f.daily
+
+  To inspect status / next-fire / last exit code:
+
+      launchctl print gui/$(id -u)/com.playhead.l2f.daily
+
+  Logs live next to the loop's own log:
+    * stdout: TestFixtures/Corpus/Snapshots/daily-loop.stdout.log
+    * stderr: TestFixtures/Corpus/Snapshots/daily-loop.stderr.log
+    * summary: TestFixtures/Corpus/Snapshots/daily-loop.log (one line per run)
+
+  We deliberately do NOT set KeepAlive — a non-zero exit is logged but NOT
+  restarted, so a broken loop won't pin a CPU core overnight.
+
+  Edit StartCalendarInterval to change the schedule. Hour/Minute is LOCAL
+  time (launchd interprets in the user's tz).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.playhead.l2f.daily</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/dabrams/playhead/scripts/l2f-daily-loop.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/dabrams/playhead</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/dabrams/playhead/TestFixtures/Corpus/Snapshots/daily-loop.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/dabrams/playhead/TestFixtures/Corpus/Snapshots/daily-loop.stderr.log</string>
+
+    <!-- Inherit a sane PATH so curl/swift/python3/fpcalc/ffmpeg resolve. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- No KeepAlive: a failing loop is reported via exit code, NOT restarted. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Don't preempt the user with low-priority I/O during sleep. -->
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <!-- Sanity bound: the loop should complete in well under 90 minutes even
+         on a full re-download batch; if it runs longer than 2 hours something
+         is wrong and launchd should kill it. -->
+    <key>ExitTimeOut</key>
+    <integer>7200</integer>
+</dict>
+</plist>

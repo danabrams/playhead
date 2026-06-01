@@ -1,0 +1,135 @@
+{
+  "episode_id": "the-nikki-glaser-podcast-2025-03-13-517-the-glaser-exit",
+  "show_name": "The Nikki Glaser Podcast",
+  "duration_seconds": 5352.763,
+  "ad_windows": [
+    {
+      "start_seconds": 2.35,
+      "end_seconds": 160.66,
+      "advertiser": "Carmax",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 2.4-160.7s (len=158.3s). rediff-sec=158.3, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1694.31,
+      "end_seconds": 1725.77,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1694.3-1725.8s (len=31.5s). rediff-sec=31.5, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 1783.99,
+      "end_seconds": 1804.43,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1784.0-1804.4s (len=20.4s). rediff-sec=20.4, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 2677.47,
+      "end_seconds": 2708.94,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 2677.5-2708.9s (len=31.5s). rediff-sec=31.5, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 2767.15,
+      "end_seconds": 2932.27,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 2767.2-2932.3s (len=165.1s). rediff-sec=165.1, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 5168.39,
+      "end_seconds": 5276.91,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 5168.4-5276.9s (len=108.5s). rediff-sec=108.5, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 2.35,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 160.66,
+      "end_seconds": 1694.31,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1725.77,
+      "end_seconds": 1783.99,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1804.43,
+      "end_seconds": 2677.47,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2708.94,
+      "end_seconds": 2767.15,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2932.27,
+      "end_seconds": 5168.39,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 5276.91,
+      "end_seconds": 5352.763,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:eef28e3b42523ab3988bd32ef27ee70571420fb83f11b26876f2a5776c7a682c",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-01T17:30:46Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

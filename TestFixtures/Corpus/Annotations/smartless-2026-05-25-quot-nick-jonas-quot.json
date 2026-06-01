@@ -1,0 +1,115 @@
+{
+  "episode_id": "smartless-2026-05-25-quot-nick-jonas-quot",
+  "show_name": "SmartLess",
+  "duration_seconds": 4107.7931875,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 78.3,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 0.0-78.3s (len=78.3s). rediff-sec=78.3, drafter-spans=1, pipeline-spans=1 (max-skip-conf=0.77).",
+      "provenance": [
+        "drafter",
+        "pipeline",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1421.14,
+      "end_seconds": 1523.22,
+      "advertiser": "Kbk",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 1421.1-1523.2s (len=102.1s). rediff-sec=102.1, drafter-spans=1, pipeline-spans=1 (max-skip-conf=0.99).",
+      "provenance": [
+        "drafter",
+        "pipeline",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 2702.77,
+      "end_seconds": 2737.46,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 2702.8-2737.5s (len=34.7s). rediff-sec=34.7, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 2758.28,
+      "end_seconds": 2941.38,
+      "advertiser": "Kbp",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 2758.3-2941.4s (len=183.1s). rediff-sec=183.1, drafter-spans=1, pipeline-spans=1 (max-skip-conf=0.95).",
+      "provenance": [
+        "drafter",
+        "pipeline",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 3970.29,
+      "end_seconds": 4035.08,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 3970.3-4035.1s (len=64.8s). rediff-sec=64.8, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 78.3,
+      "end_seconds": 1421.14,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1523.22,
+      "end_seconds": 2702.77,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2737.46,
+      "end_seconds": 2758.28,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2941.38,
+      "end_seconds": 3970.29,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 4035.08,
+      "end_seconds": 4107.7931875,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-01T17:30:46Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}
