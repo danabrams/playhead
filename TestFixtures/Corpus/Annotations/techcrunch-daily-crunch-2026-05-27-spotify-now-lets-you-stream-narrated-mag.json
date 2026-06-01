@@ -1,0 +1,34 @@
+{
+  "episode_id": "techcrunch-daily-crunch-2026-05-27-spotify-now-lets-you-stream-narrated-mag",
+  "show_name": "TechCrunch Daily Crunch",
+  "duration_seconds": 330.3,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 100.61,
+      "advertiser": "Factor",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 0.0-100.6s (len=100.6s). rediff-sec=32.5, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 100.61,
+      "end_seconds": 330.3,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:3d7bdf7705fc5021fa4607aadc6de27db2765ea3e8199aee60d54b97cce60672",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-01T19:37:04Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

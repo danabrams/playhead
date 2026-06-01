@@ -1,0 +1,130 @@
+{
+  "episode_id": "the-nikki-glaser-podcast-2025-03-07-516-nikki-the-famous-aunt-writers-room-m",
+  "show_name": "The Nikki Glaser Podcast",
+  "duration_seconds": 3985.2,
+  "ad_windows": [
+    {
+      "start_seconds": 32.71,
+      "end_seconds": 61.7,
+      "advertiser": "Smiletunes",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 32.7-61.7s (len=29.0s). rediff-sec=29.0, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 62.69,
+      "end_seconds": 124.76,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 62.7-124.8s (len=62.1s). rediff-sec=62.1, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 1409.6,
+      "end_seconds": 1495.48,
+      "advertiser": "Smiletunes",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 1409.6-1495.5s (len=85.9s). rediff-sec=61.8, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1524.1,
+      "end_seconds": 1599.92,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1524.1-1599.9s (len=75.8s). rediff-sec=75.8, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 3043.36,
+      "end_seconds": 3209.74,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 3043.4-3209.7s (len=166.4s). rediff-sec=166.4, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 4143.01,
+      "end_seconds": 4189.59,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 4143.0-4189.6s (len=46.6s). rediff-sec=46.6, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 32.71,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 61.7,
+      "end_seconds": 62.69,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 124.76,
+      "end_seconds": 1409.6,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1495.48,
+      "end_seconds": 1524.1,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1599.92,
+      "end_seconds": 3043.36,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 3209.74,
+      "end_seconds": 4143.01,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:d3f764b2ad64b017556d349d2e32eeb9216fac87617df1f24ee8ba9d76bd4008",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-01T19:37:04Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}
