@@ -104,6 +104,121 @@ final class FragilityGateLiveABTests: XCTestCase {
         )
     }
 
+    // MARK: - Multi-run aggregate (playhead-xsdz.14)
+
+    /// playhead-xsdz.14 — noise-aware multi-run aggregation across the
+    /// 5-arm fragility sweep. Runs the SAME arms × episodes as the
+    /// single-run sibling N times (default 5, configurable via the
+    /// `PLAYHEAD_MULTIRUN_N` env var, clamped to `[2,20]`), then dumps a
+    /// `MultiRunReport` with median + IQR + mean + stdev per metric and a
+    /// REAL / WITHIN-NOISE / AMBIGUOUS verdict per treatment-vs-baseline
+    /// metric (`NoiseBand.activationDefault`). The per-span diagnostic
+    /// from the sibling is NOT collected here — multi-run measures the
+    /// aggregate metrics, not the per-span per-run rows.
+    ///
+    /// Cost: each Catalyst N-run is `N × ~60 full-FM passes = N × ~12 min ×
+    /// 5 arms ≈ several hours` (default N=5 → ~10–14 hours on a warm Mac).
+    /// Design implies overnight runs.
+    ///
+    /// Gating: requires BOTH `PLAYHEAD_FRAGILITY_AB=1` (per-harness opt-in,
+    /// enforced by `setUp()`) AND `PLAYHEAD_MULTIRUN_AB=1` (combined
+    /// multi-run gate, enforced inline below).
+    func testMultiRunAggregateAcrossDogfoodCorpus() async throws {
+        try XCTSkipUnless(
+            multiRunABEnabled(),
+            "Fragility multi-run aggregation is opt-in via PLAYHEAD_MULTIRUN_AB=1 (combined gate across all 5 activation harnesses)."
+        )
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("Live FM BackfillJobRunner requires iOS 26+ / FoundationModels.")
+        }
+
+        let loader = CorpusAnnotationLoader()
+        let annotationURLs: [URL]
+        do {
+            annotationURLs = try loader.annotationFileURLs()
+        } catch {
+            throw XCTSkip("corpus annotations dir not present: \(error)")
+        }
+        try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+
+        let arms = FragilitySweepArm.allCases
+        let runCount = multiRunCountFromEnv()
+
+        let report = try await runMultiRunAggregation(
+            arms: arms.map(\.rawValue),
+            config: MultiRunDriverConfig(runCount: runCount, configHash: "fragility-gate-ab")
+        ) { armLabel, runIndex in
+            guard let arm = FragilitySweepArm(rawValue: armLabel) else {
+                throw FragilityABRunError(reason: "unknown arm \(armLabel)")
+            }
+            return try await self.scoreOneRun(
+                arm: arm,
+                runIndex: runIndex,
+                loader: loader,
+                annotationURLs: annotationURLs
+            )
+        }
+
+        print(report.table())
+        let dumpURL = loader.repoRoot.appendingPathComponent(
+            "playhead-dogfood-diagnostics-multirun-fragility-gate.json",
+            isDirectory: false
+        )
+        try report.toJSON().write(to: dumpURL, options: .atomic)
+        print("Multi-run fragility-gate JSON: \(dumpURL.path) (git-ignored)")
+    }
+
+    /// One multi-run pass for one arm: replay the same per-episode arm
+    /// loop the single-run sibling uses, fold every episode's persisted
+    /// windows into a fresh `FusionLiftModeAccumulator`, and return its
+    /// `ArmRunResult`. The fragility diagnostic observer is NOT injected
+    /// here (its rows are a different output type that multi-run does
+    /// not aggregate). A FRESH store is created per episode per arm per
+    /// run (existing `runArm` does this via `makeTempDir`).
+    @available(iOS 26.0, *)
+    private func scoreOneRun(
+        arm: FragilitySweepArm,
+        runIndex: Int,
+        loader: CorpusAnnotationLoader,
+        annotationURLs: [URL]
+    ) async throws -> ArmRunResult {
+        var accumulator = FusionLiftModeAccumulator()
+        var scoredCount = 0
+        for url in annotationURLs {
+            let episodeId = url.deletingPathExtension().lastPathComponent
+            let annotation = try loader.decode(at: url)
+            let audioURL: URL
+            do {
+                audioURL = try loader.audioFileURL(for: annotation)
+            } catch {
+                continue
+            }
+            try loader.verify(audioFingerprintFor: annotation, jsonURL: url)
+            let transcript = try CorpusTranscriptLoader.load(
+                episodeId: episodeId,
+                repoRoot: loader.repoRoot
+            )
+            guard !transcript.isEmpty else { continue }
+
+            let windows = try await runArm(
+                arm: arm,
+                episodeId: episodeId,
+                annotation: annotation,
+                audioURL: audioURL,
+                transcript: transcript,
+                diagnosticObserver: nil  // multi-run does not aggregate per-span rows
+            )
+            accumulator.addEpisode(
+                annotationWindows: annotation.adWindows,
+                adWindows: windows,
+                podcastId: annotation.showName,
+                episodeId: episodeId
+            )
+            scoredCount += 1
+        }
+        return ArmRunResult(episodeCount: scoredCount, accumulator: accumulator)
+    }
+
     // MARK: - Entry: ONE pass, BOTH the per-span diagnostic and the sweep
 
     func testFragilityDiagnosticAndSweepAcrossDogfoodCorpus() async throws {

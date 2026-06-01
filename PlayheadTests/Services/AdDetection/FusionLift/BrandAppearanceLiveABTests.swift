@@ -141,6 +141,196 @@ final class BrandAppearanceLiveABTests: XCTestCase {
         )
     }
 
+    // MARK: - Multi-run aggregate (playhead-xsdz.14)
+
+    /// playhead-xsdz.14 — noise-aware multi-run aggregation across the
+    /// 4-arm brand-appearance sweep (baseline + xsdz12Only + xsdz13Only +
+    /// bothOn). Runs the SAME arms × episodes as the combined sibling N
+    /// times (default 5, configurable via the `PLAYHEAD_MULTIRUN_N` env
+    /// var, clamped to `[2,20]`), then dumps a `MultiRunReport` with
+    /// median + IQR + mean + stdev per metric and a REAL / WITHIN-NOISE /
+    /// AMBIGUOUS verdict per treatment-vs-baseline metric
+    /// (`NoiseBand.activationDefault`). Per-channel fire counts (xsdz.12
+    /// grammar, xsdz.13 syndication, gated entities) ride along on each
+    /// run's `fireCount` dictionary so the aggregate carries the per-run
+    /// fire mean as well.
+    ///
+    /// Cost: each Catalyst N-run is `N × ~48 full-FM passes = N × ~12 min ×
+    /// 4 arms ≈ several hours` (default N=5 → ~10–12 hours on a warm Mac).
+    /// Design implies overnight runs.
+    ///
+    /// Gating: requires BOTH `PLAYHEAD_BRANDAPPEARANCE_AB=1` (per-harness
+    /// opt-in, enforced by `setUp()`) AND `PLAYHEAD_MULTIRUN_AB=1`
+    /// (combined multi-run gate, enforced inline below).
+    func testMultiRunAggregateAcrossDogfoodCorpus() async throws {
+        try XCTSkipUnless(
+            multiRunABEnabled(),
+            "Brand-appearance multi-run aggregation is opt-in via PLAYHEAD_MULTIRUN_AB=1 (combined gate across all 5 activation harnesses)."
+        )
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("Live FM BackfillJobRunner requires iOS 26+ / FoundationModels.")
+        }
+
+        let loader = CorpusAnnotationLoader()
+        let annotationURLs: [URL]
+        do {
+            annotationURLs = try loader.annotationFileURLs()
+        } catch {
+            throw XCTSkip("corpus annotations dir not present: \(error)")
+        }
+        try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+
+        // Resolve every episode ONCE so each run shares the same staged set
+        // (audio + transcript + publish-date sorted). Resolution is identical
+        // to the single-run path; failures abort the whole multi-run pass.
+        let resolved = try await Self.resolveAndSortEpisodes(
+            loader: loader,
+            annotationURLs: annotationURLs
+        )
+        try XCTSkipIf(resolved.isEmpty, "no corpus episodes resolved")
+
+        let arms = BrandAppearanceArm.allCases
+        let runCount = multiRunCountFromEnv()
+
+        let report = try await runMultiRunAggregation(
+            arms: arms.map(\.rawValue),
+            config: MultiRunDriverConfig(runCount: runCount, configHash: "brand-appearance-ab")
+        ) { armLabel, runIndex in
+            guard let arm = BrandAppearanceArm(rawValue: armLabel) else {
+                throw BrandAppearanceABRunError(reason: "unknown arm \(armLabel)")
+            }
+            return try await self.scoreOneRun(
+                arm: arm,
+                runIndex: runIndex,
+                resolved: resolved
+            )
+        }
+
+        print(report.table())
+        let dumpURL = loader.repoRoot.appendingPathComponent(
+            "playhead-dogfood-diagnostics-multirun-brand-appearance.json",
+            isDirectory: false
+        )
+        try report.toJSON().write(to: dumpURL, options: .atomic)
+        print("Multi-run brand-appearance JSON: \(dumpURL.path) (git-ignored)")
+    }
+
+    /// Resolve and publish-date-sort every staged episode. Mirrors the
+    /// single-run path's resolution + sort; extracted so each multi-run
+    /// pass shares ONE resolution rather than re-resolving every run.
+    private static func resolveAndSortEpisodes(
+        loader: CorpusAnnotationLoader,
+        annotationURLs: [URL]
+    ) async throws -> [ResolvedEpisode] {
+        var resolved: [ResolvedEpisode] = []
+        for url in annotationURLs {
+            let episodeId = url.deletingPathExtension().lastPathComponent
+            let annotation = try loader.decode(at: url)
+            let audioURL: URL
+            do {
+                audioURL = try loader.audioFileURL(for: annotation)
+            } catch {
+                continue
+            }
+            try loader.verify(audioFingerprintFor: annotation, jsonURL: url)
+            let transcript = try CorpusTranscriptLoader.load(
+                episodeId: episodeId,
+                repoRoot: loader.repoRoot
+            )
+            guard !transcript.isEmpty else { continue }
+            guard let publishDate = BrandAppearancePublishDate.parse(fromEpisodeId: episodeId) else {
+                throw BrandAppearanceABRunError(reason: "could not parse YYYY-MM-DD publish date from \(episodeId)")
+            }
+            resolved.append(ResolvedEpisode(
+                episodeId: episodeId,
+                annotation: annotation,
+                audioURL: audioURL,
+                transcript: transcript,
+                publishDate: publishDate
+            ))
+        }
+        resolved.sort {
+            if $0.publishDate != $1.publishDate { return $0.publishDate < $1.publishDate }
+            return $0.episodeId < $1.episodeId
+        }
+        return resolved
+    }
+
+    /// One multi-run pass for one arm: build a fresh per-run syndication
+    /// store (if the arm needs one), replay every resolved episode through
+    /// `runArm`, fold the persisted windows into a fresh
+    /// `FusionLiftModeAccumulator`, and roll up the per-channel fire
+    /// counts. Each run gets its OWN syndication store so runs of the same
+    /// arm cannot leak history into one another; the gate-reached entity
+    /// count is computed at the end of the run via the production
+    /// evaluator and added to the run's `fireCount`.
+    @available(iOS 26.0, *)
+    private func scoreOneRun(
+        arm: BrandAppearanceArm,
+        runIndex: Int,
+        resolved: [ResolvedEpisode]
+    ) async throws -> ArmRunResult {
+        var accumulator = FusionLiftModeAccumulator()
+        var fireTally = BrandAppearanceFireTally()
+        var scoredCount = 0
+
+        // Build a fresh syndication store per RUN (one per arm × run; the
+        // store is SHARED across all episodes of THIS run only, mirroring
+        // the single-run sibling's per-arm-per-pass shape).
+        var sharedStore: SharedSyndicationStore?
+        if arm.requiresSyndicationStore {
+            let dir = try makeTempDir(prefix: "BrandAppearanceMultiRun-\(arm.rawValue)-r\(runIndex)")
+            let store = try CrossShowSyndicationStore(directoryURL: dir)
+            try await store.migrate()
+            sharedStore = SharedSyndicationStore(store: store)
+        }
+
+        for episode in resolved {
+            let tap = BrandAppearanceChannelTapObserver()
+            if let shared = sharedStore {
+                try await shared.preSeedObservations(
+                    transcript: episode.transcript,
+                    episodeId: episode.episodeId,
+                    podcastId: episode.annotation.showName,
+                    at: episode.publishDate
+                )
+            }
+            let windows = try await runArm(
+                arm: arm,
+                episode: episode,
+                syndicationStore: sharedStore?.store,
+                tap: tap
+            )
+            accumulator.addEpisode(
+                annotationWindows: episode.annotation.adWindows,
+                adWindows: windows,
+                podcastId: episode.annotation.showName,
+                episodeId: episode.episodeId
+            )
+            let counts = await tap.fireCounts(for: episode.episodeId)
+            fireTally.add(counts)
+            scoredCount += 1
+        }
+        if let shared = sharedStore {
+            let gated = await shared.gatedEntityCount(evaluator: CrossShowSyndicationEvaluator())
+            fireTally.syndicationGatedEntities = gated
+            await shared.store.close()
+        }
+
+        let fireCounts: [String: Int] = [
+            "rhetoricalGrammar": fireTally.rhetoricalGrammarFiredSpans,
+            "crossShowSyndication": fireTally.crossShowSyndicationFiredSpans,
+            "audioForensics": fireTally.audioForensicsFiredSpans,
+            "observedSpans": fireTally.observedSpans,
+            "syndicationGatedEntities": fireTally.syndicationGatedEntities,
+        ]
+        return ArmRunResult(
+            episodeCount: scoredCount,
+            accumulator: accumulator,
+            fireCount: fireCounts
+        )
+    }
+
     // MARK: - A/B entry points (one focused method per brand-appearance signal)
 
     /// playhead-xsdz.12 — rhetorical act-sequence grammar

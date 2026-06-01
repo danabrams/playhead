@@ -132,6 +132,127 @@ final class LexicalScorerLiveABTests: XCTestCase {
 
     // MARK: - A/B entry
 
+    /// playhead-xsdz.14 — noise-aware multi-run aggregation across the
+    /// 4-arm lexical-scorer sweep. Runs the SAME arms × episodes as the
+    /// single-run sibling N times (default 5, configurable via the
+    /// `PLAYHEAD_MULTIRUN_N` env var, clamped to `[2,20]`), then dumps a
+    /// `MultiRunReport` with median + IQR + mean + stdev per metric and a
+    /// REAL / WITHIN-NOISE / AMBIGUOUS verdict per treatment-vs-baseline
+    /// metric (`NoiseBand.activationDefault`).
+    ///
+    /// Cost: each Catalyst N-run is `N × ~48 full-FM passes = N × ~12 min ×
+    /// 4 arms ≈ several hours` (default N=5 → ~10–12 hours on a warm Mac).
+    /// Design implies overnight runs; the FastTests plan skips this test
+    /// because neither `PLAYHEAD_MULTIRUN_AB` nor the original
+    /// `PLAYHEAD_LEXICAL_SCORER_AB` env var is set.
+    ///
+    /// Gating: requires BOTH `PLAYHEAD_LEXICAL_SCORER_AB=1` (per-harness
+    /// opt-in, enforced by `setUp()`) AND `PLAYHEAD_MULTIRUN_AB=1` (combined
+    /// multi-run gate across the 5 activation harnesses, enforced inline
+    /// below). In the default `PlayheadFastTests` plan neither is set, so
+    /// the sibling's `setUp()` skips clean.
+    func testMultiRunAggregateAcrossDogfoodCorpus() async throws {
+        // Multi-run is opt-in via its OWN combined env var IN ADDITION TO
+        // the sibling's single-run gate that setUp() already enforces.
+        try XCTSkipUnless(
+            multiRunABEnabled(),
+            "Lexical-scorer multi-run aggregation is opt-in via PLAYHEAD_MULTIRUN_AB=1 (combined gate across all 5 activation harnesses)."
+        )
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("Live FM BackfillJobRunner requires iOS 26+ / FoundationModels.")
+        }
+
+        let loader = CorpusAnnotationLoader()
+        let annotationURLs: [URL]
+        do {
+            annotationURLs = try loader.annotationFileURLs()
+        } catch {
+            throw XCTSkip("corpus annotations dir not present: \(error)")
+        }
+        try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+
+        let arms = LexicalScorerArm.allCases
+        let runCount = multiRunCountFromEnv()
+
+        let report = try await runMultiRunAggregation(
+            arms: arms.map(\.rawValue),
+            config: MultiRunDriverConfig(runCount: runCount, configHash: "lexical-scorer-ab")
+        ) { armLabel, runIndex in
+            guard let arm = LexicalScorerArm(rawValue: armLabel) else {
+                throw LexicalABRunError(reason: "unknown arm \(armLabel)")
+            }
+            return try await self.scoreOneRun(
+                arm: arm,
+                runIndex: runIndex,
+                loader: loader,
+                annotationURLs: annotationURLs
+            )
+        }
+
+        print(report.table())
+        let dumpURL = loader.repoRoot.appendingPathComponent(
+            "playhead-dogfood-diagnostics-multirun-lexical-scorer.json",
+            isDirectory: false
+        )
+        try report.toJSON().write(to: dumpURL, options: .atomic)
+        print("Multi-run lexical-scorer JSON: \(dumpURL.path) (git-ignored)")
+    }
+
+    /// One multi-run pass for one arm: replay the same per-episode arm
+    /// loop the single-run sibling uses, fold every episode's persisted
+    /// windows into a fresh `FusionLiftModeAccumulator`, then return its
+    /// `ArmRunResult`. A FRESH store is created per episode per arm per
+    /// run (existing `runArm` does this via `makeTempDir`), so the N runs
+    /// of one arm cannot leak state into one another. Fails loud on any
+    /// hard error (so a half-complete run cannot pollute the aggregate).
+    @available(iOS 26.0, *)
+    private func scoreOneRun(
+        arm: LexicalScorerArm,
+        runIndex: Int,
+        loader: CorpusAnnotationLoader,
+        annotationURLs: [URL]
+    ) async throws -> ArmRunResult {
+        var accumulator = FusionLiftModeAccumulator()
+        var scoredCount = 0
+        for url in annotationURLs {
+            let episodeId = url.deletingPathExtension().lastPathComponent
+            let annotation = try loader.decode(at: url)
+            let audioURL: URL
+            do {
+                audioURL = try loader.audioFileURL(for: annotation)
+            } catch {
+                // skipped — audio not staged. The aggregate's episodeCount
+                // will reflect the actually-scored set (caller knows N×N runs
+                // share the same staged corpus).
+                continue
+            }
+            try loader.verify(audioFingerprintFor: annotation, jsonURL: url)
+            let transcript = try CorpusTranscriptLoader.load(
+                episodeId: episodeId,
+                repoRoot: loader.repoRoot
+            )
+            guard !transcript.isEmpty else { continue }
+
+            let windows = try await runArm(
+                arm: arm,
+                episodeId: episodeId,
+                annotation: annotation,
+                audioURL: audioURL,
+                transcript: transcript
+            )
+            accumulator.addEpisode(
+                annotationWindows: annotation.adWindows,
+                adWindows: windows,
+                podcastId: annotation.showName,
+                episodeId: episodeId
+            )
+            scoredCount += 1
+        }
+        return ArmRunResult(episodeCount: scoredCount, accumulator: accumulator)
+    }
+
+    // MARK: - Single-run A/B entry (kept for backwards compat)
+
     func testLexicalScorerPerFeatureSweepAcrossDogfoodCorpus() async throws {
         guard #available(iOS 26.0, *) else {
             throw XCTSkip("Live FM BackfillJobRunner requires iOS 26+ / FoundationModels.")
