@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 l2f-r3-audit.py — pattern analysis for R3 (rediff-only ≥20s) auto-promotions.
 
@@ -493,6 +494,182 @@ def build_report(spans: list[dict[str, Any]], per_episode: dict[str, int]) -> st
     return "\n".join(out) + "\n"
 
 
+def scan_corpus_artifacts() -> dict[str, list[dict[str, Any]]]:
+    """
+    Cross-provenance corpus quality scan. Walks every ad_window in every
+    annotation (not filtered by audit_priority) and classifies anti-patterns
+    that are bugs irrespective of which rule promoted them.
+
+    Categories:
+      - F_PAST   : end > episode_duration + 0.5s (rediff overshoot artifact —
+                   added 2026-06-01 after PR #208 missed the TED Business R1
+                   F_PAST span because its scan was R3-only)
+      - F_NEG    : start < -0.5s (encoder/aligner returned negative offset)
+      - F_ZERO   : end <= start + 0.5s (zero/negative duration; never useful)
+      - F_TINY   : 0 < (end - start) < 5s (below DecoderConstants.minDurationSeconds;
+                   surfaces in raw rediff slots even though R3 has a 20s gate)
+
+    Returns: dict mapping category → list of offending span records
+    (each with episode_id, start, end, duration, provenance, episode_duration,
+    overshoot/etc). Categories never overlap: a span hits the FIRST matching
+    bucket only, in the order above.
+    """
+    shows = load_show_index()
+    out: dict[str, list[dict[str, Any]]] = {
+        "F_PAST": [], "F_NEG": [], "F_ZERO": [], "F_TINY": [],
+    }
+    F_PAST_TOL = 0.5
+    F_NEG_TOL = 0.5
+    F_ZERO_TOL = 0.5
+    F_TINY_FLOOR = 5.0  # mirrors DecoderConstants.minDurationSeconds
+
+    for path in sorted(ANN_DIR.glob("*.json")):
+        if path.name.startswith("_template"):
+            continue
+        try:
+            ann = json.loads(path.read_text())
+        except Exception:
+            continue
+        eid = ann.get("episode_id") or ann.get("episodeId") or path.stem
+        try:
+            dur = ann.get("duration_seconds")
+            dur = float(dur) if dur is not None else None
+        except (TypeError, ValueError):
+            dur = None
+        for w in ann.get("ad_windows") or ann.get("adWindows") or []:
+            try:
+                start = float(w.get("start_seconds") or w.get("startSeconds") or 0.0)
+                end = float(w.get("end_seconds") or w.get("endSeconds") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            rec = {
+                "episode_id": eid,
+                "show": shows.get(eid, ann.get("show_name") or "?"),
+                "start": start,
+                "end": end,
+                "duration": end - start,
+                "episode_duration": dur,
+                "audit_priority": w.get("audit_priority"),
+                "provenance": w.get("provenance") or [],
+                "ad_type": w.get("ad_type"),
+            }
+            # Order matters: a span is bucketed in the FIRST matching category.
+            if dur is not None and end > dur + F_PAST_TOL:
+                rec["overshoot"] = end - dur
+                out["F_PAST"].append(rec)
+            elif start < -F_NEG_TOL:
+                out["F_NEG"].append(rec)
+            elif end <= start + F_ZERO_TOL:
+                out["F_ZERO"].append(rec)
+            elif 0 < (end - start) < F_TINY_FLOOR:
+                out["F_TINY"].append(rec)
+    return out
+
+
+def build_artifact_section(artifacts: dict[str, list[dict[str, Any]]]) -> str:
+    """
+    Append a cross-provenance "Corpus Quality Scan" section to the R3 audit
+    report. Reports each anti-pattern category with the offending spans (so a
+    follow-up scrub via l2f-flag-false-promote.py is one copy-paste away).
+    """
+    out: list[str] = []
+    out.append("")
+    out.append("---")
+    out.append("")
+    out.append("## Corpus Quality Scan (All Provenances)")
+    out.append("")
+    out.append(
+        "Cross-provenance anti-pattern scan added 2026-06-01 after PR #212 "
+        "discovered a F_PAST artifact (TED Business R1 span, overshoot 44s) "
+        "that the original R3-only audit missed because it filtered to "
+        "`audit_priority=1`. This section scans EVERY `ad_window` regardless "
+        "of which rule promoted it."
+    )
+    out.append("")
+    total = sum(len(v) for v in artifacts.values())
+    if total == 0:
+        out.append("**No artifacts detected.** Corpus is clean across all four categories.")
+        return "\n".join(out) + "\n"
+
+    out.append(f"**Total artifacts: {total}** "
+               f"(F_PAST={len(artifacts['F_PAST'])} "
+               f"F_NEG={len(artifacts['F_NEG'])} "
+               f"F_ZERO={len(artifacts['F_ZERO'])} "
+               f"F_TINY={len(artifacts['F_TINY'])})")
+    out.append("")
+
+    for cat, label, hint in (
+        ("F_PAST",
+         "F_PAST — end past episode duration",
+         "Rediff overshoot past last audible frame. The `scripts/l2f-auto-promote.py` "
+         "F_PAST guard added in PR #212 now rejects these at promotion time; this "
+         "section catches any that slipped in before the guard (or via a different "
+         "promotion path)."),
+        ("F_NEG",
+         "F_NEG — negative start time",
+         "Span starts at < 0s. Encoder/aligner returned a negative offset — never "
+         "valid; always an artifact."),
+        ("F_ZERO",
+         "F_ZERO — zero or negative duration",
+         "Span end ≤ start. Zero-width or inverted; never valid."),
+        ("F_TINY",
+         "F_TINY — duration < 5s",
+         "Below the production decoder's minDurationSeconds floor. R3 has a 20s "
+         "gate but R1/R2 don't; surfaces when a tiny rediff sub-slot or drafter "
+         "false-positive leaks through."),
+    ):
+        rows = artifacts[cat]
+        if not rows:
+            continue
+        out.append(f"### {label} ({len(rows)})")
+        out.append("")
+        out.append(hint)
+        out.append("")
+        out.append("| Episode | Show | Span | Dur | Detail | Promoted by |")
+        out.append("|---|---|---|---|---|---|")
+        for r in rows:
+            ep_short = r["episode_id"][:48] + ("…" if len(r["episode_id"]) > 48 else "")
+            show_short = (r.get("show") or "?")[:24]
+            span_str = f"{r['start']:.1f}-{r['end']:.1f}"
+            dur_str = f"{r['duration']:.1f}s"
+            if cat == "F_PAST":
+                detail = (
+                    f"end {r['end']:.1f}s > dur {r['episode_duration']:.1f}s "
+                    f"by {r['overshoot']:.1f}s"
+                )
+            elif cat == "F_NEG":
+                detail = f"start {r['start']:.1f}s < 0"
+            elif cat == "F_ZERO":
+                detail = f"end {r['end']:.1f}s ≤ start {r['start']:.1f}s"
+            else:  # F_TINY
+                detail = f"duration {r['duration']:.1f}s < 5.0s"
+            prov = ",".join(r.get("provenance") or []) or "?"
+            out.append(
+                f"| `{ep_short}` | {show_short} | {span_str} | {dur_str} | "
+                f"{detail} | {prov} |"
+            )
+        out.append("")
+        # One-liner suggested scrub commands so the user can fix in 30s.
+        out.append("**Suggested scrub:**")
+        out.append("```bash")
+        for r in rows:
+            ep_prefix = r["episode_id"][:40]
+            reason = {
+                "F_PAST": f"F_PAST rediff overshoot (end > dur by {r.get('overshoot', 0):.1f}s)",
+                "F_NEG": "F_NEG negative start time (encoder artifact)",
+                "F_ZERO": "F_ZERO zero/negative duration",
+                "F_TINY": f"F_TINY duration {r['duration']:.1f}s < 5s floor",
+            }[cat]
+            out.append(
+                f"scripts/l2f-flag-false-promote.py {ep_prefix} "
+                f"{r['start']:.1f} --reason=\"{reason}\""
+            )
+        out.append("```")
+        out.append("")
+
+    return "\n".join(out) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-o", "--output", type=str, default=None,
@@ -502,12 +679,21 @@ def main(argv: list[str] | None = None) -> int:
     spans, per_episode = collect_spans()
     report = build_report(spans, per_episode)
 
+    # Cross-provenance corpus quality scan (added 2026-06-01 to close
+    # the audit_priority=1-only blind spot exposed by PR #212).
+    artifacts = scan_corpus_artifacts()
+    report += build_artifact_section(artifacts)
+
     if args.output:
         path = pathlib.Path(args.output)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(report)
-        print(f"wrote {path} ({len(report)} bytes, {len(spans)} R3 spans)",
-              file=sys.stderr)
+        total_artifacts = sum(len(v) for v in artifacts.values())
+        print(
+            f"wrote {path} ({len(report)} bytes, {len(spans)} R3 spans, "
+            f"{total_artifacts} cross-provenance artifacts)",
+            file=sys.stderr,
+        )
     else:
         sys.stdout.write(report)
 
