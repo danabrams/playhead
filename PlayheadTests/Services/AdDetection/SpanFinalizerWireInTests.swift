@@ -428,4 +428,193 @@ struct SpanFinalizerWireInTests {
             "expected policyOverrideApplied; got \(merged.constraintTrace)"
         )
     }
+
+    /// playhead-p56a R2 review: pins the SpanFinalizer split-path contract
+    /// that the wire-in inherits when a >180s candidate is split into two
+    /// halves. Both halves carry the SAME `DecodedSpan.id` (split-span
+    /// preserves the parent id), and BOTH carry the `splitAboveMaxDuration`
+    /// constraint in their individual `constraintTrace`. The wire-in's
+    /// rebuild loop appends BOTH to `pendingDecisions` and concatenates
+    /// the two halves' constraint traces into a single
+    /// `lastSpanFinalizerConstraintsBySpanId[parentId]` entry.
+    ///
+    /// Why this test exists: R1 deferred Finding #6 ("split path not
+    /// exercised in fast-tests") on the rationale that the >180s path is
+    /// rare. R2 closes the coverage gap with a direct finalizer call —
+    /// the input shape is hermetic, so the split contract is locked
+    /// without needing to thread a 200s+ candidate through the full
+    /// runBackfill stack. Surfaces the trace-merge semantics the wire-in
+    /// depends on (append, not replace) so any future SpanFinalizer
+    /// refactor that broke the id-preserving split would surface here
+    /// before landing on a real episode.
+    @Test("SpanFinalizer split: >180s candidate produces two finalized spans sharing the parent id, each tagged splitAboveMaxDuration")
+    func spanFinalizerSplitPreservesParentIdAndTagsBothHalves() {
+        // Single candidate spanning 0..220s — above the 180s
+        // `DecoderConstants.maxDurationSeconds` ceiling. Expect: two
+        // finalized spans at [0, 180] and [180, 220], both with
+        // `span.id == originalId`, both with `.splitAboveMaxDuration` in
+        // their individual traces.
+        let assetId = "asset-p56a-split"
+        let originalId = DecodedSpan.makeId(
+            assetId: assetId,
+            firstAtomOrdinal: 100,
+            lastAtomOrdinal: 200
+        )
+        let oversizedSpan = DecodedSpan(
+            id: originalId,
+            assetId: assetId,
+            firstAtomOrdinal: 100,
+            lastAtomOrdinal: 200,
+            startTime: 0.0,
+            endTime: 220.0,
+            anchorProvenance: []
+        )
+        let decision = DecisionResult(
+            proposalConfidence: 0.80,
+            skipConfidence: 0.85,
+            eligibilityGate: .eligible
+        )
+
+        let candidates: [CandidateSpan] = [
+            CandidateSpan(
+                span: oversizedSpan,
+                decision: decision,
+                commercialIntent: .unknown,
+                adOwnership: .unknown
+            ),
+        ]
+        // Episode duration large enough that the 50% action cap never
+        // fires on either half. Empty chapters → no chapter penalty.
+        let finalizer = SpanFinalizer(episodeDuration: 3600.0, chapters: [])
+        let result = finalizer.finalize(candidates)
+
+        // Two finalized halves.
+        #expect(result.count == 2, "expected split into 2 halves; got \(result.count)")
+        // Both halves share the parent id (this is the contract the
+        // wire-in's `pendingByOriginalId` lookup depends on).
+        #expect(result[0].span.id == originalId, "first half must inherit parent id")
+        #expect(result[1].span.id == originalId, "second half must inherit parent id")
+        // Bounds: [0, 180] and [180, 220].
+        #expect(result[0].span.startTime == 0.0)
+        #expect(result[0].span.endTime == 180.0)
+        #expect(result[1].span.startTime == 180.0)
+        #expect(result[1].span.endTime == 220.0)
+        // Each half independently carries the split constraint in its
+        // own `constraintTrace` — confirming the wire-in's
+        // `traceById[id] = traceById[id] + new` accumulation will
+        // concatenate two `.splitAboveMaxDuration` entries on the
+        // shared parent-id key.
+        #expect(
+            result[0].constraintTrace.contains(.splitAboveMaxDuration),
+            "first half missing splitAboveMaxDuration; got \(result[0].constraintTrace)"
+        )
+        #expect(
+            result[1].constraintTrace.contains(.splitAboveMaxDuration),
+            "second half missing splitAboveMaxDuration; got \(result[1].constraintTrace)"
+        )
+        // Both halves also trip the policy override (same `(.unknown,
+        // .unknown)` translation the wire-in uses).
+        #expect(result[0].constraintTrace.contains(.policyOverrideApplied))
+        #expect(result[1].constraintTrace.contains(.policyOverrideApplied))
+    }
+
+    /// playhead-p56a R2 review: pins the documented LIMITATION of the
+    /// wire-in's merge path — when constraint #2 (`mergedWithAdjacent`)
+    /// collapses two pending records into a single finalized span, the
+    /// merged-away record's `ledger`, `effectiveLedger`, `spanFingerprint`,
+    /// `spanFeatureWindows`, and `spanTopCatalogSimilarity` context is
+    /// dropped, because the rebuild loop keys by `pendingByOriginalId[
+    /// span.span.id]` and the surviving WorkingSpan carries only the
+    /// earlier `prev.spanId`. This test does not assert a fix — fixing
+    /// requires a merge-context policy decision (union the ledgers? take
+    /// the higher-confidence side's fingerprint?) outside the p56a wire-
+    /// in scope. Instead, it locks the contract so the OFF default's
+    /// byte-identity is preserved (no merge fires when the flag is off)
+    /// and surfaces the data-loss expectation for the downstream
+    /// bd-4xqf measurement run.
+    ///
+    /// This is paired with `flagOnDoesNotRegressOnCleanFixture` — that
+    /// test asserts `countOn <= countOff` (so a merge correctly REDUCES
+    /// the row count); this test asserts that the surviving row carries
+    /// `prev`'s id, not `curr`'s.
+    @Test("SpanFinalizer merge: surviving finalized span inherits the FIRST candidate's id; SECOND candidate's id is absent from output")
+    func spanFinalizerMergeKeepsFirstCandidateIdAndDropsSecond() {
+        // Same shape as `wireInTranslationTripsMergeConstraint` but with
+        // a stronger contract: the surviving span carries `prev.id`, not
+        // `curr.id`. This is the basis of the merge-data-loss limitation
+        // the wire-in's rebuild loop inherits — `pendingByOriginalId[
+        // curr.id]` is never referenced, so `curr`'s ledger/fingerprint/
+        // feature-window context is dropped from emission. Downstream
+        // bd-4xqf measurement should account for this when comparing
+        // ON-arm catalog/repeated-ad-cache rows against the OFF baseline.
+        let assetId = "asset-p56a-merge-id"
+        let firstId = DecodedSpan.makeId(
+            assetId: assetId,
+            firstAtomOrdinal: 100,
+            lastAtomOrdinal: 200
+        )
+        let secondId = DecodedSpan.makeId(
+            assetId: assetId,
+            firstAtomOrdinal: 300,
+            lastAtomOrdinal: 400
+        )
+        let firstSpan = DecodedSpan(
+            id: firstId,
+            assetId: assetId,
+            firstAtomOrdinal: 100,
+            lastAtomOrdinal: 200,
+            startTime: 10.0,
+            endTime: 40.0,
+            anchorProvenance: []
+        )
+        let secondSpan = DecodedSpan(
+            id: secondId,
+            assetId: assetId,
+            firstAtomOrdinal: 300,
+            lastAtomOrdinal: 400,
+            startTime: 42.0,
+            endTime: 72.0,
+            anchorProvenance: []
+        )
+        let firstDecision = DecisionResult(
+            proposalConfidence: 0.80,
+            skipConfidence: 0.85,
+            eligibilityGate: .eligible
+        )
+        let secondDecision = DecisionResult(
+            proposalConfidence: 0.80,
+            skipConfidence: 0.70,
+            eligibilityGate: .eligible
+        )
+
+        let finalizer = SpanFinalizer(episodeDuration: 3600.0, chapters: [])
+        let result = finalizer.finalize([
+            CandidateSpan(
+                span: firstSpan,
+                decision: firstDecision,
+                commercialIntent: .unknown,
+                adOwnership: .unknown
+            ),
+            CandidateSpan(
+                span: secondSpan,
+                decision: secondDecision,
+                commercialIntent: .unknown,
+                adOwnership: .unknown
+            ),
+        ])
+
+        // One survivor.
+        #expect(result.count == 1, "expected merge to one survivor; got \(result.count)")
+        // Survivor carries `prev.id`, not `curr.id` — this is the
+        // contract the wire-in's `pendingByOriginalId[span.span.id]`
+        // lookup depends on (resolves to `prev`'s pending record).
+        #expect(
+            result[0].span.id == firstId,
+            "merge survivor must inherit first candidate's id (got \(result[0].span.id))"
+        )
+        #expect(
+            result[0].span.id != secondId,
+            "merge survivor must NOT inherit second candidate's id — would corrupt `pendingByOriginalId` lookup"
+        )
+    }
 }
