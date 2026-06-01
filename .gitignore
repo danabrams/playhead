@@ -112,3 +112,5 @@ TestFixtures/Corpus/Drafts/*
 # contents (no transcript text), but housekeeping debt.
 playhead-diagnostics-*.json
 playhead-dogfood-diagnostics-*.json
+TestFixtures/Corpus/Snapshots/*
+!TestFixtures/Corpus/Snapshots/.gitkeep
