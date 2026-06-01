@@ -134,6 +134,16 @@ REJECTS_LOG = REPO / "TestFixtures/Corpus/Snapshots/audit-rejects.jsonl"
 REJECT_OVERLAP_TOLERANCE = 5.0  # seconds; a cluster within this margin of a
                                  # rejected span is treated as the same span
                                  # (boundary jitter between runs is normal)
+F_PAST_TOLERANCE = 0.5           # seconds; a cluster whose end exceeds the
+                                 # episode duration by more than this is
+                                 # considered a rediff artifact (rediff slots
+                                 # commonly overshoot the last audible frame
+                                 # because the mp3 encoder pads silence). See
+                                 # PR #208 / agent A's R3 audit (2026-06-01)
+                                 # for the empirical justification: 6/27
+                                 # auto-promoted spans had end > duration by
+                                 # 44-204s, all confirmable as artifacts via
+                                 # the manifest duration field.
 
 # Thresholds — see file docstring for rule definitions.
 # Comparisons use `>=` with a small EPS to absorb float-subtraction noise; a
@@ -765,6 +775,13 @@ def process_episode(
     audit_counts: dict[int, int] = {1: 0, 3: 0}
     rejects = (rejects_idx or {}).get(episode_id, [])
     audit_rejected_count = 0
+    f_past_rejected_count = 0
+    # F_PAST guard inputs: episode duration is required to detect rediff
+    # overshoot past last audible frame. derive_duration() returns None when
+    # neither the pipeline-dump nor the drafter knows the duration; in that
+    # case the guard cannot fire (we don't fail-closed since some valid
+    # episodes lack duration metadata in early-stage corpora).
+    episode_duration = derive_duration(episode_id, pipeline_idx)
     for c in clusters:
         # Manual-audit veto: if this cluster matches a previously rejected
         # span (within tolerance), skip evaluation entirely. Keeps demoted
@@ -782,6 +799,32 @@ def process_episode(
                         f"±{REJECT_OVERLAP_TOLERANCE:.0f}s tolerance)."
                     ),
                     "provenance": ["audit-reject"],
+                }
+            )
+            continue
+        # F_PAST veto: cluster ends past the episode's last audible frame.
+        # This is overwhelmingly a rediff artifact (mp3 silence padding /
+        # ID3v2 tail confusing the chromaprint aligner). Empirical: 6/27
+        # spans in the 2026-06-01 corpus had overshoot 44-204s; all
+        # confirmable as artifacts. Reject (don't trim) — we'd rather lose
+        # a real ad that touches the end-of-episode than promote ~150s of
+        # silence as ground truth that biases every downstream eval.
+        if (
+            episode_duration is not None
+            and c.end > episode_duration + F_PAST_TOLERANCE
+        ):
+            overshoot = c.end - episode_duration
+            f_past_rejected_count += 1
+            rejected.append(
+                {
+                    "start": round(c.start, 2),
+                    "end": round(c.end, 2),
+                    "notes": (
+                        f"F_PAST-rejected (cluster end {c.end:.1f}s > "
+                        f"episode duration {episode_duration:.1f}s by "
+                        f"{overshoot:.1f}s; rediff overshoot artifact)."
+                    ),
+                    "provenance": ["f-past-reject"],
                 }
             )
             continue
@@ -821,6 +864,7 @@ def process_episode(
         "rule_counts": rule_counts,
         "audit_counts": audit_counts,
         "audit_rejected": audit_rejected_count,
+        "f_past_rejected": f_past_rejected_count,
         "_promoted_clusters": promoted,  # internal; stripped before writing summary
     }
 
@@ -886,10 +930,12 @@ def main() -> int:
     written = 0
     rejected_total = 0
     audit_rejected_total = 0
+    f_past_rejected_total = 0
 
     for ep in episode_ids:
         result = process_episode(ep, pipeline_idx, manifest, rejects_idx=rejects_idx)
         audit_rejected_total += result.get("audit_rejected", 0)
+        f_past_rejected_total += result.get("f_past_rejected", 0)
         promoted_clusters = result.pop("_promoted_clusters")
         rejected_total += len(result["rejected"])
         for k, v in result["rule_counts"].items():
@@ -956,6 +1002,7 @@ def main() -> int:
             "skipped_existing": skipped_existing,
             "rejected_clusters": rejected_total,
             "audit_rejected_clusters": audit_rejected_total,
+            "f_past_rejected_clusters": f_past_rejected_total,
             "rule_counts": rule_totals,
             "audit_priority_counts": audit_totals,
         },
@@ -966,7 +1013,8 @@ def main() -> int:
         f"\nsummary: episodes={len(episode_ids)} "
         f"written={written} skipped-existing={skipped_existing} "
         f"rejected-clusters={rejected_total} "
-        f"audit-rejected={audit_rejected_total}"
+        f"audit-rejected={audit_rejected_total} "
+        f"f-past-rejected={f_past_rejected_total}"
     )
     log(
         f"  rules: R1={rule_totals['R1']} R2={rule_totals['R2']} R3={rule_totals['R3']}"
