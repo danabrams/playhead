@@ -71,11 +71,11 @@ The decoded span IS wide enough but the persisted AdWindow is narrow. Look at St
 |---|---|---|
 | **`applyBoundaryRefinement` shrinks via acoustic snap** | `AdDetectionService.swift:5219` calling `BoundaryRefiner.computeAdjustments(...)` (or `BracketAwareBoundaryRefiner` at `BracketAwareBoundaryRefiner.swift:27`) | If the candidate window has a strong acoustic break a few seconds INSIDE either edge, refinement may pull the boundary inward. Verify by comparing pre/post-refinement bounds in a dump-extension. |
 | **Eligibility-gate demotion produces a smaller persisted action range** | `BackfillEvidenceFusion.swift:991` `metadataCorroborationGate()` (and lines 1043+ for FM-consensus/FM-acoustic variants) | `blockedByEvidenceQuorum` (`EvidenceLedgerEntry.swift:21`) doesn't shrink the AdWindow's startTime/endTime in `buildFusionAdWindow` (5186 — they're verbatim from `span`). So this isn't a direct boundary shrink, BUT it can demote `decisionState` to `.candidate`, which downstream views may render differently. Verify whether the AnalysisStore row reflects the original wide bounds even when gated. |
-| **`SpanFinalizer` (defined but NOT called in production)** | `SpanFinalizer.swift` — has overlap-resolution and minimum-content-gap merge logic (lines 152, 170) | Grep confirms no production callers as of this snapshot (`grep -rn "SpanFinalizer(" Playhead --include="*.swift"` returns 0). **This is suspicious — either dead code or wired through indirect generic.** If FUSION_DROP fires, first action: confirm SpanFinalizer is unreachable. If it is reachable, its constraint #1 (non-overlap, higher confidence wins) can `trimEnd` a wider lower-confidence span to a higher-confidence shorter neighbor (lines 152–164). |
+| **`SpanFinalizer` — VERIFIED UNREACHABLE (eliminated as FUSION_DROP suspect 2026-06-01)** | `SpanFinalizer.swift` | Reachability investigation `docs/bd-4xqf-spanfinalizer-reachability-2026-06-01.md` confirms zero direct callers, zero indirect callers (no factory, generic, reflection, or DI path), and zero ever-added/ever-removed call sites in git history since the introducing commit `e5fb5151` (2026-04-15). Only invocations are in `PlayheadTests/.../SpanFinalizerTests.swift`. The file compiles into the Playhead target (`project.pbxproj:4505`) but is never invoked. Cannot be a FUSION_DROP cause. Follow-up: wire it (insertion point: between fusion at `AdDetectionService.swift:~2828` and `buildFusionAdWindow` at `:5186`) or remove it; tracked as a separate bead. |
 | **AdDecisionState recorded → wider window but `wasSkipped` only fires on the inner sub-span** | downstream of persist | If two overlapping ad windows are persisted and the player auto-skips the inner one but not the outer, the user STILL hears the unskipped portion. The boundary is right in the data but wrong in the playback action. Would explain why rediff says 150 s of ad audio plays even though the AdWindow row covers it. |
 
 **First-touch fix sites:**
-1. **Confirm SpanFinalizer reachability.** If unreachable, remove from this map. If reachable, that's the most-likely shrink site.
+1. ~~Confirm SpanFinalizer reachability.~~ **DONE 2026-06-01** — verified UNREACHABLE; see `docs/bd-4xqf-spanfinalizer-reachability-2026-06-01.md`. Eliminated as a FUSION_DROP suspect; focus on (2) and (3).
 2. **Extend the pipeline dump to also record the BoundaryRefiner adjustment.** Same pattern as #201 — add `boundaryRefinementDelta` to `DumpAdWindow` so the analyzer can directly read whether refinement is shrinking.
 3. **Verify the playback action vs the persisted bounds.** This is the most-pernicious failure mode because the data looks right; only listening reveals it.
 
@@ -106,7 +106,7 @@ The analyzer's per-pair table will pinpoint episodes for each verdict; cross-ref
 
 - `AdDetectionService.swift` total: 7700+ lines.
 - `MinimalContiguousSpanDecoder.swift`: 163 lines (well-commented, single-file responsibility).
-- `SpanFinalizer.swift`: 342+ lines but ZERO production callers per grep.
+- `SpanFinalizer.swift`: 440 lines; VERIFIED UNREACHABLE in production (only callers are tests). See `docs/bd-4xqf-spanfinalizer-reachability-2026-06-01.md`.
 - `FragilityDiagnosticObserver.swift`: 155 lines; production-nil-default, tap fires at 3467 in service file.
 
 Re-verify before acting; this file is a snapshot, not live.
