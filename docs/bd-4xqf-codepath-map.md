@@ -117,7 +117,7 @@ The analyzer's per-pair table will pinpoint episodes for each verdict; cross-ref
 
 ## Verified at snapshot 2026-06-01
 
-- `AdDetectionService.swift` total: 7700+ lines.
+- `AdDetectionService.swift` total: ~8850 lines (was ~7700 pre-2026-06-01; +213 from the playhead-p56a SpanFinalizer wire-in plus other intervening churn).
 - `MinimalContiguousSpanDecoder.swift`: 163 lines (well-commented, single-file responsibility).
 - `SpanFinalizer.swift`: 440 lines; wired behind `AdDetectionConfig.spanFinalizerEnabled` (default OFF) as of playhead-p56a (2026-06-01). The public API is unchanged; the OFF path is byte-identical to pre-p56a behavior (asserted by `SpanFinalizerWireInTests.flagOffMatchesDefaultBaseline`). When ON, the finalizer's per-span constraint trace surfaces on the live pipeline-dump path via the new `spanFinalizerConstraintsFired: [String]?` field on each `DumpAdWindow`. The pre-p56a UNREACHABLE state is documented at `docs/bd-4xqf-spanfinalizer-reachability-2026-06-01.md` for historical context.
 - `applyBoundaryRefinement` at `AdDetectionService.swift:~5429`: VERIFIED UNREACHABLE (no in-file callers). Live refinement path is the inline block at ~3186-3260 inside `runBackfill`'s per-span loop. playhead-p56a explicitly does NOT wire this helper (out of scope).

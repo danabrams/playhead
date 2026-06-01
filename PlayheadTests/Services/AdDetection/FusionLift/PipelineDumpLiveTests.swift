@@ -76,11 +76,14 @@
 //             "decisionState": "...",
 //             "eligibilityGate": "...",
 //             "wasSkipped": false,
-//             // promotionTrack / boundaryRefinement* keys appear ONLY
-//             // when non-nil; default JSONEncoder strategy omits nil
+//             // promotionTrack / boundaryRefinement* /
+//             // spanFinalizerConstraintsFired keys appear ONLY when
+//             // non-nil; default JSONEncoder strategy omits nil
 //             // optionals, matching the pre-existing wire shape.
 //             "boundaryRefinementStartAdjustment": -0.75,
-//             "boundaryRefinementEndAdjustment": 1.25 }, ...
+//             "boundaryRefinementEndAdjustment": 1.25,
+//             "spanFinalizerConstraintsFired": ["mergedWithAdjacent",
+//                                               "policyOverrideApplied"] }, ...
 //         ]
 //       }, ...
 //     ],
@@ -99,17 +102,6 @@
 // `boundaryRefinementEndAdjustment` were added 2026-06-01 as a SECOND
 // playhead-4xqf extension targeting the FUSION_DROP suspects from PR #207's
 // code-path map.
-//
-// `spanFinalizerConstraintsFired` was added 2026-06-01 by playhead-p56a
-// for the SpanFinalizer wire-in. The field is `[String]?` —
-// `FinalizerConstraint.rawValue`s in trace-emission order — and is
-// populated only when `config.spanFinalizerEnabled == true`. Under the
-// shipped `.default` (flag OFF) the key is omitted from the encoded
-// object (matches `promotionTrack` / `boundaryRefinement*` handling).
-// Read via `AdDetectionService.spanFinalizerConstraintsByWindowIdForTesting()`,
-// keyed by the live `AdWindow.id`. Per-AdWindow correlation is exact: the
-// service stamps the trace inside the emission loop at the same iteration
-// that produces the window.
 //   • `wasSkipped` (Bool) — the AdWindow.wasSkipped flag persisted on the
 //     store row. Captures the real playback signal independent of
 //     `decisionState`: an eligibility-gate demotion to `blockedByEvidenceQuorum`
@@ -132,6 +124,17 @@
 //     Double otherwise. Consumers read via `dict.get(key)` so absent and
 //     null are observationally equivalent. This is a TEST-ONLY re-derivation;
 //     production code is untouched.
+//
+// `spanFinalizerConstraintsFired` was added 2026-06-01 by playhead-p56a
+// for the SpanFinalizer wire-in. The field is `[String]?` —
+// `FinalizerConstraint.rawValue`s in trace-emission order — and is
+// populated only when `config.spanFinalizerEnabled == true`. Under the
+// shipped `.default` (flag OFF) the key is omitted from the encoded
+// object (matches `promotionTrack` / `boundaryRefinement*` handling).
+// Read via `AdDetectionService.spanFinalizerConstraintsByWindowIdForTesting()`,
+// keyed by the live `AdWindow.id`. Per-AdWindow correlation is exact: the
+// service stamps the trace inside the emission loop at the same iteration
+// that produces the window.
 //
 // NOTE on `promotionTrack`: `PromotionTrack` is NOT persisted on the
 // `AdWindow` row — it lives on the in-flight `DecisionResult`. The store can
