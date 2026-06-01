@@ -99,6 +99,17 @@
 // `boundaryRefinementEndAdjustment` were added 2026-06-01 as a SECOND
 // playhead-4xqf extension targeting the FUSION_DROP suspects from PR #207's
 // code-path map.
+//
+// `spanFinalizerConstraintsFired` was added 2026-06-01 by playhead-p56a
+// for the SpanFinalizer wire-in. The field is `[String]?` —
+// `FinalizerConstraint.rawValue`s in trace-emission order — and is
+// populated only when `config.spanFinalizerEnabled == true`. Under the
+// shipped `.default` (flag OFF) the key is omitted from the encoded
+// object (matches `promotionTrack` / `boundaryRefinement*` handling).
+// Read via `AdDetectionService.spanFinalizerConstraintsByWindowIdForTesting()`,
+// keyed by the live `AdWindow.id`. Per-AdWindow correlation is exact: the
+// service stamps the trace inside the emission loop at the same iteration
+// that produces the window.
 //   • `wasSkipped` (Bool) — the AdWindow.wasSkipped flag persisted on the
 //     store row. Captures the real playback signal independent of
 //     `decisionState`: an eligibility-gate demotion to `blockedByEvidenceQuorum`
@@ -266,6 +277,20 @@ private struct DumpAdWindow: Encodable {
     /// Re-derived legacy `BoundaryRefiner.computeAdjustments` end delta
     /// (seconds). Same semantics as `boundaryRefinementStartAdjustment`.
     let boundaryRefinementEndAdjustment: Double?
+    /// playhead-p56a: ordered list of `FinalizerConstraint.rawValue`s that
+    /// fired on this AdWindow's source span during the most recent
+    /// `runBackfill` invocation, AS REPORTED BY
+    /// `AdDetectionService.spanFinalizerConstraintsBySpanIdForTesting()`.
+    /// `nil` when `config.spanFinalizerEnabled == false` (the OFF path
+    /// never runs the finalizer, never records a trace, and this key is
+    /// omitted from the encoded object — matching the pre-existing
+    /// `promotionTrack` / `boundaryRefinement*` convention). Non-nil only
+    /// when the flag is on AND the underlying spanId has at least one
+    /// recorded constraint; empty arrays are not emitted (a span the
+    /// finalizer kept but didn't modify ends up with no trace entries and
+    /// is also represented as a nil here, not `[]`, to keep the wire shape
+    /// stable across flag-state changes for unmutated spans).
+    let spanFinalizerConstraintsFired: [String]?
 }
 
 /// One candidate decoded span observed by the FragilityDiagnosticObserver
@@ -634,6 +659,15 @@ final class PipelineDumpLiveTests: XCTestCase {
         // Per-candidate boundaries for playhead-4xqf boundary-undersizing
         // investigation (see DumpDecodedSpan docstring above).
         let decodedSpanRows = await observer.spanRows(for: assetId) ?? []
+        // playhead-p56a: per-AdWindow finalizer constraint trace. Empty
+        // map when `config.spanFinalizerEnabled == false` (the production
+        // .default this dump runs under — see `PipelineDumpHermeticTests`'s
+        // `productionConfigStateIsHeld` pin). Each map entry surfaces in
+        // the dump's `spanFinalizerConstraintsFired` key when present and
+        // non-empty; nil/missing when the underlying lookup yielded no
+        // trace, matching the default-encoder convention for nil optionals.
+        let spanFinalizerConstraintsByWindowId =
+            await service.spanFinalizerConstraintsByWindowIdForTesting()
 
         let dumpWindows: [DumpAdWindow] = windows
             .sorted { $0.startTime < $1.startTime }
@@ -674,6 +708,13 @@ final class PipelineDumpLiveTests: XCTestCase {
                     dumpStartAdj = startAdj
                     dumpEndAdj = endAdj
                 }
+                // playhead-p56a: resolve the per-window finalizer trace,
+                // omitting nil and empty arrays so the wire shape matches
+                // the existing "absent when nil" convention enforced by
+                // `dumpAdWindowEncodesBoundaryRefinementAdjustments`.
+                let trace = spanFinalizerConstraintsByWindowId[window.id]
+                let spanFinalizerConstraints: [String]? =
+                    (trace?.isEmpty ?? true) ? nil : trace
                 return DumpAdWindow(
                     startTime: window.startTime,
                     endTime: window.endTime,
@@ -683,7 +724,8 @@ final class PipelineDumpLiveTests: XCTestCase {
                     promotionTrack: nil,
                     wasSkipped: window.wasSkipped,
                     boundaryRefinementStartAdjustment: dumpStartAdj,
-                    boundaryRefinementEndAdjustment: dumpEndAdj
+                    boundaryRefinementEndAdjustment: dumpEndAdj,
+                    spanFinalizerConstraintsFired: spanFinalizerConstraints
                 )
             }
 
@@ -986,7 +1028,8 @@ struct PipelineDumpEncodingTests {
             promotionTrack: nil,
             wasSkipped: true,
             boundaryRefinementStartAdjustment: nil,
-            boundaryRefinementEndAdjustment: nil
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil
         )
         let skippedData = try JSONEncoder().encode(skipped)
         let skippedParsed = try #require(
@@ -1008,7 +1051,8 @@ struct PipelineDumpEncodingTests {
             promotionTrack: nil,
             wasSkipped: false,
             boundaryRefinementStartAdjustment: nil,
-            boundaryRefinementEndAdjustment: nil
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil
         )
         let notSkippedData = try JSONEncoder().encode(notSkipped)
         let notSkippedParsed = try #require(
@@ -1053,7 +1097,8 @@ struct PipelineDumpEncodingTests {
             promotionTrack: nil,
             wasSkipped: true,
             boundaryRefinementStartAdjustment: nil,
-            boundaryRefinementEndAdjustment: nil
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil
         )
         let nilData = try JSONEncoder().encode(nilAdj)
         let nilParsed = try #require(
@@ -1080,7 +1125,8 @@ struct PipelineDumpEncodingTests {
             promotionTrack: nil,
             wasSkipped: true,
             boundaryRefinementStartAdjustment: -0.75,
-            boundaryRefinementEndAdjustment: 1.25
+            boundaryRefinementEndAdjustment: 1.25,
+            spanFinalizerConstraintsFired: nil
         )
         let nonNilData = try JSONEncoder().encode(nonNilAdj)
         let nonNilParsed = try #require(
@@ -1112,7 +1158,8 @@ struct PipelineDumpEncodingTests {
             promotionTrack: nil,
             wasSkipped: true,
             boundaryRefinementStartAdjustment: 0.5,
-            boundaryRefinementEndAdjustment: nil
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil
         )
         let data = try JSONEncoder().encode(window)
         let parsed = try #require(
@@ -1141,10 +1188,103 @@ struct PipelineDumpEncodingTests {
         // far). Lock the "absent, not null" wire form so a future change
         // to JSONEncoder strategy (e.g. forced-null encoding) is caught.
         #expect(!parsed.keys.contains("promotionTrack"))
+        // playhead-p56a: spanFinalizerConstraintsFired: nil → key absent
+        // (matches the production .default OFF state this dump runs under).
+        #expect(!parsed.keys.contains("spanFinalizerConstraintsFired"))
         // New values round-trip (mixed nil/non-nil pair — encoded
         // independently, not as a 2-tuple).
         #expect((parsed["wasSkipped"] as? Bool) == true)
         #expect((parsed["boundaryRefinementStartAdjustment"] as? Double) == 0.5)
         #expect(!parsed.keys.contains("boundaryRefinementEndAdjustment"))
+    }
+
+    // MARK: - playhead-p56a SpanFinalizer trace field
+    //
+    // The next two tests lock the wire shape for the 2026-06-01 extension
+    // that surfaces the `SpanFinalizer.finalize(...)` constraint trace per
+    // AdWindow. Mirrors the same OFF=absent / ON=array contract the
+    // `boundaryRefinement*` adjustments use, so `scripts/l2f-bd4xqf-
+    // analyze.py` and the orchestrator's dump readers can flip between
+    // arms without a schema migration.
+
+    @Test("DumpAdWindow omits spanFinalizerConstraintsFired when nil (flag-OFF)")
+    func dumpAdWindowOmitsSpanFinalizerConstraintsWhenNil() throws {
+        // Flag OFF — the production `.default` arm. The live dump never
+        // populates the field; the default `JSONEncoder` strategy omits
+        // the key entirely (does NOT emit explicit `null`), matching the
+        // pre-existing `promotionTrack` / `boundaryRefinement*` convention
+        // used by every dump shipped so far. Downstream Python consumers
+        // (`scripts/l2f-bd4xqf-analyze.py` + the dogfood-diagnostics
+        // readers) use `dict.get(key)`, which returns `None` whether the
+        // key is absent or maps to `null` — so this also guards against
+        // a future strategy flip that would emit explicit nulls.
+        let window = DumpAdWindow(
+            startTime: 100.0,
+            endTime: 130.5,
+            skipConfidence: 0.92,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: true,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil
+        )
+        let data = try JSONEncoder().encode(window)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(parsed["spanFinalizerConstraintsFired"] == nil)
+        #expect(!parsed.keys.contains("spanFinalizerConstraintsFired"))
+        // Defense in depth: the raw JSON text must not contain the key in
+        // any form. A future CodingKeys rename would silently regress
+        // downstream parsers; catch it on the simulator instead.
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("spanFinalizerConstraintsFired"))
+    }
+
+    @Test("DumpAdWindow encodes spanFinalizerConstraintsFired as a JSON string array when present (flag-ON)")
+    func dumpAdWindowEncodesSpanFinalizerConstraintsWhenPresent() throws {
+        // Flag ON — the experimental arm. The live dump pulls the
+        // per-window trace from
+        // `AdDetectionService.spanFinalizerConstraintsByWindowIdForTesting()`
+        // and surfaces it as a JSON array of `FinalizerConstraint.rawValue`
+        // strings in trace-emission order. Order is load-bearing for the
+        // bd-4xqf attribution analyzer: constraint #2 (merge) firing
+        // BEFORE constraint #3 (duration sanity) tells a different story
+        // than the reverse.
+        let trace = [
+            FinalizerConstraint.mergedWithAdjacent.rawValue,
+            FinalizerConstraint.policyOverrideApplied.rawValue,
+        ]
+        let window = DumpAdWindow(
+            startTime: 100.0,
+            endTime: 130.5,
+            skipConfidence: 0.92,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: true,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: trace
+        )
+        let data = try JSONEncoder().encode(window)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(parsed.keys.contains("spanFinalizerConstraintsFired"))
+        let decoded = try #require(
+            parsed["spanFinalizerConstraintsFired"] as? [String]
+        )
+        #expect(decoded == trace, "trace round-trips in emission order, not alphabetized")
+        // Defense in depth: lock the raw-JSON wire form so a future
+        // CodingKeys rename surfaces here. JSON arrays preserve order;
+        // assert the rawValues appear in trace order, not the opposite.
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(json.contains("\"spanFinalizerConstraintsFired\""))
+        let mergedIdx = try #require(json.range(of: "mergedWithAdjacent")?.lowerBound)
+        let policyIdx = try #require(json.range(of: "policyOverrideApplied")?.lowerBound)
+        #expect(mergedIdx < policyIdx, "trace order must survive the JSON encode")
     }
 }
