@@ -114,3 +114,7 @@ playhead-diagnostics-*.json
 playhead-dogfood-diagnostics-*.json
 TestFixtures/Corpus/Snapshots/*
 !TestFixtures/Corpus/Snapshots/.gitkeep
+# Per-episode chromaprint fingerprint cache produced by
+# scripts/l2f-syndication-prototype.py. Reproducible from the audio
+# files; never committed.
+TestFixtures/Corpus/Snapshots/fingerprints/
