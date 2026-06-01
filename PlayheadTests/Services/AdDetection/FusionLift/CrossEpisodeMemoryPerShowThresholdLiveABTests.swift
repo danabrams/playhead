@@ -140,6 +140,143 @@ final class CrossEpisodeMemoryPerShowThresholdLiveABTests: XCTestCase {
         )
     }
 
+    // MARK: - Multi-run aggregate (playhead-xsdz.14)
+
+    /// playhead-xsdz.14 — noise-aware multi-run aggregation across BOTH
+    /// xsdz.9 (cross-episode memory) and xsdz.11 (per-show threshold)
+    /// single-signal A/Bs. Runs each signal's 2-arm sweep N times (default
+    /// 5, configurable via `PLAYHEAD_MULTIRUN_N`, clamped to `[2,20]`) and
+    /// dumps ONE `MultiRunReport` per signal with median + IQR + mean +
+    /// stdev per metric and a REAL / WITHIN-NOISE / AMBIGUOUS verdict per
+    /// treatment-vs-baseline metric (`NoiseBand.activationDefault`).
+    ///
+    /// Cost: each Catalyst N-run is `N × 2 signals × ~24 full-FM passes =
+    /// N × ~12 min × 2 arms × 2 signals ≈ several hours` (default N=5 →
+    /// ~10–12 hours on a warm Mac). Design implies overnight runs.
+    ///
+    /// Gating: requires BOTH `PLAYHEAD_FBSIGNALS_AB=1` (per-harness opt-in,
+    /// enforced by `setUp()`) AND `PLAYHEAD_MULTIRUN_AB=1` (combined
+    /// multi-run gate, enforced inline below).
+    func testMultiRunAggregateAcrossDogfoodCorpus() async throws {
+        try XCTSkipUnless(
+            multiRunABEnabled(),
+            "Fbsignals multi-run aggregation is opt-in via PLAYHEAD_MULTIRUN_AB=1 (combined gate across all 5 activation harnesses)."
+        )
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("Live FM BackfillJobRunner requires iOS 26+ / FoundationModels.")
+        }
+
+        let loader = CorpusAnnotationLoader()
+        let annotationURLs: [URL]
+        do {
+            annotationURLs = try loader.annotationFileURLs()
+        } catch {
+            throw XCTSkip("corpus annotations dir not present: \(error)")
+        }
+        try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+
+        let arms: [FbsignalsArm] = [.baseline, .treatment]
+        let runCount = multiRunCountFromEnv()
+
+        for signal in FbsignalsSignal.allCases {
+            let report = try await runMultiRunAggregation(
+                arms: arms.map(\.rawValue),
+                config: MultiRunDriverConfig(
+                    runCount: runCount,
+                    configHash: "fbsignals-\(signal.rawValue)-ab"
+                )
+            ) { armLabel, runIndex in
+                guard let arm = FbsignalsArm(rawValue: armLabel) else {
+                    throw FbsignalsABRunError(reason: "unknown arm \(armLabel)")
+                }
+                return try await self.scoreOneRun(
+                    signal: signal,
+                    arm: arm,
+                    runIndex: runIndex,
+                    loader: loader,
+                    annotationURLs: annotationURLs
+                )
+            }
+            print(report.table())
+            let dumpURL = loader.repoRoot.appendingPathComponent(
+                "playhead-dogfood-diagnostics-multirun-fbsignals-\(signal.rawValue).json",
+                isDirectory: false
+            )
+            try report.toJSON().write(to: dumpURL, options: .atomic)
+            print("Multi-run fbsignals \(signal.label) JSON: \(dumpURL.path) (git-ignored)")
+        }
+    }
+
+    /// One multi-run pass for one (signal, arm): replay the same
+    /// per-episode arm loop the single-run sibling uses, fold every
+    /// episode's persisted windows + fire counts into a fresh accumulator
+    /// + tally, and return the run's `ArmRunResult`. A FRESH analysis +
+    /// feedback store is created per episode per arm per run (existing
+    /// `runArm` does this via `makeTempDir`).
+    @available(iOS 26.0, *)
+    private func scoreOneRun(
+        signal: FbsignalsSignal,
+        arm: FbsignalsArm,
+        runIndex: Int,
+        loader: CorpusAnnotationLoader,
+        annotationURLs: [URL]
+    ) async throws -> ArmRunResult {
+        var accumulator = FusionLiftModeAccumulator()
+        var fireTally = FbsignalsFireTally()
+        var scoredCount = 0
+        for url in annotationURLs {
+            let episodeId = url.deletingPathExtension().lastPathComponent
+            let annotation = try loader.decode(at: url)
+            let audioURL: URL
+            do {
+                audioURL = try loader.audioFileURL(for: annotation)
+            } catch {
+                continue
+            }
+            try loader.verify(audioFingerprintFor: annotation, jsonURL: url)
+            let transcript = try CorpusTranscriptLoader.load(
+                episodeId: episodeId,
+                repoRoot: loader.repoRoot
+            )
+            guard !transcript.isEmpty else { continue }
+
+            let tap = BrandAppearanceChannelTapObserver()
+            let suppressionObserver = NegativeBankSuppressionObserver()
+            let offsetObserver = PerShowThresholdOffsetObserver()
+
+            let windows = try await runArm(
+                signal: signal,
+                arm: arm,
+                episodeId: episodeId,
+                annotation: annotation,
+                audioURL: audioURL,
+                transcript: transcript,
+                tap: tap,
+                suppressionObserver: suppressionObserver,
+                offsetObserver: offsetObserver
+            )
+            accumulator.addEpisode(
+                annotationWindows: annotation.adWindows,
+                adWindows: windows,
+                podcastId: annotation.showName,
+                episodeId: episodeId
+            )
+            let tapCounts = await tap.fireCounts(for: episodeId)
+            fireTally.addChannelTap(tapCounts)
+            let suppressionCounts = await suppressionObserver.fireCounts(for: episodeId)
+            fireTally.addNegativeBankSuppression(suppressionCounts)
+            let offsetCounts = await offsetObserver.fireCounts(for: episodeId)
+            fireTally.addPerShowThreshold(offsetCounts)
+            scoredCount += 1
+        }
+        let fireCounts = fireTally.asMultiRunChannelMap()
+        return ArmRunResult(
+            episodeCount: scoredCount,
+            accumulator: accumulator,
+            fireCount: fireCounts
+        )
+    }
+
     // MARK: - A/B entry points (one focused method per signal)
 
     /// playhead-xsdz.9 — cross-episode "memory" (`crossEpisodeMemoryEnabled`),

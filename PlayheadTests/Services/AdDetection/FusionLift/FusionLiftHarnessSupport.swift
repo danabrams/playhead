@@ -28,6 +28,24 @@
 // Scoring is NOT reimplemented here: the bridges (`MetricGroundTruthAd` /
 // `MetricDetectedAd`), `SpanF1`, and `FusionLiftResult` all come from
 // Phase A's `FusionLiftScoring.swift`.
+//
+// playhead-xsdz.14 — NOISE-AWARE MULTI-RUN AGGREGATION
+// -----------------------------------------------------
+// The 2026-05-29 activation campaign quantified FM intra-run noise at
+// ~±2 FP (span) and ~±0.14 (coverage precision). A SINGLE 2-arm Catalyst
+// pass cannot distinguish a real ≤±2 FP signal effect from FM noise. The
+// `ArmRunResult` / `ArmAggregate` / `MultiRunReport` / `classifyDelta`
+// machinery at the bottom of this file is the statistical instrument the
+// activation A/B harnesses use to run each arm N times (default 5),
+// compute median + IQR + mean + stdev per metric, and call each
+// treatment-vs-baseline delta REAL / WITHIN-NOISE / AMBIGUOUS using BOTH
+// IQR overlap AND an absolute noise-band threshold per metric
+// (`NoiseBand`: ±2.0 FP span, ±0.04 spanF1/spanP/spanR/covR/covF1, ±0.14
+// coverage precision). The bands are the activation-campaign findings
+// frozen as constants; calibration is a future bead. The drivers reuse
+// each harness's existing per-arm setup (store / asset / features /
+// transcripts / planner seeding / observers) — each run uses a FRESH
+// store so runs of the same arm never observe each other's state.
 
 import Foundation
 @testable import Playhead
@@ -2015,6 +2033,19 @@ struct ActempoFireTally: Sendable, Codable, Equatable {
         temporalRegPenaltyAppliedSpans += counts.penaltyAppliedSpans
         temporalRegCandidateSpans += counts.candidateSpans
     }
+
+    /// Adapter for the multi-run `ArmRunResult.fireCount` dictionary
+    /// (playhead-xsdz.14). Wire-stable keys; non-Int fields (the
+    /// temporal-reg pass also carries no float counters) are simply
+    /// projected as Int.
+    func asMultiRunChannelMap() -> [String: Int] {
+        [
+            "audioForensicsFiredSpans": audioForensicsFiredSpans,
+            "temporalRegPenaltyAppliedSpans": temporalRegPenaltyAppliedSpans,
+            "temporalRegCandidateSpans": temporalRegCandidateSpans,
+            "observedSpans": observedSpans,
+        ]
+    }
 }
 
 // MARK: - Actempo single-signal A/B report (playhead-actempo)
@@ -2318,6 +2349,23 @@ struct FbsignalsFireTally: Sendable, Codable, Equatable {
         perShowThresholdCandidateSpans += counts.candidateSpans
         perShowThresholdOffsetSum += counts.resolvedOffset
     }
+
+    /// Adapter for the multi-run `ArmRunResult.fireCount` dictionary
+    /// (playhead-xsdz.14). Wire-stable keys; the float offsetSum is
+    /// rounded-projected to Int since `fireCount` is an Int histogram —
+    /// the offset's per-run mean is recoverable from the IQR analysis on
+    /// the sum field (this aggregate carries the raw sum).
+    func asMultiRunChannelMap() -> [String: Int] {
+        [
+            "crossEpisodeMemoryPositiveFiredSpans": crossEpisodeMemoryPositiveFiredSpans,
+            "crossEpisodeMemorySuppressedSpans": crossEpisodeMemorySuppressedSpans,
+            "crossEpisodeMemorySuppressionCandidateSpans": crossEpisodeMemorySuppressionCandidateSpans,
+            "observedSpans": observedSpans,
+            "perShowThresholdShiftedSpans": perShowThresholdShiftedSpans,
+            "perShowThresholdCandidateSpans": perShowThresholdCandidateSpans,
+            "perShowThresholdOffsetSumX1000": Int((perShowThresholdOffsetSum * 1000).rounded()),
+        ]
+    }
 }
 
 struct FbsignalsSweepReport: Sendable, Codable, Equatable {
@@ -2467,4 +2515,604 @@ struct FbsignalsSweepReport: Sendable, Codable, Equatable {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(self)
     }
+}
+
+// MARK: - Multi-run aggregation (playhead-xsdz.14)
+
+/// One arm's scored metrics for ONE run over the dogfood corpus. Pure value
+/// type; no I/O. The multi-run driver builds one of these per arm per run
+/// from the arm's `FusionLiftModeAccumulator` after every episode in the run
+/// has been scored.
+///
+/// `fireCount` is a free-form per-channel histogram (key = channel name,
+/// value = spans the channel fired on across the run). Each harness uses
+/// whatever channel names it cares about (e.g. `"rhetoricalGrammar"`,
+/// `"crossShowSyndication"`, `"audioForensics"`, `"temporalRegularization"`,
+/// `"crossEpisodeMemoryPositive"`, `"perShowThresholdShifted"`); the
+/// aggregator does not interpret the names.
+struct ArmRunResult: Sendable, Codable, Equatable {
+    let episodeCount: Int
+    let truePositives: Int
+    let falsePositives: Int
+    let misses: Int
+    let spanPrecision: Double?
+    let spanRecall: Double?
+    let spanF1: Double?
+    let coveragePrecision: Double?
+    let coverageRecall: Double?
+    let fireCount: [String: Int]
+
+    /// Convenience builder from a finished accumulator. Mirrors the
+    /// `FusionLiftReport.armCounts` shape so the per-run rollup is identical
+    /// to the single-run dump's per-arm row.
+    init(
+        episodeCount: Int,
+        accumulator: FusionLiftModeAccumulator,
+        fireCount: [String: Int] = [:]
+    ) {
+        let span = accumulator.spanF1()
+        let summary = accumulator.summary()
+        self.episodeCount = episodeCount
+        self.truePositives = span.truePositives
+        self.falsePositives = span.falsePositives
+        self.misses = span.misses
+        self.spanPrecision = span.precision
+        self.spanRecall = span.recall
+        self.spanF1 = span.f1
+        self.coveragePrecision = summary.coveragePrecision
+        self.coverageRecall = summary.coverageRecall
+        self.fireCount = fireCount
+    }
+
+    /// Designated init for hermetic tests (no accumulator needed).
+    init(
+        episodeCount: Int,
+        truePositives: Int,
+        falsePositives: Int,
+        misses: Int,
+        spanPrecision: Double?,
+        spanRecall: Double?,
+        spanF1: Double?,
+        coveragePrecision: Double?,
+        coverageRecall: Double?,
+        fireCount: [String: Int] = [:]
+    ) {
+        self.episodeCount = episodeCount
+        self.truePositives = truePositives
+        self.falsePositives = falsePositives
+        self.misses = misses
+        self.spanPrecision = spanPrecision
+        self.spanRecall = spanRecall
+        self.spanF1 = spanF1
+        self.coveragePrecision = coveragePrecision
+        self.coverageRecall = coverageRecall
+        self.fireCount = fireCount
+    }
+}
+
+/// Standard descriptive statistics for one metric across N runs of one arm.
+/// All fields are `nil` if every run's value for that metric was `nil` (an
+/// undefined metric on every run cannot have a median); otherwise the
+/// defined values are used and undefined ones are skipped (so `nil` rows
+/// don't pollute the median). `p25` and `p75` are the IQR endpoints.
+struct MetricDistribution: Sendable, Codable, Equatable {
+    let median: Double?
+    let p25: Double?
+    let p75: Double?
+    let mean: Double?
+    let stdev: Double?
+    let definedCount: Int
+
+    static let empty = MetricDistribution(
+        median: nil, p25: nil, p75: nil, mean: nil, stdev: nil, definedCount: 0
+    )
+
+    private init(
+        median: Double?, p25: Double?, p75: Double?,
+        mean: Double?, stdev: Double?, definedCount: Int
+    ) {
+        self.median = median
+        self.p25 = p25
+        self.p75 = p75
+        self.mean = mean
+        self.stdev = stdev
+        self.definedCount = definedCount
+    }
+
+    /// Build a distribution from N raw samples. `nil` samples are skipped;
+    /// if every sample is `nil`, every field is `nil` and `definedCount = 0`.
+    /// IQR endpoints are the lower / upper quartiles via the linear-position
+    /// percentile (matches NumPy's "linear" / Hyndman & Fan type 7 rule) so
+    /// the implementation is stdlib-only and deterministic. `stdev` is the
+    /// SAMPLE stdev (Bessel's correction, `N-1` in the denominator); with
+    /// a single sample it is `0.0` — a single observation has zero spread.
+    init(_ rawSamples: [Double?]) {
+        let defined = rawSamples.compactMap { $0 }
+        guard !defined.isEmpty else {
+            self.init(median: nil, p25: nil, p75: nil, mean: nil, stdev: nil, definedCount: 0)
+            return
+        }
+        let sorted = defined.sorted()
+        let mean = sorted.reduce(0.0, +) / Double(sorted.count)
+        let stdev: Double
+        if sorted.count == 1 {
+            stdev = 0.0
+        } else {
+            let sumSq = sorted.reduce(0.0) { acc, v in acc + (v - mean) * (v - mean) }
+            stdev = (sumSq / Double(sorted.count - 1)).squareRoot()
+        }
+        self.init(
+            median: MetricDistribution.percentile(sorted: sorted, q: 0.5),
+            p25: MetricDistribution.percentile(sorted: sorted, q: 0.25),
+            p75: MetricDistribution.percentile(sorted: sorted, q: 0.75),
+            mean: mean,
+            stdev: stdev,
+            definedCount: sorted.count
+        )
+    }
+
+    /// Linear-interpolation percentile on a pre-sorted array. Quantile `q`
+    /// in `[0,1]`; returns the value at position `(N-1)·q`, interpolating
+    /// between neighbors. Matches NumPy's `linear` interpolation and the
+    /// common "type 7" definition (Hyndman & Fan 1996), so the result is
+    /// stable, well-documented, and independent of sample-size parity.
+    static func percentile(sorted: [Double], q: Double) -> Double? {
+        guard !sorted.isEmpty else { return nil }
+        if sorted.count == 1 { return sorted[0] }
+        let pos = Double(sorted.count - 1) * q
+        let lower = Int(pos.rounded(.down))
+        let upper = Int(pos.rounded(.up))
+        if lower == upper { return sorted[lower] }
+        let frac = pos - Double(lower)
+        return sorted[lower] + (sorted[upper] - sorted[lower]) * frac
+    }
+}
+
+/// The wire-stable names for the metrics the multi-run pipeline tracks.
+/// Used as the dictionary keys in `PairwiseLiftDelta` and the `NoiseBand`
+/// lookup. Order matches `ArmAggregate`'s field order.
+enum MultiRunMetric: String, Sendable, Codable, CaseIterable {
+    case truePositives = "truePositives"
+    case falsePositives = "falsePositives"
+    case misses = "misses"
+    case spanPrecision = "spanPrecision"
+    case spanRecall = "spanRecall"
+    case spanF1 = "spanF1"
+    case coveragePrecision = "coveragePrecision"
+    case coverageRecall = "coverageRecall"
+}
+
+/// Per-arm aggregate across N runs: one `MetricDistribution` per metric,
+/// plus a roll-up of the per-channel fire counts (sum across runs and the
+/// per-run mean). Pure value type, `Codable`, no I/O. `runCount` is the
+/// number of runs that contributed (always equals the harness driver's
+/// configured N).
+struct ArmAggregate: Sendable, Codable, Equatable {
+    let armLabel: String
+    let runCount: Int
+    let truePositives: MetricDistribution
+    let falsePositives: MetricDistribution
+    let misses: MetricDistribution
+    let spanPrecision: MetricDistribution
+    let spanRecall: MetricDistribution
+    let spanF1: MetricDistribution
+    let coveragePrecision: MetricDistribution
+    let coverageRecall: MetricDistribution
+    /// Sum of the per-channel fire counts across all N runs. Channels that
+    /// fire in some runs but not others are still present (with their
+    /// summed count); channels missing from every run are absent.
+    let fireCountTotal: [String: Int]
+    /// Mean per-run fire count per channel (`fireCountTotal / runCount`).
+    let fireCountPerRunMean: [String: Double]
+
+    /// Build the aggregate from the arm's raw per-run results. `runs` MUST
+    /// be non-empty (call sites assert N >= 1). Integer count metrics
+    /// (TP / FP / miss) are folded as `Double` so the same percentile and
+    /// stdev machinery applies — they are exact for runs within ±2^53,
+    /// far beyond any realistic span tally.
+    init(armLabel: String, runs: [ArmRunResult]) {
+        precondition(!runs.isEmpty, "ArmAggregate requires at least one run")
+        self.armLabel = armLabel
+        self.runCount = runs.count
+        self.truePositives = MetricDistribution(runs.map { (Double($0.truePositives) as Double?) })
+        self.falsePositives = MetricDistribution(runs.map { (Double($0.falsePositives) as Double?) })
+        self.misses = MetricDistribution(runs.map { (Double($0.misses) as Double?) })
+        self.spanPrecision = MetricDistribution(runs.map(\.spanPrecision))
+        self.spanRecall = MetricDistribution(runs.map(\.spanRecall))
+        self.spanF1 = MetricDistribution(runs.map(\.spanF1))
+        self.coveragePrecision = MetricDistribution(runs.map(\.coveragePrecision))
+        self.coverageRecall = MetricDistribution(runs.map(\.coverageRecall))
+
+        // Roll up fire counts: sum and per-run mean across all runs. The
+        // key space is the union of channels seen in any run; channels
+        // missing from a given run contribute 0.
+        var total: [String: Int] = [:]
+        for run in runs {
+            for (channel, count) in run.fireCount {
+                total[channel, default: 0] += count
+            }
+        }
+        self.fireCountTotal = total
+        var perRun: [String: Double] = [:]
+        for (channel, sum) in total {
+            perRun[channel] = Double(sum) / Double(runs.count)
+        }
+        self.fireCountPerRunMean = perRun
+    }
+
+    /// Look up the distribution for a metric by name. Used by the
+    /// classifier and the JSON serializer's stable key order.
+    func distribution(for metric: MultiRunMetric) -> MetricDistribution {
+        switch metric {
+        case .truePositives: return truePositives
+        case .falsePositives: return falsePositives
+        case .misses: return misses
+        case .spanPrecision: return spanPrecision
+        case .spanRecall: return spanRecall
+        case .spanF1: return spanF1
+        case .coveragePrecision: return coveragePrecision
+        case .coverageRecall: return coverageRecall
+        }
+    }
+}
+
+/// The verdict of the material-lift classifier for one metric. The
+/// classifier compares treatment vs baseline using BOTH:
+///   * absolute median delta vs an absolute noise band per metric, AND
+///   * IQR overlap (do the treatment and baseline middle-50% ranges touch?).
+/// `realEffect` requires BOTH disjoint IQRs AND |Δmedian| > band; either
+/// criterion on its own is `ambiguous`. `withinNoise` is the symmetric
+/// double-negative: BOTH overlapping IQRs AND |Δmedian| ≤ band.
+enum LiftVerdict: String, Sendable, Codable, Equatable {
+    case realEffect = "realEffect"
+    case withinNoise = "withinNoise"
+    case ambiguous = "ambiguous"
+}
+
+/// Absolute noise-band thresholds per metric. These are the activation-
+/// campaign findings frozen as constants — calibration is a future bead.
+/// A delta whose absolute value is below the band is "within noise" for
+/// that metric; above is "outside noise" (necessary but not sufficient for
+/// `realEffect`). The same band applies on both arms; the classifier never
+/// looks at sign except via `|Δmedian|`.
+struct NoiseBand: Sendable, Codable, Equatable {
+    /// Span FP noise band: ±2 false positives, the activation-campaign
+    /// quantified intra-run FM noise. Applies to TP and miss too (the
+    /// FP-pair-complement counts share the same FM source of variance).
+    let truePositives: Double
+    let falsePositives: Double
+    let misses: Double
+    /// Span precision / recall / F1 noise band: ±0.04, the activation-
+    /// campaign default for the count-based scorer.
+    let spanPrecision: Double
+    let spanRecall: Double
+    let spanF1: Double
+    /// Coverage precision noise band: ±0.14, the activation-campaign
+    /// quantified intra-run FM noise on the seconds-based covP metric.
+    let coveragePrecision: Double
+    /// Coverage recall noise band: ±0.04, the activation-campaign default
+    /// (covR is materially less noisy than covP).
+    let coverageRecall: Double
+
+    /// The activation-campaign default noise band. Frozen as a constant so
+    /// a future change is visible in diff (and pinned by the
+    /// `noiseBandConstants` hermetic test).
+    static let activationDefault = NoiseBand(
+        truePositives: 2.0,
+        falsePositives: 2.0,
+        misses: 2.0,
+        spanPrecision: 0.04,
+        spanRecall: 0.04,
+        spanF1: 0.04,
+        coveragePrecision: 0.14,
+        coverageRecall: 0.04
+    )
+
+    /// Look up the noise-band for a metric by name.
+    func band(for metric: MultiRunMetric) -> Double {
+        switch metric {
+        case .truePositives: return truePositives
+        case .falsePositives: return falsePositives
+        case .misses: return misses
+        case .spanPrecision: return spanPrecision
+        case .spanRecall: return spanRecall
+        case .spanF1: return spanF1
+        case .coveragePrecision: return coveragePrecision
+        case .coverageRecall: return coverageRecall
+        }
+    }
+}
+
+/// Material-lift classifier. Calls `metric`'s treatment-vs-baseline delta
+/// REAL / WITHIN-NOISE / AMBIGUOUS using BOTH IQR overlap and the
+/// absolute noise-band threshold.
+///
+/// Rules (EXACT; pinned by the hermetic tests):
+///   * `.realEffect`  ⇔ IQRs are DISJOINT AND `|Δmedian| > band`.
+///   * `.withinNoise` ⇔ IQRs OVERLAP AND `|Δmedian| ≤ band`.
+///   * `.ambiguous`   otherwise (exactly one criterion satisfied).
+/// When either side's median is `nil` (every run produced an undefined
+/// metric) the result is `.ambiguous` — neither criterion can be checked.
+///
+/// IQRs are checked with the standard closed-interval overlap rule: two
+/// intervals `[a₁,a₂]` and `[b₁,b₂]` overlap iff `a₁ <= b₂ AND b₁ <= a₂`.
+/// Empty distributions (no defined runs) are treated as overlapping any
+/// other; the verdict then relies only on the band check, which itself is
+/// `.ambiguous` when either median is `nil`.
+func classifyDelta(
+    metric: MultiRunMetric,
+    treatmentAgg: ArmAggregate,
+    baselineAgg: ArmAggregate,
+    noiseBand: NoiseBand = .activationDefault
+) -> LiftVerdict {
+    let band = noiseBand.band(for: metric)
+    let treatment = treatmentAgg.distribution(for: metric)
+    let baseline = baselineAgg.distribution(for: metric)
+    guard let tMedian = treatment.median, let bMedian = baseline.median else {
+        return .ambiguous
+    }
+    let deltaAbs = abs(tMedian - bMedian)
+    let outsideBand = deltaAbs > band
+
+    // IQR overlap. If either distribution has no defined p25/p75 (every
+    // sample was nil), we cannot disprove overlap, so we treat the pair as
+    // overlapping (the band check is then the only signal).
+    let iqrsDisjoint: Bool
+    if let tLow = treatment.p25, let tHigh = treatment.p75,
+       let bLow = baseline.p25, let bHigh = baseline.p75 {
+        iqrsDisjoint = (tHigh < bLow) || (bHigh < tLow)
+    } else {
+        iqrsDisjoint = false
+    }
+
+    switch (iqrsDisjoint, outsideBand) {
+    case (true, true): return .realEffect
+    case (false, false): return .withinNoise
+    default: return .ambiguous
+    }
+}
+
+/// One baseline ↔ treatment pair's per-metric verdict + median delta + IQRs.
+/// The `MultiRunReport` carries one of these per `(baseline, treatment)`
+/// arm pair. `perMetricMedianDelta[metric]` is `treatment.median -
+/// baseline.median` (positive = treatment > baseline; nil if either side
+/// is undefined). `perMetricBaselineIQR` / `perMetricTreatmentIQR` are
+/// `[p25, p75]` arrays so the JSON reader can plot the interval directly.
+struct PairwiseLiftDelta: Sendable, Codable, Equatable {
+    let baseline: String
+    let treatment: String
+    let perMetricVerdict: [String: LiftVerdict]
+    let perMetricMedianDelta: [String: Double?]
+    let perMetricBaselineIQR: [String: [Double?]]
+    let perMetricTreatmentIQR: [String: [Double?]]
+
+    /// Build the pair from two finished aggregates over EVERY tracked metric.
+    /// The dictionary keys are `MultiRunMetric` raw values so the JSON is
+    /// stable and matches the band keys.
+    init(
+        baseline: ArmAggregate,
+        treatment: ArmAggregate,
+        noiseBand: NoiseBand = .activationDefault
+    ) {
+        self.baseline = baseline.armLabel
+        self.treatment = treatment.armLabel
+        var verdicts: [String: LiftVerdict] = [:]
+        var deltas: [String: Double?] = [:]
+        var bIQRs: [String: [Double?]] = [:]
+        var tIQRs: [String: [Double?]] = [:]
+        for metric in MultiRunMetric.allCases {
+            verdicts[metric.rawValue] = classifyDelta(
+                metric: metric,
+                treatmentAgg: treatment,
+                baselineAgg: baseline,
+                noiseBand: noiseBand
+            )
+            let bDist = baseline.distribution(for: metric)
+            let tDist = treatment.distribution(for: metric)
+            if let bMed = bDist.median, let tMed = tDist.median {
+                deltas[metric.rawValue] = tMed - bMed
+            } else {
+                deltas[metric.rawValue] = nil
+            }
+            bIQRs[metric.rawValue] = [bDist.p25, bDist.p75]
+            tIQRs[metric.rawValue] = [tDist.p25, tDist.p75]
+        }
+        self.perMetricVerdict = verdicts
+        self.perMetricMedianDelta = deltas
+        self.perMetricBaselineIQR = bIQRs
+        self.perMetricTreatmentIQR = tIQRs
+    }
+}
+
+/// The serializable multi-run report: one `ArmAggregate` per arm + one
+/// `PairwiseLiftDelta` per `(baseline, treatment)` pair, plus the per-pass
+/// run count and a `configHash` the harness derives so two runs of the
+/// SAME config can be joined offline. Pure value type, `Codable`, no I/O.
+struct MultiRunReport: Sendable, Codable, Equatable {
+    let runCount: Int
+    let configHash: String
+    let armAggregates: [ArmAggregate]
+    let pairwiseDeltas: [PairwiseLiftDelta]
+    let noiseBand: NoiseBand
+
+    /// Build the report from per-arm runs. `armLabels` is the ordered list
+    /// of arms; the first arm is the baseline (anchors every delta). The
+    /// `runsByArm` MUST contain non-empty runs for every label and each
+    /// arm's run count MUST equal `runCount` (the driver asserts this).
+    /// Pairwise deltas are emitted for every non-baseline arm vs the
+    /// baseline, in `armLabels` order.
+    init(
+        runCount: Int,
+        configHash: String,
+        armLabels: [String],
+        runsByArm: [String: [ArmRunResult]],
+        noiseBand: NoiseBand = .activationDefault
+    ) {
+        precondition(!armLabels.isEmpty, "MultiRunReport requires at least one arm")
+        for label in armLabels {
+            let runs = runsByArm[label] ?? []
+            precondition(
+                runs.count == runCount,
+                "MultiRunReport: arm \(label) has \(runs.count) runs but runCount=\(runCount)"
+            )
+        }
+        self.runCount = runCount
+        self.configHash = configHash
+        self.noiseBand = noiseBand
+        self.armAggregates = armLabels.map { label in
+            ArmAggregate(armLabel: label, runs: runsByArm[label] ?? [])
+        }
+        guard let baselineAgg = self.armAggregates.first else {
+            self.pairwiseDeltas = []
+            return
+        }
+        self.pairwiseDeltas = self.armAggregates.dropFirst().map { treatmentAgg in
+            PairwiseLiftDelta(
+                baseline: baselineAgg,
+                treatment: treatmentAgg,
+                noiseBand: noiseBand
+            )
+        }
+    }
+
+    /// Encode to pretty-printed, sorted-key JSON for the repo-root dump.
+    /// Mirrors `FusionLiftReport.jsonData()`.
+    func toJSON() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(self)
+    }
+
+    /// Render a fixed-width table for the test log. Per-arm median rows
+    /// plus per-pair verdict rows, so an operator can read the lift call
+    /// without piping through `jq`.
+    func table() -> String {
+        func fmt(_ value: Double?) -> String {
+            guard let value else { return "  n/a" }
+            return String(format: "%6.4f", value)
+        }
+        func fmtMedian(_ value: Double?) -> String {
+            guard let value else { return "  n/a" }
+            return String(format: "%6.2f", value)
+        }
+        var lines: [String] = [
+            "=== Multi-Run Aggregate (xsdz.14) ===",
+            "runCount=\(runCount) configHash=\(configHash)",
+            "arm          median(TP/FP/miss/spanP/spanR/spanF1/covP/covR)",
+        ]
+        for agg in armAggregates {
+            lines.append(
+                "\(armLabel(agg.armLabel)) \(fmtMedian(agg.truePositives.median))/\(fmtMedian(agg.falsePositives.median))/\(fmtMedian(agg.misses.median))/\(fmt(agg.spanPrecision.median))/\(fmt(agg.spanRecall.median))/\(fmt(agg.spanF1.median))/\(fmt(agg.coveragePrecision.median))/\(fmt(agg.coverageRecall.median))"
+            )
+        }
+        for pair in pairwiseDeltas {
+            lines.append("--- \(pair.treatment) vs \(pair.baseline) ---")
+            for metric in MultiRunMetric.allCases {
+                let verdict = pair.perMetricVerdict[metric.rawValue] ?? .ambiguous
+                let deltaOpt = pair.perMetricMedianDelta[metric.rawValue] ?? nil
+                let deltaStr: String
+                if let delta = deltaOpt {
+                    deltaStr = String(format: "%+.4f", delta)
+                } else {
+                    deltaStr = "n/a"
+                }
+                lines.append("  \(metric.rawValue): Δmedian=\(deltaStr) verdict=\(verdict.rawValue)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func armLabel(_ arm: String) -> String {
+        (arm + String(repeating: " ", count: 11)).prefix(11).description
+    }
+}
+
+// MARK: - Multi-run driver helpers (playhead-xsdz.14)
+
+/// Configuration for `runMultiRunAggregation`. Defaults the run count to 5
+/// (the activation-campaign-recommended N) and the config-hash to the
+/// empty string; callers override both.
+struct MultiRunDriverConfig: Sendable {
+    /// Number of runs per arm (`N`). Defaulted to 5.
+    let runCount: Int
+    /// Caller-supplied config-hash for the report (so two dumps of the
+    /// same arm shape can be joined offline). Empty string is allowed;
+    /// the classifier ignores it.
+    let configHash: String
+
+    init(runCount: Int = 5, configHash: String = "") {
+        self.runCount = runCount
+        self.configHash = configHash
+    }
+}
+
+/// Parse the multi-run env var `PLAYHEAD_MULTIRUN_N`. Returns the
+/// configured N, clamped to `[2, 20]`, or `fallback` if the env is unset
+/// or unparseable. The fallback is 5 — the activation-campaign default.
+///
+/// Why the clamp: N < 2 defeats the entire purpose (no variance signal);
+/// N > 20 takes more than a working day on Mac Catalyst and the noise
+/// bands are calibrated for ~5–10.
+func multiRunCountFromEnv(
+    _ env: [String: String] = ProcessInfo.processInfo.environment,
+    key: String = "PLAYHEAD_MULTIRUN_N",
+    fallback: Int = 5
+) -> Int {
+    guard let raw = env[key], let parsed = Int(raw) else { return fallback }
+    return max(2, min(20, parsed))
+}
+
+/// Check the combined-AB env var `PLAYHEAD_MULTIRUN_AB` that gates ALL
+/// per-harness multi-run methods. The single-run sibling methods keep
+/// their original signal-specific env var; the multi-run methods share
+/// this one so an operator can enable / disable every multi-run pass with
+/// one flag on Catalyst.
+func multiRunABEnabled(
+    _ env: [String: String] = ProcessInfo.processInfo.environment,
+    key: String = "PLAYHEAD_MULTIRUN_AB"
+) -> Bool {
+    env[key] == "1"
+}
+
+/// Run an A/B pass `N` times per arm using a caller-supplied
+/// `runSingleRun` closure. The closure is responsible for the arm's
+/// per-episode loop (annotation / audio / transcript resolution, the
+/// `runArm` call, the per-arm accumulator + fire tally) — this driver
+/// reuses the harness's existing setup wholesale, never duplicating it.
+/// Each closure invocation MUST use a FRESH store/asset/feature/transcript
+/// setup so the N runs of one arm do not leak state into one another
+/// (the harness's `makeTempDir(prefix:)` per arm already enforces this on
+/// a per-run basis when the closure follows the existing pattern).
+///
+/// - Parameters:
+///   - arms: ordered list of arm labels; first MUST be the baseline.
+///   - config: run count + config-hash.
+///   - runSingleRun: `(armLabel, runIndex)` → one run's `ArmRunResult`.
+///     The closure throws to abort the entire multi-run pass (so a
+///     half-completed report cannot be emitted).
+/// - Returns: the fully-aggregated `MultiRunReport`.
+@discardableResult
+func runMultiRunAggregation(
+    arms: [String],
+    config: MultiRunDriverConfig,
+    runSingleRun: (String, Int) async throws -> ArmRunResult
+) async throws -> MultiRunReport {
+    precondition(!arms.isEmpty, "runMultiRunAggregation requires at least one arm")
+    precondition(config.runCount >= 1, "runMultiRunAggregation requires runCount >= 1")
+
+    var runsByArm: [String: [ArmRunResult]] = Dictionary(
+        uniqueKeysWithValues: arms.map { ($0, []) }
+    )
+    for arm in arms {
+        for runIndex in 0..<config.runCount {
+            let result = try await runSingleRun(arm, runIndex)
+            runsByArm[arm, default: []].append(result)
+        }
+    }
+    return MultiRunReport(
+        runCount: config.runCount,
+        configHash: config.configHash,
+        armLabels: arms,
+        runsByArm: runsByArm
+    )
 }
