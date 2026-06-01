@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Weekly corpus expansion — Sunday 02:00 local. Pairs with the daily loop
+  (com.playhead.l2f.daily, 03:30) so any new episodes added at 02:00 get
+  rediffed + auto-promoted in the same night. Install as user-level
+  LaunchAgent (not root):
+      launchctl bootstrap gui/$(id -u) /Users/dabrams/playhead/scripts/com.playhead.l2f.weekly.plist
+  Force-fire for testing:
+      launchctl kickstart -k gui/$(id -u)/com.playhead.l2f.weekly
+  Uninstall:
+      launchctl bootout   gui/$(id -u)/com.playhead.l2f.weekly
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.playhead.l2f.weekly</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/dabrams/playhead</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/dabrams/playhead/scripts/l2f-weekly-expand.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>ExitTimeOut</key>
+    <integer>3600</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/dabrams/playhead/TestFixtures/Corpus/Snapshots/weekly-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/dabrams/playhead/TestFixtures/Corpus/Snapshots/weekly-stderr.log</string>
+</dict>
+</plist>
