@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.playhead.l2f.loop-watch.plist — user-level launchd job that runs the
+  daily-loop health watchdog every 6 hours.
+
+  This file is a TEMPLATE — it lives in scripts/ under version control so the
+  schedule is reproducible. To install:
+
+      cp /Users/dabrams/playhead/scripts/com.playhead.l2f.loop-watch.plist \
+         ~/Library/LaunchAgents/
+
+      launchctl bootstrap gui/$(id -u) \
+        ~/Library/LaunchAgents/com.playhead.l2f.loop-watch.plist
+
+  To uninstall:
+
+      launchctl bootout gui/$(id -u)/com.playhead.l2f.loop-watch
+
+  To trigger an immediate one-off run (useful when first installing):
+
+      launchctl kickstart -k gui/$(id -u)/com.playhead.l2f.loop-watch
+
+  To inspect status / next-fire / last exit code:
+
+      launchctl print gui/$(id -u)/com.playhead.l2f.loop-watch
+
+  Logs live next to the daily loop's own log:
+    * stdout + stderr: TestFixtures/Corpus/Snapshots/loop-watch.log
+
+  The watchdog exits 0 silently when the loop is healthy, and exits 1 with a
+  message on stderr when daily-loop.log is stale (> 25 hours old) or missing.
+  launchd records the exit code in its service state so you can inspect it with
+  `launchctl print`.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.playhead.l2f.loop-watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/dabrams/playhead/scripts/l2f-loop-watch.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/dabrams/playhead</string>
+
+    <!-- Run every 6 hours (21600 seconds). -->
+    <key>StartInterval</key>
+    <integer>21600</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/dabrams/playhead/TestFixtures/Corpus/Snapshots/loop-watch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/dabrams/playhead/TestFixtures/Corpus/Snapshots/loop-watch.log</string>
+
+    <!-- Inherit a sane PATH so stat/date/awk resolve without surprises. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- No KeepAlive: a non-zero exit is logged but NOT restarted. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Low-priority I/O: this is a health check, not latency-sensitive work. -->
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <!-- The watchdog should complete in well under a second; 60s is a generous
+         bound to catch hung stat/awk calls without pinning a core. -->
+    <key>ExitTimeOut</key>
+    <integer>60</integer>
+</dict>
+</plist>
