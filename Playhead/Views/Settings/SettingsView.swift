@@ -2,7 +2,7 @@
 // Settings screen with all user-configurable options.
 //
 // Sections:
-// - Speech model status (Apple Speech, system-managed)
+// - Apple Intelligence status (FM availability + Recheck recovery)
 // - Ad skip behavior (auto/manual/off)
 // - Playback defaults (speed, skip intervals)
 // - Storage management (transcript cache, cached audio)
@@ -252,6 +252,15 @@ struct SettingsView: View {
                     // so neither starves the other; cancelling either
                     // child propagates from the parent task's
                     // cancellation.
+                    //
+                    // R1 audit: also subscribe to capability snapshot
+                    // updates so the Apple Intelligence row re-renders
+                    // when the asynchronous FM usability probe lands —
+                    // `recheckModels` schedules that probe via
+                    // `refreshSnapshot` but does not await it, so
+                    // without this subscription the row would read
+                    // "Unavailable" until the user closed and reopened
+                    // Settings.
                     async let icloud: Void = viewModel.observeICloudSyncStatus(
                         runtime.iCloudSyncCoordinator
                     )
@@ -260,7 +269,11 @@ struct SettingsView: View {
                             await viewModel.observePremiumStatus(entitlementManager)
                         }
                     }()
-                    _ = await (icloud, premium)
+                    async let capabilities: Void = viewModel.observeCapabilitySnapshots(
+                        runtime.capabilitiesService,
+                        evaluator: runtime.analysisEligibilityEvaluator
+                    )
+                    _ = await (icloud, premium, capabilities)
                 }
                 .onChange(of: router?.pending) { _, newRoute in
                     guard let newRoute else { return }
@@ -343,19 +356,49 @@ private extension SettingsView {
 
     var modelSection: some View {
         Section {
-            HStack(alignment: .firstTextBaseline) {
-                Text("On-device transcription")
-                    .font(AppTypography.body)
-                    .foregroundStyle(AppColors.textPrimary)
-                Spacer()
-                Text(modelStatusText)
-                    .font(AppTypography.caption)
-                    .foregroundStyle(modelStatusColor)
-                    .accessibilityIdentifier("Settings.models.statusValue")
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                HStack(alignment: .firstTextBaseline) {
+                    // Honest labeling: the gate is FM availability, not
+                    // speech transcription. Speech works without Apple
+                    // Intelligence; only the FM-backed analysis is gated.
+                    // The accessibility identifier on the status value is
+                    // held stable for backward compatibility with existing
+                    // UI tests, but the visible label is corrected.
+                    Text("Apple Intelligence")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.textPrimary)
+                    Spacer()
+                    Text(modelStatusText)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(modelStatusColor)
+                        .accessibilityIdentifier("Settings.models.statusValue")
+                }
+
+                if let reasonCaption = modelUnavailableReasonCaption {
+                    Text(reasonCaption)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("Settings.models.unavailableReason")
+                }
+
+                if modelStatusIsUnavailable {
+                    Button {
+                        Task { await recheckModels() }
+                    } label: {
+                        Text("Recheck")
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppColors.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isRecheckingModels)
+                    .accessibilityIdentifier("Settings.models.recheckButton")
+                    .accessibilityLabel("Recheck Apple Intelligence availability")
+                }
             }
             .listRowBackground(AppColors.surface)
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("On-device transcription status")
+            .accessibilityLabel("Apple Intelligence status")
             .accessibilityValue(modelStatusText)
         } header: {
             sectionHeader("Models")
@@ -368,8 +411,12 @@ private extension SettingsView {
 
     /// playhead-j2u: derive the status string from the cached
     /// `AnalysisEligibility` snapshot. Returns "Checking…" until the
-    /// first evaluation lands so we never lie about the verdict.
+    /// first evaluation lands so we never lie about the verdict. Also
+    /// returns "Checking…" while a user-triggered recheck is in flight,
+    /// so the row does not flash the stale "Unavailable" verdict that
+    /// prompted the recheck in the first place.
     var modelStatusText: String {
+        if viewModel.isRecheckingModels { return "Checking…" }
         guard let eligibility = viewModel.eligibility else {
             return "Checking…"
         }
@@ -377,12 +424,73 @@ private extension SettingsView {
     }
 
     var modelStatusColor: Color {
+        if viewModel.isRecheckingModels { return AppColors.textTertiary }
         guard let eligibility = viewModel.eligibility else {
             return AppColors.textTertiary
         }
         return eligibility.isFullyEligible
             ? AppColors.textSecondary
             : AppColors.accent
+    }
+
+    /// `true` only when the row is showing a settled "Unavailable"
+    /// verdict (i.e. eligibility has been evaluated and is not fully
+    /// eligible, and no recheck is in flight). Used to gate the
+    /// Recheck button so it does not clutter the row when everything
+    /// is working fine or while we're still figuring out the state.
+    var modelStatusIsUnavailable: Bool {
+        guard !viewModel.isRecheckingModels else { return false }
+        guard let eligibility = viewModel.eligibility else { return false }
+        return !eligibility.isFullyEligible
+    }
+
+    /// Human-readable caption explaining WHY the model is unavailable.
+    /// Returns `nil` for any state other than a settled "Unavailable"
+    /// verdict so the caption never appears during "Checking…" /
+    /// "Available" rendering. Maps each `AnalysisUnavailableReason`
+    /// case to a short, action-oriented sentence per the bead spec.
+    var modelUnavailableReasonCaption: String? {
+        guard !viewModel.isRecheckingModels else { return nil }
+        guard let eligibility = viewModel.eligibility,
+              !eligibility.isFullyEligible,
+              let reason = AnalysisUnavailableReason.derive(from: eligibility)
+        else { return nil }
+        return SettingsModelUnavailableCopy.caption(for: reason)
+    }
+
+    /// Trigger the recheck flow. Lives in the View extension so the
+    /// `runtime.capabilitiesService` and
+    /// `runtime.analysisEligibilityEvaluator` dependencies stay
+    /// implicit on the `runtime` handle the View already holds.
+    @MainActor
+    func recheckModels() async {
+        await viewModel.recheckModels(
+            using: runtime.analysisEligibilityEvaluator,
+            capabilities: runtime.capabilitiesService
+        )
+    }
+}
+
+// MARK: - Apple Intelligence unavailable copy
+//
+// Per-reason captions surfaced under the "Unavailable" status row.
+// Pulled out into a dedicated enum so the strings can be pinned in
+// tests without dragging the SwiftUI view into the test target. Any
+// future edit forces a corresponding test update.
+enum SettingsModelUnavailableCopy {
+    static func caption(for reason: AnalysisUnavailableReason) -> String {
+        switch reason {
+        case .hardwareUnsupported:
+            return "Device doesn't support Apple Intelligence"
+        case .regionUnsupported:
+            return "Not available in your region"
+        case .languageUnsupported:
+            return "Not available in your language"
+        case .appleIntelligenceDisabled:
+            return "Apple Intelligence is off in Settings"
+        case .modelTemporarilyUnavailable:
+            return "Model not ready — tap Recheck after a moment"
+        }
     }
 }
 

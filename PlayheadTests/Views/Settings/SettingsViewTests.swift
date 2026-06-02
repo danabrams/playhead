@@ -275,6 +275,409 @@ final class StubEligibilityEvaluator: AnalysisEligibilityEvaluating, @unchecked 
     func noteAppForegrounded() {}
 }
 
+// MARK: - Apple Intelligence unavailable copy
+//
+// Pins the user-facing caption strings rendered under the Apple
+// Intelligence status row when the row reads "Unavailable". The View
+// renders the caption via `SettingsModelUnavailableCopy.caption(for:)`;
+// these tests pin the mapping for every `AnalysisUnavailableReason`
+// case so any future edit forces a deliberate spec + test update.
+
+@Suite("Settings Apple Intelligence unavailable copy")
+struct SettingsModelUnavailableCopyTests {
+
+    @Test func hardwareUnsupportedCaption() {
+        #expect(
+            SettingsModelUnavailableCopy.caption(for: .hardwareUnsupported)
+                == "Device doesn't support Apple Intelligence"
+        )
+    }
+
+    @Test func regionUnsupportedCaption() {
+        #expect(
+            SettingsModelUnavailableCopy.caption(for: .regionUnsupported)
+                == "Not available in your region"
+        )
+    }
+
+    @Test func languageUnsupportedCaption() {
+        #expect(
+            SettingsModelUnavailableCopy.caption(for: .languageUnsupported)
+                == "Not available in your language"
+        )
+    }
+
+    @Test func appleIntelligenceDisabledCaption() {
+        #expect(
+            SettingsModelUnavailableCopy.caption(for: .appleIntelligenceDisabled)
+                == "Apple Intelligence is off in Settings"
+        )
+    }
+
+    @Test func modelTemporarilyUnavailableCaption() {
+        #expect(
+            SettingsModelUnavailableCopy.caption(for: .modelTemporarilyUnavailable)
+                == "Model not ready — tap Recheck after a moment"
+        )
+    }
+
+    /// Every case has a non-empty caption, so adding a new
+    /// `AnalysisUnavailableReason` case will fail compilation in
+    /// `SettingsModelUnavailableCopy.caption(for:)` rather than
+    /// silently rendering an empty caption.
+    @Test func everyReasonHasNonEmptyCaption() {
+        for reason in AnalysisUnavailableReason.allCases {
+            let caption = SettingsModelUnavailableCopy.caption(for: reason)
+            #expect(!caption.isEmpty, "Missing caption for \(reason)")
+        }
+    }
+}
+
+// MARK: - Recheck flow (view-model level)
+//
+// The SwiftUI Recheck button calls `SettingsViewModel.recheckModels`,
+// which in turn must:
+//   1. Drop the persisted FM usability cache.
+//   2. Invalidate the eligibility evaluator.
+//   3. Flip `isRecheckingModels = true` so the status row reads
+//      "Checking…" until the fresh evaluation lands.
+//   4. Re-evaluate after the snapshot refresh.
+//
+// We exercise the orchestration via a stub evaluator + the real
+// CapabilitiesService actor. The latter is safe to spin up in a unit
+// test because it owns no external state beyond its in-actor
+// snapshot.
+
+// `.serialized` because several cases here both write to and read
+// from the shared `.standard` UserDefaults slot used by
+// `FoundationModelsUsabilityProbe`. Without serialization, the
+// `observeCapabilitySnapshotsReleasesRecheckOnUsableSnapshot` case
+// can write `usable=true` while `recheckClearsPersistedProbeCache`
+// is asserting the slot has been emptied, producing a non-
+// deterministic failure. Routing through `.standard` is dictated by
+// `CapabilitiesService.captureSnapshot()` (it reads `cachedUsability()`
+// with the default UserDefaults); the cleanest reader for the
+// snapshot flag in a unit test is the same writer, so serialization
+// is the right tradeoff over plumbing a UserDefaults parameter
+// through the production service for test-only use.
+@Suite("Settings recheck flow", .serialized)
+@MainActor
+struct SettingsRecheckFlowTests {
+
+    @Test func recheckInvalidatesEvaluatorAndDropsEligibility() async {
+        let viewModel = SettingsViewModel()
+
+        // Seed an unavailable verdict so the View would show the
+        // Recheck button.
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: false, // model not ready
+            capturedAt: Date()
+        ))
+        viewModel.refreshEligibility(using: stub)
+        #expect(viewModel.eligibility?.isFullyEligible == false)
+        #expect(stub.invalidateCallCount == 0)
+
+        // Drive the recheck.
+        let capabilities = CapabilitiesService()
+        await viewModel.recheckModels(using: stub, capabilities: capabilities)
+
+        #expect(stub.invalidateCallCount == 1,
+                "Recheck must invalidate the evaluator exactly once per call")
+        // The evaluator's verdict is consulted again at the end of
+        // `recheckModels`, so the final eligibility comes from the
+        // stub's `evaluate()` call.
+        #expect(stub.evaluateCallCount == 2,
+                "Recheck must re-evaluate after the snapshot refresh (initial seed + final read)")
+        #expect(viewModel.isRecheckingModels == false,
+                "isRecheckingModels must reset to false after the recheck completes")
+        #expect(viewModel.eligibility?.isFullyEligible == false,
+                "Final eligibility reflects the stub's verdict")
+    }
+
+    @Test func recheckClearsPersistedProbeCache() async {
+        // Cache a `usable == false` record in the live UserDefaults so
+        // we can prove the recheck flow drops it. Use a recent
+        // timestamp so the TTL does not affect the result.
+        let osBuild = FoundationModelsUsabilityProbe.osBuild()
+        let bootEpoch = FoundationModelsUsabilityProbe.bootEpochSeconds()
+        FoundationModelsUsabilityProbe.cache(
+            usable: false,
+            osBuild: osBuild,
+            bootEpochSeconds: bootEpoch
+        )
+        // Sanity: the record reads back as false within the TTL.
+        #expect(FoundationModelsUsabilityProbe.cachedUsability(
+            osBuild: osBuild,
+            bootEpochSeconds: bootEpoch
+        ) == false)
+
+        defer {
+            // Belt-and-suspenders cleanup even if the test fails before
+            // the recheck path executes.
+            FoundationModelsUsabilityProbe.clearCache()
+        }
+
+        let viewModel = SettingsViewModel()
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: false,
+            capturedAt: Date()
+        ))
+        let capabilities = CapabilitiesService()
+
+        await viewModel.recheckModels(using: stub, capabilities: capabilities)
+
+        // Post-condition: the cache slot is empty.
+        #expect(FoundationModelsUsabilityProbe.cachedUsability(
+            osBuild: osBuild,
+            bootEpochSeconds: bootEpoch
+        ) == nil,
+                "Recheck must clear the FM usability cache so the schedule gate can re-probe")
+    }
+
+    @Test func freshViewModelIsNotRechecking() {
+        let viewModel = SettingsViewModel()
+        #expect(viewModel.isRecheckingModels == false,
+                "Fresh view-model defaults isRecheckingModels to false")
+    }
+
+    /// R1 audit: After a snapshot lands on `capabilityUpdates()`, the
+    /// view-model must re-evaluate eligibility so the Apple Intelligence
+    /// row reflects the post-probe verdict. Without this, the row would
+    /// remain stuck on the stale verdict the user just tried to recheck
+    /// (e.g. `modelAvailableNow == false`) until the user closed and
+    /// reopened the Settings sheet.
+    @Test func observeCapabilitySnapshotsReevaluatesOnEmission() async throws {
+        let viewModel = SettingsViewModel()
+        // Start with the stub returning Unavailable.
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: false,
+            capturedAt: Date()
+        ))
+        viewModel.refreshEligibility(using: stub)
+        #expect(viewModel.eligibility?.isFullyEligible == false)
+
+        // Flip the stub to Available BEFORE starting the observation so
+        // the very first snapshot (yielded immediately by
+        // `capabilityUpdates()` per its documented contract) triggers
+        // a re-evaluation that produces the new verdict.
+        stub.verdict = AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: true,
+            capturedAt: Date()
+        )
+
+        let capabilities = CapabilitiesService()
+        let task = Task { @MainActor in
+            await viewModel.observeCapabilitySnapshots(capabilities, evaluator: stub)
+        }
+        defer { task.cancel() }
+
+        // Poll for the row to flip — the observation runs on a child
+        // task and `capabilityUpdates()` yields the current snapshot
+        // immediately on subscribe.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while ContinuousClock.now < deadline {
+            if viewModel.eligibility?.isFullyEligible == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(viewModel.eligibility?.isFullyEligible == true,
+                "Snapshot emission must trigger an evaluate() that flips the row to Available")
+    }
+
+    /// R2 audit: The observation loop must invalidate the evaluator
+    /// before calling `evaluate()` on every emission. Without this, the
+    /// evaluator's 4-hour verdict cache races with the runtime-level
+    /// subscription in `PlayheadRuntime`: if the SettingsView's
+    /// observation wins, `evaluate()` returns the STALE cached verdict
+    /// computed against the previous snapshot, and the row stays
+    /// stuck on the pre-probe value indefinitely (until something
+    /// else triggers a snapshot AND that race goes the other way).
+    /// The fix is for the local observer to invalidate before
+    /// evaluating, guaranteeing a fresh provider sweep against the
+    /// snapshot we just received.
+    ///
+    /// R3 audit: this test now pins the ORDER of calls, not just the
+    /// counts. A refactor that swapped the order to
+    /// `evaluate(); invalidate()` would still satisfy a count-only
+    /// assertion (each iteration increments both counters), silently
+    /// breaking the race fix. The event log on the stub records the
+    /// exact arrival order; we assert the first paired (invalidate,
+    /// evaluate) sequence matches the contract.
+    @Test func observeCapabilitySnapshotsInvalidatesEvaluatorBeforeEvaluate() async throws {
+        let viewModel = SettingsViewModel()
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: true,
+            capturedAt: Date()
+        ))
+
+        let capabilities = CapabilitiesService()
+        let task = Task { @MainActor in
+            await viewModel.observeCapabilitySnapshots(capabilities, evaluator: stub)
+        }
+        defer { task.cancel() }
+
+        // Wait for the seed snapshot to arrive and the observer body
+        // to run at least once.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while ContinuousClock.now < deadline {
+            if stub.invalidateCallCount >= 1, stub.evaluateCallCount >= 1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(stub.invalidateCallCount >= 1,
+                "Observer must invalidate the evaluator on every snapshot. Invalidate count: \(stub.invalidateCallCount)")
+        #expect(stub.evaluateCallCount >= 1,
+                "Observer must re-evaluate on every snapshot. Evaluate count: \(stub.evaluateCallCount)")
+
+        // R3 audit: pin the ORDER. The first observer iteration MUST
+        // be invalidate-then-evaluate. A count-only assertion passes
+        // even if the order is reversed, silently breaking the race
+        // fix. Inspect the event log directly.
+        let events = stub.events
+        let firstInvalidateIndex = events.firstIndex(of: .invalidate)
+        let firstEvaluateIndex = events.firstIndex(of: .evaluate)
+        #expect(firstInvalidateIndex != nil && firstEvaluateIndex != nil,
+                "Observer must have called both invalidate and evaluate at least once. Events: \(events)")
+        if let inv = firstInvalidateIndex, let eval = firstEvaluateIndex {
+            #expect(inv < eval,
+                    "First invalidate must precede first evaluate (race fix). Events: \(events)")
+        }
+        // Stronger guard: every evaluate at index i must be preceded
+        // by at least one invalidate at index < i. This catches a
+        // refactor that paired the FIRST iteration correctly but
+        // reversed subsequent ones.
+        var seenInvalidate = false
+        for event in events {
+            switch event {
+            case .invalidate:
+                seenInvalidate = true
+            case .evaluate:
+                #expect(seenInvalidate,
+                        "Every evaluate must be preceded by at least one invalidate in the event log. Events: \(events)")
+            }
+        }
+    }
+
+    /// R1 audit: If a recheck is in flight when a snapshot reporting
+    /// `foundationModelsUsable == true` lands, the observation loop
+    /// must release the `isRecheckingModels` flag so the "Checking…"
+    /// indicator does not linger past the moment the probe succeeded.
+    @Test func observeCapabilitySnapshotsReleasesRecheckOnUsableSnapshot() async throws {
+        let viewModel = SettingsViewModel()
+        viewModel.isRecheckingModels = true
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: true,
+            capturedAt: Date()
+        ))
+
+        let capabilities = CapabilitiesService()
+        let task = Task { @MainActor in
+            await viewModel.observeCapabilitySnapshots(capabilities, evaluator: stub)
+        }
+        defer { task.cancel() }
+
+        // The capture path in CapabilitiesService reads
+        // `cachedUsability() ?? false`. To pin a usable snapshot
+        // without dragging the real probe in, write a fresh
+        // `usable=true` record into the shared cache slot before the
+        // observation reads it. Belt-and-suspenders: a deferred
+        // cleanup clears the slot after the test so we don't pollute
+        // sibling tests.
+        let osBuild = FoundationModelsUsabilityProbe.osBuild()
+        let bootEpoch = FoundationModelsUsabilityProbe.bootEpochSeconds()
+        FoundationModelsUsabilityProbe.cache(
+            usable: true,
+            osBuild: osBuild,
+            bootEpochSeconds: bootEpoch
+        )
+        defer { FoundationModelsUsabilityProbe.clearCache() }
+        await capabilities.refreshSnapshot()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while ContinuousClock.now < deadline {
+            if viewModel.isRecheckingModels == false { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(viewModel.isRecheckingModels == false,
+                "A usable snapshot landing during a pending recheck must clear isRecheckingModels")
+    }
+}
+
+/// Stub eligibility evaluator that records both invalidation and
+/// evaluation calls AND the order they arrived in. The ordered event
+/// log lets R2/R3 audits assert the invalidate-before-evaluate
+/// contract (a refactor swapping the two would otherwise still
+/// satisfy a pure count-based assertion). Local to the recheck-flow
+/// suite so its bookkeeping is independent of the model-status copy
+/// suite's stub.
+final class RecheckStubEligibilityEvaluator: AnalysisEligibilityEvaluating, @unchecked Sendable {
+    enum Event: Equatable, Sendable {
+        case invalidate
+        case evaluate
+    }
+
+    var verdict: AnalysisEligibility
+    private(set) var evaluateCallCount = 0
+    private(set) var invalidateCallCount = 0
+    /// Append-only log of every recorded call, in arrival order. Used
+    /// by the R3 ordering assertion to verify that invalidate
+    /// precedes evaluate within each observer iteration — a
+    /// count-only check passes even when the order is reversed.
+    private let eventsLock = NSLock()
+    private var _events: [Event] = []
+    var events: [Event] {
+        eventsLock.lock()
+        defer { eventsLock.unlock() }
+        return _events
+    }
+
+    init(verdict: AnalysisEligibility) {
+        self.verdict = verdict
+    }
+
+    func evaluate() -> AnalysisEligibility {
+        eventsLock.lock()
+        evaluateCallCount += 1
+        _events.append(.evaluate)
+        eventsLock.unlock()
+        return verdict
+    }
+
+    func invalidate() {
+        eventsLock.lock()
+        invalidateCallCount += 1
+        _events.append(.invalidate)
+        eventsLock.unlock()
+    }
+    func noteLocaleChanged() {}
+    func noteRegionChanged() {}
+    func noteOSVersionChangedIfNeeded() {}
+    func noteAppleIntelligenceToggled() {}
+    func noteAppForegrounded() {}
+}
+
 // MARK: - About section copy
 
 @Suite("Settings About copy (playhead-j2u)")
