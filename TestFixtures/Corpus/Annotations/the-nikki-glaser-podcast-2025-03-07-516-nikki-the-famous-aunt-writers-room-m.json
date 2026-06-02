@@ -60,20 +60,6 @@
       ],
       "auto_promoted": true,
       "audit_priority": 1
-    },
-    {
-      "start_seconds": 3043.36,
-      "end_seconds": 3209.74,
-      "advertiser": null,
-      "product": null,
-      "ad_type": "dai",
-      "transition_type": null,
-      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 3043.4-3209.7s (len=166.4s). rediff-sec=166.4, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
-      "provenance": [
-        "rediff"
-      ],
-      "auto_promoted": true,
-      "audit_priority": 1
     }
   ],
   "content_windows": [
