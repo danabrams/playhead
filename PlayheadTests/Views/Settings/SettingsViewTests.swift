@@ -510,6 +510,14 @@ struct SettingsRecheckFlowTests {
     /// The fix is for the local observer to invalidate before
     /// evaluating, guaranteeing a fresh provider sweep against the
     /// snapshot we just received.
+    ///
+    /// R3 audit: this test now pins the ORDER of calls, not just the
+    /// counts. A refactor that swapped the order to
+    /// `evaluate(); invalidate()` would still satisfy a count-only
+    /// assertion (each iteration increments both counters), silently
+    /// breaking the race fix. The event log on the stub records the
+    /// exact arrival order; we assert the first paired (invalidate,
+    /// evaluate) sequence matches the contract.
     @Test func observeCapabilitySnapshotsInvalidatesEvaluatorBeforeEvaluate() async throws {
         let viewModel = SettingsViewModel()
         let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
@@ -531,16 +539,41 @@ struct SettingsRecheckFlowTests {
         // to run at least once.
         let deadline = ContinuousClock.now.advanced(by: .seconds(1))
         while ContinuousClock.now < deadline {
-            if stub.invalidateCallCount >= 1 { break }
+            if stub.invalidateCallCount >= 1, stub.evaluateCallCount >= 1 { break }
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(stub.invalidateCallCount >= 1,
-                "Observer must invalidate the evaluator before evaluating, so that a stale cached verdict cannot survive a snapshot emission. Invalidate count: \(stub.invalidateCallCount)")
-        // And invalidate must always precede evaluate within a single
-        // iteration — verified indirectly by the count relationship:
-        // every invalidate is paired with an evaluate.
-        #expect(stub.evaluateCallCount >= stub.invalidateCallCount,
-                "Every invalidate must be followed by an evaluate within the same iteration")
+                "Observer must invalidate the evaluator on every snapshot. Invalidate count: \(stub.invalidateCallCount)")
+        #expect(stub.evaluateCallCount >= 1,
+                "Observer must re-evaluate on every snapshot. Evaluate count: \(stub.evaluateCallCount)")
+
+        // R3 audit: pin the ORDER. The first observer iteration MUST
+        // be invalidate-then-evaluate. A count-only assertion passes
+        // even if the order is reversed, silently breaking the race
+        // fix. Inspect the event log directly.
+        let events = stub.events
+        let firstInvalidateIndex = events.firstIndex(of: .invalidate)
+        let firstEvaluateIndex = events.firstIndex(of: .evaluate)
+        #expect(firstInvalidateIndex != nil && firstEvaluateIndex != nil,
+                "Observer must have called both invalidate and evaluate at least once. Events: \(events)")
+        if let inv = firstInvalidateIndex, let eval = firstEvaluateIndex {
+            #expect(inv < eval,
+                    "First invalidate must precede first evaluate (race fix). Events: \(events)")
+        }
+        // Stronger guard: every evaluate at index i must be preceded
+        // by at least one invalidate at index < i. This catches a
+        // refactor that paired the FIRST iteration correctly but
+        // reversed subsequent ones.
+        var seenInvalidate = false
+        for event in events {
+            switch event {
+            case .invalidate:
+                seenInvalidate = true
+            case .evaluate:
+                #expect(seenInvalidate,
+                        "Every evaluate must be preceded by at least one invalidate in the event log. Events: \(events)")
+            }
+        }
     }
 
     /// R1 audit: If a recheck is in flight when a snapshot reporting
@@ -592,24 +625,52 @@ struct SettingsRecheckFlowTests {
     }
 }
 
-/// Stub eligibility evaluator that also records invalidation calls.
-/// Local to the recheck-flow suite so its bookkeeping is independent
-/// of the model-status copy suite's stub.
+/// Stub eligibility evaluator that records both invalidation and
+/// evaluation calls AND the order they arrived in. The ordered event
+/// log lets R2/R3 audits assert the invalidate-before-evaluate
+/// contract (a refactor swapping the two would otherwise still
+/// satisfy a pure count-based assertion). Local to the recheck-flow
+/// suite so its bookkeeping is independent of the model-status copy
+/// suite's stub.
 final class RecheckStubEligibilityEvaluator: AnalysisEligibilityEvaluating, @unchecked Sendable {
+    enum Event: Equatable, Sendable {
+        case invalidate
+        case evaluate
+    }
+
     var verdict: AnalysisEligibility
     private(set) var evaluateCallCount = 0
     private(set) var invalidateCallCount = 0
+    /// Append-only log of every recorded call, in arrival order. Used
+    /// by the R3 ordering assertion to verify that invalidate
+    /// precedes evaluate within each observer iteration — a
+    /// count-only check passes even when the order is reversed.
+    private let eventsLock = NSLock()
+    private var _events: [Event] = []
+    var events: [Event] {
+        eventsLock.lock()
+        defer { eventsLock.unlock() }
+        return _events
+    }
 
     init(verdict: AnalysisEligibility) {
         self.verdict = verdict
     }
 
     func evaluate() -> AnalysisEligibility {
+        eventsLock.lock()
         evaluateCallCount += 1
+        _events.append(.evaluate)
+        eventsLock.unlock()
         return verdict
     }
 
-    func invalidate() { invalidateCallCount += 1 }
+    func invalidate() {
+        eventsLock.lock()
+        invalidateCallCount += 1
+        _events.append(.invalidate)
+        eventsLock.unlock()
+    }
     func noteLocaleChanged() {}
     func noteRegionChanged() {}
     func noteOSVersionChangedIfNeeded() {}
