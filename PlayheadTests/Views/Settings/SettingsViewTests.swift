@@ -435,6 +435,105 @@ struct SettingsRecheckFlowTests {
         #expect(viewModel.isRecheckingModels == false,
                 "Fresh view-model defaults isRecheckingModels to false")
     }
+
+    /// R1 audit: After a snapshot lands on `capabilityUpdates()`, the
+    /// view-model must re-evaluate eligibility so the Apple Intelligence
+    /// row reflects the post-probe verdict. Without this, the row would
+    /// remain stuck on the stale verdict the user just tried to recheck
+    /// (e.g. `modelAvailableNow == false`) until the user closed and
+    /// reopened the Settings sheet.
+    @Test func observeCapabilitySnapshotsReevaluatesOnEmission() async throws {
+        let viewModel = SettingsViewModel()
+        // Start with the stub returning Unavailable.
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: false,
+            capturedAt: Date()
+        ))
+        viewModel.refreshEligibility(using: stub)
+        #expect(viewModel.eligibility?.isFullyEligible == false)
+
+        // Flip the stub to Available BEFORE starting the observation so
+        // the very first snapshot (yielded immediately by
+        // `capabilityUpdates()` per its documented contract) triggers
+        // a re-evaluation that produces the new verdict.
+        stub.verdict = AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: true,
+            capturedAt: Date()
+        )
+
+        let capabilities = CapabilitiesService()
+        let task = Task { @MainActor in
+            await viewModel.observeCapabilitySnapshots(capabilities, evaluator: stub)
+        }
+        defer { task.cancel() }
+
+        // Poll for the row to flip — the observation runs on a child
+        // task and `capabilityUpdates()` yields the current snapshot
+        // immediately on subscribe.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while ContinuousClock.now < deadline {
+            if viewModel.eligibility?.isFullyEligible == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(viewModel.eligibility?.isFullyEligible == true,
+                "Snapshot emission must trigger an evaluate() that flips the row to Available")
+    }
+
+    /// R1 audit: If a recheck is in flight when a snapshot reporting
+    /// `foundationModelsUsable == true` lands, the observation loop
+    /// must release the `isRecheckingModels` flag so the "Checking…"
+    /// indicator does not linger past the moment the probe succeeded.
+    @Test func observeCapabilitySnapshotsReleasesRecheckOnUsableSnapshot() async throws {
+        let viewModel = SettingsViewModel()
+        viewModel.isRecheckingModels = true
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: true,
+            capturedAt: Date()
+        ))
+
+        let capabilities = CapabilitiesService()
+        let task = Task { @MainActor in
+            await viewModel.observeCapabilitySnapshots(capabilities, evaluator: stub)
+        }
+        defer { task.cancel() }
+
+        // The capture path in CapabilitiesService reads
+        // `cachedUsability() ?? false`. To pin a usable snapshot
+        // without dragging the real probe in, write a fresh
+        // `usable=true` record into the shared cache slot before the
+        // observation reads it. Belt-and-suspenders: a deferred
+        // cleanup clears the slot after the test so we don't pollute
+        // sibling tests.
+        let osBuild = FoundationModelsUsabilityProbe.osBuild()
+        let bootEpoch = FoundationModelsUsabilityProbe.bootEpochSeconds()
+        FoundationModelsUsabilityProbe.cache(
+            usable: true,
+            osBuild: osBuild,
+            bootEpochSeconds: bootEpoch
+        )
+        defer { FoundationModelsUsabilityProbe.clearCache() }
+        await capabilities.refreshSnapshot()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while ContinuousClock.now < deadline {
+            if viewModel.isRecheckingModels == false { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(viewModel.isRecheckingModels == false,
+                "A usable snapshot landing during a pending recheck must clear isRecheckingModels")
+    }
 }
 
 /// Stub eligibility evaluator that also records invalidation calls.

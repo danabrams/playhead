@@ -64,6 +64,38 @@ struct FoundationModelsUsabilityProbeCacheTests {
                 "Within-TTL false cache must stay trusted; got \(String(describing: result))")
     }
 
+    /// Pin the exact boundary semantic. The reader uses
+    /// `now - cachedAt > falseCacheTTL ? nil : false`, so at EXACTLY
+    /// `falseCacheTTL` of elapsed time the comparison is false and the
+    /// cached `false` verdict is still trusted. Flipping the operator
+    /// to `>=` would break this assertion — that is the point. R1
+    /// audit: the boundary was not previously pinned by any test, so a
+    /// future inversion would silently change user-visible behavior.
+    @Test("usable=false at exact TTL boundary still reads false")
+    func falseRecordAtExactTTLBoundaryReadsFalse() {
+        let (defaults, suite) = Self.isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let written = Date(timeIntervalSince1970: 2_000_000_000)
+        FoundationModelsUsabilityProbe.cache(
+            usable: false,
+            userDefaults: defaults,
+            osBuild: Self.osBuild,
+            bootEpochSeconds: Self.bootEpoch,
+            now: written
+        )
+
+        let now = written.addingTimeInterval(FoundationModelsUsabilityProbe.falseCacheTTL)
+        let result = FoundationModelsUsabilityProbe.cachedUsability(
+            userDefaults: defaults,
+            osBuild: Self.osBuild,
+            bootEpochSeconds: Self.bootEpoch,
+            now: now
+        )
+        #expect(result == false,
+                "At exactly falseCacheTTL elapsed, false cache must still be trusted; got \(String(describing: result))")
+    }
+
     @Test("usable=false past TTL returns nil so probe re-fires")
     func falseRecordPastTTLReadsNil() {
         let (defaults, suite) = Self.isolatedDefaults()

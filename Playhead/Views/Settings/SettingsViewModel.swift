@@ -102,6 +102,52 @@ final class SettingsViewModel {
         eligibility = evaluator.evaluate()
     }
 
+    /// Subscribe to capability snapshot updates and re-evaluate
+    /// eligibility on each emission so the Apple Intelligence row stays
+    /// current after asynchronous events — most importantly, the FM
+    /// usability probe that the recheck flow schedules but does not
+    /// await. The runtime's existing capability listener already
+    /// invalidates the evaluator on every snapshot (see
+    /// `PlayheadRuntime.swift` near the `CapabilitySnapshotCache` set
+    /// loop), so the next `evaluate()` call here will recompute from
+    /// the fresh snapshot rather than returning the stale cache.
+    ///
+    /// This loop also clears `isRecheckingModels` once a settled
+    /// "Available" snapshot lands — that is the moment the user's
+    /// recheck conclusively succeeded. If the snapshot reports
+    /// `foundationModelsUsable == false`, the pending flag is left
+    /// alone so the row keeps reading "Checking…" until either the
+    /// probe lands a positive result or the in-flight `recheckModels`
+    /// call returns. (Either path eventually clears the flag.)
+    ///
+    /// The loop suspends until the consuming task is cancelled —
+    /// SwiftUI tears `.task` down when the view leaves the hierarchy.
+    /// Call once per view lifecycle.
+    func observeCapabilitySnapshots(
+        _ capabilities: CapabilitiesService,
+        evaluator: AnalysisEligibilityEvaluating
+    ) async {
+        let stream = await capabilities.capabilityUpdates()
+        for await snapshot in stream {
+            // The runtime's listener has already invalidated the
+            // evaluator on this same snapshot, so `evaluate()` will
+            // recompute. But that listener is a peer Task — we can't
+            // be certain it observed THIS snapshot before us, so just
+            // call evaluate(). The evaluator is idempotent; redundant
+            // calls cost a TTL-window cache hit.
+            eligibility = evaluator.evaluate()
+            // If a recheck was in flight and the FM probe has now
+            // landed a usable verdict, clear the pending flag so the
+            // "Checking…" indicator releases without waiting for the
+            // user to tap Recheck a second time. A non-usable verdict
+            // leaves the flag alone — `recheckModels` clears it when
+            // it returns.
+            if isRecheckingModels, snapshot.foundationModelsUsable {
+                isRecheckingModels = false
+            }
+        }
+    }
+
     /// User-triggered recheck for the Apple Intelligence status row.
     ///
     /// Steps, in order, so the UI gives an honest answer once the dust

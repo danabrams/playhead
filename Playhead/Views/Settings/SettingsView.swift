@@ -252,6 +252,15 @@ struct SettingsView: View {
                     // so neither starves the other; cancelling either
                     // child propagates from the parent task's
                     // cancellation.
+                    //
+                    // R1 audit: also subscribe to capability snapshot
+                    // updates so the Apple Intelligence row re-renders
+                    // when the asynchronous FM usability probe lands —
+                    // `recheckModels` schedules that probe via
+                    // `refreshSnapshot` but does not await it, so
+                    // without this subscription the row would read
+                    // "Unavailable" until the user closed and reopened
+                    // Settings.
                     async let icloud: Void = viewModel.observeICloudSyncStatus(
                         runtime.iCloudSyncCoordinator
                     )
@@ -260,7 +269,11 @@ struct SettingsView: View {
                             await viewModel.observePremiumStatus(entitlementManager)
                         }
                     }()
-                    _ = await (icloud, premium)
+                    async let capabilities: Void = viewModel.observeCapabilitySnapshots(
+                        runtime.capabilitiesService,
+                        evaluator: runtime.analysisEligibilityEvaluator
+                    )
+                    _ = await (icloud, premium, capabilities)
                 }
                 .onChange(of: router?.pending) { _, newRoute in
                     guard let newRoute else { return }
