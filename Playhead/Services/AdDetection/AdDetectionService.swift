@@ -5425,49 +5425,6 @@ actor AdDetectionService {
         )
     }
 
-    /// Apply BoundaryRefiner to snap an AdWindow's boundaries to acoustic transitions.
-    private func applyBoundaryRefinement(
-        window: AdWindow,
-        featureWindows: [FeatureWindow]
-    ) -> AdWindow {
-        guard !featureWindows.isEmpty else { return window }
-
-        let (startAdj, endAdj) = BoundaryRefiner.computeAdjustments(
-            windows: featureWindows,
-            candidateStart: window.startTime,
-            candidateEnd: window.endTime
-        )
-
-        guard startAdj != 0 || endAdj != 0 else { return window }
-
-        return AdWindow(
-            id: window.id,
-            analysisAssetId: window.analysisAssetId,
-            startTime: window.startTime + startAdj,
-            endTime: window.endTime + endAdj,
-            confidence: window.confidence,
-            boundaryState: window.boundaryState,
-            decisionState: window.decisionState,
-            detectorVersion: window.detectorVersion,
-            advertiser: window.advertiser,
-            product: window.product,
-            adDescription: window.adDescription,
-            evidenceText: window.evidenceText,
-            evidenceStartTime: window.evidenceStartTime,
-            metadataSource: window.metadataSource,
-            metadataConfidence: window.metadataConfidence,
-            metadataPromptVersion: window.metadataPromptVersion,
-            wasSkipped: window.wasSkipped,
-            userDismissedBanner: window.userDismissedBanner,
-            evidenceSources: window.evidenceSources,
-            eligibilityGate: window.eligibilityGate,
-            // playhead-epfk: preserve catalog-store match similarity
-            // across boundary refinement; this branch only adjusts time
-            // bounds, never re-runs the AdCatalogStore query.
-            catalogStoreMatchSimilarity: window.catalogStoreMatchSimilarity
-        )
-    }
-
     // MARK: - Phase 5 Projector Phase (playhead-4my.5)
 
     /// Runs AtomEvidenceProjector + MinimalContiguousSpanDecoder on the Phase 4
