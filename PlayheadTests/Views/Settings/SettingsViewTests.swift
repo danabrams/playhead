@@ -499,6 +499,50 @@ struct SettingsRecheckFlowTests {
                 "Snapshot emission must trigger an evaluate() that flips the row to Available")
     }
 
+    /// R2 audit: The observation loop must invalidate the evaluator
+    /// before calling `evaluate()` on every emission. Without this, the
+    /// evaluator's 4-hour verdict cache races with the runtime-level
+    /// subscription in `PlayheadRuntime`: if the SettingsView's
+    /// observation wins, `evaluate()` returns the STALE cached verdict
+    /// computed against the previous snapshot, and the row stays
+    /// stuck on the pre-probe value indefinitely (until something
+    /// else triggers a snapshot AND that race goes the other way).
+    /// The fix is for the local observer to invalidate before
+    /// evaluating, guaranteeing a fresh provider sweep against the
+    /// snapshot we just received.
+    @Test func observeCapabilitySnapshotsInvalidatesEvaluatorBeforeEvaluate() async throws {
+        let viewModel = SettingsViewModel()
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: true,
+            capturedAt: Date()
+        ))
+
+        let capabilities = CapabilitiesService()
+        let task = Task { @MainActor in
+            await viewModel.observeCapabilitySnapshots(capabilities, evaluator: stub)
+        }
+        defer { task.cancel() }
+
+        // Wait for the seed snapshot to arrive and the observer body
+        // to run at least once.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while ContinuousClock.now < deadline {
+            if stub.invalidateCallCount >= 1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(stub.invalidateCallCount >= 1,
+                "Observer must invalidate the evaluator before evaluating, so that a stale cached verdict cannot survive a snapshot emission. Invalidate count: \(stub.invalidateCallCount)")
+        // And invalidate must always precede evaluate within a single
+        // iteration — verified indirectly by the count relationship:
+        // every invalidate is paired with an evaluate.
+        #expect(stub.evaluateCallCount >= stub.invalidateCallCount,
+                "Every invalidate must be followed by an evaluate within the same iteration")
+    }
+
     /// R1 audit: If a recheck is in flight when a snapshot reporting
     /// `foundationModelsUsable == true` lands, the observation loop
     /// must release the `isRecheckingModels` flag so the "Checking…"

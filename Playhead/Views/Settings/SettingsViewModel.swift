@@ -106,11 +106,24 @@ final class SettingsViewModel {
     /// eligibility on each emission so the Apple Intelligence row stays
     /// current after asynchronous events — most importantly, the FM
     /// usability probe that the recheck flow schedules but does not
-    /// await. The runtime's existing capability listener already
-    /// invalidates the evaluator on every snapshot (see
-    /// `PlayheadRuntime.swift` near the `CapabilitySnapshotCache` set
-    /// loop), so the next `evaluate()` call here will recompute from
-    /// the fresh snapshot rather than returning the stale cache.
+    /// await.
+    ///
+    /// R2 audit: explicitly `invalidate()` the evaluator before each
+    /// `evaluate()` call. `AnalysisEligibilityEvaluator` caches its
+    /// verdict for `defaultTTL` (4 hours); a peer task in `PlayheadRuntime`
+    /// also subscribes to `capabilityUpdates()` and invalidates on every
+    /// snapshot, but the two consumers race on the same snapshot —
+    /// nothing orders them. If THIS task wins (`evaluate()` before the
+    /// runtime's `invalidate()`), the verdict cache is still populated
+    /// with the pre-snapshot value (e.g. "Unavailable, modelAvailableNow
+    /// = false") and the providers are never re-read against the fresh
+    /// snapshot. That is exactly the stuck-Unavailable bug the recheck
+    /// flow exists to fix, except recurring on the post-probe snapshot.
+    /// Invalidating locally guarantees a fresh recompute from providers
+    /// on every emission. The cost is a single provider sweep
+    /// (documented non-blocking) per snapshot — the snapshot rate is
+    /// low (thermal/power/battery + occasional probe completions), so
+    /// the overhead is negligible.
     ///
     /// This loop also clears `isRecheckingModels` once a settled
     /// "Available" snapshot lands — that is the moment the user's
@@ -129,12 +142,10 @@ final class SettingsViewModel {
     ) async {
         let stream = await capabilities.capabilityUpdates()
         for await snapshot in stream {
-            // The runtime's listener has already invalidated the
-            // evaluator on this same snapshot, so `evaluate()` will
-            // recompute. But that listener is a peer Task — we can't
-            // be certain it observed THIS snapshot before us, so just
-            // call evaluate(). The evaluator is idempotent; redundant
-            // calls cost a TTL-window cache hit.
+            // R2 audit: invalidate first so `evaluate()` re-reads the
+            // providers against THIS snapshot — see the doc comment for
+            // the race rationale.
+            evaluator.invalidate()
             eligibility = evaluator.evaluate()
             // If a recheck was in flight and the FM probe has now
             // landed a usable verdict, clear the pending flag so the
