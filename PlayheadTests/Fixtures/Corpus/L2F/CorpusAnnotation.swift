@@ -75,8 +75,11 @@ struct CorpusAnnotation: Sendable, Codable, Equatable {
         let product: String?
         /// How the ad is delivered.
         let adType: AdType
-        /// How the transition into the ad is signalled.
-        let transitionType: TransitionType
+        /// How the transition into the ad is signalled. Optional because
+        /// auto-promoted DAI spans emitted by `scripts/l2f-auto-promote.py`
+        /// carry `transition_type: null` — the rediff-confirmed promotion
+        /// path has no annotator-grade transition cue to assert.
+        let transitionType: TransitionType?
         /// Free-form annotator notes about why this confidence was assigned.
         let confidenceNotes: String?
 
@@ -90,6 +93,13 @@ struct CorpusAnnotation: Sendable, Codable, Equatable {
         case blendedHostRead = "blended_host_read"
         case producedSegment = "produced_segment"
         case promo = "promo"
+        /// Rediff-confirmed Dynamic Ad Insertion. Distinct from
+        /// `dynamicInsertion` because `scripts/l2f-auto-promote.py`
+        /// emits `"dai"` for rules R1/R3 (rediff-physical-DAI
+        /// promotions) to preserve the rediff-provenance signal,
+        /// while leaving `dynamic_insertion` available for
+        /// drafter-passthrough cases that lack rediff confirmation.
+        case dai = "dai"
     }
 
     enum TransitionType: String, Sendable, Codable, Equatable {
