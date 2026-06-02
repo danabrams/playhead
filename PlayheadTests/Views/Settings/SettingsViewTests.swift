@@ -348,7 +348,19 @@ struct SettingsModelUnavailableCopyTests {
 // test because it owns no external state beyond its in-actor
 // snapshot.
 
-@Suite("Settings recheck flow")
+// `.serialized` because several cases here both write to and read
+// from the shared `.standard` UserDefaults slot used by
+// `FoundationModelsUsabilityProbe`. Without serialization, the
+// `observeCapabilitySnapshotsReleasesRecheckOnUsableSnapshot` case
+// can write `usable=true` while `recheckClearsPersistedProbeCache`
+// is asserting the slot has been emptied, producing a non-
+// deterministic failure. Routing through `.standard` is dictated by
+// `CapabilitiesService.captureSnapshot()` (it reads `cachedUsability()`
+// with the default UserDefaults); the cleanest reader for the
+// snapshot flag in a unit test is the same writer, so serialization
+// is the right tradeoff over plumbing a UserDefaults parameter
+// through the production service for test-only use.
+@Suite("Settings recheck flow", .serialized)
 @MainActor
 struct SettingsRecheckFlowTests {
 
