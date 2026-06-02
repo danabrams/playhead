@@ -110,11 +110,12 @@
 //     what the user would have heard?".
 //   • `boundaryRefinementStartAdjustment` / `boundaryRefinementEndAdjustment`
 //     (Double?) — the start/end deltas (seconds) that
-//     `BoundaryRefiner.computeAdjustments` (legacy resolver, the same path
-//     `applyBoundaryRefinement` invokes) returns when re-fed the PERSISTED
-//     AdWindow bounds against the same `featureWindows` the production run
-//     used. Under normal flow these are ~0 (the persisted bounds are
-//     post-refinement); a non-zero value here flags that production's
+//     `BoundaryRefiner.computeAdjustments` (legacy resolver, the fallback path
+//     the live inline refiner at `AdDetectionService.swift:~3186-3260` uses
+//     when `BracketAwareBoundaryRefiner` doesn't refine) returns when re-fed
+//     the PERSISTED AdWindow bounds against the same `featureWindows` the
+//     production run used. Under normal flow these are ~0 (the persisted
+//     bounds are post-refinement); a non-zero value here flags that production's
 //     refinement choice diverged from the legacy snap that would otherwise
 //     have applied — the BracketAware path took an alternate snap or further
 //     adjustments are available. OMITTED from the encoded object when both
@@ -677,8 +678,10 @@ final class PipelineDumpLiveTests: XCTestCase {
             .map { window in
                 // playhead-4xqf FUSION_DROP probe: re-feed the PERSISTED
                 // AdWindow bounds back into the legacy
-                // `BoundaryRefiner.computeAdjustments` — the same path
-                // `applyBoundaryRefinement` uses — against the same
+                // `BoundaryRefiner.computeAdjustments` — the fallback path
+                // the live inline refiner at AdDetectionService.swift
+                // ~3186-3260 uses when BracketAwareBoundaryRefiner doesn't
+                // refine — against the same
                 // `featureWindows` production used. Under normal flow
                 // these are ~0 (the persisted bounds are already
                 // post-refinement); a non-zero delta flags that the
