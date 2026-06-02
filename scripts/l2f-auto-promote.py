@@ -152,6 +152,15 @@ F_PAST_TOLERANCE = 0.5           # seconds; a cluster whose end exceeds the
 # wrote down, not rejected on numerics.
 R1_REDIFF_MIN_SECONDS = 10.0
 R2_COMBINED_MIN_SECONDS = 20.0
+# R3 ceiling — added 2026-06-02 after the span-43 phantom investigation.
+# Empirical: 6 of 7 R3 spans ≥150s were rediff time-misalignment phantoms
+# (host content shifted by an earlier ad rotation), not real DAI inserts.
+# The decoder's MAX_DURATION is 180s (see DecoderConstants.maxDurationSeconds);
+# any rediff slot longer than that — uncorroborated by drafter or pipeline —
+# is more likely a phantom than a real ad block. Require corroboration above
+# this ceiling: such spans drop to R1 (if drafter or pipeline DOES overlap)
+# or get rejected entirely (if neither corroborates).
+R3_REDIFF_MAX_UNCORROBORATED_SECONDS = 180.0
 R2_PIPELINE_MIN_SKIP_CONFIDENCE = 0.85
 R3_REDIFF_MIN_SECONDS = 20.0
 LENGTH_EPS = 0.01  # tolerate float subtraction noise
@@ -548,6 +557,27 @@ def evaluate_cluster(c: Cluster) -> dict:
         and not has_drafter
         and not has_pipeline
     ):
+        # R3 ceiling guard: long uncorroborated rediff slots are usually
+        # rediff time-misalignment phantoms, not real ad blocks. See
+        # R3_REDIFF_MAX_UNCORROBORATED_SECONDS comment + the 7 scrubs in
+        # the 2026-06-02 span-43 investigation (transcripts confirmed host
+        # content for 6 of 7 R3 spans ≥150s).
+        if rediff_total > R3_REDIFF_MAX_UNCORROBORATED_SECONDS + LENGTH_EPS:
+            return {
+                "decision": "reject",
+                "rule": "R3_TOO_LONG_UNCORROBORATED",
+                "audit_priority": None,
+                "ad_type": None,
+                "advertiser": None,
+                "provenance": ["rediff"],
+                "confidence_notes": (
+                    f"R3 ceiling guard: rediff-only span "
+                    f"{rediff_total:.1f}s > {R3_REDIFF_MAX_UNCORROBORATED_SECONDS}s "
+                    "without drafter or pipeline corroboration. Likely a "
+                    "rediff time-misalignment phantom (host content shifted "
+                    "by an earlier ad rotation). " + base_notes
+                ),
+            }
         return {
             "decision": "promote",
             "rule": "R3",
@@ -776,6 +806,7 @@ def process_episode(
     rejects = (rejects_idx or {}).get(episode_id, [])
     audit_rejected_count = 0
     f_past_rejected_count = 0
+    r3_ceiling_rejected_count = 0
     # F_PAST guard inputs: episode duration is required to detect rediff
     # overshoot past last audible frame. derive_duration() returns None when
     # neither the pipeline-dump nor the drafter knows the duration; in that
@@ -834,6 +865,8 @@ def process_episode(
             rule_counts[ev["rule"]] += 1
             audit_counts[ev["audit_priority"]] += 1
         else:
+            if ev.get("rule") == "R3_TOO_LONG_UNCORROBORATED":
+                r3_ceiling_rejected_count += 1
             rejected.append(
                 {
                     "start": round(c.start, 2),
@@ -865,6 +898,7 @@ def process_episode(
         "audit_counts": audit_counts,
         "audit_rejected": audit_rejected_count,
         "f_past_rejected": f_past_rejected_count,
+        "r3_ceiling_rejected": r3_ceiling_rejected_count,
         "_promoted_clusters": promoted,  # internal; stripped before writing summary
     }
 
@@ -931,11 +965,13 @@ def main() -> int:
     rejected_total = 0
     audit_rejected_total = 0
     f_past_rejected_total = 0
+    r3_ceiling_rejected_total = 0
 
     for ep in episode_ids:
         result = process_episode(ep, pipeline_idx, manifest, rejects_idx=rejects_idx)
         audit_rejected_total += result.get("audit_rejected", 0)
         f_past_rejected_total += result.get("f_past_rejected", 0)
+        r3_ceiling_rejected_total += result.get("r3_ceiling_rejected", 0)
         promoted_clusters = result.pop("_promoted_clusters")
         rejected_total += len(result["rejected"])
         for k, v in result["rule_counts"].items():
@@ -1003,6 +1039,7 @@ def main() -> int:
             "rejected_clusters": rejected_total,
             "audit_rejected_clusters": audit_rejected_total,
             "f_past_rejected_clusters": f_past_rejected_total,
+            "r3_ceiling_rejected_clusters": r3_ceiling_rejected_total,
             "rule_counts": rule_totals,
             "audit_priority_counts": audit_totals,
         },
@@ -1014,7 +1051,8 @@ def main() -> int:
         f"written={written} skipped-existing={skipped_existing} "
         f"rejected-clusters={rejected_total} "
         f"audit-rejected={audit_rejected_total} "
-        f"f-past-rejected={f_past_rejected_total}"
+        f"f-past-rejected={f_past_rejected_total} "
+        f"r3-ceiling-rejected={r3_ceiling_rejected_total}"
     )
     log(
         f"  rules: R1={rule_totals['R1']} R2={rule_totals['R2']} R3={rule_totals['R3']}"
