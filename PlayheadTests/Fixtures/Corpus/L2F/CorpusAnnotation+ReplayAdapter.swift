@@ -110,12 +110,18 @@ extension CorpusAnnotation {
     }
 
     /// Map an `AdType` to the simulator's `DeliveryStyle`.
+    ///
+    /// `.dai` (rediff-confirmed Dynamic Ad Insertion, emitted by
+    /// `scripts/l2f-auto-promote.py` rules R1/R3) collapses into
+    /// `.dynamicInsertion` for the simulator — the rediff-provenance
+    /// distinction lives in the corpus annotation and is not carried
+    /// through `GroundTruthAdSegment.DeliveryStyle`.
     private static func mapDeliveryStyle(
         _ type: CorpusAnnotation.AdType
     ) -> GroundTruthAdSegment.DeliveryStyle {
         switch type {
         case .hostRead: .hostRead
-        case .dynamicInsertion: .dynamicInsertion
+        case .dynamicInsertion, .dai: .dynamicInsertion
         case .blendedHostRead: .blendedHostRead
         case .producedSegment: .producedSegment
         case .promo: .producedSegment

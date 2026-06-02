@@ -85,7 +85,11 @@ extension MetricGroundTruthAd {
             return .hostRead
         case .producedSegment, .promo:
             return .produced
-        case .dynamicInsertion:
+        case .dynamicInsertion, .dai:
+            // `.dai` is rediff-physically-confirmed DAI from
+            // `scripts/l2f-auto-promote.py` rules R1/R3; folds into the
+            // same coarser `.dynamic` slicing dimension as the hand-labeled
+            // `.dynamicInsertion` case.
             return .dynamic
         }
     }

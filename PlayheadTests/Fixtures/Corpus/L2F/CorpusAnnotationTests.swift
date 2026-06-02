@@ -383,6 +383,22 @@ struct CorpusAnnotationLoaderDiskTests {
 
     @Test("loadAll succeeds on the current annotations directory")
     func loadAllSucceeds() throws {
+        // Regression guard: this test failed across review rounds R1–R8
+        // because the on-disk corpus had drifted ahead of the schema.
+        // The auto-promote pipeline (`scripts/l2f-auto-promote.py`
+        // rules R1/R3) emits `"ad_type": "dai"` for rediff-confirmed
+        // Dynamic Ad Insertion and `"transition_type": null` for every
+        // triangulated promotion, but `CorpusAnnotation.AdType` had no
+        // `.dai` case and `transitionType` was non-optional, so Codable
+        // decoding failed on every R1/R3-promoted annotation.
+        //
+        // Fix (Option A): widened `AdType` with an additive `.dai`
+        // case distinct from `.dynamicInsertion` to preserve the
+        // rediff physical-provenance signal in the audit trail, and
+        // made `transitionType` optional. Both `.dai` and
+        // `.dynamicInsertion` fold into the same `.dynamicInsertion`
+        // simulator delivery style and `.dynamic` fusion-lift bucket,
+        // so the distinction stays inside the corpus.
         let loader = CorpusAnnotationLoader()
         // The corpus may be empty until Dan completes the labeling pass;
         // an empty result is acceptable here. The contract is "doesn't
