@@ -105,7 +105,19 @@ enum FoundationModelsUsabilityProbe {
             return nil
         }
 
-        return now.timeIntervalSince(cachedAt) > falseCacheTTL ? nil : false
+        // R4 audit: treat a negative elapsed interval (i.e. `cachedAt`
+        // is in the FUTURE relative to `now`) as a corruption signal
+        // and force a re-probe. This can happen after an NTP correction
+        // pulls the clock backward, after a user manually rolls the
+        // device clock back, or after a write from a process running
+        // with a skewed clock. Honoring a future-dated `false` verdict
+        // would otherwise keep the cache "fresh" for an arbitrarily
+        // long window (until `now` catches up to `cachedAt`, then the
+        // normal 15-minute TTL) — the exact stuck-Unavailable bug this
+        // TTL exists to prevent.
+        let elapsed = now.timeIntervalSince(cachedAt)
+        if elapsed < 0 { return nil }
+        return elapsed > falseCacheTTL ? nil : false
     }
 
     static func cache(

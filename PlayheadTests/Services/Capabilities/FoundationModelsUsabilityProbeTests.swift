@@ -180,6 +180,71 @@ struct FoundationModelsUsabilityProbeCacheTests {
         )
     }
 
+    /// R4 audit: a `cachedAt` timestamp in the FUTURE (e.g. after an
+    /// NTP correction rolls the clock backward, or a manual clock
+    /// change) must be treated as corruption — return nil so the
+    /// schedule gate re-probes. Honoring a future-dated `false`
+    /// verdict would otherwise keep the cache "fresh" for an
+    /// arbitrarily long window (until `now` catches up to `cachedAt`,
+    /// then the normal 15-minute TTL), reproducing the
+    /// stuck-Unavailable bug this TTL exists to prevent.
+    @Test("usable=false with future cachedAt reads as nil (clock skew guard)")
+    func falseRecordWithFutureCachedAtReadsNil() {
+        let (defaults, suite) = Self.isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // Write the cache at time T+1h, then read at time T. The
+        // record's `cachedAt` is one hour in the future from the
+        // reader's perspective; `now - cachedAt` is negative.
+        let writtenAt = Date(timeIntervalSince1970: 2_000_000_000 + 3600)
+        FoundationModelsUsabilityProbe.cache(
+            usable: false,
+            userDefaults: defaults,
+            osBuild: Self.osBuild,
+            bootEpochSeconds: Self.bootEpoch,
+            now: writtenAt
+        )
+
+        let readAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let result = FoundationModelsUsabilityProbe.cachedUsability(
+            userDefaults: defaults,
+            osBuild: Self.osBuild,
+            bootEpochSeconds: Self.bootEpoch,
+            now: readAt
+        )
+        #expect(result == nil,
+                "Future-dated cachedAt must be treated as corrupt and read as nil so the schedule gate re-probes; got \(String(describing: result))")
+    }
+
+    /// Companion to the future-skew guard: pin the exact boundary so a
+    /// refactor that flipped the sign comparison from `< 0` to `<= 0`
+    /// would not silently re-introduce the bug at exactly `cachedAt ==
+    /// now`. At zero elapsed time the cached `false` is still valid
+    /// (we just wrote it).
+    @Test("usable=false at exact zero elapsed still reads false")
+    func falseRecordAtZeroElapsedReadsFalse() {
+        let (defaults, suite) = Self.isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let written = Date(timeIntervalSince1970: 2_000_000_000)
+        FoundationModelsUsabilityProbe.cache(
+            usable: false,
+            userDefaults: defaults,
+            osBuild: Self.osBuild,
+            bootEpochSeconds: Self.bootEpoch,
+            now: written
+        )
+
+        let result = FoundationModelsUsabilityProbe.cachedUsability(
+            userDefaults: defaults,
+            osBuild: Self.osBuild,
+            bootEpochSeconds: Self.bootEpoch,
+            now: written
+        )
+        #expect(result == false,
+                "At zero elapsed (read at the same instant as write), false cache must still be trusted; got \(String(describing: result))")
+    }
+
     // MARK: - Codable round-trip
 
     @Test("Cache record round-trips with the new cachedAt field")
