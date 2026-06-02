@@ -1,5 +1,30 @@
 // FoundationModelsUsabilityProbe.swift
 // First-call readiness probe for Apple's Foundation Models runtime.
+//
+// Cache shape
+// -----------
+// The probe persists a small `FoundationModelsUsabilityProbeCache` record
+// in UserDefaults keyed on `(osBuild, bootEpochSeconds, usable, cachedAt)`.
+//   * `usable == true` records stay valid indefinitely (until the
+//     osBuild/boot pair changes — i.e. an OS update or device reboot).
+//   * `usable == false` records expire after `falseCacheTTL` so a
+//     transient failure (model warming up, guardrail rejection,
+//     transient timeout) does not stick permanently across a single
+//     boot session.
+//
+// Old-schema compatibility
+// ------------------------
+// The `cachedAt` field was added after a release that shipped without
+// it. The field is optional in the Codable representation; an old
+// record decodes successfully with `cachedAt == nil`. The
+// `cachedUsability(...)` reader treats a nil `cachedAt` on a
+// `usable == false` record the same way it treats an expired record:
+// it returns `nil`, which causes the schedule gate in
+// `CapabilitiesService.scheduleFoundationModelsProbeIfNeeded(...)` to
+// fire a fresh probe rather than trusting a stale "unusable" verdict.
+// Old `usable == true` records (which also lack `cachedAt`) remain
+// valid — successful readiness has always been treated as durable for
+// the OS+boot pair.
 
 import Foundation
 import OSLog
@@ -19,6 +44,22 @@ struct FoundationModelsUsabilityProbeCache: Codable, Sendable, Equatable {
     let osBuild: String
     let bootEpochSeconds: Int
     let usable: Bool
+    /// Wall-clock time the record was written. Optional so records
+    /// persisted by the pre-TTL release still decode cleanly — see the
+    /// "Old-schema compatibility" note at the top of the file.
+    let cachedAt: Date?
+
+    init(
+        osBuild: String,
+        bootEpochSeconds: Int,
+        usable: Bool,
+        cachedAt: Date? = nil
+    ) {
+        self.osBuild = osBuild
+        self.bootEpochSeconds = bootEpochSeconds
+        self.usable = usable
+        self.cachedAt = cachedAt
+    }
 
     func matches(osBuild: String, bootEpochSeconds: Int) -> Bool {
         self.osBuild == osBuild && self.bootEpochSeconds == bootEpochSeconds
@@ -28,10 +69,19 @@ struct FoundationModelsUsabilityProbeCache: Codable, Sendable, Equatable {
 enum FoundationModelsUsabilityProbe {
     private static let cacheKey = "foundationModels.usabilityProbe"
 
+    /// How long a `usable == false` cache record is honored before the
+    /// reader treats it as expired (returns `nil`, which causes the
+    /// schedule gate to fire a fresh probe). 15 minutes is short enough
+    /// that a user who hits the Settings screen after a transient
+    /// guardrail/timeout failure recovers naturally; long enough that
+    /// retrying does not hammer the model when the failure is durable.
+    static let falseCacheTTL: TimeInterval = 15 * 60
+
     static func cachedUsability(
         userDefaults: UserDefaults = .standard,
         osBuild: String = osBuild(),
-        bootEpochSeconds: Int = bootEpochSeconds()
+        bootEpochSeconds: Int = bootEpochSeconds(),
+        now: Date = .now
     ) -> Bool? {
         guard let data = userDefaults.data(forKey: cacheKey),
               let record = try? JSONDecoder().decode(FoundationModelsUsabilityProbeCache.self, from: data),
@@ -39,19 +89,37 @@ enum FoundationModelsUsabilityProbe {
             return nil
         }
 
-        return record.usable
+        // Successful probes stay valid indefinitely until the OS+boot
+        // pair changes. Failed probes expire after `falseCacheTTL` so a
+        // transient failure can heal without an OS update or reboot.
+        if record.usable {
+            return true
+        }
+
+        guard let cachedAt = record.cachedAt else {
+            // Old-schema record lacking `cachedAt`. We cannot tell how
+            // long ago it was written, so treat it as expired and let
+            // the schedule gate fire a fresh probe. This is the right
+            // call: pretending a possibly-stale "unusable" verdict is
+            // still authoritative is exactly the bug this TTL fixes.
+            return nil
+        }
+
+        return now.timeIntervalSince(cachedAt) > falseCacheTTL ? nil : false
     }
 
     static func cache(
         usable: Bool,
         userDefaults: UserDefaults = .standard,
         osBuild: String = osBuild(),
-        bootEpochSeconds: Int = bootEpochSeconds()
+        bootEpochSeconds: Int = bootEpochSeconds(),
+        now: Date = .now
     ) {
         let record = FoundationModelsUsabilityProbeCache(
             osBuild: osBuild,
             bootEpochSeconds: bootEpochSeconds,
-            usable: usable
+            usable: usable,
+            cachedAt: now
         )
 
         guard let data = try? JSONEncoder().encode(record) else { return }

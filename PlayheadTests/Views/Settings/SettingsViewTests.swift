@@ -275,6 +275,193 @@ final class StubEligibilityEvaluator: AnalysisEligibilityEvaluating, @unchecked 
     func noteAppForegrounded() {}
 }
 
+// MARK: - Apple Intelligence unavailable copy
+//
+// Pins the user-facing caption strings rendered under the Apple
+// Intelligence status row when the row reads "Unavailable". The View
+// renders the caption via `SettingsModelUnavailableCopy.caption(for:)`;
+// these tests pin the mapping for every `AnalysisUnavailableReason`
+// case so any future edit forces a deliberate spec + test update.
+
+@Suite("Settings Apple Intelligence unavailable copy")
+struct SettingsModelUnavailableCopyTests {
+
+    @Test func hardwareUnsupportedCaption() {
+        #expect(
+            SettingsModelUnavailableCopy.caption(for: .hardwareUnsupported)
+                == "Device doesn't support Apple Intelligence"
+        )
+    }
+
+    @Test func regionUnsupportedCaption() {
+        #expect(
+            SettingsModelUnavailableCopy.caption(for: .regionUnsupported)
+                == "Not available in your region"
+        )
+    }
+
+    @Test func languageUnsupportedCaption() {
+        #expect(
+            SettingsModelUnavailableCopy.caption(for: .languageUnsupported)
+                == "Not available in your language"
+        )
+    }
+
+    @Test func appleIntelligenceDisabledCaption() {
+        #expect(
+            SettingsModelUnavailableCopy.caption(for: .appleIntelligenceDisabled)
+                == "Apple Intelligence is off in Settings"
+        )
+    }
+
+    @Test func modelTemporarilyUnavailableCaption() {
+        #expect(
+            SettingsModelUnavailableCopy.caption(for: .modelTemporarilyUnavailable)
+                == "Model not ready — tap Recheck after a moment"
+        )
+    }
+
+    /// Every case has a non-empty caption, so adding a new
+    /// `AnalysisUnavailableReason` case will fail compilation in
+    /// `SettingsModelUnavailableCopy.caption(for:)` rather than
+    /// silently rendering an empty caption.
+    @Test func everyReasonHasNonEmptyCaption() {
+        for reason in AnalysisUnavailableReason.allCases {
+            let caption = SettingsModelUnavailableCopy.caption(for: reason)
+            #expect(!caption.isEmpty, "Missing caption for \(reason)")
+        }
+    }
+}
+
+// MARK: - Recheck flow (view-model level)
+//
+// The SwiftUI Recheck button calls `SettingsViewModel.recheckModels`,
+// which in turn must:
+//   1. Drop the persisted FM usability cache.
+//   2. Invalidate the eligibility evaluator.
+//   3. Flip `isRecheckingModels = true` so the status row reads
+//      "Checking…" until the fresh evaluation lands.
+//   4. Re-evaluate after the snapshot refresh.
+//
+// We exercise the orchestration via a stub evaluator + the real
+// CapabilitiesService actor. The latter is safe to spin up in a unit
+// test because it owns no external state beyond its in-actor
+// snapshot.
+
+@Suite("Settings recheck flow")
+@MainActor
+struct SettingsRecheckFlowTests {
+
+    @Test func recheckInvalidatesEvaluatorAndDropsEligibility() async {
+        let viewModel = SettingsViewModel()
+
+        // Seed an unavailable verdict so the View would show the
+        // Recheck button.
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: false, // model not ready
+            capturedAt: Date()
+        ))
+        viewModel.refreshEligibility(using: stub)
+        #expect(viewModel.eligibility?.isFullyEligible == false)
+        #expect(stub.invalidateCallCount == 0)
+
+        // Drive the recheck.
+        let capabilities = CapabilitiesService()
+        await viewModel.recheckModels(using: stub, capabilities: capabilities)
+
+        #expect(stub.invalidateCallCount == 1,
+                "Recheck must invalidate the evaluator exactly once per call")
+        // The evaluator's verdict is consulted again at the end of
+        // `recheckModels`, so the final eligibility comes from the
+        // stub's `evaluate()` call.
+        #expect(stub.evaluateCallCount == 2,
+                "Recheck must re-evaluate after the snapshot refresh (initial seed + final read)")
+        #expect(viewModel.isRecheckingModels == false,
+                "isRecheckingModels must reset to false after the recheck completes")
+        #expect(viewModel.eligibility?.isFullyEligible == false,
+                "Final eligibility reflects the stub's verdict")
+    }
+
+    @Test func recheckClearsPersistedProbeCache() async {
+        // Cache a `usable == false` record in the live UserDefaults so
+        // we can prove the recheck flow drops it. Use a recent
+        // timestamp so the TTL does not affect the result.
+        let osBuild = FoundationModelsUsabilityProbe.osBuild()
+        let bootEpoch = FoundationModelsUsabilityProbe.bootEpochSeconds()
+        FoundationModelsUsabilityProbe.cache(
+            usable: false,
+            osBuild: osBuild,
+            bootEpochSeconds: bootEpoch
+        )
+        // Sanity: the record reads back as false within the TTL.
+        #expect(FoundationModelsUsabilityProbe.cachedUsability(
+            osBuild: osBuild,
+            bootEpochSeconds: bootEpoch
+        ) == false)
+
+        defer {
+            // Belt-and-suspenders cleanup even if the test fails before
+            // the recheck path executes.
+            FoundationModelsUsabilityProbe.clearCache()
+        }
+
+        let viewModel = SettingsViewModel()
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: false,
+            capturedAt: Date()
+        ))
+        let capabilities = CapabilitiesService()
+
+        await viewModel.recheckModels(using: stub, capabilities: capabilities)
+
+        // Post-condition: the cache slot is empty.
+        #expect(FoundationModelsUsabilityProbe.cachedUsability(
+            osBuild: osBuild,
+            bootEpochSeconds: bootEpoch
+        ) == nil,
+                "Recheck must clear the FM usability cache so the schedule gate can re-probe")
+    }
+
+    @Test func freshViewModelIsNotRechecking() {
+        let viewModel = SettingsViewModel()
+        #expect(viewModel.isRecheckingModels == false,
+                "Fresh view-model defaults isRecheckingModels to false")
+    }
+}
+
+/// Stub eligibility evaluator that also records invalidation calls.
+/// Local to the recheck-flow suite so its bookkeeping is independent
+/// of the model-status copy suite's stub.
+final class RecheckStubEligibilityEvaluator: AnalysisEligibilityEvaluating, @unchecked Sendable {
+    var verdict: AnalysisEligibility
+    private(set) var evaluateCallCount = 0
+    private(set) var invalidateCallCount = 0
+
+    init(verdict: AnalysisEligibility) {
+        self.verdict = verdict
+    }
+
+    func evaluate() -> AnalysisEligibility {
+        evaluateCallCount += 1
+        return verdict
+    }
+
+    func invalidate() { invalidateCallCount += 1 }
+    func noteLocaleChanged() {}
+    func noteRegionChanged() {}
+    func noteOSVersionChangedIfNeeded() {}
+    func noteAppleIntelligenceToggled() {}
+    func noteAppForegrounded() {}
+}
+
 // MARK: - About section copy
 
 @Suite("Settings About copy (playhead-j2u)")

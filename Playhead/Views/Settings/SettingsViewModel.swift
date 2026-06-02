@@ -66,6 +66,14 @@ final class SettingsViewModel {
     /// rather than guessing a verdict.
     var eligibility: AnalysisEligibility?
 
+    /// `true` while the user-triggered recheck (Settings → Apple
+    /// Intelligence → Recheck button) is in flight. The UI treats this
+    /// as the same "Checking…" state it shows when `eligibility` is
+    /// `nil` at first launch, so the user sees an honest pending
+    /// indicator instead of the stale "Unavailable" verdict that
+    /// prompted them to recheck in the first place.
+    var isRecheckingModels = false
+
     // MARK: - Injected reporter
 
     /// The reporter used to compute the storage breakdown. Defaults to
@@ -92,6 +100,46 @@ final class SettingsViewModel {
     /// main actor.
     func refreshEligibility(using evaluator: AnalysisEligibilityEvaluating) {
         eligibility = evaluator.evaluate()
+    }
+
+    /// User-triggered recheck for the Apple Intelligence status row.
+    ///
+    /// Steps, in order, so the UI gives an honest answer once the dust
+    /// settles:
+    ///   1. Drop the persisted FM usability probe cache so any prior
+    ///      `usable == false` verdict is forgotten.
+    ///   2. Invalidate the eligibility evaluator's in-memory snapshot
+    ///      so the next `evaluate()` call recomputes.
+    ///   3. Clear the local `eligibility` field and flip
+    ///      `isRecheckingModels = true` so the View flips back to
+    ///      "Checking…" while the async work runs.
+    ///   4. Ask `CapabilitiesService.refreshSnapshot()` to publish a
+    ///      fresh snapshot — that path schedules a fresh FM usability
+    ///      probe in the background.
+    ///   5. After the snapshot work returns, re-evaluate so the row
+    ///      reflects the latest verdict and drop the pending flag.
+    ///
+    /// Note: the FM probe itself runs asynchronously inside the
+    /// capabilities service. Step 4's `refreshSnapshot()` schedules it;
+    /// the row may still read "Unavailable" right after this method
+    /// returns if the probe is still in flight. That is correct — the
+    /// snapshot will be republished from the service once the probe
+    /// finishes (`finishFoundationModelsProbe()` calls `refreshSnapshot`
+    /// again), which will re-fire the View's `.task` block and bring
+    /// the row up to date. Until then the row will show whatever the
+    /// freshest eligibility verdict says, which is the most honest
+    /// answer available.
+    func recheckModels(
+        using evaluator: AnalysisEligibilityEvaluating,
+        capabilities: CapabilitiesService
+    ) async {
+        FoundationModelsUsabilityProbe.clearCache()
+        evaluator.invalidate()
+        eligibility = nil
+        isRecheckingModels = true
+        await capabilities.refreshSnapshot()
+        eligibility = evaluator.evaluate()
+        isRecheckingModels = false
     }
 
     /// Triggers EntitlementManager restore flow.
