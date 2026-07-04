@@ -23,7 +23,7 @@
 //   XCTest:        override func setUpWithError() throws {
 //                      try XCTSkipUnless(PerfGate.runsMeasurementTests, PerfGate.skipReason)
 //                  }
-//   Swift Testing: @Test(..., .enabled(if: PerfGate.runsMeasurementTests, PerfGate.skipComment))
+//   Swift Testing: @Test(..., .enabled(if: PerfGate.runsMeasurementTests, "perf pass only — see playhead-zx0l"))
 
 import Foundation
 

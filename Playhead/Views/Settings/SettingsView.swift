@@ -1917,8 +1917,14 @@ private extension SettingsView {
             // analysis_health is still useful without them because
             // the top-line "why didn't this progress?" questions are
             // answered from the snapshot alone.
+            // playhead-xx7m.2 (Phase B): fold the live model context-window
+            // size into the archive so a real-device diagnostics pull confirms
+            // the iOS 27 model reports ~32k without needing Console.app.
+            let foundationModelsContextSize = await runtime.capabilitiesService
+                .currentSnapshot.foundationModelsContextSize
             let analysisHealth = DogfoodDiagnosticsAnalysisHealth.build(
                 from: activitySnapshot,
+                foundationModelsContextSize: foundationModelsContextSize,
                 generatedAt: now
             )
             dogfoodDiagnosticsExportResult = try await Task.detached(priority: .utility) {

@@ -193,7 +193,8 @@ struct AdmissionControllerTests {
     }
 
     // M13: enqueue should not be O(n log n) per insert. Smoke test the wall time.
-    @Test("enqueue of 1000 jobs completes quickly")
+    @Test("enqueue of 1000 jobs completes quickly",
+          .enabled(if: PerfGate.runsMeasurementTests, "load-sensitive 100ms wall-clock budget — perf pass only (playhead-zx0l)"))
     func testEnqueueScales() async {
         let controller = AdmissionController()
         let start = Date()
