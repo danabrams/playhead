@@ -1342,7 +1342,10 @@ struct AppleSpeechAnalyzerRunnerTests {
         let (buffer, _) = try makeAnalyzerStyleInt16Buffer(frameCount: 512)
         let input = try AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: buffer)
 
-        #expect(input.buffer === buffer)
+        // iOS 27 deprecated `AnalyzerInput.buffer` and no longer returns the
+        // same instance, so assert passthrough via `bufferFormat` instead of
+        // object identity.
+        #expect(input.bufferFormat == buffer.format)
         #expect(input.bufferStartTime == nil)
     }
 
@@ -1352,7 +1355,8 @@ struct AppleSpeechAnalyzerRunnerTests {
         let startTime = CMTime(seconds: 5.0, preferredTimescale: 600_000)
         let input = try AppleSpeechAnalyzerRunner.makeAnalyzerInput(buffer: buffer, bufferStartTime: startTime)
 
-        #expect(input.buffer === buffer)
+        // See note above: `buffer` identity is not preserved on iOS 27.
+        #expect(input.bufferFormat == buffer.format)
         #expect(input.bufferStartTime == startTime)
     }
 

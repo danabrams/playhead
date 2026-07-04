@@ -1055,15 +1055,15 @@ struct AppleSpeechAnalyzerRunner {
     }
 
     private static func analyzerInputEndTime(_ input: AnalyzerInput) throws -> CMTime {
-        let sampleRate = input.buffer.format.sampleRate
-        guard sampleRate > 0 else {
+        // iOS 27 exposes the input duration directly via `bufferDuration`,
+        // replacing the deprecated `buffer` accessor and the manual
+        // frameLength / sampleRate arithmetic it required.
+        let duration = input.bufferDuration
+        guard duration.isNumeric, duration.seconds >= 0 else {
             throw AppleSpeechBoundaryError.invalidAnalyzerInputTimeline(
-                "SpeechAnalyzer input buffer sample rate must be positive"
+                "SpeechAnalyzer input buffer duration must be a non-negative numeric CMTime"
             )
         }
-
-        let durationSeconds = Double(input.buffer.frameLength) / sampleRate
-        let duration = CMTime(seconds: durationSeconds, preferredTimescale: 600_000)
         return CMTimeAdd(input.bufferStartTime ?? .zero, duration)
     }
 }

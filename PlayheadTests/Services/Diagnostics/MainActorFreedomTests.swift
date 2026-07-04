@@ -92,6 +92,12 @@ import XCTest
 /// actor is genuinely available during init. See file-level comment.
 final class PlayheadRuntimeMainActorFreedomTests: XCTestCase {
 
+    // Load-sensitive latency measurement — runs only in the serial perf pass
+    // where the CPU is quiescent. See PerfGate / playhead-zx0l.
+    override func setUpWithError() throws {
+        try XCTSkipUnless(PerfGate.runsMeasurementTests, PerfGate.skipReason)
+    }
+
     /// Maximum tolerated single-hop round-trip latency during init.
     /// 100 ms is the threshold below which a continuous main-actor
     /// hold is invisible to the user (six dropped frames at 60 Hz —

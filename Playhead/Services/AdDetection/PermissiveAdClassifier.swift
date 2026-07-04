@@ -48,7 +48,7 @@ import FoundationModels
 ///   The validation test (commit 57601f3) saw exactly this bug when it
 ///   reused a single session across all 124 probes.
 ///
-/// - Greedy sampling: `GenerationOptions(sampling: .greedy)` removes
+/// - Greedy sampling: `GenerationOptions(samplingMode: .greedy)` removes
 ///   ordinary decoding randomness so the same window deterministically
 ///   produces the same response across runs.
 /// bd-1en Phase 1 parser/prompt namespace. Lifted out of the actor so
@@ -886,7 +886,7 @@ actor PermissiveAdClassifier {
         let session = LanguageModelSession(model: model)
         let response = try await session.respond(
             to: prompt,
-            options: GenerationOptions(sampling: .greedy)
+            options: GenerationOptions(samplingMode: .greedy)
         )
         return response.content.trimmingCharacters(in: .whitespacesAndNewlines)
     }

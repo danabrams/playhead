@@ -112,7 +112,8 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
 
     // MARK: - Cancellation-arm bookkeeping
 
-    @Test("cancelCurrentJob mid-decode increments attemptCount")
+    @Test("cancelCurrentJob mid-decode increments attemptCount",
+          .enabled(if: PerfGate.runsMeasurementTests, "cancellation-timing measurement — perf pass only (playhead-zx0l)"))
     func cancelMidDecodeBumpsAttempt() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
@@ -238,7 +239,8 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
         #expect(after?.leaseOwner == nil)
     }
 
-    @Test("cancel-mid-decode requeue applies exponential backoff to nextEligibleAt")
+    @Test("cancel-mid-decode requeue applies exponential backoff to nextEligibleAt",
+          .enabled(if: PerfGate.runsMeasurementTests, "cancellation-timing measurement — perf pass only (playhead-zx0l)"))
     func cancelMidDecodeRequeueAppliesExponentialBackoff() async throws {
         // Review-followup (csp / H1): the `cancelCatch.revertQueued`
         // arm previously cleared `nextEligibleAt`, so a user
@@ -353,7 +355,8 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
                 "backoff must grow attempt-over-attempt; got \(observedBackoffs)")
     }
 
-    @Test("repeated mid-decode cancellation reaches maxAttemptsReached and supersedes the job")
+    @Test("repeated mid-decode cancellation reaches maxAttemptsReached and supersedes the job",
+          .enabled(if: PerfGate.runsMeasurementTests, "cancellation-timing measurement — perf pass only (playhead-zx0l)"))
     func cancelLoopSupersedesAfterMaxAttempts() async throws {
         // The 2026-04-27 incident: a job is repeatedly cancelled
         // mid-decode (e.g. `cancelCurrentJob(.taskExpired)` from BG

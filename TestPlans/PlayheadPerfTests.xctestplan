@@ -1,0 +1,27 @@
+{
+  "configurations" : [
+    {
+      "id" : "A1B2C3D4-1111-4222-8333-444455556666",
+      "name" : "Configuration 1",
+      "options" : {}
+    }
+  ],
+  "defaultOptions" : {
+    "environmentVariableEntries" : [
+      {
+        "key" : "PLAYHEAD_RUN_PERF",
+        "value" : "1"
+      }
+    ]
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:Playhead.xcodeproj",
+        "identifier" : "PlayheadTests",
+        "name" : "PlayheadTests"
+      }
+    }
+  ],
+  "version" : 1
+}

@@ -2,8 +2,8 @@ name: Playhead
 options:
   bundleIdPrefix: com.playhead
   deploymentTarget:
-    iOS: "26.0"
-  xcodeVersion: "16.4"
+    iOS: "27.0"
+  xcodeVersion: "27.0"
   generateEmptyDirectories: true
 settings:
   base:
@@ -140,6 +140,13 @@ targets:
         - path: TestPlans/PlayheadFastTests.xctestplan
           defaultPlan: true
         - path: TestPlans/PlayheadIntegrationTests.xctestplan
+        # playhead-zx0l: load-sensitive measurement tests (latency budgets,
+        # cancellation-timing) opt in via PLAYHEAD_RUN_PERF=1, set by this
+        # plan. Run ONLY through scripts/perf-tests.sh, which narrows to the
+        # measurement tests with -only-testing and disables parallelism so
+        # the CPU is quiescent. Running this plan whole (e.g. Cmd+U) would
+        # run the entire suite serially — use the script.
+        - path: TestPlans/PlayheadPerfTests.xctestplan
       storeKitConfiguration: Playhead/Resources/Playhead.storekit
   PlayheadTests:
     type: bundle.unit-test
