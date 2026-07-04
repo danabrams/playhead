@@ -38,6 +38,12 @@ True superset of FastTests — adds the 20 XCTest interruption-cycle suites. Run
 
 The `PlayheadFastTests` plan is the default in Xcode (Cmd+U).
 
+**Load-sensitive measurement tests (`scripts/perf-tests.sh`):** Latency/timing tests — `MainActorFreedomTests`, `PlayheadRuntimeLaunchPerfTests`, and the cancel-mid-decode scheduler tests — assert absolute wall-clock budgets that only hold on a quiescent CPU. The parallel FastTests suite (~7,900 tests) saturates the machine and makes them flake, so they are gated (`PerfGate`, opt-in via `PLAYHEAD_RUN_PERF=1`) to **skip** in FastTests/IntegrationTests and run **only** through the dedicated serial pass:
+```bash
+scripts/perf-tests.sh    # PlayheadPerfTests plan, parallelism off, measurement tests only
+```
+When adding a new load-sensitive test, gate it with `PerfGate` in the source **and** add it to the `MEASUREMENT_TESTS` list in the script. See playhead-zx0l.
+
 ## Parallelism Ceiling
 
 **Maximum 2 concurrent subagents running `xcodebuild` at any time on this machine (16 GB RAM).** Each parallel build can spike 1–3 GB during Swift compilation; combined with Xcode GUI, simulator, sourcekit indexers, and Claude itself, going past 2 has historically OOM'd Xcode (2026-04-17 incident). When orchestrating waves of beads, queue rather than fan out beyond 2. Sequential is always safe.

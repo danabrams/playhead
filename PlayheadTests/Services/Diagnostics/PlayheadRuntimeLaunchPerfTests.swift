@@ -51,6 +51,12 @@ import XCTest
 /// the regression is real; one isolated outlier is not enough.
 final class PlayheadRuntimeLaunchPerfTests: XCTestCase {
 
+    // Load-sensitive latency measurement — runs only in the serial perf pass
+    // where the CPU is quiescent. See PerfGate / playhead-zx0l.
+    override func setUpWithError() throws {
+        try XCTSkipUnless(PerfGate.runsMeasurementTests, PerfGate.skipReason)
+    }
+
     /// Initial budget. 250 ms matches the hkn1 `loadInputs` test for
     /// consistency. Real-device init on Dan's iPhone post-jndk/jncn
     /// runs in ~30 ms; simulator on a clean run is ~50–80 ms. The

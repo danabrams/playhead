@@ -398,7 +398,7 @@ struct LiveEpisodeSummaryTransport: EpisodeSummaryTransport {
         let response = try await session.respond(
             to: prompt,
             generating: EpisodeSummarySchema.self,
-            options: GenerationOptions(sampling: .greedy)
+            options: GenerationOptions(samplingMode: .greedy)
         )
         let schema = response.content
         return (schema.summary, schema.mainTopics, schema.notableGuests)
@@ -409,7 +409,7 @@ struct LiveEpisodeSummaryTransport: EpisodeSummaryTransport {
         let session = LanguageModelSession(model: model)
         let response = try await session.respond(
             to: prompt,
-            options: GenerationOptions(sampling: .greedy)
+            options: GenerationOptions(samplingMode: .greedy)
         )
         return response.content.trimmingCharacters(in: .whitespacesAndNewlines)
     }

@@ -1203,7 +1203,7 @@ final class PlayheadFMSmokeTests: XCTestCase {
             do {
                 let response = try await session.respond(
                     to: prompt,
-                    options: GenerationOptions(sampling: .greedy)
+                    options: GenerationOptions(samplingMode: .greedy)
                 )
                 let raw = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
                 let (status, detail) = Self.parsePermissiveResponse(raw)
