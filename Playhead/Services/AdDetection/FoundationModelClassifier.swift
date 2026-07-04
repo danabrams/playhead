@@ -1303,6 +1303,15 @@ struct FoundationModelClassifier: Sendable {
 
         let budget = try await promptBudget()
         let plans = try await planPassA(segments: segments, budget: budget)
+
+        // playhead-xx7m.2 (Phase B): once-per-classification-run breadcrumb
+        // (NOT per window) so a real-device run can confirm the iOS 27 model's
+        // ~32k context collapses the coarse window count. `runtime.contextSize`
+        // is a cheap deterministic read; `budget` and `plans.count` are the
+        // exact values this run windows against.
+        let runContextSize = await runtime.contextSize()
+        logger.notice("\(Self.coarseRunBudgetBreadcrumb(contextSize: runContextSize, coarseBudget: budget, coarseWindowCount: plans.count), privacy: .public)")
+
         guard !plans.isEmpty else {
             return FMCoarseScanOutput(
                 status: .success,
@@ -3004,6 +3013,27 @@ struct FoundationModelClassifier: Sendable {
         let conservative = preMargin / safeDivisor
         let hardCap = contextSize / safeDivisor
         return max(1, min(conservative, hardCap))
+    }
+
+    /// playhead-xx7m.2 (Phase B): format the once-per-classification-run
+    /// context-budget breadcrumb emitted at the top of the coarse pass.
+    ///
+    /// Pure so the derivation is unit-testable on the simulator without a
+    /// live FoundationModels session (the live path is graceful-unavailable
+    /// there). `contextSize` is the model's reported window, `coarseBudget`
+    /// the per-window prompt ceiling `promptBudget()` derived for this run
+    /// (already clamped by `coarseBudgetDivisor`), and `coarseWindowCount`
+    /// the number of coarse plans the run produced. On iOS 27 the ~32k
+    /// window should collapse `coarseWindowCount` from the iOS-26 ~20–25
+    /// down toward ~1–2 per episode — grep `fm.coarse.run_budget` in
+    /// Console.app to confirm (see docs/phase-b-32k-measurement-recipe.md).
+    static func coarseRunBudgetBreadcrumb(
+        contextSize: Int,
+        coarseBudget: Int,
+        coarseWindowCount: Int
+    ) -> String {
+        "fm.coarse.run_budget contextSize=\(contextSize) "
+            + "coarseBudget=\(coarseBudget) coarseWindows=\(coarseWindowCount)"
     }
 
     /// bd-34e Fix B v2: parse Apple's reported actual token count out of

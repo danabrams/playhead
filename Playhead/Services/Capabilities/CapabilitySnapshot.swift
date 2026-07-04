@@ -21,6 +21,17 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
     /// Whether the current locale/language is supported by Foundation Models.
     let foundationModelsLocaleSupported: Bool
 
+    /// The on-device Foundation Models context window size in tokens.
+    ///
+    /// playhead-xx7m.2 (Phase B): captured from
+    /// `SystemLanguageModel.default.contextSize` so a real-device run
+    /// confirms the iOS 27 model reports the expected ~32k (vs iOS 26's
+    /// 4096). `0` when FoundationModels is unavailable or the OS/compiler
+    /// predates the API — deliberately NOT the 4096 classifier fallback,
+    /// so a diagnostics reader can tell "we could not read it" (0) apart
+    /// from "we read the small window" (4096).
+    let foundationModelsContextSize: Int
+
     /// Device thermal state at snapshot time.
     let thermalState: ThermalState
 
@@ -121,6 +132,7 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
         foundationModelsUsable: Bool = false,
         appleIntelligenceEnabled: Bool,
         foundationModelsLocaleSupported: Bool,
+        foundationModelsContextSize: Int = 0,
         thermalState: ThermalState,
         isLowPowerMode: Bool,
         isCharging: Bool,
@@ -132,6 +144,7 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
         self.foundationModelsUsable = foundationModelsUsable
         self.appleIntelligenceEnabled = appleIntelligenceEnabled
         self.foundationModelsLocaleSupported = foundationModelsLocaleSupported
+        self.foundationModelsContextSize = foundationModelsContextSize
         self.thermalState = thermalState
         self.isLowPowerMode = isLowPowerMode
         self.isCharging = isCharging
@@ -148,6 +161,7 @@ struct CapabilitySnapshot: Codable, Sendable, Equatable {
         foundationModelsUsable = try container.decodeIfPresent(Bool.self, forKey: .foundationModelsUsable) ?? false
         appleIntelligenceEnabled = try container.decode(Bool.self, forKey: .appleIntelligenceEnabled)
         foundationModelsLocaleSupported = try container.decode(Bool.self, forKey: .foundationModelsLocaleSupported)
+        foundationModelsContextSize = try container.decodeIfPresent(Int.self, forKey: .foundationModelsContextSize) ?? 0
         thermalState = try container.decode(ThermalState.self, forKey: .thermalState)
         isLowPowerMode = try container.decode(Bool.self, forKey: .isLowPowerMode)
         isCharging = try container.decodeIfPresent(Bool.self, forKey: .isCharging) ?? false

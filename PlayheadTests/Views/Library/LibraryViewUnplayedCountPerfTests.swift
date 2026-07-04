@@ -27,7 +27,7 @@ struct LibraryViewUnplayedCountPerfTests {
     /// The function under test is the production helper invoked from
     /// `LibraryView.body`; calling it directly gives a deterministic
     /// wall-clock measurement that doesn't depend on SwiftUI rendering.
-    @Test("computeUnplayedCounts stays under 50ms at N=50x50")
+    @Test("computeUnplayedCounts is correct (always) and within its 50ms budget (perf pass)")
     @MainActor
     func computeUnplayedCountsDoesNotJank() throws {
         let podcastCount = 50
@@ -85,12 +85,16 @@ struct LibraryViewUnplayedCountPerfTests {
             #expect(counts[podcast.id] == episodesPerPodcast / 2)
         }
 
-        // Wall-clock budget. Simulator-under-CI noise is the dominant
-        // factor here; 50ms is comfortably above measured local runs
-        // (sub-10ms once SwiftData has faulted the relationship) but
-        // would be impossible if a regression reintroduced an O(N*M)
-        // path that re-filtered every cell every frame.
-        #expect(elapsed < 0.05,
-                "computeUnplayedCounts took \(elapsed)s; budget is 0.05s at N=\(podcastCount)x\(episodesPerPodcast)")
+        // Wall-clock budget — load-sensitive, so it is asserted ONLY in the
+        // serial perf pass (PerfGate / playhead-zx0l), never in the parallel
+        // fast suite where CPU contention makes the 50ms budget flake. The
+        // correctness assertions above always run in every suite. 50ms is
+        // comfortably above measured local runs (sub-10ms once SwiftData has
+        // faulted the relationship) but would be impossible if a regression
+        // reintroduced an O(N*M) path that re-filtered every cell every frame.
+        if PerfGate.runsMeasurementTests {
+            #expect(elapsed < 0.05,
+                    "computeUnplayedCounts took \(elapsed)s; budget is 0.05s at N=\(podcastCount)x\(episodesPerPodcast)")
+        }
     }
 }

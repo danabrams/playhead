@@ -140,6 +140,103 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         #expect(v1Surface.files.count == 1)
     }
 
+    // MARK: - FoundationModels context window (playhead-xx7m.2 Phase B)
+
+    @Test("foundation_models_context_size surfaces through build and round-trips")
+    func foundationModelsContextSizeSurfacesAndRoundTrips() throws {
+        let snapshot = makeMinimalActivitySnapshot()
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            foundationModelsContextSize: 32_768,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        #expect(health.foundationModelsContextSize == 32_768)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(health)
+        let jsonString = String(decoding: data, as: UTF8.self)
+        // The support-engineer grep contract: the snake_case key must be
+        // present and carry the exact token count.
+        #expect(jsonString.contains("\"foundation_models_context_size\":32768"))
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(DogfoodDiagnosticsAnalysisHealth.self, from: data)
+        #expect(decoded.foundationModelsContextSize == 32_768,
+                "contextSize must survive the JSON round-trip; dropping the field from any layer would fail this")
+    }
+
+    @Test("foundation_models_context_size is 0 (not omitted) when FM unavailable")
+    func foundationModelsContextSizeZeroWhenUnavailable() throws {
+        // 0 is the "read it, FM is unavailable" sentinel — distinct from
+        // nil ("did not collect"). It must still serialize as the key.
+        let snapshot = makeMinimalActivitySnapshot()
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            foundationModelsContextSize: 0,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        #expect(health.foundationModelsContextSize == 0)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(health)
+        let jsonString = String(decoding: data, as: UTF8.self)
+        #expect(jsonString.contains("foundation_models_context_size"))
+    }
+
+    @Test("build without contextSize leaves the field nil and omits the key")
+    func foundationModelsContextSizeOmittedWhenNotCollected() throws {
+        let snapshot = makeMinimalActivitySnapshot()
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        #expect(health.foundationModelsContextSize == nil)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(health)
+        let jsonString = String(decoding: data, as: UTF8.self)
+        #expect(!jsonString.contains("foundation_models_context_size"),
+                "nil optional must be omitted per the Encodable optional convention")
+    }
+
+    @Test("analysis_health JSON without contextSize key decodes as nil")
+    func foundationModelsContextSizeBackwardCompatDecoding() throws {
+        // A pre-Phase-B analysis_health block that never carried the key.
+        let json = """
+        {
+          "summary_schema_version": 1,
+          "generated_at": "2026-04-30T00:00:00Z",
+          "global": {
+            "total_assets": 0,
+            "running_count": 0,
+            "queued_count": 0,
+            "paused_count": 0,
+            "failed_count": 0,
+            "unavailable_count": 0,
+            "terminal_completed_count": 0,
+            "stale_terminal_count": 0,
+            "stale_watermark_count": 0,
+            "unknown_progress_count": 0
+          },
+          "assets": [],
+          "staleness_flags": []
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let health = try decoder.decode(
+            DogfoodDiagnosticsAnalysisHealth.self,
+            from: Data(json.utf8)
+        )
+        #expect(health.foundationModelsContextSize == nil,
+                "Missing key must decode as nil, not crash")
+    }
+
     // MARK: - Global summary
 
     @Test("global summary counts running / queued / terminal / unknown")

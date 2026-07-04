@@ -33,7 +33,15 @@ DERIVED="${PLAYHEAD_DERIVED:-.derivedData-perf}"
 MEASUREMENT_TESTS=(
   "PlayheadTests/PlayheadRuntimeMainActorFreedomTests"
   "PlayheadTests/PlayheadRuntimeLaunchPerfTests"
-  "PlayheadTests/AnalysisWorkSchedulerOutcomeBookkeepingTests"
+  "PlayheadTests/LibraryViewUnplayedCountPerfTests"
+  # Method-level: these suites are large and mostly NOT load-sensitive, so
+  # only their single perf test opts in (gated with PerfGate in-source).
+  "PlayheadTests/SemanticScanPersistenceTests/fetchReusableSemanticScanResultPerformance()"
+  "PlayheadTests/AdmissionControllerTests/testEnqueueScales()"
+  # Note: AnalysisWorkSchedulerOutcomeBookkeepingTests is intentionally NOT
+  # here — its cancel-mid-decode tests were rewritten to be deterministic
+  # (via processNextDispatchableJobForTesting) and un-gated, so they run in
+  # the normal fast suite and are no longer load-sensitive measurements.
 )
 
 only_testing_args=()

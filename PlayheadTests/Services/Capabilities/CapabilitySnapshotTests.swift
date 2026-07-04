@@ -33,6 +33,94 @@ struct CapabilitySnapshotTests {
         #expect(snapshot.isCharging == true)
     }
 
+    // MARK: - foundationModelsContextSize (playhead-xx7m.2 Phase B)
+
+    @Test("foundationModelsContextSize field is stored and defaults to 0")
+    func testContextSizeFieldStoredAndDefaults() {
+        let explicit = CapabilitySnapshot(
+            foundationModelsAvailable: true,
+            foundationModelsUsable: true,
+            appleIntelligenceEnabled: true,
+            foundationModelsLocaleSupported: true,
+            foundationModelsContextSize: 32_768,
+            thermalState: .nominal,
+            isLowPowerMode: false,
+            isCharging: true,
+            backgroundProcessingSupported: true,
+            availableDiskSpaceBytes: 1_000_000,
+            capturedAt: .now
+        )
+        #expect(explicit.foundationModelsContextSize == 32_768)
+
+        // Omitting the argument uses the 0 default (FM unavailable path).
+        let defaulted = CapabilitySnapshot(
+            foundationModelsAvailable: false,
+            foundationModelsUsable: false,
+            appleIntelligenceEnabled: false,
+            foundationModelsLocaleSupported: false,
+            thermalState: .nominal,
+            isLowPowerMode: false,
+            isCharging: false,
+            backgroundProcessingSupported: true,
+            availableDiskSpaceBytes: 1_000_000,
+            capturedAt: .now
+        )
+        #expect(defaulted.foundationModelsContextSize == 0)
+    }
+
+    @Test("foundationModelsContextSize survives a Codable round-trip")
+    func testContextSizeCodableRoundTrip() throws {
+        let snapshot = CapabilitySnapshot(
+            foundationModelsAvailable: true,
+            foundationModelsUsable: true,
+            appleIntelligenceEnabled: true,
+            foundationModelsLocaleSupported: true,
+            foundationModelsContextSize: 32_768,
+            thermalState: .fair,
+            isLowPowerMode: false,
+            isCharging: true,
+            backgroundProcessingSupported: true,
+            availableDiskSpaceBytes: 1_000_000,
+            capturedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(snapshot)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(CapabilitySnapshot.self, from: data)
+        #expect(decoded.foundationModelsContextSize == 32_768,
+                "contextSize must survive encode/decode; dropping the field from the CapabilitySnapshot layer would fail this")
+    }
+
+    @Test("Decoding JSON without foundationModelsContextSize defaults to 0")
+    func testContextSizeBackwardCompatDecoding() throws {
+        // JSON that predates the foundationModelsContextSize field.
+        let json = """
+        {
+            "foundationModelsAvailable": true,
+            "foundationModelsUsable": true,
+            "appleIntelligenceEnabled": true,
+            "foundationModelsLocaleSupported": true,
+            "thermalState": 0,
+            "isLowPowerMode": false,
+            "isCharging": true,
+            "backgroundProcessingSupported": true,
+            "availableDiskSpaceBytes": 500000000,
+            "capturedAt": "2023-11-14T22:13:20Z"
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let snapshot = try decoder.decode(
+            CapabilitySnapshot.self,
+            from: Data(json.utf8)
+        )
+        #expect(snapshot.foundationModelsContextSize == 0,
+                "Missing contextSize should default to 0, not crash")
+    }
+
     // MARK: - Backward-Compatible Decoding
 
     @Test("Decoding JSON without isCharging defaults to false")
@@ -228,11 +316,21 @@ struct CapabilitySnapshotTests {
     func testFoundationModelsCapabilityStateMapping() {
         let available = FoundationModelsCapabilityState(
             availability: .available,
-            localeSupported: true
+            localeSupported: true,
+            contextSize: 32_768
         )
         #expect(available.available == true)
         #expect(available.appleIntelligenceEnabled == true)
         #expect(available.localeSupported == true)
+        #expect(available.contextSize == 32_768,
+                "contextSize must thread through the availability-based init")
+
+        // Default contextSize is 0 (the FM-unavailable / older-compiler path).
+        let defaulted = FoundationModelsCapabilityState(
+            availability: .available,
+            localeSupported: true
+        )
+        #expect(defaulted.contextSize == 0)
 
         let modelNotReady = FoundationModelsCapabilityState(
             availability: .unavailable(.modelNotReady),
@@ -257,6 +355,52 @@ struct CapabilitySnapshotTests {
         #expect(deviceNotEligible.localeSupported == false)
     }
     #endif
+
+    @Test("FoundationModelsCapabilityState plain init carries contextSize")
+    func testCapabilityStatePlainInitContextSize() {
+        let state = FoundationModelsCapabilityState(
+            available: true,
+            appleIntelligenceEnabled: true,
+            localeSupported: true,
+            contextSize: 32_768
+        )
+        #expect(state.contextSize == 32_768)
+
+        let defaulted = FoundationModelsCapabilityState(
+            available: false,
+            appleIntelligenceEnabled: false,
+            localeSupported: false
+        )
+        #expect(defaulted.contextSize == 0,
+                "Unavailable FM must report 0, never the 4096 classifier fallback")
+    }
+
+    // MARK: - Coarse-run budget breadcrumb (playhead-xx7m.2 Phase B)
+
+    @Test("coarseRunBudgetBreadcrumb formats contextSize, budget, and window count")
+    func testCoarseRunBudgetBreadcrumbFormatting() {
+        let line = FoundationModelClassifier.coarseRunBudgetBreadcrumb(
+            contextSize: 32_768,
+            coarseBudget: 3_500,
+            coarseWindowCount: 2
+        )
+        #expect(line == "fm.coarse.run_budget contextSize=32768 coarseBudget=3500 coarseWindows=2")
+    }
+
+    @Test("coarseRunBudgetBreadcrumb reflects the iOS 26 small-window regime")
+    func testCoarseRunBudgetBreadcrumbSmallContext() {
+        // The iOS 26 4096 window produces the ~20–25 coarse windows the
+        // Phase B retune is measured against; the breadcrumb must carry
+        // those exact numbers so a Console.app grep can compare regimes.
+        let line = FoundationModelClassifier.coarseRunBudgetBreadcrumb(
+            contextSize: 4_096,
+            coarseBudget: 480,
+            coarseWindowCount: 23
+        )
+        #expect(line.contains("contextSize=4096"))
+        #expect(line.contains("coarseBudget=480"))
+        #expect(line.contains("coarseWindows=23"))
+    }
 
     // MARK: - Battery Notification Refresh
 

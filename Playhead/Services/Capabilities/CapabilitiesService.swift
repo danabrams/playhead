@@ -24,20 +24,42 @@ struct FoundationModelsCapabilityState: Sendable, Equatable {
     let appleIntelligenceEnabled: Bool
     let localeSupported: Bool
 
+    /// The on-device model's context window size in tokens.
+    ///
+    /// playhead-xx7m.2 (Phase B): threaded durably through the capability
+    /// layer so a real-device run confirms the iOS 27 model reports the
+    /// expected ~32k (vs iOS 26's 4096). The ad-classifier's per-window
+    /// prompt budget scales linearly with this value, so it drives the
+    /// boundary-undersizing retune. Holds the raw
+    /// `SystemLanguageModel.default.contextSize`; `0` only when the OS predates
+    /// iOS 26 or the compiler predates the API. It reflects the API's own value
+    /// regardless of `availability`, so on the simulator it may read 0 or 4096
+    /// (model unavailable / warming) — that 4096 is the API's base value, NOT
+    /// the classifier's 4096 budget fallback (`fallbackFoundationModelContextSize`,
+    /// which lives in the classifier's math, not here).
+    let contextSize: Int
+
     init(
         available: Bool,
         appleIntelligenceEnabled: Bool,
-        localeSupported: Bool
+        localeSupported: Bool,
+        contextSize: Int = 0
     ) {
         self.available = available
         self.appleIntelligenceEnabled = appleIntelligenceEnabled
         self.localeSupported = localeSupported
+        self.contextSize = contextSize
     }
 
     #if canImport(FoundationModels)
     @available(iOS 26.0, *)
-    init(availability: SystemLanguageModel.Availability, localeSupported: Bool) {
+    init(
+        availability: SystemLanguageModel.Availability,
+        localeSupported: Bool,
+        contextSize: Int = 0
+    ) {
         self.localeSupported = localeSupported
+        self.contextSize = contextSize
 
         switch availability {
         case .available:
@@ -97,6 +119,7 @@ actor CapabilitiesService {
         foundationModelsUsable=\(snapshot.foundationModelsUsable), \
         appleIntelligence=\(snapshot.appleIntelligenceEnabled), \
         localeSupported=\(snapshot.foundationModelsLocaleSupported), \
+        contextSize=\(snapshot.foundationModelsContextSize), \
         thermal=\(snapshot.thermalState.description), \
         lowPower=\(snapshot.isLowPowerMode), \
         charging=\(snapshot.isCharging), \
@@ -189,6 +212,7 @@ actor CapabilitiesService {
             foundationModelsUsable: FoundationModelsUsabilityProbe.cachedUsability() ?? false,
             appleIntelligenceEnabled: modelState.appleIntelligenceEnabled,
             foundationModelsLocaleSupported: modelState.localeSupported,
+            foundationModelsContextSize: modelState.contextSize,
             thermalState: thermalState,
             isLowPowerMode: isLowPowerMode,
             isCharging: isCharging,
@@ -204,9 +228,26 @@ actor CapabilitiesService {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
             let model = SystemLanguageModel.default
+            // playhead-xx7m.2 (Phase B): read the on-device model's context
+            // window so a real-device run confirms the iOS 27 model reports the
+            // expected ~32k (vs iOS 26's 4096). The ad-classifier's window
+            // budget scales linearly with this, so it drives the boundary-
+            // undersizing retune. FM only runs on device, so this is the
+            // measurement hook — one clean breadcrumb, then the value is
+            // threaded durably into the capability state below. `contextSize`
+            // is unavailable on compilers predating the API, in which case it
+            // stays 0 (the classifier keeps its own 4096 budget fallback).
+            #if compiler(>=6.3)
+            let contextSize = model.contextSize
+            Logger(subsystem: "com.playhead", category: "Capabilities")
+                .notice("fm.capability.context_window contextSize=\(contextSize, privacy: .public)")
+            #else
+            let contextSize = 0
+            #endif
             return FoundationModelsCapabilityState(
                 availability: model.availability,
-                localeSupported: model.supportsLocale()
+                localeSupported: model.supportsLocale(),
+                contextSize: contextSize
             )
         }
         return FoundationModelsCapabilityState(

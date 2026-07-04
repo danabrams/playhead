@@ -1611,7 +1611,8 @@ struct SemanticScanPersistenceTests {
         #expect(rows.isEmpty)
     }
 
-    @Test("fetchReusableSemanticScanResult is fast under cohort variation")
+    @Test("fetchReusableSemanticScanResult is fast under cohort variation",
+          .enabled(if: PerfGate.runsMeasurementTests, "load-sensitive 50ms wall-clock budget — perf pass only (playhead-zx0l)"))
     func fetchReusableSemanticScanResultPerformance() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makePersistenceTestAsset())

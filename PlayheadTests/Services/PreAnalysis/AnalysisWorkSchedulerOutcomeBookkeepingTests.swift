@@ -112,9 +112,32 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
 
     // MARK: - Cancellation-arm bookkeeping
 
-    @Test("cancelCurrentJob mid-decode increments attemptCount",
-          .enabled(if: PerfGate.runsMeasurementTests, "cancellation-timing measurement — perf pass only (playhead-zx0l)"))
+    @Test("cancelCurrentJob mid-decode increments attemptCount")
     func cancelMidDecodeBumpsAttempt() async throws {
+        // Pins the core bookkeeping invariant for the
+        // `cancelCatch.revertQueued` arm (AnalysisWorkScheduler.swift
+        // :3198-3199): a mid-decode cancel from attemptCount=0 must bump
+        // attemptCount to 1 (0+1 = 1 < maxAttemptCount 5), otherwise a
+        // poisoned job loops forever without ever reaching
+        // `maxAttemptsReached` and freeing the slot (the 2026-04-27
+        // incident).
+        //
+        // Determinism (playhead-xx7m.2): this bookkeeping invariant is a
+        // pure-correctness regression guard, so it must run in the
+        // routine fast/integration suites — not just the perf pass. The
+        // former version induced the cancel via a race (start processing
+        // in a `Task {}`, poll `decodeCallCount >= 1`, then call
+        // `cancelCurrentJob` externally hoping it lands mid-decode).
+        // Under the full parallel suite that timing was unreliable, so it
+        // was gated behind `PerfGate`. We instead drive the SAME
+        // `cancelCatch.revertQueued` arm through the deterministic
+        // `cancelAfterRunnerStart` test hook, which
+        // `processNextDispatchableJobForTesting` uses to cancel the run
+        // task synchronously (before awaiting its value) — no
+        // Task+poll+external-cancel race, no wall-clock budget. This
+        // mirrors the siblings
+        // `cancelMidDecodeRequeueAppliesExponentialBackoff` (same
+        // revertQueued arm) and `cancelLoopSupersedesAfterMaxAttempts`.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         downloads.cachedURLs["ep-cancel"] = URL(fileURLWithPath: "/tmp/ep-cancel.mp3")
@@ -139,53 +162,19 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        let processing = Task {
-            await scheduler.processNextDispatchableJobForTesting()
-        }
-
-        // Wait until the loop has acquired the lease and entered the
-        // runner's decode call. Polling on `decodeCallCount` is the
-        // sharpest signal that we're past the `acquireLease` /
-        // `resolveAnalysisAssetId` setup and inside the runTask.
-        let entered = await pollUntil {
-            audioStub.decodeCallCount >= 1
-        }
-        #expect(entered, "Decode never started — cancel would hit a different arm")
-
-        // Issue the same cancel that BackgroundProcessingService's
-        // expirationHandler issues when its task budget expires.
-        await scheduler.cancelCurrentJob(cause: .taskExpired)
-
-        // Wait for the cancel-cleanup arm to commit. The fix routes
-        // through `commitOutcomeArm(... incrementAttempt: true ...)`,
-        // so attemptCount climbs to 1 within the poll window. On main,
-        // the cleanup writes `state='queued'` + `releaseLease()`
-        // directly without an increment, so this poll times out.
-        let bumped = await pollUntil {
-            let j = try? await store.fetchJob(byId: "cancel-mid-decode")
-            return (j?.attemptCount ?? 0) >= 1
-        }
-
-        let processed = await processing.value
+        let processed = await scheduler.processNextDispatchableJobForTesting(
+            cancelAfterRunnerStart: .taskExpired
+        )
 
         #expect(processed, "Scheduler test hook should process cancel-mid-decode")
-        #expect(bumped,
-                "attemptCount must increment after a cancel-mid-decode cleanup, otherwise the job loops forever")
         let after = try await store.fetchJob(byId: "cancel-mid-decode")
-        #expect((after?.attemptCount ?? 0) >= 1,
-                "attemptCount must remain >= 1 after the cancel cleanup arm fires")
+        #expect(after?.attemptCount == 1,
+                "attemptCount must increment to 1 after a cancel-mid-decode cleanup (cancelCatch.revertQueued), otherwise the job loops forever")
         // Note: we deliberately do NOT assert `leaseOwner == nil` here.
-        // The scheduler loop may immediately re-acquire the queued
-        // job once the cancel-cleanup arm commits and bumps the
-        // attempt count, taking out a fresh lease for the next
-        // attempt. Leases are managed transactionally by
-        // `commitProcessJobOutcomeArm` (which calls `releaseLease` as
-        // its terminal write) and `acquireLeaseWithJournal` — the
-        // bookkeeping invariant under test (attemptCount must climb)
-        // is the load-bearing claim, not whatever transient state the
-        // loop sits in moments after the cancel.
-        //
-        // The companion test
+        // A revertQueued cancel leaves the job re-queued for its next
+        // attempt (state='queued'), not terminal — the load-bearing
+        // claim is that attemptCount climbs, not the transient lease
+        // state. The companion test
         // `cancelLoopSupersedesAfterMaxAttempts` covers the terminal
         // shape (state=superseded, leaseOwner=nil) end-to-end.
     }
@@ -239,8 +228,7 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
         #expect(after?.leaseOwner == nil)
     }
 
-    @Test("cancel-mid-decode requeue applies exponential backoff to nextEligibleAt",
-          .enabled(if: PerfGate.runsMeasurementTests, "cancellation-timing measurement — perf pass only (playhead-zx0l)"))
+    @Test("cancel-mid-decode requeue applies exponential backoff to nextEligibleAt")
     func cancelMidDecodeRequeueAppliesExponentialBackoff() async throws {
         // Review-followup (csp / H1): the `cancelCatch.revertQueued`
         // arm previously cleared `nextEligibleAt`, so a user
@@ -251,16 +239,35 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
         // so backoff actually paces the retries.
         //
         // Strategy: drive three separate jobs that begin at
-        // attemptCount = 0, 1, 2. Cancel each mid-decode and capture
-        // the resulting `nextEligibleAt`. Backoff after one cancel
-        // must equal min(2^(attemptCount+1) * 60, 3600), so the three
+        // attemptCount = 0, 1, 2. Cancel each mid-run and capture the
+        // resulting `nextEligibleAt`. Backoff after one cancel must
+        // equal min(2^(attemptCount+1) * 60, 3600), so the three
         // observed backoffs must double per step (120s → 240s → 480s).
+        //
+        // Determinism (playhead-xx7m.2): this backoff assertion is a
+        // pure-correctness regression guard for H1/csp, so it must run
+        // in the routine fast/integration suites — not just the perf
+        // pass. The former version induced the cancel via a race
+        // (start processing in a `Task {}`, poll `decodeCallCount >= 1`,
+        // then call `cancelCurrentJob` externally hoping it lands
+        // mid-decode). Under the full ~7,900-test parallel suite that
+        // timing was unreliable and timed out (72–88s under
+        // contention), so it was gated behind `PerfGate`. We instead
+        // drive the SAME `cancelCatch.revertQueued` arm through the
+        // deterministic `cancelAfterRunnerStart` test hook, which
+        // `processNextDispatchableJobForTesting` uses to cancel the
+        // run task synchronously (before awaiting its value) — no
+        // Task+poll+external-cancel race, no wall-clock budget. This is
+        // the same mechanism the non-gated sibling
+        // `AnalysisWorkSchedulerJournalEmissionTests.cancelMidDecodeEmitsPreemptedWithTaskExpired`
+        // relies on to reach this arm.
         //
         // We can't drive three cancels on the same job because the
         // first cancel installs a future `nextEligibleAt`, which the
-        // dispatcher honors — the second decode never starts. Three
-        // independent jobs side-step that without monkey-patching the
-        // clock seam.
+        // dispatcher honors — the second dispatch never re-selects it.
+        // Three independent jobs side-step that: each prior job is left
+        // requeued with a future `nextEligibleAt`, so only the fresh
+        // job (nextEligibleAt = nil) is eligible on the next pass.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
 
@@ -291,50 +298,26 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
                 audioProvider: audioStub,
                 downloads: downloads
             )
-            let processing = Task {
-                await scheduler.processNextDispatchableJobForTesting()
-            }
 
-            // skeptical-review-cycle-16 #45 root-cause: the original
-            // timeout (15s) was tight enough that, when this test ran
-            // concurrently with the rest of PlayheadFastTests (~5,100
-            // tests, 742 suites), cooperative-pool jitter could starve
-            // the scheduler-loop tick that admits + dispatches the job.
-            // The 2026-05-01 cycle-16 verification reproduced the
-            // "Decode never started (startingAttempts=0)" failure with
-            // a 23s wall-clock — i.e. the poll exhausted before the
-            // first dispatch. The 60s ceiling absorbs that jitter
-            // without masking a real product regression: in isolation
-            // the same test completes in 0.147s, so a regression that
-            // genuinely stalls dispatch will still trip the timeout.
-            let entered = await pollUntil(timeout: .seconds(60)) {
-                audioStub.decodeCallCount >= 1
-            }
-            #expect(entered, "Decode never started (startingAttempts=\(startingAttempts))")
-
-            // Capture wall-clock around the cancel so we can subtract
-            // the scheduler's `clock()` reading to recover the chosen
-            // backoff value with bounded jitter.
+            // Capture wall-clock immediately before the synchronous
+            // dispatch so we can subtract the scheduler's `clock()`
+            // reading (`Date()` by default) to recover the chosen
+            // backoff value. The whole pass completes in well under a
+            // second, so the residual measurement error is
+            // milliseconds — far inside the 30s tolerance below.
             let beforeCancel = Date().timeIntervalSince1970
-            await scheduler.cancelCurrentJob(cause: .taskExpired)
-
-            // Same parallel-load jitter rationale as the decode-started
-            // poll above: bumped from 10s → 60s after the cycle-16
-            // intermittent failure.
-            let landed = await pollUntil(timeout: .seconds(60)) {
-                let j = try? await store.fetchJob(byId: jobId)
-                guard let j else { return false }
-                return j.attemptCount == startingAttempts + 1
-                    && (j.nextEligibleAt ?? 0) > beforeCancel
-            }
-            #expect(landed, "attempt \(startingAttempts + 1) did not commit a future nextEligibleAt")
+            let processed = await scheduler.processNextDispatchableJobForTesting(
+                cancelAfterRunnerStart: .taskExpired
+            )
+            #expect(processed, "Scheduler test hook should process \(jobId)")
 
             let after = try await store.fetchJob(byId: jobId)
-            let backoff = (after?.nextEligibleAt ?? 0) - beforeCancel
-            observedBackoffs.append(backoff)
-
-            let processed = await processing.value
-            #expect(processed, "Scheduler test hook should process \(jobId)")
+            #expect(after?.attemptCount == startingAttempts + 1,
+                    "attempt \(startingAttempts + 1) must bump attemptCount via cancelCatch.revertQueued")
+            let nextEligible = after?.nextEligibleAt ?? 0
+            #expect(nextEligible > beforeCancel,
+                    "attempt \(startingAttempts + 1) did not commit a future nextEligibleAt")
+            observedBackoffs.append(nextEligible - beforeCancel)
         }
 
         // Exponential helper: min(2^attempt * 60, 3600). Attempts here
@@ -355,8 +338,7 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
                 "backoff must grow attempt-over-attempt; got \(observedBackoffs)")
     }
 
-    @Test("repeated mid-decode cancellation reaches maxAttemptsReached and supersedes the job",
-          .enabled(if: PerfGate.runsMeasurementTests, "cancellation-timing measurement — perf pass only (playhead-zx0l)"))
+    @Test("repeated mid-decode cancellation reaches maxAttemptsReached and supersedes the job")
     func cancelLoopSupersedesAfterMaxAttempts() async throws {
         // The 2026-04-27 incident: a job is repeatedly cancelled
         // mid-decode (e.g. `cancelCurrentJob(.taskExpired)` from BG
@@ -366,7 +348,36 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
         // After the fix, even one cancel-mid-decode cycle from
         // attemptCount=4 must supersede the job. That's the
         // invariant that bounds how long a poisoned slot can stay
-        // running before yielding to queued work behind it.
+        // running before yielding to queued work behind it. This is
+        // the ONLY test that exercises the `cancelCatch.supersede`
+        // arm (AnalysisWorkScheduler.swift:3143) — distinct from the
+        // `.failed.supersede` arm covered by
+        // `decodeFailureSupersedesAfterMaxAttempts`.
+        //
+        // Determinism (playhead-xx7m.2): this supersede invariant is a
+        // pure-correctness regression guard for the 2026-04-27
+        // incident, so it must run in the routine fast/integration
+        // suites — not just the perf pass. The former version induced
+        // the cancel via a race (start processing in a `Task {}`, poll
+        // `decodeCallCount >= 1`, then call `cancelCurrentJob`
+        // externally hoping it lands mid-decode). Under the full
+        // parallel suite that timing was unreliable, so it was gated
+        // behind `PerfGate`. We instead drive the SAME
+        // `cancelCatch.supersede` arm through the deterministic
+        // `cancelAfterRunnerStart` test hook, which
+        // `processNextDispatchableJobForTesting` uses to cancel the run
+        // task synchronously (before awaiting its value) — no
+        // Task+poll+external-cancel race, no wall-clock budget. This
+        // mirrors the sibling
+        // `cancelMidDecodeRequeueAppliesExponentialBackoff` (which
+        // drives the `cancelCatch.revertQueued` arm the same way) and
+        // `AnalysisWorkSchedulerJournalEmissionTests.cancelMidDecodeEmitsPreemptedWithTaskExpired`.
+        //
+        // Seed at attemptCount=4 so this single deterministic pass
+        // makes attempts = job.attemptCount + 1 = 5 == maxAttemptCount,
+        // taking the `attempts >= Self.maxAttemptCount` branch
+        // (cancelCatch.supersede at line 3143) rather than
+        // cancelCatch.revertQueued.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         downloads.cachedURLs["ep-cancel-loop"] = URL(fileURLWithPath: "/tmp/ep-cancel-loop.mp3")
@@ -391,27 +402,16 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             audioProvider: audioStub,
             downloads: downloads
         )
-        let processing = Task {
-            await scheduler.processNextDispatchableJobForTesting()
-        }
-
-        let entered = await pollUntil {
-            audioStub.decodeCallCount >= 1
-        }
-        #expect(entered, "Decode never started — cancel would hit a different arm")
-
-        await scheduler.cancelCurrentJob(cause: .taskExpired)
-
-        let superseded = await pollUntil {
-            let j = try? await store.fetchJob(byId: "cancel-loop")
-            return j?.state == "superseded"
-        }
-        let processed = await processing.value
+        let processed = await scheduler.processNextDispatchableJobForTesting(
+            cancelAfterRunnerStart: .taskExpired
+        )
 
         #expect(processed, "Scheduler test hook should process cancel-loop")
-        #expect(superseded, "Repeated cancel-mid-decode must supersede after maxAttemptsReached")
         let after = try await store.fetchJob(byId: "cancel-loop")
+        #expect(after?.state == "superseded",
+                "Repeated cancel-mid-decode must supersede after maxAttemptsReached")
         #expect(after?.attemptCount == 5)
+        #expect(after?.lastErrorCode?.contains("maxAttemptsReached") == true)
         #expect(after?.leaseOwner == nil)
     }
 

@@ -81,6 +81,17 @@ struct DogfoodDiagnosticsAnalysisHealth: Codable, Sendable, Equatable {
     /// means "this is what we observed".
     let learning: LearningCounts?
 
+    /// The on-device Foundation Models context window size in tokens, as
+    /// read from the live `CapabilitySnapshot` at export time.
+    ///
+    /// playhead-xx7m.2 (Phase B): surfaced into the dogfood archive so a
+    /// real-device diagnostics pull confirms the iOS 27 model reports the
+    /// expected ~32k (vs iOS 26's 4096) without needing Console.app. `nil`
+    /// means the exporter did not collect it (older export path, or the
+    /// capability snapshot was unavailable); `0` means it was read but
+    /// FoundationModels is unavailable on this device.
+    let foundationModelsContextSize: Int?
+
     /// Free-form note explaining gaps when the summary could not be
     /// fully populated (e.g. activity snapshot was nil because the
     /// AnalysisStore had not opened yet). Surfaced so support can
@@ -96,6 +107,7 @@ struct DogfoodDiagnosticsAnalysisHealth: Codable, Sendable, Equatable {
         case stalenessFlags = "staleness_flags"
         case duplicates
         case learning
+        case foundationModelsContextSize = "foundation_models_context_size"
         case captureNote = "capture_note"
     }
 
@@ -465,6 +477,7 @@ extension DogfoodDiagnosticsAnalysisHealth {
         from activitySnapshot: DogfoodDiagnosticsActivitySnapshot,
         duplicates: DuplicateCounts? = nil,
         learning: LearningCounts? = nil,
+        foundationModelsContextSize: Int? = nil,
         generatedAt: Date
     ) -> DogfoodDiagnosticsAnalysisHealth {
         let rows = activitySnapshot.rows
@@ -486,6 +499,7 @@ extension DogfoodDiagnosticsAnalysisHealth {
             stalenessFlags: allStalenessFlags,
             duplicates: duplicates,
             learning: learning,
+            foundationModelsContextSize: foundationModelsContextSize,
             captureNote: activitySnapshot.captureError.map {
                 redactedTruncated("activity_capture_error: \($0)")
             }
@@ -500,7 +514,8 @@ extension DogfoodDiagnosticsAnalysisHealth {
         reason: String,
         generatedAt: Date,
         duplicates: DuplicateCounts? = nil,
-        learning: LearningCounts? = nil
+        learning: LearningCounts? = nil,
+        foundationModelsContextSize: Int? = nil
     ) -> DogfoodDiagnosticsAnalysisHealth {
         DogfoodDiagnosticsAnalysisHealth(
             summarySchemaVersion: currentSummarySchemaVersion,
@@ -525,6 +540,7 @@ extension DogfoodDiagnosticsAnalysisHealth {
             stalenessFlags: [],
             duplicates: duplicates,
             learning: learning,
+            foundationModelsContextSize: foundationModelsContextSize,
             captureNote: redactedTruncated("no_activity_snapshot: \(reason)")
         )
     }
