@@ -157,20 +157,13 @@ struct AudioForensicsBoundaryDetector: Sendable {
         episodeWindows: [FeatureWindow],
         fusionConfig: FusionWeightConfig
     ) -> [EvidenceLedgerEntry] {
-        // Need a non-trivial episode to estimate sigma AND windows on both
-        // sides of an edge. Too few windows ⇒ no honest normalization ⇒ no
-        // entry (conservative). This also covers the empty-features edge case.
-        guard episodeWindows.count >= 3 else { return [] }
-
-        // Sort by time so "windows just outside / inside an edge" is
-        // well-defined regardless of caller ordering.
-        let windows = episodeWindows.sorted { $0.startTime < $1.startTime }
-
-        // Episode-wide sigma for each feature, used to z-score the edge steps.
-        // Zero variance (a perfectly flat episode) ⇒ no discontinuity can be
-        // normalized ⇒ no entry. This is the zero-variance edge case.
-        let stats = EpisodeFeatureStats(windows: windows, rmsFloor: Self.rmsFloor)
-        guard stats.hasUsableVariance else { return [] }
+        // Need a non-trivial, non-flat episode to estimate sigma AND windows on
+        // both sides of an edge. Too few windows / zero usable variance ⇒ no
+        // honest normalization ⇒ no entry (conservative). This also covers the
+        // empty-features and perfectly-flat-episode edge cases.
+        guard let prep = prepared(episodeWindows: episodeWindows) else { return [] }
+        let windows = prep.windows
+        let stats = prep.stats
 
         // Score each edge (start, end) and take the stronger one — a real
         // insertion need only show its seam at one edge to be evidence, and
@@ -213,6 +206,60 @@ struct AudioForensicsBoundaryDetector: Sendable {
                 contributingSignalCount: best.contributingCount
             )
         )]
+    }
+
+    // MARK: - Candidate-edge scoring (playhead-xsdz.19)
+
+    /// One candidate boundary time scored WITHOUT emitting a ledger entry.
+    /// The `stepScore` is the same merged, σ-normalized boundary-discontinuity
+    /// value `buildEntries` computes per edge; `SpliceSlotResolver` uses it to
+    /// score acoustic-splice candidate edges. Mirrors the diagnostics carried on
+    /// the `.audioForensics` ledger detail.
+    struct CandidateEdgeScore: Sendable, Equatable {
+        /// Merged boundary-discontinuity score in [0, 1].
+        let stepScore: Double
+        /// The sub-signal that contributed the most mass (`"loudnessJump"`,
+        /// `"spectralShift"`, `"noiseFloor"`, `"environment"`, or `"none"`).
+        let dominantSignal: String
+        /// How many sub-signals cleared their per-signal σ-floor.
+        let contributingSignalCount: Int
+    }
+
+    /// Score a SINGLE candidate boundary time with the exact σ-normalized
+    /// edge-step math `buildEntries` uses internally, without emitting a ledger
+    /// entry. Returns `nil` when the episode cannot be honestly normalized
+    /// (fewer than 3 windows, or zero usable feature variance); the caller
+    /// treats an unscorable edge as carrying no boundary evidence. Pure and
+    /// deterministic.
+    func scoreCandidateEdge(
+        at time: Double,
+        episodeWindows: [FeatureWindow]
+    ) -> CandidateEdgeScore? {
+        guard let prep = prepared(episodeWindows: episodeWindows) else { return nil }
+        let score = boundaryStepScore(at: time, windows: prep.windows, stats: prep.stats)
+        return CandidateEdgeScore(
+            stepScore: score.merged,
+            dominantSignal: score.dominantSignal,
+            contributingSignalCount: score.contributingCount
+        )
+    }
+
+    /// Shared normalization prep for both `buildEntries` and
+    /// `scoreCandidateEdge`: the ONE place the "≥3 windows AND usable variance"
+    /// contract and the time-sort live, so the exposed candidate scoring and the
+    /// ledger-emitting path can never fork. Returns `nil` when the episode is too
+    /// small or perfectly flat to normalize against.
+    private func prepared(
+        episodeWindows: [FeatureWindow]
+    ) -> (windows: [FeatureWindow], stats: EpisodeFeatureStats)? {
+        guard episodeWindows.count >= 3 else { return nil }
+        // Sort by time so "windows just outside / inside an edge" is
+        // well-defined regardless of caller ordering.
+        let windows = episodeWindows.sorted { $0.startTime < $1.startTime }
+        // Episode-wide sigma for each feature, used to z-score the edge steps.
+        let stats = EpisodeFeatureStats(windows: windows, rmsFloor: Self.rmsFloor)
+        guard stats.hasUsableVariance else { return nil }
+        return (windows, stats)
     }
 
     // MARK: - Per-edge scoring
