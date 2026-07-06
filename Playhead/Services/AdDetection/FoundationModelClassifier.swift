@@ -2942,10 +2942,22 @@ struct FoundationModelClassifier: Sendable {
     }
 
     private func promptBudget() async throws -> Int {
-        try await promptBudget(
-            schemaTokens: runtime.coarseSchemaTokenCount,
+        // playhead-xx7m.2 Fix B v5: the coarse divisor is now a pure function
+        // of the model's reported context window (see
+        // `effectiveCoarseBudgetDivisor`). Read `contextSize` once and derive
+        // BOTH the divisor and the budget from the same value so they stay
+        // consistent — this keeps the iOS 26 / 4096-fallback budget
+        // byte-for-byte identical (÷8) while letting a large iOS 27 window
+        // relax toward ÷4. contextSize is always read dynamically; nothing is
+        // hardcoded to 32768.
+        let contextSize = await runtime.contextSize()
+        let schemaTokenCount = try await runtime.coarseSchemaTokenCount()
+        return Self.maximumEstimatedPromptTokensSafeFor(
+            contextSize: contextSize,
+            schemaTokens: schemaTokenCount,
             maximumResponseTokens: config.coarseMaximumResponseTokens,
-            divisor: Self.coarseBudgetDivisor
+            safetyMarginTokens: config.safetyMarginTokens,
+            divisor: Self.effectiveCoarseBudgetDivisor(contextSize: contextSize)
         )
     }
 
@@ -2986,7 +2998,52 @@ struct FoundationModelClassifier: Sendable {
     /// factor. This produces ~20–25 small windows per episode (slow but
     /// safe) and the smart-shrink retry loop (see `coarseResponses`)
     /// catches the remaining outliers without aborting the whole pass.
+    ///
+    /// playhead-xx7m.2 Fix B v5 (coarse): this fixed ÷8 is no longer used
+    /// directly by the coarse path. It is now the *small-context anchor* of
+    /// `effectiveCoarseBudgetDivisor`, which derives the effective divisor
+    /// as a pure function of the model's reported `contextSize`. At
+    /// contextSize≈4096 (and on the 4096-fallback path) the effective
+    /// divisor is still exactly 8, so the safe budget is byte-for-byte what
+    /// it was before. Large-context models (≥16384) relax toward
+    /// `coarseBudgetDivisorLargeContext` (÷4) to exploit the window.
+    ///
+    /// RESOLVED 2026-07-06 (real-device runs + iOS 27 SDK read): the
+    /// on-device `SystemLanguageModel` still reports **4096** on iOS 27
+    /// hardware — the "large context" model iOS 27 added is
+    /// `PrivateCloudComputeLanguageModel` (cloud; excluded by Playhead's
+    /// on-device mandate). The large-context branch is therefore DORMANT
+    /// FUTURE-PROOFING today: it self-activates only if a future OS/device
+    /// ever reports a bigger *on-device* window. Both anchors were
+    /// device-verified byte-identical at 4096 (see
+    /// `phaseB32kRetuneOnDeviceVerification()` and
+    /// docs/phase-b-32k-measurement-recipe.md). We keep the conservative ÷4
+    /// (not ÷2) because if a large window ever appears with a worse
+    /// tokenizer ratio than assumed, the smart-shrink retry loop (see
+    /// `runCoarseSmartShrinkLoop` / `smartShrinkTargetSegments`) catches
+    /// oversized windows rather than aborting the pass.
     static let coarseBudgetDivisor = 8
+
+    /// playhead-xx7m.2 Fix B v5: large-context anchor for
+    /// `effectiveCoarseBudgetDivisor`. Conservatively ÷4 (favored over ÷2)
+    /// because the iOS 27 tokenizer ratio is UNMEASURED and the smart-shrink
+    /// loop, not this divisor, is the safety net. Must stay strictly below
+    /// `coarseBudgetDivisor` for the interpolation to relax the window.
+    static let coarseBudgetDivisorLargeContext = 4
+
+    /// playhead-xx7m.2 Fix B v5: contextSize at or below which the coarse
+    /// path uses the full small-context ÷8 (iOS 26 and the 4096-fallback
+    /// path). Pinned to the historical iOS 26 window so that regime's budget
+    /// is byte-for-byte unchanged.
+    static let coarseBudgetSmallContextCeiling = 4_096
+
+    /// playhead-xx7m.2 Fix B v5: contextSize at or above which the coarse
+    /// path uses the large-context ÷4 (iOS 27's ~32k window). Between the
+    /// ceiling and this floor the divisor interpolates monotonically.
+    /// Deliberately NOT 32768 — the value is a regime threshold, not the
+    /// hardcoded iOS 27 window; the live window is always read dynamically
+    /// via `runtime.contextSize()`.
+    static let coarseBudgetLargeContextFloor = 16_384
 
     /// bd-34e Fix B v3: maximum number of smart-shrink retry iterations
     /// before a single coarse window is abandoned. Each iteration
@@ -3015,6 +3072,83 @@ struct FoundationModelClassifier: Sendable {
         return max(1, min(conservative, hardCap))
     }
 
+    /// playhead-xx7m.2 Fix B v5: the coarse prompt-budget divisor as a PURE
+    /// function of the model's reported `contextSize`. Small windows (iOS 26 /
+    /// the 4096-fallback path) keep the conservative ÷8 that produced today's
+    /// safe budget; large windows (iOS 27's ~32k) relax toward ÷4 to exploit
+    /// the window and fix the boundary-undersizing recall bug (playhead-4xqf).
+    ///
+    /// The value is derived, dynamic (never a hardcoded 32768), and
+    /// unit-testable without a live FoundationModels session. Two invariants
+    /// hold by construction and are covered by tests:
+    ///   * `effectiveCoarseBudgetDivisor(4096) == coarseBudgetDivisor` (8), so
+    ///     the iOS 26 / fallback budget is byte-for-byte unchanged.
+    ///   * the divisor is NON-INCREASING in `contextSize`, which makes the
+    ///     safe budget MONOTONIC NON-DECREASING in `contextSize` (a larger
+    ///     window never yields a smaller per-window budget).
+    ///
+    /// Between the small-context ceiling and the large-context floor the
+    /// divisor interpolates linearly, flooring the reduction so the divisor is
+    /// rounded UP (the safer, more conservative direction) at every point.
+    static func effectiveCoarseBudgetDivisor(contextSize: Int) -> Int {
+        let small = coarseBudgetDivisor
+        let large = coarseBudgetDivisorLargeContext
+        // Defensive: if the anchors are ever misconfigured so the "large"
+        // divisor is not strictly smaller, fall back to the conservative
+        // small-context divisor rather than relaxing the window.
+        guard small > large,
+              coarseBudgetLargeContextFloor > coarseBudgetSmallContextCeiling else {
+            return small
+        }
+        if contextSize <= coarseBudgetSmallContextCeiling { return small }
+        if contextSize >= coarseBudgetLargeContextFloor { return large }
+        // In-band interpolation. `progress` and `spanDivisor` are both bounded
+        // (contextSize < floor here), so the product cannot overflow.
+        let spanContext = coarseBudgetLargeContextFloor - coarseBudgetSmallContextCeiling
+        let spanDivisor = small - large
+        let progress = contextSize - coarseBudgetSmallContextCeiling
+        let reduction = (spanDivisor * progress) / spanContext
+        return small - reduction
+    }
+
+    /// playhead-xx7m.2 Fix B v5: pure derivation of the next coarse
+    /// smart-shrink target segment count, extracted from
+    /// `smartShrunkenCoarsePlan` so its termination guarantee is unit-testable
+    /// without a live FoundationModels session.
+    ///
+    /// `actualTokens` is Apple's ground-truth count for the *oversized* window
+    /// (so no estimator divisor is applied here). The target is capped at half
+    /// the context window to leave headroom for per-segment cost variance, then
+    /// converted to a segment count via the observed per-segment cost. The
+    /// force-monotonic clause guarantees the result is STRICTLY smaller than
+    /// `originalSegmentCount` until a single segment remains, so the retry loop
+    /// always makes progress and terminates — even when the real tokenizer
+    /// ratio is far worse than the speculative ÷4 divisor assumed and the
+    /// starting window is large.
+    static func smartShrinkTargetSegments(
+        originalSegmentCount: Int,
+        actualTokens: Int,
+        contextSize: Int,
+        schemaTokens: Int,
+        responseTokens: Int,
+        safetyMarginTokens: Int
+    ) -> Int {
+        let clampedOriginal = max(1, originalSegmentCount)
+        let actualPerSegment = max(1, actualTokens / clampedOriginal)
+        let absoluteCeiling = max(1, contextSize - schemaTokens - responseTokens - safetyMarginTokens)
+        let halvedContext = max(1, contextSize / 2)
+        let targetTokens = min(absoluteCeiling, halvedContext)
+        var targetSegments = max(1, targetTokens / actualPerSegment)
+
+        // Force monotonic progress: if the math says we could keep the same
+        // number of segments (or more), drop one anyway so iteration N+1 is
+        // strictly smaller than iteration N until we bottom out at 1 segment.
+        if targetSegments >= clampedOriginal && clampedOriginal > 1 {
+            targetSegments = clampedOriginal - 1
+        }
+        return targetSegments
+    }
+
     /// playhead-xx7m.2 (Phase B): format the once-per-classification-run
     /// context-budget breadcrumb emitted at the top of the coarse pass.
     ///
@@ -3022,11 +3156,12 @@ struct FoundationModelClassifier: Sendable {
     /// live FoundationModels session (the live path is graceful-unavailable
     /// there). `contextSize` is the model's reported window, `coarseBudget`
     /// the per-window prompt ceiling `promptBudget()` derived for this run
-    /// (already clamped by `coarseBudgetDivisor`), and `coarseWindowCount`
-    /// the number of coarse plans the run produced. On iOS 27 the ~32k
-    /// window should collapse `coarseWindowCount` from the iOS-26 ~20–25
-    /// down toward ~1–2 per episode — grep `fm.coarse.run_budget` in
-    /// Console.app to confirm (see docs/phase-b-32k-measurement-recipe.md).
+    /// (clamped by `effectiveCoarseBudgetDivisor(contextSize:)` — playhead-xx7m.2
+    /// Fix B v5 — which relaxes ÷8→÷4 as the window grows), and
+    /// `coarseWindowCount` the number of coarse plans the run produced. On
+    /// iOS 27 the ~32k window should collapse `coarseWindowCount` from the
+    /// iOS-26 ~20–25 down toward ~1–2 per episode — grep `fm.coarse.run_budget`
+    /// in Console.app to confirm (see docs/phase-b-32k-measurement-recipe.md).
     static func coarseRunBudgetBreadcrumb(
         contextSize: Int,
         coarseBudget: Int,
@@ -4516,6 +4651,12 @@ struct FoundationModelClassifier: Sendable {
         // ground-truth units. bd-34e Fix B v3 caps the target at half
         // the context window so the retry leaves headroom for
         // per-segment cost variance from window to window.
+        //
+        // playhead-xx7m.2 Fix B v5: the target-segment math (and its
+        // strict-monotonic termination guarantee, which matters more now that
+        // a large iOS 27 window makes each oversized coarse window expensive)
+        // lives in the pure `smartShrinkTargetSegments` so it is unit-testable
+        // without a live FoundationModels session.
         let contextSize = await runtime.contextSize()
         let schemaTokens = (try? await runtime.coarseSchemaTokenCount()) ?? 0
         let responseTokens = config.coarseMaximumResponseTokens
@@ -4523,14 +4664,14 @@ struct FoundationModelClassifier: Sendable {
         let absoluteCeiling = max(1, contextSize - schemaTokens - responseTokens - safetyMargin)
         let halvedContext = max(1, contextSize / 2)
         let targetTokens = min(absoluteCeiling, halvedContext)
-        var targetSegments = max(1, targetTokens / actualPerSegment)
-
-        // Force monotonic progress: if the math says we could keep the
-        // same number of segments, drop one anyway so iteration N+1 is
-        // strictly smaller than iteration N (until we hit 1 segment).
-        if targetSegments >= originalSegmentCount && originalSegmentCount > 1 {
-            targetSegments = originalSegmentCount - 1
-        }
+        let targetSegments = Self.smartShrinkTargetSegments(
+            originalSegmentCount: originalSegmentCount,
+            actualTokens: actualTokens,
+            contextSize: contextSize,
+            schemaTokens: schemaTokens,
+            responseTokens: responseTokens,
+            safetyMarginTokens: safetyMargin
+        )
 
         let trimmedSegments = Array(segments.prefix(targetSegments))
         guard !trimmedSegments.isEmpty else { return nil }
