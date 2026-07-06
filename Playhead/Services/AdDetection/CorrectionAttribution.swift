@@ -199,6 +199,11 @@ enum CausalInference {
                 break
             case .classifierSeed:
                 classifierCount += 1
+            case .spliceSlot:
+                // Width-ownership marker (playhead-xsdz.22) — attribution-neutral,
+                // like `.userCorrection`. It carries no causal-source signal, so
+                // it contributes to none of the counts below.
+                break
             }
         }
 

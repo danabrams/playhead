@@ -143,6 +143,7 @@ struct AdRegionPopover: View {
         case .fmAcousticCorroborated: return "waveform.badge.magnifyingglass"
         case .userCorrection: return "hand.tap"
         case .classifierSeed: return "waveform.path.ecg"
+        case .spliceSlot: return "scissors"  // width owned by the acoustic splice channel
         }
     }
 
@@ -175,6 +176,8 @@ struct AdRegionPopover: View {
             return "User-reported ad"
         case .classifierSeed:
             return "Sequence classifier flagged this segment"
+        case .spliceSlot:
+            return "Boundaries set by audio splice"
         }
     }
 }
