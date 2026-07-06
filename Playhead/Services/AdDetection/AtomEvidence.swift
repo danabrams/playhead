@@ -33,6 +33,20 @@ enum AnchorRef: Sendable {
     /// fusion `metadataCorroborationGate` treats this as an in-audio signal
     /// (ledger surfaces a `.classifier` entry separately with the score).
     case classifierSeed(regionId: String, score: Double)
+    /// Splice-slot ownership marker (playhead-xsdz.22): the acoustic splice
+    /// channel owns this span's WIDTH. This case is BARE by design — unlike
+    /// every sibling it carries NO associated values. Presence in
+    /// `anchorProvenance` is the entire marker; slot geometry/confidence live
+    /// on the span itself and in bead-C breadcrumbs, never in provenance.
+    ///
+    /// It is INERT to eligibility gating: width provenance is not presence
+    /// evidence, so it neither selects a gate branch in
+    /// `DecisionMapper.computeGate()` (which pattern-matches only
+    /// `.fmConsensus` / `.fmAcousticCorroborated`) nor counts toward the
+    /// corroborating-evidence-kind quorum (which is over `scoringLedger`
+    /// `EvidenceSourceType`, never `AnchorRef`). No production code appends
+    /// this case yet — the slot pass that does is playhead-xsdz.20.
+    case spliceSlot
 }
 
 extension AnchorRef: Equatable {
@@ -48,6 +62,13 @@ extension AnchorRef: Equatable {
             return lid == rid && lt == rt
         case (.classifierSeed(let lid, let ls), .classifierSeed(let rid, let rs)):
             return lid == rid && ls == rs
+        case (.spliceSlot, .spliceSlot):
+            // Bare case: identity is the whole marker. This arm is REQUIRED —
+            // the `default: return false` below does NOT flag a missing case
+            // at compile time, so omitting it would silently make
+            // `.spliceSlot != .spliceSlot`, breaking DecodedSpan equality and
+            // `anchorProvenance.contains(.spliceSlot)`.
+            return true
         default:
             return false
         }

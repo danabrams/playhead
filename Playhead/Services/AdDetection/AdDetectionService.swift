@@ -414,6 +414,29 @@ struct AdDetectionConfig: Sendable {
     /// the change is safe to enable.
     let spanFinalizerEnabled: Bool
 
+    /// playhead-xsdz.20: master flag for the post-decode splice-slot OWNERSHIP
+    /// pass. When `false` (the production default), `runBackfill` never invokes
+    /// the slot pass — no resolver call, no negative-bank verdict table, no span
+    /// rewrite, no `.spliceSlot` provenance, and the refiner / audio-forensics
+    /// paths are untouched — so the pipeline OUTPUT is byte-identical to
+    /// pre-xsdz.20. Flip to `true` to let a qualifying acoustic-splice pair own
+    /// an ad span's WIDTH (transcript/FM keep owning PRESENCE). Bead C's shadow
+    /// instrumentation is separately gated and exempt from this flag.
+    let spliceSlotOwnershipEnabled: Bool
+
+    /// playhead-xsdz.21 (Bead C): master flag for the OWNERSHIP-OFF shadow pass.
+    /// When `true` AND `spliceSlotOwnershipEnabled == false`, `runBackfill`
+    /// computes the would-be dispositions by invoking the SAME shared resolver +
+    /// negative-bank verdict table + pure `SpliceSlotDispositionEngine` the
+    /// flag-ON path uses, emits one `spliceslot.shadow` breadcrumb per span, and
+    /// records structured rows to an injected observer — WITHOUT applying any
+    /// rewrite (no `.spliceSlot` provenance, no re-persist). Default OFF; ON only
+    /// in dogfood-capture builds. When `spliceSlotOwnershipEnabled == true` the
+    /// shadow pass NEVER runs (both-flags-ON ⇒ shadow silent by construction), so
+    /// there is exactly one owner of the disposition side effects. Both flags OFF
+    /// ⇒ neither pass runs and the pipeline is byte-identical.
+    let spliceSlotShadowEnabled: Bool
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -495,7 +518,9 @@ struct AdDetectionConfig: Sendable {
         perShowThresholdIntegralGain: Double = 0.005,
         perShowThresholdMaxOffset: Double = 0.15,
         perShowThresholdMinSamples: Int = 5,
-        spanFinalizerEnabled: Bool = false
+        spanFinalizerEnabled: Bool = false,
+        spliceSlotOwnershipEnabled: Bool = false,
+        spliceSlotShadowEnabled: Bool = false
     ) {
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
@@ -537,6 +562,8 @@ struct AdDetectionConfig: Sendable {
         self.perShowThresholdMaxOffset = perShowThresholdMaxOffset
         self.perShowThresholdMinSamples = perShowThresholdMinSamples
         self.spanFinalizerEnabled = spanFinalizerEnabled
+        self.spliceSlotOwnershipEnabled = spliceSlotOwnershipEnabled
+        self.spliceSlotShadowEnabled = spliceSlotShadowEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -579,7 +606,9 @@ struct AdDetectionConfig: Sendable {
         perShowThresholdIntegralGain: 0.005,
         perShowThresholdMaxOffset: 0.15,
         perShowThresholdMinSamples: 5,
-        spanFinalizerEnabled: false
+        spanFinalizerEnabled: false,
+        spliceSlotOwnershipEnabled: false,
+        spliceSlotShadowEnabled: false
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -1014,6 +1043,17 @@ actor AdDetectionService {
     /// change any gate.
     private let temporalRegularizationObserver: TemporalRegularizationObserver?
 
+    /// playhead-xsdz.21 (Bead C): optional observation-only sink for the
+    /// splice-slot SHADOW pass. When nil (the production default — PlayheadRuntime
+    /// never constructs one), the shadow pass still emits its per-span breadcrumb
+    /// (when the shadow flag is on) but accumulates no structured rows. Tests /
+    /// the dogfood-capture export inject a live observer to read the rows back.
+    /// Mirrors the `fragilityDiagnosticObserver` nil-default pattern; it NEVER
+    /// feeds back into the decision path, so it cannot change any gate, and the
+    /// shadow pass NEVER mutates the decoded-span set — output stays byte-identical
+    /// to the flag-OFF pipeline.
+    private let spliceSlotShadowObserver: SpliceSlotShadowObserver?
+
     /// playhead-fbsignals.9 fire instrumentation: optional observation-only sink
     /// that records, per asset, how many candidate spans the xsdz.9 HARD-NEGATIVE
     /// suppression actually moved (the NON-ledger half of cross-episode memory; the
@@ -1441,6 +1481,7 @@ actor AdDetectionService {
         fragilityDiagnosticObserver: FragilityDiagnosticObserver? = nil,
         brandAppearanceChannelTapObserver: BrandAppearanceChannelTapObserver? = nil,
         temporalRegularizationObserver: TemporalRegularizationObserver? = nil,
+        spliceSlotShadowObserver: SpliceSlotShadowObserver? = nil,
         negativeBankSuppressionObserver: NegativeBankSuppressionObserver? = nil,
         perShowThresholdOffsetObserver: PerShowThresholdOffsetObserver? = nil,
         skipOrchestrator: SkipOrchestrator? = nil,
@@ -1474,6 +1515,7 @@ actor AdDetectionService {
         self.fragilityDiagnosticObserver = fragilityDiagnosticObserver
         self.brandAppearanceChannelTapObserver = brandAppearanceChannelTapObserver
         self.temporalRegularizationObserver = temporalRegularizationObserver
+        self.spliceSlotShadowObserver = spliceSlotShadowObserver
         self.negativeBankSuppressionObserver = negativeBankSuppressionObserver
         self.perShowThresholdOffsetObserver = perShowThresholdOffsetObserver
         self.skipOrchestrator = skipOrchestrator
@@ -2625,6 +2667,11 @@ actor AdDetectionService {
     ///   9.  RegionFeatureExtractor
     ///   10. AtomEvidenceProjector
     ///   11. MinimalContiguousSpanDecoder
+    ///   •   Splice-slot ownership pass (playhead-xsdz.20, flag-gated OFF): a
+    ///       post-decode, per-span WIDTH rewrite that runs after decode and
+    ///       `assetAcousticBreaks`, BEFORE boundary refinement. Neutral name:
+    ///       the doc numbers below (refine=13 physically before fusion=12) are
+    ///       left intact; this pass slots in between decode and refine.
     ///   12. BackfillEvidenceFusion + DecisionMapper
     ///   13. BoundaryRefiner
     ///   14. SkipPolicyMatrix + confidence promotion (Phase 6.5: detectOnly for unknown spans; autoSkipEligible at >=0.80)
@@ -2814,7 +2861,10 @@ actor AdDetectionService {
         )
 
         let decoder = MinimalContiguousSpanDecoder()
-        let decodedSpans = decoder.decode(atoms: atomEvidence, assetId: analysisAssetId)
+        // `var` so the post-decode splice-slot ownership pass (playhead-xsdz.20,
+        // flag-gated below) can replace this with the rewritten span set before
+        // the boundary-refine loop consumes it. Flag OFF leaves it untouched.
+        var decodedSpans = decoder.decode(atoms: atomEvidence, assetId: analysisAssetId)
 
         // Persist decoded spans so TranscriptPeekView can read them.
         if !decodedSpans.isEmpty {
@@ -3174,6 +3224,44 @@ actor AdDetectionService {
             crossShowTotalObservedShows = await syndicationStore.totalObservedShowCount()
         }
 
+        // ── Post-decode SPLICE-SLOT OWNERSHIP pass (playhead-xsdz.20) ─────────
+        // Placed after decode (11) and after `assetAcousticBreaks`, BEFORE the
+        // per-span boundary-refine loop below (numbered 13 in the doc-comment).
+        // Slot ownership is PER-SPAN and POST-DECODE, NOT a decode-wide decoder
+        // mode — `decoder.decode(...)` above stays `.legacyEvidence`. When a
+        // qualifying acoustic-splice pair encloses a span's presence core, the
+        // SLOT owns the span's WIDTH; transcript/FM keep owning PRESENCE. The
+        // pass resolves every span's would-be slot, awaits the negative-bank
+        // verdict table ONCE, runs the pure `SpliceSlotDispositionEngine`
+        // (passes 2–4), then (flag-ON) rewrites the kept slots, re-persists, and
+        // hands the rewritten set to the loop. Flag OFF ⇒ never invoked, output
+        // byte-identical.
+        if config.spliceSlotOwnershipEnabled {
+            decodedSpans = await applySpliceSlotOwnershipPass(
+                decodedSpans: decodedSpans,
+                atoms: atoms,
+                atomEvidence: atomEvidence,
+                featureWindows: featureWindows,
+                acousticBreaks: assetAcousticBreaks,
+                analysisAssetId: analysisAssetId,
+                showId: catalogShowId
+            )
+        } else if config.spliceSlotShadowEnabled {
+            // playhead-xsdz.21 (Bead C): ownership OFF + shadow ON. Compute the
+            // would-be dispositions and emit breadcrumbs WITHOUT applying them.
+            // Guarded by the `else` so both-flags-ON ⇒ shadow silent (the
+            // ownership pass is the sole owner of the disposition side effects).
+            await runSpliceSlotShadowPass(
+                decodedSpans: decodedSpans,
+                atoms: atoms,
+                atomEvidence: atomEvidence,
+                featureWindows: featureWindows,
+                acousticBreaks: assetAcousticBreaks,
+                analysisAssetId: analysisAssetId,
+                showId: catalogShowId
+            )
+        }
+
         for span in decodedSpans {
             try Task.checkCancellation()
 
@@ -3196,7 +3284,14 @@ actor AdDetectionService {
             // own snap logic. So this bead is purely additive within the
             // legacy fallback path; the bracket cascade is unchanged.
             let (startAdj, endAdj): (Double, Double)
-            if featureWindows.isEmpty {
+            if span.anchorProvenance.contains(.spliceSlot) {
+                // playhead-xsdz.20: slot-owned spans bypass BOTH the bracket-aware
+                // refiner AND the legacy BoundaryRefiner — the ±3s snap clamps
+                // would blur the physical splice the slot pass just locked to.
+                // Non-slot spans keep today's exact refinement path.
+                startAdj = 0.0
+                endAdj = 0.0
+            } else if featureWindows.isEmpty {
                 startAdj = 0.0
                 endAdj = 0.0
             } else {
@@ -4720,6 +4815,250 @@ actor AdDetectionService {
         return out
     }
 
+    // MARK: - Splice-slot ownership pass (playhead-xsdz.20)
+
+    /// Post-decode splice-slot ownership pass. TWO-PHASE by construction (the
+    /// negative bank is an actor): (i) run pass 1 (the pure resolver) for every
+    /// span; (ii) await the bank ONCE to build a per-span verdict table (core +
+    /// slot token matches); (iii) invoke the pure `SpliceSlotDispositionEngine`
+    /// (passes 2–4). Then materialize the dispositions via the pure
+    /// `SpliceSlotRewriter` (pass 5), reconcile persistence (delete superseded /
+    /// absorbed rows, upsert the rewritten set), and return the rewritten spans
+    /// for the boundary-refine loop. Only invoked when
+    /// `config.spliceSlotOwnershipEnabled`.
+    ///
+    /// Bead C's shadow consumes the SAME engine + verdict-table inputs, so the
+    /// eval's `shadow == flag-ON` identity holds by construction.
+    private func applySpliceSlotOwnershipPass(
+        decodedSpans: [DecodedSpan],
+        atoms: [TranscriptAtom],
+        atomEvidence: [AtomEvidence],
+        featureWindows: [FeatureWindow],
+        acousticBreaks: [AcousticBreak],
+        analysisAssetId: String,
+        showId: String?
+    ) async -> [DecodedSpan] {
+        guard !decodedSpans.isEmpty else { return decodedSpans }
+
+        // Phases (i)–(iii): the SHARED resolver + negative-bank verdict table +
+        // pure `SpliceSlotDispositionEngine`. Bead C's shadow consumes the exact
+        // same helper, so `shadow == flag-ON` holds by construction.
+        let computation = await computeSpliceSlotPass(
+            decodedSpans: decodedSpans,
+            atoms: atoms,
+            atomEvidence: atomEvidence,
+            featureWindows: featureWindows,
+            acousticBreaks: acousticBreaks,
+            showId: showId
+        )
+        let result = computation.result
+
+        // Pass 5: materialize the dispositions (pure rewrite).
+        let rewrite = SpliceSlotRewriter.apply(
+            decodedSpans: decodedSpans,
+            dispositions: result.dispositions,
+            atomEvidence: atomEvidence
+        )
+
+        let keptCount = result.dispositions.filter {
+            if case .keepSlot = $0 { return true } else { return false }
+        }.count
+        if keptCount > 0 || !rewrite.absorbedIds.isEmpty {
+            logger.info(
+                "[xsdz.20] slot pass asset=\(analysisAssetId, privacy: .public) spans=\(decodedSpans.count) kept=\(keptCount) absorbed=\(rewrite.absorbedIds.count) rounds=\(result.fixpointRounds) absorbedIds=\(rewrite.absorbedIds, privacy: .public)"
+            )
+        }
+
+        // Reconcile persistence: delete superseded (changed-id) + absorbed rows,
+        // then upsert the rewritten set (INSERT OR REPLACE overwrites unchanged
+        // and slot-owned rows in place). Absorbed spans are never re-upserted.
+        do {
+            try await store.deleteDecodedSpans(ids: rewrite.supersededIds)
+            if !rewrite.finalSpans.isEmpty {
+                try await store.upsertDecodedSpans(rewrite.finalSpans)
+            }
+        } catch {
+            logger.warning("[xsdz.20] slot-pass re-persist failed: \(error.localizedDescription)")
+        }
+
+        return rewrite.finalSpans
+    }
+
+    /// The shared output of phases (i)–(iii): the per-span resolved slot +
+    /// diagnostics, the engine candidates, and the disposition result. Both the
+    /// flag-ON ownership pass and the flag-ON-OFF / shadow-ON shadow pass consume
+    /// this so the shadow's would-be dispositions are bit-for-bit the flag-ON
+    /// dispositions (bead C's `shadow == flag-ON` identity, by construction).
+    struct SpliceSlotPassComputation: Sendable {
+        let resolvedSlots: [SpliceSlot?]
+        let diagnostics: [SpliceSlotDiagnostics]
+        let candidates: [SpliceSlotCandidate]
+        let result: SpliceSlotDispositionResult
+    }
+
+    /// Phases (i)–(iii) of the splice-slot pass, index-aligned with `decodedSpans`.
+    /// Resolves every span's would-be slot WITH diagnostics (the shadow needs the
+    /// resolver failure reason / champion for its slot-field sourcing; discarding
+    /// the diagnostics is byte-identical to the previous `resolve` call), awaits
+    /// the negative-bank verdict table ONCE, builds the candidates, and runs the
+    /// pure disposition engine. Side-effect-free apart from the awaited bank reads.
+    private func computeSpliceSlotPass(
+        decodedSpans: [DecodedSpan],
+        atoms: [TranscriptAtom],
+        atomEvidence: [AtomEvidence],
+        featureWindows: [FeatureWindow],
+        acousticBreaks: [AcousticBreak],
+        showId: String?
+    ) async -> SpliceSlotPassComputation {
+        // Episode-wide vetoed time ranges (atoms the user marked "not an ad").
+        // EMPTY in production today — `runBackfill` projects with
+        // `NoCorrectionMaskProvider`, so no atom carries `.userVetoed`. The
+        // resolver's `.vetoNewlyEnclosed` gate is exercised only via synthetic
+        // vetoes in tests until a real `CorrectionMaskProvider` is wired.
+        let vetoedRanges: [TimeRange] = atomEvidence
+            .filter { $0.correctionMask == .userVetoed }
+            .map { TimeRange(start: $0.startTime, end: $0.endTime) }
+
+        // Phase (i): pass 1 — resolve every span's would-be slot (with diagnostics).
+        let resolver = SpliceSlotResolver()
+        let sortedAtomEvidence = atomEvidence.sorted { $0.atomOrdinal < $1.atomOrdinal }
+        let resolved: [(slot: SpliceSlot?, diagnostics: SpliceSlotDiagnostics)] = decodedSpans.map { span in
+            resolver.resolveWithDiagnostics(
+                core: TimeRange(start: span.startTime, end: span.endTime),
+                vetoedRanges: vetoedRanges,
+                breaks: acousticBreaks,
+                episodeWindows: featureWindows
+            )
+        }
+        let resolvedSlots: [SpliceSlot?] = resolved.map(\.slot)
+        let diagnostics: [SpliceSlotDiagnostics] = resolved.map(\.diagnostics)
+
+        // Whether each resolved slot's interval intersects ≥ 1 atom (the
+        // pre-pass-3 empty-atom-set disqualification input). Uses the atom
+        // stream (positive-duration interval intersection).
+        func slotIntersectsAtoms(_ slot: SpliceSlot) -> Bool {
+            let slotRange = TimeRange(start: slot.startTime, end: slot.endTime)
+            return sortedAtomEvidence.contains {
+                TimeRange(start: $0.startTime, end: $0.endTime).intersects(slotRange)
+            }
+        }
+
+        // Phase (ii): await the negative bank ONCE for the verdict table. Only
+        // when the cross-episode-memory flag is on AND a bank is wired;
+        // otherwise every verdict is `false` (dormant), matching the OFF path.
+        let bankWired = config.crossEpisodeMemoryEnabled && negativeFingerprintBank != nil
+        var coreMatch = [Bool](repeating: false, count: decodedSpans.count)
+        var slotMatch = [Bool](repeating: false, count: decodedSpans.count)
+        if bankWired, let bank = negativeFingerprintBank {
+            for (i, span) in decodedSpans.enumerated() {
+                // CORE tokens: atoms in the span's minted ordinal range.
+                let coreTokens = Self.negativeBankTokens(
+                    atoms.filter {
+                        $0.atomKey.atomOrdinal >= span.firstAtomOrdinal
+                            && $0.atomKey.atomOrdinal <= span.lastAtomOrdinal
+                    }
+                )
+                if !coreTokens.isEmpty {
+                    coreMatch[i] = await bank.bestMatch(candidateTokens: coreTokens, show: showId) != nil
+                }
+                // SLOT tokens: atoms whose interval intersects the slot interval.
+                if let slot = resolvedSlots[i] {
+                    let slotRange = TimeRange(start: slot.startTime, end: slot.endTime)
+                    let slotTokens = Self.negativeBankTokens(
+                        atoms.filter {
+                            TimeRange(start: $0.startTime, end: $0.endTime).intersects(slotRange)
+                        }
+                    )
+                    if !slotTokens.isEmpty {
+                        slotMatch[i] = await bank.bestMatch(candidateTokens: slotTokens, show: showId) != nil
+                    }
+                }
+            }
+        }
+
+        // Phase (iii): the pure disposition engine (passes 2–4).
+        let candidates: [SpliceSlotCandidate] = decodedSpans.enumerated().map { i, span in
+            let slot = resolvedSlots[i]
+            return SpliceSlotCandidate(
+                mintedInterval: TimeRange(start: span.startTime, end: span.endTime),
+                slot: slot,
+                slotIntersectsAtoms: slot.map(slotIntersectsAtoms) ?? true,
+                coreBankMatch: coreMatch[i],
+                slotBankMatch: slotMatch[i]
+            )
+        }
+        let result = SpliceSlotDispositionEngine.computeDispositions(candidates)
+
+        return SpliceSlotPassComputation(
+            resolvedSlots: resolvedSlots,
+            diagnostics: diagnostics,
+            candidates: candidates,
+            result: result
+        )
+    }
+
+    /// playhead-xsdz.21 (Bead C): the OWNERSHIP-OFF shadow pass. Invoked from
+    /// `runBackfill` ONLY when `spliceSlotShadowEnabled == true` AND
+    /// `spliceSlotOwnershipEnabled == false`. Computes the would-be dispositions
+    /// via the SAME `computeSpliceSlotPass` helper the flag-ON path uses, then —
+    /// WITHOUT applying any rewrite — emits exactly one frozen v3
+    /// `spliceslot.shadow` breadcrumb per span and records the structured rows to
+    /// the injected observer (if any). Never mutates `decodedSpans`, never
+    /// touches persistence, never stamps `.spliceSlot` provenance, so the
+    /// production decision path stays byte-identical to the flag-OFF pipeline.
+    private func runSpliceSlotShadowPass(
+        decodedSpans: [DecodedSpan],
+        atoms: [TranscriptAtom],
+        atomEvidence: [AtomEvidence],
+        featureWindows: [FeatureWindow],
+        acousticBreaks: [AcousticBreak],
+        analysisAssetId: String,
+        showId: String?
+    ) async {
+        guard !decodedSpans.isEmpty else { return }
+
+        let computation = await computeSpliceSlotPass(
+            decodedSpans: decodedSpans,
+            atoms: atoms,
+            atomEvidence: atomEvidence,
+            featureWindows: featureWindows,
+            acousticBreaks: acousticBreaks,
+            showId: showId
+        )
+
+        let rows = SpliceSlotShadowRowBuilder.makeRows(
+            assetId: analysisAssetId,
+            spanIds: decodedSpans.map(\.id),
+            candidates: computation.candidates,
+            diagnostics: computation.diagnostics,
+            dispositions: computation.result.dispositions
+        )
+
+        // One breadcrumb per span (subsystem com.playhead; precedent
+        // fm.coarse.run_budget). Non-qualifying spans emit too.
+        for row in rows {
+            logger.notice("\(SpliceSlotShadowBreadcrumb.format(row), privacy: .public)")
+        }
+
+        if let observer = spliceSlotShadowObserver {
+            await observer.record(rows, assetId: analysisAssetId)
+        }
+    }
+
+    /// Tokenize + prefix-clamp atoms' joined text the same way the negative-bank
+    /// suppression read does (mirrors the `crossEpisodeMemory` call site), so the
+    /// verdict-table alignment sees an identical token population.
+    private static func negativeBankTokens(_ atoms: [TranscriptAtom]) -> [String] {
+        let text = atoms
+            .sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
+            .map(\.text)
+            .joined(separator: " ")
+        let raw = SmithWatermanAligner.tokenize(text)
+        return raw.count > NegativeFingerprintBank.maxTokenCount
+            ? Array(raw.prefix(NegativeFingerprintBank.maxTokenCount))
+            : raw
+    }
+
     private func buildEvidenceLedger(
         span: DecodedSpan,
         classifierResults: [ClassifierResult],
@@ -4806,7 +5145,11 @@ actor AdDetectionService {
         // entry when that score is significant. Gated OFF by default: when
         // `audioForensicsEnabled` is false the detector is never called, so
         // NO entry is built and the ledger is byte-identical to pre-xsdz.8.
+        // playhead-xsdz.20: SUPPRESS the `.audioForensics` entry on slot-owned
+        // spans. The slot width evidence and this entry derive from the SAME
+        // physical discontinuity, so keeping both would double-count the seam.
         let audioForensicsEntries = config.audioForensicsEnabled
+            && !span.anchorProvenance.contains(.spliceSlot)
             ? audioForensicsDetector.buildEntries(
                 span: span,
                 episodeWindows: featureWindows,
@@ -5431,7 +5774,9 @@ actor AdDetectionService {
     /// bundles and records the resulting decoded spans in the injected observer.
     /// Failures are logged and swallowed — shadow telemetry must never affect
     /// user-visible behavior.
-    private func runPhase5ProjectorPhase(
+    // Not `private`: the playhead-xsdz.20 Phase-5 clobber-guard test drives this
+    // directly to prove no superseded-id row reappears over a slot-owned asset.
+    func runPhase5ProjectorPhase(
         observer: Phase5ProjectorObserver,
         bundles: [RegionFeatureBundle],
         chunks: [TranscriptChunk],
@@ -5471,11 +5816,26 @@ actor AdDetectionService {
         let decoder = MinimalContiguousSpanDecoder()
         let spans = decoder.decode(atoms: evidence, assetId: analysisAssetId)
 
-        // Persist to SQLite so TranscriptPeekView can read them.
-        do {
-            try await store.upsertDecodedSpans(spans)
-        } catch {
-            logger.error("Phase 5 projector: failed to persist decoded spans for asset \(analysisAssetId): \(error)")
+        // playhead-xsdz.20 CLOBBER GUARD: this projector upserts FRESHLY decoded
+        // spans that never carry `.spliceSlot`. Over a slot-owned asset a fresh
+        // decode re-mints the ORIGINAL ordinals → the original `makeId` → it
+        // would RE-INSERT the superseded-id row the backfill slot pass deleted
+        // (resurrecting the ghost row nested inside the slot span). So if this
+        // asset already has ANY persisted slot-owned rows, skip the upsert
+        // entirely and leave the slot-owned rows authoritative.
+        let existingSpans = (try? await store.fetchDecodedSpans(assetId: analysisAssetId)) ?? []
+        let assetIsSlotOwned = existingSpans.contains { $0.anchorProvenance.contains(.spliceSlot) }
+        if assetIsSlotOwned {
+            logger.info(
+                "Phase 5 projector: asset=\(analysisAssetId, privacy: .public) has slot-owned rows — skipping upsert to preserve splice-slot ownership"
+            )
+        } else {
+            // Persist to SQLite so TranscriptPeekView can read them.
+            do {
+                try await store.upsertDecodedSpans(spans)
+            } catch {
+                logger.error("Phase 5 projector: failed to persist decoded spans for asset \(analysisAssetId): \(error)")
+            }
         }
 
         // Record results in observer (DEBUG diagnostics).

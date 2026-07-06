@@ -429,6 +429,7 @@ struct MinimalContiguousSpanDecoder {
         case .fmAcousticCorroborated(let id, let s): return "fmA:\(id):\(s)"
         case .userCorrection(let id, let t): return "uC:\(id):\(t)"
         case .classifierSeed(let id, let s): return "cS:\(id):\(s)"
+        case .spliceSlot: return "ss"  // bare case: constant key collapses duplicates
         }
     }
 }
@@ -446,6 +447,7 @@ private extension Array where Element == AnchorRef {
             case .fmAcousticCorroborated(let id, let s): key = "fmA:\(id):\(s)"
             case .userCorrection(let id, let t): key = "uC:\(id):\(t)"
             case .classifierSeed(let id, let s): key = "cS:\(id):\(s)"
+            case .spliceSlot: key = "ss"  // bare case: constant key collapses duplicates
             }
             return seen.insert(key).inserted
         }

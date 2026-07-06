@@ -10932,6 +10932,23 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// playhead-xsdz.20: delete specific decoded-span rows by id. Used by the
+    /// splice-slot ownership pass to remove superseded-id rows (kept spans whose
+    /// ordinals — and therefore `makeId` — changed) and ABSORBED spans' rows
+    /// (dropped pre-fusion, no successor id) so no ghost row survives nested
+    /// inside a slot span. No-op on an empty id list.
+    func deleteDecodedSpans(ids: [String]) throws {
+        guard !ids.isEmpty else { return }
+        let sql = "DELETE FROM decoded_spans WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        for id in ids {
+            sqlite3_reset(stmt)
+            bind(stmt, 1, id)
+            try step(stmt, expecting: SQLITE_DONE)
+        }
+    }
+
     // MARK: - CRUD: ad_decision_results (Phase 6, playhead-4my.6.3)
 
     /// Upsert — a new cohort produces an updated decision for the same asset.
