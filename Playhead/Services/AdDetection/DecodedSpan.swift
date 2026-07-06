@@ -76,6 +76,10 @@ extension AnchorRef: Codable {
             let regionId = try container.decode(String.self, forKey: .regionId)
             let score = try container.decode(Double.self, forKey: .score)
             self = .classifierSeed(regionId: regionId, score: score)
+        case "spliceSlot":
+            // Bare case (playhead-xsdz.22): the stable "spliceSlot" type string
+            // is the entire encoding — no associated values to decode.
+            self = .spliceSlot
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown AnchorRef type: \(type)")
         }
@@ -103,6 +107,9 @@ extension AnchorRef: Codable {
             try container.encode("classifierSeed", forKey: .type)
             try container.encode(regionId, forKey: .regionId)
             try container.encode(score, forKey: .score)
+        case .spliceSlot:
+            // Bare case (playhead-xsdz.22): emit only the stable type string.
+            try container.encode("spliceSlot", forKey: .type)
         }
     }
 }

@@ -663,6 +663,7 @@ private extension TranscriptPeekView {
             case .fmAcousticCorroborated: return "FM and acoustic break"
             case .userCorrection: return "user-reported ad"
             case .classifierSeed: return "classifier"
+            case .spliceSlot: return "audio splice"
             }
         }
         return descriptions.joined(separator: ", ")
