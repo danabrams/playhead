@@ -2589,6 +2589,208 @@ struct FoundationModelClassifierTests {
         #expect(safe < oldFourthed)
     }
 
+    // MARK: - playhead-xx7m.2 Fix B v5 (speculative 32k divisor retune)
+
+    // The effective coarse divisor is a PURE function of contextSize. Small
+    // windows (iOS 26 / 4096-fallback) keep ÷8 byte-for-byte; large windows
+    // (iOS 27 ~32k) relax toward ÷4. Pins every regime boundary so a future
+    // change to the anchors/thresholds trips a focused test.
+    @Test("effective coarse divisor is a pure function of contextSize at each regime boundary")
+    func effectiveCoarseDivisorRegimeBoundaries() {
+        typealias FMC = FoundationModelClassifier
+        // Small-context regime: at/below the ceiling → full ÷8, including the
+        // degenerate contextSize=0 (FM-unavailable / OS predates the API).
+        #expect(FMC.effectiveCoarseBudgetDivisor(contextSize: 0) == 8)
+        #expect(FMC.effectiveCoarseBudgetDivisor(contextSize: 1) == 8)
+        #expect(FMC.effectiveCoarseBudgetDivisor(contextSize: 2048) == 8)
+        #expect(FMC.effectiveCoarseBudgetDivisor(contextSize: 4096) == 8)
+        // The 4096-anchor must equal the small-context constant exactly so the
+        // iOS 26 / fallback budget stays unchanged.
+        #expect(
+            FMC.effectiveCoarseBudgetDivisor(contextSize: FMC.coarseBudgetSmallContextCeiling)
+                == FMC.coarseBudgetDivisor
+        )
+        // Large-context regime: at/above the floor → ÷4.
+        #expect(FMC.effectiveCoarseBudgetDivisor(contextSize: 16384) == 4)
+        #expect(FMC.effectiveCoarseBudgetDivisor(contextSize: 32768) == 4)
+        #expect(FMC.effectiveCoarseBudgetDivisor(contextSize: 1_000_000) == 4)
+        #expect(
+            FMC.effectiveCoarseBudgetDivisor(contextSize: FMC.coarseBudgetLargeContextFloor)
+                == FMC.coarseBudgetDivisorLargeContext
+        )
+        // In-band interpolation: strictly between the two anchors, rounded UP
+        // (more conservative). 8192 lands on ÷7, and just below the floor on ÷5.
+        #expect(FMC.effectiveCoarseBudgetDivisor(contextSize: 8192) == 7)
+        #expect(FMC.effectiveCoarseBudgetDivisor(contextSize: 16383) == 5)
+        // Every in-band value stays strictly inside (large, small].
+        for contextSize in stride(from: 4097, to: 16384, by: 137) {
+            let divisor = FMC.effectiveCoarseBudgetDivisor(contextSize: contextSize)
+            #expect(divisor > FMC.coarseBudgetDivisorLargeContext)
+            #expect(divisor <= FMC.coarseBudgetDivisor)
+        }
+    }
+
+    // The divisor must be NON-INCREASING in contextSize so the safe budget is
+    // MONOTONIC NON-DECREASING — a larger window never yields a smaller
+    // per-window budget. Sweep across all three regimes and their boundaries.
+    @Test("coarse divisor is non-increasing and budget is monotonic non-decreasing in contextSize")
+    func coarseBudgetMonotonicInContextSize() {
+        typealias FMC = FoundationModelClassifier
+        var previousDivisor = Int.max
+        var previousBudget = 0
+        // Dense sweep from 0 through past the large-context floor, hitting the
+        // exact regime boundaries (4096, 16384) plus common windows.
+        var samples = Array(stride(from: 0, through: 40_000, by: 251))
+        samples.append(contentsOf: [4095, 4096, 4097, 8192, 16383, 16384, 16385, 32768])
+        for contextSize in samples.sorted() {
+            let divisor = FMC.effectiveCoarseBudgetDivisor(contextSize: contextSize)
+            #expect(divisor <= previousDivisor, "divisor must be non-increasing at contextSize=\(contextSize)")
+            previousDivisor = divisor
+
+            let budget = FMC.maximumEstimatedPromptTokensSafeFor(
+                contextSize: contextSize,
+                schemaTokens: 128,
+                maximumResponseTokens: 96,
+                safetyMarginTokens: 128,
+                divisor: divisor
+            )
+            #expect(budget >= 1, "budget must stay >= 1 at contextSize=\(contextSize)")
+            #expect(budget >= previousBudget, "budget must be non-decreasing at contextSize=\(contextSize)")
+            previousBudget = budget
+        }
+    }
+
+    // The whole point of the retune: a large iOS 27 window yields a materially
+    // larger per-window budget than iOS 26, while the iOS 26 / 4096-fallback
+    // budget is byte-for-byte unchanged and the large budget is still bounded
+    // by contextSize / (minimum safe divisor).
+    @Test("large context yields strictly larger budget than iOS 26 but stays bounded")
+    func largeContextBudgetLargerButBounded() {
+        typealias FMC = FoundationModelClassifier
+        // iOS 26 / 4096-fallback: byte-for-byte the historical value (468).
+        let small = FMC.maximumEstimatedPromptTokensSafeFor(
+            contextSize: 4096,
+            schemaTokens: 128,
+            maximumResponseTokens: 96,
+            safetyMarginTokens: 128,
+            divisor: FMC.effectiveCoarseBudgetDivisor(contextSize: 4096)
+        )
+        #expect(small == 468)
+
+        // iOS 27 ~32k: strictly larger, and still ≤ contextSize / 4.
+        let contextSize = 32768
+        let large = FMC.maximumEstimatedPromptTokensSafeFor(
+            contextSize: contextSize,
+            schemaTokens: 128,
+            maximumResponseTokens: 96,
+            safetyMarginTokens: 128,
+            divisor: FMC.effectiveCoarseBudgetDivisor(contextSize: contextSize)
+        )
+        #expect(large > small)
+        #expect(large <= contextSize / FMC.coarseBudgetDivisorLargeContext)
+        // Concretely: divisor ÷4 → (32768 - 352) / 4 = 8104, hardCap 8192.
+        #expect(large == 8104)
+        // Materially larger — the retune must be worth at least a several-fold
+        // jump, otherwise the coarse-window collapse it targets won't happen.
+        #expect(large > small * 4)
+    }
+
+    // maximumEstimatedPromptTokensSafeFor must stay correct and ≥1 across the
+    // full contextSize range including pathological tiny/huge inputs, with no
+    // overflow, at the divisors this retune actually uses.
+    @Test("budget math is safe across the full contextSize range with no overflow")
+    func budgetMathSafeAcrossRange() {
+        typealias FMC = FoundationModelClassifier
+        for contextSize in [0, 1, 4096, 8192, 16384, 32768, Int.max] {
+            let divisor = FMC.effectiveCoarseBudgetDivisor(contextSize: contextSize)
+            let budget = FMC.maximumEstimatedPromptTokensSafeFor(
+                contextSize: contextSize,
+                schemaTokens: 128,
+                maximumResponseTokens: 96,
+                safetyMarginTokens: 128,
+                divisor: divisor
+            )
+            #expect(budget >= 1)
+            #expect(budget <= max(1, contextSize / divisor))
+        }
+        // Pathological overhead > context still floors at 1, never negative.
+        let exhausted = FMC.maximumEstimatedPromptTokensSafeFor(
+            contextSize: 10,
+            schemaTokens: 100,
+            maximumResponseTokens: 100,
+            safetyMarginTokens: 100,
+            divisor: FMC.effectiveCoarseBudgetDivisor(contextSize: 10)
+        )
+        #expect(exhausted == 1)
+    }
+
+    // Smart-shrink must terminate even when the real tokenizer ratio is far
+    // worse than the speculative ÷4 divisor assumed. Each shrink is strictly
+    // smaller than the previous plan until a single segment remains, so a
+    // feedback loop of oversized windows converges to 1 in bounded steps and
+    // never loops forever or re-produces the same (oversized) size.
+    @Test("smart-shrink target segments strictly decreases and terminates under a worse-than-assumed ratio")
+    func smartShrinkTargetSegmentsTerminates() {
+        typealias FMC = FoundationModelClassifier
+        let contextSize = 32768          // large iOS 27 window
+        let schemaTokens = 128
+        let responseTokens = 96
+        let safetyMargin = 128
+
+        // Simulate a real tokenizer ratio far worse than the divisor assumed:
+        // every segment actually costs ~600 Apple tokens, so even a modest
+        // window blows the ceiling repeatedly.
+        let worstPerSegment = 600
+        var segmentCount = 400           // a large starting coarse window
+        var steps = 0
+        var previousCount = Int.max
+        while segmentCount > 1 {
+            let actualTokens = segmentCount * worstPerSegment
+            let next = FMC.smartShrinkTargetSegments(
+                originalSegmentCount: segmentCount,
+                actualTokens: actualTokens,
+                contextSize: contextSize,
+                schemaTokens: schemaTokens,
+                responseTokens: responseTokens,
+                safetyMarginTokens: safetyMargin
+            )
+            #expect(next >= 1, "target must never drop below 1")
+            #expect(next < segmentCount, "each shrink must be strictly smaller than the previous plan")
+            #expect(next < previousCount)
+            previousCount = next
+            segmentCount = next
+            steps += 1
+            #expect(steps < 10_000, "loop must terminate")
+        }
+        #expect(segmentCount == 1)
+
+        // A single-segment window cannot shrink further — the math bottoms out
+        // at 1 rather than returning 0 (which would drop the whole window).
+        let atFloor = FMC.smartShrinkTargetSegments(
+            originalSegmentCount: 1,
+            actualTokens: 999_999,
+            contextSize: contextSize,
+            schemaTokens: schemaTokens,
+            responseTokens: responseTokens,
+            safetyMarginTokens: safetyMargin
+        )
+        #expect(atFloor == 1)
+
+        // When the ratio is only slightly over, the proportional shrink (not
+        // the force-monotonic drop-one) does the work and still strictly
+        // decreases: 100 segments at ~400 tokens each overshoots a ÷2 target.
+        let proportional = FMC.smartShrinkTargetSegments(
+            originalSegmentCount: 100,
+            actualTokens: 100 * 400,
+            contextSize: contextSize,
+            schemaTokens: schemaTokens,
+            responseTokens: responseTokens,
+            safetyMarginTokens: safetyMargin
+        )
+        #expect(proportional < 100)
+        #expect(proportional >= 1)
+    }
+
     // bd-3h2 (2026-04-06): pins the production default
     // `refinementMaximumResponseTokens`. The on-device run on
     // iOS 26.4 produced a refinement decode failure where the FM
@@ -2867,6 +3069,121 @@ struct FoundationModelClassifierTests {
         #expect(
             coarseSchemaTokens >= 30,
             "coarseSchemaTokens=\(coarseSchemaTokens) — far below the expected lower bound; check that @Generable conformance survived the trim"
+        )
+        #else
+        return
+        #endif
+    }
+
+    // playhead-xx7m.2 (Phase B Part 2): automated on-device verification of the
+    // speculative 32k-context divisor retune — the green/red stand-in for the
+    // manual Console-grepping recipe in docs/phase-b-32k-measurement-recipe.md.
+    //
+    // Runs for real ONLY where FoundationModels is provisioned (iOS 27, Apple
+    // Intelligence enabled, cool + charging). On the simulator (FM unavailable
+    // or model assets missing) every guard early-returns, so this is a green
+    // skip there and never fails CI. Invoke on a device with:
+    //   DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
+    //   xcodebuild test -scheme Playhead -testPlan PlayheadFastTests \
+    //     -destination 'platform=iOS,name=<Your iPhone>' \
+    //     -only-testing:'PlayheadTests/FoundationModelClassifierTests/phaseB32kRetuneOnDeviceVerification()'
+    //
+    // Validates the three things a human would grep the breadcrumbs for, EXCEPT
+    // recall (success-criterion 3), which stays the scripts/l2f-bd4xqf-compare.py
+    // corpus measurement — a unit test cannot stand in for it:
+    //   1. contextSize ≫ 4096 (the iOS 27 large window is actually present).
+    //   2. A full episode's coarse pass collapses to ≤2 windows (the big window
+    //      + ÷4 retune feed through to the planner; iOS 26 ÷8 produced ~20–25).
+    //   3. [live-fit] The coarse pass runs on-device with status .success and
+    //      abandons NO window to context overflow — i.e. ÷4 did not overshoot
+    //      Apple's real tokenizer ceiling so badly that smart-shrink exhausts
+    //      its retries and drops ad coverage.
+    //
+    // Nuance on (3): smart-shrink is *designed* to rescue a mildly oversized
+    // window, and a first-attempt overshoot it recovers from increments neither
+    // `status` nor `contextOverflow` — that "÷4 slightly aggressive but safe"
+    // case surfaces only in the `fm.classifier.coarse_pass_smart_shrink` Console
+    // breadcrumb. So green here means "no lost coverage"; if you ALSO see
+    // frequent shrink breadcrumbs, nudge `coarseBudgetDivisorLargeContext` up
+    // toward 5–6. The printed `largestWindowTokens` vs `coarseBudget` shows how
+    // close to the ceiling this run actually pushed — if largestWindowTokens is
+    // far below coarseBudget, this episode underfilled the window and the
+    // ceiling was not stressed (trust the manual shrink breadcrumb / recall run).
+    @available(iOS 26.4, *)
+    @Test("Phase B: on-device 32k contextSize, coarse-window collapse, and ÷4 live-fit")
+    func phaseB32kRetuneOnDeviceVerification() async throws {
+        #if targetEnvironment(simulator)
+        // ON-DEVICE ONLY. The simulator can masquerade: availability may
+        // report .available AND contextSize may read the 4096 base value
+        // once FM catalog assets are present on the host Mac (observed
+        // 2026-07-06 — it slipped past the contextSize > 0 guard and
+        // failed all three device assertions on the sim). Per the recipe,
+        // a simulator 4096 is an API artifact, not a measurement.
+        return
+        #elseif canImport(FoundationModels) && compiler(>=6.3)
+        let model = SystemLanguageModel.default
+        guard case .available = model.availability else {
+            // FM unavailable (simulator, AI disabled, ineligible/older device).
+            return
+        }
+
+        // --- Criterion 1: the large iOS 27 context window is really present ---
+        let contextSize = model.contextSize
+        guard contextSize > 0 else {
+            // `.available` but contextSize 0 = model still warming / assets
+            // missing (a simulator masquerade). Not a real measurement.
+            return
+        }
+        #expect(
+            contextSize >= 16384,
+            "contextSize=\(contextSize): expected the iOS 27 large window (≥16384, ~32768). A real-device 4096 means iOS 27 / Apple Intelligence isn't actually active."
+        )
+
+        // Recompute the coarse budget this run will use, from the SAME
+        // production statics, so the print below shows how close to the
+        // ÷4 ceiling this episode pushed.
+        let config = FoundationModelClassifier.Config.default
+        let coarseSchemaTokens: Int
+        do {
+            coarseSchemaTokens = try await model.tokenCount(for: CoarseScreeningSchema.generationSchema)
+        } catch {
+            // `.available` but assets not fully provisioned on this host — bail clean.
+            return
+        }
+        let coarseDivisor = FoundationModelClassifier.effectiveCoarseBudgetDivisor(contextSize: contextSize)
+        let coarseBudget = FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+            contextSize: contextSize,
+            schemaTokens: coarseSchemaTokens,
+            maximumResponseTokens: config.coarseMaximumResponseTokens,
+            safetyMarginTokens: config.safetyMarginTokens,
+            divisor: coarseDivisor
+        )
+
+        // --- Criterion 2: a full episode collapses to ≤2 coarse windows ---
+        let segments = buildFixtureSegments()
+        #expect(!segments.isEmpty)
+        let classifier = FoundationModelClassifier()   // runtime: nil ⇒ live runtime
+        let plans = try await classifier.planPassA(segments: segments)
+        #expect(!plans.isEmpty)
+        let largestWindowTokens = plans.map(\.promptTokenCount).max() ?? 0
+        #expect(
+            plans.count <= 2,
+            "coarseWindows=\(plans.count) over a full episode: with a ~\(contextSize)-token window + ÷\(coarseDivisor) this must collapse to ≤2. If >2, the large context isn't feeding the budget."
+        )
+
+        // --- Criterion 3 (live-fit): the coarse pass runs on-device without
+        //     abandoning any window to context overflow. This makes real FM
+        //     inference calls (one per window), so it needs the full on-device
+        //     stack; a thermal/asset failure would have early-returned above. ---
+        let output = try await classifier.coarsePassA(segments: segments)
+        print("PHASE-B-VERIFY contextSize=\(contextSize) coarseDivisor=\(coarseDivisor) coarseBudget=\(coarseBudget) coarseWindows=\(plans.count) largestWindowTokens=\(largestWindowTokens) status=\(output.status) overflowAbandoned=\(output.permissiveFailureCounts.contextOverflow)")
+        #expect(
+            output.status == .success,
+            "coarse pass status=\(output.status): the on-device coarse pass did not complete successfully at ÷\(coarseDivisor)."
+        )
+        #expect(
+            output.permissiveFailureCounts.contextOverflow == 0,
+            "overflowAbandoned=\(output.permissiveFailureCounts.contextOverflow): ÷\(coarseDivisor) overshot Apple's real tokenizer ceiling badly enough that smart-shrink exhausted its retries and ABANDONED a window (lost ad coverage). Nudge coarseBudgetDivisorLargeContext up toward 5–6."
         )
         #else
         return
