@@ -80,6 +80,10 @@ extension AnchorRef: Codable {
             // Bare case (playhead-xsdz.22): the stable "spliceSlot" type string
             // is the entire encoding — no associated values to decode.
             self = .spliceSlot
+        case "rediffSlot":
+            // Bare case (playhead-xsdz.29): the stable "rediffSlot" type string
+            // is the entire encoding — no associated values to decode.
+            self = .rediffSlot
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown AnchorRef type: \(type)")
         }
@@ -110,6 +114,9 @@ extension AnchorRef: Codable {
         case .spliceSlot:
             // Bare case (playhead-xsdz.22): emit only the stable type string.
             try container.encode("spliceSlot", forKey: .type)
+        case .rediffSlot:
+            // Bare case (playhead-xsdz.29): emit only the stable type string.
+            try container.encode("rediffSlot", forKey: .type)
         }
     }
 }

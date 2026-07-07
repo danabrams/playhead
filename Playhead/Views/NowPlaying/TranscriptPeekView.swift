@@ -664,6 +664,7 @@ private extension TranscriptPeekView {
             case .userCorrection: return "user-reported ad"
             case .classifierSeed: return "classifier"
             case .spliceSlot: return "audio splice"
+            case .rediffSlot: return "re-download diff"
             }
         }
         return descriptions.joined(separator: ", ")

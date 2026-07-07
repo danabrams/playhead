@@ -144,6 +144,7 @@ struct AdRegionPopover: View {
         case .userCorrection: return "hand.tap"
         case .classifierSeed: return "waveform.path.ecg"
         case .spliceSlot: return "scissors"  // width owned by the acoustic splice channel
+        case .rediffSlot: return "arrow.2.squarepath"  // width owned by the rediff (re-fetch diff) oracle
         }
     }
 
@@ -178,6 +179,8 @@ struct AdRegionPopover: View {
             return "Sequence classifier flagged this segment"
         case .spliceSlot:
             return "Boundaries set by audio splice"
+        case .rediffSlot:
+            return "Boundaries set by re-download comparison"
         }
     }
 }

@@ -418,6 +418,36 @@ actor AnalysisJobRunner {
             }
         }
 
+        // playhead-xsdz.27: played-copy fingerprint capture (default-OFF).
+        // When `captureEnabledByDefault` is on, fingerprint the FULL decoded
+        // episode (`allShards`, not the coverage-bounded `shards`) as the
+        // rediff A-side and persist it in AnalysisStore. Default OFF: this
+        // whole branch is skipped, so the live pipeline is byte-for-byte
+        // unchanged (this bead ships storage + a tested capture core, not a
+        // behavioral change). Failures are non-fatal and never affect
+        // analysis. xsdz.29 flips the flag / swaps in the as-played tap once
+        // it consumes the stream — see EpisodeFingerprintCapture.
+        if EpisodeFingerprintCapture.captureEnabledByDefault {
+            do {
+                // Skip (rather than persist a misleading empty identity) when
+                // the asset can't be read — `sourceAudioIdentity` must be the
+                // real assetFingerprint for the "audio changed under a reused
+                // asset id" check to mean anything.
+                if let asset = try await store.fetchAsset(id: assetId) {
+                    try await EpisodeFingerprintCapture.captureAndPersist(
+                        shards: allShards,
+                        assetId: assetId,
+                        sourceAudioIdentity: asset.assetFingerprint,
+                        store: store
+                    )
+                } else {
+                    logger.warning("Episode fingerprint capture skipped — asset \(assetId) not found")
+                }
+            } catch {
+                logger.warning("Episode fingerprint capture failed for asset \(assetId): \(error)")
+            }
+        }
+
         // -- Checkpoint: cancellation + thermal --
 
         if let earlyStop = checkStopConditions() {
