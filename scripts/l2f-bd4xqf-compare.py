@@ -27,6 +27,68 @@ def clipped_overlap(a_start: float, a_end: float, b_start: float, b_end: float) 
     return max(0.0, min(a_end, b_end) - max(a_start, b_start))
 
 
+# --- false-widening (playhead-xsdz.32) -------------------------------------
+# The coverage metric above only measures adWindow seconds INSIDE true rediff
+# slots — it cannot penalize a treatment that "wins" coverage by enclosing
+# content (the product's stated worst outcome, which a width-WIDENING oracle
+# risks). These helpers measure the complementary quantity: adWindow seconds
+# that fall OUTSIDE every true DAI slot.
+#
+# HONEST CAVEAT: rediff truth is DAI-only (baked-in host reads are invisible to
+# it). So `falseWideningSeconds` is an UPPER BOUND on real content-eating — it
+# also counts any legitimate host-read ad detection. The precise ("evidence
+# proxy") variant subtracts windows that carry lexical/FM/chapter ad-evidence;
+# that requires the dump to emit per-window evidence, which it does not yet, so
+# it is reported as a TODO rather than computed. Use the upper bound as a
+# conservative gate: if it is small, there is provably little content-eating.
+
+def merge_intervals(ivals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    s = sorted((a, b) for a, b in ivals if b > a)
+    if not s:
+        return []
+    out: list[list[float]] = [list(s[0])]
+    for a, b in s[1:]:
+        if a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def total_len(ivals: list[tuple[float, float]]) -> float:
+    return sum(b - a for a, b in ivals)
+
+
+def intersect_len(a_merged: list[tuple[float, float]], b_merged: list[tuple[float, float]]) -> float:
+    # both inputs assumed merged + sorted; two-pointer sweep
+    total = 0.0
+    i = j = 0
+    while i < len(a_merged) and j < len(b_merged):
+        total += max(0.0, min(a_merged[i][1], b_merged[j][1]) - max(a_merged[i][0], b_merged[j][0]))
+        if a_merged[i][1] < b_merged[j][1]:
+            i += 1
+        else:
+            j += 1
+    return total
+
+
+def episode_false_widening(ep: dict[str, Any], true_slots: list[tuple[float, float]]) -> dict[str, Any]:
+    windows = merge_intervals([
+        (float(w.get("startTime", 0.0)), float(w.get("endTime", 0.0)))
+        for w in (ep.get("adWindows") or [])
+    ])
+    slots = merge_intervals(true_slots)
+    ad_total = total_len(windows)
+    inside = intersect_len(windows, slots)
+    return {
+        "adWindowSeconds": ad_total,
+        "adWindowSecondsInsideTrueSlots": inside,
+        "falseWideningSeconds": ad_total - inside,   # adWindow seconds outside every true DAI slot (upper bound)
+        "trueSlotSeconds": total_len(slots),
+    }
+# ---------------------------------------------------------------------------
+
+
 def classify(cand_cov: float | None, win_cov: float) -> str:
     if cand_cov is not None and cand_cov < CAND_THRESHOLD:
         return "CAND_NARROW"
@@ -119,6 +181,43 @@ def compare(baseline_eps: list[dict[str, Any]], treatment_eps: list[dict[str, An
                 "verdictChange": f"{b['verdict']}->{t['verdict']}" if b["verdict"] != t["verdict"] else None,
             })
 
+    # False-widening (playhead-xsdz.32): per-episode adWindow seconds enclosing
+    # content OUTSIDE every true DAI slot. Computed at EPISODE granularity (not
+    # per-slot) to avoid double-attributing a window that spans two slots.
+    ep_true_slots: dict[str, list[tuple[float, float]]] = {}
+    for rep in rediff_eps:
+        if not rep.get("rotated"):
+            continue
+        slots = [
+            (float(s.get("startSeconds", 0.0)), float(s.get("endSeconds", 0.0)))
+            for s in (rep.get("adSlots") or [])
+            if float(s.get("endSeconds", 0.0)) > float(s.get("startSeconds", 0.0))
+        ]
+        if slots:
+            ep_true_slots[rep["episodeId"]] = slots
+
+    fw_rows: list[dict[str, Any]] = []
+    fw_base_total = fw_treat_total = 0.0
+    for ep_id, slots in sorted(ep_true_slots.items()):
+        bep, tep = base_by_id.get(ep_id), treat_by_id.get(ep_id)
+        if bep is None or tep is None:
+            continue
+        fb = episode_false_widening(bep, slots)
+        ft = episode_false_widening(tep, slots)
+        fw_base_total += fb["falseWideningSeconds"]
+        fw_treat_total += ft["falseWideningSeconds"]
+        fw_rows.append({
+            "episodeId": ep_id,
+            "showSlug": (tep.get("showSlug") or bep.get("showSlug") or ""),
+            "baseline": fb,
+            "treatment": ft,
+            "deltaFalseWideningSeconds": ft["falseWideningSeconds"] - fb["falseWideningSeconds"],
+        })
+    fw_by_show: dict[str, float] = {}
+    for row in fw_rows:
+        fw_by_show[row["showSlug"]] = fw_by_show.get(row["showSlug"], 0.0) + row["treatment"]["falseWideningSeconds"]
+    fw_worst = sorted(fw_rows, key=lambda r: r["treatment"]["falseWideningSeconds"], reverse=True)
+
     matrix: dict[str, dict[str, int]] = {v: {w: 0 for w in VERDICTS} for v in VERDICTS}
     base_win = treat_win = base_cand = treat_cand = 0.0
     cand_pairs = 0
@@ -155,6 +254,22 @@ def compare(baseline_eps: list[dict[str, Any]], treatment_eps: list[dict[str, An
         "topPositiveDelta": by_delta[:5],
         "topNegativeDelta": sorted(by_delta, key=lambda p: p["deltaPipelineCoverage"])[:5],
         "mostFiredConstraints": sorted(counter.items(), key=lambda kv: kv[1], reverse=True),
+        # False-widening gate (playhead-xsdz.32) — upper bound; DAI-only truth.
+        "falseWidening": {
+            "episodeCount": len(fw_rows),
+            "baselineTotalSeconds": fw_base_total,
+            "treatmentTotalSeconds": fw_treat_total,
+            "deltaTotalSeconds": fw_treat_total - fw_base_total,
+            "baselineMeanSecondsPerEpisode": (fw_base_total / len(fw_rows)) if fw_rows else 0.0,
+            "treatmentMeanSecondsPerEpisode": (fw_treat_total / len(fw_rows)) if fw_rows else 0.0,
+            "treatmentMaxSecondsPerEpisode": (fw_worst[0]["treatment"]["falseWideningSeconds"] if fw_worst else 0.0),
+            "perShowTreatmentSeconds": dict(sorted(fw_by_show.items(), key=lambda kv: kv[1], reverse=True)),
+            "worstEpisodes": fw_worst[:8],
+            "note": "UPPER BOUND: rediff truth is DAI-only, so this also counts legitimate baked-in "
+                    "host-read detections. Evidence-proxy variant (subtract windows carrying "
+                    "lexical/FM/chapter ad-evidence) is a TODO pending per-window evidence in the dump.",
+            "evidenceProxyImplemented": False,
+        },
         "pairs": pairs,
     }
 
@@ -190,6 +305,25 @@ def render_markdown(r: dict[str, Any], base_fin: bool, treat_fin: bool) -> str:
                      f"{r['meanTreatmentCandidateCoverage']:.2%} (Δ {r['deltaMeanCandidateCoverage']:+.2%})")
     else:
         lines.append("_Candidate coverage unavailable (one or both dumps are pre-#201)._")
+
+    fw = r.get("falseWidening")
+    if fw and fw["episodeCount"]:
+        lines += ["", "## ⚠️ False-widening — content-seconds enclosed (playhead-xsdz.32)", ""]
+        lines.append(f"**Treatment content-seconds enclosed:** total {fw['treatmentTotalSeconds']:.1f}s "
+                     f"across {fw['episodeCount']} episodes "
+                     f"(mean {fw['treatmentMeanSecondsPerEpisode']:.1f}s/ep, "
+                     f"max {fw['treatmentMaxSecondsPerEpisode']:.1f}s/ep) — "
+                     f"baseline {fw['baselineTotalSeconds']:.1f}s "
+                     f"(Δ {fw['deltaTotalSeconds']:+.1f}s).")
+        lines.append(f"_{fw['note']}_")
+        if fw["worstEpisodes"]:
+            lines += ["", "| episodeId | show | treatment enclosed (s) | Δ vs baseline (s) |",
+                      "|---|---|---:|---:|"]
+            for row in fw["worstEpisodes"]:
+                lines.append(f"| {row['episodeId']} | {row['showSlug']} | "
+                             f"{row['treatment']['falseWideningSeconds']:.1f} | "
+                             f"{row['deltaFalseWideningSeconds']:+.1f} |")
+
     lines += ["", "## Verdict transition matrix (baseline → treatment)", "",
               "| baseline \\ treatment | " + " | ".join(VERDICTS) + " |",
               "|---|" + "---|" * len(VERDICTS)]
@@ -246,11 +380,35 @@ def run_self_test() -> int:
         ("topNegative B first", res["topNegativeDelta"][0]["episodeId"] == "B"),
         ("constraints tallied", {n for n, _ in res["mostFiredConstraints"]} == {"minDuration", "silenceAnchor"}),
     ]
+    # False-widening (playhead-xsdz.32): separate fixtures so the coverage
+    # assertions above stay undisturbed.
+    #   D: window [5,40] over slot [10,20]  -> enclosed 25s outside the slot
+    #   E: window [10,20] exactly on slot   -> enclosed 0s
+    #   F: two windows [0,5]+[95,100] over slot [10,20] -> enclosed 10s (both outside)
+    def fw_ep(eid, windows):
+        return {"episodeId": eid, "showSlug": eid.lower(),
+                "adWindows": [{"startTime": s, "endTime": e} for s, e in windows]}
+    fw_dump = [fw_ep("D", [(5, 40)]), fw_ep("E", [(10, 20)]), fw_ep("F", [(0, 5), (95, 100)])]
+    fw_slot = [{"startSeconds": 10.0, "endSeconds": 20.0}]
+    fw_rediff = [{"episodeId": e["episodeId"], "rotated": True, "adSlots": fw_slot} for e in fw_dump]
+    fw_res = compare(fw_dump, fw_dump, fw_rediff)["falseWidening"]
+    fw_by = {row["episodeId"]: row for row in fw_res["worstEpisodes"]}
+    checks += [
+        ("fw D=25s", abs(fw_by["D"]["treatment"]["falseWideningSeconds"] - 25.0) < 1e-6),
+        ("fw E=0s", abs(fw_by["E"]["treatment"]["falseWideningSeconds"] - 0.0) < 1e-6),
+        ("fw F=10s (both windows outside)", abs(fw_by["F"]["treatment"]["falseWideningSeconds"] - 10.0) < 1e-6),
+        ("fw max=25s", abs(fw_res["treatmentMaxSecondsPerEpisode"] - 25.0) < 1e-6),
+        ("fw total=35s", abs(fw_res["treatmentTotalSeconds"] - 35.0) < 1e-6),
+        ("fw D inside=10s", abs(fw_by["D"]["treatment"]["adWindowSecondsInsideTrueSlots"] - 10.0) < 1e-6),
+        ("fw worst is D", fw_res["worstEpisodes"][0]["episodeId"] == "D"),
+    ]
+
     failures = [name for name, ok in checks if not ok]
     if failures:
         print("SELF-TEST FAIL: " + ", ".join(failures), file=sys.stderr)
         return 1
-    print("self-test ok: +Δ, -Δ, verdict transitions, transition matrix, constraint accounting all verified")
+    print("self-test ok: +Δ, -Δ, verdict transitions, transition matrix, constraint accounting, "
+          "false-widening (enclosed-seconds, union, max/total) all verified")
     return 0
 
 
@@ -260,6 +418,10 @@ def main() -> int:
     ap.add_argument("--treatment", help="treatment pipeline-dump JSON path")
     ap.add_argument("--rediff", default=None, help="rediff JSON path (defaults to repo-root tier-a-rediff)")
     ap.add_argument("--json", action="store_true", help="emit JSON instead of markdown")
+    ap.add_argument("--max-fp-seconds-per-episode", type=float, default=None,
+                    help="HARD GATE (playhead-xsdz.32): fail (exit 3) if any treatment episode's "
+                         "content-seconds-enclosed (false-widening) exceeds this. The activation "
+                         "go/no-go must set this — eating content is the product's worst outcome.")
     ap.add_argument("--self-test", action="store_true", help="run synthetic self-test and exit")
     args = ap.parse_args()
 
@@ -292,6 +454,22 @@ def main() -> int:
         print(json.dumps(result, indent=2))
     else:
         print(render_markdown(result, has_finalizer_telemetry(base_eps), has_finalizer_telemetry(treat_eps)), end="")
+
+    # False-widening HARD GATE (playhead-xsdz.32): activation must not eat content.
+    if args.max_fp_seconds_per_episode is not None:
+        fw = result["falseWidening"]
+        over = [row for row in fw["worstEpisodes"]
+                if row["treatment"]["falseWideningSeconds"] > args.max_fp_seconds_per_episode]
+        # worstEpisodes is truncated to 8; re-scan the pinned max to be safe.
+        if fw["treatmentMaxSecondsPerEpisode"] > args.max_fp_seconds_per_episode:
+            worst = fw["worstEpisodes"][0] if fw["worstEpisodes"] else None
+            wid = worst["episodeId"] if worst else "?"
+            print(f"\nGATE FAIL (false-widening): max {fw['treatmentMaxSecondsPerEpisode']:.1f}s/ep "
+                  f"({wid}) exceeds the {args.max_fp_seconds_per_episode:.1f}s/ep budget. "
+                  f"Activation would eat content — do NOT flip.", file=sys.stderr)
+            return 3
+        print(f"\nGATE PASS (false-widening): max {fw['treatmentMaxSecondsPerEpisode']:.1f}s/ep "
+              f"<= {args.max_fp_seconds_per_episode:.1f}s/ep budget.", file=sys.stderr)
     return 0
 
 
