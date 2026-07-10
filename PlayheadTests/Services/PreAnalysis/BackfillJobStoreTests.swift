@@ -239,15 +239,11 @@ struct BackfillJobStoreTests {
     func testSchemaVersionRecorded() async throws {
         let store = try await makeTestStore()
         let version = try await store.schemaVersion()
-        // Current schema is v24 after playhead-hygc.1.4's
-        // `background_task_runs` table addition. v23 came from
-        // playhead-hygc.1.6's `correction_events` dedupe migration.
-        // v22 came from
-        // playhead-q45f.1 (`ad_listen_rewinds`); v21 came from
-        // playhead-43ed (B3, repeated-ad cache); v20 was the cycle-1 M3
-        // no-op bump alongside the work-journal/H1 reaper additions;
-        // v19 dropped the vestigial `skip_cues` table.
-        #expect(version == 26)
+        // Migration always climbs the full ladder to the current head; assert
+        // against the production constant rather than a literal (hardcoding the
+        // integer has been a recurring source of stale-assertion flakes on
+        // every schema bump — see AnalysisStore.currentSchemaVersion's doc).
+        #expect(version == AnalysisStore.currentSchemaVersion)
     }
 
     @Test("M8: deleting an asset cascades to its backfill_jobs rows")

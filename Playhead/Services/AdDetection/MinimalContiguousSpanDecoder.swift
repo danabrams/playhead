@@ -430,6 +430,7 @@ struct MinimalContiguousSpanDecoder {
         case .userCorrection(let id, let t): return "uC:\(id):\(t)"
         case .classifierSeed(let id, let s): return "cS:\(id):\(s)"
         case .spliceSlot: return "ss"  // bare case: constant key collapses duplicates
+        case .rediffSlot: return "rs"  // bare case: constant key collapses duplicates
         }
     }
 }
@@ -448,6 +449,7 @@ private extension Array where Element == AnchorRef {
             case .userCorrection(let id, let t): key = "uC:\(id):\(t)"
             case .classifierSeed(let id, let s): key = "cS:\(id):\(s)"
             case .spliceSlot: key = "ss"  // bare case: constant key collapses duplicates
+            case .rediffSlot: key = "rs"  // bare case: constant key collapses duplicates
             }
             return seen.insert(key).inserted
         }

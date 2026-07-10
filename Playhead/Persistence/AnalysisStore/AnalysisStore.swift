@@ -887,7 +887,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 26
+    nonisolated static let currentSchemaVersion = 27
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1551,6 +1551,9 @@ actor AnalysisStore {
             // Runs after the model/policy/feature-schema column appends so
             // fresh and upgraded `SELECT *` column ordering stays identical.
             try addTranscriptChunkAvgConfidenceColumnIfNeeded()
+            // playhead-xsdz.27: per-episode played-copy fingerprint store.
+            // Creates `episode_fingerprints`. Bumps schema_version to 27.
+            try migrateEpisodeFingerprintsV27IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1817,6 +1820,10 @@ actor AnalysisStore {
         // playhead-snat: mirror transcript chunk ASR confidence into the
         // ladder seam after the existing appended version columns.
         try addTranscriptChunkAvgConfidenceColumnIfNeeded()
+        // playhead-xsdz.27 (v27): mirror the episode_fingerprints migration
+        // into the ladder seam. Helper is fully idempotent (CREATE TABLE IF
+        // NOT EXISTS + setSchemaVersion), so schema-version tests lock at v27.
+        try migrateEpisodeFingerprintsV27IfNeeded()
     }
     #endif
 
@@ -4116,6 +4123,218 @@ actor AnalysisStore {
             sqlite3_bind_int64(upd, 3, p.rowid)
             try step(upd, expecting: SQLITE_DONE)
         }
+    }
+
+    // MARK: - V27: Per-episode played-copy fingerprint store (playhead-xsdz.27)
+    //
+    // `episode_fingerprints` persists the `ChromaFingerprinter` subfingerprint
+    // stream for one analyzed episode ("played copy" A-side) so the rediff
+    // width-oracle (xsdz.29) and cross-episode library matching (xsdz.17)
+    // don't recompute it.
+    //
+    // Schema:
+    //   `episode_fingerprints`
+    //     analysisAssetId       TEXT PRIMARY KEY  — analysis_assets.id (one
+    //                                               played-copy stream per
+    //                                               episode); FK ON DELETE
+    //                                               CASCADE ties retention to
+    //                                               the episode (see below).
+    //     algorithmVersion      INTEGER NOT NULL  — ChromaFingerprinter.algorithmVersion
+    //                                               at capture. THE staleness
+    //                                               key (see fetch below).
+    //     secondsPerFingerprint REAL NOT NULL     — hop/sampleRate, so a reader
+    //                                               can interpret the stream's
+    //                                               time granularity.
+    //     fingerprintCount      INTEGER NOT NULL  — number of [UInt32] entries;
+    //                                               guards blob length.
+    //     fingerprintBlob       BLOB NOT NULL     — little-endian packed [UInt32]
+    //                                               (EpisodeFingerprintBlobCodec).
+    //     sourceAudioIdentity   TEXT NOT NULL     — analysis_assets.assetFingerprint
+    //                                               at capture; detects audio
+    //                                               that changed under a reused
+    //                                               asset id.
+    //     capturedAt            REAL NOT NULL     — UNIX seconds.
+    //
+    // Sizing: ~0.125 s/fp → a 60–90 min episode is ~29k–43k fingerprints ×
+    // 4 bytes ≈ 116–174 KB blob. Compact enough that BLOB storage is fine.
+    //
+    // RETENTION: keyed on `analysisAssetId` with `REFERENCES analysis_assets(id)
+    // ON DELETE CASCADE` — the same retention discipline every per-episode
+    // child table uses. `PRAGMA foreign_keys = ON` (configurePragmas) is set,
+    // so deleting an asset (deleteAsset / eviction) cascades the fingerprint
+    // row away automatically; the stream can never outlive the audio/analysis
+    // rows it describes, and it can never over-delete (a live asset keeps its
+    // row).
+    //
+    // STALENESS CONTRACT (the whole point — see `ChromaFingerprinter.algorithmVersion`):
+    // fingerprint streams are only comparable within one algorithm version.
+    // `fetchEpisodeFingerprints` returns a row ONLY when its stored
+    // `algorithmVersion` equals the current `ChromaFingerprinter.algorithmVersion`;
+    // a mismatch reads as `nil` (re-fingerprint needed) — the store NEVER hands
+    // back a stream to be Hamming-compared across versions.
+
+    /// V27 migration — create `episode_fingerprints`. Idempotent
+    /// (`CREATE TABLE IF NOT EXISTS`).
+    private func migrateEpisodeFingerprintsV27IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 27 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS episode_fingerprints (
+                analysisAssetId       TEXT PRIMARY KEY REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                algorithmVersion      INTEGER NOT NULL,
+                secondsPerFingerprint REAL NOT NULL,
+                fingerprintCount      INTEGER NOT NULL,
+                fingerprintBlob       BLOB NOT NULL,
+                sourceAudioIdentity   TEXT NOT NULL,
+                capturedAt            REAL NOT NULL
+            );
+        """)
+        try setSchemaVersion(27)
+    }
+
+    /// Persist (upsert) the played-copy fingerprint stream for an asset. One
+    /// row per asset — a re-fingerprint replaces the prior stream in place.
+    ///
+    /// The record carries its own `algorithmVersion` (stamped from
+    /// `ChromaFingerprinter.algorithmVersion` at capture); it is stored
+    /// verbatim so the read path can enforce the staleness contract.
+    func upsertEpisodeFingerprints(_ record: EpisodeFingerprintRecord) throws {
+        let blob = EpisodeFingerprintBlobCodec.encode(record.fingerprints)
+        let sql = """
+            INSERT INTO episode_fingerprints
+            (analysisAssetId, algorithmVersion, secondsPerFingerprint,
+             fingerprintCount, fingerprintBlob, sourceAudioIdentity, capturedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(analysisAssetId) DO UPDATE SET
+                algorithmVersion = excluded.algorithmVersion,
+                secondsPerFingerprint = excluded.secondsPerFingerprint,
+                fingerprintCount = excluded.fingerprintCount,
+                fingerprintBlob = excluded.fingerprintBlob,
+                sourceAudioIdentity = excluded.sourceAudioIdentity,
+                capturedAt = excluded.capturedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, record.analysisAssetId)
+        // algorithmVersion is UInt32 — bind via int64 so the full unsigned
+        // range round-trips (sqlite3_bind_int / Int32(_) would trap above 2^31).
+        sqlite3_bind_int64(stmt, 2, Int64(record.algorithmVersion))
+        bind(stmt, 3, record.secondsPerFingerprint)
+        bind(stmt, 4, record.fingerprints.count)
+        // BLOB payload — SQLITE_TRANSIENT so SQLite copies the bytes and our
+        // `Data` can deallocate on return. A zero-length stream is rejected by
+        // the capture path (makeRecord returns nil), so `blob` is non-empty
+        // here; still, bind an empty payload as a zero-length blob (not NULL)
+        // to honor the NOT NULL column if a caller ever upserts an empty stream.
+        let byteCount = blob.count
+        blob.withUnsafeBytes { rawBuf in
+            if let base = rawBuf.baseAddress, byteCount > 0 {
+                _ = sqlite3_bind_blob(stmt, 5, base, Int32(byteCount), SQLITE_TRANSIENT_PTR)
+            } else {
+                _ = sqlite3_bind_zeroblob(stmt, 5, 0)
+            }
+        }
+        bind(stmt, 6, record.sourceAudioIdentity)
+        bind(stmt, 7, record.capturedAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Fetch the played-copy fingerprint stream for an asset — ONLY IF the
+    /// stored `algorithmVersion` equals the current
+    /// `ChromaFingerprinter.algorithmVersion`.
+    ///
+    /// Returns `nil` when:
+    ///   * no row exists (never fingerprinted), OR
+    ///   * the stored `algorithmVersion` differs from the current one
+    ///     (STALE — the stream is uncomparable to today's fingerprinter, so
+    ///     the caller must re-fingerprint; the store NEVER Hamming-compares
+    ///     across versions), OR
+    ///   * the blob is corrupt or its length disagrees with `fingerprintCount`
+    ///     (treated as absent so a bad row triggers a clean re-fingerprint).
+    ///
+    /// This gate is on `algorithmVersion` ONLY; it deliberately does NOT
+    /// compare the stored `sourceAudioIdentity` against the asset's current
+    /// `assetFingerprint`. The identity is persisted (and surfaced on the
+    /// returned record) so the CONSUMER can decide — xsdz.29 must check it
+    /// before trusting a stream as the rediff A-side, because an asset id
+    /// reused for re-downloaded (different) audio would otherwise return a
+    /// version-matching but audio-mismatched stream.
+    ///
+    /// The stale row is left on disk untouched — the next `upsert` replaces it.
+    func fetchEpisodeFingerprints(assetId: String) throws -> EpisodeFingerprintRecord? {
+        let sql = """
+            SELECT analysisAssetId, algorithmVersion, secondsPerFingerprint,
+                   fingerprintCount, fingerprintBlob, sourceAudioIdentity, capturedAt
+            FROM episode_fingerprints
+            WHERE analysisAssetId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+
+        let storedVersion = UInt32(truncatingIfNeeded: sqlite3_column_int64(stmt, 1))
+        // STALENESS GATE: a version mismatch reads as ABSENT.
+        guard storedVersion == ChromaFingerprinter.algorithmVersion else { return nil }
+
+        let expectedCount = Int(sqlite3_column_int64(stmt, 3))
+        // SQLite's documented "safest policy": call column_blob BEFORE
+        // column_bytes so a type conversion can't invalidate the pointer.
+        // (Moot here — fingerprintBlob is BLOB NOT NULL, always written via
+        // bind_blob/bind_zeroblob, so no conversion occurs — but follow the
+        // idiom. A zero-length blob returns a NULL pointer → empty Data.)
+        let blob: Data
+        if let ptr = sqlite3_column_blob(stmt, 4) {
+            let blobSize = Int(sqlite3_column_bytes(stmt, 4))
+            blob = Data(bytes: ptr, count: blobSize)
+        } else {
+            blob = Data()
+        }
+        // Corrupt/truncated blob, or count/blob disagreement → treat as absent.
+        guard let fingerprints = EpisodeFingerprintBlobCodec.decode(blob),
+              fingerprints.count == expectedCount else {
+            return nil
+        }
+        return EpisodeFingerprintRecord(
+            analysisAssetId: text(stmt, 0),
+            algorithmVersion: storedVersion,
+            secondsPerFingerprint: sqlite3_column_double(stmt, 2),
+            fingerprints: fingerprints,
+            sourceAudioIdentity: text(stmt, 5),
+            capturedAt: sqlite3_column_double(stmt, 6)
+        )
+    }
+
+    /// The `algorithmVersion` stored for an asset, regardless of whether it
+    /// matches the current one, or `nil` when no row exists. Lets a caller
+    /// distinguish "never fingerprinted" (`nil`) from "stale fingerprint
+    /// present" (a value `!= ChromaFingerprinter.algorithmVersion`) without
+    /// decoding the blob — useful for diagnostics and re-fingerprint planning.
+    func storedEpisodeFingerprintVersion(assetId: String) throws -> UInt32? {
+        let stmt = try prepare(
+            "SELECT algorithmVersion FROM episode_fingerprints WHERE analysisAssetId = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return UInt32(truncatingIfNeeded: sqlite3_column_int64(stmt, 0))
+    }
+
+    /// Delete the played-copy fingerprint row for an asset. Idempotent
+    /// (no-op when absent). The FK cascade already removes the row when the
+    /// asset itself is deleted; this is for an explicit invalidation path.
+    func deleteEpisodeFingerprints(assetId: String) throws {
+        let stmt = try prepare("DELETE FROM episode_fingerprints WHERE analysisAssetId = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Total number of persisted episode-fingerprint rows. Exposed for
+    /// retention/cascade tests.
+    func episodeFingerprintCount() throws -> Int {
+        let stmt = try prepare("SELECT COUNT(*) FROM episode_fingerprints")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(stmt, 0))
     }
 
     // MARK: - Transcript chunk ASR confidence (playhead-snat)

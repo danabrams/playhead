@@ -204,6 +204,11 @@ enum CausalInference {
                 // like `.userCorrection`. It carries no causal-source signal, so
                 // it contributes to none of the counts below.
                 break
+            case .rediffSlot:
+                // Width-ownership marker (playhead-xsdz.29) — attribution-neutral,
+                // like `.spliceSlot`. It sets WIDTH, not PRESENCE, so it carries
+                // no causal-source signal and contributes to none of the counts.
+                break
             }
         }
 

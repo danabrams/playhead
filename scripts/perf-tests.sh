@@ -38,6 +38,9 @@ MEASUREMENT_TESTS=(
   # only their single perf test opts in (gated with PerfGate in-source).
   "PlayheadTests/SemanticScanPersistenceTests/fetchReusableSemanticScanResultPerformance()"
   "PlayheadTests/AdmissionControllerTests/testEnqueueScales()"
+  # xsdz.26: 60-minute-episode fingerprinting wall-clock budget (needs the
+  # staged corpus audio in the main checkout; skips cleanly without it).
+  "PlayheadTests/ChromaFingerprinterPerfTests/sixtyMinuteEpisodeUnderBudget()"
   # Note: AnalysisWorkSchedulerOutcomeBookkeepingTests is intentionally NOT
   # here — its cancel-mid-decode tests were rewritten to be deterministic
   # (via processNextDispatchableJobForTesting) and un-gated, so they run in

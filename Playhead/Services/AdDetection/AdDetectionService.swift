@@ -437,6 +437,30 @@ struct AdDetectionConfig: Sendable {
     /// ⇒ neither pass runs and the pipeline is byte-identical.
     let spliceSlotShadowEnabled: Bool
 
+    /// playhead-xsdz.29: master flag for the post-decode REDIFF slot OWNERSHIP
+    /// pass (the double-fetch width oracle). When `false` (the production
+    /// default), `runBackfill` never invokes the rediff pass — no store read for
+    /// the A-side fingerprints, no B-side fetch, no differ, no span rewrite, no
+    /// `.rediffSlot` provenance — so the pipeline OUTPUT is byte-identical to
+    /// pre-xsdz.29. The rediff pass ALSO no-ops when no `RediffBSideProvider` is
+    /// injected (the production case today — the re-fetch scheduler is xsdz.28),
+    /// so flipping this flag alone changes nothing until a provider exists.
+    /// Rediff is the SOLE production width setter (contract 2026-07-07); the
+    /// acoustic `spliceSlotOwnershipEnabled` path is a separate, mutually-
+    /// exclusive channel and must not be ON at the same time.
+    let rediffSlotOwnershipEnabled: Bool
+
+    /// playhead-xsdz.29: master flag for the OWNERSHIP-OFF rediff SHADOW pass.
+    /// When `true` AND `rediffSlotOwnershipEnabled == false` AND a
+    /// `RediffBSideProvider` is injected, `runBackfill` computes the would-be
+    /// rediff dispositions via the SAME engine the flag-ON path uses, emits one
+    /// `rediffslot.shadow` breadcrumb per span, and records structured rows to an
+    /// injected observer — WITHOUT applying any rewrite (no `.rediffSlot`
+    /// provenance, no re-persist). Default OFF; ON only in dogfood-capture
+    /// builds. Independent of the acoustic `spliceSlotShadowEnabled` (both can
+    /// shadow at once, to their OWN observers). Both flags OFF ⇒ byte-identical.
+    let rediffSlotShadowEnabled: Bool
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -520,8 +544,21 @@ struct AdDetectionConfig: Sendable {
         perShowThresholdMinSamples: Int = 5,
         spanFinalizerEnabled: Bool = false,
         spliceSlotOwnershipEnabled: Bool = false,
-        spliceSlotShadowEnabled: Bool = false
+        spliceSlotShadowEnabled: Bool = false,
+        rediffSlotOwnershipEnabled: Bool = false,
+        rediffSlotShadowEnabled: Bool = false
     ) {
+        // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
+        // is the SOLE production width setter (contract 2026-07-07) and the
+        // acoustic ownership pass is retired to shadow/eval. Enabling BOTH would
+        // let the acoustic pass rewrite+persist `.spliceSlot` widths and then the
+        // rediff pass re-rewrite them `.rediffSlot` on top — silent double-
+        // ownership. Fail loudly at construction instead (both default OFF, so
+        // this never fires in production or any current config/test).
+        precondition(
+            !(spliceSlotOwnershipEnabled && rediffSlotOwnershipEnabled),
+            "spliceSlotOwnershipEnabled and rediffSlotOwnershipEnabled are mutually-exclusive width setters — enable at most one (rediff is the sole production width setter, playhead-xsdz.29)"
+        )
         self.candidateThreshold = candidateThreshold
         self.confirmationThreshold = confirmationThreshold
         self.suppressionThreshold = suppressionThreshold
@@ -564,6 +601,8 @@ struct AdDetectionConfig: Sendable {
         self.spanFinalizerEnabled = spanFinalizerEnabled
         self.spliceSlotOwnershipEnabled = spliceSlotOwnershipEnabled
         self.spliceSlotShadowEnabled = spliceSlotShadowEnabled
+        self.rediffSlotOwnershipEnabled = rediffSlotOwnershipEnabled
+        self.rediffSlotShadowEnabled = rediffSlotShadowEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -608,7 +647,9 @@ struct AdDetectionConfig: Sendable {
         perShowThresholdMinSamples: 5,
         spanFinalizerEnabled: false,
         spliceSlotOwnershipEnabled: false,
-        spliceSlotShadowEnabled: false
+        spliceSlotShadowEnabled: false,
+        rediffSlotOwnershipEnabled: false,
+        rediffSlotShadowEnabled: false
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -1054,6 +1095,20 @@ actor AdDetectionService {
     /// to the flag-OFF pipeline.
     private let spliceSlotShadowObserver: SpliceSlotShadowObserver?
 
+    /// playhead-xsdz.29: the re-fetched B-side audio source for the rediff width
+    /// oracle. `nil` in production (PlayheadRuntime never constructs one — the
+    /// live re-fetch scheduler + as-played tap are DEFERRED to xsdz.28 / a
+    /// follow-up), so the rediff pass no-ops and the pipeline is byte-identical.
+    /// Tests inject a provider to exercise the offline oracle. It NEVER feeds
+    /// back into presence decisions — rediff owns WIDTH only.
+    private let rediffBSideProvider: RediffBSideProvider?
+
+    /// playhead-xsdz.29: observation-only sink for REDIFF-sourced shadow rows,
+    /// separate from `spliceSlotShadowObserver` so rediff and acoustic rows never
+    /// comingle. `nil` in production; injected by dogfood-capture / tests. NEVER
+    /// feeds back into the decision path.
+    private let rediffSlotShadowObserver: SpliceSlotShadowObserver?
+
     /// playhead-fbsignals.9 fire instrumentation: optional observation-only sink
     /// that records, per asset, how many candidate spans the xsdz.9 HARD-NEGATIVE
     /// suppression actually moved (the NON-ledger half of cross-episode memory; the
@@ -1482,6 +1537,8 @@ actor AdDetectionService {
         brandAppearanceChannelTapObserver: BrandAppearanceChannelTapObserver? = nil,
         temporalRegularizationObserver: TemporalRegularizationObserver? = nil,
         spliceSlotShadowObserver: SpliceSlotShadowObserver? = nil,
+        rediffBSideProvider: RediffBSideProvider? = nil,
+        rediffSlotShadowObserver: SpliceSlotShadowObserver? = nil,
         negativeBankSuppressionObserver: NegativeBankSuppressionObserver? = nil,
         perShowThresholdOffsetObserver: PerShowThresholdOffsetObserver? = nil,
         skipOrchestrator: SkipOrchestrator? = nil,
@@ -1516,6 +1573,8 @@ actor AdDetectionService {
         self.brandAppearanceChannelTapObserver = brandAppearanceChannelTapObserver
         self.temporalRegularizationObserver = temporalRegularizationObserver
         self.spliceSlotShadowObserver = spliceSlotShadowObserver
+        self.rediffBSideProvider = rediffBSideProvider
+        self.rediffSlotShadowObserver = rediffSlotShadowObserver
         self.negativeBankSuppressionObserver = negativeBankSuppressionObserver
         self.perShowThresholdOffsetObserver = perShowThresholdOffsetObserver
         self.skipOrchestrator = skipOrchestrator
@@ -3262,6 +3321,34 @@ actor AdDetectionService {
             )
         }
 
+        // ── Post-decode REDIFF-SLOT OWNERSHIP pass (playhead-xsdz.29) ─────────
+        // The double-fetch width oracle: the SOLE production width setter
+        // (contract 2026-07-07). Independent of the acoustic block above (which
+        // is mutually-exclusive by contract) — it re-diffs the stored played-copy
+        // (A) against a re-fetched B-side and hands the played-timeline DAI slots
+        // to the SAME `SpliceSlotDispositionEngine`, rewriting kept slots with
+        // `.rediffSlot` provenance. Both branches no-op unless a
+        // `RediffBSideProvider` is injected AND the stored A-side + a fresh
+        // B-side exist, so with the flags OFF (or no provider — the production
+        // case today) the pipeline output is byte-identical.
+        if config.rediffSlotOwnershipEnabled {
+            decodedSpans = await applyRediffSlotOwnershipPass(
+                decodedSpans: decodedSpans,
+                atoms: atoms,
+                atomEvidence: atomEvidence,
+                analysisAssetId: analysisAssetId,
+                showId: catalogShowId
+            )
+        } else if config.rediffSlotShadowEnabled {
+            await runRediffSlotShadowPass(
+                decodedSpans: decodedSpans,
+                atoms: atoms,
+                atomEvidence: atomEvidence,
+                analysisAssetId: analysisAssetId,
+                showId: catalogShowId
+            )
+        }
+
         for span in decodedSpans {
             try Task.checkCancellation()
 
@@ -3284,10 +3371,12 @@ actor AdDetectionService {
             // own snap logic. So this bead is purely additive within the
             // legacy fallback path; the bracket cascade is unchanged.
             let (startAdj, endAdj): (Double, Double)
-            if span.anchorProvenance.contains(.spliceSlot) {
-                // playhead-xsdz.20: slot-owned spans bypass BOTH the bracket-aware
-                // refiner AND the legacy BoundaryRefiner — the ±3s snap clamps
-                // would blur the physical splice the slot pass just locked to.
+            if span.anchorProvenance.contains(where: { $0.isWidthOwnership }) {
+                // playhead-xsdz.20 / xsdz.29: WIDTH-owned spans (acoustic splice OR
+                // rediff) bypass BOTH the bracket-aware refiner AND the legacy
+                // BoundaryRefiner — the ±3s snap clamps would blur the physical
+                // splice the slot pass just locked to (rediff is the SOLE width
+                // setter, so its fingerprint-diff edges must not be nudged either).
                 // Non-slot spans keep today's exact refinement path.
                 startAdj = 0.0
                 endAdj = 0.0
@@ -4944,37 +5033,15 @@ actor AdDetectionService {
         }
 
         // Phase (ii): await the negative bank ONCE for the verdict table. Only
-        // when the cross-episode-memory flag is on AND a bank is wired;
-        // otherwise every verdict is `false` (dormant), matching the OFF path.
-        let bankWired = config.crossEpisodeMemoryEnabled && negativeFingerprintBank != nil
-        var coreMatch = [Bool](repeating: false, count: decodedSpans.count)
-        var slotMatch = [Bool](repeating: false, count: decodedSpans.count)
-        if bankWired, let bank = negativeFingerprintBank {
-            for (i, span) in decodedSpans.enumerated() {
-                // CORE tokens: atoms in the span's minted ordinal range.
-                let coreTokens = Self.negativeBankTokens(
-                    atoms.filter {
-                        $0.atomKey.atomOrdinal >= span.firstAtomOrdinal
-                            && $0.atomKey.atomOrdinal <= span.lastAtomOrdinal
-                    }
-                )
-                if !coreTokens.isEmpty {
-                    coreMatch[i] = await bank.bestMatch(candidateTokens: coreTokens, show: showId) != nil
-                }
-                // SLOT tokens: atoms whose interval intersects the slot interval.
-                if let slot = resolvedSlots[i] {
-                    let slotRange = TimeRange(start: slot.startTime, end: slot.endTime)
-                    let slotTokens = Self.negativeBankTokens(
-                        atoms.filter {
-                            TimeRange(start: $0.startTime, end: $0.endTime).intersects(slotRange)
-                        }
-                    )
-                    if !slotTokens.isEmpty {
-                        slotMatch[i] = await bank.bestMatch(candidateTokens: slotTokens, show: showId) != nil
-                    }
-                }
-            }
-        }
+        // when the cross-episode-memory flag is on AND a bank is wired; otherwise
+        // every verdict is `false` (dormant), matching the OFF path. Shared with
+        // the rediff pass via `negativeBankVerdicts` (identical values).
+        let (coreMatch, slotMatch) = await negativeBankVerdicts(
+            decodedSpans: decodedSpans,
+            atoms: atoms,
+            resolvedSlots: resolvedSlots,
+            showId: showId
+        )
 
         // Phase (iii): the pure disposition engine (passes 2–4).
         let candidates: [SpliceSlotCandidate] = decodedSpans.enumerated().map { i, span in
@@ -5043,6 +5110,245 @@ actor AdDetectionService {
         if let observer = spliceSlotShadowObserver {
             await observer.record(rows, assetId: analysisAssetId)
         }
+    }
+
+    // MARK: - Rediff-slot ownership pass (playhead-xsdz.29)
+
+    /// The shared output of the rediff slot pass: per-span candidates (with the
+    /// synthesized rediff slot), the resolver-parity diagnostics, and the
+    /// disposition result. Both the flag-ON ownership pass and the shadow pass
+    /// consume this, so the shadow's would-be dispositions are the flag-ON
+    /// dispositions by construction (same `shadow == flag-ON` identity the
+    /// acoustic pass relies on).
+    struct RediffSlotPassComputation: Sendable {
+        let candidates: [SpliceSlotCandidate]
+        let diagnostics: [SpliceSlotDiagnostics]
+        let result: SpliceSlotDispositionResult
+    }
+
+    /// Compute the rediff slot pass, or `nil` when there is no rediff signal:
+    /// no `RediffBSideProvider` injected (the production case today — the
+    /// re-fetch scheduler is xsdz.28), no stored A-side fingerprints, no current
+    /// asset row, no re-fetched B-side available, or the double-gate /
+    /// alignedFraction guard rejected the comparison. `nil` ⇒ the caller leaves
+    /// `decodedSpans` untouched (status-quo width — the rediff-sole-setter
+    /// contract's fall-through).
+    private func computeRediffSlotPass(
+        decodedSpans: [DecodedSpan],
+        atoms: [TranscriptAtom],
+        atomEvidence: [AtomEvidence],
+        analysisAssetId: String,
+        showId: String?
+    ) async -> RediffSlotPassComputation? {
+        guard !decodedSpans.isEmpty else { return nil }
+        // The re-fetched B-side source. Absent in production → no-op (the whole
+        // pass is inert until the re-fetch scheduler / as-played tap lands).
+        guard let provider = rediffBSideProvider else { return nil }
+
+        // Stored played-copy (A-side) fingerprint stream. The store's fetch
+        // already gates on `algorithmVersion` (returns nil on a version mismatch);
+        // the sourceAudioIdentity double-gate is applied by `gateAndDiff` below.
+        let storedASide: EpisodeFingerprintRecord
+        do {
+            guard let record = try await store.fetchEpisodeFingerprints(assetId: analysisAssetId) else { return nil }
+            storedASide = record
+        } catch {
+            logger.warning("[xsdz.29] fetchEpisodeFingerprints failed: \(error.localizedDescription)")
+            return nil
+        }
+
+        // The asset's CURRENT assetFingerprint, for the sourceAudioIdentity gate.
+        let currentAssetFingerprint: String
+        do {
+            guard let asset = try await store.fetchAsset(id: analysisAssetId) else { return nil }
+            currentAssetFingerprint = asset.assetFingerprint
+        } catch {
+            logger.warning("[xsdz.29] fetchAsset failed: \(error.localizedDescription)")
+            return nil
+        }
+
+        // Re-fetched B-side as mono 16 kHz PCM. Absent → no rediff signal this run.
+        guard let bSideSamples = await provider.refetchedBSideMono16kHz(assetId: analysisAssetId) else { return nil }
+
+        let outcome = RediffSlotOwnership.gateAndDiff(
+            storedASide: storedASide,
+            refetchedBSideSamples16kHz: bSideSamples,
+            currentAssetFingerprint: currentAssetFingerprint
+        )
+        guard case .accepted(let acceptance) = outcome else {
+            logger.info(
+                "[xsdz.29] rediff gate rejected asset=\(analysisAssetId, privacy: .public): \(String(describing: outcome), privacy: .public)"
+            )
+            return nil
+        }
+
+        // Phase 1: resolve per-span rediff slots (bank-agnostic — resolution does
+        // not depend on the bank verdicts, only slot-token gathering does).
+        let allFalse = [Bool](repeating: false, count: decodedSpans.count)
+        let bundle = RediffSlotOwnership.candidates(
+            decodedSpans: decodedSpans,
+            atomEvidence: atomEvidence,
+            playedSlots: acceptance.playedSlots,
+            coreBankMatch: allFalse,
+            slotBankMatch: allFalse
+        )
+
+        // Phase 2: the negative-bank verdict table over the resolved slots (the
+        // SAME two-phase pattern the acoustic pass uses; dormant unless the
+        // cross-episode-memory flag is on AND a bank is wired).
+        let (coreMatch, slotMatch) = await negativeBankVerdicts(
+            decodedSpans: decodedSpans,
+            atoms: atoms,
+            resolvedSlots: bundle.synthesizedSlots,
+            showId: showId
+        )
+
+        // Phase 3: candidates with the real verdicts → the shared disposition engine.
+        let candidates: [SpliceSlotCandidate] = decodedSpans.indices.map { i in
+            SpliceSlotCandidate(
+                mintedInterval: bundle.candidates[i].mintedInterval,
+                slot: bundle.candidates[i].slot,
+                slotIntersectsAtoms: bundle.candidates[i].slotIntersectsAtoms,
+                coreBankMatch: coreMatch[i],
+                slotBankMatch: slotMatch[i]
+            )
+        }
+        let result = SpliceSlotDispositionEngine.computeDispositions(candidates)
+        return RediffSlotPassComputation(
+            candidates: candidates,
+            diagnostics: bundle.diagnostics,
+            result: result
+        )
+    }
+
+    /// Flag-ON rediff OWNERSHIP pass: materialize the rediff dispositions via the
+    /// pure `SpliceSlotRewriter` carrying `.rediffSlot` provenance, reconcile
+    /// persistence (delete superseded/absorbed, upsert the rewritten set), and
+    /// return the rewritten spans. A `nil` computation (no rediff signal) leaves
+    /// `decodedSpans` byte-identical.
+    private func applyRediffSlotOwnershipPass(
+        decodedSpans: [DecodedSpan],
+        atoms: [TranscriptAtom],
+        atomEvidence: [AtomEvidence],
+        analysisAssetId: String,
+        showId: String?
+    ) async -> [DecodedSpan] {
+        guard let computation = await computeRediffSlotPass(
+            decodedSpans: decodedSpans,
+            atoms: atoms,
+            atomEvidence: atomEvidence,
+            analysisAssetId: analysisAssetId,
+            showId: showId
+        ) else { return decodedSpans }
+
+        let rewrite = SpliceSlotRewriter.apply(
+            decodedSpans: decodedSpans,
+            dispositions: computation.result.dispositions,
+            atomEvidence: atomEvidence,
+            provenance: .rediffSlot
+        )
+
+        let keptCount = computation.result.dispositions.filter {
+            if case .keepSlot = $0 { return true } else { return false }
+        }.count
+        if keptCount > 0 || !rewrite.absorbedIds.isEmpty {
+            logger.info(
+                "[xsdz.29] rediff slot pass asset=\(analysisAssetId, privacy: .public) spans=\(decodedSpans.count) kept=\(keptCount) absorbed=\(rewrite.absorbedIds.count) rounds=\(computation.result.fixpointRounds)"
+            )
+        }
+
+        do {
+            try await store.deleteDecodedSpans(ids: rewrite.supersededIds)
+            if !rewrite.finalSpans.isEmpty {
+                try await store.upsertDecodedSpans(rewrite.finalSpans)
+            }
+        } catch {
+            logger.warning("[xsdz.29] rediff slot-pass re-persist failed: \(error.localizedDescription)")
+        }
+
+        return rewrite.finalSpans
+    }
+
+    /// Flag-OFF-ownership / shadow-ON rediff SHADOW pass: compute the would-be
+    /// rediff dispositions via the SAME `computeRediffSlotPass` helper the flag-ON
+    /// path uses, emit one `rediffslot.shadow` breadcrumb per span, and record
+    /// structured rows to `rediffSlotShadowObserver` — WITHOUT applying any
+    /// rewrite (no `.rediffSlot` provenance, no re-persist), so the decision path
+    /// stays byte-identical.
+    private func runRediffSlotShadowPass(
+        decodedSpans: [DecodedSpan],
+        atoms: [TranscriptAtom],
+        atomEvidence: [AtomEvidence],
+        analysisAssetId: String,
+        showId: String?
+    ) async {
+        guard let computation = await computeRediffSlotPass(
+            decodedSpans: decodedSpans,
+            atoms: atoms,
+            atomEvidence: atomEvidence,
+            analysisAssetId: analysisAssetId,
+            showId: showId
+        ) else { return }
+
+        let rows = SpliceSlotShadowRowBuilder.makeRows(
+            assetId: analysisAssetId,
+            spanIds: decodedSpans.map(\.id),
+            candidates: computation.candidates,
+            diagnostics: computation.diagnostics,
+            dispositions: computation.result.dispositions
+        )
+
+        for row in rows {
+            logger.notice("\(RediffSlotShadowBreadcrumb.format(row), privacy: .public)")
+        }
+
+        if let observer = rediffSlotShadowObserver {
+            await observer.record(rows, assetId: analysisAssetId)
+        }
+    }
+
+    /// The negative-bank per-span verdict table (core-token + slot-token matches),
+    /// index-aligned with `decodedSpans`. Shared by the acoustic (`resolvedSlots`
+    /// from `SpliceSlotResolver`) and rediff (`resolvedSlots` from
+    /// `RediffSlotOwnership`) slot passes so both derive identical verdicts.
+    /// Dormant (all-false) unless `crossEpisodeMemoryEnabled` is on AND a bank is
+    /// wired — matching the flag-OFF path.
+    private func negativeBankVerdicts(
+        decodedSpans: [DecodedSpan],
+        atoms: [TranscriptAtom],
+        resolvedSlots: [SpliceSlot?],
+        showId: String?
+    ) async -> (coreMatch: [Bool], slotMatch: [Bool]) {
+        let bankWired = config.crossEpisodeMemoryEnabled && negativeFingerprintBank != nil
+        var coreMatch = [Bool](repeating: false, count: decodedSpans.count)
+        var slotMatch = [Bool](repeating: false, count: decodedSpans.count)
+        if bankWired, let bank = negativeFingerprintBank {
+            for (i, span) in decodedSpans.enumerated() {
+                // CORE tokens: atoms in the span's minted ordinal range.
+                let coreTokens = Self.negativeBankTokens(
+                    atoms.filter {
+                        $0.atomKey.atomOrdinal >= span.firstAtomOrdinal
+                            && $0.atomKey.atomOrdinal <= span.lastAtomOrdinal
+                    }
+                )
+                if !coreTokens.isEmpty {
+                    coreMatch[i] = await bank.bestMatch(candidateTokens: coreTokens, show: showId) != nil
+                }
+                // SLOT tokens: atoms whose interval intersects the slot interval.
+                if let slot = resolvedSlots[i] {
+                    let slotRange = TimeRange(start: slot.startTime, end: slot.endTime)
+                    let slotTokens = Self.negativeBankTokens(
+                        atoms.filter {
+                            TimeRange(start: $0.startTime, end: $0.endTime).intersects(slotRange)
+                        }
+                    )
+                    if !slotTokens.isEmpty {
+                        slotMatch[i] = await bank.bestMatch(candidateTokens: slotTokens, show: showId) != nil
+                    }
+                }
+            }
+        }
+        return (coreMatch, slotMatch)
     }
 
     /// Tokenize + prefix-clamp atoms' joined text the same way the negative-bank
@@ -5145,9 +5451,15 @@ actor AdDetectionService {
         // entry when that score is significant. Gated OFF by default: when
         // `audioForensicsEnabled` is false the detector is never called, so
         // NO entry is built and the ledger is byte-identical to pre-xsdz.8.
-        // playhead-xsdz.20: SUPPRESS the `.audioForensics` entry on slot-owned
-        // spans. The slot width evidence and this entry derive from the SAME
-        // physical discontinuity, so keeping both would double-count the seam.
+        // playhead-xsdz.20: SUPPRESS the `.audioForensics` entry on ACOUSTIC
+        // slot-owned spans. The acoustic slot width is DERIVED FROM the
+        // audio-forensics seam (the resolver picks edges from
+        // AudioForensicsBoundaryDetector scores), so keeping both double-counts
+        // the SAME evidence. DELIBERATELY splice-only (NOT `isWidthOwnership`):
+        // a rediff slot's width comes from an INDEPENDENT fingerprint diff, so an
+        // audio-forensics entry at the same physical seam is corroboration, not a
+        // double-count — it is kept. (Revisit this scoring choice at the rediff
+        // activation eval; flag-OFF today so it is inert either way.)
         let audioForensicsEntries = config.audioForensicsEnabled
             && !span.anchorProvenance.contains(.spliceSlot)
             ? audioForensicsDetector.buildEntries(
@@ -5816,18 +6128,20 @@ actor AdDetectionService {
         let decoder = MinimalContiguousSpanDecoder()
         let spans = decoder.decode(atoms: evidence, assetId: analysisAssetId)
 
-        // playhead-xsdz.20 CLOBBER GUARD: this projector upserts FRESHLY decoded
-        // spans that never carry `.spliceSlot`. Over a slot-owned asset a fresh
-        // decode re-mints the ORIGINAL ordinals → the original `makeId` → it
-        // would RE-INSERT the superseded-id row the backfill slot pass deleted
-        // (resurrecting the ghost row nested inside the slot span). So if this
-        // asset already has ANY persisted slot-owned rows, skip the upsert
-        // entirely and leave the slot-owned rows authoritative.
+        // playhead-xsdz.20 / xsdz.29 CLOBBER GUARD: this projector upserts FRESHLY
+        // decoded spans that never carry a width-ownership marker. Over a
+        // width-owned asset (acoustic splice OR rediff) a fresh decode re-mints
+        // the ORIGINAL ordinals → the original `makeId` → it would RE-INSERT the
+        // superseded-id row the backfill slot pass deleted (resurrecting the ghost
+        // row nested inside the slot span). So if this asset already has ANY
+        // persisted width-owned rows, skip the upsert entirely and leave the
+        // slot-owned rows authoritative. Checks BOTH markers via `isWidthOwnership`
+        // so a rediff-owned asset is protected identically to a splice-owned one.
         let existingSpans = (try? await store.fetchDecodedSpans(assetId: analysisAssetId)) ?? []
-        let assetIsSlotOwned = existingSpans.contains { $0.anchorProvenance.contains(.spliceSlot) }
+        let assetIsSlotOwned = existingSpans.contains { $0.anchorProvenance.contains(where: { $0.isWidthOwnership }) }
         if assetIsSlotOwned {
             logger.info(
-                "Phase 5 projector: asset=\(analysisAssetId, privacy: .public) has slot-owned rows — skipping upsert to preserve splice-slot ownership"
+                "Phase 5 projector: asset=\(analysisAssetId, privacy: .public) has width-owned rows — skipping upsert to preserve slot (splice/rediff) ownership"
             )
         } else {
             // Persist to SQLite so TranscriptPeekView can read them.

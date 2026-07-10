@@ -323,17 +323,25 @@ struct SpliceSlotRewriteResult: Sendable {
 
 /// PURE pass-5 rewrite. Applies engine dispositions to the decoded spans:
 /// rewrites each kept slot to its slot interval, recomputes INTERSECTS ordinals
-/// + `makeId`, appends `.spliceSlot` provenance, drops absorbed spans, and
-/// reports the ids whose rows must be cleaned up. No I/O, no store, no resolver.
+/// + `makeId`, appends the width-owner provenance marker, drops absorbed spans,
+/// and reports the ids whose rows must be cleaned up. No I/O, no store, no
+/// resolver.
 ///
 /// `atomEvidence` supplies the atom stream for the INTERSECTS ordinal recompute
 /// (positive-duration interval intersection with the slot). `dispositions` must
 /// be index-aligned with `decodedSpans`.
+///
+/// `provenance` is the width-owner marker appended to each kept slot's span.
+/// Defaults to `.spliceSlot` so the acoustic ownership path (playhead-xsdz.20)
+/// is byte-for-byte unchanged; the rediff ownership path (playhead-xsdz.29)
+/// passes `.rediffSlot` so a persisted span records WHICH oracle set its width.
+/// Both are BARE, gate-inert provenance markers — only the wire token differs.
 enum SpliceSlotRewriter {
     static func apply(
         decodedSpans: [DecodedSpan],
         dispositions: [SpliceSlotDisposition],
-        atomEvidence: [AtomEvidence]
+        atomEvidence: [AtomEvidence],
+        provenance: AnchorRef = .spliceSlot
     ) -> SpliceSlotRewriteResult {
         precondition(
             dispositions.count == decodedSpans.count,
@@ -369,9 +377,9 @@ enum SpliceSlotRewriter {
                     finalSpans.append(span)
                     continue
                 }
-                var provenance = span.anchorProvenance
-                if !provenance.contains(.spliceSlot) {
-                    provenance.append(.spliceSlot)
+                var newProvenance = span.anchorProvenance
+                if !newProvenance.contains(provenance) {
+                    newProvenance.append(provenance)
                 }
                 let newId = DecodedSpan.makeId(
                     assetId: span.assetId,
@@ -385,7 +393,7 @@ enum SpliceSlotRewriter {
                     lastAtomOrdinal: last,
                     startTime: slot.startTime,
                     endTime: slot.endTime,
-                    anchorProvenance: provenance
+                    anchorProvenance: newProvenance
                 ))
             }
         }
