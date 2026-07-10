@@ -23,14 +23,14 @@ Two test plans exist. **Use the correct one for your context:**
 **Per-bead work (implementation, review, fix cycles):**
 ```bash
 xcodebuild test -scheme Playhead -testPlan PlayheadFastTests \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+  -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 Skips XCTest interruption-cycle integration suites. Runs in ~3 minutes on simulator.
 
 **Phase-close verification only (final gate before closing an epic):**
 ```bash
 xcodebuild test -scheme Playhead -testPlan PlayheadIntegrationTests \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+  -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 True superset of FastTests — adds the 20 XCTest interruption-cycle suites. Runs in ~1 minute on simulator (FoundationModels gracefully unavailable). Real-device runs are slower because FM tests actually execute.
 
