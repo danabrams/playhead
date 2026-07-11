@@ -12,6 +12,8 @@ view for the daily + weekly launchd loops.
 """
 import argparse, json, pathlib, sys
 
+from l2f_canonical_manifest import load_canonical_annotations
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "TestFixtures/Corpus/Snapshots/manifest.json"
 AUDIO = ROOT / "TestFixtures/Corpus/Audio"
@@ -33,6 +35,7 @@ def main():
         print("no manifest yet — run scripts/l2f-dai-snapshot.py to start")
         sys.exit(1)
     m = json.loads(MANIFEST.read_text())
+    canonical_annotations = load_canonical_annotations(ANNOTATIONS)
 
     rows = []
     stats = {"manifest": len(m), "audio": 0, "transcript": 0, "drafter_draft": 0,
@@ -46,7 +49,8 @@ def main():
         r_draft = DRAFTS / f"{eid}.dai-rediff.json"
         ann = ANNOTATIONS / f"{eid}.json"
         st = dict(eid=eid, audio=has(audio), transcript=has(tx),
-                  drafter=has(d_draft), rediff=has(r_draft), annotation=has(ann),
+                  drafter=has(d_draft), rediff=has(r_draft),
+                  annotation=ann.name in canonical_annotations,
                   show=entry.get("show", "?"), host=entry.get("enclosureHost", "?"))
         if st["audio"]: stats["audio"] += 1
         if st["transcript"]: stats["transcript"] += 1
@@ -54,15 +58,13 @@ def main():
         if st["rediff"]: stats["rediff_draft"] += 1
         if st["annotation"]: stats["annotation"] += 1
         if st["annotation"]:
-            try:
-                ann_data = json.loads(ann.read_text())
-                wins = ann_data.get("adWindows") or ann_data.get("ad_windows") or []
-                stats["ad_windows"] += len(wins)
-                for w in wins:
-                    p = w.get("audit_priority")
-                    if p == 1: stats["audit_high"] += 1
-                    elif p and p >= 2: stats["audit_low"] += 1
-            except Exception: pass
+            ann_data = canonical_annotations[ann.name]
+            wins = ann_data.get("adWindows") or ann_data.get("ad_windows") or []
+            stats["ad_windows"] += len(wins)
+            for w in wins:
+                p = w.get("audit_priority")
+                if p == 1: stats["audit_high"] += 1
+                elif p and p >= 2: stats["audit_low"] += 1
         rows.append(st)
 
     summary = (f"manifest={stats['manifest']} audio={stats['audio']} "

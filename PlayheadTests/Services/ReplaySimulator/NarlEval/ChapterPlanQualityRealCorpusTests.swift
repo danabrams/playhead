@@ -39,6 +39,7 @@
 //     snapshot is present, assert the aggregate thresholds across the
 //     snapshot subset.
 
+import Darwin
 import Foundation
 import Testing
 @testable import Playhead
@@ -92,13 +93,195 @@ enum ChapterPlanRealCorpusThresholds {
 struct ChapterPlanGoldenSetDogfoodCorpusTests {
 
     @Test
-    func dogfoodCorpus_loadsAtLeastOneFixture() throws {
-        // The 12 committed annotations in TestFixtures/Corpus/Annotations
-        // convert to 12 dogfood goldens. Lower-bound to 1 so the test
-        // doesn't fail in a hypothetical future where the corpus is
-        // pruned, only when the directory is empty / unreadable.
+    func dogfoodCorpus_matchesCurrentEligibleGoldCount() throws {
+        let eligible = try CorpusAnnotationLoader()
+            .loadAll(verifyAudioFingerprints: false)
+            .filter(\.isEligibleForGoldEvaluation)
         let fixtures = try ChapterPlanGoldenSetLoader.allDogfoodFixtures()
-        #expect(fixtures.count >= 1, "dogfood directory should hold at least one converted golden")
+        #expect(fixtures.count == eligible.count)
+    }
+
+    @Test
+    func dogfoodCorpus_exactlyMatchesAllGoldAnnotations() throws {
+        let loader = CorpusAnnotationLoader()
+        let expectedCount = try loader.loadAll(verifyAudioFingerprints: false)
+            .filter(\.isEligibleForGoldEvaluation)
+            .count
+        let fixtures = try ChapterPlanGoldenSetLoader.canonicalDogfoodFixtures(
+            corpusLoader: loader
+        )
+        #expect(fixtures.count == expectedCount)
+    }
+
+    @Test
+    func dogfoodReaderRejectsAliasedPointerAndMembers() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "l2f-dogfood-reader-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let filePath = root
+            .appendingPathComponent("PlayheadTests/Services/ReplaySimulator/NarlEval")
+            .appendingPathComponent("Fixture.swift")
+        let parent = root
+            .appendingPathComponent("PlayheadTests/Fixtures/ChapterPlanGoldenSet")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let pointer = parent.appendingPathComponent("dogfood")
+        let external = root.appendingPathComponent("external", isDirectory: true)
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: pointer, withDestinationURL: external)
+
+        #expect(throws: CanonicalDogfoodCorpusError.self) {
+            _ = try ChapterPlanGoldenSetLoader.allDogfoodFixtures(filePath.path)
+        }
+
+        try FileManager.default.removeItem(at: pointer)
+        let generation = parent
+            .appendingPathComponent(".dogfood-generations", isDirectory: true)
+            .appendingPathComponent("empty", isDirectory: true)
+        try FileManager.default.createDirectory(at: generation, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            atPath: pointer.path,
+            withDestinationPath: ".dogfood-generations/empty"
+        )
+
+        let retainedGeneration = generation.deletingLastPathComponent()
+            .appendingPathComponent("retained", isDirectory: true)
+        let swappedFixture = external.appendingPathComponent("swapped.json")
+        try Data("{}".utf8).write(to: swappedFixture)
+        let fixtures = try ChapterPlanGoldenSetLoader.allDogfoodFixtures(
+            filePath.path,
+            afterGenerationOpen: {
+                try FileManager.default.moveItem(at: generation, to: retainedGeneration)
+                try FileManager.default.createSymbolicLink(
+                    at: generation,
+                    withDestinationURL: external
+                )
+            }
+        )
+        #expect(fixtures.isEmpty)
+        try FileManager.default.removeItem(at: swappedFixture)
+        try FileManager.default.removeItem(at: generation)
+        try FileManager.default.moveItem(at: retainedGeneration, to: generation)
+
+        #expect {
+            _ = try ChapterPlanGoldenSetLoader.loadDogfood(
+                named: "../../external/poison",
+                filePath: filePath.path
+            )
+        } throws: { error in
+            guard let corpusError = error as? CanonicalDogfoodCorpusError else {
+                return false
+            }
+            return corpusError.detail.contains("unsafe dogfood golden fixture name")
+        }
+        let externalFixture = external.appendingPathComponent("poison.json")
+        try Data("{}".utf8).write(to: externalFixture)
+        try FileManager.default.createSymbolicLink(
+            at: generation.appendingPathComponent("poison.json"),
+            withDestinationURL: externalFixture
+        )
+
+        #expect(throws: CanonicalDogfoodCorpusError.self) {
+            _ = try ChapterPlanGoldenSetLoader.allDogfoodFixtures(filePath.path)
+        }
+        #expect {
+            _ = try ChapterPlanGoldenSetLoader.loadDogfood(
+                named: "poison",
+                filePath: filePath.path
+            )
+        } throws: { error in
+            guard let corpusError = error as? CanonicalDogfoodCorpusError else {
+                return false
+            }
+            return corpusError.detail.contains("not a regular file")
+        }
+
+        let fifo = generation.appendingPathComponent("blocking.json")
+        #expect(mkfifo(fifo.path, S_IRUSR | S_IWUSR) == 0)
+        #expect(throws: CanonicalDogfoodCorpusError.self) {
+            _ = try ChapterPlanGoldenSetLoader.loadDogfood(
+                named: "blocking",
+                filePath: filePath.path
+            )
+        }
+
+        let schemaFixture = generation.appendingPathComponent("schema.json")
+        var fixture: [String: Any] = [
+            "episodeId": "schema",
+            "episodeContentHash": String(repeating: "a", count: 64),
+            "chapters": [],
+            "notes": ChapterPlanGoldenSetLoader.canonicalDogfoodNotes,
+            "advertiser": "must never enter a dogfood golden",
+        ]
+        try JSONSerialization.data(withJSONObject: fixture).write(to: schemaFixture)
+        #expect(throws: CanonicalDogfoodCorpusError.self) {
+            _ = try ChapterPlanGoldenSetLoader.loadDogfood(
+                named: "schema",
+                filePath: filePath.path
+            )
+        }
+
+        fixture.removeValue(forKey: "advertiser")
+        fixture["notes"] = "private annotation notes"
+        try JSONSerialization.data(withJSONObject: fixture).write(to: schemaFixture)
+        #expect(throws: CanonicalDogfoodCorpusError.self) {
+            _ = try ChapterPlanGoldenSetLoader.loadDogfood(
+                named: "schema",
+                filePath: filePath.path
+            )
+        }
+    }
+
+    @Test
+    func dogfoodCorpus_rejectsDuplicateAliasesAndStaleLabels() throws {
+        let loader = CorpusAnnotationLoader()
+        let annotations = try loader.loadAll(verifyAudioFingerprints: false)
+        let fixtures = try ChapterPlanGoldenSetLoader.allDogfoodFixtures()
+        guard let first = fixtures.first else {
+            #expect(annotations.allSatisfy { !$0.isEligibleForGoldEvaluation })
+            #expect(try ChapterPlanGoldenSetLoader.validateCanonicalDogfoodFixtures(
+                fixtures: [], annotations: annotations
+            ).isEmpty)
+            return
+        }
+
+        #expect(throws: CanonicalDogfoodCorpusError.self) {
+            _ = try ChapterPlanGoldenSetLoader.validateCanonicalDogfoodFixtures(
+                fixtures: fixtures + [first],
+                annotations: annotations
+            )
+        }
+
+        let aliasedURL = first.url.deletingLastPathComponent()
+            .appendingPathComponent("stale-alias.json")
+        #expect(throws: CanonicalDogfoodCorpusError.self) {
+            _ = try ChapterPlanGoldenSetLoader.validateCanonicalDogfoodFixtures(
+                fixtures: fixtures + [(url: aliasedURL, set: first.set)],
+                annotations: annotations
+            )
+        }
+
+        let changedFirstChapter = GoldenChapter(
+            startTimeSeconds: first.set.chapters[0].startTimeSeconds + 1,
+            expectedDisposition: first.set.chapters[0].expectedDisposition,
+            expectedTopicLabel: first.set.chapters[0].expectedTopicLabel
+        )
+        let staleSet = GoldenChapterSet(
+            episodeId: first.set.episodeId,
+            episodeContentHash: first.set.episodeContentHash,
+            chapters: [changedFirstChapter] + Array(first.set.chapters.dropFirst()),
+            notes: first.set.notes
+        )
+        let staleFixtures = fixtures.map { fixture in
+            fixture.url == first.url ? (url: fixture.url, set: staleSet) : fixture
+        }
+        #expect(throws: CanonicalDogfoodCorpusError.self) {
+            _ = try ChapterPlanGoldenSetLoader.validateCanonicalDogfoodFixtures(
+                fixtures: staleFixtures,
+                annotations: annotations
+            )
+        }
     }
 
     @Test
@@ -263,10 +446,11 @@ struct ChapterPlanQualityRealCorpusHarnessTests {
     @Test
     func eachDogfoodGolden_meetsThresholdsWhenSnapshotPresent_zeroContractOtherwise() throws {
         let pairs = try ChapterPlanGoldenSetLoader.allDogfoodFixturesWithSnapshots()
-        try #require(
-            pairs.isEmpty == false,
-            "no dogfood fixtures — run Scripts/convert_annotations_to_chapter_goldens.py"
-        )
+        guard !pairs.isEmpty else {
+            let annotations = try CorpusAnnotationLoader().loadAll(verifyAudioFingerprints: false)
+            #expect(annotations.allSatisfy { !$0.isEligibleForGoldEvaluation })
+            return
+        }
 
         let evaluator = ChapterPlanQualityEval()
 

@@ -1,0 +1,57 @@
+{
+  "episode_id": "why-is-this-happening-the-chris-hayes-po-2026-05-20-ai-and-the-public-good-with-ezra-klein",
+  "show_name": "Why Is This Happening? The Chris Hayes Podcast",
+  "duration_seconds": 1936.7,
+  "ad_windows": [
+    {
+      "start_seconds": 28.14,
+      "end_seconds": 57.78,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 28.1-57.8s (len=29.6s). rediff-sec=29.6, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 1905.1,
+      "end_seconds": 1933.37,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1905.1-1933.4s (len=28.3s). rediff-sec=28.3, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 28.14,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 57.78,
+      "end_seconds": 1905.1,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1933.37,
+      "end_seconds": 1936.7,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:d83a079256c6c68169e48de8379d03b16981475938b526578b3dc9ac73c8ceed",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-02T07:55:08Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

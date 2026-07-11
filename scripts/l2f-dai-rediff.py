@@ -29,14 +29,11 @@ Algorithm (v1 — keep it understandable; ~200 lines):
      with a constant offset (j-i is fixed throughout, modulo HAMMING_TOL noise
      on individual fingerprints). We greedily extend matched anchors into runs,
      then merge overlapping/adjacent runs.
-  5. GAPS: any range in B NOT covered by a run is an INSERTED segment (likely
-     a fresh ad in the rotated download). Any range in A not covered is a
-     REMOVED segment (the old ad). We emit inserted-in-B segments ≥
-     MIN_AD_SECONDS as ad slots, since "what's new in the rediff" is the
-     practically useful corpus signal (the snapshot Audio/ already has the
-     OLD audio, and the fresh download has the NEW one; the human reviewer
-     wants to know where the boundaries shift between today's listen and a
-     future re-listen).
+  5. GAPS: any range in A NOT covered by a run is a REMOVED segment (usually
+     the old dynamic ad). We emit removed-from-A segments ≥ MIN_AD_SECONDS
+     because A is the retained corpus asset. Emitting B intervals after the
+     temporary B download is deleted would attach coordinates to audio that
+     no longer exists and is therefore forbidden.
   6. CONFIDENCE: derived from the matched-run quality on either side of the
      gap. A gap flanked by two long high-density runs scores high. A gap that
      trails off into low-density alignment scores lower. v1 formula:
@@ -87,9 +84,15 @@ import json
 import math
 import os
 import pathlib
+import re
+import stat
 import subprocess
 import sys
 import tempfile
+import urllib.parse
+from typing import Optional
+
+from convert_annotations_to_chapter_goldens import path_has_symlink_component
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 AUDIO_ROOT = REPO / "TestFixtures/Corpus/Audio"
@@ -105,6 +108,59 @@ MIN_AD_SECONDS = 5.0
 HAMMING_TOL = 2  # bits tolerance for individual fingerprint comparison
 MIN_RUN_FPS = 8  # ≈1 second minimum aligned-run length before we trust an offset
 
+
+class RediffInputError(ValueError):
+    """The snapshot manifest cannot safely drive a mutating rediff run."""
+
+
+def _require_safe_path(path: pathlib.Path, *, label: str) -> None:
+    if path_has_symlink_component(path):
+        raise RediffInputError(f"{label} contains a symbolic link: {path}")
+
+
+def _require_safe_directory(
+    path: pathlib.Path, *, label: str, create: bool = False
+) -> None:
+    _require_safe_path(path, label=label)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+        _require_safe_path(path, label=label)
+    if not path.is_dir():
+        raise RediffInputError(f"{label} is not a regular directory: {path}")
+
+
+def _draft_path(episode_id: str) -> pathlib.Path:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,499}", episode_id) is None:
+        raise RediffInputError(f"unsafe episode id for rediff draft: {episode_id!r}")
+    return DRAFTS / f"{episode_id}.dai-rediff.json"
+
+
+def _atomic_write_text(path: pathlib.Path, text: str, *, label: str) -> None:
+    """Durably replace one safe output without following aliases."""
+    _require_safe_path(path, label=label)
+    _require_safe_directory(path.parent, label=f"{label} parent", create=True)
+    if path.exists() and not path.is_file():
+        raise RediffInputError(f"{label} is not a regular file: {path}")
+    temporary: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as handle:
+            temporary = pathlib.Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _require_safe_path(path, label=label)
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
 # ---------- subprocess helpers ----------
 
 def run(cmd, timeout=120, stdin_bytes=None):
@@ -118,6 +174,174 @@ def sha256_file(path: pathlib.Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def sha256_regular_file(path: pathlib.Path, *, label: str) -> str:
+    """Hash one regular file without following a final-component symlink."""
+    _require_safe_path(path, label=label)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RediffInputError(f"{label} is unavailable or unsafe: {path}") from error
+    digest = hashlib.sha256()
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RediffInputError(f"{label} is not a regular file: {path}")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return digest.hexdigest()
+
+
+def read_regular_file(path: pathlib.Path, *, label: str) -> bytes:
+    """Read one regular file without following a final-component symlink."""
+    _require_safe_path(path, label=label)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RediffInputError(f"{label} is unavailable or unsafe: {path}") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RediffInputError(f"{label} is not a regular file: {path}")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            return handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _path_has_symlink(path: pathlib.Path, *, base: pathlib.Path) -> bool:
+    """Check every existing component below base without resolving it away."""
+    current = base
+    try:
+        relative = path.relative_to(base)
+    except ValueError:
+        return True
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def load_validated_manifest() -> list[dict]:
+    """Validate all snapshot identities before any draft is retired or written."""
+    _require_safe_path(MANIFEST, label="snapshot manifest")
+    _require_safe_path(AUDIO_ROOT, label="corpus audio root")
+    if not MANIFEST.is_file():
+        raise RediffInputError(f"snapshot manifest is not a regular file: {MANIFEST}")
+    try:
+        raw = read_regular_file(MANIFEST, label="snapshot manifest")
+        rows = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RediffInputError(f"cannot read snapshot manifest {MANIFEST}: {error}") from error
+    if not isinstance(rows, list):
+        raise RediffInputError("snapshot manifest must contain an array")
+
+    repo_root = REPO.resolve()
+    audio_root = AUDIO_ROOT.resolve()
+    try:
+        audio_root.relative_to(repo_root)
+    except ValueError as error:
+        raise RediffInputError("corpus audio root escapes the repository") from error
+
+    validated: list[dict] = []
+    seen_episode_ids: set[str] = set()
+    for index, raw_row in enumerate(rows):
+        source = f"snapshot manifest row {index}"
+        if not isinstance(raw_row, dict):
+            raise RediffInputError(f"{source} must be an object")
+        episode_id = raw_row.get("episodeId")
+        if (
+            not isinstance(episode_id, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,499}", episode_id) is None
+            or episode_id != episode_id.strip()
+            or pathlib.Path(episode_id).name != episode_id
+            or "/" in episode_id
+            or "\\" in episode_id
+        ):
+            raise RediffInputError(f"{source}.episodeId must be a safe non-empty filename stem")
+        if episode_id in seen_episode_ids:
+            raise RediffInputError(f"snapshot manifest has duplicate episodeId {episode_id!r}")
+
+        expected_sha = raw_row.get("sha256")
+        if not isinstance(expected_sha, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+            raise RediffInputError(f"{source}.sha256 must be 64 lowercase hexadecimal characters")
+        raw_audio_path = raw_row.get("audioPath")
+        if (
+            not isinstance(raw_audio_path, str)
+            or not raw_audio_path.strip()
+            or raw_audio_path != raw_audio_path.strip()
+            or "\0" in raw_audio_path
+        ):
+            raise RediffInputError(f"{source}.audioPath must be a non-empty relative path")
+        relative_audio = pathlib.Path(raw_audio_path)
+        if relative_audio.is_absolute() or ".." in relative_audio.parts:
+            raise RediffInputError(f"{source}.audioPath is unsafe")
+        unresolved_audio = repo_root / relative_audio
+        if _path_has_symlink(unresolved_audio, base=repo_root):
+            raise RediffInputError(f"{source}.audioPath contains a symbolic link")
+        resolved_audio = unresolved_audio.resolve()
+        try:
+            resolved_audio.relative_to(audio_root)
+        except ValueError as error:
+            raise RediffInputError(f"{source}.audioPath escapes the corpus audio root") from error
+        if resolved_audio.stem != episode_id:
+            raise RediffInputError(f"{source}.audioPath does not match episodeId {episode_id!r}")
+
+        enclosure_url = raw_row.get("enclosureUrl")
+        if not isinstance(enclosure_url, str) or enclosure_url != enclosure_url.strip():
+            raise RediffInputError(f"{source}.enclosureUrl must be a trimmed HTTP(S) URL")
+        parsed_url = urllib.parse.urlsplit(enclosure_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise RediffInputError(f"{source}.enclosureUrl must be an HTTP(S) URL")
+
+        actual_sha = sha256_regular_file(resolved_audio, label=f"snapshot audio for {episode_id}")
+        if actual_sha != expected_sha:
+            raise RediffInputError(
+                f"snapshot audio fingerprint mismatch for {episode_id}: "
+                f"manifest={expected_sha} actual={actual_sha}"
+            )
+        row = dict(raw_row)
+        row["_snapshot_path"] = resolved_audio
+        row["_snapshot_sha"] = actual_sha
+        validated.append(row)
+        seen_episode_ids.add(episode_id)
+    return validated
+
+
+def verify_rediff_inputs_unchanged(
+    snapshot_path: pathlib.Path,
+    fresh_path: pathlib.Path,
+    *,
+    episode_id: str,
+    expected_snapshot_sha: str,
+    expected_fresh_sha: str,
+) -> None:
+    """Recheck both files after fpcalc so evidence binds the bytes it compared."""
+    actual_snapshot_sha = sha256_regular_file(
+        snapshot_path, label=f"snapshot audio for {episode_id}"
+    )
+    if actual_snapshot_sha != expected_snapshot_sha:
+        raise RediffInputError(
+            f"snapshot audio changed during rediff for {episode_id}: "
+            f"expected={expected_snapshot_sha} actual={actual_snapshot_sha}"
+        )
+    actual_fresh_sha = sha256_regular_file(
+        fresh_path, label=f"fresh comparison audio for {episode_id}"
+    )
+    if actual_fresh_sha != expected_fresh_sha:
+        raise RediffInputError(
+            f"fresh comparison audio changed during rediff for {episode_id}: "
+            f"expected={expected_fresh_sha} actual={actual_fresh_sha}"
+        )
 
 def fpcalc_raw(path: pathlib.Path) -> tuple[list[int], float]:
     """Return (fingerprints, seconds_per_fp). Raises RuntimeError on failure."""
@@ -294,6 +518,26 @@ def gaps_in_b(runs: list[tuple[int, int, int, int]], total_b: int,
         gaps.append((tail_start, total_b, last[2], 0))
     return gaps
 
+def gaps_in_a(runs: list[tuple[int, int, int, int]], total_a: int,
+              min_gap_fps: int) -> list[tuple[int, int, int, int]]:
+    """Return snapshot-A ranges absent from B, in A fingerprint indices."""
+    if not runs:
+        return [(0, total_a, 0, 0)] if total_a >= min_gap_fps else []
+    runs = sorted(runs, key=lambda r: r[0])
+    gaps = []
+    first = runs[0]
+    if first[0] >= min_gap_fps:
+        gaps.append((0, first[0], 0, first[2]))
+    for left, right in zip(runs, runs[1:]):
+        left_end = left[0] + left[2]
+        if right[0] - left_end >= min_gap_fps:
+            gaps.append((left_end, right[0], left[2], right[2]))
+    last = runs[-1]
+    tail_start = last[0] + last[2]
+    if total_a - tail_start >= min_gap_fps:
+        gaps.append((tail_start, total_a, last[2], 0))
+    return gaps
+
 def confidence_for_gap(left_run_len: int, right_run_len: int,
                        sec_per_fp: float) -> float:
     flank_sec = min(left_run_len, right_run_len) * sec_per_fp
@@ -304,7 +548,6 @@ def confidence_for_gap(left_run_len: int, right_run_len: int,
 def rediff_pair(snapshot_path: pathlib.Path, fresh_path: pathlib.Path) -> dict:
     fpA, sec_per_fp_A = fpcalc_raw(snapshot_path)
     fpB, sec_per_fp_B = fpcalc_raw(fresh_path)
-    # Use B's seconds-per-fp for gap reporting (gaps are indices into B).
     runs = find_runs(fpA, fpB)
     runs = merge_runs(runs)
     if not runs:
@@ -315,33 +558,224 @@ def rediff_pair(snapshot_path: pathlib.Path, fresh_path: pathlib.Path) -> dict:
             "secondsPerFpA": round(sec_per_fp_A, 5),
             "secondsPerFpB": round(sec_per_fp_B, 5),
         }
-    min_gap_fps = max(1, int(round(MIN_AD_SECONDS / sec_per_fp_B)))
-    gaps = gaps_in_b(runs, len(fpB), min_gap_fps)
+    by_b = sorted(runs, key=lambda run: run[1])
+    if any(
+        right[0] < left[0] + left[2]
+        for left, right in zip(by_b, by_b[1:])
+    ):
+        return {
+            "ok": False,
+            "error": "alignment-non-monotonic-a (ambiguous repeated content)",
+            "fingerprintsA": len(fpA), "fingerprintsB": len(fpB),
+            "secondsPerFpA": round(sec_per_fp_A, 5),
+            "secondsPerFpB": round(sec_per_fp_B, 5),
+        }
+    min_gap_fps = max(1, int(round(MIN_AD_SECONDS / sec_per_fp_A)))
+    gaps = gaps_in_a(runs, len(fpA), min_gap_fps)
     ad_slots = []
-    for (bs, be, lrun, rrun) in gaps:
+    for (a_start, a_end, lrun, rrun) in gaps:
         ad_slots.append({
-            "startSeconds": round(bs * sec_per_fp_B, 2),
-            "endSeconds": round(be * sec_per_fp_B, 2),
-            "durationSeconds": round((be - bs) * sec_per_fp_B, 2),
-            "confidence": confidence_for_gap(lrun, rrun, sec_per_fp_B),
-            "leftRunSeconds": round(lrun * sec_per_fp_B, 2),
-            "rightRunSeconds": round(rrun * sec_per_fp_B, 2),
+            "startSeconds": round(a_start * sec_per_fp_A, 2),
+            "endSeconds": round(a_end * sec_per_fp_A, 2),
+            "durationSeconds": round((a_end - a_start) * sec_per_fp_A, 2),
+            "confidence": confidence_for_gap(lrun, rrun, sec_per_fp_A),
+            "leftRunSeconds": round(lrun * sec_per_fp_A, 2),
+            "rightRunSeconds": round(rrun * sec_per_fp_A, 2),
         })
-    total_run_sec = sum(r[2] for r in runs) * sec_per_fp_B
+    total_run_sec = sum(r[2] for r in runs) * sec_per_fp_A
     return {
         "ok": True,
         "fingerprintsA": len(fpA), "fingerprintsB": len(fpB),
         "secondsPerFpA": round(sec_per_fp_A, 5),
         "secondsPerFpB": round(sec_per_fp_B, 5),
         "runs": len(runs),
-        "alignedSecondsB": round(total_run_sec, 2),
+        "alignedSecondsA": round(total_run_sec, 2),
         "adSlots": ad_slots,
     }
 
+def _draft_window_bounds(window: object) -> tuple[float, float]:
+    if not isinstance(window, dict):
+        raise RediffInputError("rediff draft ad windows must be objects")
+    raw_start = window.get("start_seconds")
+    raw_end = window.get("end_seconds")
+    if (
+        isinstance(raw_start, bool)
+        or isinstance(raw_end, bool)
+        or not isinstance(raw_start, (int, float))
+        or not isinstance(raw_end, (int, float))
+    ):
+        raise RediffInputError("rediff draft ad window bounds must be numbers")
+    start = float(raw_start)
+    end = float(raw_end)
+    if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+        raise RediffInputError("rediff draft ad window bounds are invalid")
+    return start, end
+
+
+def _window_comparison_fingerprint(
+    window: dict, comparison_fingerprints: list[str]
+) -> str:
+    """Resolve an interval to one exact B asset, including legacy single-B drafts."""
+    fingerprint = window.get("comparison_audio_fingerprint")
+    if fingerprint is None and len(comparison_fingerprints) == 1:
+        fingerprint = comparison_fingerprints[0]
+    if (
+        not isinstance(fingerprint, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
+        or fingerprint not in comparison_fingerprints
+    ):
+        raise RediffInputError(
+            "prior rediff draft has an interval without an exact comparison fingerprint"
+        )
+    return fingerprint
+
+
+def load_reusable_draft(episode_id: str, expected_snapshot_sha: str) -> Optional[dict]:
+    """Keep only prior evidence already bound to the same retained A bytes."""
+    _require_safe_path(DRAFTS, label="rediff drafts directory")
+    if not DRAFTS.exists():
+        return None
+    _require_safe_directory(DRAFTS, label="rediff drafts directory")
+    path = _draft_path(episode_id)
+    _require_safe_path(path, label="prior rediff draft")
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        if not path.is_file():
+            raise RediffInputError("prior rediff draft is not a regular file")
+        document = json.loads(
+            read_regular_file(path, label="prior rediff draft").decode("utf-8")
+        )
+        if not isinstance(document, dict):
+            raise RediffInputError("prior rediff draft is not an object")
+        if document.get("episode_id") != episode_id:
+            raise RediffInputError("prior rediff draft has the wrong episode identity")
+        if document.get("coordinate_space") != "snapshot_a":
+            raise RediffInputError("prior rediff draft is not in snapshot-A coordinates")
+        if document.get("audio_fingerprint") != f"sha256:{expected_snapshot_sha}":
+            raise RediffInputError("prior rediff draft targets different audio bytes")
+        comparison_fingerprints = document.get("comparison_audio_fingerprints")
+        if (
+            not isinstance(comparison_fingerprints, list)
+            or not comparison_fingerprints
+            or not all(
+                isinstance(value, str)
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", value)
+                for value in comparison_fingerprints
+            )
+            or len(set(comparison_fingerprints)) != len(comparison_fingerprints)
+        ):
+            raise RediffInputError("prior rediff draft has invalid comparison fingerprints")
+        if f"sha256:{expected_snapshot_sha}" in comparison_fingerprints:
+            raise RediffInputError("prior rediff draft reuses retained A as comparison B")
+        single_comparison = document.get("comparison_audio_fingerprint")
+        if (
+            not isinstance(single_comparison, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", single_comparison) is None
+            or single_comparison not in comparison_fingerprints
+        ):
+            raise RediffInputError("prior rediff draft has an invalid comparison fingerprint")
+        windows = document.get("ad_windows")
+        if not isinstance(windows, list):
+            raise RediffInputError("prior rediff draft lacks an ad_windows array")
+        normalized_windows: list[dict] = []
+        for raw_window in windows:
+            _draft_window_bounds(raw_window)
+            assert isinstance(raw_window, dict)
+            window = dict(raw_window)
+            comparison = _window_comparison_fingerprint(
+                window, comparison_fingerprints
+            )
+            window["comparison_audio_fingerprint"] = comparison
+            normalized_windows.append(window)
+        normalized = dict(document)
+        normalized["ad_windows"] = normalized_windows
+        return normalized
+    except (OSError, UnicodeError, json.JSONDecodeError, RediffInputError) as error:
+        retire_stale_draft(episode_id)
+        print(f"  [RETIRED] {episode_id}: {error}")
+        return None
+
+
+def merge_draft_windows(existing: list[dict], additions: list[dict]) -> list[dict]:
+    """Union A gaps only within one exact comparison-B asset."""
+    grouped: dict[str, list[tuple[float, float, dict]]] = {}
+    for window in [*existing, *additions]:
+        start, end = _draft_window_bounds(window)
+        comparison = window.get("comparison_audio_fingerprint")
+        if (
+            not isinstance(comparison, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", comparison) is None
+        ):
+            raise RediffInputError(
+                "rediff draft interval lacks an exact comparison fingerprint"
+            )
+        grouped.setdefault(comparison, []).append((start, end, dict(window)))
+
+    merged: list[dict] = []
+    for comparison in sorted(grouped):
+        comparison_windows: list[dict] = []
+        for start, end, window in sorted(
+            grouped[comparison], key=lambda item: (item[0], item[1])
+        ):
+            if not comparison_windows:
+                comparison_windows.append(window)
+                continue
+            previous_start, previous_end = _draft_window_bounds(
+                comparison_windows[-1]
+            )
+            if start > previous_end:
+                comparison_windows.append(window)
+                continue
+            notes = [
+                value
+                for value in (
+                    comparison_windows[-1].get("confidence_notes"),
+                    window.get("confidence_notes"),
+                )
+                if isinstance(value, str) and value
+            ]
+            comparison_windows[-1]["start_seconds"] = round(
+                min(previous_start, start), 2
+            )
+            comparison_windows[-1]["end_seconds"] = round(
+                max(previous_end, end), 2
+            )
+            comparison_windows[-1]["confidence_notes"] = " | ".join(
+                dict.fromkeys(notes)
+            )
+        merged.extend(comparison_windows)
+    return sorted(
+        merged,
+        key=lambda window: (
+            *_draft_window_bounds(window),
+            window["comparison_audio_fingerprint"],
+        ),
+    )
+
+
 def write_draft(episode_id: str, snapshot_path: pathlib.Path,
-                ad_slots: list[dict], fresh_sha: str) -> pathlib.Path:
-    DRAFTS.mkdir(parents=True, exist_ok=True)
-    out = DRAFTS / f"{episode_id}.dai-rediff.json"
+                ad_slots: list[dict], fresh_sha: str,
+                expected_snapshot_sha: str,
+                prior_draft: Optional[dict] = None) -> pathlib.Path:
+    """Write A-coordinate evidence only while A still has its validated bytes."""
+    if re.fullmatch(r"[0-9a-f]{64}", expected_snapshot_sha) is None:
+        raise RediffInputError("expected snapshot fingerprint is not canonical sha256")
+    if re.fullmatch(r"[0-9a-f]{64}", fresh_sha) is None:
+        raise RediffInputError("fresh comparison fingerprint is not canonical sha256")
+    if fresh_sha == expected_snapshot_sha:
+        raise RediffInputError("fresh comparison B must differ from retained snapshot A")
+    actual_snapshot_sha = sha256_regular_file(
+        snapshot_path, label=f"snapshot audio for {episode_id}"
+    )
+    if actual_snapshot_sha != expected_snapshot_sha:
+        raise RediffInputError(
+            f"snapshot audio changed during rediff for {episode_id}: "
+            f"expected={expected_snapshot_sha} actual={actual_snapshot_sha}"
+        )
+    _require_safe_directory(DRAFTS, label="rediff drafts directory", create=True)
+    out = _draft_path(episode_id)
+    _require_safe_path(out, label="rediff draft output")
     ad_windows = []
     for slot in ad_slots:
         ad_windows.append({
@@ -353,24 +787,66 @@ def write_draft(episode_id: str, snapshot_path: pathlib.Path,
             "product_guess": None,
             "ad_type": "dai",
             "transition_type": None,
+            "comparison_audio_fingerprint": f"sha256:{fresh_sha}",
             "confidence_notes": (
                 f"DRAFT chromaprint DAI rediff; alignment confidence={slot['confidence']}, "
                 f"flanking-run-seconds=(left={slot['leftRunSeconds']}, right={slot['rightRunSeconds']}). "
-                f"Boundaries derived from fingerprint alignment of original snapshot vs fresh download "
-                f"(fresh sha256={fresh_sha[:12]}). Verify advertiser/product by listening to the segment."
+                f"A-coordinate range removed from the retained snapshot in a fresh download "
+                f"(fresh comparison sha256={fresh_sha[:12]}). Verify against retained snapshot audio."
             ),
         })
+    prior_windows = prior_draft.get("ad_windows", []) if prior_draft else []
+    comparison_fingerprints = set(
+        prior_draft.get("comparison_audio_fingerprints", []) if prior_draft else []
+    )
+    if prior_draft and isinstance(prior_draft.get("comparison_audio_fingerprint"), str):
+        comparison_fingerprints.add(prior_draft["comparison_audio_fingerprint"])
+    comparison_fingerprints.add(f"sha256:{fresh_sha}")
+    if f"sha256:{expected_snapshot_sha}" in comparison_fingerprints:
+        raise RediffInputError("rediff evidence reuses retained A as comparison B")
     payload = {
         "episode_id": episode_id,
         "show_name": episode_id.replace("-", " ").title(),
-        "ad_windows": ad_windows,
-        "audio_fingerprint": f"sha256:{fresh_sha}",
+        "ad_windows": merge_draft_windows(prior_windows, ad_windows),
+        "audio_fingerprint": f"sha256:{expected_snapshot_sha}",
+        "comparison_audio_fingerprint": f"sha256:{fresh_sha}",
+        "comparison_audio_fingerprints": sorted(comparison_fingerprints),
+        "coordinate_space": "snapshot_a",
         "variant_of": None,
         "source": "l2f-dai-rediff.py",
         "draft_kind": "dai-rediff",
     }
-    out.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    temporary: Optional[pathlib.Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=DRAFTS, prefix=f".{out.name}.", delete=False
+        ) as handle:
+            temporary = pathlib.Path(handle.name)
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _require_safe_path(out, label="rediff draft output")
+        os.replace(temporary, out)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
     return out
+
+def retire_stale_draft(episode_id: str) -> bool:
+    """Remove prior rediff evidence before a real comparison supersedes it."""
+    _require_safe_path(DRAFTS, label="rediff drafts directory")
+    if not DRAFTS.exists():
+        return False
+    _require_safe_directory(DRAFTS, label="rediff drafts directory")
+    path = _draft_path(episode_id)
+    _require_safe_path(path, label="prior rediff draft")
+    if not path.exists() and not path.is_symlink():
+        return False
+    if not path.is_file():
+        raise RediffInputError(f"prior rediff draft is not a regular file: {path}")
+    path.unlink()
+    return True
 
 # ---------- self-test ----------
 
@@ -420,7 +896,12 @@ def ffmpeg_splice_with_noise(A: pathlib.Path, dst: pathlib.Path,
         raise RuntimeError(f"ffmpeg splice-with-noise failed: {p.stderr.decode('utf-8','ignore')[:400]}")
 
 def self_test() -> int:
-    manifest = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else []
+    _require_safe_path(MANIFEST, label="snapshot manifest")
+    manifest = (
+        json.loads(read_regular_file(MANIFEST, label="snapshot manifest"))
+        if MANIFEST.exists()
+        else []
+    )
     src = None
     for entry in manifest:
         p = REPO / entry["audioPath"]
@@ -432,28 +913,27 @@ def self_test() -> int:
         return 2
     print(f"self-test: splicing from {src.relative_to(REPO)}")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="l2f-dai-rediff-selftest-"))
-    A = tmp / "synthetic_A.mp3"      # first 5 minutes of src
-    B = tmp / "synthetic_B.mp3"      # A with 30s of pink noise spliced in at t=120s
+    A = tmp / "synthetic_A.mp3"      # B plus old 30s ad retained at t=120s
+    B = tmp / "synthetic_B.mp3"      # fresh comparison without the old ad
     try:
-        ffmpeg_slice(src, A, 0, 300)
-        # Build B in a single ffmpeg pass so MP3 frame boundaries on either side
+        ffmpeg_slice(src, B, 0, 300)
+        # Build A in a single ffmpeg pass so MP3 frame boundaries on either side
         # of the splice stay phase-aligned with A (otherwise -ss seeks across
         # the splice shift chromaprint fingerprints by 8-16 bits on the
         # post-splice section, fragmenting alignment).
-        ffmpeg_splice_with_noise(A, B, insert_at=120.0, insert_duration=30.0,
+        ffmpeg_splice_with_noise(B, A, insert_at=120.0, insert_duration=30.0,
                                  a_duration=300.0)
         result = rediff_pair(A, B)
         print("self-test rediff result:", json.dumps(result, indent=2))
         if not result.get("ok"):
             print(f"SELF-TEST FAIL: rediff_pair not ok: {result.get('error')}", file=sys.stderr)
             return 3
-        # PASS iff at least one inserted slot has start ∈ [115,125] and end ∈ [145,155]
         for slot in result["adSlots"]:
             if 115 <= slot["startSeconds"] <= 125 and 145 <= slot["endSeconds"] <= 155:
-                print(f"SELF-TEST PASS: detected splice at {slot['startSeconds']}-{slot['endSeconds']}s "
-                      f"(target 120-150 ±5, confidence={slot['confidence']})")
+                print(f"SELF-TEST PASS: detected retained-A removal at "
+                      f"{slot['startSeconds']}-{slot['endSeconds']}s")
                 return 0
-        print("SELF-TEST FAIL: no detected ad-slot fell within target window [115,125]×[145,155].",
+        print("SELF-TEST FAIL: no retained-A slot matched [115,125]×[145,155].",
               file=sys.stderr)
         print("Detected slots:", json.dumps(result["adSlots"], indent=2), file=sys.stderr)
         return 4
@@ -471,7 +951,7 @@ def self_test() -> int:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--self-test", action="store_true",
-                    help="Splice a synthetic pair via ffmpeg and verify the algorithm detects the known insert.")
+                    help="Splice a synthetic old ad into A and verify its A-coordinate removal.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Skip re-download; assume <audioPath>.fresh.mp3 already exists. Useful for re-running alignment.")
     ap.add_argument("--episode", action="append",
@@ -481,10 +961,13 @@ def main():
     if args.self_test:
         sys.exit(self_test())
 
-    if not MANIFEST.exists():
-        print(f"ERROR: manifest not found at {MANIFEST}", file=sys.stderr)
+    try:
+        _require_safe_path(DRAFTS, label="rediff drafts directory")
+        _require_safe_path(DIAG_OUT, label="rediff diagnostics output")
+        manifest = load_validated_manifest()
+    except RediffInputError as error:
+        print(f"ERROR: refusing rediff with invalid snapshot inputs: {error}", file=sys.stderr)
         sys.exit(2)
-    manifest = json.loads(MANIFEST.read_text())
     if args.episode:
         manifest = [e for e in manifest
                     if any(needle in e["episodeId"] for needle in args.episode)]
@@ -501,15 +984,10 @@ def main():
 
     for entry in manifest:
         ep = entry["episodeId"]
-        snapshot_path = REPO / entry["audioPath"]
-        manifest_sha = entry["sha256"]
+        snapshot_path = entry["_snapshot_path"]
+        manifest_sha = entry["_snapshot_sha"]
+        prior_draft = load_reusable_draft(ep, manifest_sha)
         record = {"episodeId": ep, "rotated": False, "adSlots": []}
-        if not snapshot_path.exists():
-            record["ok"] = False
-            record["error"] = f"snapshot audio missing at {snapshot_path}"
-            failed_count += 1
-            print(f"  [SKIP] {ep}: {record['error']}")
-            per_episode.append(record); continue
 
         if args.dry_run:
             # Look for a pre-staged fresh file alongside the snapshot.
@@ -523,7 +1001,9 @@ def main():
                 failed_count += 1
                 print(f"  [SKIP] {ep}: {record['error']}")
                 per_episode.append(record); continue
-            fresh_sha = sha256_file(fresh_path)
+            fresh_sha = sha256_regular_file(
+                fresh_path, label=f"fresh comparison audio for {ep}"
+            )
         else:
             with tempfile.NamedTemporaryFile(prefix=f"l2f-dai-rediff-{ep}-", suffix=".mp3", delete=False) as tf:
                 fresh_path = pathlib.Path(tf.name)
@@ -537,7 +1017,9 @@ def main():
                 try: fresh_path.unlink()
                 except Exception: pass
                 per_episode.append(record); continue
-            fresh_sha = sha256_file(fresh_path)
+            fresh_sha = sha256_regular_file(
+                fresh_path, label=f"fresh comparison audio for {ep}"
+            )
 
         record["freshSha256"] = fresh_sha
         record["manifestSha256"] = manifest_sha
@@ -556,7 +1038,14 @@ def main():
         print(f"  [ROTATED] {ep} (manifest {manifest_sha[:12]} → fresh {fresh_sha[:12]})")
         try:
             diff = rediff_pair(snapshot_path, fresh_path)
-        except RuntimeError as e:
+            verify_rediff_inputs_unchanged(
+                snapshot_path,
+                fresh_path,
+                episode_id=ep,
+                expected_snapshot_sha=manifest_sha,
+                expected_fresh_sha=fresh_sha,
+            )
+        except (RuntimeError, RediffInputError) as e:
             record["ok"] = False
             record["error"] = f"rediff failed: {e}"
             failed_count += 1
@@ -579,16 +1068,40 @@ def main():
                 "secondsPerFpA": diff["secondsPerFpA"],
                 "secondsPerFpB": diff["secondsPerFpB"],
                 "runs": diff["runs"],
-                "alignedSecondsB": diff["alignedSecondsB"],
+                "alignedSecondsA": diff["alignedSecondsA"],
             }
-            rotated_count += 1
+            try:
+                # A distinct, successfully aligned B asset remains evidence even
+                # when it contributes no retained-A gaps. Persist it so a later
+                # comparison can retain the complete cumulative comparison set.
+                draft_path = write_draft(
+                    ep,
+                    snapshot_path,
+                    diff["adSlots"],
+                    fresh_sha,
+                    manifest_sha,
+                    prior_draft,
+                )
+            except RediffInputError as error:
+                record["ok"] = False
+                record["error"] = f"rediff publication failed: {error}"
+                failed_count += 1
+                print(f"  [FAIL] {ep}: {error}")
+                if not args.dry_run:
+                    try: fresh_path.unlink()
+                    except Exception: pass
+                per_episode.append(record)
+                continue
+            record["draftPath"] = str(draft_path.relative_to(REPO))
+            drafted_count += 1
             if diff["adSlots"]:
-                draft_path = write_draft(ep, snapshot_path, diff["adSlots"], fresh_sha)
-                record["draftPath"] = str(draft_path.relative_to(REPO))
-                drafted_count += 1
                 print(f"  [DRAFT] wrote {draft_path.relative_to(REPO)} ({len(diff['adSlots'])} ad slots)")
             else:
-                print(f"  [ROTATED, no ad slots ≥{MIN_AD_SECONDS}s detected]")
+                print(
+                    f"  [EVIDENCE] wrote {draft_path.relative_to(REPO)} "
+                    f"(no retained-A gaps ≥{MIN_AD_SECONDS}s)"
+                )
+            rotated_count += 1
         if not args.dry_run:
             try: fresh_path.unlink()
             except Exception: pass
@@ -610,7 +1123,11 @@ def main():
         },
         "episodes": per_episode,
     }
-    DIAG_OUT.write_text(json.dumps(summary, indent=2, sort_keys=True))
+    _atomic_write_text(
+        DIAG_OUT,
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        label="rediff diagnostics output",
+    )
     print(f"\n{'='*60}")
     print(f"rediff complete: {rotated_count} rotated, {unchanged_count} unchanged, "
           f"{failed_count} failed, {drafted_count} drafts written")

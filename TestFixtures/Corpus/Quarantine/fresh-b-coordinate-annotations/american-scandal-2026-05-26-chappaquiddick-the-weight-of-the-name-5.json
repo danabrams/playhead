@@ -1,0 +1,95 @@
+{
+  "episode_id": "american-scandal-2026-05-26-chappaquiddick-the-weight-of-the-name-5",
+  "show_name": "American Scandal",
+  "duration_seconds": 2508.8,
+  "ad_windows": [
+    {
+      "start_seconds": 90.97,
+      "end_seconds": 153.81,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 91.0-153.8s (len=62.8s). rediff-sec=62.8, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 875.66,
+      "end_seconds": 922.64,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 875.7-922.6s (len=47.0s). rediff-sec=47.0, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 924.37,
+      "end_seconds": 947.06,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 924.4-947.1s (len=22.7s). rediff-sec=22.7, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 1829.66,
+      "end_seconds": 1853.95,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1829.7-1854.0s (len=24.3s). rediff-sec=24.3, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 90.97,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 153.81,
+      "end_seconds": 875.66,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 922.64,
+      "end_seconds": 924.37,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 947.06,
+      "end_seconds": 1829.66,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1853.95,
+      "end_seconds": 2508.8,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:1ef484ca29f436230cd4ba671c47423b4726da636a1380796b9c135a501f2f1f",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-03T07:36:17Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

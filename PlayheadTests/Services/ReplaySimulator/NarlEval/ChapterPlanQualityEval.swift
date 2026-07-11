@@ -59,6 +59,7 @@
 //   counts in `BoundaryCounts` and the matched-pair count in
 //   `dispositionMatchedPairs`.
 
+import Darwin
 import Foundation
 @testable import Playhead
 
@@ -764,6 +765,32 @@ enum ChapterPlanQualityRunner {
 
 // MARK: - Golden-set loader
 
+struct CanonicalDogfoodCorpusError: Error, CustomStringConvertible {
+    let detail: String
+
+    var description: String { detail }
+}
+
+struct CanonicalDogfoodFixture {
+    let url: URL
+    let set: GoldenChapterSet
+    let annotation: CorpusAnnotation
+}
+
+private final class OpenDogfoodGeneration {
+    let url: URL
+    let descriptor: Int32
+
+    init(url: URL, descriptor: Int32) {
+        self.url = url
+        self.descriptor = descriptor
+    }
+
+    deinit {
+        Darwin.close(descriptor)
+    }
+}
+
 /// Test-target helper to load `GoldenChapterSet` JSON files from disk.
 /// Uses `#filePath` to locate the fixtures directory (the same
 /// convention `ChapterSignalCaseStudyTests` and the dated NARL
@@ -772,6 +799,12 @@ enum ChapterPlanQualityRunner {
 /// are not bundled and not subject to the "Multiple commands produce"
 /// resource-copy collision).
 enum ChapterPlanGoldenSetLoader {
+
+    static let canonicalDogfoodNotes =
+        "Auto-converted from TestFixtures/Corpus/Annotations/ by "
+        + "Scripts/convert_annotations_to_chapter_goldens.py. Topic labels are "
+        + "anonymized to ad_type / 'editorial content' \u{2014} advertiser, product, "
+        + "and confidence_notes are stripped (au2v.1.22 privacy rule)."
 
     /// `PlayheadTests/Fixtures/ChapterPlanGoldenSet/synthetic/` resolved
     /// from the location of THIS source file. The file lives at
@@ -832,14 +865,121 @@ enum ChapterPlanGoldenSetLoader {
             .appendingPathComponent("dogfood", isDirectory: true)
     }
 
+    private static func validatedDogfoodGenerationDirectory(
+        _ filePath: String
+    ) throws -> OpenDogfoodGeneration {
+        let pointer = dogfoodDirectory(filePath)
+        let parent = pointer.deletingLastPathComponent()
+        let repoRoot = parent
+            .deletingLastPathComponent() // ChapterPlanGoldenSet
+            .deletingLastPathComponent() // Fixtures
+            .deletingLastPathComponent() // PlayheadTests
+        guard !CorpusAnnotationLoader.hasSymbolicLinkComponent(parent, relativeTo: repoRoot) else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "dogfood golden pointer is missing or unsafe: \(pointer.path)"
+            )
+        }
+
+        let directoryFlags = O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+        let parentDescriptor = Darwin.open(parent.path, directoryFlags)
+        guard parentDescriptor >= 0 else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "dogfood golden parent is missing or unsafe: \(parent.path)"
+            )
+        }
+        defer { Darwin.close(parentDescriptor) }
+
+        var targetBuffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        let targetLength = targetBuffer.withUnsafeMutableBufferPointer { buffer in
+            Darwin.readlinkat(
+                parentDescriptor,
+                "dogfood",
+                buffer.baseAddress,
+                Int(PATH_MAX)
+            )
+        }
+        guard targetLength > 0, targetLength < Int(PATH_MAX) else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "dogfood golden pointer is missing or unsafe: \(pointer.path)"
+            )
+        }
+        let target = String(
+            decoding: targetBuffer.prefix(Int(targetLength)).map { UInt8(bitPattern: $0) },
+            as: UTF8.self
+        )
+        let components = target.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count == 2,
+              components[0] == ".dogfood-generations",
+              !components[1].isEmpty,
+              components[1] != ".",
+              components[1] != "..",
+              components[1] == "empty"
+                || (components[1].count == 64 && components[1].allSatisfy({
+                    "0123456789abcdef".contains($0)
+                }))
+        else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "dogfood golden pointer has an unsafe target: \(target)"
+            )
+        }
+
+        let generationRoot = parent.appendingPathComponent(
+            ".dogfood-generations",
+            isDirectory: true
+        )
+        let generation = generationRoot.appendingPathComponent(
+            String(components[1]),
+            isDirectory: true
+        )
+        let rootDescriptor = Darwin.openat(
+            parentDescriptor,
+            ".dogfood-generations",
+            directoryFlags
+        )
+        guard rootDescriptor >= 0 else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "dogfood golden generation root is missing or unsafe: \(generationRoot.path)"
+            )
+        }
+        defer { Darwin.close(rootDescriptor) }
+        let generationDescriptor = Darwin.openat(
+            rootDescriptor,
+            String(components[1]),
+            directoryFlags
+        )
+        guard generationDescriptor >= 0 else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "dogfood golden generation is missing or unsafe: \(generation.path)"
+            )
+        }
+        return OpenDogfoodGeneration(url: generation, descriptor: generationDescriptor)
+    }
+
     /// Load a single dogfood golden-set fixture by basename (without `.json`).
     static func loadDogfood(
         named name: String,
         filePath: String = #filePath
     ) throws -> GoldenChapterSet {
-        let url = dogfoodDirectory(filePath)
-            .appendingPathComponent("\(name).json", isDirectory: false)
-        let data = try Data(contentsOf: url)
+        guard !name.isEmpty,
+              name != ".",
+              name != "..",
+              !name.contains("/"),
+              !name.contains("\\"),
+              (name as NSString).lastPathComponent == name
+        else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "unsafe dogfood golden fixture name: \(name)"
+            )
+        }
+        let generation = try validatedDogfoodGenerationDirectory(filePath)
+        let filename = "\(name).json"
+        let url = generation.url.appendingPathComponent(filename, isDirectory: false)
+        let data = try readRegularGoldenFixture(
+            named: filename,
+            in: generation,
+            at: url
+        )
+        try validateDogfoodFixtureJSON(data, at: url)
         return try JSONDecoder().decode(GoldenChapterSet.self, from: data)
     }
 
@@ -848,11 +988,133 @@ enum ChapterPlanGoldenSetLoader {
     /// the directory does not yet exist (so tests can run in checkouts
     /// where the converter has not been executed locally).
     static func allDogfoodFixtures(
-        _ filePath: String = #filePath
+        _ filePath: String = #filePath,
+        afterGenerationOpen: (() throws -> Void)? = nil
     ) throws -> [(url: URL, set: GoldenChapterSet)] {
-        let dir = dogfoodDirectory(filePath)
-        guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
-        return try loadFixtures(in: dir)
+        let generation = try validatedDogfoodGenerationDirectory(filePath)
+        try afterGenerationOpen?()
+        return try loadDogfoodFixtures(in: generation)
+    }
+
+    /// Bind generated dogfood fixtures one-to-one to validated, whole-episode
+    /// gold annotations. Call this before any accuracy run or snapshot mutation.
+    static func canonicalDogfoodFixtures(
+        filePath: String = #filePath,
+        corpusLoader: CorpusAnnotationLoader = CorpusAnnotationLoader()
+    ) throws -> [CanonicalDogfoodFixture] {
+        let annotations = try corpusLoader.loadAll(verifyAudioFingerprints: false)
+        let fixtures = try allDogfoodFixtures(filePath)
+        return try validateCanonicalDogfoodFixtures(
+            fixtures: fixtures,
+            annotations: annotations
+        )
+    }
+
+    static func validateCanonicalDogfoodFixtures(
+        fixtures: [(url: URL, set: GoldenChapterSet)],
+        annotations: [CorpusAnnotation]
+    ) throws -> [CanonicalDogfoodFixture] {
+        let goldAnnotations = annotations.filter(\.isEligibleForGoldEvaluation)
+        guard !goldAnnotations.isEmpty else {
+            guard fixtures.isEmpty else {
+                throw CanonicalDogfoodCorpusError(
+                    detail: "dogfood fixtures exist while canonical corpus has no all-gold episodes"
+                )
+            }
+            return []
+        }
+
+        var annotationsByID: [String: CorpusAnnotation] = [:]
+        for annotation in goldAnnotations {
+            guard annotationsByID.updateValue(annotation, forKey: annotation.episodeId) == nil else {
+                throw CanonicalDogfoodCorpusError(
+                    detail: "duplicate canonical gold episode_id: \(annotation.episodeId)"
+                )
+            }
+        }
+
+        var seenFixtureIDs: Set<String> = []
+        var bound: [CanonicalDogfoodFixture] = []
+        for fixture in fixtures {
+            let filenameID = fixture.url.deletingPathExtension().lastPathComponent
+            guard filenameID == fixture.set.episodeId else {
+                throw CanonicalDogfoodCorpusError(
+                    detail: "dogfood filename \(filenameID) does not match episodeId \(fixture.set.episodeId)"
+                )
+            }
+            guard seenFixtureIDs.insert(fixture.set.episodeId).inserted else {
+                throw CanonicalDogfoodCorpusError(
+                    detail: "duplicate dogfood episodeId: \(fixture.set.episodeId)"
+                )
+            }
+            guard let annotation = annotationsByID[fixture.set.episodeId] else {
+                throw CanonicalDogfoodCorpusError(
+                    detail: "dogfood fixture is not canonical all-gold: \(fixture.set.episodeId)"
+                )
+            }
+            let expectedHash = String(
+                annotation.audioFingerprint.dropFirst(CorpusAudioFingerprint.prefix.count)
+            )
+            guard fixture.set.episodeContentHash == expectedHash else {
+                throw CanonicalDogfoodCorpusError(
+                    detail: "dogfood content hash does not match annotation: \(fixture.set.episodeId)"
+                )
+            }
+            guard fixture.set.chapters == canonicalChapters(for: annotation) else {
+                throw CanonicalDogfoodCorpusError(
+                    detail: "dogfood chapters do not match canonical annotation labels: \(fixture.set.episodeId); regenerate dogfood goldens"
+                )
+            }
+            guard fixture.set.notes == canonicalDogfoodNotes else {
+                throw CanonicalDogfoodCorpusError(
+                    detail: "dogfood notes do not match the privacy-safe converter value: \(fixture.set.episodeId)"
+                )
+            }
+            bound.append(.init(url: fixture.url, set: fixture.set, annotation: annotation))
+        }
+
+        let expectedIDs = Set(annotationsByID.keys)
+        guard seenFixtureIDs == expectedIDs else {
+            let missing = expectedIDs.subtracting(seenFixtureIDs).sorted().joined(separator: ", ")
+            let extra = seenFixtureIDs.subtracting(expectedIDs).sorted().joined(separator: ", ")
+            throw CanonicalDogfoodCorpusError(
+                detail: "dogfood membership mismatch; missing=[\(missing)] extra=[\(extra)]"
+            )
+        }
+        return bound
+    }
+
+    private static func canonicalChapters(
+        for annotation: CorpusAnnotation
+    ) -> [GoldenChapter] {
+        let ads = annotation.adWindows.map { window in
+            GoldenChapter(
+                startTimeSeconds: window.startSeconds,
+                expectedDisposition: .adBreak,
+                expectedTopicLabel: canonicalTopicLabel(for: window.adType)
+            )
+        }
+        let content = annotation.contentWindows.map { window in
+            GoldenChapter(
+                startTimeSeconds: window.startSeconds,
+                expectedDisposition: .content,
+                expectedTopicLabel: "editorial content"
+            )
+        }
+        return (ads + content).sorted { $0.startTimeSeconds < $1.startTimeSeconds }
+    }
+
+    private static func canonicalTopicLabel(
+        for adType: CorpusAnnotation.AdType
+    ) -> String {
+        switch adType {
+        case .hostRead:
+            return "host-read sponsor"
+        case .blendedHostRead:
+            return "blended host-read"
+        default:
+            return "advertisement"
+        }
     }
 
     // MARK: - Pipeline-snapshot directory (au2v.1.23)
@@ -921,7 +1183,9 @@ enum ChapterPlanGoldenSetLoader {
     static func allDogfoodFixturesWithSnapshots(
         _ filePath: String = #filePath
     ) throws -> [DogfoodFixtureWithSnapshot] {
-        let fixtures = try allDogfoodFixtures(filePath)
+        let fixtures = try canonicalDogfoodFixtures(filePath: filePath).map {
+            (url: $0.url, set: $0.set)
+        }
         let snapshotDir = pipelineSnapshotDirectory(filePath)
         return try pairFixturesWithSnapshots(fixtures: fixtures, snapshotDir: snapshotDir)
     }
@@ -972,8 +1236,53 @@ enum ChapterPlanGoldenSetLoader {
         }
     }
 
+    private static func loadDogfoodFixtures(
+        in generation: OpenDogfoodGeneration
+    ) throws -> [(url: URL, set: GoldenChapterSet)] {
+        let duplicate = Darwin.dup(generation.descriptor)
+        guard duplicate >= 0 else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "cannot inspect dogfood golden generation: \(generation.url.path)"
+            )
+        }
+        guard let directory = Darwin.fdopendir(duplicate) else {
+            Darwin.close(duplicate)
+            throw CanonicalDogfoodCorpusError(
+                detail: "cannot inspect dogfood golden generation: \(generation.url.path)"
+            )
+        }
+        defer { Darwin.closedir(directory) }
+
+        var names: [String] = []
+        errno = 0
+        while let entry = Darwin.readdir(directory) {
+            var nameBytes = entry.pointee.d_name
+            let name = withUnsafeBytes(of: &nameBytes) { bytes in
+                String(cString: bytes.baseAddress!.assumingMemoryBound(to: CChar.self))
+            }
+            if !name.hasPrefix("."), name.hasSuffix(".json") {
+                names.append(name)
+            }
+            errno = 0
+        }
+        guard errno == 0 else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "cannot enumerate dogfood golden generation: \(generation.url.path)"
+            )
+        }
+
+        let decoder = JSONDecoder()
+        return try names.sorted().map { name in
+            let url = generation.url.appendingPathComponent(name, isDirectory: false)
+            let data = try readRegularGoldenFixture(named: name, in: generation, at: url)
+            try validateDogfoodFixtureJSON(data, at: url)
+            return (url: url, set: try decoder.decode(GoldenChapterSet.self, from: data))
+        }
+    }
+
     private static func loadFixtures(
-        in dir: URL
+        in dir: URL,
+        requireCanonicalDogfoodSchema: Bool = false
     ) throws -> [(url: URL, set: GoldenChapterSet)] {
         let entries = try FileManager.default.contentsOfDirectory(
             at: dir,
@@ -985,9 +1294,87 @@ enum ChapterPlanGoldenSetLoader {
             .filter { $0.pathExtension == "json" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
             .map { url in
-                let data = try Data(contentsOf: url)
+                let data = try readRegularGoldenFixture(at: url)
+                if requireCanonicalDogfoodSchema {
+                    try validateDogfoodFixtureJSON(data, at: url)
+                }
                 return (url: url, set: try decoder.decode(GoldenChapterSet.self, from: data))
             }
+    }
+
+    private static func validateDogfoodFixtureJSON(_ data: Data, at url: URL) throws {
+        let rootKeys = Set(["episodeId", "episodeContentHash", "chapters", "notes"])
+        let chapterKeys = Set([
+            "startTimeSeconds", "expectedDisposition", "expectedTopicLabel",
+        ])
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(root.keys) == rootKeys,
+              let chapters = root["chapters"] as? [[String: Any]],
+              chapters.allSatisfy({ Set($0.keys) == chapterKeys }),
+              root["notes"] as? String == canonicalDogfoodNotes
+        else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "dogfood fixture has unsafe or non-canonical JSON fields: \(url.path)"
+            )
+        }
+    }
+
+    private static func readRegularGoldenFixture(at url: URL) throws -> Data {
+        // A hostile FIFO must not block the test process before fstat can
+        // reject it. O_NONBLOCK is inert for ordinary files.
+        let descriptor = Darwin.open(
+            url.path,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+        )
+        guard descriptor >= 0 else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "golden fixture is not a regular file: \(url.path)"
+            )
+        }
+        return try readRegularGoldenFixture(from: descriptor, at: url)
+    }
+
+    private static func readRegularGoldenFixture(
+        named name: String,
+        in generation: OpenDogfoodGeneration,
+        at url: URL
+    ) throws -> Data {
+        let descriptor = Darwin.openat(
+            generation.descriptor,
+            name,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+        )
+        guard descriptor >= 0 else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "golden fixture is not a regular file: \(url.path)"
+            )
+        }
+        return try readRegularGoldenFixture(from: descriptor, at: url)
+    }
+
+    private static func readRegularGoldenFixture(
+        from descriptor: Int32,
+        at url: URL
+    ) throws -> Data {
+        defer { Darwin.close(descriptor) }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFREG
+        else {
+            throw CanonicalDogfoodCorpusError(
+                detail: "golden fixture is not a regular file: \(url.path)"
+            )
+        }
+        do {
+            return try FileHandle(
+                fileDescriptor: descriptor,
+                closeOnDealloc: false
+            ).readToEnd() ?? Data()
+        } catch {
+            throw CanonicalDogfoodCorpusError(
+                detail: "cannot read golden fixture \(url.path): \(error.localizedDescription)"
+            )
+        }
     }
 }
 

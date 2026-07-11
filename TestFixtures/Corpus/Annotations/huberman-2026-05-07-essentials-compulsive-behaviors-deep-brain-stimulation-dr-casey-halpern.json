@@ -10,7 +10,10 @@
       "product": "health testing membership",
       "ad_type": "host_read",
       "transition_type": "explicit",
-      "confidence_notes": "Explicit quick-break sponsor read."
+      "confidence_notes": "Explicit quick-break sponsor read.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 1108.6,
@@ -19,7 +22,10 @@
       "product": "nutrition supplement",
       "ad_type": "blended_host_read",
       "transition_type": "blended",
-      "confidence_notes": "Sponsor read starts from host personal-use framing and returns directly to interview content."
+      "confidence_notes": "Sponsor read starts from host personal-use framing and returns directly to interview content.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 1651.2,
@@ -28,7 +34,10 @@
       "product": "water filter",
       "ad_type": "blended_host_read",
       "transition_type": "blended",
-      "confidence_notes": "Host-read product segment leading into URL CTA."
+      "confidence_notes": "Host-read product segment leading into URL CTA.",
+      "provenance": [
+        "human_first_pass"
+      ]
     }
   ],
   "content_windows": [
@@ -54,5 +63,16 @@
     }
   ],
   "variant_of": null,
-  "audio_fingerprint": "sha256:dd0d1415f521d1dedc14a965129463c7b4a7f321360f4c1e22b3a20091638666"
+  "audio_fingerprint": "sha256:dd0d1415f521d1dedc14a965129463c7b4a7f321360f4c1e22b3a20091638666",
+  "provenance": [
+    "human_first_pass"
+  ],
+  "review_attestations": [
+    {
+      "reviewer": "Dan Abrams",
+      "reviewed_at": "2026-05-12T03:06:35Z",
+      "audio_fingerprint": "sha256:dd0d1415f521d1dedc14a965129463c7b4a7f321360f4c1e22b3a20091638666",
+      "review_artifact_id": "sha256:88306e39982d867a3df5a6561f6ae8a199ac3fb50c6266d00ceb21d1194cee3a"
+    }
+  ]
 }

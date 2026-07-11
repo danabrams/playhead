@@ -15,6 +15,8 @@ through opportunistically with ffplay.
 """
 import argparse, json, pathlib, sys
 
+from l2f_canonical_manifest import load_canonical_annotations
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ANN_DIR = ROOT / "TestFixtures/Corpus/Annotations"
 AUDIO_DIR = ROOT / "TestFixtures/Corpus/Audio"
@@ -36,11 +38,8 @@ def main():
             pass
 
     queue = []
-    for ann_path in sorted(ANN_DIR.glob("*.json")):
-        try:
-            ann = json.loads(ann_path.read_text())
-        except Exception:
-            continue
+    for filename, ann in load_canonical_annotations(ANN_DIR).items():
+        ann_path = ANN_DIR / filename
         eid = ann.get("episodeId") or ann_path.stem
         wins = ann.get("adWindows") or ann.get("ad_windows") or []
         for w in wins:

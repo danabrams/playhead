@@ -59,6 +59,63 @@ struct CorpusAnnotation: Sendable, Codable, Equatable {
     let variantOf: String?
     /// SHA-256 hash of the referenced audio file, prefixed with `sha256:`.
     let audioFingerprint: String
+    /// True when the annotation was created by the automated promotion pipeline.
+    let autoPromoted: Bool?
+    /// Promotion timestamp retained as source data rather than interpreted locally.
+    let autoPromotedAt: String?
+    /// Tool or workflow that produced the automatic annotation.
+    let autoPromotedBy: String?
+    /// Episode-level provenance. Unknown values are intentionally preserved.
+    let provenance: [String]?
+    /// Episode-level audit priority emitted by promotion tooling, when present.
+    let auditPriority: Int?
+    /// Durable, asset-bound human review evidence. Gold requires two distinct
+    /// reviewers and two distinct canonical review artifacts.
+    let reviewAttestations: [ReviewAttestation]?
+
+    init(
+        episodeId: String,
+        showName: String,
+        durationSeconds: Double,
+        adWindows: [AdWindow],
+        contentWindows: [ContentWindow],
+        variantOf: String?,
+        audioFingerprint: String,
+        autoPromoted: Bool? = nil,
+        autoPromotedAt: String? = nil,
+        autoPromotedBy: String? = nil,
+        provenance: [String]? = nil,
+        auditPriority: Int? = nil,
+        reviewAttestations: [ReviewAttestation]? = nil
+    ) {
+        self.episodeId = episodeId
+        self.showName = showName
+        self.durationSeconds = durationSeconds
+        self.adWindows = adWindows
+        self.contentWindows = contentWindows
+        self.variantOf = variantOf
+        self.audioFingerprint = audioFingerprint
+        self.autoPromoted = autoPromoted
+        self.autoPromotedAt = autoPromotedAt
+        self.autoPromotedBy = autoPromotedBy
+        self.provenance = provenance
+        self.auditPriority = auditPriority
+        self.reviewAttestations = reviewAttestations
+    }
+
+    struct ReviewAttestation: Sendable, Codable, Equatable {
+        let reviewer: String
+        let reviewedAt: String
+        let audioFingerprint: String
+        let reviewArtifactId: String
+    }
+
+    /// Quality tier used to keep proposals out of human-reviewed evaluation gates.
+    enum LabelTier: String, Sendable, Codable, Equatable, Hashable, CaseIterable {
+        case gold
+        case silver
+        case boundaryProposal = "boundary_proposal"
+    }
 
     // MARK: AdWindow
 
@@ -82,9 +139,57 @@ struct CorpusAnnotation: Sendable, Codable, Equatable {
         let transitionType: TransitionType?
         /// Free-form annotator notes about why this confidence was assigned.
         let confidenceNotes: String?
+        /// True when this window came from the automatic promotion pipeline.
+        let autoPromoted: Bool?
+        /// Window-level promotion timestamp, when emitted by a producer.
+        let autoPromotedAt: String?
+        /// Window-level promotion tool marker, when emitted by a producer.
+        let autoPromotedBy: String?
+        /// Ordered evidence sources. Unknown source names survive round trips.
+        let provenance: [String]?
+        /// R3 proposals use priority 1; triangulated promotions use priority 3.
+        let auditPriority: Int?
+
+        init(
+            startSeconds: Double,
+            endSeconds: Double,
+            advertiser: String?,
+            product: String?,
+            adType: AdType,
+            transitionType: TransitionType?,
+            confidenceNotes: String?,
+            autoPromoted: Bool? = nil,
+            autoPromotedAt: String? = nil,
+            autoPromotedBy: String? = nil,
+            provenance: [String]? = nil,
+            auditPriority: Int? = nil
+        ) {
+            self.startSeconds = startSeconds
+            self.endSeconds = endSeconds
+            self.advertiser = advertiser
+            self.product = product
+            self.adType = adType
+            self.transitionType = transitionType
+            self.confidenceNotes = confidenceNotes
+            self.autoPromoted = autoPromoted
+            self.autoPromotedAt = autoPromotedAt
+            self.autoPromotedBy = autoPromotedBy
+            self.provenance = provenance
+            self.auditPriority = auditPriority
+        }
 
         /// Window length in seconds.
         var durationSeconds: Double { endSeconds - startSeconds }
+
+        /// Tier derived from window-local metadata. Parent metadata is applied by
+        /// ``CorpusAnnotation/labelTier(for:)``.
+        var labelTier: LabelTier {
+            CorpusAnnotation.derivedTier(
+                autoPromoted: autoPromoted == true || autoPromotedAt != nil || autoPromotedBy != nil,
+                provenance: provenance,
+                auditPriority: auditPriority
+            )
+        }
     }
 
     enum AdType: String, Sendable, Codable, Equatable {
@@ -123,6 +228,136 @@ struct CorpusAnnotation: Sendable, Codable, Equatable {
         let notes: String?
 
         var durationSeconds: Double { endSeconds - startSeconds }
+    }
+
+    /// Apply both episode- and window-level provenance. Automated parent
+    /// metadata always wins, so an auto-promoted record can never become gold.
+    func labelTier(for window: AdWindow) -> LabelTier {
+        let sourceEpisodeTier = Self.derivedTier(
+            autoPromoted: hasAutomaticEpisodeMarker,
+            provenance: provenance,
+            auditPriority: auditPriority
+        )
+        let episodeTier: LabelTier = sourceEpisodeTier == .gold && !hasVerifiedReviewAttestations
+            ? .silver : sourceEpisodeTier
+        if episodeTier == .boundaryProposal || window.labelTier == .boundaryProposal {
+            return .boundaryProposal
+        }
+        if episodeTier == .silver || window.labelTier == .silver {
+            return .silver
+        }
+        return .gold
+    }
+
+    /// Episode tier is the least-trusted tier present. Gold requires the
+    /// explicit second-listener provenance transition.
+    var labelTier: LabelTier {
+        let sourceEpisodeTier = Self.derivedTier(
+            autoPromoted: hasAutomaticEpisodeMarker,
+            provenance: provenance,
+            auditPriority: auditPriority
+        )
+        let episodeTier: LabelTier = sourceEpisodeTier == .gold && !hasVerifiedReviewAttestations
+            ? .silver : sourceEpisodeTier
+        return adWindows.reduce(episodeTier) { current, window in
+            let tier = labelTier(for: window)
+            if current == .boundaryProposal || tier == .boundaryProposal {
+                return .boundaryProposal
+            }
+            if current == .silver || tier == .silver {
+                return .silver
+            }
+            return .gold
+        }
+    }
+
+    /// Gold precision/recall gates score whole episodes. Mixing an automatic
+    /// window into a human episode would otherwise make a valid prediction on
+    /// that window look like a gold false positive, so only all-gold episodes
+    /// are eligible.
+    var isEligibleForGoldEvaluation: Bool {
+        labelTier == .gold
+    }
+
+    private var hasAutomaticEpisodeMarker: Bool {
+        autoPromoted == true || autoPromotedAt != nil || autoPromotedBy != nil
+    }
+
+    var hasVerifiedReviewAttestations: Bool {
+        guard let attestations = reviewAttestations, attestations.count == 2 else {
+            return false
+        }
+        guard reviewAttestationsAreWellFormed else { return false }
+        let reviewerLocale = Locale(identifier: "en_US_POSIX")
+        let reviewers = Set(attestations.map {
+            $0.reviewer.folding(options: [.caseInsensitive], locale: reviewerLocale)
+        })
+        let artifacts = Set(attestations.map(\.reviewArtifactId))
+        return reviewers.count == 2 && artifacts.count == 2
+    }
+
+    var reviewAttestationsAreWellFormed: Bool {
+        guard let attestations = reviewAttestations else { return true }
+        let fingerprintPattern = #"^sha256:[0-9a-f]{64}$"#
+        return attestations.allSatisfy({ attestation in
+            let reviewer = attestation.reviewer.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !reviewer.isEmpty
+                && reviewer == attestation.reviewer
+                && attestation.audioFingerprint == audioFingerprint
+                && attestation.reviewArtifactId.range(
+                    of: fingerprintPattern,
+                    options: .regularExpression
+                ) != nil
+                && Self.isCanonicalReviewTimestamp(attestation.reviewedAt)
+        })
+    }
+
+    static func isCanonicalReviewTimestamp(_ value: String) -> Bool {
+        guard value.range(
+            of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"#,
+            options: .regularExpression
+        ) != nil else { return false }
+        let formatter = ISO8601DateFormatter()
+        guard let parsed = formatter.date(from: value) else { return false }
+        return formatter.string(from: parsed) == value
+    }
+
+    private static let automaticProvenance = Set(["rediff", "drafter", "pipeline"])
+    private static let humanProvenance = Set(["human_reviewed"])
+
+    var hasHumanOnlyProvenance: Bool {
+        guard let provenance, !provenance.isEmpty else { return false }
+        return Set(provenance.map { $0.lowercased() }) == Self.humanProvenance
+    }
+
+    private static func derivedTier(
+        autoPromoted: Bool?,
+        provenance: [String]?,
+        auditPriority: Int?
+    ) -> LabelTier {
+        if auditPriority == 1 {
+            return .boundaryProposal
+        }
+        if autoPromoted == true || auditPriority != nil {
+            return .silver
+        }
+        guard let provenance else {
+            // Missing provenance is not evidence of the second-listener gate.
+            return .silver
+        }
+        guard !provenance.isEmpty else {
+            // An explicit but empty source list is not evidence of human review.
+            return .silver
+        }
+        let normalized = Set(provenance.map { $0.lowercased() })
+        if !normalized.isDisjoint(with: automaticProvenance) {
+            return .silver
+        }
+        if normalized.isSubset(of: humanProvenance) {
+            return .gold
+        }
+        // Unknown provenance is preserved but cannot silently acquire gold status.
+        return .silver
     }
 
     // MARK: - Decoder / Encoder

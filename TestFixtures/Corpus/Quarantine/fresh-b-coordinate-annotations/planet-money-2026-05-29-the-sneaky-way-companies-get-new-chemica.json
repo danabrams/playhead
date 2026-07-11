@@ -1,0 +1,78 @@
+{
+  "episode_id": "planet-money-2026-05-29-the-sneaky-way-companies-get-new-chemica",
+  "show_name": "Planet Money",
+  "duration_seconds": 2391.9,
+  "ad_windows": [
+    {
+      "start_seconds": 518.09,
+      "end_seconds": 604.11,
+      "advertiser": "Linkedin",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 518.1-604.1s (len=86.0s). rediff-sec=76.8, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1403.8,
+      "end_seconds": 1423.88,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 1403.8-1423.9s (len=20.1s). rediff-sec=20.1, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1455.61,
+      "end_seconds": 1487.72,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1455.6-1487.7s (len=32.1s). rediff-sec=32.1, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 518.09,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 604.11,
+      "end_seconds": 1403.8,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1423.88,
+      "end_seconds": 1455.61,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1487.72,
+      "end_seconds": 2391.9,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:5f48e429a62faf8165ad0cf8655f47b26d1c0f9663fe3569a9081db6549737e3",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-02T07:55:08Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

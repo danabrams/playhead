@@ -10,7 +10,10 @@
       "product": "banking, wireless service, credit card",
       "ad_type": "produced_segment",
       "transition_type": "explicit",
-      "confidence_notes": "Opening ad pod; transcript segment at the end blends ad disclaimer into content, so audio review should refine the exact boundary."
+      "confidence_notes": "Opening ad pod; transcript segment at the end blends ad disclaimer into content, so audio review should refine the exact boundary.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 2542.2,
@@ -19,7 +22,10 @@
       "product": "wireless service, prescription drug, car selling",
       "ad_type": "produced_segment",
       "transition_type": "explicit",
-      "confidence_notes": "Mid-roll break ad pod between explicit break and return."
+      "confidence_notes": "Mid-roll break ad pod between explicit break and return.",
+      "provenance": [
+        "human_first_pass"
+      ]
     }
   ],
   "content_windows": [
@@ -35,5 +41,16 @@
     }
   ],
   "variant_of": null,
-  "audio_fingerprint": "sha256:cf354d8cd96b64c067c7d0b23e1b9ebfb02a820b8edced3dc2c219bdcf515978"
+  "audio_fingerprint": "sha256:cf354d8cd96b64c067c7d0b23e1b9ebfb02a820b8edced3dc2c219bdcf515978",
+  "provenance": [
+    "human_first_pass"
+  ],
+  "review_attestations": [
+    {
+      "reviewer": "Dan Abrams",
+      "reviewed_at": "2026-05-12T03:06:35Z",
+      "audio_fingerprint": "sha256:cf354d8cd96b64c067c7d0b23e1b9ebfb02a820b8edced3dc2c219bdcf515978",
+      "review_artifact_id": "sha256:88306e39982d867a3df5a6561f6ae8a199ac3fb50c6266d00ceb21d1194cee3a"
+    }
+  ]
 }

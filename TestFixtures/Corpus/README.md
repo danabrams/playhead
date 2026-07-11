@@ -17,6 +17,7 @@ TestFixtures/Corpus/
 ├── Transcripts/           ← local ASR transcript JSON, ignored by git
 ├── Drafts/                ← generated draft annotations, ignored by git
 └── Annotations/           ← per-episode JSON annotations
+    ├── _canonical-manifest.json ← authoritative annotation membership
     ├── _template.example.json
     ├── _template.example.md     ← field-by-field reference
     └── <episode_id>.json        ← real annotations go here
@@ -25,6 +26,10 @@ TestFixtures/Corpus/
 Filenames in `Annotations/` that begin with `_` or end with
 `.example.json` are treated as templates by
 `CorpusAnnotationLoader.isTemplate(_:)` and skipped during validation.
+All evaluation, audit, diagnostic, and promotion workflows read annotation
+membership from `_canonical-manifest.json`; an unlisted JSON file is not part
+of the corpus. Both reviewed and automatic promotion validate their complete
+output batches and enroll them transactionally.
 
 ## Categories (target ≥ 15 episodes)
 
@@ -96,12 +101,18 @@ For every episode:
 4. **Promote after review.** Once every selected entry has a final GUI
    decision, run:
    ```sh
-   python3 scripts/l2f-promote-reviewed-corpus.py --promote
+   python3 scripts/l2f-promote-reviewed-corpus.py --promote \
+     --reviewer-id "<first reviewer>" \
+     --reviewed-at "<YYYY-MM-DDTHH:MM:SSZ>"
    ```
+   This creates a `human_first_pass` annotation. It remains silver and cannot
+   enter gold evaluation or generated dogfood goldens yet.
    The promoter computes `audio_fingerprint` as `sha256:<hex>` from the local
    audio bytes, probes the episode duration, validates reviewed ad metadata
    and timing, and writes explicit content windows as the complement of the
-   verified ad windows. It refuses real promotion if any selected entry is
+   verified ad windows. It also atomically enrolls every written annotation in
+   `Annotations/_canonical-manifest.json`; promotion fails if the required
+   manifest is missing or invalid. It refuses real promotion if any selected entry is
    unreviewed, marked `unsure`, missing audio or duration, missing required
    corpus metadata such as `show_name` or ad metadata, or has
    invalid/overlapping timing. Use
@@ -117,8 +128,19 @@ For every episode:
    file.
 7. **Run the validator.** Either via Xcode (run `CorpusAnnotationLoaderDiskTests`)
    or by calling `CorpusAnnotationLoader().loadAll(verifyAudioFingerprints: true)`.
-8. **Second-pass review.** A second listener spot-checks every
-   annotation before the corpus is treated as ground truth.
+8. **Second-pass review.** A second listener spot-checks every annotation,
+   then explicitly advances the existing first-pass member to gold:
+   ```sh
+   python3 scripts/l2f-promote-reviewed-corpus.py \
+     --promote --force --second-pass-reviewed \
+     --reviewer-id "<second reviewer>" \
+     --reviewed-at "<YYYY-MM-DDTHH:MM:SSZ>"
+   ```
+   The command refuses to create gold directly: the canonical member must
+   already carry `human_first_pass` provenance. The replacement is published
+   as `human_reviewed` under the canonical corpus lock only when the existing
+   and new attestations identify different reviewers and different canonical
+   review artifacts bound to the same audio fingerprint.
 
 `playhead-l2f.3` and `playhead-l2f.4` are intentionally manual gates.
 Transcript-derived drafts, Codex transcript review, and generated review
@@ -145,6 +167,18 @@ It covers all 15 selected local review episodes and 33 final review decisions:
   `daily-2026-05-09-a-personal-finance-star-on-what-millennials-need-from-their-boomer-parents`.
 - 12 annotation JSON files are committed under `Annotations/`, with 24
   `ad_windows` and 28 explicit `content_windows`.
+
+This slice has one durable first-pass attestation in
+`Reviews/88306e39982d867a3df5a6561f6ae8a199ac3fb50c6266d00ceb21d1194cee3a.json` and remains silver. No annotation is
+currently eligible for gold evaluation. A distinct reviewer must use a new,
+fingerprint-bound review artifact to complete the second pass.
+
+The June auto-promotions were found to combine fresh-download coordinates with
+retained-snapshot hashes. All 36 are preserved under `Quarantine/` and are not
+canonical corpus members. The original assetless July ledgers are also
+quarantined. Their active audit copy is bound to the exact retained audio that
+was played; only the nine explicit content decisions produce active,
+asset-specific vetoes.
 
 Promoter category coverage for this slice:
 
@@ -237,9 +271,13 @@ annotations and this README are committed.
   locally from audio and may contain copyrighted transcript text.
 - **Drafts** (`Drafts/*`) — NOT committed. Generated hints for a
   human labeler, never ground truth by themselves.
+- **Review artifacts** (`Reviews/<sha256>.json`) — committed immutable
+  evidence. The filename is the SHA-256 of the exact file bytes; gold
+  attestations must resolve one of these files and match its reviewer,
+  timestamp, episode, audio fingerprint, and final decisions.
 
-The promotion tool follows the same storage policy: it only writes committed
-annotation JSON. GUI reviews, review queues, transcripts, and audio remain
-ignored local artifacts.
+The promotion tool publishes a content-addressed review artifact before it
+writes an attested annotation. Mutable GUI reviews, review queues, transcripts,
+and audio remain ignored local artifacts.
 
 See `.gitignore` for the exact audio exclusion rules.

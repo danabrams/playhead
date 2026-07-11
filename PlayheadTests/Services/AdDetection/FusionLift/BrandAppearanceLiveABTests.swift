@@ -175,10 +175,11 @@ final class BrandAppearanceLiveABTests: XCTestCase {
         let annotationURLs: [URL]
         do {
             annotationURLs = try loader.annotationFileURLs()
-        } catch {
-            throw XCTSkip("corpus annotations dir not present: \(error)")
+        } catch CorpusAnnotationLoaderError.directoryNotFound(let url) {
+            throw XCTSkip("corpus annotations dir not present: \(url.path)")
         }
         try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+        try loader.preflightGoldEvaluationInputs(annotationURLs: annotationURLs)
 
         // Resolve every episode ONCE so each run shares the same staged set
         // (audio + transcript + publish-date sorted). Resolution is identical
@@ -225,7 +226,8 @@ final class BrandAppearanceLiveABTests: XCTestCase {
         var resolved: [ResolvedEpisode] = []
         for url in annotationURLs {
             let episodeId = url.deletingPathExtension().lastPathComponent
-            let annotation = try loader.decode(at: url)
+            let annotation = try loader.loadAndValidate(at: url)
+            guard annotation.isEligibleForGoldEvaluation else { continue }
             let audioURL: URL
             do {
                 audioURL = try loader.audioFileURL(for: annotation)
@@ -394,10 +396,11 @@ final class BrandAppearanceLiveABTests: XCTestCase {
         let annotationURLs: [URL]
         do {
             annotationURLs = try loader.annotationFileURLs()
-        } catch {
-            throw XCTSkip("corpus annotations dir not present: \(error)")
+        } catch CorpusAnnotationLoaderError.directoryNotFound(let url) {
+            throw XCTSkip("corpus annotations dir not present: \(url.path)")
         }
         try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+        try loader.preflightGoldEvaluationInputs(annotationURLs: annotationURLs)
 
         // Resolve every episode FIRST (annotation + audio + transcript), so the
         // arm loops can process them in PUBLISH-DATE order. An episode that fails
@@ -411,11 +414,12 @@ final class BrandAppearanceLiveABTests: XCTestCase {
 
             let annotation: CorpusAnnotation
             do {
-                annotation = try loader.decode(at: url)
+                annotation = try loader.loadAndValidate(at: url)
             } catch {
-                failed.append((episodeId, "annotation decode failed: \(error.localizedDescription)"))
+                failed.append((episodeId, "annotation validation failed: \(error.localizedDescription)"))
                 continue
             }
+            guard annotation.isEligibleForGoldEvaluation else { continue }
 
             let audioURL: URL
             do {
@@ -471,6 +475,10 @@ final class BrandAppearanceLiveABTests: XCTestCase {
         resolved.sort {
             if $0.publishDate != $1.publishDate { return $0.publishDate < $1.publishDate }
             return $0.episodeId < $1.episodeId
+        }
+        guard failed.isEmpty else {
+            XCTFail("Corpus preflight failures: \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))")
+            return
         }
 
         // One accumulator + one fire tally per arm IN THIS PASS.
@@ -548,6 +556,17 @@ final class BrandAppearanceLiveABTests: XCTestCase {
             await shared.store.close()
         }
 
+        guard failed.isEmpty else {
+            XCTFail("Hard failures: \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))")
+            return
+        }
+        guard !scored.isEmpty else {
+            XCTFail(
+                "PLAYHEAD_BRANDAPPEARANCE_AB=1 was set but no episodes scored; all staged inputs were skipped"
+            )
+            return
+        }
+
         // Build + print + dump the report over EXACTLY the arms this pass ran
         // (baseline first), so the JSON carries no phantom zero rows for arms a
         // single-signal pass never ran.
@@ -571,19 +590,6 @@ final class BrandAppearanceLiveABTests: XCTestCase {
         try report.jsonData().write(to: dumpURL, options: .atomic)
         print("Brand-appearance A/B JSON: \(dumpURL.path) (git-ignored)")
 
-        // Fail loud on hard failures; fail loud if nothing scored (env set but
-        // every episode landed in skipped — audio/transcript not staged).
-        if !failed.isEmpty {
-            XCTFail("Hard failures: \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))")
-        } else if scored.isEmpty {
-            XCTFail(
-                """
-                PLAYHEAD_BRANDAPPEARANCE_AB=1 was set but no episodes scored — \
-                every episode landed in `skipped` because audio or the transcript \
-                sidecar is not staged. See the file header for the staging recipe.
-                """
-            )
-        }
     }
 
     // MARK: - One arm

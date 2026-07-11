@@ -166,10 +166,11 @@ final class LexicalScorerLiveABTests: XCTestCase {
         let annotationURLs: [URL]
         do {
             annotationURLs = try loader.annotationFileURLs()
-        } catch {
-            throw XCTSkip("corpus annotations dir not present: \(error)")
+        } catch CorpusAnnotationLoaderError.directoryNotFound(let url) {
+            throw XCTSkip("corpus annotations dir not present: \(url.path)")
         }
         try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+        try loader.preflightGoldEvaluationInputs(annotationURLs: annotationURLs)
 
         let arms = LexicalScorerArm.allCases
         let runCount = multiRunCountFromEnv()
@@ -216,7 +217,8 @@ final class LexicalScorerLiveABTests: XCTestCase {
         var scoredCount = 0
         for url in annotationURLs {
             let episodeId = url.deletingPathExtension().lastPathComponent
-            let annotation = try loader.decode(at: url)
+            let annotation = try loader.loadAndValidate(at: url)
+            guard annotation.isEligibleForGoldEvaluation else { continue }
             let audioURL: URL
             do {
                 audioURL = try loader.audioFileURL(for: annotation)
@@ -263,10 +265,11 @@ final class LexicalScorerLiveABTests: XCTestCase {
         let annotationURLs: [URL]
         do {
             annotationURLs = try loader.annotationFileURLs()
-        } catch {
-            throw XCTSkip("corpus annotations dir not present: \(error)")
+        } catch CorpusAnnotationLoaderError.directoryNotFound(let url) {
+            throw XCTSkip("corpus annotations dir not present: \(url.path)")
         }
         try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+        try loader.preflightGoldEvaluationInputs(annotationURLs: annotationURLs)
 
         // One accumulator per sweep arm, keyed by arm. Each arm runs the SAME
         // store/features/transcripts/planner-seeding/FM-mode `.full` per
@@ -285,11 +288,12 @@ final class LexicalScorerLiveABTests: XCTestCase {
             // Resolve annotation (ground truth).
             let annotation: CorpusAnnotation
             do {
-                annotation = try loader.decode(at: url)
+                annotation = try loader.loadAndValidate(at: url)
             } catch {
-                failed.append((episodeId, "annotation decode failed: \(error.localizedDescription)"))
+                failed.append((episodeId, "annotation validation failed: \(error.localizedDescription)"))
                 continue
             }
+            guard annotation.isEligibleForGoldEvaluation else { continue }
 
             // Resolve audio.
             let audioURL: URL
@@ -359,6 +363,17 @@ final class LexicalScorerLiveABTests: XCTestCase {
             }
         }
 
+        guard failed.isEmpty else {
+            XCTFail("Hard failures: \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))")
+            return
+        }
+        guard !scored.isEmpty else {
+            XCTFail(
+                "PLAYHEAD_LEXICAL_SCORER_AB=1 was set but no episodes scored; all staged inputs were skipped"
+            )
+            return
+        }
+
         // Build + print + dump the per-feature sweep report.
         let report = LexicalScorerSweepReport(
             episodeCount: scored.count,
@@ -380,22 +395,6 @@ final class LexicalScorerLiveABTests: XCTestCase {
         try report.jsonData().write(to: dumpURL, options: .atomic)
         print("Lift summary JSON: \(dumpURL.path) (git-ignored)")
 
-        // Fail loud on hard failures; fail loud if nothing scored (env was set
-        // but every episode landed in skipped — audio/transcript not staged).
-        // Otherwise the A/B is informational (no pinned lift number — this is
-        // an orchestrator measurement step, not a green gate).
-        if !failed.isEmpty {
-            XCTFail("Hard failures: \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))")
-        } else if scored.isEmpty {
-            XCTFail(
-                """
-                PLAYHEAD_LEXICAL_SCORER_AB=1 was set but no episodes scored — \
-                every episode landed in `skipped` because audio or the \
-                transcript sidecar is not staged. See the file header for the \
-                staging recipe.
-                """
-            )
-        }
     }
 
     // MARK: - One arm

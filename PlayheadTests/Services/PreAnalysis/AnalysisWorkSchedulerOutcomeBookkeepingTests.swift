@@ -84,7 +84,8 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
     private func makeScheduler(
         store: AnalysisStore,
         audioProvider: any AnalysisAudioProviding,
-        downloads: StubDownloadProvider
+        downloads: StubDownloadProvider,
+        clock: @escaping @Sendable () -> Date = { Date() }
     ) -> AnalysisWorkScheduler {
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
         let runner = AnalysisJobRunner(
@@ -106,7 +107,8 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
                 return b
             }(),
             transportStatusProvider: StubTransportStatusProvider(),
-            config: PreAnalysisConfig()
+            config: PreAnalysisConfig(),
+            clock: clock
         )
     }
 
@@ -270,6 +272,7 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
         // job (nextEligibleAt = nil) is eligible on the next pass.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
+        let fixedNow = Date(timeIntervalSince1970: 1_800_000_000)
 
         var observedBackoffs: [Double] = []
 
@@ -296,16 +299,10 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             let scheduler = makeScheduler(
                 store: store,
                 audioProvider: audioStub,
-                downloads: downloads
+                downloads: downloads,
+                clock: { fixedNow }
             )
 
-            // Capture wall-clock immediately before the synchronous
-            // dispatch so we can subtract the scheduler's `clock()`
-            // reading (`Date()` by default) to recover the chosen
-            // backoff value. The whole pass completes in well under a
-            // second, so the residual measurement error is
-            // milliseconds — far inside the 30s tolerance below.
-            let beforeCancel = Date().timeIntervalSince1970
             let processed = await scheduler.processNextDispatchableJobForTesting(
                 cancelAfterRunnerStart: .taskExpired
             )
@@ -315,20 +312,19 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             #expect(after?.attemptCount == startingAttempts + 1,
                     "attempt \(startingAttempts + 1) must bump attemptCount via cancelCatch.revertQueued")
             let nextEligible = after?.nextEligibleAt ?? 0
-            #expect(nextEligible > beforeCancel,
+            #expect(nextEligible > fixedNow.timeIntervalSince1970,
                     "attempt \(startingAttempts + 1) did not commit a future nextEligibleAt")
-            observedBackoffs.append(nextEligible - beforeCancel)
+            observedBackoffs.append(nextEligible - fixedNow.timeIntervalSince1970)
         }
 
         // Exponential helper: min(2^attempt * 60, 3600). Attempts here
-        // are 1, 2, 3 → 120s, 240s, 480s. Use a 30-second jitter
-        // margin around each expected target to absorb test-host
-        // scheduling jitter while still pinning the doubling.
+        // are 1, 2, 3 → 120s, 240s, 480s. The injected clock makes
+        // these exact and independent of test-host scheduling stalls.
         #expect(observedBackoffs.count == 3)
         let expected: [Double] = [120, 240, 480]
         for (i, target) in expected.enumerated() {
-            #expect(abs(observedBackoffs[i] - target) < 30,
-                    "attempt \(i + 1) backoff was \(observedBackoffs[i])s, expected ~\(target)s")
+            #expect(observedBackoffs[i] == target,
+                    "attempt \(i + 1) backoff was \(observedBackoffs[i])s, expected \(target)s")
         }
         // Strictly increasing too — defends against a future regression
         // that happens to land each value inside the same 30s window.

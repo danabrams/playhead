@@ -148,10 +148,11 @@ final class AudioForensicsTemporalRegLiveABTests: XCTestCase {
         let annotationURLs: [URL]
         do {
             annotationURLs = try loader.annotationFileURLs()
-        } catch {
-            throw XCTSkip("corpus annotations dir not present: \(error)")
+        } catch CorpusAnnotationLoaderError.directoryNotFound(let url) {
+            throw XCTSkip("corpus annotations dir not present: \(url.path)")
         }
         try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+        try loader.preflightGoldEvaluationInputs(annotationURLs: annotationURLs)
 
         let arms: [ActempoArm] = [.baseline, .treatment]
         let runCount = multiRunCountFromEnv()
@@ -204,7 +205,8 @@ final class AudioForensicsTemporalRegLiveABTests: XCTestCase {
         var scoredCount = 0
         for url in annotationURLs {
             let episodeId = url.deletingPathExtension().lastPathComponent
-            let annotation = try loader.decode(at: url)
+            let annotation = try loader.loadAndValidate(at: url)
+            guard annotation.isEligibleForGoldEvaluation else { continue }
             let audioURL: URL
             do {
                 audioURL = try loader.audioFileURL(for: annotation)
@@ -295,10 +297,11 @@ final class AudioForensicsTemporalRegLiveABTests: XCTestCase {
         let annotationURLs: [URL]
         do {
             annotationURLs = try loader.annotationFileURLs()
-        } catch {
-            throw XCTSkip("corpus annotations dir not present: \(error)")
+        } catch CorpusAnnotationLoaderError.directoryNotFound(let url) {
+            throw XCTSkip("corpus annotations dir not present: \(url.path)")
         }
         try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+        try loader.preflightGoldEvaluationInputs(annotationURLs: annotationURLs)
 
         // One accumulator + one fire tally per arm IN THIS PASS.
         var accumulators: [ActempoArm: FusionLiftModeAccumulator] = Dictionary(
@@ -318,11 +321,12 @@ final class AudioForensicsTemporalRegLiveABTests: XCTestCase {
             // Resolve annotation (ground truth).
             let annotation: CorpusAnnotation
             do {
-                annotation = try loader.decode(at: url)
+                annotation = try loader.loadAndValidate(at: url)
             } catch {
-                failed.append((episodeId, "annotation decode failed: \(error.localizedDescription)"))
+                failed.append((episodeId, "annotation validation failed: \(error.localizedDescription)"))
                 continue
             }
+            guard annotation.isEligibleForGoldEvaluation else { continue }
 
             // Resolve audio.
             let audioURL: URL
@@ -405,6 +409,17 @@ final class AudioForensicsTemporalRegLiveABTests: XCTestCase {
             }
         }
 
+        guard failed.isEmpty else {
+            XCTFail("Hard failures: \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))")
+            return
+        }
+        guard !scored.isEmpty else {
+            XCTFail(
+                "PLAYHEAD_ACTEMPO_AB=1 was set but no episodes scored; all staged inputs were skipped"
+            )
+            return
+        }
+
         // Build + print + dump the report over EXACTLY the arms this pass ran.
         let report = ActempoSweepReport(
             signal: signal,
@@ -425,19 +440,6 @@ final class AudioForensicsTemporalRegLiveABTests: XCTestCase {
         try report.jsonData().write(to: dumpURL, options: .atomic)
         print("Actempo \(signal.label) A/B JSON: \(dumpURL.path) (git-ignored)")
 
-        // Fail loud on hard failures; fail loud if nothing scored (env set but
-        // every episode landed in skipped — audio/transcript not staged).
-        if !failed.isEmpty {
-            XCTFail("Hard failures: \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))")
-        } else if scored.isEmpty {
-            XCTFail(
-                """
-                PLAYHEAD_ACTEMPO_AB=1 was set but no episodes scored — every \
-                episode landed in `skipped` because audio or the transcript \
-                sidecar is not staged. See the file header for the staging recipe.
-                """
-            )
-        }
     }
 
     // MARK: - One arm

@@ -10,7 +10,10 @@
       "product": "network intro, enterprise AI, prescription drug, health care, eggs, event promo",
       "ad_type": "dynamic_insertion",
       "transition_type": "hard_cut",
-      "confidence_notes": "Pre-roll inserted ad/promo chain before episode content."
+      "confidence_notes": "Pre-roll inserted ad/promo chain before episode content.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 789.8,
@@ -19,7 +22,10 @@
       "product": "pet insurance, food products, prep paper, retail",
       "ad_type": "dynamic_insertion",
       "transition_type": "hard_cut",
-      "confidence_notes": "Mid-roll inserted ad pod before story content resumes."
+      "confidence_notes": "Mid-roll inserted ad pod before story content resumes.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 1516.7,
@@ -28,7 +34,10 @@
       "product": "pet insurance, food products, prep paper, retail",
       "ad_type": "dynamic_insertion",
       "transition_type": "hard_cut",
-      "confidence_notes": "Second mid-roll inserted ad pod before story content resumes."
+      "confidence_notes": "Second mid-roll inserted ad pod before story content resumes.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 2389.7,
@@ -37,7 +46,10 @@
       "product": "PrEP education, video streaming, prep paper, retail, network outro",
       "ad_type": "dynamic_insertion",
       "transition_type": "hard_cut",
-      "confidence_notes": "Post-roll inserted ad chain after show outro/music."
+      "confidence_notes": "Post-roll inserted ad chain after show outro/music.",
+      "provenance": [
+        "human_first_pass"
+      ]
     }
   ],
   "content_windows": [
@@ -58,5 +70,16 @@
     }
   ],
   "variant_of": null,
-  "audio_fingerprint": "sha256:16f974feb751f783a8f96be92cda6931ca95f119f70cf233f95104bb3ef7c21d"
+  "audio_fingerprint": "sha256:16f974feb751f783a8f96be92cda6931ca95f119f70cf233f95104bb3ef7c21d",
+  "provenance": [
+    "human_first_pass"
+  ],
+  "review_attestations": [
+    {
+      "reviewer": "Dan Abrams",
+      "reviewed_at": "2026-05-12T03:06:35Z",
+      "audio_fingerprint": "sha256:16f974feb751f783a8f96be92cda6931ca95f119f70cf233f95104bb3ef7c21d",
+      "review_artifact_id": "sha256:88306e39982d867a3df5a6561f6ae8a199ac3fb50c6266d00ceb21d1194cee3a"
+    }
+  ]
 }

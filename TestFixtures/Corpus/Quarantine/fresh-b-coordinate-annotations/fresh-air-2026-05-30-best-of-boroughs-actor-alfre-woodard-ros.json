@@ -1,0 +1,87 @@
+{
+  "episode_id": "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros",
+  "show_name": "Fresh Air",
+  "duration_seconds": 3233.4,
+  "ad_windows": [
+    {
+      "start_seconds": 95.9,
+      "end_seconds": 159.4,
+      "advertiser": "Att",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 95.9-159.4s (len=63.5s). rediff-sec=49.8, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1179.42,
+      "end_seconds": 1269.13,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1179.4-1269.1s (len=89.7s). rediff-sec=89.7, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 1994.03,
+      "end_seconds": 2071.11,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1994.0-2071.1s (len=77.1s). rediff-sec=77.1, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 95.9,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 159.4,
+      "end_seconds": 1179.42,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1269.13,
+      "end_seconds": 1994.03,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2071.11,
+      "end_seconds": 3162.55,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 3162.55,
+      "end_seconds": 3196.13,
+      "notes": "Audit-derived content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 3196.13,
+      "end_seconds": 3233.4,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:b9dc85a6a7e8dc2beef8565adbee2949f6d70892ac6f0995f18f8e6efb06143e",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-02T07:55:08Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

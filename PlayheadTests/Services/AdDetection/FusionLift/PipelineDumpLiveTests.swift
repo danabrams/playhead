@@ -63,6 +63,7 @@
 //     "runUtc": "ISO8601",
 //     "episodes": [
 //       { "episodeId": "...", "showSlug": "...", "publishDate": "...",
+//         "audioFingerprint": "sha256:...",
 //         "episodeDurationSeconds": 1234.5,
 //         "candidateDecodedSpans": <int>,
 //         "candidateDecodedSpanList": [
@@ -211,14 +212,20 @@ enum PipelineDumpManifestLoader {
 
     enum LoadError: Error, CustomStringConvertible {
         case manifestMissing(URL)
+        case manifestUnsafe(URL)
         case decodeFailed(URL, Error)
+        case invalidEntry(Int, String)
 
         var description: String {
             switch self {
             case .manifestMissing(let url):
                 return "Snapshot manifest not found at \(url.path)"
+            case .manifestUnsafe(let url):
+                return "Snapshot manifest is not a regular unaliased file at \(url.path)"
             case .decodeFailed(let url, let err):
                 return "Failed to decode \(url.lastPathComponent): \(err.localizedDescription)"
+            case .invalidEntry(let index, let detail):
+                return "Invalid snapshot manifest entry \(index): \(detail)"
             }
         }
     }
@@ -229,6 +236,11 @@ enum PipelineDumpManifestLoader {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw LoadError.manifestMissing(url)
         }
+        guard let values = try? url.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        ), values.isRegularFile == true, values.isSymbolicLink != true else {
+            throw LoadError.manifestUnsafe(url)
+        }
         let data: Data
         do {
             data = try Data(contentsOf: url)
@@ -236,15 +248,83 @@ enum PipelineDumpManifestLoader {
             throw LoadError.decodeFailed(url, error)
         }
         do {
-            return try JSONDecoder().decode([PipelineDumpSnapshotEntry].self, from: data)
+            let entries = try JSONDecoder().decode([PipelineDumpSnapshotEntry].self, from: data)
+            try validate(entries)
+            return entries
         } catch {
+            if let loadError = error as? LoadError { throw loadError }
             throw LoadError.decodeFailed(url, error)
         }
     }
 
     /// Load + decode the manifest from its canonical repo-root location.
     static func load(repoRoot: URL) throws -> [PipelineDumpSnapshotEntry] {
-        try decode(at: manifestURL(repoRoot: repoRoot))
+        let url = manifestURL(repoRoot: repoRoot)
+        guard !CorpusAnnotationLoader.hasSymbolicLinkComponent(url, relativeTo: repoRoot) else {
+            throw LoadError.manifestUnsafe(url)
+        }
+        return try decode(at: url)
+    }
+
+    static func audioURL(
+        for entry: PipelineDumpSnapshotEntry,
+        repoRoot: URL
+    ) throws -> URL {
+        try validate([entry])
+        let directory = repoRoot
+            .appendingPathComponent(CorpusAnnotationLoader.audioRelativePath, isDirectory: true)
+            .standardizedFileURL
+        let candidate = repoRoot
+            .appendingPathComponent(entry.audioPath, isDirectory: false)
+            .standardizedFileURL
+        guard candidate.deletingLastPathComponent() == directory,
+              !CorpusAnnotationLoader.hasSymbolicLinkComponent(candidate, relativeTo: repoRoot)
+        else {
+            throw LoadError.invalidEntry(0, "audioPath escapes the canonical corpus audio directory")
+        }
+        return candidate
+    }
+
+    private static func validate(_ entries: [PipelineDumpSnapshotEntry]) throws {
+        var episodeIds: Set<String> = []
+        for (index, entry) in entries.enumerated() {
+            let episodeId = entry.episodeId
+            guard !episodeId.isEmpty,
+                  episodeId != ".",
+                  episodeId != "..",
+                  !episodeId.contains("/"),
+                  !episodeId.contains("\\"),
+                  (episodeId as NSString).lastPathComponent == episodeId
+            else {
+                throw LoadError.invalidEntry(index, "episodeId must be a bare non-empty identifier")
+            }
+            guard episodeIds.insert(episodeId).inserted else {
+                throw LoadError.invalidEntry(index, "duplicate episodeId \(episodeId)")
+            }
+            guard !entry.showSlug.isEmpty, !entry.publishDate.isEmpty else {
+                throw LoadError.invalidEntry(index, "showSlug and publishDate must be non-empty")
+            }
+            let filename = "\(episodeId).\((entry.audioPath as NSString).pathExtension)"
+            let expectedPrefix = "TestFixtures/Corpus/Audio/"
+            guard entry.audioPath.hasPrefix(expectedPrefix),
+                  entry.audioPath == expectedPrefix + filename,
+                  CorpusAnnotationLoader.audioFileExtensions.contains(
+                    (entry.audioPath as NSString).pathExtension.lowercased()
+                  )
+            else {
+                throw LoadError.invalidEntry(
+                    index,
+                    "audioPath must name the episode directly under TestFixtures/Corpus/Audio"
+                )
+            }
+            if let hash = entry.sha256 {
+                guard hash.count == 64, hash.unicodeScalars.allSatisfy({
+                    CharacterSet(charactersIn: "0123456789abcdef").contains($0)
+                }) else {
+                    throw LoadError.invalidEntry(index, "sha256 must be 64 lowercase hex characters")
+                }
+            }
+        }
     }
 }
 
@@ -317,6 +397,8 @@ private struct DumpDecodedSpan: Encodable {
 /// Per-episode dump row.
 private struct DumpEpisode: Encodable {
     let episodeId: String
+    /// Exact bytes whose timeline all coordinate-bearing fields use.
+    let audioFingerprint: String
     let showSlug: String
     let publishDate: String
     let episodeDurationSeconds: Double
@@ -493,17 +575,38 @@ final class PipelineDumpLiveTests: XCTestCase {
         let episodeId = entry.episodeId
 
         // Resolve audio file from the manifest's repo-root-relative path.
-        let audioURL = repoRoot.appendingPathComponent(entry.audioPath, isDirectory: false)
+        let audioURL = try PipelineDumpManifestLoader.audioURL(for: entry, repoRoot: repoRoot)
         guard FileManager.default.fileExists(atPath: audioURL.path) else {
             throw PipelineDumpRunError(
                 severity: .soft,
                 reason: "audio file not staged at \(audioURL.path)"
             )
         }
+        guard let audioValues = try? audioURL.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        ), audioValues.isRegularFile == true, audioValues.isSymbolicLink != true else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "audio at \(audioURL.path) is not a regular unaliased file"
+            )
+        }
         guard let localURL = LocalAudioURL(audioURL) else {
             throw PipelineDumpRunError(
                 severity: .hard,
                 reason: "audio at \(audioURL.path) is not a file URL"
+            )
+        }
+        guard let expectedHash = entry.sha256 else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "snapshot manifest lacks sha256 for \(episodeId)"
+            )
+        }
+        let audioFingerprint = try CorpusAudioFingerprint.fingerprint(of: audioURL)
+        guard audioFingerprint == "sha256:\(expectedHash)" else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "audio fingerprint differs from snapshot manifest for \(episodeId)"
             )
         }
 
@@ -515,7 +618,8 @@ final class PipelineDumpLiveTests: XCTestCase {
         do {
             transcript = try CorpusTranscriptLoader.load(
                 episodeId: episodeId,
-                repoRoot: repoRoot
+                repoRoot: repoRoot,
+                audioURL: audioURL
             )
         } catch {
             throw PipelineDumpRunError(
@@ -750,6 +854,7 @@ final class PipelineDumpLiveTests: XCTestCase {
 
         return DumpEpisode(
             episodeId: episodeId,
+            audioFingerprint: audioFingerprint,
             showSlug: entry.showSlug,
             publishDate: entry.publishDate,
             episodeDurationSeconds: episodeDuration,
@@ -870,56 +975,68 @@ struct PipelineDumpHermeticTests {
 
     @Test("snapshot manifest decodes and lists the expected 9 episodes")
     func manifestDecodesNineEpisodes() throws {
-        let repoRoot = PipelineDumpManifestLoader.repoRoot()
-        // playhead-p56a R1 review: the manifest file is generated by the
-        // env-gated Catalyst dump pipeline and is NOT checked into the
-        // repo (`TestFixtures/Corpus/Snapshots/.gitkeep` is the only
-        // tracked entry under that directory). Without this guard, the
-        // test deterministically fails on every developer machine that
-        // hasn't run the Catalyst dump locally — masking real signal
-        // and noise-floor-ing the sim test run.
-        //
-        // playhead-p56a R5/R6 note on Swift Testing skip semantics:
-        //   - `try #require(<bool>)` records a failure when the value is
-        //     false. It is NOT a runtime soft-skip primitive; reaching for
-        //     `try #require(FileManager.default.fileExists(...))` would
-        //     flip this test back to a hard failure on every developer
-        //     machine without the Catalyst dump output.
-        //   - Swift Testing DOES have trait-level skip primitives —
-        //     `.enabled(if:)` / `.disabled(if:)` (see
-        //     `NarlEvalCorpusBuilderTests.swift` for an analogous env-gated
-        //     fixture using `.enabled(if: Self.envGateOpen)`), and the
-        //     unconditional `.disabled("reason")` trait. Either could be
-        //     applied here by hoisting `manifestURL` resolution into a
-        //     `static let` (`#filePath` is a compile-time literal, so the
-        //     path is statically computable).
-        //   - We deliberately picked the body-level guard-return form
-        //     because (a) the fail-message stays adjacent to the assertion
-        //     it guards, (b) test discovery still reports the test as
-        //     "passing" (not "skipped") which keeps green/red signal
-        //     legible in PlayheadFastTests aggregate counts, and (c) the
-        //     guard pattern is what the implementer-loop converged on in
-        //     R1 — no behavioral upside justifies a refactor.
-        //   Future maintainers: do NOT "fix" the guard by replacing it with
-        //   `try #require(FileManager...)`. If you want to migrate to a
-        //   trait-level skip via `.enabled(if:)`, that is a defensible
-        //   stylistic change — but verify it preserves the soft-skip on
-        //   manifest-absent machines (xcodebuild should NOT report a
-        //   failure) before landing.
-        let manifestURL = PipelineDumpManifestLoader.manifestURL(repoRoot: repoRoot)
-        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
-            // Manifest absent on this checkout — short-circuit cleanly.
-            // The Catalyst dump pipeline regenerates it on demand; on a
-            // fresh sim checkout it is simply not present. See the
-            // multi-line rationale above for why this is a guard-return
-            // rather than `try #require` or a trait-level skip.
-            return
+        let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "pipeline-dump-nine-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        let fixtureURL = tempDirectory.appendingPathComponent("manifest.json")
+        let fixture: [[String: String]] = (1...9).map { index in
+            [
+                "show": "Show \(index)",
+                "showSlug": "show-\(index)",
+                "episodeId": "episode-\(index)",
+                "publishDate": "2026-06-\(String(format: "%02d", index))",
+                "audioPath": "TestFixtures/Corpus/Audio/episode-\(index).mp3",
+                "sha256": String(repeating: "a", count: 64),
+            ]
         }
-        let entries = try PipelineDumpManifestLoader.load(repoRoot: repoRoot)
+        try JSONSerialization.data(withJSONObject: fixture).write(to: fixtureURL)
+        let entries = try PipelineDumpManifestLoader.decode(at: fixtureURL)
 
         #expect(entries.count == 9, "manifest must list exactly the 9 NEW snapshot episodes (got \(entries.count))")
+        assertStructurallyValid(entries)
+    }
 
-        // Each entry must carry the four fields the harness reads.
+    @Test("snapshot manifest rejects episode and audio path traversal")
+    func manifestRejectsPathTraversal() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "pipeline-dump-traversal-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        let fixtureURL = tempDirectory.appendingPathComponent("manifest.json")
+
+        for (episodeId, audioPath) in [
+            ("../escape", "TestFixtures/Corpus/Audio/escape.mp3"),
+            ("episode-1", "TestFixtures/Corpus/Audio/../../../escape.mp3"),
+        ] {
+            let fixture: [[String: String]] = [[
+                "show": "Show",
+                "showSlug": "show",
+                "episodeId": episodeId,
+                "publishDate": "2026-06-01",
+                "audioPath": audioPath,
+                "sha256": String(repeating: "a", count: 64),
+            ]]
+            try JSONSerialization.data(withJSONObject: fixture).write(to: fixtureURL)
+            #expect(throws: PipelineDumpManifestLoader.LoadError.self) {
+                _ = try PipelineDumpManifestLoader.decode(at: fixtureURL)
+            }
+        }
+    }
+
+    @Test("mutable live snapshot is structurally valid when present")
+    func liveManifestIsStructurallyValidWhenPresent() throws {
+        let repoRoot = PipelineDumpManifestLoader.repoRoot()
+        let manifestURL = PipelineDumpManifestLoader.manifestURL(repoRoot: repoRoot)
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else { return }
+        let entries = try PipelineDumpManifestLoader.load(repoRoot: repoRoot)
+        #expect(!entries.isEmpty, "live snapshot manifest must not be empty")
+        assertStructurallyValid(entries)
+    }
+
+    private func assertStructurallyValid(_ entries: [PipelineDumpSnapshotEntry]) {
         for entry in entries {
             #expect(!entry.episodeId.isEmpty, "episodeId missing")
             #expect(!entry.showSlug.isEmpty, "showSlug missing for \(entry.episodeId)")
@@ -930,8 +1047,6 @@ struct PipelineDumpHermeticTests {
             )
         }
 
-        // No duplicates — the dump would otherwise double-write the same
-        // episode under a single store/asset id.
         let uniqueIds = Set(entries.map(\.episodeId))
         #expect(
             uniqueIds.count == entries.count,
@@ -1029,6 +1144,7 @@ struct PipelineDumpEncodingTests {
         // silently. Lock it here.
         let episode = DumpEpisode(
             episodeId: "ep-1",
+            audioFingerprint: "sha256:" + String(repeating: "a", count: 64),
             showSlug: "show-x",
             publishDate: "2026-06-01",
             episodeDurationSeconds: 1800.0,
@@ -1051,6 +1167,7 @@ struct PipelineDumpEncodingTests {
             try JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
         #expect((parsed["candidateDecodedSpans"] as? Int) == 3)
+        #expect((parsed["audioFingerprint"] as? String) == "sha256:" + String(repeating: "a", count: 64))
         let list = try #require(parsed["candidateDecodedSpanList"] as? [[String: Any]])
         #expect(list.count == 3)
         #expect((list[0]["spanId"] as? String) == "a")

@@ -28,6 +28,100 @@ with wave.open(path, "wb") as handle:
 PY
 }
 
+seed_annotations() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat > "$dir/canonical-seed.json" <<'JSON'
+{"episode_id":"canonical-seed","show_name":"Seed","duration_seconds":1,"ad_windows":[],"content_windows":[{"start_seconds":0,"end_seconds":1,"notes":null}],"variant_of":null,"audio_fingerprint":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+JSON
+  cat > "$dir/_canonical-manifest.json" <<'JSON'
+{"schema_version":1,"annotations":["canonical-seed.json"]}
+JSON
+}
+
+promote() {
+  local review_file=""
+  local reviewer_id=""
+  local reviewed_at=""
+  local previous=""
+  for argument in "$@"; do
+    if [[ "$previous" == "--review-file" ]]; then review_file="$argument"; fi
+    if [[ "$previous" == "--reviewer-id" ]]; then reviewer_id="$argument"; fi
+    if [[ "$previous" == "--reviewed-at" ]]; then reviewed_at="$argument"; fi
+    previous="$argument"
+  done
+  if [[ -n "$review_file" && -f "$review_file" ]]; then
+    python3 - "$review_file" "$ROOT" "$reviewer_id" "$reviewed_at" <<'PY'
+import hashlib,json,pathlib,sys
+review_path=pathlib.Path(sys.argv[1]).resolve(); repo=pathlib.Path(sys.argv[2]).resolve()
+reviewer=sys.argv[3]; reviewed_at=sys.argv[4]
+review=json.loads(review_path.read_text())
+raw_queue=review.get("queue_path")
+if isinstance(raw_queue,str):
+    queue_path=pathlib.Path(raw_queue)
+    if not queue_path.is_absolute():
+        local=(review_path.parent/queue_path).resolve()
+        queue_path=local if local.exists() else (repo/queue_path).resolve()
+    if queue_path.is_file():
+        queue=json.loads(queue_path.read_text())
+        changed=False
+        for entry in queue.get("entries",[]):
+            raw_audio=entry.get("audio_path")
+            if not isinstance(raw_audio,str): continue
+            audio=pathlib.Path(raw_audio)
+            if not audio.is_absolute(): audio=(queue_path.parent/audio).resolve()
+            if not audio.is_file(): continue
+            fp="sha256:"+hashlib.sha256(audio.read_bytes()).hexdigest()
+            entry["audio_fingerprint"]=fp
+            decision=review.get("reviews",{}).get(entry.get("id"))
+            if isinstance(decision,dict):
+                decision["audio_fingerprint"]=fp
+                if reviewer: decision["reviewer"]=reviewer
+                if reviewed_at: decision["reviewed_at"]=reviewed_at
+            changed=True
+        for entry in review.get("manual_entries",[]):
+            raw_audio=entry.get("audio_path")
+            if not isinstance(raw_audio,str): continue
+            audio=pathlib.Path(raw_audio)
+            if not audio.is_absolute(): audio=(review_path.parent/audio).resolve()
+            if not audio.is_file(): continue
+            fp="sha256:"+hashlib.sha256(audio.read_bytes()).hexdigest()
+            entry["audio_fingerprint"]=fp
+            decision=review.get("reviews",{}).get(entry.get("id"))
+            if isinstance(decision,dict):
+                decision["audio_fingerprint"]=fp
+                if reviewer: decision["reviewer"]=reviewer
+                if reviewed_at: decision["reviewed_at"]=reviewed_at
+            changed=True
+        if changed:
+            queue_path.write_text(json.dumps(queue,indent=2)+"\n")
+            review_path.write_text(json.dumps(review,indent=2)+"\n")
+PY
+  fi
+  python3 scripts/l2f-promote-reviewed-corpus.py "$@"
+}
+
+for annotations_dir in \
+  "$OUT/annotations" \
+  "$OUT/annotations-unknown-episode" \
+  "$OUT/boolean-string-metadata-annotations" \
+  "$OUT/boolean-timing-annotations" \
+  "$OUT/malformed-annotations" \
+  "$OUT/manual-missed-annotations" \
+  "$OUT/missing-show-annotations" \
+  "$OUT/mixed-skipped-ready-annotations" \
+  "$OUT/non-trap-false-positive-annotations" \
+  "$OUT/overlap-annotations" \
+  "$OUT/relative/annotations" \
+  "$OUT/strict-annotations" \
+  "$OUT/string-false-trap-annotations" \
+  "$OUT/tiny-overshoot-annotations" \
+  "$OUT/zero-annotations" \
+  "$OUT/zero-false-positive-annotations"
+do
+  seed_annotations "$annotations_dir"
+done
+
 mkdir -p "$OUT/audio" "$OUT/annotations"
 make_wav "$OUT/audio/episode-two-ads.wav" 100
 make_wav "$OUT/audio/episode-zero.wav" 80
@@ -102,8 +196,10 @@ cat > "$OUT/two-ads-review.json" <<JSON
 }
 JSON
 
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --promote \
+  --reviewer-id "Reviewer One" \
+  --reviewed-at "2026-07-10T12:00:00Z" \
   --review-file "$OUT/two-ads-review.json" \
   --annotations-dir "$OUT/annotations" \
   --audio-dir "$OUT/audio" >"$OUT/two-ads-promote.out"
@@ -116,9 +212,13 @@ jq -e 'keys == [
   "content_windows",
   "duration_seconds",
   "episode_id",
+  "provenance",
+  "review_attestations",
   "show_name",
   "variant_of"
 ]' "$OUT/annotations/episode-two-ads.json" >/dev/null
+jq -e '.provenance == ["human_first_pass"] and (.ad_windows | all(.provenance == ["human_first_pass"]))' \
+  "$OUT/annotations/episode-two-ads.json" >/dev/null
 jq -e '.content_windows[0].start_seconds == 0' "$OUT/annotations/episode-two-ads.json" >/dev/null
 jq -e '.content_windows[0].end_seconds == 10' "$OUT/annotations/episode-two-ads.json" >/dev/null
 jq -e '.content_windows[1].start_seconds == 20' "$OUT/annotations/episode-two-ads.json" >/dev/null
@@ -133,6 +233,34 @@ print("sha256:" + hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
 PY
 )"
 test "$(jq -r '.audio_fingerprint' "$OUT/annotations/episode-two-ads.json")" = "$expected_fp"
+
+jq '.review_pass = 2' "$OUT/two-ads-review.json" > "$OUT/two-ads-review-pass-2.json"
+
+promote \
+  --promote \
+  --force \
+  --second-pass-reviewed \
+  --reviewer-id "Reviewer Two" \
+  --reviewed-at "2026-07-10T13:00:00Z" \
+  --review-file "$OUT/two-ads-review-pass-2.json" \
+  --annotations-dir "$OUT/annotations" \
+  --audio-dir "$OUT/audio" >"$OUT/two-ads-second-pass.out"
+jq -e '.provenance == ["human_reviewed"] and (.ad_windows | all(.provenance == ["human_reviewed"]))' \
+  "$OUT/annotations/episode-two-ads.json" >/dev/null
+jq -e '(.review_attestations | length) == 2' "$OUT/annotations/episode-two-ads.json" >/dev/null
+
+seed_annotations "$OUT/custom-corpus/Annotations"
+promote \
+  --promote \
+  --reviewer-id "Custom Reviews Reviewer" \
+  --reviewed-at "2026-07-10T14:00:00Z" \
+  --review-file "$OUT/two-ads-review.json" \
+  --annotations-dir "$OUT/custom-corpus/Annotations" \
+  --reviews-dir "$OUT/custom-review-artifacts" \
+  --audio-dir "$OUT/audio" >"$OUT/custom-reviews-promote.out"
+test -f "$OUT/custom-corpus/Annotations/episode-two-ads.json"
+test "$(find "$OUT/custom-review-artifacts" -type f -name '*.json' | wc -l | tr -d ' ')" = "1"
+test ! -e "$OUT/custom-corpus/Reviews"
 
 mkdir -p "$OUT/relative/audio" "$OUT/relative/annotations"
 make_wav "$OUT/relative/audio/episode-relative.wav" 12
@@ -175,7 +303,7 @@ cat > "$OUT/relative/review.json" <<JSON
   }
 }
 JSON
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --promote \
   --review-file "$OUT/relative/review.json" \
   --annotations-dir "$OUT/relative/annotations" \
@@ -183,7 +311,7 @@ python3 scripts/l2f-promote-reviewed-corpus.py \
 test "$(jq -r '.show_name' "$OUT/relative/annotations/episode-relative.json")" = "Relative Path Show"
 jq -e '.duration_seconds == 12' "$OUT/relative/annotations/episode-relative.json" >/dev/null
 
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --review-file "$OUT/two-ads-review.json" \
   --annotations-dir "$OUT/annotations" \
   --audio-dir "$OUT/audio" >"$OUT/existing-annotation-dry-run.out"
@@ -191,7 +319,7 @@ grep -q "BLOCKED episode-two-ads" "$OUT/existing-annotation-dry-run.out"
 grep -q "annotation_exists:" "$OUT/existing-annotation-dry-run.out"
 grep -q "ready_episodes=0 skipped_episodes=0 blocked_episodes=1" "$OUT/existing-annotation-dry-run.out"
 
-if python3 scripts/l2f-promote-reviewed-corpus.py \
+if promote \
   --promote \
   --review-file "$OUT/two-ads-review.json" \
   --annotations-dir "$OUT/annotations-unknown-episode" \
@@ -278,7 +406,7 @@ cat > "$OUT/strict-review.json" <<JSON
 }
 JSON
 
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --review-file "$OUT/missing-review-file.json" \
   --queue "$OUT/strict-queue.json" \
   --annotations-dir "$OUT/strict-annotations" \
@@ -302,7 +430,7 @@ cat > "$OUT/malformed-queue.json" <<JSON
 }
 JSON
 
-if python3 scripts/l2f-promote-reviewed-corpus.py \
+if promote \
   --review-file "$OUT/missing-review-file.json" \
   --queue "$OUT/malformed-queue.json" \
   --annotations-dir "$OUT/malformed-annotations" \
@@ -312,7 +440,7 @@ if python3 scripts/l2f-promote-reviewed-corpus.py \
 fi
 grep -q "entries\\[1\\] must be a JSON object" "$OUT/malformed-queue.err"
 
-if python3 scripts/l2f-promote-reviewed-corpus.py \
+if promote \
   --promote \
   --review-file "$OUT/strict-review.json" \
   --annotations-dir "$OUT/strict-annotations" \
@@ -361,7 +489,7 @@ cat > "$OUT/boolean-timing-review.json" <<JSON
 }
 JSON
 
-if python3 scripts/l2f-promote-reviewed-corpus.py \
+if promote \
   --promote \
   --review-file "$OUT/boolean-timing-review.json" \
   --annotations-dir "$OUT/boolean-timing-annotations" \
@@ -407,7 +535,7 @@ cat > "$OUT/boolean-string-metadata-review.json" <<JSON
 }
 JSON
 
-if python3 scripts/l2f-promote-reviewed-corpus.py \
+if promote \
   --promote \
   --review-file "$OUT/boolean-string-metadata-review.json" \
   --annotations-dir "$OUT/boolean-string-metadata-annotations" \
@@ -458,7 +586,7 @@ cat > "$OUT/missing-show-review.json" <<JSON
 }
 JSON
 
-if python3 scripts/l2f-promote-reviewed-corpus.py \
+if promote \
   --promote \
   --review-file "$OUT/missing-show-review.json" \
   --annotations-dir "$OUT/missing-show-annotations" \
@@ -498,7 +626,7 @@ cat > "$OUT/zero-review.json" <<JSON
 }
 JSON
 
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --promote \
   --review-file "$OUT/zero-review.json" \
   --annotations-dir "$OUT/zero-annotations" \
@@ -522,7 +650,7 @@ cat > "$OUT/zero-false-positive-review.json" <<JSON
 }
 JSON
 
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --promote \
   --review-file "$OUT/zero-false-positive-review.json" \
   --annotations-dir "$OUT/zero-false-positive-annotations" \
@@ -559,7 +687,7 @@ cat > "$OUT/string-false-trap-review.json" <<JSON
 }
 JSON
 
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --promote \
   --review-file "$OUT/string-false-trap-review.json" \
   --annotations-dir "$OUT/string-false-trap-annotations" \
@@ -597,7 +725,7 @@ cat > "$OUT/non-trap-false-positive-review.json" <<JSON
 }
 JSON
 
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --promote \
   --review-file "$OUT/non-trap-false-positive-review.json" \
   --annotations-dir "$OUT/non-trap-false-positive-annotations" \
@@ -663,7 +791,7 @@ mkdir -p "$OUT/mixed-skipped-ready-annotations"
 printf '{"stale": true}\n' \
   >"$OUT/mixed-skipped-ready-annotations/episode-non-trap-missing-audio-false-positive.json"
 
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --promote \
   --review-file "$OUT/mixed-skipped-ready-review.json" \
   --annotations-dir "$OUT/mixed-skipped-ready-annotations" \
@@ -727,7 +855,7 @@ cat > "$OUT/manual-missed-review.json" <<JSON
 }
 JSON
 
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --promote \
   --review-file "$OUT/manual-missed-review.json" \
   --annotations-dir "$OUT/manual-missed-annotations" \
@@ -771,7 +899,7 @@ cat > "$OUT/tiny-overshoot-review.json" <<JSON
 }
 JSON
 
-python3 scripts/l2f-promote-reviewed-corpus.py \
+promote \
   --promote \
   --review-file "$OUT/tiny-overshoot-review.json" \
   --annotations-dir "$OUT/tiny-overshoot-annotations" \
@@ -871,7 +999,7 @@ cat > "$OUT/overlap-review.json" <<JSON
 }
 JSON
 
-if python3 scripts/l2f-promote-reviewed-corpus.py \
+if promote \
   --promote \
   --review-file "$OUT/overlap-review.json" \
   --annotations-dir "$OUT/overlap-annotations" \

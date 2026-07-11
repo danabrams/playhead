@@ -1,0 +1,153 @@
+{
+  "episode_id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol",
+  "show_name": "The Mel Robbins Podcast",
+  "duration_seconds": 5003.5,
+  "ad_windows": [
+    {
+      "start_seconds": 198.82,
+      "end_seconds": 231.28,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 198.8-231.3s (len=32.5s). rediff-sec=32.5, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 1888.36,
+      "end_seconds": 1922.05,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1888.4-1922.0s (len=33.7s). rediff-sec=33.7, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 1924.03,
+      "end_seconds": 2003.68,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1924.0-2003.7s (len=79.7s). rediff-sec=79.7, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 2818.54,
+      "end_seconds": 2851.24,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 2818.5-2851.2s (len=32.7s). rediff-sec=32.7, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 4913.51,
+      "end_seconds": 4950.8,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 4913.5-4950.8s (len=37.3s). rediff-sec=37.3, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 4952.66,
+      "end_seconds": 4980.9,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 4952.7-4980.9s (len=28.2s). rediff-sec=28.2, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 198.82,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 231.28,
+      "end_seconds": 1888.36,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1922.05,
+      "end_seconds": 1924.03,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2003.68,
+      "end_seconds": 2643.0,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2643.0,
+      "end_seconds": 2805.03,
+      "notes": "Audit-derived content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2805.03,
+      "end_seconds": 2818.54,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2851.24,
+      "end_seconds": 2854.34,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2854.34,
+      "end_seconds": 3211.1,
+      "notes": "Audit-derived content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 3211.1,
+      "end_seconds": 4913.51,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 4950.8,
+      "end_seconds": 4952.66,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 4980.9,
+      "end_seconds": 5003.5,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-02T07:55:08Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

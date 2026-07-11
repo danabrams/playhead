@@ -10,7 +10,10 @@
       "product": "live shows and network shows",
       "ad_type": "promo",
       "transition_type": "hard_cut",
-      "confidence_notes": "Opening network/show promo before host-read ad pod."
+      "confidence_notes": "Opening network/show promo before host-read ad pod.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 108.7,
@@ -19,7 +22,10 @@
       "product": "commerce platform and insurance",
       "ad_type": "host_read",
       "transition_type": "hard_cut",
-      "confidence_notes": "Back-to-back pre-roll sponsor reads; episode content begins after both."
+      "confidence_notes": "Back-to-back pre-roll sponsor reads; episode content begins after both.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 1293.3,
@@ -28,7 +34,10 @@
       "product": "eSIM and data-removal services",
       "ad_type": "host_read",
       "transition_type": "hard_cut",
-      "confidence_notes": "Back-to-back mid-roll sponsor reads before episode content resumes."
+      "confidence_notes": "Back-to-back mid-roll sponsor reads before episode content resumes.",
+      "provenance": [
+        "human_first_pass"
+      ]
     }
   ],
   "content_windows": [
@@ -49,5 +58,16 @@
     }
   ],
   "variant_of": null,
-  "audio_fingerprint": "sha256:452103dd0805d73a306eb7cd4bc540404e17baa3895c5cfe6732c3b35b55e67a"
+  "audio_fingerprint": "sha256:452103dd0805d73a306eb7cd4bc540404e17baa3895c5cfe6732c3b35b55e67a",
+  "provenance": [
+    "human_first_pass"
+  ],
+  "review_attestations": [
+    {
+      "reviewer": "Dan Abrams",
+      "reviewed_at": "2026-05-12T03:06:35Z",
+      "audio_fingerprint": "sha256:452103dd0805d73a306eb7cd4bc540404e17baa3895c5cfe6732c3b35b55e67a",
+      "review_artifact_id": "sha256:88306e39982d867a3df5a6561f6ae8a199ac3fb50c6266d00ceb21d1194cee3a"
+    }
+  ]
 }

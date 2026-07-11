@@ -1,0 +1,93 @@
+{
+  "episode_id": "morbid-2026-05-21-the-matamoros-devil-murders-part-1",
+  "show_name": "Morbid",
+  "duration_seconds": 3765.9,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 98.62,
+      "advertiser": "Progressive",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 0.0-98.6s (len=98.6s). rediff-sec=86.6, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1227.81,
+      "end_seconds": 1349.1,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 1227.8-1349.1s (len=121.3s). rediff-sec=113.7, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 2487.83,
+      "end_seconds": 2571.46,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 2487.8-2571.5s (len=83.6s). rediff-sec=83.6, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 2578.4,
+      "end_seconds": 2655.59,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 2578.4-2655.6s (len=77.2s). rediff-sec=77.2, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 98.62,
+      "end_seconds": 1227.81,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1349.1,
+      "end_seconds": 2487.83,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2571.46,
+      "end_seconds": 2578.4,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2655.59,
+      "end_seconds": 3765.9,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:b81865e6c4088082ec385752a6c48eb0987d6083f3a767c75106a76ca187d11d",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-02T07:55:08Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

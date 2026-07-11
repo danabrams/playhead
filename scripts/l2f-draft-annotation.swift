@@ -7,6 +7,7 @@
 // draft before it becomes corpus ground truth.
 
 import CryptoKit
+import CoreFoundation
 import Foundation
 
 struct Options {
@@ -16,7 +17,6 @@ struct Options {
     var showName: String?
     var episodeId: String?
     var force = false
-    var allowMissingAudio = false
     var durationOverride: Double?
     var paddingSeconds = 2.0
     var mergeGapSeconds = 75.0
@@ -49,6 +49,7 @@ struct Candidate {
 
 struct ReviewQueueCandidate {
     var episodeId: String
+    var audioFingerprint: String
     var start: Double?
     var end: Double?
     var duration: Double?
@@ -74,9 +75,10 @@ func printUsage() {
       --show-name NAME       Show name to put into generated drafts.
       --episode-id ID        Episode id override. Only valid with one transcript input.
       --force                Overwrite existing drafts.
-      --allow-missing-audio  Permit draft generation without an audio file. Uses a
-                             placeholder fingerprint and transcript-derived duration.
-      --duration SECONDS     Duration override. Useful only with --allow-missing-audio.
+      --allow-missing-audio  Deprecated compatibility flag. Coordinate-bearing drafts
+                             still require the exact source audio referenced by the
+                             transcript's source_audio_fingerprint.
+      --duration SECONDS     Duration override for draft generation.
       --padding-seconds N    Pad final expanded pod candidates by N seconds. Default: 2.
       --merge-gap-seconds N  Merge cue hits separated by up to N seconds before pod
                              expansion. Default: 75.
@@ -98,8 +100,9 @@ func printUsage() {
       --review-queue-name NAME
                              Basename for review queue artifacts. Default: review-queue.
 
-    Supported transcript JSON shapes include whisper.cpp 'transcription',
-    OpenAI/Whisper 'segments', and arrays of {start,end,text}.
+    Supported transcript JSON shapes include whisper.cpp 'transcription' and
+    OpenAI/Whisper 'segments'. Every sidecar must be a JSON object with a
+    source_audio_fingerprint value matching the exact local audio bytes.
     """
     FileHandle.standardError.write(Data(msg.utf8))
     FileHandle.standardError.write(Data("\n".utf8))
@@ -137,7 +140,7 @@ func parseArgs(_ argv: [String]) -> Options {
         case "--force":
             opts.force = true
         case "--allow-missing-audio":
-            opts.allowMissingAudio = true
+            break
         case "--duration":
             i += 1
             guard i < argv.count, let seconds = Double(argv[i]), seconds > 0 else {
@@ -284,13 +287,15 @@ func collectTranscripts() -> [URL] {
 }
 
 func number(_ value: Any?) -> Double? {
+    let result: Double?
     switch value {
-    case let v as Double: return v
-    case let v as Int: return Double(v)
-    case let v as NSNumber: return v.doubleValue
-    case let v as String: return Double(v)
-    default: return nil
+    case let v as NSNumber:
+        result = CFGetTypeID(v) == CFBooleanGetTypeID() ? nil : v.doubleValue
+    case let v as String: result = Double(v)
+    default: result = nil
     }
+    guard let result, result.isFinite else { return nil }
+    return result
 }
 
 func timecodeSeconds(_ raw: String) -> Double? {
@@ -341,7 +346,18 @@ func parseSegment(_ item: Any) -> TranscriptSegment? {
     return TranscriptSegment(start: s, end: e, text: text)
 }
 
-func parseTranscript(_ url: URL, fallbackDuration: Double?) throws -> [TranscriptSegment] {
+func isCanonicalSHA256Fingerprint(_ value: String) -> Bool {
+    guard value.count == 71, value.hasPrefix("sha256:") else { return false }
+    return value.dropFirst(7).unicodeScalars.allSatisfy {
+        CharacterSet(charactersIn: "0123456789abcdef").contains($0)
+    }
+}
+
+func parseTranscript(
+    _ url: URL,
+    fallbackDuration: Double?,
+    expectedAudioFingerprint: String
+) throws -> [TranscriptSegment] {
     let rawData = try Data(contentsOf: url)
     let data: Data
     if String(data: rawData, encoding: .utf8) == nil {
@@ -351,40 +367,96 @@ func parseTranscript(_ url: URL, fallbackDuration: Double?) throws -> [Transcrip
     }
     let json = try JSONSerialization.jsonObject(with: data)
 
-    if let array = json as? [Any] {
-        return array.compactMap(parseSegment).sorted { $0.start < $1.start }
-    }
-
     guard let obj = json as? [String: Any] else {
-        throw NSError(domain: "L2FDraft", code: 1, userInfo: [NSLocalizedDescriptionKey: "root JSON is not an object or array"])
+        throw NSError(domain: "L2FDraft", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "transcript root must be an object carrying source_audio_fingerprint",
+        ])
+    }
+    guard let sourceFingerprint = obj["source_audio_fingerprint"] as? String else {
+        throw NSError(domain: "L2FDraft", code: 2, userInfo: [
+            NSLocalizedDescriptionKey: "transcript lacks source_audio_fingerprint",
+        ])
+    }
+    guard isCanonicalSHA256Fingerprint(sourceFingerprint) else {
+        throw NSError(domain: "L2FDraft", code: 3, userInfo: [
+            NSLocalizedDescriptionKey: "transcript source_audio_fingerprint is not canonical sha256:<lowercase-hex>",
+        ])
+    }
+    guard sourceFingerprint == expectedAudioFingerprint else {
+        throw NSError(domain: "L2FDraft", code: 4, userInfo: [
+            NSLocalizedDescriptionKey: "transcript source_audio_fingerprint \(sourceFingerprint) does not match retained audio \(expectedAudioFingerprint)",
+        ])
     }
 
-    if let segments = obj["segments"] as? [Any] {
-        return segments.compactMap(parseSegment).sorted { $0.start < $1.start }
+    func parseAll(_ rows: [Any], field: String) throws -> [TranscriptSegment] {
+        var parsed: [TranscriptSegment] = []
+        for (index, row) in rows.enumerated() {
+            guard let segment = parseSegment(row), segment.start >= 0 else {
+                throw NSError(domain: "L2FDraft", code: 5, userInfo: [
+                    NSLocalizedDescriptionKey: "malformed \(field) segment at index \(index)",
+                ])
+            }
+            parsed.append(segment)
+        }
+        return parsed.sorted { $0.start < $1.start }
     }
-    if let transcription = obj["transcription"] as? [Any] {
-        return transcription.compactMap(parseSegment).sorted { $0.start < $1.start }
+    let hasSegments = obj.keys.contains("segments")
+    let hasTranscription = obj.keys.contains("transcription")
+    if hasSegments && hasTranscription {
+        throw NSError(domain: "L2FDraft", code: 5, userInfo: [
+            NSLocalizedDescriptionKey: "transcript must not contain both segments and transcription",
+        ])
+    }
+    if hasSegments {
+        guard let segments = obj["segments"] as? [Any] else {
+            throw NSError(domain: "L2FDraft", code: 5, userInfo: [
+                NSLocalizedDescriptionKey: "transcript segments must be an array",
+            ])
+        }
+        return try parseAll(segments, field: "segments")
+    }
+    if hasTranscription {
+        guard let transcription = obj["transcription"] as? [Any] else {
+            throw NSError(domain: "L2FDraft", code: 5, userInfo: [
+                NSLocalizedDescriptionKey: "transcript transcription must be an array",
+            ])
+        }
+        return try parseAll(transcription, field: "transcription")
     }
     if let text = obj["text"] as? String, let duration = fallbackDuration {
         return [TranscriptSegment(start: 0, end: duration, text: text)]
     }
-    throw NSError(domain: "L2FDraft", code: 2, userInfo: [NSLocalizedDescriptionKey: "no supported transcript segments found"])
+    throw NSError(domain: "L2FDraft", code: 5, userInfo: [NSLocalizedDescriptionKey: "no supported transcript segments found"])
 }
 
 let audioExtensions: Set<String> = ["m4a", "mp3", "mp4", "aac", "wav", "flac"]
 
-func matchingAudio(for episodeId: String) -> URL? {
+func matchingAudioFiles(for episodeId: String) -> [URL] {
     guard let files = try? FileManager.default.contentsOfDirectory(
         at: audioDir,
         includingPropertiesForKeys: nil,
         options: [.skipsHiddenFiles]
     ) else {
-        return nil
+        return []
     }
-    return files.first {
+    return files.filter {
         $0.deletingPathExtension().lastPathComponent == episodeId
             && audioExtensions.contains($0.pathExtension.lowercased())
+            && (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+    }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+}
+
+func requiredMatchingAudio(for episodeId: String) throws -> URL {
+    let matches = matchingAudioFiles(for: episodeId)
+    guard matches.count == 1 else {
+        let detail = matches.isEmpty
+            ? "no supported audio file"
+            : "ambiguous audio files: \(matches.map(\.lastPathComponent).joined(separator: ", "))"
+        throw NSError(domain: "L2FDraft", code: 6, userInfo: [
+            NSLocalizedDescriptionKey: "\(detail) for \(episodeId) under \(audioDir.path)",
+        ])
     }
+    return matches[0]
 }
 
 func runCapture(_ executable: String, _ args: [String]) throws -> String {
@@ -1055,13 +1127,47 @@ func reviewCandidatesFromCodexReview(_ url: URL) throws -> [ReviewQueueCandidate
         ])
     }
 
-    return episodes.flatMap { episode -> [ReviewQueueCandidate] in
-        let episodeId = stringValue(episode["episode_id"]) ?? "unknown-episode"
+    var candidates: [ReviewQueueCandidate] = []
+    for (episodeIndex, episode) in episodes.enumerated() {
+        guard let episodeId = stringValue(episode["episode_id"]) else {
+            throw NSError(domain: "L2FDraft", code: 22, userInfo: [
+                NSLocalizedDescriptionKey: "episodes[\(episodeIndex)] lacks episode_id",
+            ])
+        }
+        guard let audioFingerprint = stringValue(episode["audio_fingerprint"]),
+              isCanonicalSHA256Fingerprint(audioFingerprint)
+        else {
+            throw NSError(domain: "L2FDraft", code: 22, userInfo: [
+                NSLocalizedDescriptionKey: "\(episodeId) lacks a canonical audio_fingerprint",
+            ])
+        }
         let episodeNotes = stringValue(episode["notes"]) ?? "Review transcript-derived candidate against local audio."
-        let windows = episode["codex_windows"] as? [[String: Any]] ?? []
+        guard let rawWindows = episode["codex_windows"] as? [Any] else {
+            throw NSError(domain: "L2FDraft", code: 22, userInfo: [
+                NSLocalizedDescriptionKey: "\(episodeId) codex_windows must be an array",
+            ])
+        }
+        let windows = try rawWindows.enumerated().map { index, raw -> [String: Any] in
+            guard let window = raw as? [String: Any] else {
+                throw NSError(domain: "L2FDraft", code: 22, userInfo: [
+                    NSLocalizedDescriptionKey: "\(episodeId) codex_windows[\(index)] must be an object",
+                ])
+            }
+            guard let start = number(window["start_seconds"]),
+                  let end = number(window["end_seconds"]),
+                  start >= 0,
+                  end > start
+            else {
+                throw NSError(domain: "L2FDraft", code: 22, userInfo: [
+                    NSLocalizedDescriptionKey: "\(episodeId) codex_windows[\(index)] has invalid bounds",
+                ])
+            }
+            return window
+        }
         if windows.isEmpty {
-            return [ReviewQueueCandidate(
+            candidates.append(ReviewQueueCandidate(
                 episodeId: episodeId,
+                audioFingerprint: audioFingerprint,
                 start: nil,
                 end: nil,
                 duration: nil,
@@ -1072,11 +1178,13 @@ func reviewCandidatesFromCodexReview(_ url: URL) throws -> [ReviewQueueCandidate
                 notes: episodeNotes,
                 source: url.lastPathComponent,
                 isFalsePositiveTrap: true
-            )]
+            ))
+            continue
         }
-        return windows.map { window in
+        candidates.append(contentsOf: windows.map { window in
             ReviewQueueCandidate(
                 episodeId: episodeId,
+                audioFingerprint: audioFingerprint,
                 start: number(window["start_seconds"]),
                 end: number(window["end_seconds"]),
                 duration: nil,
@@ -1088,18 +1196,48 @@ func reviewCandidatesFromCodexReview(_ url: URL) throws -> [ReviewQueueCandidate
                 source: url.lastPathComponent,
                 isFalsePositiveTrap: false
             )
-        }
+        })
     }
+    return candidates
 }
 
 func reviewCandidatesFromDraft(_ url: URL) throws -> [ReviewQueueCandidate] {
     let object = try jsonObject(from: url)
     let episodeId = stringValue(object["episode_id"]) ?? url.deletingPathExtension().deletingPathExtension().lastPathComponent
+    guard let audioFingerprint = stringValue(object["audio_fingerprint"]),
+          isCanonicalSHA256Fingerprint(audioFingerprint)
+    else {
+        throw NSError(domain: "L2FDraft", code: 23, userInfo: [
+            NSLocalizedDescriptionKey: "\(url.path) lacks a canonical audio_fingerprint",
+        ])
+    }
     let duration = number(object["duration_seconds"])
-    let windows = object["ad_windows"] as? [[String: Any]] ?? []
+    guard let rawWindows = object["ad_windows"] as? [Any] else {
+        throw NSError(domain: "L2FDraft", code: 23, userInfo: [
+            NSLocalizedDescriptionKey: "\(url.path) ad_windows must be an array",
+        ])
+    }
+    let windows = try rawWindows.enumerated().map { index, raw -> [String: Any] in
+        guard let window = raw as? [String: Any] else {
+            throw NSError(domain: "L2FDraft", code: 23, userInfo: [
+                NSLocalizedDescriptionKey: "\(url.path) ad_windows[\(index)] must be an object",
+            ])
+        }
+        guard let start = number(window["start_seconds"]),
+              let end = number(window["end_seconds"]),
+              start >= 0,
+              end > start
+        else {
+            throw NSError(domain: "L2FDraft", code: 23, userInfo: [
+                NSLocalizedDescriptionKey: "\(url.path) ad_windows[\(index)] has invalid bounds",
+            ])
+        }
+        return window
+    }
     if windows.isEmpty {
         return [ReviewQueueCandidate(
             episodeId: episodeId,
+            audioFingerprint: audioFingerprint,
             start: nil,
             end: nil,
             duration: duration,
@@ -1115,6 +1253,7 @@ func reviewCandidatesFromDraft(_ url: URL) throws -> [ReviewQueueCandidate] {
     return windows.map { window in
         ReviewQueueCandidate(
             episodeId: episodeId,
+            audioFingerprint: audioFingerprint,
             start: number(window["start_seconds"]),
             end: number(window["end_seconds"]),
             duration: duration,
@@ -1156,10 +1295,6 @@ func safeArtifactBasename(_ value: String) -> String {
     return trimmed.isEmpty ? "episode" : trimmed
 }
 
-func reviewAudio(for episodeId: String) -> URL? {
-    matchingAudio(for: episodeId)
-}
-
 func reviewCommand(for candidate: ReviewQueueCandidate, audio: URL?) -> (playback: String, extraction: String) {
     guard let audio else {
         let episode = shellQuoted(candidate.episodeId)
@@ -1194,6 +1329,7 @@ func queueEntryJSON(
     candidate: ReviewQueueCandidate,
     index: Int,
     audio: URL?,
+    boundFingerprint: String,
     commands: (playback: String, extraction: String)
 ) -> [String: Any] {
     let contextStart = candidate.start.map { max(0, $0 - options.reviewContextSeconds) }
@@ -1216,6 +1352,7 @@ func queueEntryJSON(
         "false_positive_trap": candidate.isFalsePositiveTrap,
         "source": candidate.source,
         "audio_path": audio?.path as Any? ?? NSNull(),
+        "audio_fingerprint": boundFingerprint,
         "playback_command": commands.playback,
         "extraction_command": commands.extraction,
         "checklist": [
@@ -1269,12 +1406,26 @@ func makeReviewQueueMarkdown(entries: [[String: Any]]) -> String {
 
 func writeReviewQueue(from candidates: [ReviewQueueCandidate]) throws {
     var perEpisodeIndex: [String: Int] = [:]
-    let entries: [[String: Any]] = candidates.map { candidate in
+    var audioBindings: [(url: URL, fingerprint: String)] = []
+    let entries: [[String: Any]] = try candidates.map { candidate in
         let index = perEpisodeIndex[candidate.episodeId, default: 0]
         perEpisodeIndex[candidate.episodeId] = index + 1
-        let audio = reviewAudio(for: candidate.episodeId)
+        let audio = try requiredMatchingAudio(for: candidate.episodeId)
+        let actualFingerprint = try fingerprint(of: audio)
+        guard actualFingerprint == candidate.audioFingerprint else {
+            throw NSError(domain: "L2FDraft", code: 24, userInfo: [
+                NSLocalizedDescriptionKey: "review source audio_fingerprint \(candidate.audioFingerprint) does not match retained audio \(actualFingerprint) for \(candidate.episodeId)",
+            ])
+        }
+        audioBindings.append((audio, actualFingerprint))
         let commands = reviewCommand(for: candidate, audio: audio)
-        return queueEntryJSON(candidate: candidate, index: index, audio: audio, commands: commands)
+        return queueEntryJSON(
+            candidate: candidate,
+            index: index,
+            audio: audio,
+            boundFingerprint: actualFingerprint,
+            commands: commands
+        )
     }
     let json: [String: Any] = [
         "schema": "playhead-l2f-review-queue-v1",
@@ -1290,6 +1441,13 @@ func writeReviewQueue(from candidates: [ReviewQueueCandidate]) throws {
         withJSONObject: json,
         options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
     )
+    for binding in audioBindings {
+        guard try fingerprint(of: binding.url) == binding.fingerprint else {
+            throw NSError(domain: "L2FDraft", code: 25, userInfo: [
+                NSLocalizedDescriptionKey: "source audio changed while generating the review queue: \(binding.url.path)",
+            ])
+        }
+    }
     try data.write(to: jsonURL)
     try Data(makeReviewQueueMarkdown(entries: entries).utf8).write(to: markdownURL)
     print("wrote: \(jsonURL.path)")
@@ -1317,43 +1475,56 @@ if !options.reviewQueueOnly {
         exit(0)
     }
 
-    let placeholderFingerprint = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-
     for transcript in transcripts {
         let episodeId = options.episodeId ?? transcript.deletingPathExtension().lastPathComponent
         let draftURL = draftDir.appendingPathComponent("\(episodeId).draft.json")
         let reviewURL = draftDir.appendingPathComponent("\(episodeId).review.md")
 
-        if FileManager.default.fileExists(atPath: draftURL.path), !options.force {
-            print("skip: \(draftURL.path) already exists; pass --force to rebuild")
-            if options.writeReviewQueue && options.reviewSource == nil {
-                do {
-                    generatedReviewQueueCandidates.append(contentsOf: try reviewCandidatesFromDraft(draftURL))
-                } catch {
-                    FileHandle.standardError.write(Data("failed \(draftURL.path): \(error.localizedDescription)\n".utf8))
-                    failures += 1
-                }
-            }
-            continue
-        }
-
-        let audio = matchingAudio(for: episodeId)
-        if audio == nil && !options.allowMissingAudio {
-            FileHandle.standardError.write(Data("missing audio for \(episodeId); pass --allow-missing-audio for a placeholder draft\n".utf8))
+        let audio: URL
+        do {
+            audio = try requiredMatchingAudio(for: episodeId)
+        } catch {
+            FileHandle.standardError.write(Data("failed \(transcript.path): \(error.localizedDescription)\n".utf8))
             failures += 1
             continue
         }
 
-        let audioDuration = audio.flatMap(durationSeconds)
+        let fingerprintBefore: String
+        do {
+            fingerprintBefore = try fingerprint(of: audio)
+        } catch {
+            FileHandle.standardError.write(Data("failed to fingerprint \(audio.path): \(error.localizedDescription)\n".utf8))
+            failures += 1
+            continue
+        }
+        let audioDuration = durationSeconds(of: audio)
         let provisionalDuration = options.durationOverride ?? audioDuration
 
         do {
-            let segments = try parseTranscript(transcript, fallbackDuration: provisionalDuration)
+            let segments = try parseTranscript(
+                transcript,
+                fallbackDuration: provisionalDuration,
+                expectedAudioFingerprint: fingerprintBefore
+            )
             guard !segments.isEmpty else {
-                throw NSError(domain: "L2FDraft", code: 3, userInfo: [NSLocalizedDescriptionKey: "transcript has no timestamped segments"])
+                throw NSError(domain: "L2FDraft", code: 7, userInfo: [NSLocalizedDescriptionKey: "transcript has no timestamped segments"])
             }
+
+            if FileManager.default.fileExists(atPath: draftURL.path), !options.force {
+                let existing = try jsonObject(from: draftURL)
+                guard stringValue(existing["audio_fingerprint"]) == fingerprintBefore else {
+                    throw NSError(domain: "L2FDraft", code: 8, userInfo: [
+                        NSLocalizedDescriptionKey: "existing draft is not bound to the retained audio; pass --force to rebuild",
+                    ])
+                }
+                print("skip: \(draftURL.path) already exists and matches source audio; pass --force to rebuild")
+                if options.writeReviewQueue && options.reviewSource == nil {
+                    generatedReviewQueueCandidates.append(contentsOf: try reviewCandidatesFromDraft(draftURL))
+                }
+                continue
+            }
+
             let duration = options.durationOverride ?? audioDuration ?? segments.map(\.end).max()!
-            let fingerprintValue = try audio.map(fingerprint) ?? placeholderFingerprint
             let foundCandidates = candidates(from: segments, duration: duration)
 
             let adWindows: [[String: Any]] = foundCandidates.map { candidate in
@@ -1378,9 +1549,15 @@ if !options.reviewQueueOnly {
                 "ad_windows": adWindows,
                 "content_windows": contentWindows(duration: duration, ads: adWindows),
                 "variant_of": NSNull(),
-                "audio_fingerprint": fingerprintValue,
+                "audio_fingerprint": fingerprintBefore,
             ]
 
+            let fingerprintAfter = try fingerprint(of: audio)
+            guard fingerprintAfter == fingerprintBefore else {
+                throw NSError(domain: "L2FDraft", code: 9, userInfo: [
+                    NSLocalizedDescriptionKey: "source audio changed while generating the draft",
+                ])
+            }
             let data = try JSONSerialization.data(
                 withJSONObject: annotation,
                 options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

@@ -139,10 +139,13 @@ final class ChapterFusionLiftABTests: XCTestCase {
             throw XCTSkip("ChapterLabelingService.live requires iOS 26+ / FoundationModels.")
         }
 
-        let goldens = try ChapterPlanGoldenSetLoader.allDogfoodFixtures()
-        try XCTSkipIf(goldens.isEmpty, "no dogfood goldens — run Scripts/convert_annotations_to_chapter_goldens.py")
-
         let corpusLoader = CorpusAnnotationLoader()
+        let goldens = try ChapterPlanGoldenSetLoader.canonicalDogfoodFixtures(
+            corpusLoader: corpusLoader
+        )
+        try corpusLoader.preflightGoldEvaluationInputs(
+            annotationURLs: try corpusLoader.annotationFileURLs()
+        )
 
         var offAccumulator = FusionLiftModeAccumulator()
         var enabledAccumulator = FusionLiftModeAccumulator()
@@ -151,20 +154,13 @@ final class ChapterFusionLiftABTests: XCTestCase {
         var skipped: [(episodeId: String, reason: String)] = []
         var failed: [(episodeId: String, reason: String)] = []
 
-        for (goldenURL, golden) in goldens {
+        for fixture in goldens {
+            let goldenURL = fixture.url
+            let golden = fixture.set
             let episodeId = goldenURL.deletingPathExtension().lastPathComponent
 
             // Resolve annotation (ground truth) + audio + transcript.
-            let annotation: CorpusAnnotation
-            do {
-                annotation = try corpusLoader.decode(
-                    at: corpusLoader.annotationsDirectoryURL
-                        .appendingPathComponent("\(episodeId).json", isDirectory: false)
-                )
-            } catch {
-                failed.append((episodeId, "annotation decode failed: \(error.localizedDescription)"))
-                continue
-            }
+            let annotation = fixture.annotation
 
             let audioURL: URL
             do {
@@ -249,6 +245,17 @@ final class ChapterFusionLiftABTests: XCTestCase {
             }
         }
 
+        guard failed.isEmpty else {
+            XCTFail("Hard failures: \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))")
+            return
+        }
+        guard !scored.isEmpty else {
+            XCTFail(
+                "PLAYHEAD_CHAPTER_FUSION_LIFT_AB=1 was set but no episodes scored; all staged inputs were skipped"
+            )
+            return
+        }
+
         // Build + print + dump the lift report.
         let report = FusionLiftReport(
             episodeCount: scored.count,
@@ -271,22 +278,6 @@ final class ChapterFusionLiftABTests: XCTestCase {
         try report.jsonData().write(to: dumpURL, options: .atomic)
         print("Lift summary JSON: \(dumpURL.path) (git-ignored)")
 
-        // Fail loud on hard failures; fail loud if nothing scored (env was
-        // set but every episode landed in skipped — audio/transcript not
-        // staged). Otherwise the A/B is informational (no pinned lift
-        // number — see Validation scope in the bead).
-        if !failed.isEmpty {
-            XCTFail("Hard failures: \(failed.map { "\($0.episodeId): \($0.reason)" }.joined(separator: " | "))")
-        } else if scored.isEmpty {
-            XCTFail(
-                """
-                PLAYHEAD_CHAPTER_FUSION_LIFT_AB=1 was set but no episodes \
-                scored — every episode landed in `skipped` because audio \
-                or the transcript sidecar is not staged. See the file \
-                header for the staging recipe.
-                """
-            )
-        }
     }
 
     // MARK: - One arm

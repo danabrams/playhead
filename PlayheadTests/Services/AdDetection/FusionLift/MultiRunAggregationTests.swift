@@ -31,6 +31,7 @@ struct MultiRunAggregationTests {
     /// metrics default to `nil` (most tests only exercise the count lens).
     private static func makeRun(
         tp: Int, fp: Int, miss: Int,
+        episodeCount: Int = 12,
         spanPrecision: Double? = nil,
         spanRecall: Double? = nil,
         spanF1: Double? = nil,
@@ -39,7 +40,7 @@ struct MultiRunAggregationTests {
         fireCount: [String: Int] = [:]
     ) -> ArmRunResult {
         ArmRunResult(
-            episodeCount: 12,
+            episodeCount: episodeCount,
             truePositives: tp,
             falsePositives: fp,
             misses: miss,
@@ -365,5 +366,42 @@ struct MultiRunAggregationTests {
         #expect(report.configHash == "test-hash")
         #expect(report.armAggregates.count == 2)
         #expect(report.pairwiseDeltas.count == 1)
+    }
+
+    @Test("runMultiRunAggregation rejects an enabled run with no scored episodes")
+    func runMultiRunAggregation_rejectsEmptyCohort() async {
+        await #expect(throws: MultiRunDriverError.zeroEpisodeCount(
+            arm: "baseline",
+            runIndex: 0
+        )) {
+            _ = try await runMultiRunAggregation(
+                arms: ["baseline", "treatment"],
+                config: MultiRunDriverConfig(runCount: 2, configHash: "empty")
+            ) { _, _ in
+                Self.makeRun(tp: 0, fp: 0, miss: 0, episodeCount: 0)
+            }
+        }
+    }
+
+    @Test("runMultiRunAggregation rejects different cohorts across arms or runs")
+    func runMultiRunAggregation_rejectsInconsistentCohort() async {
+        await #expect(throws: MultiRunDriverError.inconsistentEpisodeCount(
+            expected: 12,
+            actual: 11,
+            arm: "treatment",
+            runIndex: 0
+        )) {
+            _ = try await runMultiRunAggregation(
+                arms: ["baseline", "treatment"],
+                config: MultiRunDriverConfig(runCount: 2, configHash: "mismatch")
+            ) { arm, _ in
+                Self.makeRun(
+                    tp: 5,
+                    fp: 0,
+                    miss: 0,
+                    episodeCount: arm == "baseline" ? 12 : 11
+                )
+            }
+        }
     }
 }

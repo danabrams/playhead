@@ -104,8 +104,13 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
     /// output so a partial capture run surfaces exactly which episodes
     /// succeeded vs. which need investigation.
     func testCaptureAllDogfoodSnapshots() async throws {
-        let goldens = try ChapterPlanGoldenSetLoader.allDogfoodFixtures()
-        try XCTSkipIf(goldens.isEmpty, "no dogfood goldens — run Scripts/convert_annotations_to_chapter_goldens.py")
+        let corpusLoader = CorpusAnnotationLoader()
+        let goldens = try ChapterPlanGoldenSetLoader.canonicalDogfoodFixtures(
+            corpusLoader: corpusLoader
+        )
+        try corpusLoader.preflightGoldEvaluationInputs(
+            annotationURLs: try corpusLoader.annotationFileURLs()
+        )
 
         let snapshotDir = ChapterPlanGoldenSetLoader.pipelineSnapshotDirectory()
         try ensureDirectoryExists(snapshotDir)
@@ -128,31 +133,19 @@ final class ChapterPlanPipelineSnapshotCaptureTests: XCTestCase {
             try? FileManager.default.removeItem(at: cacheRoot)
         }
 
-        let corpusLoader = CorpusAnnotationLoader()
-
         var produced: [String] = []
         var skipped: [(episodeId: String, reason: String)] = []
         var failed: [(episodeId: String, reason: String)] = []
 
-        for (goldenURL, golden) in goldens {
+        for fixture in goldens {
+            let goldenURL = fixture.url
+            let golden = fixture.set
             let episodeId = goldenURL.deletingPathExtension().lastPathComponent
 
             // Resolve audio. The corpus loader is the single source of
             // truth for the Audio/ convention; threading it through
             // here keeps the resolution rule in one place.
-            let annotation: CorpusAnnotation
-            do {
-                annotation = try corpusLoader.decode(
-                    at: corpusLoader.annotationsDirectoryURL
-                        .appendingPathComponent("\(episodeId).json", isDirectory: false)
-                )
-            } catch {
-                failed.append((
-                    episodeId,
-                    "annotation decode failed: \(error.localizedDescription)"
-                ))
-                continue
-            }
+            let annotation = fixture.annotation
 
             let audioURL: URL
             do {
@@ -526,10 +519,13 @@ final class ChapterLabelingDiagnosticTests: XCTestCase {
             throw XCTSkip("ChapterLabelingService.live requires iOS 26+ / FoundationModels.")
         }
 
-        let goldens = try ChapterPlanGoldenSetLoader.allDogfoodFixtures()
-        try XCTSkipIf(goldens.isEmpty, "no dogfood goldens to diagnose")
-
         let corpusLoader = CorpusAnnotationLoader()
+        let goldens = try ChapterPlanGoldenSetLoader.canonicalDogfoodFixtures(
+            corpusLoader: corpusLoader
+        )
+        try corpusLoader.preflightGoldEvaluationInputs(
+            annotationURLs: try corpusLoader.annotationFileURLs()
+        )
         let labelService = ChapterLabelingService.live()
 
         // Aggregate cross-tab: among candidates overlapping a golden
@@ -543,22 +539,18 @@ final class ChapterLabelingDiagnosticTests: XCTestCase {
         var totalGoldenAdSpansCovered = 0
         var episodesDiagnosed: [String] = []
 
-        for (goldenURL, golden) in goldens {
+        for fixture in goldens {
+            let goldenURL = fixture.url
+            let golden = fixture.set
             let episodeId = goldenURL.deletingPathExtension().lastPathComponent
 
             // Resolve audio + transcript (soft-skip when unavailable).
-            let annotation: CorpusAnnotation
-            do {
-                annotation = try corpusLoader.decode(
-                    at: corpusLoader.annotationsDirectoryURL
-                        .appendingPathComponent("\(episodeId).json", isDirectory: false)
-                )
-            } catch { continue }
+            let annotation = fixture.annotation
             guard let audioURL = try? corpusLoader.audioFileURL(for: annotation) else { continue }
-            let transcript = (try? CorpusTranscriptLoader.load(
+            let transcript = try CorpusTranscriptLoader.load(
                 episodeId: episodeId,
                 repoRoot: corpusLoader.repoRoot
-            )) ?? []
+            )
 
             let snapshot = try await ChapterFeatureSnapshotBuilder.build(
                 audioURL: audioURL,
@@ -744,6 +736,32 @@ final class ChapterLabelingDiagnosticTests: XCTestCase {
 /// that starved the boundary detector (no lexical/speaker signals) and
 /// the FM labeler (empty `regionText` → every chapter labeled
 /// `content`).
+enum CorpusTranscriptLoaderError: LocalizedError {
+    case unsafeCorpusPath(URL)
+    case missingSourceAudioFingerprint(URL)
+    case malformedSourceAudioFingerprint(URL, String)
+    case sourceAudioMissing(String, URL)
+    case sourceAudioAmbiguous(String, [URL])
+    case sourceAudioFingerprintMismatch(URL, expected: String, actual: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unsafeCorpusPath(let url):
+            return "corpus transcript or audio path is unsafe: \(url.path)"
+        case .missingSourceAudioFingerprint(let transcriptURL):
+            return "transcript \(transcriptURL.lastPathComponent) lacks source_audio_fingerprint"
+        case .malformedSourceAudioFingerprint(let transcriptURL, let value):
+            return "transcript \(transcriptURL.lastPathComponent) has malformed source_audio_fingerprint \(value)"
+        case .sourceAudioMissing(let episodeId, let directory):
+            return "transcript sidecar for \(episodeId) is present, but retained audio is missing under \(directory.path)"
+        case .sourceAudioAmbiguous(let episodeId, let matches):
+            return "transcript sidecar for \(episodeId) has ambiguous retained audio: \(matches.map(\.lastPathComponent).joined(separator: ", "))"
+        case .sourceAudioFingerprintMismatch(let transcriptURL, let expected, let actual):
+            return "transcript \(transcriptURL.lastPathComponent) is bound to \(expected), but retained audio is \(actual)"
+        }
+    }
+}
+
 enum CorpusTranscriptLoader {
 
     /// whisper.cpp `--output-json-full` envelope. We only need the
@@ -751,7 +769,13 @@ enum CorpusTranscriptLoader {
     /// `offsets` and the recognized `text`. Token-level detail is
     /// ignored — the chapter pipeline scans segment text, not tokens.
     private struct WhisperTranscript: Decodable {
+        let sourceAudioFingerprint: String?
         let transcription: [Segment]
+
+        private enum CodingKeys: String, CodingKey {
+            case sourceAudioFingerprint = "source_audio_fingerprint"
+            case transcription
+        }
 
         struct Segment: Decodable {
             let text: String
@@ -769,14 +793,61 @@ enum CorpusTranscriptLoader {
     /// episodes still gets a (transcript-starved) snapshot rather than a
     /// hard failure — the capture summary already distinguishes starved
     /// from rich plans via the downstream eval.
-    static func load(episodeId: String, repoRoot: URL) throws -> [TranscriptChunk] {
-        let url = repoRoot
+    static func load(
+        episodeId: String,
+        repoRoot: URL,
+        audioURL explicitAudioURL: URL? = nil
+    ) throws -> [TranscriptChunk] {
+        guard isBareEpisodeId(episodeId) else {
+            throw CorpusTranscriptLoaderError.unsafeCorpusPath(
+                URL(fileURLWithPath: episodeId)
+            )
+        }
+        let transcriptDirectory = repoRoot
             .appendingPathComponent("TestFixtures/Corpus/Transcripts", isDirectory: true)
+            .standardizedFileURL
+        let url = transcriptDirectory
             .appendingPathComponent("\(episodeId).json", isDirectory: false)
+            .standardizedFileURL
+        guard url.deletingLastPathComponent() == transcriptDirectory,
+              !CorpusAnnotationLoader.hasSymbolicLinkComponent(url, relativeTo: repoRoot) else {
+            throw CorpusTranscriptLoaderError.unsafeCorpusPath(url)
+        }
+        let validatedExplicitAudioURL = try explicitAudioURL.map {
+            try validateExplicitAudioURL($0, repoRoot: repoRoot)
+        }
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        guard let transcriptValues = try? url.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        ), transcriptValues.isRegularFile == true, transcriptValues.isSymbolicLink != true else {
+            throw CorpusTranscriptLoaderError.unsafeCorpusPath(url)
+        }
 
         let data = try Data(contentsOf: url)
         let whisper = try JSONDecoder().decode(WhisperTranscript.self, from: data)
+        guard let expectedFingerprint = whisper.sourceAudioFingerprint else {
+            throw CorpusTranscriptLoaderError.missingSourceAudioFingerprint(url)
+        }
+        guard isCanonicalSHA256Fingerprint(expectedFingerprint) else {
+            throw CorpusTranscriptLoaderError.malformedSourceAudioFingerprint(
+                url,
+                expectedFingerprint
+            )
+        }
+        let audioURL: URL
+        if let validatedExplicitAudioURL {
+            audioURL = validatedExplicitAudioURL
+        } else {
+            audioURL = try resolveRetainedAudioURL(episodeId: episodeId, repoRoot: repoRoot)
+        }
+        let actualFingerprint = try CorpusAudioFingerprint.fingerprint(of: audioURL)
+        guard actualFingerprint == expectedFingerprint else {
+            throw CorpusTranscriptLoaderError.sourceAudioFingerprintMismatch(
+                url,
+                expected: expectedFingerprint,
+                actual: actualFingerprint
+            )
+        }
 
         return whisper.transcription.enumerated().map { index, segment in
             // `normalizedText` uses the same normalizer the production
@@ -806,6 +877,339 @@ enum CorpusTranscriptLoader {
                 avgConfidence: nil
             )
         }
+    }
+
+    private static func isCanonicalSHA256Fingerprint(_ value: String) -> Bool {
+        guard value.count == 71, value.hasPrefix("sha256:") else { return false }
+        return value.dropFirst(7).unicodeScalars.allSatisfy {
+            CharacterSet(charactersIn: "0123456789abcdef").contains($0)
+        }
+    }
+
+    private static func isBareEpisodeId(_ value: String) -> Bool {
+        !value.isEmpty
+            && value != "."
+            && value != ".."
+            && !value.contains("/")
+            && !value.contains("\\")
+            && (value as NSString).lastPathComponent == value
+    }
+
+    private static func validateExplicitAudioURL(_ url: URL, repoRoot: URL) throws -> URL {
+        let audioDirectory = repoRoot
+            .appendingPathComponent("TestFixtures/Corpus/Audio", isDirectory: true)
+            .standardizedFileURL
+        let candidate = url.standardizedFileURL
+        guard candidate.deletingLastPathComponent() == audioDirectory,
+              !CorpusAnnotationLoader.hasSymbolicLinkComponent(candidate, relativeTo: repoRoot),
+              let values = try? candidate.resourceValues(
+                forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+              ),
+              values.isRegularFile == true,
+              values.isSymbolicLink != true
+        else {
+            throw CorpusTranscriptLoaderError.unsafeCorpusPath(url)
+        }
+        return candidate
+    }
+
+    private static func resolveRetainedAudioURL(episodeId: String, repoRoot: URL) throws -> URL {
+        let directory = repoRoot
+            .appendingPathComponent("TestFixtures/Corpus/Audio", isDirectory: true)
+        guard !CorpusAnnotationLoader.hasSymbolicLinkComponent(
+            directory,
+            relativeTo: repoRoot
+        ), let directoryValues = try? directory.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+        ), directoryValues.isDirectory == true, directoryValues.isSymbolicLink != true else {
+            throw CorpusTranscriptLoaderError.sourceAudioMissing(episodeId, directory)
+        }
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        )
+        let matches = files.filter {
+            let values = try? $0.resourceValues(
+                forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+            )
+            return $0.deletingPathExtension().lastPathComponent == episodeId
+                && CorpusAnnotationLoader.audioFileExtensions.contains(
+                    $0.pathExtension.lowercased()
+                )
+                && values?.isRegularFile == true
+                && values?.isSymbolicLink != true
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !matches.isEmpty else {
+            throw CorpusTranscriptLoaderError.sourceAudioMissing(episodeId, directory)
+        }
+        guard matches.count == 1 else {
+            throw CorpusTranscriptLoaderError.sourceAudioAmbiguous(episodeId, matches)
+        }
+        return matches[0]
+    }
+}
+
+final class CorpusTranscriptLoaderBindingTests: XCTestCase {
+    func testMissingSidecarRemainsSoftWithoutAudio() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        XCTAssertTrue(
+            try CorpusTranscriptLoader.load(episodeId: "episode-1", repoRoot: root).isEmpty
+        )
+    }
+
+    func testBoundSidecarLoadsAgainstExactRetainedAudio() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audioURL = try writeAudio(Data("retained audio".utf8), root: root)
+        let fingerprint = try CorpusAudioFingerprint.fingerprint(of: audioURL)
+        try writeTranscript(sourceFingerprint: fingerprint, root: root)
+
+        let chunks = try CorpusTranscriptLoader.load(
+            episodeId: "episode-1",
+            repoRoot: root
+        )
+
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertEqual(chunks[0].startTime, 1.0)
+        XCTAssertEqual(chunks[0].endTime, 2.0)
+    }
+
+    func testPresentSidecarWithoutBindingFailsClosed() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try writeAudio(Data("retained audio".utf8), root: root)
+        try writeTranscript(sourceFingerprint: nil, root: root)
+
+        XCTAssertThrowsError(
+            try CorpusTranscriptLoader.load(episodeId: "episode-1", repoRoot: root)
+        ) { error in
+            guard case CorpusTranscriptLoaderError.missingSourceAudioFingerprint = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testLegacyArraySidecarFailsClosed() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try writeAudio(Data("retained audio".utf8), root: root)
+        let transcriptURL = try transcriptURL(root: root)
+        try Data("[]".utf8).write(to: transcriptURL)
+
+        XCTAssertThrowsError(
+            try CorpusTranscriptLoader.load(episodeId: "episode-1", repoRoot: root)
+        )
+    }
+
+    func testMismatchedSidecarFailsClosedBeforeChunksAreReturned() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try writeAudio(Data("retained audio".utf8), root: root)
+        try writeTranscript(
+            sourceFingerprint: "sha256:" + String(repeating: "a", count: 64),
+            root: root
+        )
+
+        XCTAssertThrowsError(
+            try CorpusTranscriptLoader.load(episodeId: "episode-1", repoRoot: root)
+        ) { error in
+            guard case CorpusTranscriptLoaderError.sourceAudioFingerprintMismatch = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testExplicitAudioURLUsesTheManifestResolvedFile() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audioURL = try writeAudio(Data("manifest audio".utf8), root: root)
+        let fingerprint = try CorpusAudioFingerprint.fingerprint(of: audioURL)
+        try writeTranscript(sourceFingerprint: fingerprint, root: root)
+
+        let chunks = try CorpusTranscriptLoader.load(
+            episodeId: "episode-1",
+            repoRoot: root,
+            audioURL: audioURL
+        )
+
+        XCTAssertEqual(chunks.count, 1)
+    }
+
+    func testEpisodeTraversalAndExplicitAudioOutsideCorpusFailClosed() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        XCTAssertThrowsError(
+            try CorpusTranscriptLoader.load(episodeId: "../escape", repoRoot: root)
+        ) { error in
+            guard case CorpusTranscriptLoaderError.unsafeCorpusPath = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
+
+        let outsideAudio = root.appendingPathComponent("manifest-cut.mp3")
+        try Data("outside canonical audio directory".utf8).write(to: outsideAudio)
+        let fingerprint = try CorpusAudioFingerprint.fingerprint(of: outsideAudio)
+        try writeTranscript(sourceFingerprint: fingerprint, root: root)
+        XCTAssertThrowsError(
+            try CorpusTranscriptLoader.load(
+                episodeId: "episode-1",
+                repoRoot: root,
+                audioURL: outsideAudio
+            )
+        ) { error in
+            guard case CorpusTranscriptLoaderError.unsafeCorpusPath = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testTranscriptLeafAndParentAliasesFailClosed() throws {
+        for aliasParent in [false, true] {
+            let root = try makeRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let audioURL = try writeAudio(Data("retained audio".utf8), root: root)
+            let fingerprint = try CorpusAudioFingerprint.fingerprint(of: audioURL)
+            let externalRoot = try makeRoot()
+            defer { try? FileManager.default.removeItem(at: externalRoot) }
+            try writeTranscript(sourceFingerprint: fingerprint, root: externalRoot)
+            let externalTranscript = try transcriptURL(root: externalRoot)
+            let transcripts = root.appendingPathComponent(
+                "TestFixtures/Corpus/Transcripts",
+                isDirectory: true
+            )
+            if aliasParent {
+                try FileManager.default.createSymbolicLink(
+                    at: transcripts,
+                    withDestinationURL: externalTranscript.deletingLastPathComponent()
+                )
+            } else {
+                try FileManager.default.createDirectory(
+                    at: transcripts,
+                    withIntermediateDirectories: true
+                )
+                try FileManager.default.createSymbolicLink(
+                    at: transcripts.appendingPathComponent("episode-1.json"),
+                    withDestinationURL: externalTranscript
+                )
+            }
+
+            XCTAssertThrowsError(
+                try CorpusTranscriptLoader.load(episodeId: "episode-1", repoRoot: root)
+            ) { error in
+                guard case CorpusTranscriptLoaderError.unsafeCorpusPath = error else {
+                    return XCTFail("unexpected error: \(error)")
+                }
+            }
+        }
+    }
+
+    func testRetainedAudioLeafAndParentAliasesFailClosed() throws {
+        for aliasParent in [false, true] {
+            let root = try makeRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let external = root.appendingPathComponent("external-audio", isDirectory: true)
+            try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+            let externalAudio = external.appendingPathComponent("episode-1.mp3")
+            let original = Data("external retained audio".utf8)
+            try original.write(to: externalAudio)
+            let fingerprint = try CorpusAudioFingerprint.fingerprint(of: externalAudio)
+            try writeTranscript(sourceFingerprint: fingerprint, root: root)
+            let audio = root.appendingPathComponent(
+                "TestFixtures/Corpus/Audio",
+                isDirectory: true
+            )
+            if aliasParent {
+                try FileManager.default.createSymbolicLink(
+                    at: audio,
+                    withDestinationURL: external
+                )
+            } else {
+                try FileManager.default.createDirectory(at: audio, withIntermediateDirectories: true)
+                try FileManager.default.createSymbolicLink(
+                    at: audio.appendingPathComponent("episode-1.mp3"),
+                    withDestinationURL: externalAudio
+                )
+            }
+
+            XCTAssertThrowsError(
+                try CorpusTranscriptLoader.load(episodeId: "episode-1", repoRoot: root)
+            )
+            XCTAssertEqual(try Data(contentsOf: externalAudio), original)
+        }
+    }
+
+    func testExplicitAudioAliasAndEscapeFailClosed() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let externalRoot = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: externalRoot) }
+        let externalAudio = externalRoot.appendingPathComponent("episode-1.mp3")
+        let original = Data("external explicit audio".utf8)
+        try original.write(to: externalAudio)
+        let fingerprint = try CorpusAudioFingerprint.fingerprint(of: externalAudio)
+        try writeTranscript(sourceFingerprint: fingerprint, root: root)
+        let alias = root.appendingPathComponent("explicit-audio.mp3")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: externalAudio)
+
+        for unsafeAudio in [alias, externalAudio] {
+            XCTAssertThrowsError(
+                try CorpusTranscriptLoader.load(
+                    episodeId: "episode-1",
+                    repoRoot: root,
+                    audioURL: unsafeAudio
+                )
+            ) { error in
+                guard case CorpusTranscriptLoaderError.unsafeCorpusPath = error else {
+                    return XCTFail("unexpected error: \(error)")
+                }
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: externalAudio), original)
+    }
+
+    private func makeRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "corpus-transcript-binding-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func writeAudio(_ data: Data, root: URL) throws -> URL {
+        let directory = root.appendingPathComponent(
+            "TestFixtures/Corpus/Audio",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("episode-1.mp3")
+        try data.write(to: url)
+        return url
+    }
+
+    private func transcriptURL(root: URL) throws -> URL {
+        let directory = root.appendingPathComponent(
+            "TestFixtures/Corpus/Transcripts",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("episode-1.json")
+    }
+
+    private func writeTranscript(sourceFingerprint: String?, root: URL) throws {
+        var transcript: [String: Any] = [
+            "transcription": [[
+                "text": "bound transcript",
+                "offsets": ["from": 1_000, "to": 2_000],
+            ]],
+        ]
+        transcript["source_audio_fingerprint"] = sourceFingerprint
+        let data = try JSONSerialization.data(withJSONObject: transcript, options: [.sortedKeys])
+        try data.write(to: transcriptURL(root: root))
     }
 }
 

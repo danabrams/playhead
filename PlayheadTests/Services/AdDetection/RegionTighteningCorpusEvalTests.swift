@@ -74,10 +74,23 @@ final class RegionTighteningCorpusEvalTests: XCTestCase {
         let annotationURLs: [URL]
         do {
             annotationURLs = try loader.annotationFileURLs()
-        } catch {
-            throw XCTSkip("corpus annotations dir not present: \(error)")
+        } catch CorpusAnnotationLoaderError.directoryNotFound(let url) {
+            throw XCTSkip("corpus annotations dir not present: \(url.path)")
         }
         try XCTSkipIf(annotationURLs.isEmpty, "no corpus annotations staged")
+        let canonicalAnnotations = try loader.loadAll(verifyAudioFingerprints: false)
+        if canonicalAnnotations.allSatisfy({ !$0.isEligibleForGoldEvaluation }) {
+            XCTAssertThrowsError(
+                try loader.preflightGoldEvaluationInputs(annotationURLs: annotationURLs)
+            ) { error in
+                guard case CorpusAnnotationLoaderError.evaluationCohortIncomplete(let detail) = error else {
+                    return XCTFail("expected explicit no-gold preflight failure, got \(error)")
+                }
+                XCTAssertTrue(detail.contains("no explicitly human-reviewed gold"))
+            }
+            return
+        }
+        try loader.preflightGoldEvaluationInputs(annotationURLs: annotationURLs)
 
         // Two narrowing configs differing ONLY in the lexical-cluster snap.
         let baselineConfig = NarrowingConfig(
@@ -96,24 +109,16 @@ final class RegionTighteningCorpusEvalTests: XCTestCase {
         for url in annotationURLs {
             let episodeId = url.deletingPathExtension().lastPathComponent
 
-            let annotation: CorpusAnnotation
-            do {
-                annotation = try loader.decode(at: url)
-            } catch {
-                skipped.append((episodeId, "annotation decode failed: \(error)"))
+            let annotation = try loader.loadAndValidate(at: url)
+            guard annotation.isEligibleForGoldEvaluation else {
+                skipped.append((episodeId, "non-gold label tier: \(annotation.labelTier.rawValue)"))
                 continue
             }
 
-            let transcript: [TranscriptChunk]
-            do {
-                transcript = try CorpusTranscriptLoader.load(
-                    episodeId: episodeId,
-                    repoRoot: loader.repoRoot
-                )
-            } catch {
-                skipped.append((episodeId, "transcript decode failed: \(error)"))
-                continue
-            }
+            let transcript = try CorpusTranscriptLoader.load(
+                episodeId: episodeId,
+                repoRoot: loader.repoRoot
+            )
             guard !transcript.isEmpty else {
                 skipped.append((episodeId, "transcript sidecar empty/absent"))
                 continue

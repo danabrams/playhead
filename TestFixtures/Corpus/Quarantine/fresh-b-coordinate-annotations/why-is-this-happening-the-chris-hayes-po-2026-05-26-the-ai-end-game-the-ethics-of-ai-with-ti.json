@@ -1,0 +1,129 @@
+{
+  "episode_id": "why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-of-ai-with-ti",
+  "show_name": "Why Is This Happening? The Chris Hayes Podcast",
+  "duration_seconds": 3550.77225,
+  "ad_windows": [
+    {
+      "start_seconds": 23.28,
+      "end_seconds": 63.69,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 23.3-63.7s (len=40.4s). rediff-sec=35.7, drafter-spans=0, pipeline-spans=1 (max-skip-conf=0.66).",
+      "provenance": [
+        "pipeline",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1212.2,
+      "end_seconds": 1258.79,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 1212.2-1258.8s (len=46.6s). rediff-sec=33.8, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1303.0,
+      "end_seconds": 1345.68,
+      "advertiser": "Rho",
+      "product": null,
+      "ad_type": "blended_host_read",
+      "transition_type": null,
+      "confidence_notes": "RULE R2 (drafter heuristic + pipeline decision agree). auto-promoted 1303.0-1345.7s (len=42.7s). rediff-sec=0.0, drafter-spans=1, pipeline-spans=1 (max-skip-conf=0.79).",
+      "provenance": [
+        "drafter",
+        "pipeline"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 2815.33,
+      "end_seconds": 2927.09,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 2815.3-2927.1s (len=111.8s). rediff-sec=111.8, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 2980.4,
+      "end_seconds": 3022.1,
+      "advertiser": "Row",
+      "product": null,
+      "ad_type": "blended_host_read",
+      "transition_type": null,
+      "confidence_notes": "RULE R2 (drafter heuristic + pipeline decision agree). auto-promoted 2980.4-3022.1s (len=41.7s). rediff-sec=0.0, drafter-spans=1, pipeline-spans=2 (max-skip-conf=0.94).",
+      "provenance": [
+        "drafter",
+        "pipeline"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 23.28,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 63.69,
+      "end_seconds": 83.76,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 83.76,
+      "end_seconds": 195.03,
+      "notes": "Audit-derived content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 195.03,
+      "end_seconds": 1212.2,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1258.79,
+      "end_seconds": 1303.0,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1345.68,
+      "end_seconds": 2815.33,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2927.09,
+      "end_seconds": 2980.4,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 3022.1,
+      "end_seconds": 3550.77225,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:fa8902d8f25d447e33a153b81d410f10db403d2156d1dd63f071bba33a72f8cb",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-01T17:30:46Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

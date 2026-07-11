@@ -3046,6 +3046,25 @@ struct MultiRunDriverConfig: Sendable {
     }
 }
 
+enum MultiRunDriverError: Error, Sendable, Equatable, CustomStringConvertible {
+    case zeroEpisodeCount(arm: String, runIndex: Int)
+    case inconsistentEpisodeCount(
+        expected: Int,
+        actual: Int,
+        arm: String,
+        runIndex: Int
+    )
+
+    var description: String {
+        switch self {
+        case .zeroEpisodeCount(let arm, let runIndex):
+            return "multi-run arm \(arm) run \(runIndex) scored zero episodes"
+        case .inconsistentEpisodeCount(let expected, let actual, let arm, let runIndex):
+            return "multi-run arm \(arm) run \(runIndex) scored \(actual) episodes; expected \(expected)"
+        }
+    }
+}
+
 /// Parse the multi-run env var `PLAYHEAD_MULTIRUN_N`. Returns the
 /// configured N, clamped to `[2, 20]`, or `fallback` if the env is unset
 /// or unparseable. The fallback is 5 — the activation-campaign default.
@@ -3103,9 +3122,25 @@ func runMultiRunAggregation(
     var runsByArm: [String: [ArmRunResult]] = Dictionary(
         uniqueKeysWithValues: arms.map { ($0, []) }
     )
+    var expectedEpisodeCount: Int?
     for arm in arms {
         for runIndex in 0..<config.runCount {
             let result = try await runSingleRun(arm, runIndex)
+            guard result.episodeCount > 0 else {
+                throw MultiRunDriverError.zeroEpisodeCount(
+                    arm: arm,
+                    runIndex: runIndex
+                )
+            }
+            if let expectedEpisodeCount, result.episodeCount != expectedEpisodeCount {
+                throw MultiRunDriverError.inconsistentEpisodeCount(
+                    expected: expectedEpisodeCount,
+                    actual: result.episodeCount,
+                    arm: arm,
+                    runIndex: runIndex
+                )
+            }
+            expectedEpisodeCount = expectedEpisodeCount ?? result.episodeCount
             runsByArm[arm, default: []].append(result)
         }
     }

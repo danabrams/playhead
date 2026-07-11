@@ -1,0 +1,548 @@
+{
+    "artifact_kind": "human_first_pass_attestation",
+    "audio_bindings": [
+        {
+            "audio_fingerprint": "sha256:18349b985b9f4d2aa5336d5ce1cafed9abfeaec5703406367dbdd63937b7d325",
+            "episode_id": "99pi-2026-05-05-enshittification",
+            "annotation_decision": {
+                "episode_id": "99pi-2026-05-05-enshittification",
+                "audio_fingerprint": "sha256:18349b985b9f4d2aa5336d5ce1cafed9abfeaec5703406367dbdd63937b7d325",
+                "show_name": "99pi 2026 05 05 Enshittification",
+                "duration_seconds": 2104.973067,
+                "variant_of": null,
+                "ad_windows": [],
+                "content_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 2104.973067,
+                        "notes": "Reviewed no-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:b876aeb67e76d4e9c4b387fa191e163e19318db211b8a31025b7607904ddb4cd",
+            "episode_id": "doac-2026-05-07-ww3-expert-this-could-trigger-global-starvation",
+            "annotation_decision": {
+                "episode_id": "doac-2026-05-07-ww3-expert-this-could-trigger-global-starvation",
+                "audio_fingerprint": "sha256:b876aeb67e76d4e9c4b387fa191e163e19318db211b8a31025b7607904ddb4cd",
+                "show_name": "Doac 2026 05 07 Ww3 Expert This Could Trigger Global Starvation",
+                "duration_seconds": 8023.640816,
+                "variant_of": null,
+                "ad_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 75.2,
+                        "advertiser": "Lufthansa",
+                        "product": "Allegris Business Class",
+                        "ad_type": "host_read",
+                        "transition_type": "explicit",
+                        "confidence_notes": "Opening sponsor read before interview content."
+                    },
+                    {
+                        "start_seconds": 4044.3,
+                        "end_seconds": 4103.4,
+                        "advertiser": "shopify",
+                        "product": "Shopify",
+                        "ad_type": "blended_host_read",
+                        "transition_type": "blended",
+                        "confidence_notes": "Host-read sponsor segment inserted mid-interview; transcript resumes interview immediately after CTA."
+                    }
+                ],
+                "content_windows": [
+                    {
+                        "start_seconds": 75.2,
+                        "end_seconds": 4044.3,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 4103.4,
+                        "end_seconds": 8023.640816,
+                        "notes": "Post-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:bc40dee7c50880b6ef400569cd40fb8f19b0171e221251040ab9fdd72862d477",
+            "episode_id": "doac-2026-05-08-most-replayed-moment-this-is-the-best-exercise-protocol-for-women",
+            "annotation_decision": {
+                "episode_id": "doac-2026-05-08-most-replayed-moment-this-is-the-best-exercise-protocol-for-women",
+                "audio_fingerprint": "sha256:bc40dee7c50880b6ef400569cd40fb8f19b0171e221251040ab9fdd72862d477",
+                "show_name": "Doac 2026 05 08 Most Replayed Moment This Is The Best Exercise Protocol For Women",
+                "duration_seconds": 1951.373061,
+                "variant_of": null,
+                "ad_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 75.2,
+                        "advertiser": "Lufthansa",
+                        "product": "Allegris Business Class",
+                        "ad_type": "host_read",
+                        "transition_type": "explicit",
+                        "confidence_notes": "Opening sponsor read before content."
+                    },
+                    {
+                        "start_seconds": 1868.5,
+                        "end_seconds": 1947.0,
+                        "advertiser": "Lufthansa",
+                        "product": "Allegris Business Class",
+                        "ad_type": "host_read",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Closing sponsor read after episode excerpt."
+                    }
+                ],
+                "content_windows": [
+                    {
+                        "start_seconds": 75.2,
+                        "end_seconds": 1868.5,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 1947.0,
+                        "end_seconds": 1951.373061,
+                        "notes": "Post-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:d4102e706a0ccd0ee5b81fc0bce5b754994dce772ce61f76211f47a2d7e42c8a",
+            "episode_id": "ghost-machine-2024-06-28-episode-7-we-will-catch-you",
+            "annotation_decision": {
+                "episode_id": "ghost-machine-2024-06-28-episode-7-we-will-catch-you",
+                "audio_fingerprint": "sha256:d4102e706a0ccd0ee5b81fc0bce5b754994dce772ce61f76211f47a2d7e42c8a",
+                "show_name": "Ghost Machine 2024 06 28 Episode 7 We Will Catch You",
+                "duration_seconds": 2949.616313,
+                "variant_of": null,
+                "ad_windows": [],
+                "content_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 2949.616313,
+                        "notes": "Reviewed no-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:0b2ae166a4e6ad8ea9444489271af4fdb0672cf1018064955efbe0b7c21958f0",
+            "episode_id": "hard-fork-2026-05-08-can-the-u-s-rein-in-prediction-markets-joanna-stern-on-her-year-of-a-i-experimen",
+            "annotation_decision": {
+                "episode_id": "hard-fork-2026-05-08-can-the-u-s-rein-in-prediction-markets-joanna-stern-on-her-year-of-a-i-experimen",
+                "audio_fingerprint": "sha256:0b2ae166a4e6ad8ea9444489271af4fdb0672cf1018064955efbe0b7c21958f0",
+                "show_name": "Hard Fork 2026 05 08 Can The U S Rein In Prediction Markets Joanna Stern On Her Year Of A I Experimen",
+                "duration_seconds": 4345.782813,
+                "variant_of": null,
+                "ad_windows": [],
+                "content_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 4345.782813,
+                        "notes": "Reviewed no-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:dd0d1415f521d1dedc14a965129463c7b4a7f321360f4c1e22b3a20091638666",
+            "episode_id": "huberman-2026-05-07-essentials-compulsive-behaviors-deep-brain-stimulation-dr-casey-halpern",
+            "annotation_decision": {
+                "episode_id": "huberman-2026-05-07-essentials-compulsive-behaviors-deep-brain-stimulation-dr-casey-halpern",
+                "audio_fingerprint": "sha256:dd0d1415f521d1dedc14a965129463c7b4a7f321360f4c1e22b3a20091638666",
+                "show_name": "Huberman 2026 05 07 Essentials Compulsive Behaviors Deep Brain Stimulation Dr Casey Halpern",
+                "duration_seconds": 2271.947756,
+                "variant_of": null,
+                "ad_windows": [
+                    {
+                        "start_seconds": 612.0,
+                        "end_seconds": 709.4,
+                        "advertiser": "Function",
+                        "product": "health testing membership",
+                        "ad_type": "host_read",
+                        "transition_type": "explicit",
+                        "confidence_notes": "Explicit quick-break sponsor read."
+                    },
+                    {
+                        "start_seconds": 1108.6,
+                        "end_seconds": 1187.0,
+                        "advertiser": "AG1",
+                        "product": "nutrition supplement",
+                        "ad_type": "blended_host_read",
+                        "transition_type": "blended",
+                        "confidence_notes": "Sponsor read starts from host personal-use framing and returns directly to interview content."
+                    },
+                    {
+                        "start_seconds": 1651.2,
+                        "end_seconds": 1726.6,
+                        "advertiser": "Rorra",
+                        "product": "water filter",
+                        "ad_type": "blended_host_read",
+                        "transition_type": "blended",
+                        "confidence_notes": "Host-read product segment leading into URL CTA."
+                    }
+                ],
+                "content_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 612.0,
+                        "notes": "Pre-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 709.4,
+                        "end_seconds": 1108.6,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 1187.0,
+                        "end_seconds": 1651.2,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 1726.6,
+                        "end_seconds": 2271.947756,
+                        "notes": "Post-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:452103dd0805d73a306eb7cd4bc540404e17baa3895c5cfe6732c3b35b55e67a",
+            "episode_id": "night-vale-2026-05-01-287-hey-does-anyone-hear-that-sound-behind-the-sky",
+            "annotation_decision": {
+                "episode_id": "night-vale-2026-05-01-287-hey-does-anyone-hear-that-sound-behind-the-sky",
+                "audio_fingerprint": "sha256:452103dd0805d73a306eb7cd4bc540404e17baa3895c5cfe6732c3b35b55e67a",
+                "show_name": "Night Vale 2026 05 01 287 Hey Does Anyone Hear That Sound Behind The Sky",
+                "duration_seconds": 1866.448922,
+                "variant_of": null,
+                "ad_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 107.0,
+                        "advertiser": "Night Vale Presents",
+                        "product": "live shows and network shows",
+                        "ad_type": "promo",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Opening network/show promo before host-read ad pod."
+                    },
+                    {
+                        "start_seconds": 108.7,
+                        "end_seconds": 240.2,
+                        "advertiser": "Shopify / Progressive",
+                        "product": "commerce platform and insurance",
+                        "ad_type": "host_read",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Back-to-back pre-roll sponsor reads; episode content begins after both."
+                    },
+                    {
+                        "start_seconds": 1293.3,
+                        "end_seconds": 1462.7,
+                        "advertiser": "Saily / Incogni",
+                        "product": "eSIM and data-removal services",
+                        "ad_type": "host_read",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Back-to-back mid-roll sponsor reads before episode content resumes."
+                    }
+                ],
+                "content_windows": [
+                    {
+                        "start_seconds": 107.0,
+                        "end_seconds": 108.7,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 240.2,
+                        "end_seconds": 1293.3,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 1462.7,
+                        "end_seconds": 1866.448922,
+                        "notes": "Post-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:789889c352de1e3006fb876381ee5bca82b6096059929990aa143349d0574148",
+            "episode_id": "radiolab-2026-05-08-the-bad-show",
+            "annotation_decision": {
+                "episode_id": "radiolab-2026-05-08-the-bad-show",
+                "audio_fingerprint": "sha256:789889c352de1e3006fb876381ee5bca82b6096059929990aa143349d0574148",
+                "show_name": "Radiolab 2026 05 08 The Bad Show",
+                "duration_seconds": 3998.955063,
+                "variant_of": null,
+                "ad_windows": [],
+                "content_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 3998.955063,
+                        "notes": "Reviewed no-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:cf354d8cd96b64c067c7d0b23e1b9ebfb02a820b8edced3dc2c219bdcf515978",
+            "episode_id": "rest-history-2026-05-06-667-the-mystery-of-the-mona-lisa",
+            "annotation_decision": {
+                "episode_id": "rest-history-2026-05-06-667-the-mystery-of-the-mona-lisa",
+                "audio_fingerprint": "sha256:cf354d8cd96b64c067c7d0b23e1b9ebfb02a820b8edced3dc2c219bdcf515978",
+                "show_name": "Rest History 2026 05 06 667 The Mystery Of The Mona Lisa",
+                "duration_seconds": 4349.466067,
+                "variant_of": null,
+                "ad_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 169.1,
+                        "advertiser": "Lloyds / Mint Mobile / Apple Card",
+                        "product": "banking, wireless service, credit card",
+                        "ad_type": "produced_segment",
+                        "transition_type": "explicit",
+                        "confidence_notes": "Opening ad pod; transcript segment at the end blends ad disclaimer into content, so audio review should refine the exact boundary."
+                    },
+                    {
+                        "start_seconds": 2542.2,
+                        "end_seconds": 2671.1,
+                        "advertiser": "Mint Mobile / Tremfya / Carvana",
+                        "product": "wireless service, prescription drug, car selling",
+                        "ad_type": "produced_segment",
+                        "transition_type": "explicit",
+                        "confidence_notes": "Mid-roll break ad pod between explicit break and return."
+                    }
+                ],
+                "content_windows": [
+                    {
+                        "start_seconds": 169.1,
+                        "end_seconds": 2542.2,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 2671.1,
+                        "end_seconds": 4349.466067,
+                        "notes": "Post-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:88df76fd90db9eae61447fe5c97a9b726bdc87f0a14e341a0363e82e3c7f2a56",
+            "episode_id": "themove-2026-05-08-giro-d-italia-stage-1-analysis-stage-2-preview-themove",
+            "annotation_decision": {
+                "episode_id": "themove-2026-05-08-giro-d-italia-stage-1-analysis-stage-2-preview-themove",
+                "audio_fingerprint": "sha256:88df76fd90db9eae61447fe5c97a9b726bdc87f0a14e341a0363e82e3c7f2a56",
+                "show_name": "Themove 2026 05 08 Giro D Italia Stage 1 Analysis Stage 2 Preview Themove",
+                "duration_seconds": 2444.38175,
+                "variant_of": null,
+                "ad_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 21.6,
+                        "advertiser": "Progressive",
+                        "product": "insurance",
+                        "ad_type": "produced_segment",
+                        "transition_type": "explicit",
+                        "confidence_notes": "Opening pre-roll before episode content."
+                    },
+                    {
+                        "start_seconds": 1020.0,
+                        "end_seconds": 1174.1,
+                        "advertiser": "Hims / Caldera Lab",
+                        "product": "health care and skin care",
+                        "ad_type": "host_read",
+                        "transition_type": "explicit",
+                        "confidence_notes": "Explicit quick-break ad pod with back-to-back sponsor reads."
+                    },
+                    {
+                        "start_seconds": 1586.0,
+                        "end_seconds": 1669.2,
+                        "advertiser": "2 Percent / Progressive",
+                        "product": "podcast promo and insurance",
+                        "ad_type": "produced_segment",
+                        "transition_type": "explicit",
+                        "confidence_notes": "Explicit quick-break pod before content resumes."
+                    },
+                    {
+                        "start_seconds": 2374.8,
+                        "end_seconds": 2442.0,
+                        "advertiser": "Progressive / Libsyn Ads",
+                        "product": "insurance and podcast advertising",
+                        "ad_type": "produced_segment",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Post-roll ad pod after episode wrap."
+                    }
+                ],
+                "content_windows": [
+                    {
+                        "start_seconds": 21.6,
+                        "end_seconds": 1020.0,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 1174.1,
+                        "end_seconds": 1586.0,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 1669.2,
+                        "end_seconds": 2374.8,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 2442.0,
+                        "end_seconds": 2444.38175,
+                        "notes": "Post-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:91ed45f2e4a628f3f7298062e0dd8e828363d88081e7280514d75e816ee8e286",
+            "episode_id": "unexplained-2026-05-01-season-09-episode-20-over-the-hills-and-far-away",
+            "annotation_decision": {
+                "episode_id": "unexplained-2026-05-01-season-09-episode-20-over-the-hills-and-far-away",
+                "audio_fingerprint": "sha256:91ed45f2e4a628f3f7298062e0dd8e828363d88081e7280514d75e816ee8e286",
+                "show_name": "Unexplained 2026 05 01 Season 09 Episode 20 Over The Hills And Far Away",
+                "duration_seconds": 2487.405714,
+                "variant_of": null,
+                "ad_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 185.2,
+                        "advertiser": "iHeart / Amyloid / IBM / Kesimpta / Vital Farms / CrimeCon",
+                        "product": "network intro, health, enterprise AI, prescription drug, eggs, event promo",
+                        "ad_type": "dynamic_insertion",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Pre-roll chain of inserted ads/promos before episode content."
+                    },
+                    {
+                        "start_seconds": 687.4,
+                        "end_seconds": 914.1,
+                        "advertiser": "Amyloid / Pets Best / Hero Bread / Reynolds Kitchens",
+                        "product": "health info, pet insurance, food products, prep paper",
+                        "ad_type": "dynamic_insertion",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Mid-roll inserted ad pod; content resumes after Reynolds ad."
+                    },
+                    {
+                        "start_seconds": 1472.0,
+                        "end_seconds": 1665.3,
+                        "advertiser": "Amyloid / Pets Best / Hero Bread / Reynolds Kitchens",
+                        "product": "health info, pet insurance, food products, prep paper",
+                        "ad_type": "dynamic_insertion",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Second mid-roll inserted ad pod before story content resumes."
+                    },
+                    {
+                        "start_seconds": 2319.8,
+                        "end_seconds": 2487.4,
+                        "advertiser": "Amyloid / Gilead / Prime Video / Reynolds Kitchens",
+                        "product": "health info, PrEP education, video streaming, prep paper",
+                        "ad_type": "dynamic_insertion",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Post-roll inserted ad pod after show outro/music."
+                    }
+                ],
+                "content_windows": [
+                    {
+                        "start_seconds": 185.2,
+                        "end_seconds": 687.4,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 914.1,
+                        "end_seconds": 1472.0,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 1665.3,
+                        "end_seconds": 2319.8,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 2487.4,
+                        "end_seconds": 2487.405714,
+                        "notes": "Post-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        },
+        {
+            "audio_fingerprint": "sha256:16f974feb751f783a8f96be92cda6931ca95f119f70cf233f95104bb3ef7c21d",
+            "episode_id": "unexplained-2026-05-08-season-09-episode-21-triangled-veils",
+            "annotation_decision": {
+                "episode_id": "unexplained-2026-05-08-season-09-episode-21-triangled-veils",
+                "audio_fingerprint": "sha256:16f974feb751f783a8f96be92cda6931ca95f119f70cf233f95104bb3ef7c21d",
+                "show_name": "Unexplained 2026 05 08 Season 09 Episode 21 Triangled Veils",
+                "duration_seconds": 2566.687347,
+                "variant_of": null,
+                "ad_windows": [
+                    {
+                        "start_seconds": 0.0,
+                        "end_seconds": 171.3,
+                        "advertiser": "iHeart / IBM / Kesimpta / UnitedHealthcare / Vital Farms / CrimeCon",
+                        "product": "network intro, enterprise AI, prescription drug, health care, eggs, event promo",
+                        "ad_type": "dynamic_insertion",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Pre-roll inserted ad/promo chain before episode content."
+                    },
+                    {
+                        "start_seconds": 789.8,
+                        "end_seconds": 955.2,
+                        "advertiser": "Pets Best / Hero Bread / Reynolds Kitchens / HomeSense",
+                        "product": "pet insurance, food products, prep paper, retail",
+                        "ad_type": "dynamic_insertion",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Mid-roll inserted ad pod before story content resumes."
+                    },
+                    {
+                        "start_seconds": 1516.7,
+                        "end_seconds": 1677.7,
+                        "advertiser": "Pets Best / Hero Bread / Reynolds Kitchens / HomeSense",
+                        "product": "pet insurance, food products, prep paper, retail",
+                        "ad_type": "dynamic_insertion",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Second mid-roll inserted ad pod before story content resumes."
+                    },
+                    {
+                        "start_seconds": 2389.7,
+                        "end_seconds": 2566.687347,
+                        "advertiser": "Gilead / Prime Video / Reynolds Kitchens / HomeSense / iHeart",
+                        "product": "PrEP education, video streaming, prep paper, retail, network outro",
+                        "ad_type": "dynamic_insertion",
+                        "transition_type": "hard_cut",
+                        "confidence_notes": "Post-roll inserted ad chain after show outro/music."
+                    }
+                ],
+                "content_windows": [
+                    {
+                        "start_seconds": 171.3,
+                        "end_seconds": 789.8,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 955.2,
+                        "end_seconds": 1516.7,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    },
+                    {
+                        "start_seconds": 1677.7,
+                        "end_seconds": 2389.7,
+                        "notes": "Inter-ad content - must NEVER be skipped"
+                    }
+                ]
+            }
+        }
+    ],
+    "reviewed_at": "2026-05-12T03:06:35Z",
+    "reviewer": "Dan Abrams",
+    "reviewer_attribution": {
+        "basis": "git authorship of the first-pass corpus promotion",
+        "commit": "abe2fd88a0765f3a8b89951f7eb5dd7273a5ff6d"
+    },
+    "schema_version": 1,
+    "source_decision_count": 33,
+    "source_review_payload_sha256": "sha256:2b65ba76bac0ed79c7e597b320d1ddc6339e5e199061d268ae8e60faecd567d1",
+    "source_reviewer_fields_were_unset": true,
+    "statement": "One local-audio review pass only. This artifact does not assert a second listener or gold status."
+}

@@ -11,5 +11,16 @@
     }
   ],
   "variant_of": null,
-  "audio_fingerprint": "sha256:0b2ae166a4e6ad8ea9444489271af4fdb0672cf1018064955efbe0b7c21958f0"
+  "audio_fingerprint": "sha256:0b2ae166a4e6ad8ea9444489271af4fdb0672cf1018064955efbe0b7c21958f0",
+  "provenance": [
+    "human_first_pass"
+  ],
+  "review_attestations": [
+    {
+      "reviewer": "Dan Abrams",
+      "reviewed_at": "2026-05-12T03:06:35Z",
+      "audio_fingerprint": "sha256:0b2ae166a4e6ad8ea9444489271af4fdb0672cf1018064955efbe0b7c21958f0",
+      "review_artifact_id": "sha256:88306e39982d867a3df5a6561f6ae8a199ac3fb50c6266d00ceb21d1194cee3a"
+    }
+  ]
 }

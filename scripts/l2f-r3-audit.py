@@ -28,7 +28,9 @@ import pathlib
 import statistics
 import sys
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, Mapping
+
+from l2f_canonical_manifest import load_canonical_annotations
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ANN_DIR = ROOT / "TestFixtures/Corpus/Annotations"
@@ -45,19 +47,17 @@ def load_show_index() -> dict[str, str]:
     return {e.get("episodeId", ""): e.get("show", "?") for e in data}
 
 
-def collect_spans() -> tuple[list[dict[str, Any]], dict[str, int]]:
+def collect_spans(
+    annotations: Mapping[str, dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Walk every annotation; return audit_priority=1 spans + per-episode counts."""
     shows = load_show_index()
     spans: list[dict[str, Any]] = []
     per_episode_ap1_count: dict[str, int] = defaultdict(int)
 
-    for path in sorted(ANN_DIR.glob("*.json")):
-        if path.name.startswith("_template"):
-            continue
-        try:
-            ann = json.loads(path.read_text())
-        except Exception:
-            continue
+    canonical = annotations if annotations is not None else load_canonical_annotations(ANN_DIR)
+    for filename, ann in canonical.items():
+        path = ANN_DIR / filename
         eid = ann.get("episode_id") or ann.get("episodeId") or path.stem
         duration = ann.get("duration_seconds")
         try:
@@ -494,7 +494,9 @@ def build_report(spans: list[dict[str, Any]], per_episode: dict[str, int]) -> st
     return "\n".join(out) + "\n"
 
 
-def scan_corpus_artifacts() -> dict[str, list[dict[str, Any]]]:
+def scan_corpus_artifacts(
+    annotations: Mapping[str, dict[str, Any]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     """
     Cross-provenance corpus quality scan. Walks every ad_window in every
     annotation (not filtered by audit_priority) and classifies anti-patterns
@@ -523,13 +525,9 @@ def scan_corpus_artifacts() -> dict[str, list[dict[str, Any]]]:
     F_ZERO_TOL = 0.5
     F_TINY_FLOOR = 5.0  # mirrors DecoderConstants.minDurationSeconds
 
-    for path in sorted(ANN_DIR.glob("*.json")):
-        if path.name.startswith("_template"):
-            continue
-        try:
-            ann = json.loads(path.read_text())
-        except Exception:
-            continue
+    canonical = annotations if annotations is not None else load_canonical_annotations(ANN_DIR)
+    for filename, ann in canonical.items():
+        path = ANN_DIR / filename
         eid = ann.get("episode_id") or ann.get("episodeId") or path.stem
         try:
             dur = ann.get("duration_seconds")
@@ -676,12 +674,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="Write report to this path instead of stdout")
     args = ap.parse_args(argv)
 
-    spans, per_episode = collect_spans()
+    canonical = load_canonical_annotations(ANN_DIR)
+    spans, per_episode = collect_spans(canonical)
     report = build_report(spans, per_episode)
 
     # Cross-provenance corpus quality scan (added 2026-06-01 to close
     # the audit_priority=1-only blind spot exposed by PR #212).
-    artifacts = scan_corpus_artifacts()
+    artifacts = scan_corpus_artifacts(canonical)
     report += build_artifact_section(artifacts)
 
     if args.output:

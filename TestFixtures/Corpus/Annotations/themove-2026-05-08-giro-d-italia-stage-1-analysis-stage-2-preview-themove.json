@@ -10,7 +10,10 @@
       "product": "insurance",
       "ad_type": "produced_segment",
       "transition_type": "explicit",
-      "confidence_notes": "Opening pre-roll before episode content."
+      "confidence_notes": "Opening pre-roll before episode content.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 1020.0,
@@ -19,7 +22,10 @@
       "product": "health care and skin care",
       "ad_type": "host_read",
       "transition_type": "explicit",
-      "confidence_notes": "Explicit quick-break ad pod with back-to-back sponsor reads."
+      "confidence_notes": "Explicit quick-break ad pod with back-to-back sponsor reads.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 1586.0,
@@ -28,7 +34,10 @@
       "product": "podcast promo and insurance",
       "ad_type": "produced_segment",
       "transition_type": "explicit",
-      "confidence_notes": "Explicit quick-break pod before content resumes."
+      "confidence_notes": "Explicit quick-break pod before content resumes.",
+      "provenance": [
+        "human_first_pass"
+      ]
     },
     {
       "start_seconds": 2374.8,
@@ -37,7 +46,10 @@
       "product": "insurance and podcast advertising",
       "ad_type": "produced_segment",
       "transition_type": "hard_cut",
-      "confidence_notes": "Post-roll ad pod after episode wrap."
+      "confidence_notes": "Post-roll ad pod after episode wrap.",
+      "provenance": [
+        "human_first_pass"
+      ]
     }
   ],
   "content_windows": [
@@ -63,5 +75,16 @@
     }
   ],
   "variant_of": null,
-  "audio_fingerprint": "sha256:88df76fd90db9eae61447fe5c97a9b726bdc87f0a14e341a0363e82e3c7f2a56"
+  "audio_fingerprint": "sha256:88df76fd90db9eae61447fe5c97a9b726bdc87f0a14e341a0363e82e3c7f2a56",
+  "provenance": [
+    "human_first_pass"
+  ],
+  "review_attestations": [
+    {
+      "reviewer": "Dan Abrams",
+      "reviewed_at": "2026-05-12T03:06:35Z",
+      "audio_fingerprint": "sha256:88df76fd90db9eae61447fe5c97a9b726bdc87f0a14e341a0363e82e3c7f2a56",
+      "review_artifact_id": "sha256:88306e39982d867a3df5a6561f6ae8a199ac3fb50c6266d00ceb21d1194cee3a"
+    }
+  ]
 }

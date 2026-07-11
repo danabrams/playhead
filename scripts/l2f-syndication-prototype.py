@@ -52,6 +52,8 @@ import time
 from collections import defaultdict
 from typing import Iterable
 
+from l2f_canonical_manifest import load_canonical_annotations
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 AUDIO_DIR = ROOT / "TestFixtures/Corpus/Audio"
 MANIFEST = ROOT / "TestFixtures/Corpus/Snapshots/manifest.json"
@@ -302,11 +304,8 @@ def load_audit_priority1_spans() -> dict[str, list[tuple[float, float]]]:
     spans: dict[str, list[tuple[float, float]]] = defaultdict(list)
     if not ANN_DIR.exists():
         return spans
-    for ann_path in sorted(ANN_DIR.glob("*.json")):
-        try:
-            ann = json.loads(ann_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
+    for filename, ann in load_canonical_annotations(ANN_DIR).items():
+        ann_path = ANN_DIR / filename
         eid = ann.get("episodeId") or ann_path.stem
         wins = ann.get("adWindows") or ann.get("ad_windows") or []
         for w in wins:

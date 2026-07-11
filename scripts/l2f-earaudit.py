@@ -36,11 +36,20 @@ import random
 import subprocess
 import sys
 
+from l2f_canonical_manifest import load_canonical_annotations
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ANN_DIR = ROOT / "TestFixtures/Corpus/Annotations"
 AUDIO_DIR = ROOT / "TestFixtures/Corpus/Audio"
 MANIFEST = ROOT / "TestFixtures/Corpus/Snapshots/manifest.json"
 RESULTS = ROOT / "playhead-rediff-earaudit-results.jsonl"
+
+
+def first_present(document: dict, *keys: str) -> object | None:
+    for key in keys:
+        if key in document and document[key] is not None:
+            return document[key]
+    return None
 
 
 def load_spans() -> list[dict]:
@@ -52,17 +61,16 @@ def load_spans() -> list[dict]:
         except Exception:
             pass
     spans: list[dict] = []
-    for ann_path in sorted(ANN_DIR.glob("*.json")):
-        try:
-            ann = json.loads(ann_path.read_text())
-        except Exception:
-            continue
+    for filename, ann in load_canonical_annotations(ANN_DIR).items():
+        ann_path = ANN_DIR / filename
         eid = ann.get("episodeId") or ann_path.stem
         for w in (ann.get("adWindows") or ann.get("ad_windows") or []):
             if w.get("audit_priority") != 1:
                 continue
-            start = float(w.get("startSeconds", w.get("start", 0.0)))
-            end = float(w.get("endSeconds", w.get("end", 0.0)))
+            raw_start = first_present(w, "start_seconds", "startSeconds", "start")
+            raw_end = first_present(w, "end_seconds", "endSeconds", "end")
+            start = float(raw_start if raw_start is not None else 0.0)
+            end = float(raw_end if raw_end is not None else 0.0)
             if end <= start:
                 continue
             spans.append({

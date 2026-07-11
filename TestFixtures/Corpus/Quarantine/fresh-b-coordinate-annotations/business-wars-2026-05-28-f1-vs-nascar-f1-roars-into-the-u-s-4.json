@@ -1,0 +1,77 @@
+{
+  "episode_id": "business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4",
+  "show_name": "Business Wars",
+  "duration_seconds": 2611.0,
+  "ad_windows": [
+    {
+      "start_seconds": 132.11,
+      "end_seconds": 194.83,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 132.1-194.8s (len=62.7s). rediff-sec=62.7, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 198.0,
+      "end_seconds": 214.0,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 198.0-214.0s (len=16.0s). rediff-sec=10.3, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1864.1,
+      "end_seconds": 1884.8,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1864.1-1884.8s (len=20.7s). rediff-sec=20.7, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 132.11,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 194.83,
+      "end_seconds": 198.0,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 214.0,
+      "end_seconds": 1864.1,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1884.8,
+      "end_seconds": 2611.0,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:e8c6b4be730ea982ac42829555edef5c716d67ba31dd9f5f3b173d1ee581b262",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-03T07:36:17Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

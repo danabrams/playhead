@@ -13,16 +13,23 @@ Reviewed decisions are written only under TestFixtures/Corpus/Drafts.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
+import hashlib
 import html
 import json
+import math
 import mimetypes
 import os
 import posixpath
+import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -40,6 +47,15 @@ TRANSCRIPT_DIR = CORPUS_DIR / "Transcripts"
 CODEX_REVIEW = DRAFTS_DIR / "codex-transcript-review.json"
 DEFAULT_REVIEW_FILE = DRAFTS_DIR / "l2f-audio-review.json"
 AUDIO_EXTENSIONS = {".m4a", ".mp3", ".mp4", ".aac", ".wav", ".flac"}
+FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+VALID_REVIEW_STATUSES = {
+    "unreviewed",
+    "verified_ad",
+    "false_positive",
+    "unsure",
+    "zero_ad_confirmed",
+}
+_REVIEW_LOCK = threading.RLock()
 TRANSCRIPT_CONTEXT_FALLBACK_SECONDS = 180.0
 TRANSCRIPT_CONTEXT_PADDING_SECONDS = 30.0
 
@@ -611,7 +627,7 @@ HTML_PAGE = r"""<!doctype html>
               <option value="low">Low</option>
             </select>
           </label>
-          <label><span>Reviewer</span><input id="reviewer" type="text" placeholder="Optional"></label>
+          <label><span>Reviewer</span><input id="reviewer" type="text" placeholder="Required" required></label>
         </div>
         <label><span>Review notes</span><textarea id="reviewNotes"></textarea></label>
         <div class="toolbar action-toolbar">
@@ -1370,7 +1386,25 @@ def load_json(path: Path, default: Any = None) -> Any:
 
 
 def load_transcript_json(path: Path) -> Any:
-    data = path.read_bytes()
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise ValueError(f"cannot open transcript as a regular file: {path}") from error
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError("transcript must be a regular file")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        data = b"".join(chunks)
+    except OSError as error:
+        raise ValueError(f"cannot read transcript: {path}") from error
+    finally:
+        os.close(descriptor)
     return json.loads(data.decode("utf-8", errors="replace"))
 
 
@@ -1381,7 +1415,14 @@ def write_json_atomic(path: Path, value: Any) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(value, handle, indent=2, sort_keys=True)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp_name, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
@@ -1394,10 +1435,77 @@ def safe_name(value: str) -> str:
 
 
 def find_audio(episode_id: str) -> Path | None:
-    for child in AUDIO_DIR.iterdir():
-        if child.is_file() and child.suffix.lower() in AUDIO_EXTENSIONS and child.stem == episode_id:
-            return child
-    return None
+    matches = sorted(
+        child
+        for child in AUDIO_DIR.iterdir()
+        if not child.is_symlink()
+        and child.is_file()
+        and child.suffix.lower() in AUDIO_EXTENSIONS
+        and child.stem == episode_id
+    )
+    if len(matches) > 1:
+        raise ValueError(f"multiple local audio files match {episode_id}")
+    return matches[0] if matches else None
+
+
+def expected_audio_fingerprint(entry: dict[str, Any]) -> str:
+    fingerprint = entry.get("audio_fingerprint")
+    if not isinstance(fingerprint, str) or FINGERPRINT_PATTERN.fullmatch(fingerprint) is None:
+        raise ValueError("review queue entry lacks an exact audio fingerprint")
+    return fingerprint
+
+
+def audio_path_for_entry(entry: dict[str, Any]) -> Path:
+    episode_id = entry.get("episode_id")
+    if not isinstance(episode_id, str) or not episode_id:
+        raise ValueError("review queue entry lacks an episode id")
+    declared = entry.get("audio_path")
+    if isinstance(declared, str) and declared.strip():
+        path = Path(declared)
+        if not path.is_absolute():
+            path = REPO_ROOT / path
+    else:
+        path = find_audio(episode_id) or Path()
+    if (
+        path == Path()
+        or path.is_symlink()
+        or not path.is_file()
+        or path.suffix.lower() not in AUDIO_EXTENSIONS
+        or path.stem != episode_id
+    ):
+        raise ValueError(f"no regular local audio file matches {episode_id}")
+    return path
+
+
+def open_bound_audio(entry: dict[str, Any]) -> tuple[Any, Path, int]:
+    """Open and hash the same descriptor that playback or saving relies on."""
+    expected = expected_audio_fingerprint(entry)
+    path = audio_path_for_entry(entry)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f"cannot open bound audio for {entry.get('episode_id')}: {error}") from error
+    handle = os.fdopen(descriptor, "rb")
+    try:
+        opened = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError(f"bound audio is not a regular file: {path}")
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+        actual = "sha256:" + digest.hexdigest()
+        if actual != expected:
+            raise ValueError(
+                f"audio fingerprint mismatch for {entry.get('episode_id')}: "
+                f"expected {expected}, got {actual}"
+            )
+        size = opened.st_size
+        handle.seek(0)
+        return handle, path, size
+    except BaseException:
+        handle.close()
+        raise
 
 
 def choose_queue_path(explicit: str | None, auto_generate: bool) -> Path:
@@ -1448,17 +1556,52 @@ def decorate_entry(raw: dict[str, Any], fallback_index: int) -> dict[str, Any]:
         or f"{entry.get('episode_id', 'episode')}#{entry.get('candidate_index', fallback_index)}"
     )
     episode_id = str(entry.get("episode_id") or entry_id.split("#")[0])
-    audio = find_audio(episode_id)
-    entry["id"] = entry_id
     entry["episode_id"] = episode_id
+    try:
+        expected_audio_fingerprint(entry)
+        audio = audio_path_for_entry(entry)
+        audio_error = None
+    except ValueError as error:
+        audio = None
+        audio_error = str(error)
+    entry["id"] = entry_id
     entry["audio_available"] = audio is not None
+    entry["audio_binding_error"] = audio_error
     entry["audio_url"] = f"/api/audio/{urllib.parse.quote(entry_id, safe='')}" if audio else None
     return entry
 
 
 def load_review_payload(review_path: Path) -> dict[str, Any]:
+    if not review_path.exists():
+        return {}
     payload = load_json(review_path, default={})
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"{review_path} must contain a review object")
+    if payload.get("schema") != "playhead-l2f-audio-review-v1":
+        raise ValueError(f"{review_path} has an invalid review schema")
+    if not isinstance(payload.get("reviews"), dict):
+        raise ValueError(f"{review_path} reviews must be an object")
+    manual_entries = payload.get("manual_entries", [])
+    if not isinstance(manual_entries, list) or not all(
+        isinstance(row, dict) for row in manual_entries
+    ):
+        raise ValueError(f"{review_path} manual_entries must contain only objects")
+    return payload
+
+
+@contextlib.contextmanager
+def review_transaction(review_path: Path):
+    """Serialize complete review read-modify-write operations across threads/processes."""
+    lock_path = review_path.with_name(f".{review_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _REVIEW_LOCK:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
 
 def load_queue_entries(queue_path: Path) -> list[dict[str, Any]]:
@@ -1466,9 +1609,9 @@ def load_queue_entries(queue_path: Path) -> list[dict[str, Any]]:
     if not isinstance(queue, dict) or not isinstance(queue.get("entries"), list):
         raise ValueError(f"{queue_path} does not contain review queue entries")
     entries: list[dict[str, Any]] = []
-    for raw in queue["entries"]:
+    for index, raw in enumerate(queue["entries"]):
         if not isinstance(raw, dict):
-            continue
+            raise ValueError(f"{queue_path} entries[{index}] must be an object")
         entries.append(decorate_entry(raw, len(entries) + 1))
     return entries
 
@@ -1480,8 +1623,6 @@ def load_manual_entries(review_path: Path) -> list[dict[str, Any]]:
         return []
     entries: list[dict[str, Any]] = []
     for raw in raw_entries:
-        if not isinstance(raw, dict):
-            continue
         entry = dict(raw)
         entry["manual_entry"] = True
         entry["false_positive_trap"] = False
@@ -1492,7 +1633,11 @@ def load_manual_entries(review_path: Path) -> list[dict[str, Any]]:
 
 
 def load_all_entries(queue_path: Path, review_path: Path) -> list[dict[str, Any]]:
-    return load_queue_entries(queue_path) + load_manual_entries(review_path)
+    entries = load_queue_entries(queue_path) + load_manual_entries(review_path)
+    identifiers = [entry["id"] for entry in entries]
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("review queue and manual entries contain duplicate ids")
+    return entries
 
 
 def load_reviews(review_path: Path) -> dict[str, Any]:
@@ -1500,11 +1645,50 @@ def load_reviews(review_path: Path) -> dict[str, Any]:
     if not payload:
         return {}
     reviews = payload.get("reviews")
-    return reviews if isinstance(reviews, dict) else {}
+    if not isinstance(reviews, dict) or not all(
+        isinstance(identifier, str) and isinstance(review, dict)
+        for identifier, review in reviews.items()
+    ):
+        raise ValueError(f"{review_path} reviews must map ids to objects")
+    for identifier, review in reviews.items():
+        clean_review_status(review.get("status"))
+        if validated_reviewer(review) != review.get("reviewer"):
+            raise ValueError(f"persisted review {identifier} has a non-canonical reviewer")
+        fingerprint = review.get("audio_fingerprint")
+        if not isinstance(fingerprint, str) or FINGERPRINT_PATTERN.fullmatch(fingerprint) is None:
+            raise ValueError(f"persisted review {identifier} lacks an exact audio fingerprint")
+        reviewed_at = review.get("reviewed_at")
+        if not isinstance(reviewed_at, str):
+            raise ValueError(f"persisted review {identifier} lacks reviewed_at")
+        try:
+            parsed = time.strptime(reviewed_at, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError as error:
+            raise ValueError(
+                f"persisted review {identifier} has invalid reviewed_at"
+            ) from error
+        if time.strftime("%Y-%m-%dT%H:%M:%SZ", parsed) != reviewed_at:
+            raise ValueError(f"persisted review {identifier} has non-canonical reviewed_at")
+    return reviews
+
+
+def load_bound_reviews(
+    review_path: Path, entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    reviews = load_reviews(review_path)
+    by_id = {entry["id"]: entry for entry in entries}
+    for identifier, review in reviews.items():
+        entry = by_id.get(identifier)
+        if entry is None:
+            raise ValueError(f"persisted review references unknown entry id: {identifier}")
+        if review["audio_fingerprint"] != expected_audio_fingerprint(entry):
+            raise ValueError(f"persisted review references different audio: {identifier}")
+        if clean_review_status(review.get("status")) == "verified_ad":
+            validated_ad_bounds(review, entry)
+    return reviews
 
 
 def persisted_manual_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    ignored = {"audio_available", "audio_url"}
+    ignored = {"audio_available", "audio_url", "audio_binding_error"}
     return [
         {key: value for key, value in entry.items() if key not in ignored}
         for entry in entries
@@ -1530,7 +1714,12 @@ def save_manual_entries(
     entries: list[dict[str, Any]],
     reviews: dict[str, Any],
 ) -> dict[str, Any]:
-    payload = save_reviews(review_path, queue_path, reviews)
+    payload = load_review_payload(review_path)
+    payload["schema"] = "playhead-l2f-audio-review-v1"
+    payload["queue_path"] = str(queue_path.relative_to(REPO_ROOT)) if queue_path.is_relative_to(REPO_ROOT) else str(queue_path)
+    payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["human_audio_verification_required"] = True
+    payload["reviews"] = reviews
     payload["manual_entries"] = persisted_manual_entries(entries)
     write_json_atomic(review_path, payload)
     return payload
@@ -1630,11 +1819,15 @@ def progress_summary(entries: list[dict[str, Any]], reviews: dict[str, Any]) -> 
 
 
 def numeric_seconds(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)):
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     if isinstance(value, str):
         try:
-            return float(value)
+            number = float(value)
+            return number if math.isfinite(number) else None
         except ValueError:
             return None
     return None
@@ -1642,7 +1835,10 @@ def numeric_seconds(value: Any) -> float | None:
 
 def clean_review_status(value: Any) -> str:
     if isinstance(value, str) and value.strip():
-        return value.strip()
+        status = value.strip()
+        if status not in VALID_REVIEW_STATUSES:
+            raise ValueError(f"unsupported review status: {status}")
+        return status
     return "unreviewed"
 
 
@@ -1687,34 +1883,47 @@ def segment_time(raw: dict[str, Any], key: str) -> float | None:
     return None
 
 
-def transcript_path_for(episode_id: str) -> Path | None:
-    path = TRANSCRIPT_DIR / f"{episode_id}.json"
-    return path if path.exists() else None
+def transcript_path_for(episode_id: str) -> Path:
+    if (
+        not isinstance(episode_id, str)
+        or not episode_id
+        or episode_id in {".", ".."}
+        or "\x00" in episode_id
+        or "/" in episode_id
+        or "\\" in episode_id
+    ):
+        raise ValueError("unsafe transcript episode id")
+    return TRANSCRIPT_DIR / f"{episode_id}.json"
 
 
-def parse_transcript_segments(path: Path) -> list[dict[str, Any]]:
-    payload = load_transcript_json(path)
+def parse_transcript_segments(payload: Any) -> list[dict[str, Any]]:
     raw_segments: Any
     if isinstance(payload, dict):
-        raw_segments = payload.get("segments") or payload.get("transcription") or []
-    elif isinstance(payload, list):
-        raw_segments = payload
+        has_segments = "segments" in payload
+        has_transcription = "transcription" in payload
+        if has_segments == has_transcription:
+            raise ValueError(
+                "transcript must contain exactly one of segments or transcription"
+            )
+        raw_segments = payload["segments"] if has_segments else payload["transcription"]
     else:
-        raw_segments = []
+        raise ValueError("transcript root must be an object")
+    if not isinstance(raw_segments, list):
+        raise ValueError("transcript must contain a segment array")
 
     segments: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_segments):
         if not isinstance(raw, dict):
-            continue
+            raise ValueError(f"transcript segment {index} must be an object")
         text = raw.get("text")
         if not isinstance(text, str) or not text.strip():
-            continue
+            raise ValueError(f"transcript segment {index} has no text")
         start = segment_time(raw, "start")
         end = segment_time(raw, "end")
         if start is None or end is None:
-            continue
-        if end < start:
-            continue
+            raise ValueError(f"transcript segment {index} has invalid timestamps")
+        if start < 0 or end <= start:
+            raise ValueError(f"transcript segment {index} has invalid range")
         segments.append(
             {
                 "index": index,
@@ -1745,7 +1954,9 @@ def transcript_window(entry: dict[str, Any], full: bool) -> tuple[float | None, 
 
 def transcript_payload_for(entry: dict[str, Any], full: bool) -> dict[str, Any]:
     path = transcript_path_for(entry["episode_id"])
-    if path is None:
+    try:
+        payload = load_transcript_json(path)
+    except FileNotFoundError:
         return {
             "episode_id": entry["episode_id"],
             "scope": "full" if full else "context",
@@ -1754,7 +1965,14 @@ def transcript_payload_for(entry: dict[str, Any], full: bool) -> dict[str, Any]:
             "missing": True,
         }
 
-    segments = parse_transcript_segments(path)
+    if not isinstance(payload, dict):
+        raise ValueError("transcript root must be an object")
+    expected = expected_audio_fingerprint(entry)
+    if payload.get("source_audio_fingerprint") != expected:
+        raise ValueError(
+            f"transcript audio fingerprint does not match review entry for {entry['episode_id']}"
+        )
+    segments = parse_transcript_segments(payload)
     start, end = transcript_window(entry, full)
     if start is not None and end is not None:
         filtered = [
@@ -1826,6 +2044,7 @@ def build_manual_entry(
         "false_positive_trap": False,
         "source": "manual_missed_ad",
         "audio_path": source.get("audio_path"),
+        "audio_fingerprint": source.get("audio_fingerprint"),
         "playback_command": source.get("playback_command"),
         "extraction_command": source.get("extraction_command"),
         "checklist": [
@@ -1838,6 +2057,31 @@ def build_manual_entry(
         "notes": "Missed ad added manually in the review GUI.",
     }
     return decorate_entry(entry, manual_index)
+
+
+def validated_ad_bounds(
+    review: dict[str, Any], entry: dict[str, Any] | None = None
+) -> tuple[float, float]:
+    start = numeric_seconds(review.get("start_seconds"))
+    end = numeric_seconds(review.get("end_seconds"))
+    if start is None or end is None or start < 0 or end <= start:
+        raise ValueError("verified ad requires finite bounds with 0 <= start < end")
+    if entry is not None:
+        duration = numeric_seconds(
+            entry.get("duration_seconds")
+            if entry.get("duration_seconds") is not None
+            else entry.get("episode_duration_seconds")
+        )
+        if duration is not None and duration > 0 and end > duration + 0.05:
+            raise ValueError("verified ad bounds exceed the known episode duration")
+    return start, end
+
+
+def validated_reviewer(review: dict[str, Any]) -> str:
+    reviewer = review.get("reviewer")
+    if not isinstance(reviewer, str) or not reviewer.strip():
+        raise ValueError("reviewer is required for durable review evidence")
+    return reviewer.strip()
 
 
 def best_lan_ip() -> str:
@@ -1937,16 +2181,24 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
         return json.loads(data.decode("utf-8"))
 
     def send_state(self) -> None:
-        reviews = load_reviews(self.config.review_path)
-        self.send_json(
-            {
-                "queue_path": str(self.config.queue_path.relative_to(REPO_ROOT)),
-                "review_path": str(self.config.review_path.relative_to(REPO_ROOT)),
-                "entries": self.entries,
-                "reviews": reviews,
-                "progress": progress_summary(self.entries, reviews),
-            }
-        )
+        try:
+            with review_transaction(self.config.review_path):
+                entries = list(self.entries)
+                reviews = load_bound_reviews(self.config.review_path, entries)
+            self.send_json(
+                {
+                    "queue_path": str(self.config.queue_path.relative_to(REPO_ROOT)),
+                    "review_path": str(self.config.review_path.relative_to(REPO_ROOT)),
+                    "entries": entries,
+                    "reviews": reviews,
+                    "progress": progress_summary(entries, reviews),
+                }
+            )
+        except Exception as error:
+            self.send_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                explain=html.escape(str(error)),
+            )
 
     def send_transcript(self, entry_id: str, query: dict[str, list[str]]) -> None:
         entry = next((item for item in self.entries if item["id"] == entry_id), None)
@@ -1954,7 +2206,10 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         scope = (query.get("scope") or ["context"])[0]
-        self.send_json(transcript_payload_for(entry, full=scope == "full"))
+        try:
+            self.send_json(transcript_payload_for(entry, full=scope == "full"))
+        except ValueError as error:
+            self.send_error(HTTPStatus.UNPROCESSABLE_ENTITY, explain=html.escape(str(error)))
 
     def save_review(self) -> None:
         try:
@@ -1963,12 +2218,22 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
             review = body["review"]
             if not isinstance(review, dict):
                 raise ValueError("review must be an object")
-            if entry_id not in {entry["id"] for entry in self.entries}:
-                raise ValueError(f"unknown entry id: {entry_id}")
-            review["reviewed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            reviews = load_reviews(self.config.review_path)
-            reviews[entry_id] = review
-            save_reviews(self.config.review_path, self.config.queue_path, reviews)
+            with review_transaction(self.config.review_path):
+                entry = next((entry for entry in self.entries if entry["id"] == entry_id), None)
+                if entry is None:
+                    raise ValueError(f"unknown entry id: {entry_id}")
+                fingerprint = expected_audio_fingerprint(entry)
+                handle, _, _ = open_bound_audio(entry)
+                handle.close()
+                reviewer = validated_reviewer(review)
+                review["reviewer"] = reviewer
+                review["audio_fingerprint"] = fingerprint
+                if clean_review_status(review.get("status")) == "verified_ad":
+                    validated_ad_bounds(review, entry)
+                review["reviewed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                reviews = load_bound_reviews(self.config.review_path, self.entries)
+                reviews[entry_id] = review
+                save_reviews(self.config.review_path, self.config.queue_path, reviews)
             self.send_json({"ok": True, "reviews": reviews})
         except Exception as exc:
             self.send_error(HTTPStatus.BAD_REQUEST, explain=html.escape(str(exc)))
@@ -1977,28 +2242,44 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
         try:
             body = self.read_json_body()
             source_entry_id = str(body["source_entry_id"])
-            source = next((item for item in self.entries if item["id"] == source_entry_id), None)
-            if not source:
-                raise ValueError(f"unknown source entry id: {source_entry_id}")
             review = body.get("review", {})
             if not isinstance(review, dict):
                 raise ValueError("review must be an object")
-            review["status"] = clean_review_status(review.get("status"))
-            if review["status"] in {"unreviewed", "false_positive", "zero_ad_confirmed"}:
+            with review_transaction(self.config.review_path):
+                source = next(
+                    (item for item in self.entries if item["id"] == source_entry_id),
+                    None,
+                )
+                if not source:
+                    raise ValueError(f"unknown source entry id: {source_entry_id}")
+                clean_review_status(review.get("status"))
                 review["status"] = "verified_ad"
-            review["reviewed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            review.setdefault("notes", None)
-            manual_index = next_manual_index(self.entries, source["episode_id"])
-            entry = build_manual_entry(source, review, manual_index)
-            self.entries.append(entry)
-            reviews = load_reviews(self.config.review_path)
-            reviews[entry["id"]] = review
-            save_manual_entries(self.config.review_path, self.config.queue_path, self.entries, reviews)
+                review["reviewed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                fingerprint = expected_audio_fingerprint(source)
+                handle, _, _ = open_bound_audio(source)
+                handle.close()
+                reviewer = validated_reviewer(review)
+                review["reviewer"] = reviewer
+                review["audio_fingerprint"] = fingerprint
+                validated_ad_bounds(review, source)
+                review.setdefault("notes", None)
+                manual_index = next_manual_index(self.entries, source["episode_id"])
+                entry = build_manual_entry(source, review, manual_index)
+                new_entries = [*self.entries, entry]
+                reviews = load_bound_reviews(self.config.review_path, self.entries)
+                reviews[entry["id"]] = review
+                save_manual_entries(
+                    self.config.review_path,
+                    self.config.queue_path,
+                    new_entries,
+                    reviews,
+                )
+                self.server.entries = new_entries  # type: ignore[attr-defined]
             self.send_json(
                 {
                     "ok": True,
                     "new_entry_id": entry["id"],
-                    "entries": self.entries,
+                    "entries": new_entries,
                     "reviews": reviews,
                     "progress": progress_summary(self.entries, reviews),
                 }
@@ -2008,8 +2289,10 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
 
     def export_episode_reviews(self) -> None:
         try:
-            reviews = load_reviews(self.config.review_path)
-            grouped = grouped_episode_reviews(self.entries, reviews)
+            with review_transaction(self.config.review_path):
+                entries = list(self.entries)
+                reviews = load_bound_reviews(self.config.review_path, entries)
+                grouped = grouped_episode_reviews(entries, reviews)
             files: list[str] = []
             for episode_id, episode_entries in grouped.items():
                 path = DRAFTS_DIR / f"{safe_name(episode_id)}.audio-review.json"
@@ -2031,13 +2314,14 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
         if not entry:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        audio = find_audio(entry["episode_id"])
-        if not audio:
-            self.send_error(HTTPStatus.NOT_FOUND)
+        try:
+            handle, audio, size = open_bound_audio(entry)
+        except ValueError as error:
+            self.send_error(HTTPStatus.CONFLICT, explain=html.escape(str(error)))
             return
-        size = audio.stat().st_size
         start, end, partial = parse_range(self.headers.get("Range"), size)
         if start > end:
+            handle.close()
             self.send_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
             return
         mime = mimetypes.guess_type(str(audio))[0] or "application/octet-stream"
@@ -2048,7 +2332,7 @@ class L2FReviewHandler(BaseHTTPRequestHandler):
         if partial:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
-        with audio.open("rb") as handle:
+        with handle:
             handle.seek(start)
             try:
                 shutil.copyfileobj(_LimitedReader(handle, end - start + 1), self.wfile)
@@ -2075,6 +2359,7 @@ class L2FReviewServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], config: AppConfig) -> None:
         self.config = config
         self.entries = load_all_entries(config.queue_path, config.review_path)
+        load_bound_reviews(config.review_path, self.entries)
         super().__init__(address, L2FReviewHandler)
 
 

@@ -8,6 +8,7 @@
 // Transcript files are intentionally ignored by git because they are derived
 // from copyrighted audio and can be regenerated locally.
 
+import CryptoKit
 import Foundation
 
 struct Options {
@@ -40,7 +41,8 @@ func printUsage() {
       --dry-run             Print commands without running them. Does not require --model.
 
     Audio names should be <episode_id>.<ext>. The generated transcript is
-    <transcript-dir>/<episode_id>.json.
+    <transcript-dir>/<episode_id>.json. Each transcript is bound to the exact
+    source bytes with a top-level source_audio_fingerprint field.
     """
     FileHandle.standardError.write(Data(msg.utf8))
     FileHandle.standardError.write(Data("\n".utf8))
@@ -143,6 +145,52 @@ func shellQuoted(_ args: [String]) -> String {
     }.joined(separator: " ")
 }
 
+func fingerprint(of url: URL) throws -> String {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+
+    var hasher = SHA256()
+    while true {
+        let data = try handle.read(upToCount: 1024 * 1024) ?? Data()
+        if data.isEmpty { break }
+        hasher.update(data: data)
+    }
+    let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    return "sha256:\(hex)"
+}
+
+func transcriptSourceFingerprint(at url: URL) throws -> String {
+    let data = try Data(contentsOf: url)
+    let json = try JSONSerialization.jsonObject(with: data)
+    guard let object = json as? [String: Any] else {
+        throw NSError(domain: "L2FTranscribe", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "transcript root is not a JSON object",
+        ])
+    }
+    guard let value = object["source_audio_fingerprint"] as? String else {
+        throw NSError(domain: "L2FTranscribe", code: 2, userInfo: [
+            NSLocalizedDescriptionKey: "transcript lacks source_audio_fingerprint",
+        ])
+    }
+    return value
+}
+
+func bindTranscript(at url: URL, to sourceAudioFingerprint: String) throws {
+    let data = try Data(contentsOf: url)
+    let json = try JSONSerialization.jsonObject(with: data)
+    guard var object = json as? [String: Any] else {
+        throw NSError(domain: "L2FTranscribe", code: 3, userInfo: [
+            NSLocalizedDescriptionKey: "whisper transcript root is not a JSON object",
+        ])
+    }
+    object["source_audio_fingerprint"] = sourceAudioFingerprint
+    let bound = try JSONSerialization.data(
+        withJSONObject: object,
+        options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    )
+    try bound.write(to: url, options: .atomic)
+}
+
 @discardableResult
 func run(_ executable: String, _ args: [String], dryRun: Bool = false) throws -> Int32 {
     let printable = shellQuoted([executable] + args)
@@ -188,14 +236,34 @@ for audio in audioFiles {
     let outputBase = transcriptDir.appendingPathComponent(stem)
     let outputJSON = outputBase.appendingPathExtension("json")
 
-    if FileManager.default.fileExists(atPath: outputJSON.path), !options.force {
-        print("skip: \(outputJSON.path) already exists; pass --force to rebuild")
-        continue
-    }
-
     guard FileManager.default.fileExists(atPath: audio.path) else {
         FileHandle.standardError.write(Data("missing audio: \(audio.path)\n".utf8))
         failures += 1
+        continue
+    }
+
+    let sourceFingerprintBefore: String
+    do {
+        sourceFingerprintBefore = try fingerprint(of: audio)
+    } catch {
+        FileHandle.standardError.write(Data("could not fingerprint \(audio.path): \(error.localizedDescription)\n".utf8))
+        failures += 1
+        continue
+    }
+
+    if FileManager.default.fileExists(atPath: outputJSON.path), !options.force {
+        do {
+            let boundFingerprint = try transcriptSourceFingerprint(at: outputJSON)
+            guard boundFingerprint == sourceFingerprintBefore else {
+                throw NSError(domain: "L2FTranscribe", code: 4, userInfo: [
+                    NSLocalizedDescriptionKey: "transcript is bound to \(boundFingerprint), current audio is \(sourceFingerprintBefore)",
+                ])
+            }
+            print("skip: \(outputJSON.path) already exists and matches source audio; pass --force to rebuild")
+        } catch {
+            FileHandle.standardError.write(Data("invalid existing transcript \(outputJSON.path): \(error.localizedDescription); pass --force to rebuild\n".utf8))
+            failures += 1
+        }
         continue
     }
 
@@ -250,7 +318,7 @@ for audio in audioFiles {
             continue
         }
         if options.dryRun {
-            print("would write: \(outputJSON.path)")
+            print("would write: \(outputJSON.path) bound to \(sourceFingerprintBefore)")
             continue
         }
         if !options.dryRun && !FileManager.default.fileExists(atPath: outputJSON.path) {
@@ -258,6 +326,13 @@ for audio in audioFiles {
             failures += 1
             continue
         }
+        let sourceFingerprintAfter = try fingerprint(of: audio)
+        guard sourceFingerprintAfter == sourceFingerprintBefore else {
+            FileHandle.standardError.write(Data("source audio changed during transcription: \(audio.path)\n".utf8))
+            failures += 1
+            continue
+        }
+        try bindTranscript(at: outputJSON, to: sourceFingerprintAfter)
         print("wrote: \(outputJSON.path)")
     } catch {
         FileHandle.standardError.write(Data("whisper launch failed: \(error)\n".utf8))

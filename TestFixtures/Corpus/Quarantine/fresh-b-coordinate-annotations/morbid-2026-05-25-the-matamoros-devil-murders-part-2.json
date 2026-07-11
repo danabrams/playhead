@@ -1,0 +1,72 @@
+{
+  "episode_id": "morbid-2026-05-25-the-matamoros-devil-murders-part-2",
+  "show_name": "Morbid",
+  "duration_seconds": 3465.7,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 90.0,
+      "advertiser": "Progressive",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 0.0-90.0s (len=90.0s). rediff-sec=85.9, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 1105.06,
+      "end_seconds": 1188.82,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 1105.1-1188.8s (len=83.8s). rediff-sec=83.8, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 2441.56,
+      "end_seconds": 2499.55,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 2441.6-2499.6s (len=58.0s). rediff-sec=58.0, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 90.0,
+      "end_seconds": 1105.06,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1188.82,
+      "end_seconds": 2441.56,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2499.55,
+      "end_seconds": 3465.7,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:fe46c5cbfa34db7742fd6ce67cbd55f53619570c29d0ef5891916c224fb6580d",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-02T07:55:08Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

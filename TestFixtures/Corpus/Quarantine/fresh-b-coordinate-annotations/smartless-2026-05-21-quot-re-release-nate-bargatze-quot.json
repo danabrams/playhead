@@ -1,0 +1,73 @@
+{
+  "episode_id": "smartless-2026-05-21-quot-re-release-nate-bargatze-quot",
+  "show_name": "SmartLess",
+  "duration_seconds": 3463.5,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 55.26,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R3 (rediff-only physical DAI; audit_priority=1 high). auto-promoted 0.0-55.3s (len=55.3s). rediff-sec=55.3, drafter-spans=0, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 1
+    },
+    {
+      "start_seconds": 1144.51,
+      "end_seconds": 1226.66,
+      "advertiser": "Hair",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 1144.5-1226.7s (len=82.2s). rediff-sec=82.2, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    },
+    {
+      "start_seconds": 2311.7,
+      "end_seconds": 2361.38,
+      "advertiser": "Hair",
+      "product": null,
+      "ad_type": "dai",
+      "transition_type": null,
+      "confidence_notes": "RULE R1 (physical DAI rediff confirmed by content signal). auto-promoted 2311.7-2361.4s (len=49.7s). rediff-sec=49.7, drafter-spans=1, pipeline-spans=0 (max-skip-conf=0.00).",
+      "provenance": [
+        "drafter",
+        "rediff"
+      ],
+      "auto_promoted": true,
+      "audit_priority": 3
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 55.26,
+      "end_seconds": 1144.51,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 1226.66,
+      "end_seconds": 2311.7,
+      "notes": "Auto-derived inter-ad content - must NEVER be skipped"
+    },
+    {
+      "start_seconds": 2361.38,
+      "end_seconds": 3463.5,
+      "notes": "Auto-derived post-ad content - must NEVER be skipped"
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:b46d1f2f52ce1abc38158e6ebaa8177dee2a2371b65b4e797e2bca0f90f6ea54",
+  "auto_promoted": true,
+  "auto_promoted_at": "2026-06-02T07:55:08Z",
+  "auto_promoted_by": "scripts/l2f-auto-promote.py"
+}

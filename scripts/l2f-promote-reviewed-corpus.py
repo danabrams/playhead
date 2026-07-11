@@ -10,17 +10,39 @@ blocking review, metadata, timing, audio, or duration issues.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import wave
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from l2f_canonical_manifest import (
+    MANIFEST_FILENAME as CANONICAL_MANIFEST_FILENAME,
+    CanonicalCorpusError,
+    commit_canonical_annotations,
+    load_canonical_annotations,
+    reject_veto_precommit,
+)
+from convert_annotations_to_chapter_goldens import (
+    ConversionError,
+    annotation_decision,
+    has_distinct_review_attestations,
+    is_gold_annotation,
+    load_review_artifacts,
+    path_has_symlink_component,
+    validate_annotation,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +50,7 @@ CORPUS_DIR = REPO_ROOT / "TestFixtures" / "Corpus"
 DEFAULT_REVIEW_FILE = CORPUS_DIR / "Drafts" / "l2f-audio-review.json"
 DEFAULT_ANNOTATIONS_DIR = CORPUS_DIR / "Annotations"
 DEFAULT_AUDIO_DIR = CORPUS_DIR / "Audio"
+DEFAULT_REJECTS_FILE = CORPUS_DIR / "Snapshots" / "audit-rejects.jsonl"
 AUDIO_EXTENSIONS = {".m4a", ".mp3", ".mp4", ".aac", ".wav", ".flac"}
 VALID_AD_TYPES = {
     "host_read",
@@ -39,6 +62,9 @@ VALID_AD_TYPES = {
 VALID_TRANSITION_TYPES = {"explicit", "musical", "hard_cut", "blended"}
 FINAL_REVIEW_STATUSES = {"verified_ad", "false_positive", "zero_ad_confirmed"}
 BOUNDARY_TOLERANCE_SECONDS = 0.05
+FIRST_PASS_PROVENANCE = "human_first_pass"
+SECOND_PASS_PROVENANCE = "human_reviewed"
+AUDIO_PROBE_TIMEOUT_SECONDS = 10
 
 
 @dataclass
@@ -82,6 +108,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Output directory for promoted annotation JSON.",
     )
     parser.add_argument(
+        "--reviews-dir",
+        help="Immutable review artifacts. Defaults to a Reviews sibling of annotations-dir.",
+    )
+    parser.add_argument(
         "--episode",
         action="append",
         default=[],
@@ -97,34 +127,91 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Overwrite an existing annotation file during --promote.",
     )
+    parser.add_argument(
+        "--second-pass-reviewed",
+        action="store_true",
+        help=(
+            "Promote an existing first-pass annotation to human-reviewed gold. "
+            "Requires --promote --force after a second listener has checked it."
+        ),
+    )
+    parser.add_argument(
+        "--reviewer-id",
+        help="Stable non-empty identity for an optional asset-bound review attestation.",
+    )
+    parser.add_argument(
+        "--reviewed-at",
+        help="Timestamp for --reviewer-id. Both fields are required together.",
+    )
+    parser.add_argument(
+        "--rejects-file",
+        default=str(DEFAULT_REJECTS_FILE),
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args(argv)
 
 
 def resolve_path(raw: str | Path, base: Path = REPO_ROOT) -> Path:
+    """Make an input path absolute without resolving away alias evidence."""
+    path = Path(raw)
+    if not path.is_absolute():
+        if ".." in path.parts:
+            raise ValueError(f"input path must not traverse a parent directory: {raw}")
+        path = base / path
+    return Path(os.path.abspath(path))
+
+
+def lexical_output_path(raw: str | Path, base: Path = REPO_ROOT) -> Path:
+    """Make an output path absolute without resolving away symlink evidence."""
     path = Path(raw)
     if not path.is_absolute():
         path = base / path
-    return path.resolve()
+    return Path(os.path.abspath(path))
 
 
 def resolve_local_then_repo(raw: str | Path, local_base: Path) -> Path:
     path = Path(raw)
     if path.is_absolute():
-        return path.resolve()
-    local = (local_base / path).resolve()
-    if local.exists():
+        return Path(os.path.abspath(path))
+    if ".." in path.parts:
+        raise ValueError(f"input path must not traverse a parent directory: {raw}")
+    local = Path(os.path.abspath(local_base / path))
+    if path_has_symlink_component(local):
+        raise ValueError(f"input path contains a symbolic link: {local}")
+    if local.exists() or local.is_symlink():
         return local
-    repo = (REPO_ROOT / path).resolve()
-    if repo.exists():
+    repo = Path(os.path.abspath(REPO_ROOT / path))
+    if path_has_symlink_component(repo):
+        raise ValueError(f"input path contains a symbolic link: {repo}")
+    if repo.exists() or repo.is_symlink():
         return repo
     return local
 
 
+def require_safe_input_path(path: Path, *, label: str) -> None:
+    if path_has_symlink_component(path):
+        raise ValueError(f"{label} contains a symbolic link: {path}")
+
+
 def load_json(path: Path, default: Any = None) -> Any:
+    """Read one regular JSON input without following aliases."""
+    require_safe_input_path(path, label="JSON input")
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f"JSON input is unavailable or unsafe: {path}") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"JSON input is not a regular file: {path}")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            return json.load(handle)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def choose_queue_path(
@@ -143,8 +230,8 @@ def choose_queue_path(
         CORPUS_DIR / "Drafts" / "codex-review-queue.json",
     ):
         if candidate.exists():
-            return candidate.resolve()
-    return (CORPUS_DIR / "Drafts" / "review-queue.json").resolve()
+            return Path(os.path.abspath(candidate))
+    return Path(os.path.abspath(CORPUS_DIR / "Drafts" / "review-queue.json"))
 
 
 def load_review_file(path: Path) -> tuple[dict[str, Any] | None, dict[str, Any], bool]:
@@ -159,6 +246,145 @@ def load_review_file(path: Path) -> tuple[dict[str, Any] | None, dict[str, Any],
     if not isinstance(reviews, dict):
         raise ValueError(f"{path} reviews must be a JSON object")
     return payload, reviews, False
+
+
+def review_artifact_bytes(payload: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False)
+        + "\n"
+    ).encode("utf-8")
+
+
+def canonical_review_artifact_id(payload: dict[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(review_artifact_bytes(payload)).hexdigest()
+
+
+def build_review_artifact(
+    reports: list[EpisodeReport],
+    reviews: dict[str, Any],
+    *,
+    reviewer: str,
+    reviewed_at: str,
+    artifact_kind: str = "corpus_review_attestation",
+) -> dict[str, Any]:
+    if artifact_kind not in {
+        "corpus_review_attestation",
+        "human_first_pass_attestation",
+    }:
+        raise ValueError(f"unsupported review artifact kind: {artifact_kind}")
+    artifact_reviews: dict[str, Any] = {}
+    episodes: list[dict[str, Any]] = []
+    for report in reports:
+        if report.annotation is None or report.skipped:
+            continue
+        fingerprint = report.annotation["audio_fingerprint"]
+        decision_ids: list[str] = []
+        for entry in report.entries:
+            entry_id = entry["id"]
+            decision = reviews.get(entry_id)
+            if not isinstance(decision, dict):
+                raise ValueError(f"review artifact lacks decision {entry_id}")
+            if clean_string(decision.get("reviewer")) != reviewer:
+                raise ValueError(
+                    f"reviewer mismatch: {entry_id} does not belong to {reviewer!r}"
+                )
+            if clean_string(decision.get("audio_fingerprint")) != fingerprint:
+                raise ValueError(f"review artifact audio mismatch: {entry_id}")
+            if clean_string(decision.get("reviewed_at")) is None:
+                raise ValueError(f"review artifact timestamp missing: {entry_id}")
+            if clean_string(decision.get("status")) not in FINAL_REVIEW_STATUSES:
+                raise ValueError(f"review artifact decision is not final: {entry_id}")
+            decision_copy = copy.deepcopy(decision)
+            decision_copy["source_reviewed_at"] = decision_copy["reviewed_at"]
+            decision_copy["reviewed_at"] = reviewed_at
+            decision_episode = clean_string(decision_copy.get("episode_id"))
+            if decision_episode is not None and decision_episode != report.episode_id:
+                raise ValueError(f"review artifact episode mismatch: {entry_id}")
+            decision_copy["episode_id"] = report.episode_id
+            artifact_reviews[entry_id] = decision_copy
+            decision_ids.append(entry_id)
+        episodes.append({
+            "episode_id": report.episode_id,
+            "audio_fingerprint": fingerprint,
+            "decision_ids": decision_ids,
+            "annotation_decision": annotation_decision(report.annotation),
+        })
+    if not episodes:
+        raise ValueError("review artifact has no promotable episode decisions")
+    if artifact_kind == "human_first_pass_attestation":
+        if not artifact_reviews:
+            raise ValueError("first-pass review artifact has no source decisions")
+        return {
+            "schema_version": 1,
+            "artifact_kind": artifact_kind,
+            "reviewer": reviewer,
+            "reviewed_at": reviewed_at,
+            "source_decision_count": len(artifact_reviews),
+            "audio_bindings": [
+                {
+                    "episode_id": episode["episode_id"],
+                    "audio_fingerprint": episode["audio_fingerprint"],
+                    "annotation_decision": episode["annotation_decision"],
+                }
+                for episode in episodes
+            ],
+        }
+    return {
+        "schema_version": 1,
+        "artifact_kind": artifact_kind,
+        "reviewer": reviewer,
+        "reviewed_at": reviewed_at,
+        "episodes": episodes,
+        "reviews": artifact_reviews,
+    }
+
+
+def persist_review_artifact(reviews_dir: Path, artifact: dict[str, Any]) -> tuple[str, Path]:
+    data = review_artifact_bytes(artifact)
+    digest = hashlib.sha256(data).hexdigest()
+    artifact_id = "sha256:" + digest
+    path = reviews_dir / f"{digest}.json"
+    if path_has_symlink_component(reviews_dir):
+        raise ValueError(f"review artifacts directory must not be a symbolic link: {reviews_dir}")
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+    if not reviews_dir.is_dir():
+        raise ValueError(f"review artifacts path is not a directory: {reviews_dir}")
+
+    def validate_existing() -> None:
+        if path.is_symlink() or path.read_bytes() != data:
+            raise ValueError(f"immutable review artifact collision: {path}")
+
+    def sync_reviews_directory() -> None:
+        directory = os.open(reviews_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    if path.exists() or path.is_symlink():
+        validate_existing()
+        sync_reviews_directory()
+        return artifact_id, path
+
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb", dir=reviews_dir, prefix=f".{path.name}.", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o644)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError:
+            validate_existing()
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    sync_reviews_directory()
+    return artifact_id, path
 
 
 def load_queue(path: Path) -> list[dict[str, Any]]:
@@ -262,46 +488,225 @@ def group_by_episode(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, 
     return dict(sorted(grouped.items()))
 
 
+def validate_unique_entry_ids(entries: list[dict[str, Any]]) -> None:
+    """Require one globally unique review decision key per queue entry."""
+    owners: dict[str, str] = {}
+    for entry in entries:
+        entry_id = entry["id"]
+        episode_id = entry["episode_id"]
+        if owner := owners.get(entry_id):
+            raise ValueError(
+                f"duplicate review entry id {entry_id!r} for episodes "
+                f"{owner!r} and {episode_id!r}"
+            )
+        owners[entry_id] = episode_id
+
+
+def validate_episode_invariants(
+    report: EpisodeReport,
+    entries: list[dict[str, Any]],
+    reviews: dict[str, Any],
+    queue_dir: Path,
+) -> None:
+    """Reject queue rows that cannot describe one coherent episode asset."""
+    show_names: set[str] = set()
+    variants: set[str] = set()
+    audio_paths: set[Path] = set()
+    durations: list[float] = []
+    duration_keys = ("duration_seconds", "duration", "episode_duration_seconds")
+
+    for entry in entries:
+        entry_id = entry["id"]
+        review = review_for(entry, reviews)
+
+        review_episode_id = review.get("episode_id")
+        if review_episode_id is not None:
+            normalized_episode_id = clean_string(review_episode_id)
+            if normalized_episode_id != report.episode_id:
+                report.issues.append(
+                    f"conflicting_episode_id: {entry_id} review identifies "
+                    f"{review_episode_id!r}, expected {report.episode_id!r}"
+                )
+
+        for field, values in (("show_name", show_names), ("variant_of", variants)):
+            raw = value_from(review, entry, field)
+            if raw is None:
+                continue
+            normalized = clean_string(raw)
+            if normalized is None:
+                report.issues.append(
+                    f"invalid_episode_metadata: {entry_id} {field} must be a non-empty string"
+                )
+            else:
+                values.add(normalized)
+
+        raw_audio = value_from(review, entry, "audio_path")
+        if raw_audio is not None:
+            normalized_audio = clean_string(raw_audio)
+            if normalized_audio is None:
+                report.issues.append(
+                    f"invalid_audio_path: {entry_id} audio_path must be a non-empty string"
+                )
+            else:
+                try:
+                    audio_path = resolve_local_then_repo(normalized_audio, queue_dir)
+                    require_safe_input_path(audio_path, label="reviewed audio input")
+                except ValueError as error:
+                    report.issues.append(f"invalid_audio_path: {entry_id}: {error}")
+                    continue
+                if not audio_path.is_file():
+                    report.issues.append(
+                        f"invalid_audio_path: {entry_id} does not reference a regular file: "
+                        f"{audio_path}"
+                    )
+                else:
+                    audio_paths.add(audio_path)
+
+        # Any review-supplied duration metadata overrides the queue row as a
+        # group. This mirrors duration_from_metadata's review-before-entry
+        # precedence while still detecting disagreeing aliases or rows.
+        duration_source = review if any(
+            review.get(key) is not None for key in duration_keys
+        ) else entry
+        for key in duration_keys:
+            raw_duration = duration_source.get(key)
+            if raw_duration is None:
+                continue
+            normalized_duration = number(raw_duration)
+            if normalized_duration is None or normalized_duration <= 0:
+                report.issues.append(
+                    f"invalid_episode_metadata: {entry_id} {key} must be a finite positive number"
+                )
+            else:
+                durations.append(normalized_duration)
+
+    if len(show_names) > 1:
+        report.issues.append(
+            "conflicting_show_name: episode entries disagree: "
+            + ", ".join(repr(value) for value in sorted(show_names))
+        )
+    if len(variants) > 1:
+        report.issues.append(
+            "conflicting_variant_of: episode entries disagree: "
+            + ", ".join(repr(value) for value in sorted(variants))
+        )
+    if len(audio_paths) > 1:
+        report.issues.append(
+            "conflicting_audio_path: episode entries reference different files: "
+            + ", ".join(str(value) for value in sorted(audio_paths))
+        )
+    if durations and max(durations) - min(durations) > BOUNDARY_TOLERANCE_SECONDS:
+        report.issues.append(
+            "conflicting_duration: episode entries disagree: "
+            + ", ".join(f"{value:g}" for value in sorted(set(durations)))
+        )
+
+
 def find_audio(
     episode_id: str,
     entries: list[dict[str, Any]],
+    reviews: dict[str, Any],
     audio_dir: Path,
     queue_dir: Path,
 ) -> Path | None:
     for entry in entries:
-        raw = clean_string(entry.get("audio_path"))
+        raw = clean_string(value_from(review_for(entry, reviews), entry, "audio_path"))
         if not raw:
             continue
         candidate = resolve_local_then_repo(raw, queue_dir)
+        require_safe_input_path(candidate, label="reviewed audio input")
         if candidate.is_file():
             return candidate
+    require_safe_input_path(audio_dir, label="reviewed audio directory")
     if audio_dir.is_dir():
+        matches: list[Path] = []
         for child in sorted(audio_dir.iterdir()):
-            if child.is_file() and child.stem == episode_id and child.suffix.lower() in AUDIO_EXTENSIONS:
-                return child.resolve()
+            if child.stem != episode_id or child.suffix.lower() not in AUDIO_EXTENSIONS:
+                continue
+            require_safe_input_path(child, label="reviewed audio input")
+            if child.is_file():
+                matches.append(child)
+        if len(matches) > 1:
+            raise ValueError(
+                f"ambiguous_audio: multiple media files match {episode_id}: "
+                + ", ".join(str(path) for path in matches)
+            )
+        if matches:
+            return matches[0]
     return None
 
 
-def sha256_fingerprint(path: Path) -> str:
+def open_regular_audio(path: Path) -> tuple[int, os.stat_result]:
+    """Open one regular input without following aliases or blocking on a FIFO."""
+    require_safe_input_path(path, label="reviewed audio input")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"reviewed audio is not a regular file: {path}")
+        return descriptor, metadata
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def stable_audio_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def fingerprint_descriptor(descriptor: int, path: Path) -> str:
+    before = os.fstat(descriptor)
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+        digest.update(chunk)
+    after = os.fstat(descriptor)
+    if stable_audio_identity(before) != stable_audio_identity(after):
+        raise ValueError(f"reviewed audio changed while hashing: {path}")
+    os.lseek(descriptor, 0, os.SEEK_SET)
     return "sha256:" + digest.hexdigest()
 
 
-def duration_from_wav(path: Path) -> float | None:
+def sha256_fingerprint(path: Path) -> str:
+    descriptor, _ = open_regular_audio(path)
     try:
-        with wave.open(str(path), "rb") as handle:
-            rate = handle.getframerate()
-            if rate <= 0:
-                return None
-            return handle.getnframes() / float(rate)
+        return fingerprint_descriptor(descriptor, path)
+    finally:
+        os.close(descriptor)
+
+
+def duration_from_wav_descriptor(descriptor: int) -> float | None:
+    try:
+        duplicate = os.dup(descriptor)
+        with os.fdopen(duplicate, "rb") as audio:
+            audio.seek(0)
+            with wave.open(audio, "rb") as handle:
+                rate = handle.getframerate()
+                if rate <= 0:
+                    return None
+                return handle.getnframes() / float(rate)
     except (wave.Error, OSError, EOFError):
         return None
 
 
-def run_duration_probe(command: list[str], pattern: re.Pattern[str] | None = None) -> float | None:
+def run_duration_probe(
+    command: list[str],
+    pattern: re.Pattern[str] | None = None,
+    *,
+    pass_fds: tuple[int, ...] = (),
+) -> float | None:
     try:
         completed = subprocess.run(
             command,
@@ -309,8 +714,10 @@ def run_duration_probe(command: list[str], pattern: re.Pattern[str] | None = Non
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            pass_fds=pass_fds,
+            timeout=AUDIO_PROBE_TIMEOUT_SECONDS,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     output = f"{completed.stdout}\n{completed.stderr}"
     if pattern:
@@ -325,44 +732,73 @@ def run_duration_probe(command: list[str], pattern: re.Pattern[str] | None = Non
     return None
 
 
-def duration_from_audio(path: Path) -> float | None:
-    if path.suffix.lower() == ".wav":
-        wav_duration = duration_from_wav(path)
-        if wav_duration and wav_duration > 0:
-            return wav_duration
+def duration_from_audio(path: Path, descriptor: int | None = None) -> float | None:
+    owned_descriptor = descriptor is None
+    if descriptor is None:
+        descriptor, _ = open_regular_audio(path)
+    try:
+        if path.suffix.lower() == ".wav":
+            wav_duration = duration_from_wav_descriptor(descriptor)
+            if wav_duration and wav_duration > 0:
+                return wav_duration
 
-    ffprobe_candidates = [Path("/opt/homebrew/bin/ffprobe")]
-    found_ffprobe = shutil.which("ffprobe")
-    if found_ffprobe:
-        ffprobe_candidates.append(Path(found_ffprobe))
-    for ffprobe in ffprobe_candidates:
-        if ffprobe.exists():
-            duration = run_duration_probe(
-                [
-                    str(ffprobe),
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1:nokey=1",
-                    str(path),
-                ]
-            )
-            if duration and duration > 0:
-                return duration
+        descriptor_path = f"/dev/fd/{descriptor}"
+        inherited_descriptors = (descriptor,)
+        ffprobe_candidates = [Path("/opt/homebrew/bin/ffprobe")]
+        found_ffprobe = shutil.which("ffprobe")
+        if found_ffprobe:
+            ffprobe_candidates.append(Path(found_ffprobe))
+        for ffprobe in ffprobe_candidates:
+            if ffprobe.exists():
+                duration = run_duration_probe(
+                    [
+                        str(ffprobe),
+                        "-v",
+                        "error",
+                        "-show_entries",
+                        "format=duration",
+                        "-of",
+                        "default=noprint_wrappers=1:nokey=1",
+                        descriptor_path,
+                    ],
+                    pass_fds=inherited_descriptors,
+                )
+                if duration and duration > 0:
+                    return duration
 
-    afinfo_candidates = [Path("/usr/bin/afinfo")]
-    found_afinfo = shutil.which("afinfo")
-    if found_afinfo:
-        afinfo_candidates.append(Path(found_afinfo))
-    afinfo_pattern = re.compile(r"(?:estimated duration|duration):\s*([0-9]+(?:\.[0-9]+)?)\s*sec", re.I)
-    for afinfo in afinfo_candidates:
-        if afinfo.exists():
-            duration = run_duration_probe([str(afinfo), str(path)], afinfo_pattern)
-            if duration and duration > 0:
-                return duration
-    return None
+        afinfo_candidates = [Path("/usr/bin/afinfo")]
+        found_afinfo = shutil.which("afinfo")
+        if found_afinfo:
+            afinfo_candidates.append(Path(found_afinfo))
+        afinfo_pattern = re.compile(
+            r"(?:estimated duration|duration):\s*([0-9]+(?:\.[0-9]+)?)\s*sec",
+            re.I,
+        )
+        for afinfo in afinfo_candidates:
+            if afinfo.exists():
+                duration = run_duration_probe(
+                    [str(afinfo), descriptor_path],
+                    afinfo_pattern,
+                    pass_fds=inherited_descriptors,
+                )
+                if duration and duration > 0:
+                    return duration
+        return None
+    finally:
+        if owned_descriptor:
+            os.close(descriptor)
+
+
+def fingerprint_and_duration(path: Path) -> tuple[str, float | None]:
+    descriptor, _ = open_regular_audio(path)
+    try:
+        fingerprint = fingerprint_descriptor(descriptor, path)
+        duration = duration_from_audio(path, descriptor=descriptor)
+        if fingerprint_descriptor(descriptor, path) != fingerprint:
+            raise ValueError(f"reviewed audio changed while determining duration: {path}")
+        return fingerprint, duration
+    finally:
+        os.close(descriptor)
 
 
 def duration_from_metadata(entries: list[dict[str, Any]], reviews: dict[str, Any]) -> float | None:
@@ -504,6 +940,9 @@ def analyze_episode(
     reviews: dict[str, Any],
     audio_dir: Path,
     queue_dir: Path,
+    *,
+    second_pass_reviewed: bool = False,
+    review_attestation: dict[str, str] | None = None,
 ) -> EpisodeReport:
     report = EpisodeReport(episode_id=episode_id, entries=entries)
 
@@ -522,12 +961,40 @@ def analyze_episode(
         )
         return report
 
-    audio_path = find_audio(episode_id, entries, audio_dir, queue_dir)
+    validate_episode_invariants(report, entries, reviews, queue_dir)
+    try:
+        audio_path = find_audio(episode_id, entries, reviews, audio_dir, queue_dir)
+    except ValueError as error:
+        report.issues.append(str(error))
+        audio_path = None
     report.audio_path = audio_path
     if audio_path is None:
         report.issues.append("missing_audio: no local audio file found")
+    resolved_fingerprint: str | None = None
+    duration: float | None = None
+    if audio_path is not None:
+        try:
+            resolved_fingerprint, duration = fingerprint_and_duration(audio_path)
+        except (OSError, ValueError) as error:
+            report.issues.append(f"invalid_audio: {error}")
+    if resolved_fingerprint is not None:
+        for entry in entries:
+            entry_id = entry["id"]
+            entry_fingerprint = clean_string(entry.get("audio_fingerprint"))
+            review_fingerprint = clean_string(
+                review_for(entry, reviews).get("audio_fingerprint")
+            )
+            if entry_fingerprint != resolved_fingerprint:
+                report.issues.append(
+                    f"audio_fingerprint_mismatch: {entry_id} queue evidence is not bound "
+                    "to the resolved audio"
+                )
+            if review_fingerprint != resolved_fingerprint:
+                report.issues.append(
+                    f"audio_fingerprint_mismatch: {entry_id} review decision is not bound "
+                    "to the resolved audio"
+                )
 
-    duration = duration_from_audio(audio_path) if audio_path is not None else None
     if duration is None:
         duration = duration_from_metadata(entries, reviews)
     report.duration_seconds = duration
@@ -604,6 +1071,11 @@ def analyze_episode(
                 "ad_type": ad_type,
                 "transition_type": transition_type,
                 "confidence_notes": notes,
+                "provenance": [
+                    SECOND_PASS_PROVENANCE
+                    if second_pass_reviewed
+                    else FIRST_PASS_PROVENANCE
+                ],
             }
         )
 
@@ -628,9 +1100,140 @@ def analyze_episode(
         "ad_windows": sorted_ads,
         "content_windows": build_content_windows(duration, sorted_ads),
         "variant_of": variant_of,
-        "audio_fingerprint": sha256_fingerprint(audio_path),
+        "audio_fingerprint": resolved_fingerprint,
+        "provenance": [
+            SECOND_PASS_PROVENANCE
+            if second_pass_reviewed
+            else FIRST_PASS_PROVENANCE
+        ],
     }
+    if review_attestation is not None:
+        report.annotation["review_attestations"] = [{
+            **review_attestation,
+            "audio_fingerprint": report.annotation["audio_fingerprint"],
+        }]
     return report
+
+
+def is_first_pass_annotation(document: object) -> bool:
+    """Return true only for an annotation awaiting the second listener gate."""
+    if not isinstance(document, dict) or document.get("provenance") != [FIRST_PASS_PROVENANCE]:
+        return False
+    windows = document.get("ad_windows")
+    return isinstance(windows, list) and all(
+        isinstance(window, dict)
+        and window.get("provenance") == [FIRST_PASS_PROVENANCE]
+        for window in windows
+    )
+
+
+def is_second_pass_annotation(document: object) -> bool:
+    if not isinstance(document, dict) or document.get("provenance") != [SECOND_PASS_PROVENANCE]:
+        return False
+    windows = document.get("ad_windows")
+    return isinstance(windows, list) and all(
+        isinstance(window, dict)
+        and window.get("provenance") == [SECOND_PASS_PROVENANCE]
+        for window in windows
+    )
+
+
+def without_review_provenance(document: dict[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(document)
+    normalized.pop("provenance", None)
+    normalized.pop("review_attestations", None)
+    for window in normalized.get("ad_windows", []):
+        if isinstance(window, dict):
+            window.pop("provenance", None)
+    return normalized
+
+
+def reviewed_promotion_precommit(
+    rejects_path: Path,
+    *,
+    second_pass_reviewed: bool,
+    audio_paths_by_filename: Mapping[str, Path],
+    artifact_index: dict[str, dict] | None = None,
+    reviews_dir: Path | None = None,
+):
+    """Recheck assets, vetoes, and the two-listener transition under lock."""
+    reject_policy = reject_veto_precommit(rejects_path)
+
+    def enforce(existing: dict[str, dict[str, Any]], proposed: dict[str, dict[str, Any]]) -> None:
+        reject_policy(existing, proposed)
+        current_artifact_index = artifact_index
+        if reviews_dir is not None:
+            try:
+                current_artifact_index = load_review_artifacts(reviews_dir)
+                for filename, candidate in proposed.items():
+                    validate_annotation(
+                        candidate,
+                        source=filename,
+                        artifact_index=current_artifact_index,
+                    )
+            except ConversionError as error:
+                raise CanonicalCorpusError(
+                    f"review evidence changed before publication: {error}"
+                ) from error
+        for filename, candidate in proposed.items():
+            audio_path = audio_paths_by_filename.get(filename)
+            if audio_path is None:
+                raise CanonicalCorpusError(
+                    f"reviewed promotion has no retained audio path: {filename}"
+                )
+            try:
+                current_fingerprint = sha256_fingerprint(audio_path)
+            except (OSError, ValueError) as error:
+                raise CanonicalCorpusError(
+                    f"cannot recheck retained audio before reviewed promotion: {filename}: {error}"
+                ) from error
+            if current_fingerprint != candidate["audio_fingerprint"]:
+                raise CanonicalCorpusError(
+                    "retained audio changed before reviewed promotion publication: "
+                    f"{filename}"
+                )
+            current = existing.get(filename)
+            if second_pass_reviewed:
+                if current is None or not is_first_pass_annotation(current):
+                    raise CanonicalCorpusError(
+                        f"second-pass review requires an existing first-pass annotation: {filename}"
+                    )
+                current_attestations = current.get("review_attestations", [])
+                candidate_attestations = candidate.get("review_attestations", [])
+                preserves_current_attestations = (
+                    isinstance(current_attestations, list)
+                    and isinstance(candidate_attestations, list)
+                    and candidate_attestations[: len(current_attestations)]
+                    == current_attestations
+                )
+                if (
+                    not is_second_pass_annotation(candidate)
+                    or not preserves_current_attestations
+                    or not has_distinct_review_attestations(
+                        candidate,
+                        current_artifact_index,
+                        require_artifacts=current_artifact_index is not None,
+                    )
+                    or without_review_provenance(current)
+                    != without_review_provenance(candidate)
+                ):
+                    raise CanonicalCorpusError(
+                        f"second-pass review may only advance provenance: {filename}"
+                    )
+            elif current is not None and is_gold_annotation(
+                current,
+                current_artifact_index,
+                require_review_artifacts=current_artifact_index is not None,
+            ):
+                raise CanonicalCorpusError(
+                    f"refusing first-pass overwrite of human-gold annotation: {filename}"
+                )
+            elif not is_first_pass_annotation(proposed[filename]):
+                raise CanonicalCorpusError(
+                    f"first-pass promotion must retain pending provenance: {filename}"
+                )
+
+    return enforce
 
 
 def review_status_counts(entries: list[dict[str, Any]], reviews: dict[str, Any]) -> dict[str, int]:
@@ -731,15 +1334,47 @@ def write_annotation(path: Path, annotation: dict[str, Any], force: bool) -> Non
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    review_path = resolve_path(args.review_file)
-    audio_dir = resolve_path(args.audio_dir)
-    annotations_dir = resolve_path(args.annotations_dir)
+    if args.second_pass_reviewed and (not args.promote or not args.force):
+        print(
+            "error: --second-pass-reviewed requires --promote --force",
+            file=sys.stderr,
+        )
+        return 2
+    if bool(args.reviewer_id) != bool(args.reviewed_at):
+        print("error: --reviewer-id and --reviewed-at must be supplied together", file=sys.stderr)
+        return 2
+    if args.second_pass_reviewed and not args.reviewer_id:
+        print("error: second-pass review requires --reviewer-id and --reviewed-at", file=sys.stderr)
+        return 2
+    try:
+        review_path = resolve_path(args.review_file)
+        audio_dir = resolve_path(args.audio_dir)
+        annotations_dir = lexical_output_path(args.annotations_dir)
+        reviews_dir = (
+            lexical_output_path(args.reviews_dir)
+            if args.reviews_dir
+            else annotations_dir.parent / "Reviews"
+        )
+        # Preserve the lexical path so the veto reader can detect parent aliases.
+        # Resolving first would erase the evidence and silently trust an external
+        # ledger reached through a symbolic link.
+        rejects_path = lexical_output_path(args.rejects_file)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     try:
         review_payload, reviews, review_missing = load_review_file(review_path)
+        if args.reviewer_id and review_payload is None:
+            raise ValueError("cannot attest a missing review artifact")
+        reviewer_id = args.reviewer_id.strip() if args.reviewer_id else None
+        reviewed_at = args.reviewed_at.strip() if args.reviewed_at else None
+        if args.reviewer_id and (not reviewer_id or not reviewed_at):
+            raise ValueError("reviewer identity and timestamp must be non-empty")
         queue_path = choose_queue_path(args, review_path, review_payload)
         entries = load_queue(queue_path)
         entries.extend(load_manual_entries(review_payload))
+        validate_unique_entry_ids(entries)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -762,9 +1397,45 @@ def main(argv: list[str]) -> int:
         return 2
     grouped = group_by_episode(entries)
     reports = [
-        analyze_episode(episode_id, episode_entries, reviews, audio_dir, queue_path.parent)
+        analyze_episode(
+            episode_id,
+            episode_entries,
+            reviews,
+            audio_dir,
+            queue_path.parent,
+            second_pass_reviewed=args.second_pass_reviewed,
+            review_attestation=None,
+        )
         for episode_id, episode_entries in grouped.items()
     ]
+
+    review_artifact: dict[str, Any] | None = None
+    review_artifact_id: str | None = None
+    if reviewer_id and reviewed_at:
+        try:
+            review_artifact = build_review_artifact(
+                reports,
+                reviews,
+                reviewer=reviewer_id,
+                reviewed_at=reviewed_at,
+                artifact_kind=(
+                    "corpus_review_attestation"
+                    if args.second_pass_reviewed
+                    else "human_first_pass_attestation"
+                ),
+            )
+            review_artifact_id = canonical_review_artifact_id(review_artifact)
+            for report in reports:
+                if report.annotation is not None and not report.skipped:
+                    report.annotation["review_attestations"] = [{
+                        "reviewer": reviewer_id,
+                        "reviewed_at": reviewed_at,
+                        "audio_fingerprint": report.annotation["audio_fingerprint"],
+                        "review_artifact_id": review_artifact_id,
+                    }]
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     for report in reports:
         out = annotations_dir / f"{report.episode_id}.json"
@@ -783,14 +1454,70 @@ def main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 2
-        written: list[Path] = []
         try:
-            for report in reports:
-                if report.annotation is None:
-                    continue
-                out = annotations_dir / f"{report.episode_id}.json"
-                write_annotation(out, report.annotation, args.force)
-                written.append(out)
+            canonical_snapshot = load_canonical_annotations(
+                annotations_dir, reviews_dir=reviews_dir
+            )
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        planned = {
+            f"{report.episode_id}.json": report.annotation
+            for report in reports
+            if report.annotation is not None
+        }
+        audio_paths_by_filename = {
+            f"{report.episode_id}.json": report.audio_path
+            for report in reports
+            if report.annotation is not None and report.audio_path is not None
+        }
+        if args.second_pass_reviewed:
+            for filename, candidate in planned.items():
+                try:
+                    current = copy.deepcopy(canonical_snapshot[filename])
+                except KeyError:
+                    print(
+                        f"error: first-pass annotation is not canonical: {filename}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                existing_attestations = current.get("review_attestations", [])
+                if not isinstance(existing_attestations, list):
+                    print(f"error: invalid first-pass review attestations: {filename}", file=sys.stderr)
+                    return 2
+                candidate["review_attestations"] = (
+                    copy.deepcopy(existing_attestations)
+                    + candidate.get("review_attestations", [])
+                )
+        try:
+            if review_artifact is not None:
+                persisted_id, _ = persist_review_artifact(reviews_dir, review_artifact)
+                if persisted_id != review_artifact_id:
+                    raise ValueError("persisted review artifact identity changed")
+            artifact_index = load_review_artifacts(reviews_dir)
+            for filename, candidate in planned.items():
+                validate_annotation(
+                    candidate,
+                    source=filename,
+                    artifact_index=artifact_index,
+                )
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        try:
+            written = commit_canonical_annotations(
+                annotations_dir,
+                planned,
+                force=args.force,
+                reviews_dir=reviews_dir,
+                precommit=reviewed_promotion_precommit(
+                    rejects_path,
+                    second_pass_reviewed=args.second_pass_reviewed,
+                    audio_paths_by_filename=audio_paths_by_filename,
+                    artifact_index=artifact_index,
+                    reviews_dir=reviews_dir,
+                ),
+            )
         except Exception as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
