@@ -9,6 +9,7 @@
 // from copyrighted audio and can be regenerated locally.
 
 import CryptoKit
+import Darwin
 import Foundation
 
 struct Options {
@@ -146,14 +147,41 @@ func shellQuoted(_ args: [String]) -> String {
 }
 
 func fingerprint(of url: URL) throws -> String {
+    let resolvedURL = url.resolvingSymlinksInPath()
+    guard let values = try? resolvedURL.resourceValues(forKeys: [.isRegularFileKey]),
+          values.isRegularFile == true else {
+        throw NSError(domain: "L2FTranscribe", code: 6, userInfo: [
+            NSLocalizedDescriptionKey: "audio is missing or not a regular file",
+        ])
+    }
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
+
+    var descriptorStatus = stat()
+    guard fstat(handle.fileDescriptor, &descriptorStatus) == 0,
+          descriptorStatus.st_mode & S_IFMT == S_IFREG else {
+        throw NSError(domain: "L2FTranscribe", code: 6, userInfo: [
+            NSLocalizedDescriptionKey: "audio is missing or not a regular file",
+        ])
+    }
 
     var hasher = SHA256()
     while true {
         let data = try handle.read(upToCount: 1024 * 1024) ?? Data()
         if data.isEmpty { break }
         hasher.update(data: data)
+    }
+
+    var pathStatus = stat()
+    let pathStatusResult = url.path.withCString {
+        fstatat(AT_FDCWD, $0, &pathStatus, 0)
+    }
+    guard pathStatusResult == 0,
+          pathStatus.st_dev == descriptorStatus.st_dev,
+          pathStatus.st_ino == descriptorStatus.st_ino else {
+        throw NSError(domain: "L2FTranscribe", code: 7, userInfo: [
+            NSLocalizedDescriptionKey: "audio path changed while fingerprinting",
+        ])
     }
     let hex = hasher.finalize().map { String(format: "%02x", $0) }.joined()
     return "sha256:\(hex)"
@@ -175,20 +203,59 @@ func transcriptSourceFingerprint(at url: URL) throws -> String {
     return value
 }
 
-func bindTranscript(at url: URL, to sourceAudioFingerprint: String) throws {
-    let data = try Data(contentsOf: url)
-    let json = try JSONSerialization.jsonObject(with: data)
+/// Canonicalize only bytes just produced by whisper.cpp. Some whisper builds
+/// can emit ill-formed UTF-8 inside otherwise valid JSON strings; lossy UTF-8
+/// decoding replaces those bytes with U+FFFD while preserving the surrounding
+/// ASR text. Existing sidecars never pass through this trust-boundary repair.
+func canonicalBoundTranscript(
+    at stagedURL: URL,
+    sourceAudioFingerprint: String
+) throws -> Data {
+    let rawData = try Data(contentsOf: stagedURL)
+    // Intentional lossy repair of whisper.cpp's freshly staged output.
+    // swiftlint:disable:next optional_data_string_conversion
+    let repairedText = String(decoding: rawData, as: UTF8.self)
+    let repairedData = Data(repairedText.utf8)
+    let json = try JSONSerialization.jsonObject(with: repairedData)
     guard var object = json as? [String: Any] else {
         throw NSError(domain: "L2FTranscribe", code: 3, userInfo: [
             NSLocalizedDescriptionKey: "whisper transcript root is not a JSON object",
         ])
     }
     object["source_audio_fingerprint"] = sourceAudioFingerprint
-    let bound = try JSONSerialization.data(
+    return try JSONSerialization.data(
         withJSONObject: object,
         options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
     )
-    try bound.write(to: url, options: .atomic)
+}
+
+func publishBoundTranscript(
+    _ data: Data,
+    to finalURL: URL,
+    replacing: Bool,
+    validateSource: () throws -> Void
+) throws {
+    let manager = FileManager.default
+    let temporaryURL = finalURL.deletingLastPathComponent().appendingPathComponent(
+        ".\(finalURL.lastPathComponent).\(UUID().uuidString).tmp"
+    )
+    defer { try? manager.removeItem(at: temporaryURL) }
+    try data.write(to: temporaryURL, options: .withoutOverwriting)
+    // Writing a large canonical transcript can take long enough for retained
+    // audio to change after the post-Whisper check. Validate again only after
+    // every byte is staged, before either publication primitive can expose it.
+    try validateSource()
+    if replacing {
+        if manager.fileExists(atPath: finalURL.path) {
+            _ = try manager.replaceItemAt(finalURL, withItemAt: temporaryURL)
+        } else {
+            try manager.moveItem(at: temporaryURL, to: finalURL)
+        }
+        return
+    }
+    // A hard-link publication is atomic and fails if another process created
+    // the final after our initial resumability check.
+    try manager.linkItem(at: temporaryURL, to: finalURL)
 }
 
 @discardableResult
@@ -223,7 +290,10 @@ guard !audioFiles.isEmpty else {
 }
 
 let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-    .appendingPathComponent("playhead-l2f-transcribe-\(getpid())", isDirectory: true)
+    .appendingPathComponent(
+        "playhead-l2f-transcribe-\(getpid())-\(UUID().uuidString)",
+        isDirectory: true
+    )
 if !options.dryRun {
     try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
 }
@@ -235,12 +305,9 @@ for audio in audioFiles {
     let stem = audio.deletingPathExtension().lastPathComponent
     let outputBase = transcriptDir.appendingPathComponent(stem)
     let outputJSON = outputBase.appendingPathExtension("json")
-
-    guard FileManager.default.fileExists(atPath: audio.path) else {
-        FileHandle.standardError.write(Data("missing audio: \(audio.path)\n".utf8))
-        failures += 1
-        continue
-    }
+    let stagingDirectory = tempRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let stagedOutputBase = stagingDirectory.appendingPathComponent(stem)
+    let stagedOutputJSON = stagedOutputBase.appendingPathExtension("json")
 
     let sourceFingerprintBefore: String
     do {
@@ -259,6 +326,12 @@ for audio in audioFiles {
                     NSLocalizedDescriptionKey: "transcript is bound to \(boundFingerprint), current audio is \(sourceFingerprintBefore)",
                 ])
             }
+            let sourceFingerprintAfter = try fingerprint(of: audio)
+            guard sourceFingerprintAfter == sourceFingerprintBefore else {
+                throw NSError(domain: "L2FTranscribe", code: 8, userInfo: [
+                    NSLocalizedDescriptionKey: "source audio changed while validating existing transcript",
+                ])
+            }
             print("skip: \(outputJSON.path) already exists and matches source audio; pass --force to rebuild")
         } catch {
             FileHandle.standardError.write(Data("invalid existing transcript \(outputJSON.path): \(error.localizedDescription); pass --force to rebuild\n".utf8))
@@ -269,8 +342,20 @@ for audio in audioFiles {
 
     var whisperInput = audio
     let ext = audio.pathExtension.lowercased()
+    if !options.dryRun {
+        do {
+            try FileManager.default.createDirectory(
+                at: stagingDirectory,
+                withIntermediateDirectories: false
+            )
+        } catch {
+            FileHandle.standardError.write(Data("could not create staging directory: \(error)\n".utf8))
+            failures += 1
+            continue
+        }
+    }
     if !whisperNativeExtensions.contains(ext) {
-        let wav = tempRoot.appendingPathComponent(stem).appendingPathExtension("wav")
+        let wav = stagingDirectory.appendingPathComponent(stem).appendingPathExtension("wav")
         let ffmpegArgs = [
             "-y", "-v", "error",
             "-i", audio.path,
@@ -300,7 +385,7 @@ for audio in audioFiles {
         "-oj",
         "-ojf",
         "-np",
-        "-of", outputBase.path,
+        "-of", stagedOutputBase.path,
     ]
     if let threads = options.threads {
         whisperArgs.append(contentsOf: ["-t", String(threads)])
@@ -321,21 +406,38 @@ for audio in audioFiles {
             print("would write: \(outputJSON.path) bound to \(sourceFingerprintBefore)")
             continue
         }
-        if !options.dryRun && !FileManager.default.fileExists(atPath: outputJSON.path) {
-            FileHandle.standardError.write(Data("expected transcript missing: \(outputJSON.path)\n".utf8))
+        if !FileManager.default.fileExists(atPath: stagedOutputJSON.path) {
+            FileHandle.standardError.write(Data("expected staged transcript missing: \(stagedOutputJSON.path)\n".utf8))
             failures += 1
             continue
         }
+        let boundData = try canonicalBoundTranscript(
+            at: stagedOutputJSON,
+            sourceAudioFingerprint: sourceFingerprintBefore
+        )
         let sourceFingerprintAfter = try fingerprint(of: audio)
         guard sourceFingerprintAfter == sourceFingerprintBefore else {
             FileHandle.standardError.write(Data("source audio changed during transcription: \(audio.path)\n".utf8))
             failures += 1
             continue
         }
-        try bindTranscript(at: outputJSON, to: sourceFingerprintAfter)
+        // Force mode atomically replaces a validated prior final. Normal mode
+        // atomically refuses a concurrent writer after the initial skip check.
+        try publishBoundTranscript(
+            boundData,
+            to: outputJSON,
+            replacing: options.force
+        ) {
+            let publicationFingerprint = try fingerprint(of: audio)
+            guard publicationFingerprint == sourceFingerprintBefore else {
+                throw NSError(domain: "L2FTranscribe", code: 5, userInfo: [
+                    NSLocalizedDescriptionKey: "source audio changed while staging publication",
+                ])
+            }
+        }
         print("wrote: \(outputJSON.path)")
     } catch {
-        FileHandle.standardError.write(Data("whisper launch failed: \(error)\n".utf8))
+        FileHandle.standardError.write(Data("transcription failed for \(audio.path): \(error)\n".utf8))
         failures += 1
     }
 }

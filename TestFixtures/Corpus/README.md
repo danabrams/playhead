@@ -226,6 +226,71 @@ guard does not expand the evaluation's content labels. Every other point on
 every timeline is `unknown_elsewhere`. In particular, the reconciler does not
 synthesize content complements or enroll anything in `Annotations/`.
 
+### Freeze the unchanged-production baseline
+
+Run the opt-in Catalyst harness three times from a clean committed revision.
+It selects the exact 27 assets from the content-addressed evaluation above,
+requires fingerprint-bound local transcripts, invokes the production
+`AdDetectionService.runBackfill` path with `AdDetectionConfig.default`,
+`NarrowingConfig.default`, and the live Foundation Models classifier, and
+refuses to replace an existing raw capture. `PLAYHEAD_CORPUS_ROOT` may point at
+another regular checkout containing the ignored `Audio/` and `Transcripts/`
+directories; labels and policy always come from the source checkout.
+The app currently has an iOS 27.0 Catalyst deployment target, so the capture
+host must run macOS 27 or newer. The wrapper checks this before staging or
+building; macOS 26 cannot run this production binary, and an iOS Simulator run
+is not a substitute for the live on-device Foundation Models path.
+
+This is explicitly a **cold, isolated production-core lane**: every episode
+gets a fresh analysis store and the optional catalog, repeated-ad cache,
+learning, and playback-orchestration dependencies are nil. That removes order
+and prior-user-state effects while preserving the shipped detector config,
+classifiers, narrowing, planner regime, and `runBackfill` implementation. The
+raw config and scoring policy freeze this state identity. It is not a claim
+about warmed catalog/cache lift, which requires a separately predeclared lane.
+
+```sh
+capture_dir="${PLAYHEAD_BASELINE_CAPTURE_DIR:-/tmp/playhead-l2f8-captures}"
+corpus_root="${PLAYHEAD_CORPUS_ROOT:-$PWD}"
+mkdir -p "$capture_dir"
+
+for ordinal in 1 2 3; do
+  run_id="baseline-run-${ordinal}"
+  output="$capture_dir/playhead-partial-silver-baseline-${run_id}.json"
+  scripts/l2f-capture-partial-silver.sh \
+    --run-id "$run_id" \
+    --output "$output" \
+    --corpus-root "$corpus_root"
+done
+
+revision="$(git rev-parse HEAD)"
+```
+
+Freeze and score the exact raw bytes (the scorer discovers the single tracked
+policy artifact by default):
+
+```sh
+python3 scripts/l2f-score-partial-silver.py \
+  --raw-run "$capture_dir/playhead-partial-silver-baseline-baseline-run-1.json" \
+  --raw-run "$capture_dir/playhead-partial-silver-baseline-baseline-run-2.json" \
+  --raw-run "$capture_dir/playhead-partial-silver-baseline-baseline-run-3.json" \
+  --output-dir TestFixtures/Corpus/Evaluations/Baselines/"$revision"
+```
+
+The freezer preserves each raw input byte-for-byte under its SHA-256 filename
+and publishes a deterministic content-addressed report. Apple Foundation
+Models can vary between invocations, so use the three-run median/range and
+per-break detection frequency rather than treating one run as canonical.
+Because the labels are partial silver, predictions in unlabeled audio remain
+unknown: the report intentionally does not compute whole-episode precision or
+recall. Its precision field is labeled-region-conditional only. Detection,
+full-break localization, presence-anchor recall, exact content-veto collisions,
+and continuous-music edge cohorts are reported separately. A prediction that
+touches both a positive label and a content veto remains a labeled collision
+error and cannot take the conditional-precision positive match from a clean
+prediction. Primary detection matching remains governed only by the frozen
+cardinality, intersection, boundary-error, and stable tie-break objectives.
+
 Promoter category coverage for this slice:
 
 | Category | Total reviewed entries | Verified ad entries |

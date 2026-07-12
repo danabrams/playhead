@@ -156,7 +156,12 @@
 //     PLAYHEAD_PIPELINE_DUMP=1
 
 import AVFoundation
+import CryptoKit
+import Darwin
 import Foundation
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 import Testing
 import XCTest
 @testable import Playhead
@@ -328,6 +333,536 @@ enum PipelineDumpManifestLoader {
     }
 }
 
+// MARK: - Content-addressed partial-silver evaluation (test-only)
+
+// This strict, test-only wire model mirrors the nested immutable artifact.
+// swiftlint:disable nesting
+struct PartialSilverEvaluation: Decodable, Sendable {
+    struct LabelSemantics: Decodable, Equatable, Sendable {
+        let contentVetoes: String
+        let coverage: String
+        let fullBreaks: String
+        let presenceAnchors: String
+        let quality: String
+        let unlabeledAudio: String
+
+        enum CodingKeys: String, CodingKey {
+            case contentVetoes = "content_vetoes"
+            case coverage
+            case fullBreaks = "full_breaks"
+            case presenceAnchors = "presence_anchors"
+            case quality
+            case unlabeledAudio = "unlabeled_audio"
+        }
+    }
+
+    struct Interval: Decodable, Sendable {
+        let startSeconds: Double
+        let endSeconds: Double
+
+        enum CodingKeys: String, CodingKey {
+            case startSeconds = "start_seconds"
+            case endSeconds = "end_seconds"
+        }
+    }
+
+    struct Asset: Decodable, Sendable {
+        let audioFingerprint: String
+        let contentVetoes: [Interval]
+        let durationSeconds: Double
+        let episodeId: String
+        let fullBreaks: [Interval]
+        let presenceAnchors: [Interval]
+        let showName: String
+
+        enum CodingKeys: String, CodingKey {
+            case audioFingerprint = "audio_fingerprint"
+            case contentVetoes = "content_vetoes"
+            case durationSeconds = "duration_seconds"
+            case episodeId = "episode_id"
+            case fullBreaks = "full_breaks"
+            case presenceAnchors = "presence_anchors"
+            case showName = "show_name"
+        }
+    }
+
+    struct Summary: Decodable, Sendable {
+        let assets: Int
+        let contentVetoes: Int
+        let fullBreakAssets: Int
+        let fullBreaks: Int
+        let labeledRegions: Int
+        let presenceAnchors: Int
+
+        enum CodingKeys: String, CodingKey {
+            case assets
+            case contentVetoes = "content_vetoes"
+            case fullBreakAssets = "full_break_assets"
+            case fullBreaks = "full_breaks"
+            case labeledRegions = "labeled_regions"
+            case presenceAnchors = "presence_anchors"
+        }
+    }
+
+    let artifactKind: String
+    let assets: [Asset]
+    let labelSemantics: LabelSemantics
+    let schemaVersion: Int
+    let summary: Summary
+
+    enum CodingKeys: String, CodingKey {
+        case artifactKind = "artifact_kind"
+        case assets
+        case labelSemantics = "label_semantics"
+        case schemaVersion = "schema_version"
+        case summary
+    }
+}
+
+enum PartialSilverEvaluationLoader {
+    static let expectedAssetCount = 27
+    static let evaluationSHA256 =
+        "0d85a0ec8bfa30873bad63bbc4bb12a3f7613aca76d5b76149e25db2a0be226f"
+    static let relativePath =
+        "TestFixtures/Corpus/Evaluations/earaudit-partial-silver-\(evaluationSHA256).json"
+    private static let expectedLabelSemantics = PartialSilverEvaluation.LabelSemantics(
+        contentVetoes: "only the exact interval is labeled human-reviewed content; "
+            + "the separate reject ledger may conservatively block overlapping promotion "
+            + "candidates without labeling surrounding audio",
+        coverage: "partial",
+        fullBreaks: "human-reviewed complete contiguous ad-break boundaries",
+        presenceAnchors: "ad presence only; bounds are not full-break boundary truth",
+        quality: "silver",
+        unlabeledAudio: "unknown_elsewhere"
+    )
+
+    enum LoadError: Error, CustomStringConvertible {
+        case unsafeFile(URL)
+        case oversizedFile(URL)
+        case contentAddressMismatch(URL)
+        case decodeFailed(URL, Error)
+        case invalidArtifact(String)
+        case unsafeCorpusRoot(URL)
+        case audioMembership(String, String)
+
+        var description: String {
+            switch self {
+            case .unsafeFile(let url):
+                return "baseline input is missing or unsafe: \(url.path)"
+            case .oversizedFile(let url):
+                return "baseline input exceeds its size limit: \(url.path)"
+            case .contentAddressMismatch(let url):
+                return "baseline filename does not match its SHA-256: \(url.path)"
+            case .decodeFailed(let url, let error):
+                return "failed to decode \(url.lastPathComponent): \(error.localizedDescription)"
+            case .invalidArtifact(let reason):
+                return "invalid partial-silver evaluation: \(reason)"
+            case .unsafeCorpusRoot(let url):
+                return "PLAYHEAD_CORPUS_ROOT is not a regular unaliased directory: \(url.path)"
+            case .audioMembership(let episodeId, let reason):
+                return "retained audio for \(episodeId) is invalid: \(reason)"
+            }
+        }
+    }
+
+    static func load(sourceRoot: URL) throws -> PartialSilverEvaluation {
+        let url = sourceRoot.appendingPathComponent(relativePath, isDirectory: false)
+        guard !hasUnsafeFilesystemComponent(sourceRoot),
+              !CorpusAnnotationLoader.hasSymbolicLinkComponent(url, relativeTo: sourceRoot) else {
+            throw LoadError.unsafeFile(url)
+        }
+        return try decode(at: url)
+    }
+
+    static func decode(at url: URL) throws -> PartialSilverEvaluation {
+        let data = try readRegularBytes(at: url, maximumBytes: 8 * 1_024 * 1_024)
+        let digest = sha256Hex(data)
+        guard url.lastPathComponent.hasSuffix("-\(digest).json") else {
+            throw LoadError.contentAddressMismatch(url)
+        }
+        let evaluation: PartialSilverEvaluation
+        do {
+            evaluation = try JSONDecoder().decode(PartialSilverEvaluation.self, from: data)
+        } catch {
+            throw LoadError.decodeFailed(url, error)
+        }
+        try validate(evaluation)
+        return evaluation
+    }
+
+    static func validatedCorpusRoot(sourceRoot: URL) throws -> URL {
+        let configured = ProcessInfo.processInfo.environment["PLAYHEAD_CORPUS_ROOT"]
+        if let configured,
+           !configured.hasPrefix("/") || containsTraversalComponent(configured) {
+            throw LoadError.unsafeCorpusRoot(URL(fileURLWithPath: configured))
+        }
+        let root = configured.map { URL(fileURLWithPath: $0) } ?? sourceRoot
+        let standardized = root.standardizedFileURL
+        guard let values = try? standardized.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isAliasFileKey]
+        ), values.isDirectory == true,
+           values.isSymbolicLink != true,
+           values.isAliasFile != true,
+           !hasUnsafeFilesystemComponent(standardized) else {
+            throw LoadError.unsafeCorpusRoot(standardized)
+        }
+        return standardized
+    }
+
+    static func audioURL(for asset: PartialSilverEvaluation.Asset, corpusRoot: URL) throws -> URL {
+        let directory = corpusRoot
+            .appendingPathComponent(CorpusAnnotationLoader.audioRelativePath, isDirectory: true)
+            .standardizedFileURL
+        guard let directoryValues = try? directory.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isAliasFileKey]
+        ), directoryValues.isDirectory == true,
+           directoryValues.isSymbolicLink != true,
+           directoryValues.isAliasFile != true,
+           !hasUnsafeFilesystemComponent(directory),
+           !CorpusAnnotationLoader.hasSymbolicLinkComponent(directory, relativeTo: corpusRoot) else {
+            throw LoadError.audioMembership(asset.episodeId, "audio directory is missing or aliased")
+        }
+        let candidates: [URL]
+        do {
+            candidates = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .isAliasFileKey],
+                options: [.skipsHiddenFiles]
+            ).filter {
+                $0.deletingPathExtension().lastPathComponent == asset.episodeId
+                    && CorpusAnnotationLoader.audioFileExtensions.contains(
+                        $0.pathExtension.lowercased()
+                    )
+            }
+        } catch {
+            throw LoadError.audioMembership(asset.episodeId, "cannot enumerate audio directory")
+        }
+        guard candidates.count == 1, let candidate = candidates.first else {
+            throw LoadError.audioMembership(
+                asset.episodeId,
+                "expected exactly one direct audio file, found \(candidates.count)"
+            )
+        }
+        let values = try candidate.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .isAliasFileKey]
+        )
+        guard values.isRegularFile == true,
+              values.isSymbolicLink != true,
+              values.isAliasFile != true,
+              !hasUnsafeFilesystemComponent(candidate),
+              !CorpusAnnotationLoader.hasSymbolicLinkComponent(candidate, relativeTo: corpusRoot) else {
+            throw LoadError.audioMembership(asset.episodeId, "audio is not a regular unaliased file")
+        }
+        let actual = try CorpusAudioFingerprint.fingerprint(of: candidate)
+        guard actual == asset.audioFingerprint else {
+            throw LoadError.audioMembership(asset.episodeId, "fingerprint mismatch")
+        }
+        return candidate
+    }
+
+    static func transcriptURL(for episodeId: String, corpusRoot: URL) throws -> URL {
+        let directory = corpusRoot
+            .appendingPathComponent("TestFixtures/Corpus/Transcripts", isDirectory: true)
+            .standardizedFileURL
+        let url = directory.appendingPathComponent("\(episodeId).json").standardizedFileURL
+        guard url.deletingLastPathComponent() == directory,
+              !hasUnsafeFilesystemComponent(url),
+              !CorpusAnnotationLoader.hasSymbolicLinkComponent(url, relativeTo: corpusRoot) else {
+            throw LoadError.unsafeFile(url)
+        }
+        _ = try readRegularBytes(at: url, maximumBytes: 128 * 1_024 * 1_024)
+        return url
+    }
+
+    static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func fileSHA256Hex(_ url: URL, maximumBytes: Int) throws -> String {
+        sha256Hex(try readRegularBytes(at: url, maximumBytes: maximumBytes))
+    }
+
+    static func hasUnsafeFilesystemComponent(_ url: URL) -> Bool {
+        let absolute = url.standardizedFileURL
+        let compatibilityLinks: Set<String> = ["etc", "tmp", "var"]
+        var cursor = URL(fileURLWithPath: "/", isDirectory: true)
+        for (index, component) in absolute.pathComponents.dropFirst().enumerated() {
+            cursor.appendPathComponent(component)
+            guard let values = try? cursor.resourceValues(
+                forKeys: [.isSymbolicLinkKey, .isAliasFileKey]
+            ) else {
+                continue
+            }
+            if values.isAliasFile == true {
+                return true
+            }
+            if values.isSymbolicLink == true,
+               !(index == 0 && compatibilityLinks.contains(component)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func containsTraversalComponent(_ path: String) -> Bool {
+        path.split(separator: "/", omittingEmptySubsequences: false).contains {
+            $0 == "." || $0 == ".."
+        }
+    }
+
+    static func readRegularBytes(
+        at url: URL,
+        maximumBytes: Int,
+        afterOpen: (() throws -> Void)? = nil
+    ) throws -> Data {
+        let descriptor = try openRegularDescriptor(at: url)
+        defer { Darwin.close(descriptor) }
+        var before = stat()
+        guard fstat(descriptor, &before) == 0, isRegular(before) else {
+            throw LoadError.unsafeFile(url)
+        }
+        guard before.st_size >= 0, before.st_size <= off_t(maximumBytes) else {
+            throw LoadError.oversizedFile(url)
+        }
+        try afterOpen?()
+
+        var data = Data()
+        data.reserveCapacity(Int(before.st_size))
+        var buffer = [UInt8](repeating: 0, count: 1_024 * 1_024)
+        while true {
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            if count == 0 { break }
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw LoadError.decodeFailed(url, posixError("read"))
+            }
+            guard data.count <= maximumBytes - count else {
+                throw LoadError.oversizedFile(url)
+            }
+            data.append(contentsOf: buffer[0..<count])
+        }
+        var after = stat()
+        guard fstat(descriptor, &after) == 0,
+              sameFile(before, after),
+              before.st_size == after.st_size,
+              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec,
+              data.count == Int(after.st_size) else {
+            throw LoadError.unsafeFile(url)
+        }
+        return data
+    }
+
+    static func snapshotRegularFile(
+        at source: URL,
+        to destination: URL,
+        maximumBytes: Int
+    ) throws -> String {
+        let data = try readRegularBytes(at: source, maximumBytes: maximumBytes)
+        try data.write(to: destination, options: [.withoutOverwriting])
+        return sha256Hex(data)
+    }
+
+    static func openDirectoryDescriptor(at url: URL) throws -> Int32 {
+        guard url.isFileURL else { throw LoadError.unsafeFile(url) }
+        let flags = O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        var current = Darwin.open("/", flags)
+        guard current >= 0 else {
+            throw LoadError.decodeFailed(url, posixError("open root"))
+        }
+        do {
+            for component in safePathComponents(url) {
+                var before = stat()
+                guard component.withCString({
+                    fstatat(current, $0, &before, AT_SYMLINK_NOFOLLOW)
+                }) == 0, isDirectory(before) else {
+                    throw LoadError.unsafeFile(url)
+                }
+                let next = component.withCString { openat(current, $0, flags) }
+                guard next >= 0 else { throw LoadError.unsafeFile(url) }
+                var after = stat()
+                guard fstat(next, &after) == 0, sameFile(before, after) else {
+                    Darwin.close(next)
+                    throw LoadError.unsafeFile(url)
+                }
+                Darwin.close(current)
+                current = next
+            }
+            return current
+        } catch {
+            Darwin.close(current)
+            throw error
+        }
+    }
+
+    private static func openRegularDescriptor(at url: URL) throws -> Int32 {
+        guard url.isFileURL else { throw LoadError.unsafeFile(url) }
+        let components = safePathComponents(url)
+        let directoryFlags = O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        var directoryDescriptor = Darwin.open("/", directoryFlags)
+        guard directoryDescriptor >= 0 else {
+            throw LoadError.decodeFailed(url, posixError("open root"))
+        }
+        do {
+            for component in components.dropLast() {
+                var before = stat()
+                guard component.withCString({
+                    fstatat(directoryDescriptor, $0, &before, AT_SYMLINK_NOFOLLOW)
+                }) == 0, isDirectory(before) else {
+                    throw LoadError.unsafeFile(url)
+                }
+                let next = component.withCString {
+                    openat(directoryDescriptor, $0, directoryFlags)
+                }
+                guard next >= 0 else { throw LoadError.unsafeFile(url) }
+                var after = stat()
+                guard fstat(next, &after) == 0, sameFile(before, after) else {
+                    Darwin.close(next)
+                    throw LoadError.unsafeFile(url)
+                }
+                Darwin.close(directoryDescriptor)
+                directoryDescriptor = next
+            }
+            guard let filename = components.last else {
+                throw LoadError.unsafeFile(url)
+            }
+            var before = stat()
+            guard filename.withCString({
+                fstatat(directoryDescriptor, $0, &before, AT_SYMLINK_NOFOLLOW)
+            }) == 0, isRegular(before) else {
+                throw LoadError.unsafeFile(url)
+            }
+            let descriptor = filename.withCString {
+                openat(directoryDescriptor, $0, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+            }
+            guard descriptor >= 0 else { throw LoadError.unsafeFile(url) }
+            var after = stat()
+            guard fstat(descriptor, &after) == 0, sameFile(before, after) else {
+                Darwin.close(descriptor)
+                throw LoadError.unsafeFile(url)
+            }
+            Darwin.close(directoryDescriptor)
+            return descriptor
+        } catch {
+            Darwin.close(directoryDescriptor)
+            throw error
+        }
+    }
+
+    private static func safePathComponents(_ url: URL) -> [String] {
+        var components = url.standardizedFileURL.pathComponents
+        guard components.first == "/" else { return [] }
+        if components.count > 1, ["etc", "tmp", "var"].contains(components[1]) {
+            let compatibility = URL(fileURLWithPath: "/\(components[1])")
+                .resolvingSymlinksInPath().standardizedFileURL.pathComponents
+            components = compatibility + Array(components.dropFirst(2))
+        }
+        return Array(components.dropFirst())
+    }
+
+    private static func sameFile(_ left: stat, _ right: stat) -> Bool {
+        left.st_dev == right.st_dev && left.st_ino == right.st_ino
+    }
+
+    private static func isRegular(_ metadata: stat) -> Bool {
+        metadata.st_mode & S_IFMT == S_IFREG
+    }
+
+    private static func isDirectory(_ metadata: stat) -> Bool {
+        metadata.st_mode & S_IFMT == S_IFDIR
+    }
+
+    private static func posixError(_ operation: String) -> NSError {
+        NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(errno),
+            userInfo: [NSLocalizedDescriptionKey: "\(operation) failed: \(String(cString: strerror(errno)))"]
+        )
+    }
+}
+
+private extension PartialSilverEvaluationLoader {
+    private static func validate(_ evaluation: PartialSilverEvaluation) throws {
+        guard evaluation.artifactKind == "retained_audio_partial_silver_evaluation",
+              evaluation.schemaVersion == 1 else {
+            throw LoadError.invalidArtifact("unexpected artifact kind or schema version")
+        }
+        guard evaluation.labelSemantics == expectedLabelSemantics else {
+            throw LoadError.invalidArtifact("label semantics are not the frozen partial-silver contract")
+        }
+        guard evaluation.assets.count == expectedAssetCount else {
+            throw LoadError.invalidArtifact(
+                "expected \(expectedAssetCount) assets, found \(evaluation.assets.count)"
+            )
+        }
+        var episodeIds: Set<String> = []
+        var fingerprints: Set<String> = []
+        for asset in evaluation.assets {
+            try validate(asset)
+            guard episodeIds.insert(asset.episodeId).inserted else {
+                throw LoadError.invalidArtifact("duplicate episode_id \(asset.episodeId)")
+            }
+            guard fingerprints.insert(asset.audioFingerprint).inserted else {
+                throw LoadError.invalidArtifact("duplicate audio fingerprint")
+            }
+        }
+        try validateSummary(evaluation)
+    }
+
+    private static func validate(_ asset: PartialSilverEvaluation.Asset) throws {
+        guard isBareIdentifier(asset.episodeId), !asset.showName.isEmpty else {
+            throw LoadError.invalidArtifact("invalid episode or show identity")
+        }
+        guard isSHA256Fingerprint(asset.audioFingerprint) else {
+            throw LoadError.invalidArtifact("malformed fingerprint for \(asset.episodeId)")
+        }
+        guard asset.durationSeconds.isFinite, asset.durationSeconds > 0 else {
+            throw LoadError.invalidArtifact("invalid duration for \(asset.episodeId)")
+        }
+        for interval in asset.fullBreaks + asset.presenceAnchors + asset.contentVetoes {
+            guard interval.startSeconds.isFinite,
+                  interval.endSeconds.isFinite,
+                  interval.startSeconds >= 0,
+                  interval.startSeconds < interval.endSeconds,
+                  interval.endSeconds <= asset.durationSeconds else {
+                throw LoadError.invalidArtifact("invalid label interval for \(asset.episodeId)")
+            }
+        }
+    }
+
+    private static func validateSummary(_ evaluation: PartialSilverEvaluation) throws {
+        let fullBreaks = evaluation.assets.reduce(0) { $0 + $1.fullBreaks.count }
+        let anchors = evaluation.assets.reduce(0) { $0 + $1.presenceAnchors.count }
+        let vetoes = evaluation.assets.reduce(0) { $0 + $1.contentVetoes.count }
+        let fullBreakAssets = evaluation.assets.filter { !$0.fullBreaks.isEmpty }.count
+        let summary = evaluation.summary
+        guard summary.assets == evaluation.assets.count,
+              summary.fullBreaks == fullBreaks,
+              summary.presenceAnchors == anchors,
+              summary.contentVetoes == vetoes,
+              summary.fullBreakAssets == fullBreakAssets,
+              summary.labeledRegions == fullBreaks + anchors + vetoes else {
+            throw LoadError.invalidArtifact("summary disagrees with label arrays")
+        }
+    }
+
+    private static func isBareIdentifier(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".."
+            && !value.contains("/") && !value.contains("\\")
+            && (value as NSString).lastPathComponent == value
+    }
+
+    private static func isSHA256Fingerprint(_ value: String) -> Bool {
+        guard value.count == 71, value.hasPrefix("sha256:") else { return false }
+        return value.dropFirst("sha256:".count).unicodeScalars.allSatisfy {
+            CharacterSet(charactersIn: "0123456789abcdef").contains($0)
+        }
+    }
+}
+// swiftlint:enable nesting
+
 // MARK: - Dump payload (test-only)
 
 /// Per-`AdWindow` row written into the JSON dump. The Codable
@@ -431,6 +966,645 @@ private struct DumpPayload: Encodable {
     let summary: DumpSummary
 }
 
+private struct BaselinePrediction: Encodable {
+    let startSeconds: Double
+    let endSeconds: Double
+    let decisionState: String
+    let wasSkipped: Bool
+    let confidence: Double
+
+    init(_ window: DumpAdWindow) {
+        startSeconds = window.startTime
+        endSeconds = window.endTime
+        decisionState = window.decisionState
+        wasSkipped = window.wasSkipped
+        confidence = window.skipConfidence
+    }
+}
+
+private struct BaselineMusicFeature: Encodable {
+    let startSeconds: Double
+    let endSeconds: Double
+    let musicProbability: Double
+    let musicBedLevel: String
+    let musicBedChangeScore: Double
+    let musicBedOnsetScore: Double
+    let musicBedOffsetScore: Double
+
+    init(_ window: FeatureWindow) {
+        startSeconds = window.startTime
+        endSeconds = window.endTime
+        musicProbability = window.musicProbability
+        musicBedLevel = window.musicBedLevel.rawValue
+        musicBedChangeScore = window.musicBedChangeScore
+        musicBedOnsetScore = window.musicBedOnsetScore
+        musicBedOffsetScore = window.musicBedOffsetScore
+    }
+}
+
+private struct BaselineEpisode: Encodable {
+    let episodeId: String
+    let showName: String
+    let audioFingerprint: String
+    let transcriptSHA256: String
+    let durationSeconds: Double
+    let predictions: [BaselinePrediction]
+    let musicFeatures: [BaselineMusicFeature]
+}
+
+private struct BaselinePipelineVersions: Encodable {
+    let modelVersion: String
+    let policyVersion: String
+    let featureSchemaVersion: Int
+}
+
+private struct BaselineAdDetectionDefaults: Encodable {
+    let audioForensicsEnabled: Bool
+    let autoSkipConfidenceThreshold: Double
+    let bracketRefinementEnabled: Bool
+    let bracketRefinementMinCoarseScore: Double
+    let bracketRefinementMinFineConfidence: Double
+    let bracketRefinementMinTrust: Double
+    let candidateThreshold: Double
+    let chapterSignalMode: String
+    let classifierSeedQualifiedThreshold: Double
+    let confirmationThreshold: Double
+    let crossEpisodeMemoryEnabled: Bool
+    let crossShowSyndicationEnabled: Bool
+    let detectorVersion: String
+    let evidenceFragilityPenaltyEnabled: Bool
+    let fmBackfillMode: String
+    let fmConsensusThreshold: Int
+    let fmScanBudgetSeconds: Double
+    let fragilityPenalty: Double
+    let fragilityThreshold: Double
+    let hotPathLookahead: Double
+    let lexicalAutoAdEnabled: Bool
+    let lexicalAutoAdQualifiedThreshold: Double
+    let markOnlyThreshold: Double
+    let perShowThresholdControlEnabled: Bool
+    let perShowThresholdIntegralGain: Double
+    let perShowThresholdMaxOffset: Double
+    let perShowThresholdMinSamples: Int
+    let perShowThresholdProportionalGain: Double
+    let rediffSlotOwnershipEnabled: Bool
+    let rediffSlotShadowEnabled: Bool
+    let rhetoricalGrammarEnabled: Bool
+    let segmentAutoSkipThreshold: Double
+    let segmentUICandidateThreshold: Double
+    let spanFinalizerEnabled: Bool
+    let spliceSlotOwnershipEnabled: Bool
+    let spliceSlotShadowEnabled: Bool
+    let suppressionThreshold: Double
+    let temporalHighConfidenceNeighborThreshold: Double
+    let temporalIsolationPenaltyFactor: Double
+    let temporalMinDwellPenaltyFactor: Double
+    let temporalMinDwellSeconds: Double
+    let temporalNeighborWindowSeconds: Double
+    let temporalRegularizationEnabled: Bool
+    let transcriptBoundaryCueEnabled: Bool
+}
+
+private struct BaselineNarrowingDefaults: Encodable {
+    let perAnchorPaddingSegments: Int
+    let maxNarrowedSegmentsPerPhase: Int
+    let acousticBreakSnapMaxDistanceSeconds: Double
+    let lexicalClusterSnapEnabled: Bool
+    let lexicalClusterGapSeconds: Double
+    let lexicalClusterMarginSegments: Int?
+    let lexicalClusterMinHits: Int
+}
+
+private let baselineAdDetectionDefaultKeys: Set<String> = [
+    "audio_forensics_enabled", "auto_skip_confidence_threshold",
+    "bracket_refinement_enabled", "bracket_refinement_min_coarse_score",
+    "bracket_refinement_min_fine_confidence", "bracket_refinement_min_trust",
+    "candidate_threshold", "chapter_signal_mode", "classifier_seed_qualified_threshold",
+    "confirmation_threshold", "cross_episode_memory_enabled",
+    "cross_show_syndication_enabled", "detector_version",
+    "evidence_fragility_penalty_enabled", "fm_backfill_mode", "fm_consensus_threshold",
+    "fm_scan_budget_seconds", "fragility_penalty", "fragility_threshold",
+    "hot_path_lookahead", "lexical_auto_ad_enabled",
+    "lexical_auto_ad_qualified_threshold", "mark_only_threshold",
+    "per_show_threshold_control_enabled", "per_show_threshold_integral_gain",
+    "per_show_threshold_max_offset", "per_show_threshold_min_samples",
+    "per_show_threshold_proportional_gain", "rediff_slot_ownership_enabled",
+    "rediff_slot_shadow_enabled", "rhetorical_grammar_enabled",
+    "segment_auto_skip_threshold", "segment_ui_candidate_threshold",
+    "span_finalizer_enabled", "splice_slot_ownership_enabled",
+    "splice_slot_shadow_enabled", "suppression_threshold",
+    "temporal_high_confidence_neighbor_threshold", "temporal_isolation_penalty_factor",
+    "temporal_min_dwell_penalty_factor", "temporal_min_dwell_seconds",
+    "temporal_neighbor_window_seconds", "temporal_regularization_enabled",
+    "transcript_boundary_cue_enabled"
+]
+
+private struct BaselineProductionConfig: Encodable {
+    let entryPoint: String
+    let adDetectionConfigIdentity: String
+    let narrowingConfigIdentity: String
+    let hotPathClassifierIdentity: String
+    let foundationModelClassifierIdentity: String
+    let foundationModelEnvironmentIdentity: String
+    let foundationModelRedactorIdentity: String
+    let detectorStateIdentity: String
+    let plannerRegime: String
+    let plannerSeedObservations: Int
+    let runnerAdmissionIdentity: String
+    let scanCohortIdentity: String
+    let pipelineVersions: BaselinePipelineVersions
+    let adDetectionDefaults: BaselineAdDetectionDefaults
+    let narrowingDefaults: BaselineNarrowingDefaults
+
+    static func current() -> BaselineProductionConfig {
+        let config = AdDetectionConfig.default
+        let narrowing = NarrowingConfig.default
+        let versions = PipelineVersions.current()
+        return BaselineProductionConfig(
+            entryPoint: "AdDetectionService.runBackfill",
+            adDetectionConfigIdentity: "AdDetectionConfig.default",
+            narrowingConfigIdentity: "NarrowingConfig.default",
+            hotPathClassifierIdentity: "CoreMLSequenceClassifier()",
+            foundationModelClassifierIdentity:
+                "PlayheadRuntime.makeFoundationModelClassifier(SystemLanguageModel.default)",
+            foundationModelEnvironmentIdentity: "production_no_experiment_overrides",
+            foundationModelRedactorIdentity: "PromptRedactor.loadDefault",
+            detectorStateIdentity:
+                "cold_isolated_per_episode:fresh_store;nil_catalog_cache_learning_"
+                + "orchestration;fallback_metadata;production_calibration",
+            plannerRegime: "targetedWithAudit",
+            plannerSeedObservations: 5,
+            runnerAdmissionIdentity: "permissive_capability_snapshot+battery_level_1.0",
+            scanCohortIdentity: "ScanCohort.productionJSON",
+            pipelineVersions: BaselinePipelineVersions(
+                modelVersion: versions.modelVersion,
+                policyVersion: versions.policyVersion,
+                featureSchemaVersion: versions.featureSchemaVersion
+            ),
+            adDetectionDefaults: adDetectionDefaults(config),
+            narrowingDefaults: narrowingDefaults(narrowing)
+        )
+    }
+
+    private static func adDetectionDefaults(
+        _ config: AdDetectionConfig
+    ) -> BaselineAdDetectionDefaults {
+        BaselineAdDetectionDefaults(
+                audioForensicsEnabled: config.audioForensicsEnabled,
+                autoSkipConfidenceThreshold: config.autoSkipConfidenceThreshold,
+                bracketRefinementEnabled: config.bracketRefinementEnabled,
+                bracketRefinementMinCoarseScore: config.bracketRefinementMinCoarseScore,
+                bracketRefinementMinFineConfidence: config.bracketRefinementMinFineConfidence,
+                bracketRefinementMinTrust: config.bracketRefinementMinTrust,
+                candidateThreshold: config.candidateThreshold,
+                chapterSignalMode: String(describing: config.chapterSignalMode),
+                classifierSeedQualifiedThreshold: config.classifierSeedQualifiedThreshold,
+                confirmationThreshold: config.confirmationThreshold,
+                crossEpisodeMemoryEnabled: config.crossEpisodeMemoryEnabled,
+                crossShowSyndicationEnabled: config.crossShowSyndicationEnabled,
+                detectorVersion: config.detectorVersion,
+                evidenceFragilityPenaltyEnabled: config.evidenceFragilityPenaltyEnabled,
+                fmBackfillMode: String(describing: config.fmBackfillMode),
+                fmConsensusThreshold: config.fmConsensusThreshold,
+                fmScanBudgetSeconds: config.fmScanBudgetSeconds,
+                fragilityPenalty: config.fragilityPenalty,
+                fragilityThreshold: config.fragilityThreshold,
+                hotPathLookahead: config.hotPathLookahead,
+                lexicalAutoAdEnabled: config.lexicalAutoAdEnabled,
+                lexicalAutoAdQualifiedThreshold: config.lexicalAutoAdQualifiedThreshold,
+                markOnlyThreshold: config.markOnlyThreshold,
+                perShowThresholdControlEnabled: config.perShowThresholdControlEnabled,
+                perShowThresholdIntegralGain: config.perShowThresholdIntegralGain,
+                perShowThresholdMaxOffset: config.perShowThresholdMaxOffset,
+                perShowThresholdMinSamples: config.perShowThresholdMinSamples,
+                perShowThresholdProportionalGain: config.perShowThresholdProportionalGain,
+                rediffSlotOwnershipEnabled: config.rediffSlotOwnershipEnabled,
+                rediffSlotShadowEnabled: config.rediffSlotShadowEnabled,
+                rhetoricalGrammarEnabled: config.rhetoricalGrammarEnabled,
+                segmentAutoSkipThreshold: config.segmentAutoSkipThreshold,
+                segmentUICandidateThreshold: config.segmentUICandidateThreshold,
+                spanFinalizerEnabled: config.spanFinalizerEnabled,
+                spliceSlotOwnershipEnabled: config.spliceSlotOwnershipEnabled,
+                spliceSlotShadowEnabled: config.spliceSlotShadowEnabled,
+                suppressionThreshold: config.suppressionThreshold,
+                temporalHighConfidenceNeighborThreshold:
+                    config.temporalHighConfidenceNeighborThreshold,
+                temporalIsolationPenaltyFactor: config.temporalIsolationPenaltyFactor,
+                temporalMinDwellPenaltyFactor: config.temporalMinDwellPenaltyFactor,
+                temporalMinDwellSeconds: config.temporalMinDwellSeconds,
+                temporalNeighborWindowSeconds: config.temporalNeighborWindowSeconds,
+                temporalRegularizationEnabled: config.temporalRegularizationEnabled,
+                transcriptBoundaryCueEnabled: config.transcriptBoundaryCueEnabled
+        )
+    }
+
+    private static func narrowingDefaults(
+        _ narrowing: NarrowingConfig
+    ) -> BaselineNarrowingDefaults {
+        BaselineNarrowingDefaults(
+            perAnchorPaddingSegments: narrowing.perAnchorPaddingSegments,
+            maxNarrowedSegmentsPerPhase: narrowing.maxNarrowedSegmentsPerPhase,
+            acousticBreakSnapMaxDistanceSeconds: narrowing.acousticBreakSnapMaxDistanceSeconds,
+            lexicalClusterSnapEnabled: narrowing.lexicalClusterSnapEnabled,
+            lexicalClusterGapSeconds: narrowing.lexicalClusterGapSeconds,
+            lexicalClusterMarginSegments: narrowing.lexicalClusterMarginSegments,
+            lexicalClusterMinHits: narrowing.lexicalClusterMinHits
+        )
+    }
+}
+
+private struct BaselineRuntimeIdentity: Encodable {
+    let osVersion: String
+    let architecture: String
+    let localeIdentifier: String
+    let xcodeVersionActual: String
+    let executableIdentity: String
+    let foundationModelsAvailability: String
+    let foundationModelsContextSize: Int
+
+    @available(iOS 26.0, *)
+    static func current() -> BaselineRuntimeIdentity {
+        #if arch(arm64)
+        let architecture = "arm64"
+        #elseif arch(x86_64)
+        let architecture = "x86_64"
+        #else
+        let architecture = "unknown"
+        #endif
+        #if canImport(FoundationModels)
+        let model = SystemLanguageModel.default
+        let availability = String(describing: model.availability)
+        #if compiler(>=6.3)
+        let contextSize = model.contextSize
+        #else
+        let contextSize = 0
+        #endif
+        #else
+        let availability = "framework_unavailable"
+        let contextSize = 0
+        #endif
+        let environment = ProcessInfo.processInfo.environment
+        let bundle = Bundle.main
+        let bundleIdentity = bundle.bundleIdentifier ?? "unknown-bundle"
+        let bundleVersion = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+            ?? "unknown-version"
+        return BaselineRuntimeIdentity(
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            architecture: architecture,
+            localeIdentifier: Locale.current.identifier,
+            xcodeVersionActual: environment["XCODE_VERSION_ACTUAL"] ?? "unavailable",
+            executableIdentity: "\(bundleIdentity)@\(bundleVersion)",
+            foundationModelsAvailability: availability,
+            foundationModelsContextSize: contextSize
+        )
+    }
+}
+
+private struct BaselineRawPayload: Encodable {
+    let schemaVersion: Int
+    let artifactKind: String
+    let runId: String
+    let capturedAtUtc: String
+    let sourceRevision: String
+    let evaluationSHA256: String
+    let productionConfig: BaselineProductionConfig
+    let runtime: BaselineRuntimeIdentity
+    let episodes: [BaselineEpisode]
+}
+
+private struct ProductionEpisodeRunResult {
+    let episode: DumpEpisode
+    let transcriptSHA256: String
+    let musicFeatures: [BaselineMusicFeature]
+}
+
+private struct StableTranscriptResult {
+    let chunks: [TranscriptChunk]
+    let sha256: String
+    let url: URL
+}
+
+private struct StableInputSnapshot {
+    let corpusRoot: URL
+    let audioURL: URL
+}
+
+private enum BaselineRawValidator {
+    private static let decisionStates: Set<String> = [
+        "applied", "candidate", "confirmed", "reverted", "suppressed"
+    ]
+    private static let musicBedLevels: Set<String> = [
+        "background", "foreground", "none"
+    ]
+
+    static func validate(
+        episodes: [BaselineEpisode],
+        evaluation: PartialSilverEvaluation
+    ) throws {
+        let assets = Dictionary(
+            uniqueKeysWithValues: evaluation.assets.map { ($0.episodeId, $0) }
+        )
+        guard episodes.count == PartialSilverEvaluationLoader.expectedAssetCount,
+              Set(episodes.map(\.episodeId)).count == episodes.count,
+              Set(episodes.map(\.episodeId)) == Set(assets.keys) else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "raw baseline membership is not the exact 27-asset evaluation"
+            )
+        }
+        for episode in episodes {
+            guard let asset = assets[episode.episodeId] else {
+                throw invalidEpisode(episode.episodeId)
+            }
+            try validate(episode, against: asset)
+        }
+    }
+
+    private static func validate(
+        _ episode: BaselineEpisode,
+        against asset: PartialSilverEvaluation.Asset
+    ) throws {
+        guard episode.audioFingerprint == asset.audioFingerprint,
+              episode.showName == asset.showName,
+              episode.durationSeconds.isFinite,
+              episode.durationSeconds > 0,
+              abs(episode.durationSeconds - asset.durationSeconds) <= 1.0,
+              isSHA256(episode.transcriptSHA256),
+              episode.predictions.count <= 4_096,
+              episode.musicFeatures.count <= 4_096 else {
+            throw invalidEpisode(episode.episodeId)
+        }
+        for prediction in episode.predictions {
+            guard prediction.startSeconds.isFinite,
+                  prediction.endSeconds.isFinite,
+                  prediction.confidence.isFinite,
+                  prediction.startSeconds >= 0,
+                  prediction.startSeconds < prediction.endSeconds,
+                  prediction.endSeconds <= episode.durationSeconds,
+                  (0...1).contains(prediction.confidence),
+                  decisionStates.contains(prediction.decisionState) else {
+                throw invalidEpisode(episode.episodeId)
+            }
+        }
+        var featureIntervals: Set<String> = []
+        for feature in episode.musicFeatures {
+            let values = [
+                feature.startSeconds, feature.endSeconds, feature.musicProbability,
+                feature.musicBedChangeScore, feature.musicBedOnsetScore,
+                feature.musicBedOffsetScore
+            ]
+            let interval = "\(feature.startSeconds)|\(feature.endSeconds)"
+            guard values.allSatisfy(\.isFinite),
+                  feature.startSeconds >= 0,
+                  feature.startSeconds < feature.endSeconds,
+                  feature.endSeconds <= episode.durationSeconds,
+                  values.dropFirst(2).allSatisfy({ (0...1).contains($0) }),
+                  musicBedLevels.contains(feature.musicBedLevel),
+                  featureIntervals.insert(interval).inserted else {
+                throw invalidEpisode(episode.episodeId)
+            }
+        }
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy {
+            CharacterSet(charactersIn: "0123456789abcdef").contains($0)
+        }
+    }
+
+    private static func invalidEpisode(_ episodeId: String) -> PipelineDumpRunError {
+        PipelineDumpRunError(
+            severity: .hard,
+            reason: "raw baseline contains invalid bounded data for \(episodeId)"
+        )
+    }
+}
+
+enum BaselineRawPublisher {
+    private static let requiredRunIds: Set<String> = [
+        "baseline-run-1", "baseline-run-2", "baseline-run-3"
+    ]
+    private static let runIdCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    )
+    private static let firstRunIdCharacters = CharacterSet.alphanumerics
+    private static let lowercaseHexCharacters = CharacterSet(
+        charactersIn: "0123456789abcdef"
+    )
+
+    enum PublishError: Error, CustomStringConvertible {
+        case invalidRunId
+        case invalidSourceRevision
+        case invalidOutputPath
+        case experimentOverride(String)
+        case unsafeOutputDirectory(URL)
+        case outputExists(URL)
+        case publicationFailed(String)
+
+        var description: String {
+            switch self {
+            case .invalidRunId:
+                return "PLAYHEAD_BASELINE_RUN_ID must be baseline-run-1, -2, or -3"
+            case .invalidSourceRevision:
+                return "PLAYHEAD_BASELINE_SOURCE_REVISION must be a 40-digit lowercase Git revision"
+            case .invalidOutputPath:
+                return "PLAYHEAD_BASELINE_OUTPUT_PATH must be an absolute path named for the run ID"
+            case .experimentOverride(let key):
+                return "production baseline forbids Foundation Models override \(key)"
+            case .unsafeOutputDirectory(let url):
+                return "baseline output directory is missing, symlinked, or aliased: \(url.path)"
+            case .outputExists(let url):
+                return "baseline raw output already exists; refusing overwrite: \(url.path)"
+            case .publicationFailed(let reason):
+                return "baseline raw publication failed: \(reason)"
+            }
+        }
+    }
+
+    static func validateRunId(_ value: String) throws -> String {
+        guard (1...64).contains(value.count),
+              value != ".", value != "..",
+              value.unicodeScalars.allSatisfy({ runIdCharacters.contains($0) }),
+              value.unicodeScalars.first.map({ firstRunIdCharacters.contains($0) }) == true,
+              requiredRunIds.contains(value) else {
+            throw PublishError.invalidRunId
+        }
+        return value
+    }
+
+    static func validateSourceRevision(_ value: String) throws -> String {
+        guard value.count == 40,
+              value.unicodeScalars.allSatisfy({ lowercaseHexCharacters.contains($0) }) else {
+            throw PublishError.invalidSourceRevision
+        }
+        return value
+    }
+
+    static func outputURL(path: String, runId: String) throws -> URL {
+        guard path.hasPrefix("/"),
+              !PartialSilverEvaluationLoader.containsTraversalComponent(path) else {
+            throw PublishError.invalidOutputPath
+        }
+        let outputURL = URL(fileURLWithPath: path).standardizedFileURL
+        let expectedName = "playhead-partial-silver-baseline-\(runId).json"
+        guard outputURL.lastPathComponent == expectedName else {
+            throw PublishError.invalidOutputPath
+        }
+        let directory = outputURL.deletingLastPathComponent()
+        guard let values = try? directory.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isAliasFileKey]
+        ), values.isDirectory == true,
+           values.isSymbolicLink != true,
+           values.isAliasFile != true,
+           !PartialSilverEvaluationLoader.hasUnsafeFilesystemComponent(directory) else {
+            throw PublishError.unsafeOutputDirectory(directory)
+        }
+        return outputURL
+    }
+
+    static func validateProductionEnvironment(_ environment: [String: String]) throws {
+        for key in [
+            "PLAYHEAD_FM_DROP_PREAMBLE",
+            "PLAYHEAD_FM_PROMPT_VARIANT",
+            "PLAYHEAD_FM_REDACT"
+        ] where environment[key] != nil {
+            throw PublishError.experimentOverride(key)
+        }
+    }
+
+    static func publish(
+        _ data: Data,
+        to outputURL: URL,
+        beforeLink: (() throws -> Void)? = nil
+    ) throws {
+        let directoryURL = outputURL.deletingLastPathComponent()
+        let directoryDescriptor: Int32
+        do {
+            directoryDescriptor = try PartialSilverEvaluationLoader.openDirectoryDescriptor(
+                at: directoryURL
+            )
+        } catch {
+            throw PublishError.unsafeOutputDirectory(directoryURL)
+        }
+        defer { Darwin.close(directoryDescriptor) }
+        let finalName = outputURL.lastPathComponent
+        var existing = stat()
+        let existingStatus = finalName.withCString {
+            fstatat(directoryDescriptor, $0, &existing, AT_SYMLINK_NOFOLLOW)
+        }
+        if existingStatus == 0 { throw PublishError.outputExists(outputURL) }
+        guard errno == ENOENT else {
+            throw PublishError.publicationFailed("cannot inspect destination")
+        }
+
+        let temporaryName = ".\(finalName).\(UUID().uuidString).tmp"
+        let temporaryDescriptor = temporaryName.withCString {
+            openat(
+                directoryDescriptor,
+                $0,
+                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                S_IRUSR | S_IWUSR
+            )
+        }
+        guard temporaryDescriptor >= 0 else {
+            throw PublishError.publicationFailed("cannot create private staging file")
+        }
+        defer {
+            Darwin.close(temporaryDescriptor)
+            temporaryName.withCString { _ = unlinkat(directoryDescriptor, $0, 0) }
+        }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                guard let baseAddress = bytes.baseAddress else { break }
+                let written = Darwin.write(
+                    temporaryDescriptor,
+                    baseAddress.advanced(by: offset),
+                    bytes.count - offset
+                )
+                if written < 0, errno == EINTR { continue }
+                guard written > 0 else {
+                    throw PublishError.publicationFailed("cannot write staged bytes")
+                }
+                offset += written
+            }
+        }
+        guard fsync(temporaryDescriptor) == 0 else {
+            throw PublishError.publicationFailed("cannot sync staged bytes")
+        }
+        try beforeLink?()
+        let linkStatus = temporaryName.withCString { temporaryPointer in
+            finalName.withCString { finalPointer in
+                linkat(
+                    directoryDescriptor,
+                    temporaryPointer,
+                    directoryDescriptor,
+                    finalPointer,
+                    0
+                )
+            }
+        }
+        if linkStatus != 0, errno == EEXIST {
+            throw PublishError.outputExists(outputURL)
+        }
+        guard linkStatus == 0, fsync(directoryDescriptor) == 0 else {
+            throw PublishError.publicationFailed("cannot link or sync final output")
+        }
+        let current: Int32
+        do {
+            current = try PartialSilverEvaluationLoader.openDirectoryDescriptor(at: directoryURL)
+        } catch {
+            throw PublishError.unsafeOutputDirectory(directoryURL)
+        }
+        defer { Darwin.close(current) }
+        var pinnedMetadata = stat()
+        var currentMetadata = stat()
+        guard fstat(directoryDescriptor, &pinnedMetadata) == 0,
+              fstat(current, &currentMetadata) == 0,
+              pinnedMetadata.st_dev == currentMetadata.st_dev,
+              pinnedMetadata.st_ino == currentMetadata.st_ino else {
+            throw PublishError.unsafeOutputDirectory(directoryURL)
+        }
+    }
+}
+
+enum BaselineSourceIdentity {
+    enum SourceError: Error, CustomStringConvertible {
+        case buildRevisionUnavailable
+        case revisionMismatch(declared: String, build: String)
+
+        var description: String {
+            switch self {
+            case .buildRevisionUnavailable:
+                return "production baseline build lacks a Git revision stamp"
+            case .revisionMismatch(let declared, let build):
+                return "declared source revision \(declared) does not match build \(build)"
+            }
+        }
+    }
+
+    static func resolve(declaredRevision: String) throws -> String {
+        try validate(
+            declaredRevision: declaredRevision,
+            buildRevision: BuildInfo.commitSHA
+        )
+        return declaredRevision
+    }
+
+    static func validate(declaredRevision: String, buildRevision: String) throws {
+        let declared = try BaselineRawPublisher.validateSourceRevision(declaredRevision)
+        let lowercaseHex = CharacterSet(charactersIn: "0123456789abcdef")
+        guard (7...40).contains(buildRevision.count),
+              buildRevision.unicodeScalars.allSatisfy({ lowercaseHex.contains($0) }) else {
+            throw SourceError.buildRevisionUnavailable
+        }
+        guard declared.hasPrefix(buildRevision) else {
+            throw SourceError.revisionMismatch(declared: declared, build: buildRevision)
+        }
+    }
+
+}
+
 // MARK: - Live test
 
 final class PipelineDumpLiveTests: XCTestCase {
@@ -442,17 +1616,20 @@ final class PipelineDumpLiveTests: XCTestCase {
         ProcessInfo.processInfo.environment["PLAYHEAD_PIPELINE_DUMP"] == "1"
     }
 
+    private static var partialSilverBaselineEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYHEAD_PARTIAL_SILVER_BASELINE"] == "1"
+    }
+
     override func setUp() async throws {
         try await super.setUp()
         try XCTSkipUnless(
-            Self.dumpEnabled,
+            Self.dumpEnabled || Self.partialSilverBaselineEnabled,
             """
-            One-shot pipeline dump on the 9 NEW corpus episodes is opt-in \
-            and SLOW (~9 full-FM passes on Mac Catalyst). Set \
-            PLAYHEAD_PIPELINE_DUMP=1 in the test plan env vars and run on \
-            Mac Catalyst (or an iOS 26 device) with Apple Intelligence \
-            enabled and corpus audio + transcripts staged. See the file \
-            header for the full invocation recipe.
+            Live production-path capture is opt-in and slow. Set either \
+            PLAYHEAD_PIPELINE_DUMP=1 for the legacy snapshot dump or \
+            PLAYHEAD_PARTIAL_SILVER_BASELINE=1 for the immutable 27-asset \
+            baseline, then run on Mac Catalyst with Apple Intelligence and \
+            retained corpus audio/transcripts available.
             """
         )
     }
@@ -464,6 +1641,15 @@ final class PipelineDumpLiveTests: XCTestCase {
             throw XCTSkip("Live FM BackfillJobRunner requires iOS 26+ / FoundationModels.")
         }
 
+        if Self.partialSilverBaselineEnabled {
+            try await capturePartialSilverProductionBaseline()
+            return
+        }
+
+        try await captureLegacySnapshotDump()
+    }
+
+    private func captureLegacySnapshotDump() async throws {
         let repoRoot = PipelineDumpManifestLoader.repoRoot()
 
         // Read the 9 NEW snapshot entries from the manifest. Missing or
@@ -487,8 +1673,8 @@ final class PipelineDumpLiveTests: XCTestCase {
 
         for entry in entries {
             do {
-                let row = try await runSingleEpisode(entry: entry, repoRoot: repoRoot)
-                dumpEpisodes.append(row)
+                let result = try await runSingleEpisode(entry: entry, repoRoot: repoRoot)
+                dumpEpisodes.append(result.episode)
             } catch let error as PipelineDumpRunError {
                 switch error.severity {
                 case .hard:
@@ -556,7 +1742,108 @@ final class PipelineDumpLiveTests: XCTestCase {
             )
         }
     }
+}
 
+private extension PipelineDumpLiveTests {
+    @available(iOS 26.0, *)
+    private func capturePartialSilverProductionBaseline() async throws {
+        let sourceRoot = PipelineDumpManifestLoader.repoRoot()
+        let evaluation = try PartialSilverEvaluationLoader.load(sourceRoot: sourceRoot)
+        let corpusRoot = try PartialSilverEvaluationLoader.validatedCorpusRoot(
+            sourceRoot: sourceRoot
+        )
+        let environment = ProcessInfo.processInfo.environment
+        try BaselineRawPublisher.validateProductionEnvironment(environment)
+        let runId = try BaselineRawPublisher.validateRunId(
+            XCTUnwrap(environment["PLAYHEAD_BASELINE_RUN_ID"])
+        )
+        let declaredSourceRevision = try BaselineRawPublisher.validateSourceRevision(
+            XCTUnwrap(environment["PLAYHEAD_BASELINE_SOURCE_REVISION"])
+        )
+        let sourceRevision = try BaselineSourceIdentity.resolve(
+            declaredRevision: declaredSourceRevision
+        )
+        let outputURL = try BaselineRawPublisher.outputURL(
+            path: XCTUnwrap(environment["PLAYHEAD_BASELINE_OUTPUT_PATH"]),
+            runId: runId
+        )
+
+        var episodes: [BaselineEpisode] = []
+        for asset in evaluation.assets.sorted(by: { $0.episodeId < $1.episodeId }) {
+            let audioURL = try PartialSilverEvaluationLoader.audioURL(
+                for: asset,
+                corpusRoot: corpusRoot
+            )
+            let showHash = PartialSilverEvaluationLoader.sha256Hex(Data(asset.showName.utf8))
+            let entry = PipelineDumpSnapshotEntry(
+                show: asset.showName,
+                showSlug: "partial-silver-\(showHash.prefix(16))",
+                episodeId: asset.episodeId,
+                publishDate: "partial-silver",
+                audioPath: "TestFixtures/Corpus/Audio/\(audioURL.lastPathComponent)",
+                sha256: String(asset.audioFingerprint.dropFirst("sha256:".count))
+            )
+            let edges = asset.fullBreaks.flatMap { [$0.startSeconds, $0.endSeconds] }
+            let result = try await runSingleEpisode(
+                entry: entry,
+                repoRoot: corpusRoot,
+                musicBoundaryEdges: edges
+            )
+            guard abs(result.episode.episodeDurationSeconds - asset.durationSeconds) <= 1.0 else {
+                throw PipelineDumpRunError(
+                    severity: .hard,
+                    reason: "decoded duration differs from partial-silver artifact for \(asset.episodeId)"
+                )
+            }
+            episodes.append(BaselineEpisode(
+                episodeId: asset.episodeId,
+                showName: asset.showName,
+                audioFingerprint: result.episode.audioFingerprint,
+                transcriptSHA256: result.transcriptSHA256,
+                durationSeconds: result.episode.episodeDurationSeconds,
+                predictions: result.episode.adWindows.map(BaselinePrediction.init),
+                musicFeatures: result.musicFeatures
+            ))
+        }
+        guard episodes.count == PartialSilverEvaluationLoader.expectedAssetCount,
+              Set(episodes.map(\.episodeId)).count == episodes.count else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "baseline did not produce exactly 27 unique evaluation episodes"
+            )
+        }
+        try BaselineRawValidator.validate(episodes: episodes, evaluation: evaluation)
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let runtime = BaselineRuntimeIdentity.current()
+        guard runtime.foundationModelsAvailability == "available" else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "Foundation Models runtime is not available for production capture"
+            )
+        }
+        let payload = BaselineRawPayload(
+            schemaVersion: 1,
+            artifactKind: "unchanged_production_partial_silver_raw",
+            runId: runId,
+            capturedAtUtc: formatter.string(from: Date()),
+            sourceRevision: sourceRevision,
+            evaluationSHA256: PartialSilverEvaluationLoader.evaluationSHA256,
+            productionConfig: BaselineProductionConfig.current(),
+            runtime: runtime,
+            episodes: episodes
+        )
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(payload)
+        try BaselineRawPublisher.publish(data, to: outputURL)
+        print("Partial-silver unchanged-production raw capture: \(outputURL.path)")
+    }
+}
+
+private extension PipelineDumpLiveTests {
     // MARK: - Single-episode run
 
     /// Run `runBackfill` once for a single manifest entry under production
@@ -570,36 +1857,44 @@ final class PipelineDumpLiveTests: XCTestCase {
     @available(iOS 26.0, *)
     private func runSingleEpisode(
         entry: PipelineDumpSnapshotEntry,
-        repoRoot: URL
-    ) async throws -> DumpEpisode {
+        repoRoot: URL,
+        musicBoundaryEdges: [Double] = []
+    ) async throws -> ProductionEpisodeRunResult {
         let episodeId = entry.episodeId
 
         // Resolve audio file from the manifest's repo-root-relative path.
-        let audioURL = try PipelineDumpManifestLoader.audioURL(for: entry, repoRoot: repoRoot)
-        guard FileManager.default.fileExists(atPath: audioURL.path) else {
+        let sourceAudioURL = try PipelineDumpManifestLoader.audioURL(for: entry, repoRoot: repoRoot)
+        guard FileManager.default.fileExists(atPath: sourceAudioURL.path) else {
             throw PipelineDumpRunError(
                 severity: .soft,
-                reason: "audio file not staged at \(audioURL.path)"
+                reason: "audio file not staged at \(sourceAudioURL.path)"
             )
         }
-        guard let audioValues = try? audioURL.resourceValues(
+        guard let audioValues = try? sourceAudioURL.resourceValues(
             forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
         ), audioValues.isRegularFile == true, audioValues.isSymbolicLink != true else {
             throw PipelineDumpRunError(
                 severity: .hard,
-                reason: "audio at \(audioURL.path) is not a regular unaliased file"
-            )
-        }
-        guard let localURL = LocalAudioURL(audioURL) else {
-            throw PipelineDumpRunError(
-                severity: .hard,
-                reason: "audio at \(audioURL.path) is not a file URL"
+                reason: "audio at \(sourceAudioURL.path) is not a regular unaliased file"
             )
         }
         guard let expectedHash = entry.sha256 else {
             throw PipelineDumpRunError(
                 severity: .hard,
                 reason: "snapshot manifest lacks sha256 for \(episodeId)"
+            )
+        }
+        let inputSnapshot = try snapshotInputs(
+            episodeId: episodeId,
+            sourceAudioURL: sourceAudioURL,
+            sourceRoot: repoRoot,
+            expectedAudioSHA256: expectedHash
+        )
+        let audioURL = inputSnapshot.audioURL
+        guard let localURL = LocalAudioURL(audioURL) else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "snapshotted audio at \(audioURL.path) is not a file URL"
             )
         }
         let audioFingerprint = try CorpusAudioFingerprint.fingerprint(of: audioURL)
@@ -614,26 +1909,18 @@ final class PipelineDumpLiveTests: XCTestCase {
         // chapter-plan snapshot capture uses. A MISSING transcript is a
         // HARD failure here — per the task, the snapshot pipeline should
         // have produced one for each manifest entry.
-        let transcript: [TranscriptChunk]
-        do {
-            transcript = try CorpusTranscriptLoader.load(
-                episodeId: episodeId,
-                repoRoot: repoRoot,
-                audioURL: audioURL
-            )
-        } catch {
-            throw PipelineDumpRunError(
-                severity: .hard,
-                reason: "transcript decode failed: \(error.localizedDescription)"
-            )
-        }
+        let transcriptResult = try loadStableTranscript(
+            episodeId: episodeId,
+            repoRoot: inputSnapshot.corpusRoot,
+            audioURL: audioURL
+        )
+        let transcript = transcriptResult.chunks
         guard !transcript.isEmpty else {
             throw PipelineDumpRunError(
                 severity: .hard,
                 reason: "transcript sidecar empty/absent for \(episodeId) — snapshot pipeline should have produced one"
             )
         }
-
         // Fresh store so this run never observes any previous episode's
         // persisted windows or planner state.
         let storeDir = try makeTempDir(prefix: "PipelineDumpLive-\(episodeId)")
@@ -711,7 +1998,6 @@ final class PipelineDumpLiveTests: XCTestCase {
 
         let service = AdDetectionService(
             store: store,
-            classifier: RuleBasedClassifier(),
             metadataExtractor: FallbackExtractor(),
             config: config,
             backfillJobRunnerFactory: Self.makeLiveRunnerFactory(),
@@ -778,7 +2064,9 @@ final class PipelineDumpLiveTests: XCTestCase {
             await service.spanFinalizerConstraintsByWindowIdForTesting()
 
         let dumpWindows: [DumpAdWindow] = windows
-            .sorted { $0.startTime < $1.startTime }
+            .sorted {
+                ($0.startTime, $0.endTime, $0.id) < ($1.startTime, $1.endTime, $1.id)
+            }
             .map { window in
                 // playhead-4xqf FUSION_DROP probe: re-feed the PERSISTED
                 // AdWindow bounds back into the legacy
@@ -840,7 +2128,10 @@ final class PipelineDumpLiveTests: XCTestCase {
             }
 
         let dumpDecodedSpans: [DumpDecodedSpan] = decodedSpanRows
-            .sorted { $0.spanStart < $1.spanStart }
+            .sorted {
+                ($0.spanStart, $0.spanEnd, $0.spanId)
+                    < ($1.spanStart, $1.spanEnd, $1.spanId)
+            }
             .map {
                 DumpDecodedSpan(
                     spanId: $0.spanId,
@@ -852,15 +2143,149 @@ final class PipelineDumpLiveTests: XCTestCase {
                 )
             }
 
-        return DumpEpisode(
-            episodeId: episodeId,
-            audioFingerprint: audioFingerprint,
-            showSlug: entry.showSlug,
-            publishDate: entry.publishDate,
-            episodeDurationSeconds: episodeDuration,
-            candidateDecodedSpans: decodedSpanCount,
-            candidateDecodedSpanList: dumpDecodedSpans,
-            adWindows: dumpWindows
+        let musicFeatures = Self.musicFeatures(
+            featureWindows,
+            around: musicBoundaryEdges
+        )
+        let finalAudioFingerprint = try CorpusAudioFingerprint.fingerprint(of: audioURL)
+        guard finalAudioFingerprint == audioFingerprint else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "audio changed during production capture for \(episodeId)"
+            )
+        }
+        let finalTranscriptSHA256 = try PartialSilverEvaluationLoader.fileSHA256Hex(
+            transcriptResult.url,
+            maximumBytes: 128 * 1_024 * 1_024
+        )
+        guard finalTranscriptSHA256 == transcriptResult.sha256 else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "transcript changed during production capture for \(episodeId)"
+            )
+        }
+        return ProductionEpisodeRunResult(
+            episode: DumpEpisode(
+                episodeId: episodeId,
+                audioFingerprint: audioFingerprint,
+                showSlug: entry.showSlug,
+                publishDate: entry.publishDate,
+                episodeDurationSeconds: episodeDuration,
+                candidateDecodedSpans: decodedSpanCount,
+                candidateDecodedSpanList: dumpDecodedSpans,
+                adWindows: dumpWindows
+            ),
+            transcriptSHA256: finalTranscriptSHA256,
+            musicFeatures: musicFeatures
+        )
+    }
+
+    private static func musicFeatures(
+        _ windows: [FeatureWindow],
+        around boundaryEdges: [Double]
+    ) -> [BaselineMusicFeature] {
+        windows
+            .filter { window in
+                boundaryEdges.contains { edge in
+                    window.endTime > edge - 8.0 && window.startTime < edge + 8.0
+                }
+            }
+            .sorted {
+                ($0.startTime, $0.endTime) < ($1.startTime, $1.endTime)
+            }
+            .map(BaselineMusicFeature.init)
+    }
+}
+
+private extension PipelineDumpLiveTests {
+    private func snapshotInputs(
+        episodeId: String,
+        sourceAudioURL: URL,
+        sourceRoot: URL,
+        expectedAudioSHA256: String
+    ) throws -> StableInputSnapshot {
+        let root = try makeTempDir(prefix: "PipelineDumpInput-\(episodeId)")
+        let audioDirectory = root.appendingPathComponent(
+            "TestFixtures/Corpus/Audio",
+            isDirectory: true
+        )
+        let transcriptDirectory = root.appendingPathComponent(
+            "TestFixtures/Corpus/Transcripts",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: audioDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: transcriptDirectory,
+            withIntermediateDirectories: true
+        )
+        let audioURL = audioDirectory.appendingPathComponent(sourceAudioURL.lastPathComponent)
+        let audioSHA256 = try PartialSilverEvaluationLoader.snapshotRegularFile(
+            at: sourceAudioURL,
+            to: audioURL,
+            maximumBytes: 4 * 1_024 * 1_024 * 1_024
+        )
+        guard audioSHA256 == expectedAudioSHA256 else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "audio fingerprint differs while snapshotting \(episodeId)"
+            )
+        }
+        let sourceTranscriptURL = try PartialSilverEvaluationLoader.transcriptURL(
+            for: episodeId,
+            corpusRoot: sourceRoot
+        )
+        let transcriptURL = transcriptDirectory.appendingPathComponent("\(episodeId).json")
+        _ = try PartialSilverEvaluationLoader.snapshotRegularFile(
+            at: sourceTranscriptURL,
+            to: transcriptURL,
+            maximumBytes: 128 * 1_024 * 1_024
+        )
+        return StableInputSnapshot(corpusRoot: root, audioURL: audioURL)
+    }
+
+    private func loadStableTranscript(
+        episodeId: String,
+        repoRoot: URL,
+        audioURL: URL
+    ) throws -> StableTranscriptResult {
+        let transcriptURL = try PartialSilverEvaluationLoader.transcriptURL(
+            for: episodeId,
+            corpusRoot: repoRoot
+        )
+        let before = try PartialSilverEvaluationLoader.fileSHA256Hex(
+            transcriptURL,
+            maximumBytes: 128 * 1_024 * 1_024
+        )
+        let chunks: [TranscriptChunk]
+        do {
+            chunks = try CorpusTranscriptLoader.load(
+                episodeId: episodeId,
+                repoRoot: repoRoot,
+                audioURL: audioURL
+            )
+        } catch {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "transcript decode failed: \(error.localizedDescription)"
+            )
+        }
+        let after = try PartialSilverEvaluationLoader.fileSHA256Hex(
+            transcriptURL,
+            maximumBytes: 128 * 1_024 * 1_024
+        )
+        guard after == before else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "transcript changed while loading \(episodeId)"
+            )
+        }
+        return StableTranscriptResult(
+            chunks: chunks,
+            sha256: after,
+            url: transcriptURL
         )
     }
 
@@ -897,7 +2322,12 @@ final class PipelineDumpLiveTests: XCTestCase {
         -> (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)
     {
         { store, mode in
-            let redactor = (try? PromptRedactor.loadDefault()) ?? .noop
+            let redactor: PromptRedactor
+            do {
+                redactor = try PromptRedactor.loadDefault()
+            } catch {
+                preconditionFailure("PromptRedactor.loadDefault failed: \(error)")
+            }
             let router = SensitiveWindowRouter(redactor: redactor)
             let permissiveClassifierBox: BackfillJobRunner.PermissiveClassifierBox?
             if #available(iOS 26.0, *) {
@@ -908,14 +2338,14 @@ final class PipelineDumpLiveTests: XCTestCase {
             return BackfillJobRunner(
                 store: store,
                 admissionController: AdmissionController(),
-                // No `runtime:` argument ⇒ FoundationModelClassifier uses
-                // its live runtime against `SystemLanguageModel.default`.
-                classifier: FoundationModelClassifier(),
+                classifier: PlayheadRuntime.makeFoundationModelClassifier(
+                    redactor: redactor
+                ),
                 coveragePlanner: CoveragePlanner(),
                 mode: mode,
                 capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
                 batteryLevelProvider: { 1.0 },
-                scanCohortJSON: makeTestScanCohortJSON(promptLabel: "pipeline-dump-new9"),
+                scanCohortJSON: ScanCohort.productionJSON(),
                 sensitiveRouter: router,
                 permissiveClassifier: permissiveClassifierBox,
                 // Production-default narrowing — the shipped state for
@@ -973,6 +2403,317 @@ private struct PipelineDumpRunError: Error {
 /// simulator with NO env var — they neither read audio nor hit FM.
 struct PipelineDumpHermeticTests {
 
+    @Test("tracked partial-silver artifact is content-addressed and selects exactly 27 assets")
+    func partialSilverArtifactSelectsExactCohort() throws {
+        let sourceRoot = PipelineDumpManifestLoader.repoRoot()
+        let evaluation = try PartialSilverEvaluationLoader.load(sourceRoot: sourceRoot)
+
+        #expect(evaluation.assets.count == 27)
+        #expect(Set(evaluation.assets.map(\.episodeId)).count == 27)
+        #expect(Set(evaluation.assets.map(\.audioFingerprint)).count == 27)
+        #expect(evaluation.assets.reduce(0) { $0 + $1.fullBreaks.count } == 20)
+        #expect(evaluation.assets.reduce(0) { $0 + $1.presenceAnchors.count } == 20)
+        #expect(evaluation.assets.reduce(0) { $0 + $1.contentVetoes.count } == 24)
+    }
+
+    @Test("partial-silver bounded reader pins the opened inode across parent swaps")
+    func partialSilverReaderPinsOpenedInput() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "partial-silver-reader-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let source = root.appendingPathComponent("source", isDirectory: true)
+        let hostile = root.appendingPathComponent("hostile", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: hostile, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let input = source.appendingPathComponent("input.json")
+        try Data("expected".utf8).write(to: input)
+        try Data("substituted".utf8).write(
+            to: hostile.appendingPathComponent("input.json")
+        )
+
+        let data = try PartialSilverEvaluationLoader.readRegularBytes(
+            at: input,
+            maximumBytes: 64
+        ) {
+            try FileManager.default.moveItem(
+                at: source,
+                to: root.appendingPathComponent("original", isDirectory: true)
+            )
+            try FileManager.default.createSymbolicLink(
+                at: source,
+                withDestinationURL: hostile
+            )
+        }
+
+        #expect(data == Data("expected".utf8))
+    }
+
+    @Test("partial-silver loader rejects hash, schema, count, identity, and fingerprint drift")
+    func partialSilverArtifactRejectsDrift() throws {
+        let sourceRoot = PipelineDumpManifestLoader.repoRoot()
+        let sourceURL = sourceRoot.appendingPathComponent(
+            PartialSilverEvaluationLoader.relativePath
+        )
+        let sourceData = try Data(contentsOf: sourceURL)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "partial-silver-loader-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let wrongName = directory.appendingPathComponent(
+            "earaudit-partial-silver-\(String(repeating: "0", count: 64)).json"
+        )
+        try sourceData.write(to: wrongName)
+        #expect(throws: PartialSilverEvaluationLoader.LoadError.self) {
+            _ = try PartialSilverEvaluationLoader.decode(at: wrongName)
+        }
+
+        var root = try #require(
+            JSONSerialization.jsonObject(with: sourceData) as? [String: Any]
+        )
+        let originalAssets = try #require(root["assets"] as? [[String: Any]])
+        let mutations: [([String: Any]) -> [String: Any]] = [
+            { document in
+                var changed = document
+                changed["schema_version"] = 2
+                return changed
+            },
+            { document in
+                var changed = document
+                changed["assets"] = Array(originalAssets.dropLast())
+                return changed
+            },
+            { document in
+                var changed = document
+                changed["assets"] = originalAssets + [originalAssets[0]]
+                return changed
+            },
+            { document in
+                var changed = document
+                var assets = originalAssets
+                assets[1]["episode_id"] = assets[0]["episode_id"]
+                changed["assets"] = assets
+                return changed
+            },
+            { document in
+                var changed = document
+                var assets = originalAssets
+                assets[1]["audio_fingerprint"] = assets[0]["audio_fingerprint"]
+                changed["assets"] = assets
+                return changed
+            },
+            { document in
+                var changed = document
+                var assets = originalAssets
+                assets[0]["audio_fingerprint"] = "sha256:not-a-digest"
+                changed["assets"] = assets
+                return changed
+            },
+        ]
+        for mutate in mutations {
+            root = mutate(root)
+            let bytes = try JSONSerialization.data(
+                withJSONObject: root,
+                options: [.sortedKeys]
+            )
+            let digest = PartialSilverEvaluationLoader.sha256Hex(bytes)
+            let url = directory.appendingPathComponent(
+                "earaudit-partial-silver-\(digest).json"
+            )
+            try bytes.write(to: url)
+            #expect(throws: PartialSilverEvaluationLoader.LoadError.self) {
+                _ = try PartialSilverEvaluationLoader.decode(at: url)
+            }
+            root = try #require(
+                JSONSerialization.jsonObject(with: sourceData) as? [String: Any]
+            )
+        }
+    }
+
+    @Test("retained audio resolver requires one regular exact-fingerprint member")
+    func partialSilverAudioMembershipIsExact() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "partial-silver-audio-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let directory = root.appendingPathComponent("TestFixtures/Corpus/Audio")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bytes = Data("retained audio".utf8)
+        let fingerprint = "sha256:\(PartialSilverEvaluationLoader.sha256Hex(bytes))"
+        let asset = PartialSilverEvaluation.Asset(
+            audioFingerprint: fingerprint,
+            contentVetoes: [],
+            durationSeconds: 1,
+            episodeId: "episode",
+            fullBreaks: [],
+            presenceAnchors: [],
+            showName: "Show"
+        )
+
+        #expect(throws: PartialSilverEvaluationLoader.LoadError.self) {
+            _ = try PartialSilverEvaluationLoader.audioURL(for: asset, corpusRoot: root)
+        }
+        let first = directory.appendingPathComponent("episode.mp3")
+        try bytes.write(to: first)
+        #expect(try PartialSilverEvaluationLoader.audioURL(for: asset, corpusRoot: root) == first)
+
+        let second = directory.appendingPathComponent("episode.wav")
+        try bytes.write(to: second)
+        #expect(throws: PartialSilverEvaluationLoader.LoadError.self) {
+            _ = try PartialSilverEvaluationLoader.audioURL(for: asset, corpusRoot: root)
+        }
+        try FileManager.default.removeItem(at: second)
+        try Data("wrong bytes".utf8).write(to: first)
+        #expect(throws: PartialSilverEvaluationLoader.LoadError.self) {
+            _ = try PartialSilverEvaluationLoader.audioURL(for: asset, corpusRoot: root)
+        }
+
+        try FileManager.default.removeItem(at: directory)
+        let realDirectory = root.appendingPathComponent("RealAudio", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: realDirectory,
+            withIntermediateDirectories: false
+        )
+        try bytes.write(to: realDirectory.appendingPathComponent("episode.mp3"))
+        try FileManager.default.createSymbolicLink(
+            at: directory,
+            withDestinationURL: realDirectory
+        )
+        #expect(throws: PartialSilverEvaluationLoader.LoadError.self) {
+            _ = try PartialSilverEvaluationLoader.audioURL(for: asset, corpusRoot: root)
+        }
+    }
+
+    @Test("raw publisher validates identities and atomically refuses overwrite")
+    func baselineRawPublisherRefusesOverwrite() throws {
+        #expect(throws: BaselineRawPublisher.PublishError.self) {
+            _ = try BaselineRawPublisher.validateRunId("../escape")
+        }
+        #expect(throws: BaselineRawPublisher.PublishError.self) {
+            _ = try BaselineRawPublisher.validateSourceRevision("not-a-revision")
+        }
+        #expect(throws: BaselineRawPublisher.PublishError.self) {
+            _ = try BaselineRawPublisher.validateRunId("run-001")
+        }
+        #expect(
+            try BaselineRawPublisher.validateRunId("baseline-run-1") == "baseline-run-1"
+        )
+        #expect(
+            try BaselineRawPublisher.validateSourceRevision(String(repeating: "a", count: 40))
+                == String(repeating: "a", count: 40)
+        )
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "partial-silver-publisher-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(throws: BaselineRawPublisher.PublishError.self) {
+            _ = try BaselineRawPublisher.outputURL(
+                path: "relative.json",
+                runId: "baseline-run-1"
+            )
+        }
+        #expect(throws: BaselineRawPublisher.PublishError.self) {
+            _ = try BaselineRawPublisher.outputURL(
+                path: directory.appendingPathComponent("wrong.json").path,
+                runId: "baseline-run-1"
+            )
+        }
+        #expect(throws: BaselineRawPublisher.PublishError.self) {
+            _ = try BaselineRawPublisher.outputURL(
+                path: directory.path
+                    + "/../playhead-partial-silver-baseline-baseline-run-1.json",
+                runId: "baseline-run-1"
+            )
+        }
+        #expect(throws: BaselineRawPublisher.PublishError.self) {
+            try BaselineRawPublisher.validateProductionEnvironment([
+                "PLAYHEAD_FM_PROMPT_VARIANT": "extract"
+            ])
+        }
+        try BaselineRawPublisher.validateProductionEnvironment([:])
+        let output = try BaselineRawPublisher.outputURL(
+            path: directory
+                .appendingPathComponent(
+                    "playhead-partial-silver-baseline-baseline-run-1.json"
+                )
+                .path,
+            runId: "baseline-run-1"
+        )
+        let first = Data("first".utf8)
+        try BaselineRawPublisher.publish(first, to: output)
+        #expect(try Data(contentsOf: output) == first)
+        #expect(throws: BaselineRawPublisher.PublishError.self) {
+            try BaselineRawPublisher.publish(Data("second".utf8), to: output)
+        }
+        #expect(try Data(contentsOf: output) == first)
+    }
+
+    @Test("baseline source identity requires the declared clean HEAD revision")
+    func baselineSourceIdentityRejectsMismatch() throws {
+        let revision = String(repeating: "a", count: 40)
+        try BaselineSourceIdentity.validate(
+            declaredRevision: revision,
+            buildRevision: String(revision.prefix(12))
+        )
+        #expect(throws: BaselineSourceIdentity.SourceError.self) {
+            try BaselineSourceIdentity.validate(
+                declaredRevision: revision,
+                buildRevision: String(repeating: "b", count: 12)
+            )
+        }
+        #expect(throws: BaselineSourceIdentity.SourceError.self) {
+            try BaselineSourceIdentity.validate(
+                declaredRevision: revision,
+                buildRevision: "unknown"
+            )
+        }
+    }
+
+    @Test("raw publisher pins its output directory across a parent swap")
+    func baselineRawPublisherPinsOutputDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "partial-silver-publisher-swap-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let outputDirectory = root.appendingPathComponent("output", isDirectory: true)
+        let hostile = root.appendingPathComponent("hostile", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: outputDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(at: hostile, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let filename = "playhead-partial-silver-baseline-baseline-run-1.json"
+        let output = outputDirectory.appendingPathComponent(filename)
+        let bytes = Data("pinned bytes".utf8)
+
+        #expect(throws: BaselineRawPublisher.PublishError.self) {
+            try BaselineRawPublisher.publish(bytes, to: output) {
+                try FileManager.default.moveItem(
+                    at: outputDirectory,
+                    to: root.appendingPathComponent("original", isDirectory: true)
+                )
+                try FileManager.default.createSymbolicLink(
+                    at: outputDirectory,
+                    withDestinationURL: hostile
+                )
+            }
+        }
+
+        #expect(try FileManager.default.contentsOfDirectory(atPath: hostile.path).isEmpty)
+        #expect(try Data(contentsOf: root.appendingPathComponent("original/\(filename)")) == bytes)
+    }
+}
+
+extension PipelineDumpHermeticTests {
     @Test("snapshot manifest decodes and lists the expected 9 episodes")
     func manifestDecodesNineEpisodes() throws {
         let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -1084,6 +2825,46 @@ struct PipelineDumpHermeticTests {
         // flagOffMatchesDefaultBaseline`) would catch the AdWindow drift
         // but the dump-schema drift would land here.
         #expect(cfg.spanFinalizerEnabled == false, "spanFinalizerEnabled must be off in production .default")
+
+        let narrowing = NarrowingConfig.default
+        #expect(narrowing.perAnchorPaddingSegments == 5)
+        #expect(narrowing.maxNarrowedSegmentsPerPhase == 60)
+        #expect(narrowing.acousticBreakSnapMaxDistanceSeconds == 2.0)
+        #expect(narrowing.lexicalClusterSnapEnabled == true)
+        #expect(narrowing.lexicalClusterGapSeconds == 8.0)
+        #expect(narrowing.lexicalClusterMarginSegments == 3)
+        #expect(narrowing.lexicalClusterMinHits == 1)
+    }
+
+    @Test("raw config captures every output-affecting production default")
+    func baselineConfigSchemaIsComplete() throws {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let data = try encoder.encode(BaselineProductionConfig.current())
+        let root = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let defaults = try #require(
+            root["ad_detection_defaults"] as? [String: Any]
+        )
+        #expect(Set(defaults.keys) == baselineAdDetectionDefaultKeys)
+        #expect(root["entry_point"] as? String == "AdDetectionService.runBackfill")
+        #expect(
+            root["hot_path_classifier_identity"] as? String
+                == "CoreMLSequenceClassifier()"
+        )
+        #expect(
+            root["runner_admission_identity"] as? String
+                == "permissive_capability_snapshot+battery_level_1.0"
+        )
+        #expect(root["scan_cohort_identity"] as? String == "ScanCohort.productionJSON")
+        #expect(
+            root["foundation_model_redactor_identity"] as? String
+                == "PromptRedactor.loadDefault"
+        )
+        #expect(defaults["bracket_refinement_enabled"] as? Bool == true)
+        #expect(defaults["transcript_boundary_cue_enabled"] as? Bool == true)
+        #expect(defaults["rediff_slot_ownership_enabled"] as? Bool == false)
     }
 }
 
