@@ -3005,6 +3005,17 @@ class CorpusWorkflowIntegrityTests(unittest.TestCase):
             AUTO_PROMOTE._cluster_is_rejected(jittered_same_span, [reject]), reject
         )
 
+        exact_content = (100.0, 200.0)
+        self.assertEqual(
+            CANONICAL.matching_reject(150.0, 250.0, [exact_content]),
+            exact_content,
+        )
+        self.assertEqual(
+            CANONICAL.matching_reject(0.0, 300.0, [exact_content]),
+            exact_content,
+        )
+        self.assertIsNone(CANONICAL.matching_reject(200.0, 250.0, [exact_content]))
+
     def test_permanent_reject_veto_is_scoped_to_exact_audio_asset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = pathlib.Path(tmp) / "rejects.jsonl"

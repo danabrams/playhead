@@ -112,14 +112,14 @@ class DemotionTests(unittest.TestCase):
                     ))
         self.assertEqual(quarantined_fillers, expected_fillers)
 
-    def test_tracked_reject_ledger_preserves_history_and_nine_audit_scrubs(self) -> None:
+    def test_tracked_reject_ledger_preserves_prior_and_completed_review_vetoes(self) -> None:
         ledger = SCRIPT.parents[1] / "TestFixtures/Corpus/Snapshots/audit-rejects.jsonl"
         records = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
         identities = [
             (row["episodeId"], float(row["startSeconds"]), float(row["endSeconds"]))
             for row in records
         ]
-        expected_new_ids = {
+        expected_prior_ids = {
             "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros@3162.55-3196.13",
             "the-daily-show-ears-edition-2026-05-29-tds-time-machine-produce-pete-with-steve@718.30-738.75",
             "the-daily-show-ears-edition-2026-05-29-tds-time-machine-produce-pete-with-steve@879.81-904.97",
@@ -131,13 +131,22 @@ class DemotionTests(unittest.TestCase):
             "why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-of-ai-with-ti@83.76-195.03",
         }
 
-        self.assertEqual(len(records), 9)
-        self.assertEqual(len(set(identities)), 9)
+        self.assertEqual(len(records), 24)
+        self.assertEqual(len(set(identities)), 24)
         self.assertTrue(all(row["audioFingerprint"].startswith("sha256:") for row in records))
         self.assertTrue(all("assetBindingProvenance" in row for row in records))
         self.assertEqual(
             {row.get("id") for row in records if row.get("disposition") == "isolated_hallucination"},
-            expected_new_ids,
+            expected_prior_ids,
+        )
+        reviewed = [
+            row for row in records if row.get("disposition") == "ear_audit_rejected"
+        ]
+        self.assertEqual(len(reviewed), 15)
+        self.assertTrue(all(row.get("sourceReviewId") == row.get("id") for row in reviewed))
+        self.assertEqual(
+            {row.get("reviewArtifact", {}).get("sha256") for row in reviewed},
+            {"6b11a85754db5d1ea2fb0243b3b53fd2c61375e7ba54ad42c444102690b98e99"},
         )
 
     def test_complement_handles_leading_middle_trailing_and_adjacent_ads(self) -> None:

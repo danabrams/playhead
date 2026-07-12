@@ -16,6 +16,9 @@ TestFixtures/Corpus/
 │                            named `<episode_id>.<ext>`
 ├── Transcripts/           ← local ASR transcript JSON, ignored by git
 ├── Drafts/                ← generated draft annotations, ignored by git
+├── Audits/                ← immutable fingerprint-bound audit evidence
+├── Evaluations/           ← content-addressed partial silver label sets
+├── Snapshots/             ← active fingerprint-bound content vetoes
 └── Annotations/           ← per-episode JSON annotations
     ├── _canonical-manifest.json ← authoritative annotation membership
     ├── _template.example.json
@@ -198,6 +201,30 @@ music-bed boundary-calibration evidence and evaluate both edges against the
 full-break human bounds. This audit artifact remains review evidence only; it
 does not by itself enroll quarantined annotations or satisfy the independent
 artifact/reviewer requirements for gold.
+
+The deterministic reconciler publishes the usable subset of that evidence:
+
+```sh
+python3 scripts/l2f-reconcile-earaudit.py
+```
+
+The current output is
+`Evaluations/earaudit-partial-silver-0d85a0ec8bfa30873bad63bbc4bb12a3f7613aca76d5b76149e25db2a0be226f.json`.
+Its filename suffix is the SHA-256 of its exact bytes. It represents all 27
+fingerprint-bound assets with 20 human full-break labels, 20 standalone ad
+presence anchors, and 24 exact content vetoes. The two near-identical Mel
+Robbins reviews collapse conservatively to their intersection; five tight-ad
+rows attach as evidence without widening a human boundary. The active reject
+ledger contains the nine prior vetoes plus the 15 newly reviewed rejections.
+
+This artifact is deliberately **partial silver**, not canonical gold. A full
+break gives boundary truth only for that reviewed interval; a presence anchor
+establishes ad presence but not complete break edges; a content veto protects
+only its exact interval. The active reject ledger separately applies its
+conservative overlap rule when blocking unsafe promotion candidates; that
+guard does not expand the evaluation's content labels. Every other point on
+every timeline is `unknown_elsewhere`. In particular, the reconciler does not
+synthesize content complements or enroll anything in `Annotations/`.
 
 Promoter category coverage for this slice:
 

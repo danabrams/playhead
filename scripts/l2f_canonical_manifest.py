@@ -355,8 +355,13 @@ def canonical_manifest_lock(annotations_dir: Path):
             yield
         finally:
             held.discard(key)
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
+            # Closing the descriptor releases flock. A separate LOCK_UN can
+            # fail after a caller has durably committed and falsely turn that
+            # successful transaction into a reported failure.
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _atomic_write_bytes(path: Path, data: bytes, *, mode: int | None = None) -> None:
