@@ -1,0 +1,944 @@
+{
+  "history": [
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1ef484ca29f436230cd4ba671c47423b4726da636a1380796b9c135a501f2f1f",
+        "id": "american-scandal-2026-05-26-chappaquiddick-the-weight-of-the-name-5@924.37-947.06",
+        "note": "",
+        "proposed_end_seconds": 938.5,
+        "proposed_start_seconds": 878.1,
+        "reviewed_at": "2026-07-12T12:23:46Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:23:46Z",
+      "before": null,
+      "id": "american-scandal-2026-05-26-chappaquiddick-the-weight-of-the-name-5@924.37-947.06",
+      "sequence": 1
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:e8c6b4be730ea982ac42829555edef5c716d67ba31dd9f5f3b173d1ee581b262",
+        "id": "business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4@1864.10-1884.80",
+        "note": "",
+        "proposed_end_seconds": 1874.4,
+        "proposed_start_seconds": 1814.5,
+        "reviewed_at": "2026-07-12T12:24:24Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:24:24Z",
+      "before": null,
+      "id": "business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4@1864.10-1884.80",
+      "sequence": 2
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:b9dc85a6a7e8dc2beef8565adbee2949f6d70892ac6f0995f18f8e6efb06143e",
+        "id": "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros@1179.42-1269.13",
+        "note": "",
+        "proposed_end_seconds": 1279.4,
+        "proposed_start_seconds": 1196.9,
+        "reviewed_at": "2026-07-12T12:26:04Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:26:04Z",
+      "before": null,
+      "id": "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros@1179.42-1269.13",
+      "sequence": 3
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:b9dc85a6a7e8dc2beef8565adbee2949f6d70892ac6f0995f18f8e6efb06143e",
+        "id": "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros@1994.03-2071.11",
+        "note": "",
+        "proposed_end_seconds": 2087.2,
+        "proposed_start_seconds": 2005.5,
+        "reviewed_at": "2026-07-12T12:26:39Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:26:39Z",
+      "before": null,
+      "id": "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros@1994.03-2071.11",
+      "sequence": 4
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:4c213fd42aaba6c1fb234321c0143d77aaabdfc3007a8058f75321ddb009dd1b",
+        "id": "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@1293.70-1349.70",
+        "note": "",
+        "proposed_end_seconds": 1415.3,
+        "proposed_start_seconds": 1318.5,
+        "reviewed_at": "2026-07-12T12:28:22Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:28:22Z",
+      "before": null,
+      "id": "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@1293.70-1349.70",
+      "sequence": 5
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:4c213fd42aaba6c1fb234321c0143d77aaabdfc3007a8058f75321ddb009dd1b",
+        "id": "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@2523.48-2553.34",
+        "note": "",
+        "proposed_end_seconds": 2629.0,
+        "proposed_start_seconds": 2532.3,
+        "reviewed_at": "2026-07-12T12:29:24Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:29:24Z",
+      "before": null,
+      "id": "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@2523.48-2553.34",
+      "sequence": 6
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:4c213fd42aaba6c1fb234321c0143d77aaabdfc3007a8058f75321ddb009dd1b",
+        "id": "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@3669.75-3700.10",
+        "note": "",
+        "proposed_end_seconds": 3781.2,
+        "proposed_start_seconds": 3684.0,
+        "reviewed_at": "2026-07-12T12:30:18Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:30:18Z",
+      "before": null,
+      "id": "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@3669.75-3700.10",
+      "sequence": 7
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:b81865e6c4088082ec385752a6c48eb0987d6083f3a767c75106a76ca187d11d",
+        "id": "morbid-2026-05-21-the-matamoros-devil-murders-part-1@2487.83-2571.46",
+        "note": "",
+        "proposed_end_seconds": 2597.4,
+        "proposed_start_seconds": 2539.0,
+        "reviewed_at": "2026-07-12T12:31:11Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:31:11Z",
+      "before": null,
+      "id": "morbid-2026-05-21-the-matamoros-devil-murders-part-1@2487.83-2571.46",
+      "sequence": 8
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:fe46c5cbfa34db7742fd6ce67cbd55f53619570c29d0ef5891916c224fb6580d",
+        "id": "morbid-2026-05-25-the-matamoros-devil-murders-part-2@2441.56-2499.55",
+        "note": "",
+        "proposed_end_seconds": 2499.55,
+        "proposed_start_seconds": 2441.56,
+        "reviewed_at": "2026-07-12T12:31:29Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:31:29Z",
+      "before": null,
+      "id": "morbid-2026-05-25-the-matamoros-devil-murders-part-2@2441.56-2499.55",
+      "sequence": 9
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:4f07a8c048660fc6a1e437caf5a00d2c21add19b727b02e0519a1e6991324f19",
+        "id": "morbid-2026-05-28-listener-tales-110-playdates-with-the-pa@26.64-73.85",
+        "note": "",
+        "proposed_end_seconds": 88.0,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-12T12:32:41Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:32:41Z",
+      "before": null,
+      "id": "morbid-2026-05-28-listener-tales-110-playdates-with-the-pa@26.64-73.85",
+      "sequence": 10
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+        "id": "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@122.30-149.56",
+        "note": "",
+        "proposed_end_seconds": 141.7,
+        "proposed_start_seconds": 59.1,
+        "reviewed_at": "2026-07-12T12:33:35Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:33:35Z",
+      "before": null,
+      "id": "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@122.30-149.56",
+      "sequence": 11
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+        "id": "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@1039.70-1167.58",
+        "note": "",
+        "proposed_end_seconds": 1205.7,
+        "proposed_start_seconds": 1114.1,
+        "reviewed_at": "2026-07-12T12:35:02Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:35:02Z",
+      "before": null,
+      "id": "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@1039.70-1167.58",
+      "sequence": 12
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+        "id": "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@2382.36-2449.27",
+        "note": "",
+        "proposed_end_seconds": 2449.27,
+        "proposed_start_seconds": 2382.36,
+        "reviewed_at": "2026-07-12T12:42:25Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:42:25Z",
+      "before": null,
+      "id": "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@2382.36-2449.27",
+      "sequence": 13
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:0c11abce89c5a7e724b73cbc1f457e165784e134ad1cf12e90fdd0228b3c1046",
+        "id": "smartless-2026-05-11-quot-kareem-rahma-quot@2588.98-2660.59",
+        "note": "",
+        "proposed_end_seconds": 2660.59,
+        "proposed_start_seconds": 2588.98,
+        "reviewed_at": "2026-07-12T12:42:48Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:42:48Z",
+      "before": null,
+      "id": "smartless-2026-05-11-quot-kareem-rahma-quot@2588.98-2660.59",
+      "sequence": 14
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+        "id": "smartless-2026-05-25-quot-nick-jonas-quot@2702.77-2737.46",
+        "note": "",
+        "proposed_end_seconds": 2834.2,
+        "proposed_start_seconds": 2720.9,
+        "reviewed_at": "2026-07-12T12:44:15Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:44:15Z",
+      "before": null,
+      "id": "smartless-2026-05-25-quot-nick-jonas-quot@2702.77-2737.46",
+      "sequence": 15
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+        "id": "smartless-2026-05-25-quot-nick-jonas-quot@3970.29-4035.08",
+        "note": "",
+        "proposed_end_seconds": 4107.7,
+        "proposed_start_seconds": 4026.0,
+        "reviewed_at": "2026-07-12T12:45:26Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:45:26Z",
+      "before": null,
+      "id": "smartless-2026-05-25-quot-nick-jonas-quot@3970.29-4035.08",
+      "sequence": 16
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+        "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@1888.36-1922.05",
+        "note": "",
+        "proposed_end_seconds": 1922.05,
+        "proposed_start_seconds": 1888.36,
+        "reviewed_at": "2026-07-12T12:45:41Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:45:41Z",
+      "before": null,
+      "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@1888.36-1922.05",
+      "sequence": 17
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+        "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@1924.03-2003.68",
+        "note": "",
+        "proposed_end_seconds": 2003.68,
+        "proposed_start_seconds": 1924.03,
+        "reviewed_at": "2026-07-12T12:45:59Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:45:59Z",
+      "before": null,
+      "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@1924.03-2003.68",
+      "sequence": 18
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+        "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@2818.54-2851.24",
+        "note": "",
+        "proposed_end_seconds": 2851.24,
+        "proposed_start_seconds": 2818.54,
+        "reviewed_at": "2026-07-12T12:46:19Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:46:19Z",
+      "before": null,
+      "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@2818.54-2851.24",
+      "sequence": 19
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+        "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@4913.51-4950.80",
+        "note": "",
+        "proposed_end_seconds": 5003.5,
+        "proposed_start_seconds": 4958.1,
+        "reviewed_at": "2026-07-12T12:47:56Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:47:56Z",
+      "before": null,
+      "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@4913.51-4950.80",
+      "sequence": 20
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+        "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@4952.66-4980.90",
+        "note": "",
+        "proposed_end_seconds": 5003.5,
+        "proposed_start_seconds": 4957.8,
+        "reviewed_at": "2026-07-12T12:48:36Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:48:36Z",
+      "before": null,
+      "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@4952.66-4980.90",
+      "sequence": 21
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+        "id": "the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t@3200.45-3285.68",
+        "note": "",
+        "proposed_end_seconds": 3285.68,
+        "proposed_start_seconds": 3200.45,
+        "reviewed_at": "2026-07-12T12:49:10Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:49:10Z",
+      "before": null,
+      "id": "the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t@3200.45-3285.68",
+      "sequence": 22
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:2889b75d09332f7f59a68a2b7d3058b620c90eefbf6788218e5248ffebdfebbd",
+        "id": "the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os@2924.17-3014.86",
+        "note": "",
+        "proposed_end_seconds": 2937.7,
+        "proposed_start_seconds": 2846.6,
+        "reviewed_at": "2026-07-12T12:50:19Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:50:19Z",
+      "before": null,
+      "id": "the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os@2924.17-3014.86",
+      "sequence": 23
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:2889b75d09332f7f59a68a2b7d3058b620c90eefbf6788218e5248ffebdfebbd",
+        "id": "the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os@3015.97-3071.35",
+        "note": "",
+        "proposed_end_seconds": 3071.35,
+        "proposed_start_seconds": 3015.97,
+        "reviewed_at": "2026-07-12T12:50:37Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:50:37Z",
+      "before": null,
+      "id": "the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os@3015.97-3071.35",
+      "sequence": 24
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:d3f764b2ad64b017556d349d2e32eeb9216fac87617df1f24ee8ba9d76bd4008",
+        "id": "the-nikki-glaser-podcast-2025-03-07-516-nikki-the-famous-aunt-writers-room-m@62.69-124.76",
+        "note": "",
+        "proposed_end_seconds": 94.6,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-12T12:51:14Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:51:14Z",
+      "before": null,
+      "id": "the-nikki-glaser-podcast-2025-03-07-516-nikki-the-famous-aunt-writers-room-m@62.69-124.76",
+      "sequence": 25
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:d3f764b2ad64b017556d349d2e32eeb9216fac87617df1f24ee8ba9d76bd4008",
+        "id": "the-nikki-glaser-podcast-2025-03-07-516-nikki-the-famous-aunt-writers-room-m@1524.10-1599.92",
+        "note": "",
+        "proposed_end_seconds": 1599.92,
+        "proposed_start_seconds": 1524.1,
+        "reviewed_at": "2026-07-12T12:51:29Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:51:29Z",
+      "before": null,
+      "id": "the-nikki-glaser-podcast-2025-03-07-516-nikki-the-famous-aunt-writers-room-m@1524.10-1599.92",
+      "sequence": 26
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:eef28e3b42523ab3988bd32ef27ee70571420fb83f11b26876f2a5776c7a682c",
+        "id": "the-nikki-glaser-podcast-2025-03-13-517-the-glaser-exit@1783.99-1804.43",
+        "note": "",
+        "proposed_end_seconds": 1842.5,
+        "proposed_start_seconds": 1682.4,
+        "reviewed_at": "2026-07-12T12:52:55Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:52:55Z",
+      "before": null,
+      "id": "the-nikki-glaser-podcast-2025-03-13-517-the-glaser-exit@1783.99-1804.43",
+      "sequence": 27
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:eef28e3b42523ab3988bd32ef27ee70571420fb83f11b26876f2a5776c7a682c",
+        "id": "the-nikki-glaser-podcast-2025-03-13-517-the-glaser-exit@2677.47-2708.94",
+        "note": "",
+        "proposed_end_seconds": 2708.94,
+        "proposed_start_seconds": 2677.47,
+        "reviewed_at": "2026-07-12T12:53:10Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:53:10Z",
+      "before": null,
+      "id": "the-nikki-glaser-podcast-2025-03-13-517-the-glaser-exit@2677.47-2708.94",
+      "sequence": 28
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a172b800dee9a21529ffddd9d0c590032bca8927efcb574158b36d7a58573a1d",
+        "id": "up-first-2026-06-01-can-graham-platner-survive-another-contr@1992.88-2031.54",
+        "note": "",
+        "proposed_end_seconds": 2031.54,
+        "proposed_start_seconds": 1992.88,
+        "reviewed_at": "2026-07-12T12:53:30Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:53:30Z",
+      "before": null,
+      "id": "up-first-2026-06-01-can-graham-platner-survive-another-contr@1992.88-2031.54",
+      "sequence": 29
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:8ebccf85ddd47602a2846203f5f16e888da874b0868385948a3afdfb53fd1e58",
+        "id": "why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leading-the-way-wi@3110.13-3219.90",
+        "note": "",
+        "proposed_end_seconds": 3219.9,
+        "proposed_start_seconds": 3110.13,
+        "reviewed_at": "2026-07-12T12:53:58Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:53:58Z",
+      "before": null,
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leading-the-way-wi@3110.13-3219.90",
+      "sequence": 30
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:34542a8aa5335ad3823fcbab18c6a25264e4fb5b04e070dfaa242966ea25bf8c",
+        "id": "why-is-this-happening-the-chris-hayes-po-2026-05-12-the-ai-end-game-how-work-is-changing-wit@2512.12-2591.06",
+        "note": "",
+        "proposed_end_seconds": 2566.6,
+        "proposed_start_seconds": 2504.5,
+        "reviewed_at": "2026-07-12T12:54:38Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:54:38Z",
+      "before": null,
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-12-the-ai-end-game-how-work-is-changing-wit@2512.12-2591.06",
+      "sequence": 31
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:02c7ba5dbf214e72a36b3dc8e79eed6fcbbd912f0665ce57e7ad42e899b8d7b3",
+        "id": "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@611.94-642.05",
+        "note": "",
+        "proposed_end_seconds": 642.05,
+        "proposed_start_seconds": 611.94,
+        "reviewed_at": "2026-07-12T12:54:49Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:54:49Z",
+      "before": null,
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@611.94-642.05",
+      "sequence": 32
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:02c7ba5dbf214e72a36b3dc8e79eed6fcbbd912f0665ce57e7ad42e899b8d7b3",
+        "id": "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@746.86-809.68",
+        "note": "",
+        "proposed_end_seconds": 809.68,
+        "proposed_start_seconds": 746.86,
+        "reviewed_at": "2026-07-12T12:55:01Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:55:01Z",
+      "before": null,
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@746.86-809.68",
+      "sequence": 33
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:02c7ba5dbf214e72a36b3dc8e79eed6fcbbd912f0665ce57e7ad42e899b8d7b3",
+        "id": "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@1499.18-1577.24",
+        "note": "",
+        "proposed_end_seconds": 1577.24,
+        "proposed_start_seconds": 1499.18,
+        "reviewed_at": "2026-07-12T12:55:24Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-12T12:55:24Z",
+      "before": null,
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@1499.18-1577.24",
+      "sequence": 34
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:d83a079256c6c68169e48de8379d03b16981475938b526578b3dc9ac73c8ceed",
+        "id": "why-is-this-happening-the-chris-hayes-po-2026-05-20-ai-and-the-public-good-with-ezra-klein@28.14-57.78",
+        "note": "",
+        "proposed_end_seconds": 60.3,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-12T12:56:16Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:56:16Z",
+      "before": null,
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-20-ai-and-the-public-good-with-ezra-klein@28.14-57.78",
+      "sequence": 35
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:d83a079256c6c68169e48de8379d03b16981475938b526578b3dc9ac73c8ceed",
+        "id": "why-is-this-happening-the-chris-hayes-po-2026-05-20-ai-and-the-public-good-with-ezra-klein@1905.10-1933.37",
+        "note": "",
+        "proposed_end_seconds": 1936.7,
+        "proposed_start_seconds": 1906.8,
+        "reviewed_at": "2026-07-12T12:56:56Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-12T12:56:56Z",
+      "before": null,
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-20-ai-and-the-public-good-with-ezra-klein@1905.10-1933.37",
+      "sequence": 36
+    }
+  ],
+  "next_sequence": 37,
+  "reviews": {
+    "american-scandal-2026-05-26-chappaquiddick-the-weight-of-the-name-5@924.37-947.06": {
+      "audio_fingerprint": "sha256:1ef484ca29f436230cd4ba671c47423b4726da636a1380796b9c135a501f2f1f",
+      "id": "american-scandal-2026-05-26-chappaquiddick-the-weight-of-the-name-5@924.37-947.06",
+      "note": "",
+      "proposed_end_seconds": 938.5,
+      "proposed_start_seconds": 878.1,
+      "reviewed_at": "2026-07-12T12:23:46Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4@1864.10-1884.80": {
+      "audio_fingerprint": "sha256:e8c6b4be730ea982ac42829555edef5c716d67ba31dd9f5f3b173d1ee581b262",
+      "id": "business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4@1864.10-1884.80",
+      "note": "",
+      "proposed_end_seconds": 1874.4,
+      "proposed_start_seconds": 1814.5,
+      "reviewed_at": "2026-07-12T12:24:24Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros@1179.42-1269.13": {
+      "audio_fingerprint": "sha256:b9dc85a6a7e8dc2beef8565adbee2949f6d70892ac6f0995f18f8e6efb06143e",
+      "id": "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros@1179.42-1269.13",
+      "note": "",
+      "proposed_end_seconds": 1279.4,
+      "proposed_start_seconds": 1196.9,
+      "reviewed_at": "2026-07-12T12:26:04Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros@1994.03-2071.11": {
+      "audio_fingerprint": "sha256:b9dc85a6a7e8dc2beef8565adbee2949f6d70892ac6f0995f18f8e6efb06143e",
+      "id": "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros@1994.03-2071.11",
+      "note": "",
+      "proposed_end_seconds": 2087.2,
+      "proposed_start_seconds": 2005.5,
+      "reviewed_at": "2026-07-12T12:26:39Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@1293.70-1349.70": {
+      "audio_fingerprint": "sha256:4c213fd42aaba6c1fb234321c0143d77aaabdfc3007a8058f75321ddb009dd1b",
+      "id": "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@1293.70-1349.70",
+      "note": "",
+      "proposed_end_seconds": 1415.3,
+      "proposed_start_seconds": 1318.5,
+      "reviewed_at": "2026-07-12T12:28:22Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@2523.48-2553.34": {
+      "audio_fingerprint": "sha256:4c213fd42aaba6c1fb234321c0143d77aaabdfc3007a8058f75321ddb009dd1b",
+      "id": "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@2523.48-2553.34",
+      "note": "",
+      "proposed_end_seconds": 2629.0,
+      "proposed_start_seconds": 2532.3,
+      "reviewed_at": "2026-07-12T12:29:24Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@3669.75-3700.10": {
+      "audio_fingerprint": "sha256:4c213fd42aaba6c1fb234321c0143d77aaabdfc3007a8058f75321ddb009dd1b",
+      "id": "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi@3669.75-3700.10",
+      "note": "",
+      "proposed_end_seconds": 3781.2,
+      "proposed_start_seconds": 3684.0,
+      "reviewed_at": "2026-07-12T12:30:18Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "morbid-2026-05-21-the-matamoros-devil-murders-part-1@2487.83-2571.46": {
+      "audio_fingerprint": "sha256:b81865e6c4088082ec385752a6c48eb0987d6083f3a767c75106a76ca187d11d",
+      "id": "morbid-2026-05-21-the-matamoros-devil-murders-part-1@2487.83-2571.46",
+      "note": "",
+      "proposed_end_seconds": 2597.4,
+      "proposed_start_seconds": 2539.0,
+      "reviewed_at": "2026-07-12T12:31:11Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "morbid-2026-05-25-the-matamoros-devil-murders-part-2@2441.56-2499.55": {
+      "audio_fingerprint": "sha256:fe46c5cbfa34db7742fd6ce67cbd55f53619570c29d0ef5891916c224fb6580d",
+      "id": "morbid-2026-05-25-the-matamoros-devil-murders-part-2@2441.56-2499.55",
+      "note": "",
+      "proposed_end_seconds": 2499.55,
+      "proposed_start_seconds": 2441.56,
+      "reviewed_at": "2026-07-12T12:31:29Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "morbid-2026-05-28-listener-tales-110-playdates-with-the-pa@26.64-73.85": {
+      "audio_fingerprint": "sha256:4f07a8c048660fc6a1e437caf5a00d2c21add19b727b02e0519a1e6991324f19",
+      "id": "morbid-2026-05-28-listener-tales-110-playdates-with-the-pa@26.64-73.85",
+      "note": "",
+      "proposed_end_seconds": 88.0,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-12T12:32:41Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@1039.70-1167.58": {
+      "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+      "id": "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@1039.70-1167.58",
+      "note": "",
+      "proposed_end_seconds": 1205.7,
+      "proposed_start_seconds": 1114.1,
+      "reviewed_at": "2026-07-12T12:35:02Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@122.30-149.56": {
+      "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+      "id": "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@122.30-149.56",
+      "note": "",
+      "proposed_end_seconds": 141.7,
+      "proposed_start_seconds": 59.1,
+      "reviewed_at": "2026-07-12T12:33:35Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@2382.36-2449.27": {
+      "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+      "id": "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8@2382.36-2449.27",
+      "note": "",
+      "proposed_end_seconds": 2449.27,
+      "proposed_start_seconds": 2382.36,
+      "reviewed_at": "2026-07-12T12:42:25Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "smartless-2026-05-11-quot-kareem-rahma-quot@2588.98-2660.59": {
+      "audio_fingerprint": "sha256:0c11abce89c5a7e724b73cbc1f457e165784e134ad1cf12e90fdd0228b3c1046",
+      "id": "smartless-2026-05-11-quot-kareem-rahma-quot@2588.98-2660.59",
+      "note": "",
+      "proposed_end_seconds": 2660.59,
+      "proposed_start_seconds": 2588.98,
+      "reviewed_at": "2026-07-12T12:42:48Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "smartless-2026-05-25-quot-nick-jonas-quot@2702.77-2737.46": {
+      "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+      "id": "smartless-2026-05-25-quot-nick-jonas-quot@2702.77-2737.46",
+      "note": "",
+      "proposed_end_seconds": 2834.2,
+      "proposed_start_seconds": 2720.9,
+      "reviewed_at": "2026-07-12T12:44:15Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "smartless-2026-05-25-quot-nick-jonas-quot@3970.29-4035.08": {
+      "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+      "id": "smartless-2026-05-25-quot-nick-jonas-quot@3970.29-4035.08",
+      "note": "",
+      "proposed_end_seconds": 4107.7,
+      "proposed_start_seconds": 4026.0,
+      "reviewed_at": "2026-07-12T12:45:26Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@1888.36-1922.05": {
+      "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+      "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@1888.36-1922.05",
+      "note": "",
+      "proposed_end_seconds": 1922.05,
+      "proposed_start_seconds": 1888.36,
+      "reviewed_at": "2026-07-12T12:45:41Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@1924.03-2003.68": {
+      "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+      "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@1924.03-2003.68",
+      "note": "",
+      "proposed_end_seconds": 2003.68,
+      "proposed_start_seconds": 1924.03,
+      "reviewed_at": "2026-07-12T12:45:59Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@2818.54-2851.24": {
+      "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+      "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@2818.54-2851.24",
+      "note": "",
+      "proposed_end_seconds": 2851.24,
+      "proposed_start_seconds": 2818.54,
+      "reviewed_at": "2026-07-12T12:46:19Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@4913.51-4950.80": {
+      "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+      "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@4913.51-4950.80",
+      "note": "",
+      "proposed_end_seconds": 5003.5,
+      "proposed_start_seconds": 4958.1,
+      "reviewed_at": "2026-07-12T12:47:56Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@4952.66-4980.90": {
+      "audio_fingerprint": "sha256:a8b5fe250e001627d01c7b96566d076bd32252b216f7842c37f0193257737d17",
+      "id": "the-mel-robbins-podcast-2026-06-01-how-to-handle-difficult-people-7-psychol@4952.66-4980.90",
+      "note": "",
+      "proposed_end_seconds": 5003.5,
+      "proposed_start_seconds": 4957.8,
+      "reviewed_at": "2026-07-12T12:48:36Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t@3200.45-3285.68": {
+      "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+      "id": "the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t@3200.45-3285.68",
+      "note": "",
+      "proposed_end_seconds": 3285.68,
+      "proposed_start_seconds": 3200.45,
+      "reviewed_at": "2026-07-12T12:49:10Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os@2924.17-3014.86": {
+      "audio_fingerprint": "sha256:2889b75d09332f7f59a68a2b7d3058b620c90eefbf6788218e5248ffebdfebbd",
+      "id": "the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os@2924.17-3014.86",
+      "note": "",
+      "proposed_end_seconds": 2937.7,
+      "proposed_start_seconds": 2846.6,
+      "reviewed_at": "2026-07-12T12:50:19Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os@3015.97-3071.35": {
+      "audio_fingerprint": "sha256:2889b75d09332f7f59a68a2b7d3058b620c90eefbf6788218e5248ffebdfebbd",
+      "id": "the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os@3015.97-3071.35",
+      "note": "",
+      "proposed_end_seconds": 3071.35,
+      "proposed_start_seconds": 3015.97,
+      "reviewed_at": "2026-07-12T12:50:37Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "the-nikki-glaser-podcast-2025-03-07-516-nikki-the-famous-aunt-writers-room-m@1524.10-1599.92": {
+      "audio_fingerprint": "sha256:d3f764b2ad64b017556d349d2e32eeb9216fac87617df1f24ee8ba9d76bd4008",
+      "id": "the-nikki-glaser-podcast-2025-03-07-516-nikki-the-famous-aunt-writers-room-m@1524.10-1599.92",
+      "note": "",
+      "proposed_end_seconds": 1599.92,
+      "proposed_start_seconds": 1524.1,
+      "reviewed_at": "2026-07-12T12:51:29Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "the-nikki-glaser-podcast-2025-03-07-516-nikki-the-famous-aunt-writers-room-m@62.69-124.76": {
+      "audio_fingerprint": "sha256:d3f764b2ad64b017556d349d2e32eeb9216fac87617df1f24ee8ba9d76bd4008",
+      "id": "the-nikki-glaser-podcast-2025-03-07-516-nikki-the-famous-aunt-writers-room-m@62.69-124.76",
+      "note": "",
+      "proposed_end_seconds": 94.6,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-12T12:51:14Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "the-nikki-glaser-podcast-2025-03-13-517-the-glaser-exit@1783.99-1804.43": {
+      "audio_fingerprint": "sha256:eef28e3b42523ab3988bd32ef27ee70571420fb83f11b26876f2a5776c7a682c",
+      "id": "the-nikki-glaser-podcast-2025-03-13-517-the-glaser-exit@1783.99-1804.43",
+      "note": "",
+      "proposed_end_seconds": 1842.5,
+      "proposed_start_seconds": 1682.4,
+      "reviewed_at": "2026-07-12T12:52:55Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "the-nikki-glaser-podcast-2025-03-13-517-the-glaser-exit@2677.47-2708.94": {
+      "audio_fingerprint": "sha256:eef28e3b42523ab3988bd32ef27ee70571420fb83f11b26876f2a5776c7a682c",
+      "id": "the-nikki-glaser-podcast-2025-03-13-517-the-glaser-exit@2677.47-2708.94",
+      "note": "",
+      "proposed_end_seconds": 2708.94,
+      "proposed_start_seconds": 2677.47,
+      "reviewed_at": "2026-07-12T12:53:10Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "up-first-2026-06-01-can-graham-platner-survive-another-contr@1992.88-2031.54": {
+      "audio_fingerprint": "sha256:a172b800dee9a21529ffddd9d0c590032bca8927efcb574158b36d7a58573a1d",
+      "id": "up-first-2026-06-01-can-graham-platner-survive-another-contr@1992.88-2031.54",
+      "note": "",
+      "proposed_end_seconds": 2031.54,
+      "proposed_start_seconds": 1992.88,
+      "reviewed_at": "2026-07-12T12:53:30Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leading-the-way-wi@3110.13-3219.90": {
+      "audio_fingerprint": "sha256:8ebccf85ddd47602a2846203f5f16e888da874b0868385948a3afdfb53fd1e58",
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leading-the-way-wi@3110.13-3219.90",
+      "note": "",
+      "proposed_end_seconds": 3219.9,
+      "proposed_start_seconds": 3110.13,
+      "reviewed_at": "2026-07-12T12:53:58Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "why-is-this-happening-the-chris-hayes-po-2026-05-12-the-ai-end-game-how-work-is-changing-wit@2512.12-2591.06": {
+      "audio_fingerprint": "sha256:34542a8aa5335ad3823fcbab18c6a25264e4fb5b04e070dfaa242966ea25bf8c",
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-12-the-ai-end-game-how-work-is-changing-wit@2512.12-2591.06",
+      "note": "",
+      "proposed_end_seconds": 2566.6,
+      "proposed_start_seconds": 2504.5,
+      "reviewed_at": "2026-07-12T12:54:38Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@1499.18-1577.24": {
+      "audio_fingerprint": "sha256:02c7ba5dbf214e72a36b3dc8e79eed6fcbbd912f0665ce57e7ad42e899b8d7b3",
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@1499.18-1577.24",
+      "note": "",
+      "proposed_end_seconds": 1577.24,
+      "proposed_start_seconds": 1499.18,
+      "reviewed_at": "2026-07-12T12:55:24Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@611.94-642.05": {
+      "audio_fingerprint": "sha256:02c7ba5dbf214e72a36b3dc8e79eed6fcbbd912f0665ce57e7ad42e899b8d7b3",
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@611.94-642.05",
+      "note": "",
+      "proposed_end_seconds": 642.05,
+      "proposed_start_seconds": 611.94,
+      "reviewed_at": "2026-07-12T12:54:49Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@746.86-809.68": {
+      "audio_fingerprint": "sha256:02c7ba5dbf214e72a36b3dc8e79eed6fcbbd912f0665ce57e7ad42e899b8d7b3",
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with@746.86-809.68",
+      "note": "",
+      "proposed_end_seconds": 809.68,
+      "proposed_start_seconds": 746.86,
+      "reviewed_at": "2026-07-12T12:55:01Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "why-is-this-happening-the-chris-hayes-po-2026-05-20-ai-and-the-public-good-with-ezra-klein@1905.10-1933.37": {
+      "audio_fingerprint": "sha256:d83a079256c6c68169e48de8379d03b16981475938b526578b3dc9ac73c8ceed",
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-20-ai-and-the-public-good-with-ezra-klein@1905.10-1933.37",
+      "note": "",
+      "proposed_end_seconds": 1936.7,
+      "proposed_start_seconds": 1906.8,
+      "reviewed_at": "2026-07-12T12:56:56Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "why-is-this-happening-the-chris-hayes-po-2026-05-20-ai-and-the-public-good-with-ezra-klein@28.14-57.78": {
+      "audio_fingerprint": "sha256:d83a079256c6c68169e48de8379d03b16981475938b526578b3dc9ac73c8ceed",
+      "id": "why-is-this-happening-the-chris-hayes-po-2026-05-20-ai-and-the-public-good-with-ezra-klein@28.14-57.78",
+      "note": "",
+      "proposed_end_seconds": 60.3,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-12T12:56:16Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    }
+  },
+  "schema_version": 2
+}

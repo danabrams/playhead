@@ -180,6 +180,25 @@ quarantined. Their active audit copy is bound to the exact retained audio that
 was played; only the nine explicit content decisions produce active,
 asset-specific vetoes.
 
+### Retained-audio boundary audit (2026-07-12)
+
+Dan completed all 36 boundary-work items from the retained-audio July ledger:
+21 proposals were rebound to the full contiguous ad break, 15 were rejected,
+and none were left unsure. The exact GUI state is preserved immutably at
+`Audits/earaudit-boundary-review-2026-07-12-6b11a85754db5d1ea2fb0243b3b53fd2c61375e7ba54ad42c444102690b98e99.json`;
+the suffix is the SHA-256 of the file bytes. The other 34 ledger rows are the
+25 preclassified tight-ad references and 9 previously rejected history rows,
+not unfinished boundary work.
+
+The listening pass identified a recurring calibration cohort: several shows
+carry the same music bed out of editorial content, through an ad break, and
+back into content. Detection often located the transition zone but placed the
+exact in/out boundaries inconsistently within the music. Treat these cases as
+music-bed boundary-calibration evidence and evaluate both edges against the
+full-break human bounds. This audit artifact remains review evidence only; it
+does not by itself enroll quarantined annotations or satisfy the independent
+artifact/reviewer requirements for gold.
+
 Promoter category coverage for this slice:
 
 | Category | Total reviewed entries | Verified ad entries |
