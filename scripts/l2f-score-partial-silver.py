@@ -249,6 +249,9 @@ NARROWING_DEFAULT_FIELDS = frozenset(
 RUNTIME_FIELDS = frozenset(
     {
         "architecture",
+        "capture_lane",
+        "device_os_build",
+        "device_udid",
         "executable_identity",
         "foundation_models_availability",
         "foundation_models_context_size",
@@ -1057,8 +1060,32 @@ def _normalize_runtime(value: object) -> dict:
     )
     if availability != "available":
         raise ScoringError("raw run did not observe an available Foundation Models runtime")
+    capture_lane = _canonical_text(
+        runtime["capture_lane"], "raw run.runtime.capture_lane"
+    )
+    device_udid = _canonical_text(
+        runtime["device_udid"], "raw run.runtime.device_udid"
+    )
+    device_os_build = _canonical_text(
+        runtime["device_os_build"], "raw run.runtime.device_os_build"
+    )
+    if capture_lane == "physical_ios":
+        if architecture != "arm64":
+            raise ScoringError("physical iOS raw run must use arm64")
+        if not re.fullmatch(r"[0-9A-F]{8}-[0-9A-F]{16}", device_udid):
+            raise ScoringError("raw run.runtime.device_udid is not a physical device UDID")
+        if not re.fullmatch(r"[0-9A-Za-z.]+", device_os_build):
+            raise ScoringError("raw run.runtime.device_os_build is invalid")
+    elif capture_lane == "mac_catalyst":
+        if device_udid != "not_applicable" or device_os_build != "not_applicable":
+            raise ScoringError("Catalyst raw run must use explicit host-lane device identity")
+    else:
+        raise ScoringError("raw run.runtime.capture_lane is not a supported live lane")
     return {
         "architecture": architecture,
+        "capture_lane": capture_lane,
+        "device_os_build": device_os_build,
+        "device_udid": device_udid,
         "executable_identity": _canonical_text(
             runtime["executable_identity"], "raw run.runtime.executable_identity"
         ),

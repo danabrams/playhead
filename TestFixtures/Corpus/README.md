@@ -228,18 +228,45 @@ synthesize content complements or enroll anything in `Annotations/`.
 
 ### Freeze the unchanged-production baseline
 
-Run the opt-in Catalyst harness three times from a clean committed revision.
-It selects the exact 27 assets from the content-addressed evaluation above,
-requires fingerprint-bound local transcripts, invokes the production
-`AdDetectionService.runBackfill` path with `AdDetectionConfig.default`,
-`NarrowingConfig.default`, and the live Foundation Models classifier, and
-refuses to replace an existing raw capture. `PLAYHEAD_CORPUS_ROOT` may point at
-another regular checkout containing the ignored `Audio/` and `Transcripts/`
-directories; labels and policy always come from the source checkout.
-The app currently has an iOS 27.0 Catalyst deployment target, so the capture
-host must run macOS 27 or newer. The wrapper checks this before staging or
-building; macOS 26 cannot run this production binary, and an iOS Simulator run
-is not a substitute for the live on-device Foundation Models path.
+Run the opt-in physical-iPhone harness three times from a clean committed
+revision. The capture identity is pinned to iPhone 16 Pro Max
+`00008140-001609A42660801C`, iOS 27.0 build `24A5380h`. All three baseline
+runs and every later `playhead-l2f.6` treatment comparison must use this same
+phone, OS build, Xcode build, executable identity, locale, and Foundation
+Models runtime. Do not combine captures after an OS, Xcode, app-signing,
+locale, or model-runtime change.
+
+The wrapper builds and signs the test host, stages a deliberately constructed
+27-asset root under the app's dedicated `Documents/l2f8/...` directory, runs a
+bounded preflight, and retrieves the exact device output before descriptor-
+pinned host publication. Preflight proves the physical runtime, all evaluation,
+audio, and transcript-to-audio bindings, Foundation Models availability, and
+round-trip output transport without processing an episode. It writes a
+`physical_device_partial_silver_preflight` artifact, never a baseline raw run.
+The durable raw runtime identity also records the capture lane, device UDID,
+and exact OS build; the scorer rejects drift in any of them across runs.
+Use `--preflight-only` when validating the lane:
+
+```sh
+scripts/l2f-capture-partial-silver-device.sh \
+  --run-id baseline-run-1 \
+  --output /tmp/playhead-partial-silver-baseline-baseline-run-1.json \
+  --corpus-root /Users/dabrams/playhead \
+  --preflight-only
+```
+
+The harness then selects the exact 27 assets from the content-addressed
+evaluation above, requires fingerprint-bound local transcripts, invokes the
+production `AdDetectionService.runBackfill` path with
+`AdDetectionConfig.default`, `NarrowingConfig.default`, and the live Foundation
+Models classifier, and refuses to replace an existing raw capture. The
+`--corpus-root` option may point at another checkout containing ignored
+`Audio/` and `Transcripts/` directories; its unrelated untracked files do not
+affect the clean-source check, while labels and policy always come from the
+clean source worktree. The separate Catalyst wrapper remains valid for a
+compatible host, but its output must not be mixed into this physical-device
+baseline. A Simulator run is not a substitute for live on-device Foundation
+Models.
 
 This is explicitly a **cold, isolated production-core lane**: every episode
 gets a fresh analysis store and the optional catalog, repeated-ad cache,
@@ -257,7 +284,7 @@ mkdir -p "$capture_dir"
 for ordinal in 1 2 3; do
   run_id="baseline-run-${ordinal}"
   output="$capture_dir/playhead-partial-silver-baseline-${run_id}.json"
-  scripts/l2f-capture-partial-silver.sh \
+  scripts/l2f-capture-partial-silver-device.sh \
     --run-id "$run_id" \
     --output "$output" \
     --corpus-root "$corpus_root"

@@ -1216,6 +1216,9 @@ private struct BaselineProductionConfig: Encodable {
 private struct BaselineRuntimeIdentity: Encodable {
     let osVersion: String
     let architecture: String
+    let captureLane: String
+    let deviceUDID: String
+    let deviceOSBuild: String
     let localeIdentifier: String
     let xcodeVersionActual: String
     let executableIdentity: String
@@ -1223,7 +1226,9 @@ private struct BaselineRuntimeIdentity: Encodable {
     let foundationModelsContextSize: Int
 
     @available(iOS 26.0, *)
-    static func current() -> BaselineRuntimeIdentity {
+    static func current(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> BaselineRuntimeIdentity {
         #if arch(arm64)
         let architecture = "arm64"
         #elseif arch(x86_64)
@@ -1243,7 +1248,43 @@ private struct BaselineRuntimeIdentity: Encodable {
         let availability = "framework_unavailable"
         let contextSize = 0
         #endif
-        let environment = ProcessInfo.processInfo.environment
+        let captureLane: String
+        let deviceUDID: String
+        let deviceOSBuild: String
+        switch BaselineCaptureTransport.Runtime.current {
+        case .physicalIOS:
+            guard environment["PLAYHEAD_BASELINE_DEVICE_MODE"] == "1",
+                  let configuredUDID = environment["PLAYHEAD_BASELINE_DEVICE_UDID"],
+                  configuredUDID.range(
+                    of: #"^[0-9A-F]{8}-[0-9A-F]{16}$"#,
+                    options: .regularExpression
+                  ) != nil,
+                  let configuredBuild = environment["PLAYHEAD_BASELINE_DEVICE_OS_BUILD"],
+                  configuredBuild.range(
+                    of: #"^[0-9A-Za-z.]+$"#,
+                    options: .regularExpression
+                  ) != nil else {
+                throw PipelineDumpRunError(
+                    severity: .hard,
+                    reason: "physical capture runtime identity is missing or invalid"
+                )
+            }
+            captureLane = "physical_ios"
+            deviceUDID = configuredUDID
+            deviceOSBuild = configuredBuild
+        case .catalyst:
+            captureLane = "mac_catalyst"
+            deviceUDID = "not_applicable"
+            deviceOSBuild = "not_applicable"
+        case .simulator:
+            captureLane = "ios_simulator"
+            deviceUDID = "not_applicable"
+            deviceOSBuild = "not_applicable"
+        case .unsupported:
+            captureLane = "unsupported"
+            deviceUDID = "not_applicable"
+            deviceOSBuild = "not_applicable"
+        }
         let bundle = Bundle.main
         let bundleIdentity = bundle.bundleIdentifier ?? "unknown-bundle"
         let bundleVersion = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
@@ -1251,6 +1292,9 @@ private struct BaselineRuntimeIdentity: Encodable {
         return BaselineRuntimeIdentity(
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             architecture: architecture,
+            captureLane: captureLane,
+            deviceUDID: deviceUDID,
+            deviceOSBuild: deviceOSBuild,
             localeIdentifier: Locale.current.identifier,
             xcodeVersionActual: environment["XCODE_VERSION_ACTUAL"] ?? "unavailable",
             executableIdentity: "\(bundleIdentity)@\(bundleVersion)",
@@ -1272,6 +1316,20 @@ private struct BaselineRawPayload: Encodable {
     let episodes: [BaselineEpisode]
 }
 
+private struct BaselineDevicePreflightPayload: Encodable {
+    let schemaVersion: Int
+    let artifactKind: String
+    let runId: String
+    let sourceRevision: String
+    let evaluationSHA256: String
+    let deviceUDID: String
+    let expectedOSVersion: String
+    let expectedOSBuild: String
+    let runtime: BaselineRuntimeIdentity
+    let stagedAssetCount: Int
+    let outputTransportWritable: Bool
+}
+
 private struct ProductionEpisodeRunResult {
     let episode: DumpEpisode
     let transcriptSHA256: String
@@ -1287,6 +1345,260 @@ private struct StableTranscriptResult {
 private struct StableInputSnapshot {
     let corpusRoot: URL
     let audioURL: URL
+}
+
+enum BaselineCaptureTransport {
+    enum Runtime: Equatable {
+        case physicalIOS
+        case catalyst
+        case simulator
+        case unsupported
+
+        static var current: Runtime {
+            #if targetEnvironment(macCatalyst)
+            return .catalyst
+            #elseif targetEnvironment(simulator)
+            return .simulator
+            #elseif os(iOS)
+            return .physicalIOS
+            #else
+            return .unsupported
+            #endif
+        }
+    }
+
+    struct Paths {
+        let sourceRoot: URL
+        let corpusRoot: URL
+        let outputURL: URL
+    }
+
+    enum TransportError: Error, CustomStringConvertible {
+        case deviceModeRequired
+        case invalidDevicePath(String)
+        case hostOutputPathMissing
+        case physicalRuntimeRequired
+
+        var description: String {
+            switch self {
+            case .deviceModeRequired:
+                return "physical baseline capture requires PLAYHEAD_BASELINE_DEVICE_MODE=1"
+            case .invalidDevicePath(let key):
+                return "\(key) must be a relative path beneath Documents/l2f8"
+            case .hostOutputPathMissing:
+                return "PLAYHEAD_BASELINE_OUTPUT_PATH is required for Catalyst capture"
+            case .physicalRuntimeRequired:
+                return "device-mode baseline capture refuses simulator and unsupported runtimes"
+            }
+        }
+    }
+
+    static func resolve(
+        environment: [String: String],
+        fallbackSourceRoot: URL,
+        documentsDirectory: URL,
+        runtime: Runtime
+    ) throws -> Paths {
+        switch runtime {
+        case .physicalIOS:
+            guard environment["PLAYHEAD_BASELINE_DEVICE_MODE"] == "1" else {
+                throw TransportError.deviceModeRequired
+            }
+            let sourceRoot = try resolveDevicePath(
+                key: "PLAYHEAD_BASELINE_DEVICE_INPUT_ROOT",
+                environment: environment,
+                documentsDirectory: documentsDirectory
+            )
+            let outputURL = try resolveDevicePath(
+                key: "PLAYHEAD_BASELINE_DEVICE_OUTPUT_PATH",
+                environment: environment,
+                documentsDirectory: documentsDirectory
+            )
+            return Paths(
+                sourceRoot: sourceRoot,
+                corpusRoot: sourceRoot,
+                outputURL: outputURL
+            )
+        case .catalyst:
+            if environment["PLAYHEAD_BASELINE_DEVICE_MODE"] == "1" {
+                throw TransportError.physicalRuntimeRequired
+            }
+            guard let outputPath = environment["PLAYHEAD_BASELINE_OUTPUT_PATH"] else {
+                throw TransportError.hostOutputPathMissing
+            }
+            let corpusRoot = environment["PLAYHEAD_CORPUS_ROOT"].map {
+                URL(fileURLWithPath: $0, isDirectory: true)
+            } ?? fallbackSourceRoot
+            return Paths(
+                sourceRoot: fallbackSourceRoot,
+                corpusRoot: corpusRoot,
+                outputURL: URL(fileURLWithPath: outputPath)
+            )
+        case .simulator, .unsupported:
+            throw TransportError.physicalRuntimeRequired
+        }
+    }
+
+    static func resolveDevicePath(
+        key: String,
+        environment: [String: String],
+        documentsDirectory: URL
+    ) throws -> URL {
+        guard let path = environment[key],
+              !path.isEmpty,
+              !path.hasPrefix("/"),
+              !PartialSilverEvaluationLoader.containsTraversalComponent(path) else {
+            throw TransportError.invalidDevicePath(key)
+        }
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count >= 2,
+              components.first == "l2f8",
+              components.allSatisfy({ !$0.isEmpty }) else {
+            throw TransportError.invalidDevicePath(key)
+        }
+        let documents = documentsDirectory.standardizedFileURL
+        let resolved = documents.appendingPathComponent(path).standardizedFileURL
+        guard resolved.path.hasPrefix(documents.path + "/l2f8/") else {
+            throw TransportError.invalidDevicePath(key)
+        }
+        return resolved
+    }
+}
+
+private struct BaselineDeviceStagingManifest: Decodable {
+    struct Asset: Decodable {
+        let episodeId: String
+        let audioPath: String
+        let audioSHA256: String
+        let transcriptPath: String
+        let transcriptSHA256: String
+        let transcriptAudioFingerprint: String
+
+        enum CodingKeys: String, CodingKey {
+            case episodeId = "episode_id"
+            case audioPath = "audio_path"
+            case audioSHA256 = "audio_sha256"
+            case transcriptPath = "transcript_path"
+            case transcriptSHA256 = "transcript_sha256"
+            case transcriptAudioFingerprint = "transcript_audio_fingerprint"
+        }
+    }
+
+    let artifactKind: String
+    let schemaVersion: Int
+    let sourceRevision: String
+    let evaluationSHA256: String
+    let runId: String
+    let assets: [Asset]
+
+    enum CodingKeys: String, CodingKey {
+        case artifactKind = "artifact_kind"
+        case schemaVersion = "schema_version"
+        case sourceRevision = "source_revision"
+        case evaluationSHA256 = "evaluation_sha256"
+        case runId = "run_id"
+        case assets
+    }
+}
+
+private enum BaselineDeviceStagingValidator {
+    static let manifestName = "playhead-l2f8-device-staging.json"
+
+    static func validate(
+        root: URL,
+        evaluation: PartialSilverEvaluation,
+        runId: String,
+        sourceRevision: String
+    ) throws {
+        let manifestURL = root.appendingPathComponent(manifestName)
+        let data = try PartialSilverEvaluationLoader.readRegularBytes(
+            at: manifestURL,
+            maximumBytes: 1_024 * 1_024
+        )
+        let manifest = try JSONDecoder().decode(BaselineDeviceStagingManifest.self, from: data)
+        guard manifest.artifactKind == "physical_device_partial_silver_staging",
+              manifest.schemaVersion == 1,
+              manifest.sourceRevision == sourceRevision,
+              manifest.evaluationSHA256 == PartialSilverEvaluationLoader.evaluationSHA256,
+              manifest.runId == runId,
+              manifest.assets.count == PartialSilverEvaluationLoader.expectedAssetCount,
+              Set(manifest.assets.map(\.episodeId)).count == manifest.assets.count else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "physical-device staging manifest identity is invalid"
+            )
+        }
+        let manifestAssets = Dictionary(
+            uniqueKeysWithValues: manifest.assets.map { ($0.episodeId, $0) }
+        )
+        guard Set(manifestAssets.keys) == Set(evaluation.assets.map(\.episodeId)) else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "physical-device staging is not the exact 27-asset evaluation"
+            )
+        }
+        for asset in evaluation.assets {
+            guard let staged = manifestAssets[asset.episodeId],
+                  staged.audioSHA256 == String(asset.audioFingerprint.dropFirst("sha256:".count)),
+                  isDirectCorpusPath(
+                    staged.audioPath,
+                    directory: "Audio",
+                    episodeId: asset.episodeId
+                  ),
+                  staged.transcriptPath
+                    == "TestFixtures/Corpus/Transcripts/\(asset.episodeId).json",
+                  staged.transcriptAudioFingerprint == asset.audioFingerprint else {
+                throw PipelineDumpRunError(
+                    severity: .hard,
+                    reason: "physical-device staging binding is invalid for \(asset.episodeId)"
+                )
+            }
+            let audioURL = try PartialSilverEvaluationLoader.audioURL(
+                for: asset,
+                corpusRoot: root
+            )
+            guard audioURL.path.hasSuffix(staged.audioPath) else {
+                throw PipelineDumpRunError(
+                    severity: .hard,
+                    reason: "physical-device audio path differs for \(asset.episodeId)"
+                )
+            }
+            let transcriptURL = try PartialSilverEvaluationLoader.transcriptURL(
+                for: asset.episodeId,
+                corpusRoot: root
+            )
+            let transcriptSHA256 = try PartialSilverEvaluationLoader.fileSHA256Hex(
+                transcriptURL,
+                maximumBytes: 128 * 1_024 * 1_024
+            )
+            let transcriptData = try PartialSilverEvaluationLoader.readRegularBytes(
+                at: transcriptURL,
+                maximumBytes: 128 * 1_024 * 1_024
+            )
+            let transcriptDocument = try JSONSerialization.jsonObject(with: transcriptData)
+            guard transcriptSHA256 == staged.transcriptSHA256,
+                  let transcriptObject = transcriptDocument as? [String: Any],
+                  transcriptObject["source_audio_fingerprint"] as? String
+                    == asset.audioFingerprint else {
+                throw PipelineDumpRunError(
+                    severity: .hard,
+                    reason: "physical-device transcript lineage differs for \(asset.episodeId)"
+                )
+            }
+        }
+    }
+
+    private static func isDirectCorpusPath(
+        _ path: String,
+        directory: String,
+        episodeId: String
+    ) -> Bool {
+        let prefix = "TestFixtures/Corpus/\(directory)/"
+        guard path.hasPrefix(prefix) else { return false }
+        let name = String(path.dropFirst(prefix.count))
+        return !name.contains("/")
+            && (name as NSString).deletingPathExtension == episodeId
+    }
 }
 
 private enum BaselineRawValidator {
@@ -1620,16 +1932,20 @@ final class PipelineDumpLiveTests: XCTestCase {
         ProcessInfo.processInfo.environment["PLAYHEAD_PARTIAL_SILVER_BASELINE"] == "1"
     }
 
+    private static var devicePreflightEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYHEAD_BASELINE_DEVICE_PREFLIGHT"] == "1"
+    }
+
     override func setUp() async throws {
         try await super.setUp()
         try XCTSkipUnless(
-            Self.dumpEnabled || Self.partialSilverBaselineEnabled,
+            Self.dumpEnabled || Self.partialSilverBaselineEnabled || Self.devicePreflightEnabled,
             """
             Live production-path capture is opt-in and slow. Set either \
             PLAYHEAD_PIPELINE_DUMP=1 for the legacy snapshot dump or \
             PLAYHEAD_PARTIAL_SILVER_BASELINE=1 for the immutable 27-asset \
-            baseline, then run on Mac Catalyst with Apple Intelligence and \
-            retained corpus audio/transcripts available.
+            baseline, or PLAYHEAD_BASELINE_DEVICE_PREFLIGHT=1 for the bounded \
+            physical-device transport check.
             """
         )
     }
@@ -1647,6 +1963,106 @@ final class PipelineDumpLiveTests: XCTestCase {
         }
 
         try await captureLegacySnapshotDump()
+    }
+
+    @available(iOS 26.0, *)
+    func testPhysicalDeviceBaselinePreflight() throws {
+        guard Self.devicePreflightEnabled else {
+            throw XCTSkip("Physical-device preflight is opt-in.")
+        }
+        guard BaselineCaptureTransport.Runtime.current == .physicalIOS else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "physical-device preflight refuses simulator and Catalyst runtimes"
+            )
+        }
+        let environment = ProcessInfo.processInfo.environment
+        try BaselineRawPublisher.validateProductionEnvironment(environment)
+        let runId = try BaselineRawPublisher.validateRunId(
+            XCTUnwrap(environment["PLAYHEAD_BASELINE_RUN_ID"])
+        )
+        let declaredRevision = try BaselineRawPublisher.validateSourceRevision(
+            XCTUnwrap(environment["PLAYHEAD_BASELINE_SOURCE_REVISION"])
+        )
+        let sourceRevision = try BaselineSourceIdentity.resolve(
+            declaredRevision: declaredRevision
+        )
+        let paths = try Self.capturePaths(environment: environment)
+        let evaluation = try PartialSilverEvaluationLoader.load(sourceRoot: paths.sourceRoot)
+        try BaselineDeviceStagingValidator.validate(
+            root: paths.sourceRoot,
+            evaluation: evaluation,
+            runId: runId,
+            sourceRevision: sourceRevision
+        )
+        let runtime = try BaselineRuntimeIdentity.current(environment: environment)
+        guard runtime.foundationModelsAvailability == "available" else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "Foundation Models runtime is unavailable during device preflight"
+            )
+        }
+        let documents = try Self.documentsDirectory()
+        let preflightURL = try BaselineCaptureTransport.resolveDevicePath(
+            key: "PLAYHEAD_BASELINE_DEVICE_PREFLIGHT_OUTPUT_PATH",
+            environment: environment,
+            documentsDirectory: documents
+        )
+        let payload = BaselineDevicePreflightPayload(
+            schemaVersion: 1,
+            artifactKind: "physical_device_partial_silver_preflight",
+            runId: runId,
+            sourceRevision: sourceRevision,
+            evaluationSHA256: PartialSilverEvaluationLoader.evaluationSHA256,
+            deviceUDID: try XCTUnwrap(environment["PLAYHEAD_BASELINE_DEVICE_UDID"]),
+            expectedOSVersion: try XCTUnwrap(
+                environment["PLAYHEAD_BASELINE_DEVICE_OS_VERSION"]
+            ),
+            expectedOSBuild: try XCTUnwrap(
+                environment["PLAYHEAD_BASELINE_DEVICE_OS_BUILD"]
+            ),
+            runtime: runtime,
+            stagedAssetCount: evaluation.assets.count,
+            outputTransportWritable: true
+        )
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try BaselineRawPublisher.publish(encoder.encode(payload), to: preflightURL)
+        print("Physical-device partial-silver preflight: \(preflightURL.path)")
+    }
+
+    private static func capturePaths(
+        environment: [String: String]
+    ) throws -> BaselineCaptureTransport.Paths {
+        let documents = try documentsDirectory()
+        let fallbackSourceRoot: URL
+        switch BaselineCaptureTransport.Runtime.current {
+        case .physicalIOS:
+            // Device capture must never derive a host path from #filePath.
+            fallbackSourceRoot = documents
+        case .catalyst, .simulator, .unsupported:
+            fallbackSourceRoot = PipelineDumpManifestLoader.repoRoot()
+        }
+        return try BaselineCaptureTransport.resolve(
+            environment: environment,
+            fallbackSourceRoot: fallbackSourceRoot,
+            documentsDirectory: documents,
+            runtime: BaselineCaptureTransport.Runtime.current
+        )
+    }
+
+    private static func documentsDirectory() throws -> URL {
+        guard let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first else {
+            throw PipelineDumpRunError(
+                severity: .hard,
+                reason: "app Documents directory is unavailable"
+            )
+        }
+        return documents
     }
 
     private func captureLegacySnapshotDump() async throws {
@@ -1747,13 +2163,19 @@ final class PipelineDumpLiveTests: XCTestCase {
 private extension PipelineDumpLiveTests {
     @available(iOS 26.0, *)
     private func capturePartialSilverProductionBaseline() async throws {
-        let sourceRoot = PipelineDumpManifestLoader.repoRoot()
-        let evaluation = try PartialSilverEvaluationLoader.load(sourceRoot: sourceRoot)
-        let corpusRoot = try PartialSilverEvaluationLoader.validatedCorpusRoot(
-            sourceRoot: sourceRoot
-        )
         let environment = ProcessInfo.processInfo.environment
         try BaselineRawPublisher.validateProductionEnvironment(environment)
+        let paths = try Self.capturePaths(environment: environment)
+        let evaluation = try PartialSilverEvaluationLoader.load(sourceRoot: paths.sourceRoot)
+        let corpusRoot: URL
+        switch BaselineCaptureTransport.Runtime.current {
+        case .physicalIOS:
+            corpusRoot = paths.corpusRoot
+        case .catalyst, .simulator, .unsupported:
+            corpusRoot = try PartialSilverEvaluationLoader.validatedCorpusRoot(
+                sourceRoot: paths.sourceRoot
+            )
+        }
         let runId = try BaselineRawPublisher.validateRunId(
             XCTUnwrap(environment["PLAYHEAD_BASELINE_RUN_ID"])
         )
@@ -1763,8 +2185,16 @@ private extension PipelineDumpLiveTests {
         let sourceRevision = try BaselineSourceIdentity.resolve(
             declaredRevision: declaredSourceRevision
         )
+        if BaselineCaptureTransport.Runtime.current == .physicalIOS {
+            try BaselineDeviceStagingValidator.validate(
+                root: paths.sourceRoot,
+                evaluation: evaluation,
+                runId: runId,
+                sourceRevision: sourceRevision
+            )
+        }
         let outputURL = try BaselineRawPublisher.outputURL(
-            path: XCTUnwrap(environment["PLAYHEAD_BASELINE_OUTPUT_PATH"]),
+            path: paths.outputURL.path,
             runId: runId
         )
 
@@ -1816,7 +2246,7 @@ private extension PipelineDumpLiveTests {
 
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        let runtime = BaselineRuntimeIdentity.current()
+        let runtime = try BaselineRuntimeIdentity.current(environment: environment)
         guard runtime.foundationModelsAvailability == "available" else {
             throw PipelineDumpRunError(
                 severity: .hard,
@@ -2402,6 +2832,92 @@ private struct PipelineDumpRunError: Error {
 /// (no shadow copy, no flag drift). These run in `PlayheadFastTests` on the
 /// simulator with NO env var — they neither read audio nor hit FM.
 struct PipelineDumpHermeticTests {
+
+    @Test("physical capture paths stay beneath the app Documents l2f8 root")
+    func physicalCapturePathsResolveInsideDocuments() throws {
+        let documents = URL(fileURLWithPath: "/private/app/Documents", isDirectory: true)
+        let environment = [
+            "PLAYHEAD_BASELINE_DEVICE_MODE": "1",
+            "PLAYHEAD_BASELINE_DEVICE_INPUT_ROOT": "l2f8/baseline-run-1/input",
+            "PLAYHEAD_BASELINE_DEVICE_OUTPUT_PATH":
+                "l2f8/baseline-run-1/output/playhead-partial-silver-baseline-baseline-run-1.json",
+        ]
+
+        let paths = try BaselineCaptureTransport.resolve(
+            environment: environment,
+            fallbackSourceRoot: URL(fileURLWithPath: "/host/source", isDirectory: true),
+            documentsDirectory: documents,
+            runtime: .physicalIOS
+        )
+
+        #expect(paths.sourceRoot.path == "/private/app/Documents/l2f8/baseline-run-1/input")
+        #expect(paths.corpusRoot == paths.sourceRoot)
+        #expect(
+            paths.outputURL.path
+                == "/private/app/Documents/l2f8/baseline-run-1/output/"
+                    + "playhead-partial-silver-baseline-baseline-run-1.json"
+        )
+
+        for invalidRoot in [
+            "/host/TestFixtures",
+            "../TestFixtures",
+            "l2f8/../TestFixtures",
+            "other/baseline-run-1/input",
+        ] {
+            var invalid = environment
+            invalid["PLAYHEAD_BASELINE_DEVICE_INPUT_ROOT"] = invalidRoot
+            #expect(throws: BaselineCaptureTransport.TransportError.self) {
+                _ = try BaselineCaptureTransport.resolve(
+                    environment: invalid,
+                    fallbackSourceRoot: URL(fileURLWithPath: "/host/source"),
+                    documentsDirectory: documents,
+                    runtime: .physicalIOS
+                )
+            }
+        }
+        #expect(throws: BaselineCaptureTransport.TransportError.self) {
+            _ = try BaselineCaptureTransport.resolve(
+                environment: environment,
+                fallbackSourceRoot: URL(fileURLWithPath: "/host/source"),
+                documentsDirectory: documents,
+                runtime: .simulator
+            )
+        }
+    }
+
+    @Test("Catalyst capture paths retain host path behavior")
+    func catalystCapturePathsRemainHostPaths() throws {
+        let source = URL(fileURLWithPath: "/host/source", isDirectory: true)
+        let corpus = URL(fileURLWithPath: "/host/corpus", isDirectory: true)
+        let output = "/host/output/playhead-partial-silver-baseline-baseline-run-1.json"
+
+        let paths = try BaselineCaptureTransport.resolve(
+            environment: [
+                "PLAYHEAD_CORPUS_ROOT": corpus.path,
+                "PLAYHEAD_BASELINE_OUTPUT_PATH": output,
+            ],
+            fallbackSourceRoot: source,
+            documentsDirectory: URL(fileURLWithPath: "/unused/Documents"),
+            runtime: .catalyst
+        )
+
+        #expect(paths.sourceRoot == source)
+        #expect(paths.corpusRoot == corpus)
+        #expect(paths.outputURL.path == output)
+
+        #expect(throws: BaselineCaptureTransport.TransportError.self) {
+            _ = try BaselineCaptureTransport.resolve(
+                environment: [
+                    "PLAYHEAD_BASELINE_DEVICE_MODE": "1",
+                    "PLAYHEAD_BASELINE_DEVICE_INPUT_ROOT": "l2f8/input",
+                    "PLAYHEAD_BASELINE_DEVICE_OUTPUT_PATH": "l2f8/output/raw.json",
+                ],
+                fallbackSourceRoot: source,
+                documentsDirectory: URL(fileURLWithPath: "/unused/Documents"),
+                runtime: .catalyst
+            )
+        }
+    }
 
     @Test("tracked partial-silver artifact is content-addressed and selects exactly 27 assets")
     func partialSilverArtifactSelectsExactCohort() throws {

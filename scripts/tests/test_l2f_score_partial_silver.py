@@ -248,6 +248,9 @@ def raw_document(run_id: str, predictions: list[dict], *, features: list[dict] |
         "run_id": run_id,
         "runtime": {
             "architecture": "arm64",
+            "capture_lane": "physical_ios",
+            "device_os_build": "24A5380h",
+            "device_udid": "00008140-001609A42660801C",
             "executable_identity": "com.playhead.tests@1",
             "foundation_models_availability": "available",
             "foundation_models_context_size": 4096,
@@ -1054,6 +1057,44 @@ raise SystemExit(1)
             evaluation_path, policy_path, raw_paths = self.make_case(root, raws)
             with self.assertRaisesRegex(SCORER.ScoringError, "distinct capture timestamps"):
                 SCORER.build_report(evaluation_path, policy_path, raw_paths)
+
+        for field, changed in [
+            ("device_udid", "00008140-001609A42660801D"),
+            ("device_os_build", "24A9999z"),
+        ]:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                raws = [
+                    raw_document(f"baseline-run-{index}", [])
+                    for index in range(1, 4)
+                ]
+                raws[1]["runtime"][field] = changed
+                evaluation_path, policy_path, raw_paths = self.make_case(root, raws)
+                with self.assertRaisesRegex(SCORER.ScoringError, "runtime drift"):
+                    SCORER.build_report(evaluation_path, policy_path, raw_paths)
+
+    def test_runtime_identity_supports_explicit_catalyst_host_lane(self) -> None:
+        raws = [
+            raw_document(f"baseline-run-{index}", [])
+            for index in range(1, 4)
+        ]
+        for raw in raws:
+            raw["runtime"].update(
+                capture_lane="mac_catalyst",
+                device_os_build="not_applicable",
+                device_udid="not_applicable",
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            evaluation_path, policy_path, raw_paths = self.make_case(
+                pathlib.Path(tmp),
+                raws,
+            )
+            report = SCORER.build_report(evaluation_path, policy_path, raw_paths)
+
+        self.assertEqual(
+            report["controlled_identity"]["runtime"]["capture_lane"],
+            "mac_catalyst",
+        )
 
     def test_duration_tolerance_cannot_leave_a_label_unreachable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
