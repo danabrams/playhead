@@ -151,7 +151,10 @@ codesign --force --sign "$EXPECTED_SIGNING_CERTIFICATE_SHA1" \
   exit 1
 }
 
-DEVELOPER_DIR="$DEVELOPER_DIR_PATH" xcodebuild build-for-testing \
+# The provenance build phase can rewrite a cached app resource without causing
+# Xcode to refresh its code seal. Clean build products so every captured commit
+# is signed after its provenance stamp is written.
+DEVELOPER_DIR="$DEVELOPER_DIR_PATH" xcodebuild clean build-for-testing \
   -project Playhead.xcodeproj \
   -scheme Playhead \
   -testPlan Playhead \

@@ -318,6 +318,7 @@ class PartialSilverDeviceCaptureContractTests(unittest.TestCase):
         self.assertIn("--destination Documents/l2f8/", source)
         self.assertNotIn("--destination Documents\n", source)
         self.assertIn("build-for-testing", source)
+        self.assertIn("xcodebuild clean build-for-testing", source)
         self.assertIn("test-without-building", source)
         self.assertIn("plistlib", source)
         self.assertIn("json.load", source)
