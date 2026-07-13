@@ -584,10 +584,17 @@ enum PartialSilverEvaluationLoader {
 
     static func hasUnsafeFilesystemComponent(_ url: URL) -> Bool {
         let absolute = url.standardizedFileURL
+        let components = Array(absolute.pathComponents.dropFirst())
+        let containerAnchorLength = trustedApplicationContainerAnchorLength(components)
+        let trustedPrefixLength = max(0, containerAnchorLength - 1)
         let compatibilityLinks: Set<String> = ["etc", "tmp", "var"]
         var cursor = URL(fileURLWithPath: "/", isDirectory: true)
-        for (index, component) in absolute.pathComponents.dropFirst().enumerated() {
+        for (index, component) in components.enumerated() {
             cursor.appendPathComponent(component)
+            // A physical iOS app cannot choose or replace the system-managed
+            // data-container ancestors. Inspect the standard app directory
+            // itself and every caller-controlled component below it.
+            if index < trustedPrefixLength { continue }
             guard let values = try? cursor.resourceValues(
                 forKeys: [.isSymbolicLinkKey, .isAliasFileKey]
             ) else {
@@ -602,6 +609,23 @@ enum PartialSilverEvaluationLoader {
             }
         }
         return false
+    }
+
+    static func trustedApplicationContainerAnchorLength(_ components: [String]) -> Int {
+        let prefixes = [
+            ["var", "mobile", "Containers", "Data", "Application"],
+            ["private", "var", "mobile", "Containers", "Data", "Application"],
+        ]
+        let anchors: Set<String> = ["Documents", "Library", "tmp"]
+        for prefix in prefixes where components.count >= prefix.count + 2 {
+            guard Array(components.prefix(prefix.count)) == prefix,
+                  UUID(uuidString: components[prefix.count]) != nil,
+                  anchors.contains(components[prefix.count + 1]) else {
+                continue
+            }
+            return prefix.count + 2
+        }
+        return 0
     }
 
     static func containsTraversalComponent(_ path: String) -> Bool {
@@ -668,12 +692,11 @@ enum PartialSilverEvaluationLoader {
     static func openDirectoryDescriptor(at url: URL) throws -> Int32 {
         guard url.isFileURL else { throw LoadError.unsafeFile(url) }
         let flags = O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-        var current = Darwin.open("/", flags)
-        guard current >= 0 else {
-            throw LoadError.decodeFailed(url, posixError("open root"))
-        }
+        let traversal = try openTraversalRoot(at: url, flags: flags)
+        var current = traversal.descriptor
+        let components = traversal.components
         do {
-            for component in safePathComponents(url) {
+            for component in components {
                 var before = stat()
                 guard component.withCString({
                     fstatat(current, $0, &before, AT_SYMLINK_NOFOLLOW)
@@ -699,12 +722,13 @@ enum PartialSilverEvaluationLoader {
 
     private static func openRegularDescriptor(at url: URL) throws -> Int32 {
         guard url.isFileURL else { throw LoadError.unsafeFile(url) }
-        let components = safePathComponents(url)
         let directoryFlags = O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-        var directoryDescriptor = Darwin.open("/", directoryFlags)
-        guard directoryDescriptor >= 0 else {
-            throw LoadError.decodeFailed(url, posixError("open root"))
-        }
+        let traversal = try openTraversalRoot(
+            at: url,
+            flags: directoryFlags
+        )
+        var directoryDescriptor = traversal.descriptor
+        let components = traversal.components
         do {
             for component in components.dropLast() {
                 var before = stat()
@@ -749,6 +773,27 @@ enum PartialSilverEvaluationLoader {
             Darwin.close(directoryDescriptor)
             throw error
         }
+    }
+
+    private static func openTraversalRoot(
+        at url: URL,
+        flags: Int32
+    ) throws -> (descriptor: Int32, components: [String]) {
+        let components = safePathComponents(url)
+        let containerAnchorLength = trustedApplicationContainerAnchorLength(components)
+        if containerAnchorLength > 0 {
+            let anchorPath = "/" + components.prefix(containerAnchorLength).joined(separator: "/")
+            let descriptor = anchorPath.withCString { Darwin.open($0, flags) }
+            guard descriptor >= 0 else {
+                throw LoadError.decodeFailed(url, posixError("open app container anchor"))
+            }
+            return (descriptor, Array(components.dropFirst(containerAnchorLength)))
+        }
+        let descriptor = Darwin.open("/", flags)
+        guard descriptor >= 0 else {
+            throw LoadError.decodeFailed(url, posixError("open root"))
+        }
+        return (descriptor, components)
     }
 
     private static func safePathComponents(_ url: URL) -> [String] {
@@ -2832,6 +2877,51 @@ private struct PipelineDumpRunError: Error {
 /// (no shadow copy, no flag drift). These run in `PlayheadFastTests` on the
 /// simulator with NO env var — they neither read audio nor hit FM.
 struct PipelineDumpHermeticTests {
+
+    @Test("physical app-container checks begin at standard app directories")
+    func physicalAppContainerTrustBoundaryIsExact() {
+        #expect(
+            PartialSilverEvaluationLoader.trustedApplicationContainerAnchorLength([
+                "var", "mobile", "Containers", "Data", "Application",
+                "0F1720F9-935A-4B60-8C1A-34BDE805F570", "Documents", "l2f8",
+            ]) == 7
+        )
+        #expect(
+            PartialSilverEvaluationLoader.trustedApplicationContainerAnchorLength([
+                "private", "var", "mobile", "Containers", "Data", "Application",
+                "0F1720F9-935A-4B60-8C1A-34BDE805F570", "Documents", "l2f8",
+            ]) == 8
+        )
+        #expect(
+            PartialSilverEvaluationLoader.trustedApplicationContainerAnchorLength([
+                "private", "var", "mobile", "Containers", "Data", "Application",
+                "0F1720F9-935A-4B60-8C1A-34BDE805F570", "tmp", "capture",
+            ]) == 8
+        )
+        #expect(
+            PartialSilverEvaluationLoader.trustedApplicationContainerAnchorLength([
+                "private", "var", "mobile", "Containers", "Data", "Application",
+                "0F1720F9-935A-4B60-8C1A-34BDE805F570", "Library", "Caches",
+            ]) == 8
+        )
+        #expect(
+            PartialSilverEvaluationLoader.trustedApplicationContainerAnchorLength([
+                "var", "mobile", "Containers", "Data", "Application",
+                "not-a-container-id", "Documents", "l2f8",
+            ]) == 0
+        )
+        #expect(
+            PartialSilverEvaluationLoader.trustedApplicationContainerAnchorLength([
+                "var", "mobile", "Containers", "Data", "Application",
+                "0F1720F9-935A-4B60-8C1A-34BDE805F570", "unexpected", "l2f8",
+            ]) == 0
+        )
+        #expect(
+            PartialSilverEvaluationLoader.trustedApplicationContainerAnchorLength([
+                "tmp", "Documents", "l2f8",
+            ]) == 0
+        )
+    }
 
     @Test("physical capture paths stay beneath the app Documents l2f8 root")
     func physicalCapturePathsResolveInsideDocuments() throws {
