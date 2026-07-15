@@ -809,9 +809,20 @@ enum PartialSilverEvaluationLoader {
         var components = url.standardizedFileURL.pathComponents
         guard components.first == "/" else { return [] }
         if components.count > 1, ["etc", "tmp", "var"].contains(components[1]) {
-            let compatibility = URL(fileURLWithPath: "/\(components[1])")
-                .resolvingSymlinksInPath().standardizedFileURL.pathComponents
-            components = compatibility + Array(components.dropFirst(2))
+            // Foundation's `resolvingSymlinksInPath()` strips the /private
+            // prefix straight back off ("/var" → "/private/var" → "/var"),
+            // so it can never rewrite the root compatibility links and the
+            // O_NOFOLLOW descriptor walk would die on the /var symlink —
+            // which is where every macOS (Catalyst) temp path starts.
+            // realpath(3) has no such stripping behavior.
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+            if let resolved = realpath("/\(components[1])", &buffer) {
+                let compatibility = URL(
+                    fileURLWithPath: String(cString: resolved),
+                    isDirectory: true
+                ).pathComponents
+                components = compatibility + Array(components.dropFirst(2))
+            }
         }
         return Array(components.dropFirst())
     }
@@ -2961,6 +2972,36 @@ struct PipelineDumpHermeticTests {
                 link.appendingPathComponent("probe.json", isDirectory: false)
             )
         )
+    }
+
+    @Test("bounded reader traverses the /var root compatibility link")
+    func boundedReaderTraversesVarCompatibilityLink() throws {
+        // macOS user temp — and thus every Catalyst per-episode snapshot —
+        // lives under /var/folders/…, so the O_NOFOLLOW descriptor walk must
+        // rewrite the root compatibility link to private/var or the Catalyst
+        // lane can never read its own staged inputs. /var/tmp is the
+        // writable stand-in reachable from the simulator (host filesystem)
+        // and macOS.
+        let directory = URL(fileURLWithPath: "/var/tmp", isDirectory: true)
+        let file = directory.appendingPathComponent(
+            "playhead-l2f8-guard-probe-\(UUID().uuidString).json",
+            isDirectory: false
+        )
+        let payload = Data("{\"probe\":true}".utf8)
+        do {
+            try payload.write(to: file, options: [.withoutOverwriting])
+        } catch {
+            // Sandboxed runtimes (physical device) cannot write /var/tmp;
+            // the walk under test is only reachable from Catalyst and the
+            // simulator, so there is nothing to pin here.
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: file) }
+        let bytes = try PartialSilverEvaluationLoader.readRegularBytes(
+            at: file,
+            maximumBytes: 1_024
+        )
+        #expect(bytes == payload)
     }
 
     @Test("physical capture paths stay beneath the app Documents l2f8 root")
