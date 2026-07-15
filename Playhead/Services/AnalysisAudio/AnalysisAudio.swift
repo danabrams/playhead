@@ -98,14 +98,18 @@ private struct ShardCache: Sendable {
         cacheDirectory.appendingPathComponent(episodeID, isDirectory: true)
     }
 
-    /// Path for a single shard file.
-    private static func shardPath(episodeID: String, shardID: Int) -> URL {
+    /// Path for a single shard file. Non-private so the ranged
+    /// `AnalysisShardPCMReader` below (playhead-l2f.6) can address a single
+    /// shard without loading the whole episode; the enclosing type stays
+    /// file-scoped.
+    static func shardPath(episodeID: String, shardID: Int) -> URL {
         episodeDirectory(episodeID: episodeID)
             .appendingPathComponent("shard_\(shardID).pcm")
     }
 
-    /// Path for the shard manifest (metadata JSON).
-    private static func manifestPath(episodeID: String) -> URL {
+    /// Path for the shard manifest (metadata JSON). Non-private for the
+    /// same playhead-l2f.6 reader.
+    static func manifestPath(episodeID: String) -> URL {
         episodeDirectory(episodeID: episodeID)
             .appendingPathComponent("manifest.json")
     }
@@ -176,6 +180,108 @@ private struct ShardManifestEntry: Codable, Sendable {
     let id: Int
     let startTime: TimeInterval
     let duration: TimeInterval
+}
+
+// MARK: - AnalysisShardPCMReader (playhead-l2f.6)
+
+/// Ranged, read-only PCM access over the persisted analysis-shard cache.
+///
+/// The stinger-anchored boundary refinement (`StingerRefiner`, consulted
+/// from `AdDetectionService.runBackfill` behind the OFF-by-default
+/// `stingerRefinementEnabled` flag) needs ±90 s of 16 kHz mono PCM around a
+/// candidate ad edge. The cheapest existing decoded-audio seam is the shard
+/// cache `AnalysisAudioService` already persists for every fully-decoded
+/// episode (`Application Support/AnalysisShards/<episodeID>/shard_<N>.pcm`,
+/// 30 s of raw Float32 each): reading the 6–7 shard files overlapping the
+/// request range is a few MB of file IO and NO second decode of the episode. When the cache is
+/// absent (episode never fully decoded, or already evicted) the reader
+/// returns nil and the refinement for that edge silently no-ops — the
+/// refiner treats "no PCM" as "cannot snap", never as an error.
+enum AnalysisShardPCMReader {
+
+    /// Load the decoded samples covering `[startSeconds, endSeconds)`,
+    /// clipped to what the cache holds. Returns nil when the manifest is
+    /// missing/undecodable, any overlapping shard file is unreadable, or
+    /// the clipped range is empty. `startSeconds` on the returned slice is
+    /// the exact episode time of the first returned sample.
+    static func loadSamples(
+        episodeID: String,
+        from startSeconds: Double,
+        to endSeconds: Double
+    ) -> StingerPCMSlice? {
+        let sampleRate = AnalysisAudioService.targetSampleRate
+        let requestStart = max(0.0, startSeconds)
+        guard endSeconds > requestStart else { return nil }
+
+        guard let data = try? Data(
+            contentsOf: ShardCache.manifestPath(episodeID: episodeID)
+        ), let entries = try? JSONDecoder().decode(
+            [ShardManifestEntry].self, from: data
+        ) else {
+            return nil
+        }
+
+        var samples: [Float] = []
+        var sliceStart: Double?
+        var previousShardEnd: Double?
+        for entry in entries.sorted(by: { $0.startTime < $1.startTime }) {
+            let shardEnd = entry.startTime + entry.duration
+            guard shardEnd > requestStart, entry.startTime < endSeconds else { continue }
+            // Timeline-continuity guard: concatenating across a gap —
+            // whether a hole in the manifest or a shard file shorter than
+            // its manifest entry — would silently shift every later
+            // sample's implied time. Shards are written contiguously by
+            // the decoder, so any discontinuity means a corrupt/partial
+            // cache: treat the whole range as unavailable rather than
+            // misalign the snap.
+            if let previousEnd = previousShardEnd,
+               abs(entry.startTime - previousEnd) > 0.01 {
+                return nil
+            }
+            guard let pcmData = try? Data(
+                contentsOf: ShardCache.shardPath(episodeID: episodeID, shardID: entry.id)
+            ) else {
+                // A missing shard mid-range would corrupt the timeline —
+                // treat the whole range as unavailable.
+                return nil
+            }
+            let shardSampleCount = pcmData.count / MemoryLayout<Float>.size
+            guard shardSampleCount > 0 else { return nil }
+            let clipStart = max(requestStart, entry.startTime)
+            let clipEnd = min(endSeconds, shardEnd)
+            var firstIndex = Int(((clipStart - entry.startTime) * sampleRate).rounded())
+            var lastIndex = Int(((clipEnd - entry.startTime) * sampleRate).rounded())
+            firstIndex = max(0, min(firstIndex, shardSampleCount))
+            lastIndex = max(firstIndex, min(lastIndex, shardSampleCount))
+            guard lastIndex > firstIndex else { continue }
+            // Actual appended end time — a shard FILE shorter than its
+            // manifest duration surfaces here and fails the continuity
+            // guard on the next iteration.
+            previousShardEnd = entry.startTime + Double(lastIndex) / sampleRate
+            if sliceStart == nil {
+                sliceStart = entry.startTime + Double(firstIndex) / sampleRate
+            }
+            // Copy into an aligned Float buffer rather than binding memory
+            // over a Data slice — tiny slices can be stored inline by
+            // Foundation without 4-byte alignment, making `bindMemory`
+            // undefined behavior there. `copyBytes` is alignment-safe and
+            // avoids the intermediate subdata allocation.
+            let byteStart = firstIndex * MemoryLayout<Float>.size
+            let byteEnd = lastIndex * MemoryLayout<Float>.size
+            let chunk = [Float](
+                unsafeUninitializedCapacity: lastIndex - firstIndex
+            ) { buffer, initializedCount in
+                let copied = pcmData.copyBytes(
+                    to: UnsafeMutableRawBufferPointer(buffer),
+                    from: byteStart..<byteEnd
+                )
+                initializedCount = copied / MemoryLayout<Float>.size
+            }
+            samples.append(contentsOf: chunk)
+        }
+        guard let sliceStartSeconds = sliceStart, !samples.isEmpty else { return nil }
+        return StingerPCMSlice(samples: samples, startSeconds: sliceStartSeconds)
+    }
 }
 
 // MARK: - AnalysisAudioProviding

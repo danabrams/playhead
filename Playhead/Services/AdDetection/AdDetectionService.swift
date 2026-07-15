@@ -461,6 +461,35 @@ struct AdDetectionConfig: Sendable {
     /// shadow at once, to their OWN observers). Both flags OFF ⇒ byte-identical.
     let rediffSlotShadowEnabled: Bool
 
+    /// playhead-l2f.6: master kill switch for StingerBank boundary
+    /// refinement. When `false` (the production default), `runBackfill`
+    /// never loads the bundled `StingerBank.json`, never fetches the
+    /// asset's episode identity, never reads shard PCM, and never invokes
+    /// `StingerRefiner` — so the per-span bounds, persisted rows, and both
+    /// stinger trace maps are byte-identical to pre-l2f.6 behaviour (same
+    /// invariant `spanFinalizerEnabled` holds for the finalizer).
+    ///
+    /// Flip to `true` to enable the per-show stinger-anchored edge snap
+    /// inside the inline boundary-refinement block: for each candidate ad
+    /// span on a show with a bank entry, a 50 Hz log-RMS envelope over a
+    /// ±90 s search span around each edge (read from the persisted 16 kHz
+    /// analysis-shard cache — no second decode) is matched against the
+    /// show's learned stinger template by normalized cross-correlation.
+    /// The strongest peak clearing the per-show gate
+    /// (`max(0.50, learning_confidence − 0.15)`) snaps the edge; snaps
+    /// moving an edge > 75 s are refused; when exactly one edge snapped and
+    /// the show has a pod-width grid the other edge follows the grid; a
+    /// refined window that no longer overlaps the proposal reverts both
+    /// edges. The refiner never splits or merges windows and can never
+    /// produce `end <= start` (see `StingerRefiner`).
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate: main stays
+    /// behavior-neutral and the refiner is never wired into a production
+    /// config or A/B arm until the Catalyst dump + gold-scorer measurement
+    /// (`scripts/l2f-score-oracle-gold.py`) confirms the lift. The bank +
+    /// refiner stay fully built and unit-tested, just inert in production.
+    let stingerRefinementEnabled: Bool
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -546,7 +575,8 @@ struct AdDetectionConfig: Sendable {
         spliceSlotOwnershipEnabled: Bool = false,
         spliceSlotShadowEnabled: Bool = false,
         rediffSlotOwnershipEnabled: Bool = false,
-        rediffSlotShadowEnabled: Bool = false
+        rediffSlotShadowEnabled: Bool = false,
+        stingerRefinementEnabled: Bool = false
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -603,6 +633,7 @@ struct AdDetectionConfig: Sendable {
         self.spliceSlotShadowEnabled = spliceSlotShadowEnabled
         self.rediffSlotOwnershipEnabled = rediffSlotOwnershipEnabled
         self.rediffSlotShadowEnabled = rediffSlotShadowEnabled
+        self.stingerRefinementEnabled = stingerRefinementEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -649,7 +680,8 @@ struct AdDetectionConfig: Sendable {
         spliceSlotOwnershipEnabled: false,
         spliceSlotShadowEnabled: false,
         rediffSlotOwnershipEnabled: false,
-        rediffSlotShadowEnabled: false
+        rediffSlotShadowEnabled: false,
+        stingerRefinementEnabled: false
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -813,6 +845,27 @@ struct BracketRefinementCounts: Sendable, Equatable {
 /// `decision` is passed through to the emission loop UNCHANGED, so the output
 /// is byte-identical to pre-xsdz.10. The two-loop shape is the only structural
 /// change; each emission step is verbatim the code that previously ran inline.
+// MARK: - Stinger refinement plumbing (playhead-l2f.6)
+
+/// Ranged PCM source for stinger search envelopes: `(episodeID, from, to)`
+/// → decoded 16 kHz mono samples, or nil when the range is unavailable.
+/// Production uses `AnalysisShardPCMReader.loadSamples`; tests inject
+/// synthetic PCM.
+typealias StingerPCMProvider = @Sendable (
+    _ episodeID: String,
+    _ startSeconds: Double,
+    _ endSeconds: Double
+) async -> StingerPCMSlice?
+
+/// Per-run stinger context resolved once per `runBackfill` (flag ON + the
+/// show has a bank entry). `episodeID` is nil when the asset row could not
+/// be fetched — the refiner is still consulted so the trace records the
+/// no-PCM outcome, but neither side can snap.
+private struct StingerRefinementRunContext {
+    let entry: StingerShowEntry
+    let episodeID: String?
+}
+
 private struct PendingBackfillDecision {
     /// playhead-p56a: `var` (was `let`) so the SpanFinalizer wire-in can
     /// substitute time-adjusted `DecodedSpan`s into the pending record after
@@ -1438,6 +1491,51 @@ actor AdDetectionService {
     /// `spanFinalizerConstraintsByWindowIdForTesting()`.
     private var lastSpanFinalizerConstraintsByWindowId: [String: [String]] = [:]
 
+    /// playhead-l2f.6: per-spanId stinger refinement trace from the most
+    /// recent `runBackfill`. Keys are `DecodedSpan.id` for spans the
+    /// refiner was consulted on (the show had a bank entry); values carry
+    /// the snap/grid/revert outcome. Empty when
+    /// `config.stingerRefinementEnabled == false` (the OFF path never
+    /// resolves a bank entry, never allocates a trace — preserves the
+    /// byte-identical OFF contract). Reset at the start of every backfill
+    /// run. Test-observable via `stingerRefinementTraceBySpanIdForTesting()`.
+    private var lastStingerRefinementTraceBySpanId: [String: StingerRefinementTrace] = [:]
+
+    /// playhead-l2f.6: per-AdWindow stinger refinement trace, pre-resolved
+    /// per window in the emission loop so the live pipeline-dump path can
+    /// correlate directly (same convention as
+    /// `lastSpanFinalizerConstraintsByWindowId`). Empty when
+    /// `config.stingerRefinementEnabled == false`. Reset at the start of
+    /// every backfill run. Test-observable via
+    /// `stingerRefinementTraceByWindowIdForTesting()`.
+    private var lastStingerRefinementTraceByWindowId: [String: StingerRefinementTrace] = [:]
+
+    /// playhead-l2f.6: lazily-loaded bundled `StingerBank`. `.notLoaded`
+    /// until the first flag-ON backfill on a show; a load failure is
+    /// remembered (`.failed`) so a malformed bundle logs loudly ONCE and
+    /// then degrades to "no bank" instead of re-reading the resource every
+    /// run. Never touched when `config.stingerRefinementEnabled == false`.
+    private var stingerBankCacheState: StingerBankLoadState = .notLoaded
+
+    private enum StingerBankLoadState {
+        case notLoaded
+        case loaded(StingerBank)
+        case failed
+    }
+
+    /// playhead-l2f.6: test-injectable bank override. When non-nil it wins
+    /// over the bundled resource, letting wire-in tests plant deterministic
+    /// templates without touching the app bundle. Production leaves this
+    /// nil (bundle load on first flag-ON use).
+    private let stingerBankOverride: StingerBank?
+
+    /// playhead-l2f.6: ranged PCM source for the stinger search envelopes.
+    /// Production default reads the persisted 16 kHz analysis-shard cache
+    /// (`AnalysisShardPCMReader` — the app's existing decoded-audio path, no
+    /// second decode); tests inject synthetic PCM. Only invoked when the
+    /// flag is ON and the show has a bank entry.
+    private let stingerPCMProvider: StingerPCMProvider
+
     /// playhead-43ed: optional repeated-ad cache. When non-nil and enabled,
     /// `classifyCandidates` derives a 128-bit perceptual fingerprint from
     /// each candidate's feature windows and looks it up against entries
@@ -1551,6 +1649,8 @@ actor AdDetectionService {
         decisionLogger: DecisionLoggerProtocol? = nil,
         classifierCalibrationProfile: ClassifierCalibrationProfile = .production,
         repeatedAdCache: RepeatedAdCacheService? = nil,
+        stingerBank: StingerBank? = nil,
+        stingerPCMProvider: StingerPCMProvider? = nil,
         chapterGenerationPhaseFactory: (@Sendable () -> ChapterGenerationPhase)? = nil,
         chapterPlanCache: ChapterPlanCache? = nil,
         chapterPhaseInstallIDProvider: @escaping @Sendable () -> UUID = { UUID() },
@@ -1594,6 +1694,18 @@ actor AdDetectionService {
         }
         self.classifierCalibrationProfile = classifierCalibrationProfile
         self.repeatedAdCache = repeatedAdCache
+        self.stingerBankOverride = stingerBank
+        // playhead-l2f.6: default to the production shard-cache reader.
+        // The provider is only ever invoked when
+        // `config.stingerRefinementEnabled == true` AND the show has a bank
+        // entry, so wiring it unconditionally costs nothing on the OFF path.
+        self.stingerPCMProvider = stingerPCMProvider ?? { episodeID, start, end in
+            AnalysisShardPCMReader.loadSamples(
+                episodeID: episodeID,
+                from: start,
+                to: end
+            )
+        }
         self.chapterGenerationPhaseFactory = chapterGenerationPhaseFactory
         self.chapterPlanCache = chapterPlanCache
         self.chapterPhaseInstallIDProvider = chapterPhaseInstallIDProvider
@@ -1849,6 +1961,165 @@ actor AdDetectionService {
     /// correlation — no span/window lookup, no time-range matching.
     func spanFinalizerConstraintsByWindowIdForTesting() -> [String: [String]] {
         lastSpanFinalizerConstraintsByWindowId
+    }
+
+    // MARK: - playhead-l2f.6: Stinger refinement trace telemetry
+
+    /// Test seam: returns the per-spanId stinger refinement trace from the
+    /// most recent `runBackfill`. Keys are `DecodedSpan.id` for every span
+    /// the refiner was consulted on (flag ON + show has a bank entry —
+    /// including spans where nothing snapped, so the no-snap outcome is
+    /// observable). Empty when `config.stingerRefinementEnabled == false`
+    /// (the OFF path never consults the refiner, never allocates a trace).
+    /// Pairs with `stingerRefinementTraceByWindowIdForTesting()`.
+    func stingerRefinementTraceBySpanIdForTesting() -> [String: StingerRefinementTrace] {
+        lastStingerRefinementTraceBySpanId
+    }
+
+    /// Test seam: returns the per-AdWindow stinger refinement trace from
+    /// the most recent `runBackfill`. Keys are `AdWindow.id` (the UUID
+    /// stamped by `buildFusionAdWindow`); values mirror what
+    /// `stingerRefinementTraceBySpanIdForTesting()` carries for the
+    /// underlying spanId. Empty when
+    /// `config.stingerRefinementEnabled == false`. The live pipeline-dump
+    /// path uses this for direct per-window correlation, matching the
+    /// `spanFinalizerConstraintsByWindowIdForTesting()` convention.
+    func stingerRefinementTraceByWindowIdForTesting() -> [String: StingerRefinementTrace] {
+        lastStingerRefinementTraceByWindowId
+    }
+
+    // MARK: - playhead-l2f.6: Stinger refinement helpers
+
+    /// Resolve the bank: the test override wins; otherwise lazily load the
+    /// bundled resource once, remembering failure so a malformed asset logs
+    /// loudly exactly once and then degrades to "no bank" (refinement
+    /// silently disabled — never a crash). Only reached when
+    /// `config.stingerRefinementEnabled == true`.
+    private func stingerBankIfEnabled() -> StingerBank? {
+        if let stingerBankOverride { return stingerBankOverride }
+        switch stingerBankCacheState {
+        case .loaded(let bank):
+            return bank
+        case .failed:
+            return nil
+        case .notLoaded:
+            do {
+                let bank = try StingerBank.load()
+                stingerBankCacheState = .loaded(bank)
+                logger.info("[l2f6] StingerBank loaded: \(bank.shows.count) shows")
+                return bank
+            } catch {
+                logger.error("[l2f6] StingerBank load failed — stinger refinement disabled: \(String(describing: error), privacy: .public)")
+                stingerBankCacheState = .failed
+                return nil
+            }
+        }
+    }
+
+    /// Resolve the per-run stinger context: flag ON + known show + bank
+    /// entry. The episode identity (shard-cache key) comes from the asset
+    /// row; a fetch failure degrades to a context without PCM access so
+    /// the trace still records the refiner outcome. Returns nil on the OFF
+    /// path without touching the bank, the store, or the filesystem.
+    private func resolveStingerRefinementContext(
+        analysisAssetId: String,
+        showKey: String?
+    ) async -> StingerRefinementRunContext? {
+        guard config.stingerRefinementEnabled,
+              let bank = stingerBankIfEnabled(),
+              let entry = bank.entry(forShowKey: showKey) else {
+            return nil
+        }
+        var episodeID: String?
+        do {
+            episodeID = try await store.fetchAsset(id: analysisAssetId)?.episodeId
+        } catch {
+            logger.warning("[l2f6] asset fetch failed for \(analysisAssetId, privacy: .public) — stinger refinement runs without PCM: \(error.localizedDescription, privacy: .public)")
+        }
+        logger.info("[l2f6] stinger context resolved: show=\(entry.showName, privacy: .public) sides=[\(entry.pre != nil ? "pre" : "", privacy: .public)\(entry.post != nil ? " post" : "", privacy: .public)] grid=\(entry.podWidthGridSeconds ?? 0)")
+        return StingerRefinementRunContext(entry: entry, episodeID: episodeID)
+    }
+
+    /// Apply stinger refinement to one decoded span (flag ON, bank entry
+    /// resolved). Loads the ±90 s search envelope per templated side from
+    /// the shard-cache PCM (nil PCM ⇒ that side cannot snap), runs the pure
+    /// `StingerRefiner`, records the per-span trace, and returns the span
+    /// with refined bounds (identity, ordinals, and provenance preserved —
+    /// the refiner never splits or merges).
+    ///
+    /// `episodeDuration` is threaded from the CALLER's `runBackfill`
+    /// parameter — deliberately NOT the `self.episodeDuration` actor
+    /// property, which a concurrently-admitted hot-path run for a
+    /// different episode can reassign across this method's suspension
+    /// points (actor reentrancy). The local parameter is immutable for the
+    /// duration of the backfill.
+    private func applyStingerRefinement(
+        span: DecodedSpan,
+        context: StingerRefinementRunContext,
+        episodeDuration: Double
+    ) async -> DecodedSpan {
+        let entry = context.entry
+        var startEnvelope: StingerSearchEnvelope?
+        var endEnvelope: StingerSearchEnvelope?
+        if let episodeID = context.episodeID {
+            if entry.pre != nil {
+                startEnvelope = await loadStingerSearchEnvelope(
+                    episodeID: episodeID,
+                    center: span.startTime,
+                    episodeDuration: episodeDuration
+                )
+            }
+            if entry.post != nil {
+                endEnvelope = await loadStingerSearchEnvelope(
+                    episodeID: episodeID,
+                    center: span.endTime,
+                    episodeDuration: episodeDuration
+                )
+            }
+        }
+        let result = StingerRefiner.refine(
+            proposalStart: span.startTime,
+            proposalEnd: span.endTime,
+            entry: entry,
+            startEnvelope: startEnvelope,
+            endEnvelope: endEnvelope,
+            episodeDuration: episodeDuration
+        )
+        lastStingerRefinementTraceBySpanId[span.id] = result.trace
+        guard result.startTime != span.startTime || result.endTime != span.endTime else {
+            return span
+        }
+        logger.info("[l2f6] stinger snap: spanId=\(span.id, privacy: .public) [\(span.startTime, format: .fixed(precision: 2)), \(span.endTime, format: .fixed(precision: 2))] -> [\(result.startTime, format: .fixed(precision: 2)), \(result.endTime, format: .fixed(precision: 2))] startSnapped=\(result.trace.startSnapped) endSnapped=\(result.trace.endSnapped) gridApplied=\(result.trace.gridApplied)")
+        return DecodedSpan(
+            id: span.id,
+            assetId: span.assetId,
+            firstAtomOrdinal: span.firstAtomOrdinal,
+            lastAtomOrdinal: span.lastAtomOrdinal,
+            startTime: result.startTime,
+            endTime: result.endTime,
+            anchorProvenance: span.anchorProvenance
+        )
+    }
+
+    /// Read the decoded PCM for `center ± 90 s` (clamped to the episode)
+    /// from the injected provider and reduce it to the 50 Hz log-RMS search
+    /// envelope. Nil when the range is empty or no PCM is available (that
+    /// side simply cannot snap — never an error). `episodeDuration` is the
+    /// caller-threaded runBackfill parameter (see `applyStingerRefinement`).
+    private func loadStingerSearchEnvelope(
+        episodeID: String,
+        center: Double,
+        episodeDuration: Double
+    ) async -> StingerSearchEnvelope? {
+        let start = max(0.0, center - StingerRefiner.searchRadiusSeconds)
+        let end = min(episodeDuration, center + StingerRefiner.searchRadiusSeconds)
+        guard end > start,
+              let slice = await stingerPCMProvider(episodeID, start, end) else {
+            return nil
+        }
+        let values = StingerEnvelope.compute(samples: slice.samples)
+        guard !values.isEmpty else { return nil }
+        return StingerSearchEnvelope(values: values, startSeconds: slice.startSeconds)
     }
 
     /// playhead-hygc.1.8 (R11): test seam exposing the per-asset in-flight
@@ -3172,6 +3443,19 @@ actor AdDetectionService {
         // the rest of the run — preserves the byte-identical OFF contract.
         lastSpanFinalizerConstraintsBySpanId = [:]
         lastSpanFinalizerConstraintsByWindowId = [:]
+        // playhead-l2f.6: same reset contract for the stinger trace maps.
+        // The OFF path (`config.stingerRefinementEnabled == false`) leaves
+        // them empty for the rest of the run.
+        lastStingerRefinementTraceBySpanId = [:]
+        lastStingerRefinementTraceByWindowId = [:]
+        // playhead-l2f.6: resolve the per-show stinger context ONCE per run
+        // (bank entry + episode identity for shard-cache PCM). Flag OFF ⇒
+        // nil without touching the bank, the store, or the filesystem —
+        // byte-identical to pre-l2f.6.
+        let stingerContext = await resolveStingerRefinementContext(
+            analysisAssetId: analysisAssetId,
+            showKey: catalogShowId
+        )
         let bracketShowTrust: Double
         if config.bracketRefinementEnabled, !podcastId.isEmpty {
             let trustStore = bracketTrustStoreLazy()
@@ -3421,7 +3705,7 @@ actor AdDetectionService {
                     }
                 }
             }
-            let refinedSpan = DecodedSpan(
+            var refinedSpan = DecodedSpan(
                 id: span.id,
                 assetId: span.assetId,
                 firstAtomOrdinal: span.firstAtomOrdinal,
@@ -3430,6 +3714,23 @@ actor AdDetectionService {
                 endTime: span.endTime + endAdj,
                 anchorProvenance: span.anchorProvenance
             )
+
+            // playhead-l2f.6: stinger-anchored refinement, applied on top
+            // of the acoustic snap above so fusion and persistence see the
+            // stinger-refined bounds. Flag OFF ⇒ `stingerContext` is nil
+            // and this is a zero-cost no-op (byte-identical). WIDTH-owned
+            // spans (acoustic splice / rediff) are exempt for the same
+            // reason they bypass the bracket/legacy refiners above: the
+            // slot pass locked their physical edges and no snap may blur
+            // them.
+            if let stingerContext,
+               !span.anchorProvenance.contains(where: { $0.isWidthOwnership }) {
+                refinedSpan = await applyStingerRefinement(
+                    span: refinedSpan,
+                    context: stingerContext,
+                    episodeDuration: episodeDuration
+                )
+            }
 
             // playhead-z3ch: build per-span metadata entries from the cached cues.
             // Builder is pure; the heavy work (cue extraction) was done once above.
@@ -4133,6 +4434,17 @@ actor AdDetectionService {
             // and the window-keyed map stays empty — byte-identical OFF.
             if let trace = lastSpanFinalizerConstraintsBySpanId[refinedSpan.id], !trace.isEmpty {
                 lastSpanFinalizerConstraintsByWindowId[window.id] = trace
+            }
+
+            // playhead-l2f.6: resolve the per-window stinger refinement
+            // trace from the spanId map populated inside the boundary-
+            // refinement block. Same stamp point and rationale as the
+            // p56a trace above: the window id is fresh per call, so this
+            // iteration is the only place that knows both ids. When the
+            // flag is off the spanId map is empty (see top-of-run reset)
+            // and the window-keyed map stays empty — byte-identical OFF.
+            if let stingerTrace = lastStingerRefinementTraceBySpanId[refinedSpan.id] {
+                lastStingerRefinementTraceByWindowId[window.id] = stingerTrace
             }
 
             // playhead-gtt9.17: catalog ingress. When a span gates to

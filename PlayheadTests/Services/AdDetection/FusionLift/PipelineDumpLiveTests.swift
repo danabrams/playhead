@@ -975,6 +975,65 @@ private struct DumpAdWindow: Encodable {
     /// is also represented as a nil here, not `[]`, to keep the wire shape
     /// stable across flag-state changes for unmutated spans).
     let spanFinalizerConstraintsFired: [String]?
+    /// playhead-l2f.6: stinger-refinement trace for this AdWindow's source
+    /// span during the most recent `runBackfill`, AS REPORTED BY
+    /// `AdDetectionService.stingerRefinementTraceByWindowIdForTesting()`.
+    /// `nil` when `config.stingerRefinementEnabled == false` (the OFF path
+    /// never consults the refiner, never records a trace, and this key is
+    /// omitted from the encoded object — matching the pre-existing
+    /// `promotionTrack` / `boundaryRefinement*` /
+    /// `spanFinalizerConstraintsFired` convention). Non-nil only when the
+    /// flag is on AND the window's show had a bank entry (a no-snap
+    /// consult still records a trace so the OFF-vs-no-snap distinction is
+    /// observable downstream).
+    let stingerRefinement: DumpStingerRefinement?
+}
+
+/// playhead-l2f.6: dump mirror of `StingerRefinementTrace`. A dedicated
+/// Encodable struct (rather than encoding the production type directly)
+/// keeps the dump schema locked in this file alongside every other wire
+/// shape, so a production-side trace refactor breaks here first instead of
+/// silently in a downstream Python reader.
+private struct DumpStingerRefinement: Encodable {
+    let startSnapped: Bool
+    let endSnapped: Bool
+    let gridApplied: Bool
+    let revertedNoOverlap: Bool
+    let startPeak: Double?
+    let endPeak: Double?
+    let startDeltaSeconds: Double?
+    let endDeltaSeconds: Double?
+
+    init(_ trace: StingerRefinementTrace) {
+        startSnapped = trace.startSnapped
+        endSnapped = trace.endSnapped
+        gridApplied = trace.gridApplied
+        revertedNoOverlap = trace.revertedNoOverlap
+        startPeak = trace.startPeak
+        endPeak = trace.endPeak
+        startDeltaSeconds = trace.startDeltaSeconds
+        endDeltaSeconds = trace.endDeltaSeconds
+    }
+
+    init(
+        startSnapped: Bool,
+        endSnapped: Bool,
+        gridApplied: Bool,
+        revertedNoOverlap: Bool,
+        startPeak: Double?,
+        endPeak: Double?,
+        startDeltaSeconds: Double?,
+        endDeltaSeconds: Double?
+    ) {
+        self.startSnapped = startSnapped
+        self.endSnapped = endSnapped
+        self.gridApplied = gridApplied
+        self.revertedNoOverlap = revertedNoOverlap
+        self.startPeak = startPeak
+        self.endPeak = endPeak
+        self.startDeltaSeconds = startDeltaSeconds
+        self.endDeltaSeconds = endDeltaSeconds
+    }
 }
 
 /// One candidate decoded span observed by the FragilityDiagnosticObserver
@@ -1120,6 +1179,7 @@ private struct BaselineAdDetectionDefaults: Encodable {
     let spanFinalizerEnabled: Bool
     let spliceSlotOwnershipEnabled: Bool
     let spliceSlotShadowEnabled: Bool
+    let stingerRefinementEnabled: Bool
     let suppressionThreshold: Double
     let temporalHighConfidenceNeighborThreshold: Double
     let temporalIsolationPenaltyFactor: Double
@@ -1157,7 +1217,8 @@ private let baselineAdDetectionDefaultKeys: Set<String> = [
     "rediff_slot_shadow_enabled", "rhetorical_grammar_enabled",
     "segment_auto_skip_threshold", "segment_ui_candidate_threshold",
     "span_finalizer_enabled", "splice_slot_ownership_enabled",
-    "splice_slot_shadow_enabled", "suppression_threshold",
+    "splice_slot_shadow_enabled", "stinger_refinement_enabled",
+    "suppression_threshold",
     "temporal_high_confidence_neighbor_threshold", "temporal_isolation_penalty_factor",
     "temporal_min_dwell_penalty_factor", "temporal_min_dwell_seconds",
     "temporal_neighbor_window_seconds", "temporal_regularization_enabled",
@@ -1251,6 +1312,7 @@ private struct BaselineProductionConfig: Encodable {
                 spanFinalizerEnabled: config.spanFinalizerEnabled,
                 spliceSlotOwnershipEnabled: config.spliceSlotOwnershipEnabled,
                 spliceSlotShadowEnabled: config.spliceSlotShadowEnabled,
+                stingerRefinementEnabled: config.stingerRefinementEnabled,
                 suppressionThreshold: config.suppressionThreshold,
                 temporalHighConfidenceNeighborThreshold:
                     config.temporalHighConfidenceNeighborThreshold,
@@ -2557,6 +2619,14 @@ private extension PipelineDumpLiveTests {
         // trace, matching the default-encoder convention for nil optionals.
         let spanFinalizerConstraintsByWindowId =
             await service.spanFinalizerConstraintsByWindowIdForTesting()
+        // playhead-l2f.6: per-AdWindow stinger refinement trace. Empty map
+        // when `config.stingerRefinementEnabled == false` (the production
+        // .default this dump runs under — see `productionConfigStateIsHeld`).
+        // Each entry surfaces in the dump's `stingerRefinement` key when
+        // present; nil/missing otherwise, matching the default-encoder
+        // convention for nil optionals.
+        let stingerRefinementByWindowId =
+            await service.stingerRefinementTraceByWindowIdForTesting()
 
         let dumpWindows: [DumpAdWindow] = windows
             .sorted {
@@ -2608,6 +2678,10 @@ private extension PipelineDumpLiveTests {
                 let trace = spanFinalizerConstraintsByWindowId[window.id]
                 let spanFinalizerConstraints: [String]? =
                     (trace?.isEmpty ?? true) ? nil : trace
+                // playhead-l2f.6: nil under the production .default (flag
+                // OFF) so the key is omitted from the encoded object.
+                let stingerRefinement = stingerRefinementByWindowId[window.id]
+                    .map(DumpStingerRefinement.init)
                 return DumpAdWindow(
                     startTime: window.startTime,
                     endTime: window.endTime,
@@ -2618,7 +2692,8 @@ private extension PipelineDumpLiveTests {
                     wasSkipped: window.wasSkipped,
                     boundaryRefinementStartAdjustment: dumpStartAdj,
                     boundaryRefinementEndAdjustment: dumpEndAdj,
-                    spanFinalizerConstraintsFired: spanFinalizerConstraints
+                    spanFinalizerConstraintsFired: spanFinalizerConstraints,
+                    stingerRefinement: stingerRefinement
                 )
             }
 
@@ -3512,6 +3587,11 @@ extension PipelineDumpHermeticTests {
         // flagOffMatchesDefaultBaseline`) would catch the AdWindow drift
         // but the dump-schema drift would land here.
         #expect(cfg.spanFinalizerEnabled == false, "spanFinalizerEnabled must be off in production .default")
+        // playhead-l2f.6: the dump's contract that the `stingerRefinement`
+        // JSON key is absent on every window relies on the production
+        // .default keeping stinger refinement OFF — same rationale as the
+        // spanFinalizer pin above.
+        #expect(cfg.stingerRefinementEnabled == false, "stingerRefinementEnabled must be off in production .default")
 
         let narrowing = NarrowingConfig.default
         #expect(narrowing.perAnchorPaddingSegments == 5)
@@ -3675,7 +3755,8 @@ struct PipelineDumpEncodingTests {
             wasSkipped: true,
             boundaryRefinementStartAdjustment: nil,
             boundaryRefinementEndAdjustment: nil,
-            spanFinalizerConstraintsFired: nil
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: nil
         )
         let skippedData = try JSONEncoder().encode(skipped)
         let skippedParsed = try #require(
@@ -3698,7 +3779,8 @@ struct PipelineDumpEncodingTests {
             wasSkipped: false,
             boundaryRefinementStartAdjustment: nil,
             boundaryRefinementEndAdjustment: nil,
-            spanFinalizerConstraintsFired: nil
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: nil
         )
         let notSkippedData = try JSONEncoder().encode(notSkipped)
         let notSkippedParsed = try #require(
@@ -3744,7 +3826,8 @@ struct PipelineDumpEncodingTests {
             wasSkipped: true,
             boundaryRefinementStartAdjustment: nil,
             boundaryRefinementEndAdjustment: nil,
-            spanFinalizerConstraintsFired: nil
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: nil
         )
         let nilData = try JSONEncoder().encode(nilAdj)
         let nilParsed = try #require(
@@ -3772,7 +3855,8 @@ struct PipelineDumpEncodingTests {
             wasSkipped: true,
             boundaryRefinementStartAdjustment: -0.75,
             boundaryRefinementEndAdjustment: 1.25,
-            spanFinalizerConstraintsFired: nil
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: nil
         )
         let nonNilData = try JSONEncoder().encode(nonNilAdj)
         let nonNilParsed = try #require(
@@ -3805,7 +3889,8 @@ struct PipelineDumpEncodingTests {
             wasSkipped: true,
             boundaryRefinementStartAdjustment: 0.5,
             boundaryRefinementEndAdjustment: nil,
-            spanFinalizerConstraintsFired: nil
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: nil
         )
         let data = try JSONEncoder().encode(window)
         let parsed = try #require(
@@ -3837,6 +3922,9 @@ struct PipelineDumpEncodingTests {
         // playhead-p56a: spanFinalizerConstraintsFired: nil → key absent
         // (matches the production .default OFF state this dump runs under).
         #expect(!parsed.keys.contains("spanFinalizerConstraintsFired"))
+        // playhead-l2f.6: stingerRefinement: nil → key absent (same
+        // production .default OFF rationale).
+        #expect(!parsed.keys.contains("stingerRefinement"))
         // New values round-trip (mixed nil/non-nil pair — encoded
         // independently, not as a 2-tuple).
         #expect((parsed["wasSkipped"] as? Bool) == true)
@@ -3874,7 +3962,8 @@ struct PipelineDumpEncodingTests {
             wasSkipped: true,
             boundaryRefinementStartAdjustment: nil,
             boundaryRefinementEndAdjustment: nil,
-            spanFinalizerConstraintsFired: nil
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: nil
         )
         let data = try JSONEncoder().encode(window)
         let parsed = try #require(
@@ -3913,7 +4002,8 @@ struct PipelineDumpEncodingTests {
             wasSkipped: true,
             boundaryRefinementStartAdjustment: nil,
             boundaryRefinementEndAdjustment: nil,
-            spanFinalizerConstraintsFired: trace
+            spanFinalizerConstraintsFired: trace,
+            stingerRefinement: nil
         )
         let data = try JSONEncoder().encode(window)
         let parsed = try #require(
@@ -3932,5 +4022,102 @@ struct PipelineDumpEncodingTests {
         let mergedIdx = try #require(json.range(of: "mergedWithAdjacent")?.lowerBound)
         let policyIdx = try #require(json.range(of: "policyOverrideApplied")?.lowerBound)
         #expect(mergedIdx < policyIdx, "trace order must survive the JSON encode")
+    }
+
+    // MARK: - playhead-l2f.6 stinger refinement trace field
+    //
+    // The next two tests lock the wire shape for the `stingerRefinement`
+    // extension. Mirrors the same OFF=absent / ON=object contract the
+    // `spanFinalizerConstraintsFired` field uses, so the gold scorer and
+    // the bd-4xqf-style analyzers can flip between arms without a schema
+    // migration.
+
+    @Test("DumpAdWindow omits stingerRefinement when nil (flag-OFF)")
+    func dumpAdWindowOmitsStingerRefinementWhenNil() throws {
+        // Flag OFF — the production `.default` arm. The live dump never
+        // populates the field; the default `JSONEncoder` strategy omits
+        // the key entirely (does NOT emit explicit `null`), matching the
+        // pre-existing optional-field convention used by every dump
+        // shipped so far.
+        let window = DumpAdWindow(
+            startTime: 100.0,
+            endTime: 130.5,
+            skipConfidence: 0.92,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: true,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: nil
+        )
+        let data = try JSONEncoder().encode(window)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(parsed["stingerRefinement"] == nil)
+        #expect(!parsed.keys.contains("stingerRefinement"))
+        // Defense in depth: the raw JSON text must not contain the key in
+        // any form so downstream `dict.get("stingerRefinement")` readers
+        // see None on the OFF arm.
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("stingerRefinement"))
+    }
+
+    @Test("DumpAdWindow encodes stingerRefinement as a JSON object when present (flag-ON)")
+    func dumpAdWindowEncodesStingerRefinementWhenPresent() throws {
+        // Flag ON — the experimental arm. The live dump pulls the
+        // per-window trace from
+        // `AdDetectionService.stingerRefinementTraceByWindowIdForTesting()`
+        // and surfaces it as a nested object. A grid-applied one-sided
+        // snap is used so all four booleans plus the optional peak/delta
+        // fields are exercised in one shape: startPeak present +
+        // endPeak absent (only the start side snapped), both deltas
+        // present (the grid moved the end edge too).
+        let window = DumpAdWindow(
+            startTime: 100.0,
+            endTime: 130.5,
+            skipConfidence: 0.92,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: true,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: DumpStingerRefinement(
+                startSnapped: true,
+                endSnapped: false,
+                gridApplied: true,
+                revertedNoOverlap: false,
+                startPeak: 0.874,
+                endPeak: nil,
+                startDeltaSeconds: -6.42,
+                endDeltaSeconds: 2.08
+            )
+        )
+        let data = try JSONEncoder().encode(window)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let refinement = try #require(
+            parsed["stingerRefinement"] as? [String: Any]
+        )
+        #expect((refinement["startSnapped"] as? Bool) == true)
+        #expect((refinement["endSnapped"] as? Bool) == false)
+        #expect((refinement["gridApplied"] as? Bool) == true)
+        #expect((refinement["revertedNoOverlap"] as? Bool) == false)
+        #expect((refinement["startPeak"] as? Double) == 0.874)
+        // Nil optionals inside the nested object follow the same
+        // absent-not-null convention as the top level.
+        #expect(!refinement.keys.contains("endPeak"))
+        #expect((refinement["startDeltaSeconds"] as? Double) == -6.42)
+        #expect((refinement["endDeltaSeconds"] as? Double) == 2.08)
+        // Defense in depth: raw wire form carries the nested key names.
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(json.contains("\"stingerRefinement\""))
+        #expect(json.contains("\"startSnapped\":true"))
+        #expect(!json.contains("\"endPeak\""))
     }
 }

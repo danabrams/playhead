@@ -20,14 +20,36 @@ Recipe being measured (bead notes, 2026-07-15):
   as the median residual between mapped and actual gold edges;
 - pod-width grid: morbid/nikki pods sit on a 30s grid — learned when a show's
   other-break widths cluster on multiples of 30.
+
+--emit-bank (playhead-l2f.6 production wire-in): build FULL-CORPUS (NOT
+leave-one-out) per-show models from the gold evaluation artifact + the
+retained corpus audio, and write the production `StingerBank` JSON that
+ships bundled under `Playhead/Resources`. Emit-mode envelopes are extracted
+at 16 kHz (`BANK_SAMPLE_RATE`) so the templates match the runtime envelopes
+the app computes from its persisted 16 kHz analysis shards; the default
+leave-one-out evaluation path keeps the original 8 kHz extraction so its
+published spike numbers stay reproducible.
+
+Join-key contract (documented decision, playhead-l2f.6): production
+identifies a show inside `AdDetectionService.runBackfill` by the opaque
+`podcastId` string it receives — the RSS feed URL in the shipping app, and
+the corpus `showSlug` on the Catalyst pipeline-dump measurement path (the
+dump harness passes `entry.showSlug` as `podcastId`). Neither side computes
+the other, so each bank entry carries a `showKeys` alias list containing
+BOTH forms — the corpus slug (derived from the gold `episode_id` stem) and
+the show's feed URL(s) (from the corpus snapshots manifest) — and the
+runtime resolves an entry by exact string match of `podcastId` against any
+alias.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import pathlib
+import re
 import statistics
 import subprocess
 import sys
@@ -39,6 +61,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 ENVELOPE_HZ = 50
 SAMPLE_RATE = 8000
 HOP = SAMPLE_RATE // ENVELOPE_HZ
+# --emit-bank only: the app computes runtime envelopes from its persisted
+# 16 kHz mono analysis shards, so bank templates must be learned from
+# 16 kHz-decoded envelopes for NCC parity. Frame rate stays ENVELOPE_HZ.
+BANK_SAMPLE_RATE = 16000
+BANK_SCHEMA_VERSION = 1
+DEFAULT_SNAPSHOTS_MANIFEST = ROOT / "TestFixtures/Corpus/Snapshots/manifest.json"
 PRE_CLIP = (12.0, 2.0)  # seconds before/after the gold START edge
 POST_CLIP = (2.0, 12.0)  # seconds before/after the gold END edge
 LEARN_NCC_MIN = 0.50  # template-vs-clip alignment confidence during learning
@@ -66,8 +94,14 @@ SCORE = _load("l2f_score_oracle_gold", "l2f-score-oracle-gold.py")
 
 
 class EnvelopeCache:
-    def __init__(self, audio_by_episode: dict[str, pathlib.Path]):
+    def __init__(
+        self,
+        audio_by_episode: dict[str, pathlib.Path],
+        sample_rate: int = SAMPLE_RATE,
+    ):
         self.audio_by_episode = audio_by_episode
+        self.sample_rate = sample_rate
+        self.hop = sample_rate // ENVELOPE_HZ
         self._cache: dict[tuple[str, float, float], np.ndarray] = {}
 
     def get(self, episode_id: str, start_s: float, end_s: float) -> np.ndarray:
@@ -84,15 +118,19 @@ class EnvelopeCache:
                 "ffmpeg", "-v", "error",
                 "-ss", f"{start_s:.3f}", "-t", f"{duration:.3f}",
                 "-i", str(self.audio_by_episode[episode_id]),
-                "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "-",
+                "-ac", "1", "-ar", str(self.sample_rate), "-f", "f32le", "-",
             ],
             capture_output=True,
             check=True,
         )
         pcm = np.frombuffer(result.stdout, dtype=np.float32)
-        if pcm.size < HOP:
+        if pcm.size < self.hop:
             return np.zeros(1, dtype=np.float64)
-        frames = pcm[: pcm.size - pcm.size % HOP].reshape(-1, HOP).astype(np.float64)
+        frames = (
+            pcm[: pcm.size - pcm.size % self.hop]
+            .reshape(-1, self.hop)
+            .astype(np.float64)
+        )
         rms = np.sqrt((frames**2).mean(axis=1))
         return np.log1p(rms * 100.0)
 
@@ -148,11 +186,36 @@ def ncc_nearest(
 def learn_show_model(
     show_breaks: list[dict],
     envelopes: EnvelopeCache,
-    exclude_index: int,
+    exclude_index: int | None,
+    full_templates_only: bool = False,
 ) -> dict:
-    others = [b for i, b in enumerate(show_breaks) if i != exclude_index]
+    """Learn a per-show model from `show_breaks`.
+
+    `exclude_index` selects the evaluation regime: an int runs the original
+    leave-one-out spike protocol (no break refined with evidence learned
+    from itself); `None` runs the FULL-CORPUS protocol used by --emit-bank
+    (every gold break contributes to the shipped production model).
+
+    `full_templates_only` (emit-bank only; default False keeps the spike
+    protocol byte-identical): drop clips whose edge template was truncated
+    by the episode boundary (e.g. a break starting at 0.0s) from the
+    stinger-learning set. A truncated 1-second template wins exemplar
+    selection with cheap short-template NCC scores and then poisons the
+    learned-offset spread with misaligned residuals; the truncated clip's
+    short envelope also scores an unmatchable 0.0 against every full-width
+    candidate, dragging their medians down. Grid learning still uses every
+    break's width.
+    """
+    others = [
+        b
+        for i, b in enumerate(show_breaks)
+        if exclude_index is None or i != exclude_index
+    ]
     model: dict = {"pre": None, "post": None, "grid": None}
     if len(others) >= 2:
+        full_template_samples = int(
+            (TEMPLATE_INNER + TEMPLATE_OUTER) * ENVELOPE_HZ
+        )
         for side, (before_s, after_s), edge_key in (
             ("pre", PRE_CLIP, "start_seconds"),
             ("post", POST_CLIP, "end_seconds"),
@@ -177,6 +240,14 @@ def learn_show_model(
                 lo = max(0, lo)
                 c["template"] = c["env"][lo:hi]
                 c["template_edge"] = c["edge_sample"] - lo
+            if full_templates_only:
+                clips = [
+                    c for c in clips if c["template"].size == full_template_samples
+                ]
+                if len(clips) < 3:
+                    # Exemplar + >= 2 offset contributors are required below;
+                    # fewer full-width clips cannot produce a shippable side.
+                    continue
             best_exemplar, best_score = None, 0.0
             for i, candidate in enumerate(clips):
                 peaks = []
@@ -281,15 +352,174 @@ def refine_edges(
     return new_start, new_end, trace
 
 
+def group_breaks_by_show(evaluation: dict) -> dict[str, list[dict]]:
+    breaks_by_show: dict[str, list[dict]] = {}
+    for asset in evaluation["assets"]:
+        for b in asset["full_breaks"]:
+            breaks_by_show.setdefault(asset["show_name"], []).append(
+                {**b, "episode_id": asset["episode_id"], "show_name": asset["show_name"]}
+            )
+    return breaks_by_show
+
+
+def show_slug_from_episode_id(episode_id: str) -> str:
+    """Corpus episode ids are `<show-slug>-<yyyy-mm-dd>-<title-slug>`."""
+    match = re.match(r"^(.+?)-\d{4}-\d{2}-\d{2}-", episode_id)
+    if not match:
+        raise ValueError(f"cannot derive show slug from episode_id {episode_id!r}")
+    return match.group(1)
+
+
+def load_feed_urls_by_slug(manifest_path: pathlib.Path | None) -> dict[str, list[str]]:
+    """slug -> feed-URL aliases from the corpus snapshots manifest.
+
+    The manifest is gitignored alongside the audio (main repo only), so a
+    missing file degrades to slug-only keys rather than failing the emit.
+    """
+    if manifest_path is None or not manifest_path.exists():
+        return {}
+    entries = json.loads(manifest_path.read_text(encoding="utf-8"))
+    feeds: dict[str, set[str]] = {}
+    for entry in entries:
+        slug = entry.get("showSlug")
+        feed = entry.get("feedUrl")
+        if slug and feed:
+            feeds.setdefault(slug, set()).add(feed)
+    return {slug: sorted(urls) for slug, urls in feeds.items()}
+
+
+def build_bank(
+    evaluation: dict,
+    envelopes: EnvelopeCache,
+    feed_urls_by_slug: dict[str, list[str]],
+) -> dict:
+    """Build the production StingerBank payload (FULL-CORPUS models).
+
+    A show ships in the bank only when the learner produced at least one
+    stinger side — a pod-width grid alone is inert at runtime (the grid
+    only applies after exactly one edge snapped, which requires a stinger).
+    """
+    shows = []
+    for show, show_breaks in sorted(group_breaks_by_show(evaluation).items()):
+        model = learn_show_model(
+            show_breaks, envelopes, None, full_templates_only=True
+        )
+        if not model["pre"] and not model["post"]:
+            continue
+        slugs = {show_slug_from_episode_id(b["episode_id"]) for b in show_breaks}
+        if len(slugs) != 1:
+            raise ValueError(f"show {show!r} spans multiple slugs: {sorted(slugs)}")
+        slug = slugs.pop()
+        entry: dict = {
+            "showKeys": [slug, *feed_urls_by_slug.get(slug, [])],
+            "showName": show,
+        }
+        for side in ("pre", "post"):
+            side_model = model[side]
+            if not side_model:
+                continue
+            template = [round(float(v), 5) for v in side_model["template"].tolist()]
+            if len(template) < ENVELOPE_HZ:
+                # The runtime refiner refuses sub-second templates; do not
+                # ship one the app would reject.
+                continue
+            entry[side] = {
+                "template": template,
+                "edgeSampleIndex": int(side_model["edge_sample"]),
+                "edgeOffsetSeconds": round(float(side_model["offset"]), 3),
+                "confidence": float(side_model["confidence"]),
+                "support": int(side_model["support"]),
+            }
+        if "pre" not in entry and "post" not in entry:
+            continue
+        if model["grid"]:
+            entry["podWidthGridSeconds"] = float(model["grid"])
+        shows.append(entry)
+    return {
+        "schemaVersion": BANK_SCHEMA_VERSION,
+        "envelopeHz": ENVELOPE_HZ,
+        "pcmSampleRate": envelopes.sample_rate,
+        "generator": "scripts/l2f-boundary-stinger-prototype.py --emit-bank",
+        "protocol": (
+            "full-corpus per-show stinger anchors (envelope NCC) + learned "
+            "edge offsets + 30s pod-width grid"
+        ),
+        "shows": shows,
+    }
+
+
+def emit_bank(args: argparse.Namespace) -> int:
+    evaluation = SCORE.load_evaluation(args.evaluation)
+    audio_by_stem = {
+        p.stem: p
+        for p in args.audio_dir.iterdir()
+        if p.suffix.lower() in {".mp3", ".m4a", ".aac", ".wav", ".flac", ".caf"}
+    }
+    envelopes = EnvelopeCache(audio_by_stem, sample_rate=BANK_SAMPLE_RATE)
+    feed_urls = load_feed_urls_by_slug(args.snapshots_manifest)
+    bank = build_bank(evaluation, envelopes, feed_urls)
+    bank["sources"] = {
+        "evaluation": args.evaluation.name,
+        "evaluationSha256": hashlib.sha256(args.evaluation.read_bytes()).hexdigest(),
+        "snapshotsManifest": (
+            "TestFixtures/Corpus/Snapshots/manifest.json"
+            if args.snapshots_manifest and args.snapshots_manifest.exists()
+            else None
+        ),
+        "snapshotsManifestSha256": (
+            hashlib.sha256(args.snapshots_manifest.read_bytes()).hexdigest()
+            if args.snapshots_manifest and args.snapshots_manifest.exists()
+            else None
+        ),
+    }
+    args.emit_bank.write_text(
+        json.dumps(bank, indent=1, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(f"bank: {len(bank['shows'])} shows -> {args.emit_bank}")
+    for entry in bank["shows"]:
+        sides = [s for s in ("pre", "post") if s in entry]
+        grid = entry.get("podWidthGridSeconds")
+        detail = ", ".join(
+            f"{s}(conf={entry[s]['confidence']:.3f}, support={entry[s]['support']}, "
+            f"len={len(entry[s]['template'])})"
+            for s in sides
+        )
+        print(
+            f"  {entry['showKeys'][0]:34} {detail}"
+            + (f", grid={grid:.0f}s" if grid else "")
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--evaluation", type=pathlib.Path, required=True)
-    parser.add_argument("--dump", type=pathlib.Path, required=True)
+    parser.add_argument("--dump", type=pathlib.Path)
     parser.add_argument(
         "--audio-dir", type=pathlib.Path, default=ROOT / "TestFixtures/Corpus/Audio"
     )
     parser.add_argument("--report", type=pathlib.Path)
+    parser.add_argument(
+        "--emit-bank",
+        type=pathlib.Path,
+        help=(
+            "write the production StingerBank JSON (full-corpus per-show "
+            "models) to this path instead of running the leave-one-out "
+            "refinement evaluation"
+        ),
+    )
+    parser.add_argument(
+        "--snapshots-manifest",
+        type=pathlib.Path,
+        default=DEFAULT_SNAPSHOTS_MANIFEST,
+        help="corpus snapshots manifest supplying feed-URL show aliases",
+    )
     args = parser.parse_args(argv)
+
+    if args.emit_bank:
+        return emit_bank(args)
+    if not args.dump:
+        parser.error("--dump is required unless --emit-bank is given")
 
     evaluation = SCORE.load_evaluation(args.evaluation)
     audio_by_stem = {
@@ -299,14 +529,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     envelopes = EnvelopeCache(audio_by_stem)
 
-    breaks_by_show: dict[str, list[dict]] = {}
+    breaks_by_show = group_breaks_by_show(evaluation)
     durations: dict[str, float] = {}
     for asset in evaluation["assets"]:
         durations[asset["episode_id"]] = asset["duration_seconds"]
-        for b in asset["full_breaks"]:
-            breaks_by_show.setdefault(asset["show_name"], []).append(
-                {**b, "episode_id": asset["episode_id"], "show_name": asset["show_name"]}
-            )
 
     refined = {
         eid: [dict(p) for p in spans]
