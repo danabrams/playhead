@@ -112,6 +112,7 @@ staging_dir="$output_dir/$staging_name"
 staged_name="playhead-partial-silver-baseline-${run_id}.json"
 staged_output="$staging_dir/$staged_name"
 cleanup() {
+  [[ -n "${capture_xctestrun:-}" ]] && rm -f "$capture_xctestrun" || true
   python3 "$capture_fs" cleanup \
     "$output_dir" "$output_identity" "$staging_name" "$staging_identity" \
     >/dev/null 2>&1 || true
@@ -121,18 +122,41 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
-PLAYHEAD_PARTIAL_SILVER_BASELINE=1 \
-PLAYHEAD_BASELINE_RUN_ID="$run_id" \
-PLAYHEAD_BASELINE_SOURCE_REVISION="$revision" \
-PLAYHEAD_BASELINE_OUTPUT_PATH="$staged_output" \
-PLAYHEAD_CORPUS_ROOT="$corpus_root" \
-xcodebuild test \
+# The Catalyst test host does NOT inherit xcodebuild's process environment
+# (and `xcodebuild test` offers no other env seam), so the baseline
+# configuration must be patched into the xctestrun's EnvironmentVariables —
+# the same mechanism the physical-device wrapper uses. build-for-testing
+# emits the xctestrun; the scheme's default test plan is fine because the
+# capture narrows to the single live test with -only-testing.
+developer_dir="/Applications/Xcode-beta.app/Contents/Developer"
+xcode_version_actual="$(DEVELOPER_DIR="$developer_dir" xcodebuild -version | paste -sd ' ' -)"
+
+DEVELOPER_DIR="$developer_dir" xcodebuild build-for-testing \
   -project Playhead.xcodeproj \
   -scheme Playhead \
-  -testPlan Playhead \
   -destination 'platform=macOS,variant=Mac Catalyst' \
-  -derivedDataPath "$derived_data" \
+  -derivedDataPath "$derived_data"
+
+set -- "$derived_data"/Build/Products/*.xctestrun
+[[ "$#" -eq 1 && -f "$1" ]] || {
+  echo "expected exactly one build-for-testing xctestrun" >&2
+  exit 1
+}
+xctestrun="$1"
+capture_xctestrun="${xctestrun%/*}/.playhead-l2f8-$$-catalyst.xctestrun"
+rm -f "$capture_xctestrun"
+python3 "$ROOT/scripts/l2f_capture_device.py" patch-xctestrun \
+  "$xctestrun" "$capture_xctestrun" \
+  "PLAYHEAD_PARTIAL_SILVER_BASELINE=1" \
+  "PLAYHEAD_BASELINE_RUN_ID=$run_id" \
+  "PLAYHEAD_BASELINE_SOURCE_REVISION=$revision" \
+  "PLAYHEAD_BASELINE_OUTPUT_PATH=$staged_output" \
+  "PLAYHEAD_CORPUS_ROOT=$corpus_root" \
+  "XCODE_VERSION_ACTUAL=$xcode_version_actual"
+
+DEVELOPER_DIR="$developer_dir" xcodebuild test-without-building \
+  -xctestrun "$capture_xctestrun" \
+  -destination 'platform=macOS,variant=Mac Catalyst' \
   -only-testing:'PlayheadTests/PipelineDumpLiveTests/testProductionPipelineDumpOnNewEpisodes'
 
 [[ "$(git rev-parse --verify HEAD)" = "$revision" ]] || {

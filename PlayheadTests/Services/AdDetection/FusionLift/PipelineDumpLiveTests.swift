@@ -600,11 +600,20 @@ enum PartialSilverEvaluationLoader {
             ) else {
                 continue
             }
-            if values.isAliasFile == true {
+            // `isAliasFile` is documented true for symbolic links as well as
+            // Finder aliases, so the root compatibility links (/etc, /tmp,
+            // /var) need the same exemption in both branches. Without it the
+            // Catalyst lane can never stage inputs: the macOS user temp root
+            // is /var/folders/…, and /var is a root-level symlink — iOS never
+            // hits this because container paths sit inside the trusted-anchor
+            // prefix skipped above.
+            let isRootCompatibilityLink = index == 0
+                && compatibilityLinks.contains(component)
+                && values.isSymbolicLink == true
+            if values.isAliasFile == true, !isRootCompatibilityLink {
                 return true
             }
-            if values.isSymbolicLink == true,
-               !(index == 0 && compatibilityLinks.contains(component)) {
+            if values.isSymbolicLink == true, !isRootCompatibilityLink {
                 return true
             }
         }
@@ -2920,6 +2929,37 @@ struct PipelineDumpHermeticTests {
             PartialSilverEvaluationLoader.trustedApplicationContainerAnchorLength([
                 "tmp", "Documents", "l2f8",
             ]) == 0
+        )
+    }
+
+    @Test("root compatibility symlinks pass the unsafe-component walk")
+    func rootCompatibilitySymlinksAreNotUnsafe() throws {
+        // The macOS (Catalyst) user temp root is /var/folders/…, and /var is
+        // a root-level symlink whose `isAliasFile` is ALSO true. With no
+        // container anchor to skip it, the walk must still accept the root
+        // compatibility links or the Catalyst lane can never stage
+        // per-episode snapshot inputs.
+        #expect(
+            !PartialSilverEvaluationLoader.hasUnsafeFilesystemComponent(
+                URL(fileURLWithPath: "/var/tmp", isDirectory: true)
+            )
+        )
+        #expect(
+            !PartialSilverEvaluationLoader.hasUnsafeFilesystemComponent(
+                FileManager.default.temporaryDirectory
+            )
+        )
+        // The exemption is root-only: a symlink component deeper in the
+        // tree is still rejected.
+        let scratch = try makeTempDir(prefix: "GuardProbe")
+        let real = scratch.appendingPathComponent("real", isDirectory: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        let link = scratch.appendingPathComponent("link", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        #expect(
+            PartialSilverEvaluationLoader.hasUnsafeFilesystemComponent(
+                link.appendingPathComponent("probe.json", isDirectory: false)
+            )
         )
     }
 

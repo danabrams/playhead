@@ -60,13 +60,82 @@ case "${1:-}" in
 esac
 """,
         )
+        # The stub mirrors the real Catalyst mechanism: env reaches the test
+        # host only through the patched xctestrun, so test-without-building
+        # reads its configuration back out of that plist rather than from
+        # the process environment.
         self._write_executable(
             "xcodebuild",
             """#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_XCODE_LOG:?}"
-printf '%s\n' "${PLAYHEAD_BASELINE_OUTPUT_PATH:?}" > "${FAKE_STAGED_PATH_LOG:?}"
-printf '%s' "${FAKE_STAGED_BYTES:-raw capture}" > "${PLAYHEAD_BASELINE_OUTPUT_PATH:?}"
+case "${1:-}" in
+  -version)
+    printf 'Xcode 27.0\nBuild version 27A5209h\n'
+    exit 0
+    ;;
+  build-for-testing)
+    products=""
+    previous=""
+    for argument in "$@"; do
+      [[ "$previous" == "-derivedDataPath" ]] && products="$argument/Build/Products"
+      previous="$argument"
+    done
+    mkdir -p "${products:?}"
+    /usr/bin/python3 - "$products/Playhead_Playhead_macosx27.0-arm64.xctestrun" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "wb") as handle:
+    plistlib.dump(
+        {
+            "TestConfigurations": [
+                {
+                    "TestTargets": [
+                        {
+                            "BlueprintName": "PlayheadTests",
+                            "TestBundlePath": "__TESTHOST__/PlugIns/PlayheadTests.xctest",
+                            "EnvironmentVariables": {},
+                        }
+                    ]
+                }
+            ]
+        },
+        handle,
+    )
+PY
+    exit 0
+    ;;
+  test-without-building) ;;
+  *)
+    echo "unexpected fake xcodebuild action: $*" >&2
+    exit 97
+    ;;
+esac
+xctestrun=""
+previous=""
+for argument in "$@"; do
+  [[ "$previous" == "-xctestrun" ]] && xctestrun="$argument"
+  previous="$argument"
+done
+staged_output="$(/usr/bin/python3 - "${xctestrun:?}" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    document = plistlib.load(handle)
+target = document["TestConfigurations"][0]["TestTargets"][0]
+environment = target["EnvironmentVariables"]
+assert environment["PLAYHEAD_PARTIAL_SILVER_BASELINE"] == "1"
+assert environment["PLAYHEAD_BASELINE_RUN_ID"]
+assert environment["PLAYHEAD_BASELINE_SOURCE_REVISION"]
+assert environment["PLAYHEAD_CORPUS_ROOT"]
+assert environment["XCODE_VERSION_ACTUAL"] == "Xcode 27.0 Build version 27A5209h"
+print(environment["PLAYHEAD_BASELINE_OUTPUT_PATH"])
+PY
+)"
+printf '%s\n' "$staged_output" > "${FAKE_STAGED_PATH_LOG:?}"
+printf '%s' "${FAKE_STAGED_BYTES:-raw capture}" > "$staged_output"
 if [[ -n "${FAKE_FINAL_OUTPUT:-}" ]]; then
   printf '%s' "${FAKE_FINAL_BYTES:-concurrent capture}" > "$FAKE_FINAL_OUTPUT"
 fi
@@ -408,6 +477,10 @@ exec /usr/bin/shasum "$@"
         shutil.copy2(SCRIPT, capture_script)
         shutil.copy2(CAPTURE_FS_SCRIPT, scripts / CAPTURE_FS_SCRIPT.name)
         shutil.copy2(
+            ROOT / "scripts/l2f_capture_device.py",
+            scripts / "l2f_capture_device.py",
+        )
+        shutil.copy2(
             ROOT / "scripts/l2f-score-partial-silver.py",
             scripts / "l2f-score-partial-silver.py",
         )
@@ -445,9 +518,72 @@ exec /usr/bin/shasum "$@"
         real_bin.mkdir()
         xcodebuild = real_bin / "xcodebuild"
         xcodebuild.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            "printf '%s' 'real git capture' > \"${PLAYHEAD_BASELINE_OUTPUT_PATH:?}\"\n",
+            """#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  -version)
+    printf 'Xcode 27.0\\nBuild version 27A5209h\\n'
+    exit 0
+    ;;
+  build-for-testing)
+    products=""
+    previous=""
+    for argument in "$@"; do
+      [[ "$previous" == "-derivedDataPath" ]] && products="$argument/Build/Products"
+      previous="$argument"
+    done
+    mkdir -p "${products:?}"
+    /usr/bin/python3 - "$products/Playhead_Playhead_macosx27.0-arm64.xctestrun" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "wb") as handle:
+    plistlib.dump(
+        {
+            "TestConfigurations": [
+                {
+                    "TestTargets": [
+                        {
+                            "BlueprintName": "PlayheadTests",
+                            "TestBundlePath": "__TESTHOST__/PlugIns/PlayheadTests.xctest",
+                            "EnvironmentVariables": {},
+                        }
+                    ]
+                }
+            ]
+        },
+        handle,
+    )
+PY
+    exit 0
+    ;;
+  test-without-building) ;;
+  *)
+    echo "unexpected fake xcodebuild action: $*" >&2
+    exit 97
+    ;;
+esac
+xctestrun=""
+previous=""
+for argument in "$@"; do
+  [[ "$previous" == "-xctestrun" ]] && xctestrun="$argument"
+  previous="$argument"
+done
+staged_output="$(/usr/bin/python3 - "${xctestrun:?}" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    document = plistlib.load(handle)
+print(
+    document["TestConfigurations"][0]["TestTargets"][0][
+        "EnvironmentVariables"
+    ]["PLAYHEAD_BASELINE_OUTPUT_PATH"]
+)
+PY
+)"
+printf '%s' 'real git capture' > "$staged_output"
+""",
             encoding="utf-8",
         )
         xcodebuild.chmod(0o755)
