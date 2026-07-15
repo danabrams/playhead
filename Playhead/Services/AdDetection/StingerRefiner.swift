@@ -113,6 +113,11 @@ struct StingerRefinementTrace: Sendable, Equatable {
 enum StingerRefiner {
     /// Search span half-width around each proposed edge.
     static let searchRadiusSeconds = 90.0
+    /// Recipe v2 (2026-07-16 measurement): a grid width-snap may only ride
+    /// on a confident edge snap. The first flag-ON dump breached the 90 s
+    /// false-widening budget (132.6 s/ep) via grid widenings anchored to
+    /// 0.50-0.52 peaks that barely cleared the gate floor.
+    static let gridMinimumPeak = 0.65
     /// Refuse snaps that move an edge farther than this from the proposal.
     static let maxEdgeMoveSeconds = 75.0
     /// Refined windows keep at least this width (clamp floor); combined
@@ -180,16 +185,30 @@ enum StingerRefiner {
         // the SAME pod count the spike measured — `.rounded()`'s
         // half-away-from-zero default would diverge by a full grid step in
         // precisely that case.
+        // Recipe v2 guards: the anchoring snap must be confident
+        // (`gridMinimumPeak`), and the grid-adjusted edge honors the same
+        // move cap as snaps — the v1 measurement breached the 90 s
+        // false-widening budget through uncapped grid widenings.
         if let grid = entry.podWidthGridSeconds,
            trace.startSnapped != trace.endSnapped {
-            let width = newEnd - newStart
-            let snappedWidth = grid * max(1.0, (width / grid).rounded(.toNearestOrEven))
-            if trace.startSnapped {
-                newEnd = newStart + snappedWidth
-            } else {
-                newStart = newEnd - snappedWidth
+            let anchorPeak = trace.startSnapped ? trace.startPeak : trace.endPeak
+            if let anchorPeak, anchorPeak >= Self.gridMinimumPeak {
+                let width = newEnd - newStart
+                let snappedWidth = grid * max(1.0, (width / grid).rounded(.toNearestOrEven))
+                if trace.startSnapped {
+                    let candidate = newStart + snappedWidth
+                    if abs(candidate - proposalEnd) <= Self.maxEdgeMoveSeconds {
+                        newEnd = candidate
+                        trace.gridApplied = true
+                    }
+                } else {
+                    let candidate = newEnd - snappedWidth
+                    if abs(candidate - proposalStart) <= Self.maxEdgeMoveSeconds {
+                        newStart = candidate
+                        trace.gridApplied = true
+                    }
+                }
             }
-            trace.gridApplied = true
         }
 
         // Clamp to the episode. Order is load-bearing: the end clamp's

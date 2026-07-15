@@ -333,13 +333,14 @@ class EmitBankCLITests(unittest.TestCase):
         PROTO.EnvelopeCache = PatchedCache
         self.addCleanup(setattr, PROTO, "EnvelopeCache", self.original_cache)
 
-    def _emit(self, out_path):
+    def _emit(self, out_path, extra=()):
         return PROTO.main(
             [
                 "--evaluation", str(self.evaluation_path),
                 "--emit-bank", str(out_path),
                 "--audio-dir", str(self.audio_dir),
                 "--snapshots-manifest", str(self.manifest_path),
+                *extra,
             ]
         )
 
@@ -367,6 +368,21 @@ class EmitBankCLITests(unittest.TestCase):
         raw = out.read_text(encoding="utf-8")
         self.assertTrue(raw.endswith("\n"))
         self.assertEqual(raw, json.dumps(bank, indent=1, sort_keys=True) + "\n")
+
+    def test_emit_bank_exclude_side_curates_and_records(self):
+        out = self.tmp / "bank-excluded.json"
+        self.assertEqual(self._emit(out, extra=["--exclude-side", "show-a:post"]), 0)
+        bank = json.loads(out.read_text(encoding="utf-8"))
+        entry = bank["shows"][0]
+        self.assertIn("pre", entry)
+        self.assertNotIn("post", entry)
+        self.assertEqual(bank["sources"]["curatedExclusions"], ["show-a:post"])
+
+    def test_emit_bank_exclude_side_rejects_bad_spec(self):
+        out = self.tmp / "bank-bad.json"
+        with self.assertRaises(SystemExit):
+            self._emit(out, extra=["--exclude-side", "show-a:sideways"])
+        self.assertFalse(out.exists())
 
     def test_emit_bank_is_deterministic(self):
         first = self.tmp / "bank1.json"

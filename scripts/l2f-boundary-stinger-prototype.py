@@ -78,6 +78,7 @@ TEMPLATE_OUTER = 1.0  # template seconds past the edge (SYSK straddle)
 OFFSET_SPREAD_MAX = 2.0  # learned offsets must agree within this many seconds
 SEARCH_RADIUS_SECONDS = 90.0
 GRID_SECONDS = 30.0
+GRID_MIN_PEAK = 0.65  # recipe v2: grid rides only on a confident anchor snap
 GRID_SNAP_TOLERANCE = 3.0
 GRID_MIN_FRACTION = 0.6
 
@@ -330,14 +331,24 @@ def refine_edges(
             trace["end_snapped"] = True
             trace["end_peak"] = round(peak, 3)
     if model.get("grid") and trace["start_snapped"] != trace["end_snapped"]:
-        grid = model["grid"]
-        width = new_end - new_start
-        snapped_width = grid * max(1, round(width / grid))
-        if trace["start_snapped"]:
-            new_end = new_start + snapped_width
-        else:
-            new_start = new_end - snapped_width
-        trace["grid_applied"] = True
+        # Recipe v2 guards (2026-07-16): anchor peak floor + move cap on the
+        # grid-adjusted edge; v1's uncapped low-peak grid widenings breached
+        # the 90s false-widening budget on the first flag-ON dump.
+        anchor_peak = trace.get("start_peak") if trace["start_snapped"] else trace.get("end_peak")
+        if anchor_peak is not None and anchor_peak >= GRID_MIN_PEAK:
+            grid = model["grid"]
+            width = new_end - new_start
+            snapped_width = grid * max(1, round(width / grid))
+            if trace["start_snapped"]:
+                candidate = new_start + snapped_width
+                if abs(candidate - proposal["end"]) <= MAX_EDGE_MOVE_SECONDS:
+                    new_end = candidate
+                    trace["grid_applied"] = True
+            else:
+                candidate = new_end - snapped_width
+                if abs(candidate - proposal["start"]) <= MAX_EDGE_MOVE_SECONDS:
+                    new_start = candidate
+                    trace["grid_applied"] = True
     new_start = max(0.0, min(new_start, duration - 1.0))
     new_end = max(new_start + 1.0, min(new_end, duration))
     # Sanity: refinement must not abandon the presence evidence entirely.
@@ -458,7 +469,23 @@ def emit_bank(args: argparse.Namespace) -> int:
     envelopes = EnvelopeCache(audio_by_stem, sample_rate=BANK_SAMPLE_RATE)
     feed_urls = load_feed_urls_by_slug(args.snapshots_manifest)
     bank = build_bank(evaluation, envelopes, feed_urls)
+    exclusions = []
+    for spec in args.exclude_side:
+        slug, _, side = spec.partition(":")
+        if not slug or side not in {"pre", "post"}:
+            raise SystemExit(f"--exclude-side expects SLUG:pre|post, got {spec!r}")
+        exclusions.append((slug, side))
+    if exclusions:
+        kept = []
+        for entry in bank["shows"]:
+            for slug, side in exclusions:
+                if slug in entry["showKeys"] and side in entry:
+                    del entry[side]
+            if "pre" in entry or "post" in entry:
+                kept.append(entry)
+        bank["shows"] = kept
     bank["sources"] = {
+        "curatedExclusions": sorted(f"{s_}:{d}" for s_, d in exclusions) or None,
         "evaluation": args.evaluation.name,
         "evaluationSha256": hashlib.sha256(args.evaluation.read_bytes()).hexdigest(),
         "snapshotsManifest": (
@@ -513,6 +540,16 @@ def main(argv: list[str] | None = None) -> int:
         type=pathlib.Path,
         default=DEFAULT_SNAPSHOTS_MANIFEST,
         help="corpus snapshots manifest supplying feed-URL show aliases",
+    )
+    parser.add_argument(
+        "--exclude-side",
+        action="append",
+        default=[],
+        metavar="SLUG:SIDE",
+        help=(
+            "curated emit-time exclusion (repeatable), e.g. smartless:post; "
+            "recorded in the bank's provenance"
+        ),
     )
     args = parser.parse_args(argv)
 

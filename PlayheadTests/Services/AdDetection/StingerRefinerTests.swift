@@ -292,6 +292,70 @@ struct StingerRefinerTests {
         #expect(result.trace.gridApplied)
     }
 
+    @Test("Grid requires a confident anchor snap (recipe v2 peak floor)")
+    func gridRequiresConfidentAnchorPeak() throws {
+        // Recipe v2: the v1 flag-ON dump breached the 90s false-widening
+        // budget via grid widenings anchored to 0.50-0.52 peaks. Blend the
+        // planted copy with a decorrelated signal so the snap peak lands in
+        // [gate, gridMinimumPeak) — snap accepted, grid refused. The
+        // two-arm #require pre-flight keeps the fixture honest if
+        // constants ever move.
+        let values = Self.syntheticTemplate()
+        // Independent PRNG stream => near-zero correlation with `values`;
+        // 0.6/0.8 amplitudes put the NCC peak near 0.60 — inside
+        // [snap gate 0.50, grid floor 0.65).
+        let noise = Self.syntheticTemplate(seed: 77)
+        let blended = zip(values, noise).map { 0.6 * $0 + 0.8 * $1 }
+        let pre = Self.template(values, edgeIndex: 300, confidence: 0.65) // gate = 0.50
+        let envelope = Self.envelope(planting: blended, at: 4200, totalFrames: 9000, startSeconds: 5.0)
+
+        let probe = StingerRefiner.refine(
+            proposalStart: 100.0,
+            proposalEnd: 152.0,
+            entry: Self.entry(pre: pre),
+            startEnvelope: envelope,
+            endEnvelope: nil,
+            episodeDuration: 600.0
+        )
+        let peak = try #require(probe.trace.startPeak, "fixture must still clear the snap gate")
+        try #require(peak < StingerRefiner.gridMinimumPeak, "fixture peak must sit below the grid floor (got \(peak))")
+
+        let result = StingerRefiner.refine(
+            proposalStart: 100.0,
+            proposalEnd: 152.0,
+            entry: Self.entry(pre: pre, grid: 30.0),
+            startEnvelope: envelope,
+            endEnvelope: nil,
+            episodeDuration: 600.0
+        )
+        #expect(result.trace.startSnapped, "snap itself stays accepted")
+        #expect(!result.trace.gridApplied, "grid must refuse a sub-floor anchor peak")
+        #expect(abs(result.endTime - 152.0) < 0.001, "unsnapped edge must stay at the proposal")
+    }
+
+    @Test("Grid-adjusted edge honors the move cap (recipe v2)")
+    func gridAdjustedEdgeHonorsMoveCap() {
+        // With a 30s grid the adjusted edge can only drift ±grid/2 from the
+        // proposal, so the cap is belt-and-braces for larger grids: a 200s
+        // grid candidate moves the end ~193s from the proposal and must be
+        // refused while the snap itself stands.
+        let values = Self.syntheticTemplate()
+        let pre = Self.template(values, edgeIndex: 300)
+        let envelope = Self.envelope(planting: values, at: 4200, totalFrames: 9000, startSeconds: 5.0)
+        let result = StingerRefiner.refine(
+            proposalStart: 100.0,
+            proposalEnd: 106.5,
+            entry: Self.entry(pre: pre, grid: 200.0),
+            startEnvelope: envelope,
+            endEnvelope: nil,
+            episodeDuration: 600.0
+        )
+        #expect(abs(result.startTime - 95.0) < 0.001)
+        #expect(result.trace.startSnapped)
+        #expect(!result.trace.gridApplied, "grid candidate beyond the move cap must be refused")
+        #expect(abs(result.endTime - 106.5) < 0.001, "end must stay at the proposal")
+    }
+
     @Test("Grid does not apply when both edges snapped")
     func gridSkippedWhenBothEdgesSnap() {
         let preValues = Self.syntheticTemplate(seed: 11)

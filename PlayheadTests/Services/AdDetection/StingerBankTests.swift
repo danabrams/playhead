@@ -301,19 +301,28 @@ struct StingerBankTests {
                 show.showKeys.dropFirst().allSatisfy { $0.hasPrefix("https://") },
                 "\(show.showName): non-slug aliases must be feed URLs"
             )
-            // Both sides shipped for all four shows, full-width templates
-            // (7s × 50 Hz), pre edge at frame 300 / post edge at frame 50
-            // (the offline TEMPLATE_INNER/OUTER geometry).
+            // Full-width templates (7s × 50 Hz), pre edge at frame 300 /
+            // post edge at frame 50 (the offline TEMPLATE_INNER/OUTER
+            // geometry). Recipe v2 (2026-07-16): smartless ships PRE-ONLY —
+            // its post edge is a spoken framing phrase, not music, and the
+            // v1 measurement showed the post template dragging a window off
+            // its gold break (curated exclusion, recorded in provenance).
             let pre = try #require(show.pre, "\(show.showName): pre side expected")
-            let post = try #require(show.post, "\(show.showName): post side expected")
-            for (side, name) in [(pre, "pre"), (post, "post")] {
+            var sides = [(pre, "pre")]
+            if show.showKeys.contains("smartless") {
+                #expect(show.post == nil, "smartless post is a curated exclusion (lexical edge)")
+            } else {
+                let post = try #require(show.post, "\(show.showName): post side expected")
+                #expect(post.edgeSampleIndex == 50)
+                sides.append((post, "post"))
+            }
+            for (side, name) in sides {
                 #expect(side.template.count == 350, "\(show.showName) \(name): template must be 350 frames")
                 #expect(side.confidence > 0 && side.confidence <= 1)
                 #expect(side.support >= 2)
                 #expect(abs(side.edgeOffsetSeconds) < 5, "\(show.showName) \(name): learned offset out of sane range")
             }
             #expect(pre.edgeSampleIndex == 300)
-            #expect(post.edgeSampleIndex == 50)
         }
 
         // Grid values: morbid and on-the-media earned the 30s pod grid;
@@ -325,7 +334,7 @@ struct StingerBankTests {
         #expect(bank.entry(forShowKey: "the-nikki-glaser-podcast")?.podWidthGridSeconds == nil)
 
         // The expected-coverage contract from the bead: morbid pre+post+
-        // grid and smartless post shipped; TED Business validated OUT
+        // grid shipped; smartless post curated OUT (v2); TED Business validated OUT
         // (offset spread 4.4s > 2.0s learning gate) so it must NOT ship
         // until a future corpus qualifies it.
         #expect(bank.entry(forShowKey: "ted-business") == nil, "TED Business failed the full-corpus learning gates and must not ship")
