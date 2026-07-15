@@ -2036,7 +2036,10 @@ actor AdDetectionService {
         } catch {
             logger.warning("[l2f6] asset fetch failed for \(analysisAssetId, privacy: .public) — stinger refinement runs without PCM: \(error.localizedDescription, privacy: .public)")
         }
-        logger.info("[l2f6] stinger context resolved: show=\(entry.showName, privacy: .public) sides=[\(entry.pre != nil ? "pre" : "", privacy: .public)\(entry.post != nil ? " post" : "", privacy: .public)] grid=\(entry.podWidthGridSeconds ?? 0)")
+        let sides = [entry.pre != nil ? "pre" : nil, entry.post != nil ? "post" : nil]
+            .compactMap { $0 }
+            .joined(separator: "+")
+        logger.info("[l2f6] stinger context resolved: show=\(entry.showName, privacy: .public) sides=[\(sides, privacy: .public)] grid=\(entry.podWidthGridSeconds ?? 0)")
         return StingerRefinementRunContext(entry: entry, episodeID: episodeID)
     }
 
