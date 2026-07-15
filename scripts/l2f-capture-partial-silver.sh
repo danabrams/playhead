@@ -126,8 +126,11 @@ trap 'exit 143' TERM
 # (and `xcodebuild test` offers no other env seam), so the baseline
 # configuration must be patched into the xctestrun's EnvironmentVariables —
 # the same mechanism the physical-device wrapper uses. build-for-testing
-# emits the xctestrun; the scheme's default test plan is fine because the
-# capture narrows to the single live test with -only-testing.
+# emits the xctestrun; the explicit -testPlan keeps that to exactly one
+# file (without it, every plan in the scheme gets an xctestrun). The plan
+# choice does not shape the capture — -only-testing narrows to the single
+# live test — but it does require the xcodegen-generated scheme; if the
+# plan is missing, regenerate with `xcodegen`.
 developer_dir="/Applications/Xcode-beta.app/Contents/Developer"
 xcode_version_actual="$(DEVELOPER_DIR="$developer_dir" xcodebuild -version | paste -sd ' ' -)"
 
@@ -139,6 +142,7 @@ rm -f "$derived_data"/Build/Products/*.xctestrun
 DEVELOPER_DIR="$developer_dir" xcodebuild build-for-testing \
   -project Playhead.xcodeproj \
   -scheme Playhead \
+  -testPlan PlayheadFastTests \
   -destination 'platform=macOS,variant=Mac Catalyst' \
   -derivedDataPath "$derived_data"
 

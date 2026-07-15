@@ -82,7 +82,7 @@ case "${1:-}" in
       previous="$argument"
     done
     mkdir -p "${products:?}"
-    /usr/bin/python3 - "$products/Playhead_Playhead_macosx27.0-arm64.xctestrun" <<'PY'
+    /usr/bin/python3 - "$products/Playhead_PlayheadFastTests_macosx27.0-arm64.xctestrun" <<'PY'
 import plistlib
 import sys
 
@@ -237,6 +237,7 @@ exec /usr/bin/shasum "$@"
         )
         self.assertEqual(staged_path.parent.parent, self.output_dir)
         invocation = self.xcode_log.read_text(encoding="utf-8")
+        self.assertIn("-testPlan PlayheadFastTests", invocation)
         self.assertIn("-only-testing:PlayheadTests/PipelineDumpLiveTests/", invocation)
         self.assertIn("testProductionPipelineDumpOnNewEpisodes", invocation)
 
@@ -541,7 +542,7 @@ case "${1:-}" in
       previous="$argument"
     done
     mkdir -p "${products:?}"
-    /usr/bin/python3 - "$products/Playhead_Playhead_macosx27.0-arm64.xctestrun" <<'PY'
+    /usr/bin/python3 - "$products/Playhead_PlayheadFastTests_macosx27.0-arm64.xctestrun" <<'PY'
 import plistlib
 import sys
 
