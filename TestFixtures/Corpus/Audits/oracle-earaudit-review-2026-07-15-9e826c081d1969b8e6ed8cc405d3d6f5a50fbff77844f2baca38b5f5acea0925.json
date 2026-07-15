@@ -1,0 +1,1255 @@
+{
+  "history": [
+    {
+      "after": {
+        "audio_fingerprint": "sha256:e8c6b4be730ea982ac42829555edef5c716d67ba31dd9f5f3b173d1ee581b262",
+        "id": "oracle-business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4-200",
+        "note": "",
+        "proposed_end_seconds": 212.4,
+        "proposed_start_seconds": 132.7,
+        "reviewed_at": "2026-07-15T16:26:32Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T16:26:32Z",
+      "before": null,
+      "id": "oracle-business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4-200",
+      "sequence": 1
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:29d88dd9a187e0b2fbe267406d64f8619c9ed6ae87484d29660d2d6c49295978",
+        "id": "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-38",
+        "note": "",
+        "proposed_end_seconds": 73.5,
+        "proposed_start_seconds": 10.9,
+        "reviewed_at": "2026-07-15T16:27:49Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T16:27:49Z",
+      "before": null,
+      "id": "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-38",
+      "sequence": 2
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:29d88dd9a187e0b2fbe267406d64f8619c9ed6ae87484d29660d2d6c49295978",
+        "id": "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-1912",
+        "note": "",
+        "proposed_end_seconds": 2054.8,
+        "proposed_start_seconds": 1912.7,
+        "reviewed_at": "2026-07-15T16:29:45Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T16:29:45Z",
+      "before": null,
+      "id": "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-1912",
+      "sequence": 3
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:b9dc85a6a7e8dc2beef8565adbee2949f6d70892ac6f0995f18f8e6efb06143e",
+        "id": "oracle-fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros-71",
+        "note": "",
+        "proposed_end_seconds": 152.1,
+        "proposed_start_seconds": 73.85,
+        "reviewed_at": "2026-07-15T16:31:22Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T16:31:22Z",
+      "before": null,
+      "id": "oracle-fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros-71",
+      "sequence": 4
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:4c213fd42aaba6c1fb234321c0143d77aaabdfc3007a8058f75321ddb009dd1b",
+        "id": "oracle-hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi-3671",
+        "note": "",
+        "proposed_end_seconds": 3780.5,
+        "proposed_start_seconds": 3684.6,
+        "reviewed_at": "2026-07-15T16:32:26Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T16:32:26Z",
+      "before": null,
+      "id": "oracle-hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi-3671",
+      "sequence": 5
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:fe46c5cbfa34db7742fd6ce67cbd55f53619570c29d0ef5891916c224fb6580d",
+        "id": "oracle-morbid-2026-05-25-the-matamoros-devil-murders-part-2-1097",
+        "note": "",
+        "proposed_end_seconds": 1134.7,
+        "proposed_start_seconds": 1106.0,
+        "reviewed_at": "2026-07-15T17:28:48Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:28:48Z",
+      "before": null,
+      "id": "oracle-morbid-2026-05-25-the-matamoros-devil-murders-part-2-1097",
+      "sequence": 6
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:4f07a8c048660fc6a1e437caf5a00d2c21add19b727b02e0519a1e6991324f19",
+        "id": "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-1076",
+        "note": "",
+        "proposed_end_seconds": 1123.5,
+        "proposed_start_seconds": 1064.1,
+        "reviewed_at": "2026-07-15T17:29:34Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:29:34Z",
+      "before": null,
+      "id": "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-1076",
+      "sequence": 7
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:4f07a8c048660fc6a1e437caf5a00d2c21add19b727b02e0519a1e6991324f19",
+        "id": "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-2163",
+        "note": "",
+        "proposed_end_seconds": 2195.4,
+        "proposed_start_seconds": 2144.7,
+        "reviewed_at": "2026-07-15T17:30:27Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:30:27Z",
+      "before": null,
+      "id": "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-2163",
+      "sequence": 8
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+        "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-57",
+        "note": "",
+        "proposed_end_seconds": 88.9,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-15T17:31:21Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:31:21Z",
+      "before": null,
+      "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-57",
+      "sequence": 9
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+        "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-1403",
+        "note": "",
+        "proposed_end_seconds": 1446.0,
+        "proposed_start_seconds": 1355.4,
+        "reviewed_at": "2026-07-15T17:32:35Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:32:35Z",
+      "before": null,
+      "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-1403",
+      "sequence": 10
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+        "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2741",
+        "note": "",
+        "proposed_end_seconds": 2843.2,
+        "proposed_start_seconds": 2753.2,
+        "reviewed_at": "2026-07-15T17:33:15Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:33:15Z",
+      "before": null,
+      "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2741",
+      "sequence": 11
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+        "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2831",
+        "note": "",
+        "proposed_end_seconds": 2843.2,
+        "proposed_start_seconds": 2753.0,
+        "reviewed_at": "2026-07-15T17:33:59Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:33:59Z",
+      "before": null,
+      "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2831",
+      "sequence": 12
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+        "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-4021",
+        "note": "",
+        "proposed_end_seconds": 4096.5,
+        "proposed_start_seconds": 4035.9,
+        "reviewed_at": "2026-07-15T17:36:04Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:36:04Z",
+      "before": null,
+      "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-4021",
+      "sequence": 13
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+        "id": "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-89",
+        "note": "",
+        "proposed_end_seconds": 141.8,
+        "proposed_start_seconds": 59.0,
+        "reviewed_at": "2026-07-15T17:37:46Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:37:46Z",
+      "before": null,
+      "id": "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-89",
+      "sequence": 14
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+        "id": "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1123",
+        "note": "",
+        "proposed_end_seconds": 1205.6,
+        "proposed_start_seconds": 1114.1,
+        "reviewed_at": "2026-07-15T17:39:34Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:39:34Z",
+      "before": null,
+      "id": "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1123",
+      "sequence": 15
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+        "id": "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1199",
+        "note": "",
+        "proposed_end_seconds": 1205.7,
+        "proposed_start_seconds": 1114.1,
+        "reviewed_at": "2026-07-15T17:41:11Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:41:11Z",
+      "before": null,
+      "id": "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1199",
+      "sequence": 16
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:5f48e429a62faf8165ad0cf8655f47b26d1c0f9663fe3569a9081db6549737e3",
+        "id": "oracle-planet-money-2026-05-29-the-sneaky-way-companies-get-new-chemica-500",
+        "note": "",
+        "proposed_end_seconds": 596.7,
+        "proposed_start_seconds": 502.7,
+        "reviewed_at": "2026-07-15T17:42:11Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:42:11Z",
+      "before": null,
+      "id": "oracle-planet-money-2026-05-29-the-sneaky-way-companies-get-new-chemica-500",
+      "sequence": 17
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c64612d0f451ce1cec9265cb882967f2c023a85255ec5c5136c81aee50774ba5",
+        "id": "oracle-radiolab-2026-05-29-this-american-roach-1263",
+        "note": "",
+        "proposed_end_seconds": 1330.7,
+        "proposed_start_seconds": 1147.8,
+        "reviewed_at": "2026-07-15T17:50:44Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:50:44Z",
+      "before": null,
+      "id": "oracle-radiolab-2026-05-29-this-american-roach-1263",
+      "sequence": 18
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:ae5c389210587a60eeb48ae72a5a42ee6f0e5636bd612531ed65f013444c722c",
+        "id": "oracle-smartless-2026-05-18-quot-sting-quot-0",
+        "note": "",
+        "proposed_end_seconds": 74.4,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-15T17:52:38Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:52:38Z",
+      "before": null,
+      "id": "oracle-smartless-2026-05-18-quot-sting-quot-0",
+      "sequence": 19
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:ae5c389210587a60eeb48ae72a5a42ee6f0e5636bd612531ed65f013444c722c",
+        "id": "oracle-smartless-2026-05-18-quot-sting-quot-1376",
+        "note": "",
+        "proposed_end_seconds": 1429.8,
+        "proposed_start_seconds": 1353.4,
+        "reviewed_at": "2026-07-15T17:57:56Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T17:57:56Z",
+      "before": null,
+      "id": "oracle-smartless-2026-05-18-quot-sting-quot-1376",
+      "sequence": 20
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:b46d1f2f52ce1abc38158e6ebaa8177dee2a2371b65b4e797e2bca0f90f6ea54",
+        "id": "oracle-smartless-2026-05-21-quot-re-release-nate-bargatze-quot-1179",
+        "note": "",
+        "proposed_end_seconds": 1201.4,
+        "proposed_start_seconds": 1154.4,
+        "reviewed_at": "2026-07-15T18:02:35Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:02:35Z",
+      "before": null,
+      "id": "oracle-smartless-2026-05-21-quot-re-release-nate-bargatze-quot-1179",
+      "sequence": 21
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+        "id": "oracle-smartless-2026-05-25-quot-nick-jonas-quot-0",
+        "note": "",
+        "proposed_end_seconds": 90.1,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-15T18:03:03Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:03:03Z",
+      "before": null,
+      "id": "oracle-smartless-2026-05-25-quot-nick-jonas-quot-0",
+      "sequence": 22
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+        "id": "oracle-smartless-2026-05-25-quot-nick-jonas-quot-1474",
+        "note": "",
+        "proposed_end_seconds": 1540.1,
+        "proposed_start_seconds": 1447.0,
+        "reviewed_at": "2026-07-15T18:09:41Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:09:41Z",
+      "before": null,
+      "id": "oracle-smartless-2026-05-25-quot-nick-jonas-quot-1474",
+      "sequence": 23
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+        "id": "oracle-smartless-2026-05-25-quot-nick-jonas-quot-2737",
+        "note": "",
+        "proposed_end_seconds": 2833.2,
+        "proposed_start_seconds": 2720.7,
+        "reviewed_at": "2026-07-15T18:10:14Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:10:14Z",
+      "before": null,
+      "id": "oracle-smartless-2026-05-25-quot-nick-jonas-quot-2737",
+      "sequence": 24
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a3bf38876eb5fd431ab22a470055738b1964b97de629f0eb9475f3651e493597",
+        "id": "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1",
+        "note": "",
+        "proposed_end_seconds": 86.1,
+        "proposed_start_seconds": 4.1,
+        "reviewed_at": "2026-07-15T18:10:59Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:10:59Z",
+      "before": null,
+      "id": "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1",
+      "sequence": 25
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a3bf38876eb5fd431ab22a470055738b1964b97de629f0eb9475f3651e493597",
+        "id": "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1314",
+        "note": "",
+        "proposed_end_seconds": 1354.6,
+        "proposed_start_seconds": 1312.0,
+        "reviewed_at": "2026-07-15T18:11:51Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:11:51Z",
+      "before": null,
+      "id": "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1314",
+      "sequence": 26
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a3bf38876eb5fd431ab22a470055738b1964b97de629f0eb9475f3651e493597",
+        "id": "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-2682",
+        "note": "",
+        "proposed_end_seconds": 2798.5,
+        "proposed_start_seconds": 2617.3,
+        "reviewed_at": "2026-07-15T18:13:11Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:13:11Z",
+      "before": null,
+      "id": "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-2682",
+      "sequence": 27
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:3d7bdf7705fc5021fa4607aadc6de27db2765ea3e8199aee60d54b97cce60672",
+        "id": "oracle-techcrunch-daily-crunch-2026-05-27-spotify-now-lets-you-stream-narrated-mag-4",
+        "note": "",
+        "proposed_end_seconds": 97.1,
+        "proposed_start_seconds": 5.7,
+        "reviewed_at": "2026-07-15T18:15:07Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:15:07Z",
+      "before": null,
+      "id": "oracle-techcrunch-daily-crunch-2026-05-27-spotify-now-lets-you-stream-narrated-mag-4",
+      "sequence": 28
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:5ded646c7ef8a845ad9464199132e207c873ff4230eec061bc0beea557609a38",
+        "id": "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-4",
+        "note": "",
+        "proposed_end_seconds": 95.6,
+        "proposed_start_seconds": 5.7,
+        "reviewed_at": "2026-07-15T18:15:43Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:15:43Z",
+      "before": null,
+      "id": "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-4",
+      "sequence": 29
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:5ded646c7ef8a845ad9464199132e207c873ff4230eec061bc0beea557609a38",
+        "id": "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-223",
+        "note": "",
+        "proposed_end_seconds": 279.3795625,
+        "proposed_start_seconds": 223.53,
+        "reviewed_at": "2026-07-15T18:16:04Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-15T18:16:04Z",
+      "before": null,
+      "id": "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-223",
+      "sequence": 30
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-0",
+        "note": "",
+        "proposed_end_seconds": 63.3,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-15T18:16:26Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:16:26Z",
+      "before": null,
+      "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-0",
+      "sequence": 31
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-0",
+        "note": "",
+        "proposed_end_seconds": 70.1,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-15T18:16:50Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:16:50Z",
+      "before": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-0",
+        "note": "",
+        "proposed_end_seconds": 63.3,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-15T18:16:26Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-0",
+      "sequence": 32
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-922",
+        "note": "",
+        "proposed_end_seconds": 1017.8,
+        "proposed_start_seconds": 950.5,
+        "reviewed_at": "2026-07-15T18:18:03Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:18:03Z",
+      "before": null,
+      "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-922",
+      "sequence": 33
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1890",
+        "note": "",
+        "proposed_end_seconds": 1937.8,
+        "proposed_start_seconds": 1837.2,
+        "reviewed_at": "2026-07-15T18:19:28Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:19:28Z",
+      "before": null,
+      "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1890",
+      "sequence": 34
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-2681",
+        "note": "",
+        "proposed_end_seconds": 2755.68,
+        "proposed_start_seconds": 2625.6,
+        "reviewed_at": "2026-07-15T18:20:26Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:20:26Z",
+      "before": null,
+      "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-2681",
+      "sequence": 35
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+        "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-1571",
+        "note": "",
+        "proposed_end_seconds": 1634.0,
+        "proposed_start_seconds": 1542.9,
+        "reviewed_at": "2026-07-15T18:21:31Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:21:31Z",
+      "before": null,
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-1571",
+      "sequence": 36
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+        "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3096",
+        "note": "",
+        "proposed_end_seconds": 3143.2,
+        "proposed_start_seconds": 3052.0,
+        "reviewed_at": "2026-07-15T18:21:55Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:21:55Z",
+      "before": null,
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3096",
+      "sequence": 37
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+        "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3127",
+        "note": "",
+        "proposed_end_seconds": 3143.3,
+        "proposed_start_seconds": 3051.8,
+        "reviewed_at": "2026-07-15T18:22:50Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:22:50Z",
+      "before": null,
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3127",
+      "sequence": 38
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+        "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-4268",
+        "note": "",
+        "proposed_end_seconds": 4433.711,
+        "proposed_start_seconds": 4338.1,
+        "reviewed_at": "2026-07-15T18:24:29Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:24:29Z",
+      "before": null,
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-4268",
+      "sequence": 39
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:48619d606a3b97775dc4e58c5956680fa4da93255cd07e9adfaef8afbb666d3f",
+        "id": "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1154",
+        "note": "",
+        "proposed_end_seconds": 1306.8,
+        "proposed_start_seconds": 1215.6,
+        "reviewed_at": "2026-07-15T18:26:16Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:26:16Z",
+      "before": null,
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1154",
+      "sequence": 40
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:48619d606a3b97775dc4e58c5956680fa4da93255cd07e9adfaef8afbb666d3f",
+        "id": "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1273",
+        "note": "",
+        "proposed_end_seconds": 1306.8,
+        "proposed_start_seconds": 1215.6,
+        "reviewed_at": "2026-07-15T18:27:03Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:27:03Z",
+      "before": null,
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1273",
+      "sequence": 41
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:48619d606a3b97775dc4e58c5956680fa4da93255cd07e9adfaef8afbb666d3f",
+        "id": "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1290",
+        "note": "",
+        "proposed_end_seconds": 1306.8,
+        "proposed_start_seconds": 1215.4,
+        "reviewed_at": "2026-07-15T18:27:37Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:27:37Z",
+      "before": null,
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1290",
+      "sequence": 42
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:2889b75d09332f7f59a68a2b7d3058b620c90eefbf6788218e5248ffebdfebbd",
+        "id": "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-1186",
+        "note": "",
+        "proposed_end_seconds": 1263.6,
+        "proposed_start_seconds": 1157.4,
+        "reviewed_at": "2026-07-15T18:29:42Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:29:42Z",
+      "before": null,
+      "id": "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-1186",
+      "sequence": 43
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:2889b75d09332f7f59a68a2b7d3058b620c90eefbf6788218e5248ffebdfebbd",
+        "id": "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-4208",
+        "note": "",
+        "proposed_end_seconds": 4304.521,
+        "proposed_start_seconds": 4178.8,
+        "reviewed_at": "2026-07-15T18:30:14Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:30:14Z",
+      "before": null,
+      "id": "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-4208",
+      "sequence": 44
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:8ebccf85ddd47602a2846203f5f16e888da874b0868385948a3afdfb53fd1e58",
+        "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leadin-0",
+        "note": "",
+        "proposed_end_seconds": 50.2,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-15T18:30:39Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:30:39Z",
+      "before": null,
+      "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leadin-0",
+      "sequence": 45
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:02c7ba5dbf214e72a36b3dc8e79eed6fcbbd912f0665ce57e7ad42e899b8d7b3",
+        "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-old-0",
+        "note": "",
+        "proposed_end_seconds": 44.2,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-15T18:31:02Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:31:02Z",
+      "before": null,
+      "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-old-0",
+      "sequence": 46
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:fa8902d8f25d447e33a153b81d410f10db403d2156d1dd63f071bba33a72f8cb",
+        "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-0",
+        "note": "",
+        "proposed_end_seconds": 59.2,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-15T18:31:16Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:31:16Z",
+      "before": null,
+      "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-0",
+      "sequence": 47
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:fa8902d8f25d447e33a153b81d410f10db403d2156d1dd63f071bba33a72f8cb",
+        "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-1302",
+        "note": "",
+        "proposed_end_seconds": 1343.7,
+        "proposed_start_seconds": 1221.7,
+        "reviewed_at": "2026-07-15T18:32:25Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-15T18:32:25Z",
+      "before": null,
+      "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-1302",
+      "sequence": 48
+    }
+  ],
+  "next_sequence": 49,
+  "reviews": {
+    "oracle-business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4-200": {
+      "audio_fingerprint": "sha256:e8c6b4be730ea982ac42829555edef5c716d67ba31dd9f5f3b173d1ee581b262",
+      "id": "oracle-business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4-200",
+      "note": "",
+      "proposed_end_seconds": 212.4,
+      "proposed_start_seconds": 132.7,
+      "reviewed_at": "2026-07-15T16:26:32Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-1912": {
+      "audio_fingerprint": "sha256:29d88dd9a187e0b2fbe267406d64f8619c9ed6ae87484d29660d2d6c49295978",
+      "id": "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-1912",
+      "note": "",
+      "proposed_end_seconds": 2054.8,
+      "proposed_start_seconds": 1912.7,
+      "reviewed_at": "2026-07-15T16:29:45Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-38": {
+      "audio_fingerprint": "sha256:29d88dd9a187e0b2fbe267406d64f8619c9ed6ae87484d29660d2d6c49295978",
+      "id": "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-38",
+      "note": "",
+      "proposed_end_seconds": 73.5,
+      "proposed_start_seconds": 10.9,
+      "reviewed_at": "2026-07-15T16:27:49Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros-71": {
+      "audio_fingerprint": "sha256:b9dc85a6a7e8dc2beef8565adbee2949f6d70892ac6f0995f18f8e6efb06143e",
+      "id": "oracle-fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros-71",
+      "note": "",
+      "proposed_end_seconds": 152.1,
+      "proposed_start_seconds": 73.85,
+      "reviewed_at": "2026-07-15T16:31:22Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi-3671": {
+      "audio_fingerprint": "sha256:4c213fd42aaba6c1fb234321c0143d77aaabdfc3007a8058f75321ddb009dd1b",
+      "id": "oracle-hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi-3671",
+      "note": "",
+      "proposed_end_seconds": 3780.5,
+      "proposed_start_seconds": 3684.6,
+      "reviewed_at": "2026-07-15T16:32:26Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-morbid-2026-05-25-the-matamoros-devil-murders-part-2-1097": {
+      "audio_fingerprint": "sha256:fe46c5cbfa34db7742fd6ce67cbd55f53619570c29d0ef5891916c224fb6580d",
+      "id": "oracle-morbid-2026-05-25-the-matamoros-devil-murders-part-2-1097",
+      "note": "",
+      "proposed_end_seconds": 1134.7,
+      "proposed_start_seconds": 1106.0,
+      "reviewed_at": "2026-07-15T17:28:48Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-1076": {
+      "audio_fingerprint": "sha256:4f07a8c048660fc6a1e437caf5a00d2c21add19b727b02e0519a1e6991324f19",
+      "id": "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-1076",
+      "note": "",
+      "proposed_end_seconds": 1123.5,
+      "proposed_start_seconds": 1064.1,
+      "reviewed_at": "2026-07-15T17:29:34Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-2163": {
+      "audio_fingerprint": "sha256:4f07a8c048660fc6a1e437caf5a00d2c21add19b727b02e0519a1e6991324f19",
+      "id": "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-2163",
+      "note": "",
+      "proposed_end_seconds": 2195.4,
+      "proposed_start_seconds": 2144.7,
+      "reviewed_at": "2026-07-15T17:30:27Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-1403": {
+      "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+      "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-1403",
+      "note": "",
+      "proposed_end_seconds": 1446.0,
+      "proposed_start_seconds": 1355.4,
+      "reviewed_at": "2026-07-15T17:32:35Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2741": {
+      "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+      "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2741",
+      "note": "",
+      "proposed_end_seconds": 2843.2,
+      "proposed_start_seconds": 2753.2,
+      "reviewed_at": "2026-07-15T17:33:15Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2831": {
+      "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+      "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2831",
+      "note": "",
+      "proposed_end_seconds": 2843.2,
+      "proposed_start_seconds": 2753.0,
+      "reviewed_at": "2026-07-15T17:33:59Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-4021": {
+      "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+      "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-4021",
+      "note": "",
+      "proposed_end_seconds": 4096.5,
+      "proposed_start_seconds": 4035.9,
+      "reviewed_at": "2026-07-15T17:36:04Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-57": {
+      "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+      "id": "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-57",
+      "note": "",
+      "proposed_end_seconds": 88.9,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-15T17:31:21Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1123": {
+      "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+      "id": "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1123",
+      "note": "",
+      "proposed_end_seconds": 1205.6,
+      "proposed_start_seconds": 1114.1,
+      "reviewed_at": "2026-07-15T17:39:34Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1199": {
+      "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+      "id": "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1199",
+      "note": "",
+      "proposed_end_seconds": 1205.7,
+      "proposed_start_seconds": 1114.1,
+      "reviewed_at": "2026-07-15T17:41:11Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-89": {
+      "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+      "id": "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-89",
+      "note": "",
+      "proposed_end_seconds": 141.8,
+      "proposed_start_seconds": 59.0,
+      "reviewed_at": "2026-07-15T17:37:46Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-planet-money-2026-05-29-the-sneaky-way-companies-get-new-chemica-500": {
+      "audio_fingerprint": "sha256:5f48e429a62faf8165ad0cf8655f47b26d1c0f9663fe3569a9081db6549737e3",
+      "id": "oracle-planet-money-2026-05-29-the-sneaky-way-companies-get-new-chemica-500",
+      "note": "",
+      "proposed_end_seconds": 596.7,
+      "proposed_start_seconds": 502.7,
+      "reviewed_at": "2026-07-15T17:42:11Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-radiolab-2026-05-29-this-american-roach-1263": {
+      "audio_fingerprint": "sha256:c64612d0f451ce1cec9265cb882967f2c023a85255ec5c5136c81aee50774ba5",
+      "id": "oracle-radiolab-2026-05-29-this-american-roach-1263",
+      "note": "",
+      "proposed_end_seconds": 1330.7,
+      "proposed_start_seconds": 1147.8,
+      "reviewed_at": "2026-07-15T17:50:44Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-smartless-2026-05-18-quot-sting-quot-0": {
+      "audio_fingerprint": "sha256:ae5c389210587a60eeb48ae72a5a42ee6f0e5636bd612531ed65f013444c722c",
+      "id": "oracle-smartless-2026-05-18-quot-sting-quot-0",
+      "note": "",
+      "proposed_end_seconds": 74.4,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-15T17:52:38Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-smartless-2026-05-18-quot-sting-quot-1376": {
+      "audio_fingerprint": "sha256:ae5c389210587a60eeb48ae72a5a42ee6f0e5636bd612531ed65f013444c722c",
+      "id": "oracle-smartless-2026-05-18-quot-sting-quot-1376",
+      "note": "",
+      "proposed_end_seconds": 1429.8,
+      "proposed_start_seconds": 1353.4,
+      "reviewed_at": "2026-07-15T17:57:56Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-smartless-2026-05-21-quot-re-release-nate-bargatze-quot-1179": {
+      "audio_fingerprint": "sha256:b46d1f2f52ce1abc38158e6ebaa8177dee2a2371b65b4e797e2bca0f90f6ea54",
+      "id": "oracle-smartless-2026-05-21-quot-re-release-nate-bargatze-quot-1179",
+      "note": "",
+      "proposed_end_seconds": 1201.4,
+      "proposed_start_seconds": 1154.4,
+      "reviewed_at": "2026-07-15T18:02:35Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-smartless-2026-05-25-quot-nick-jonas-quot-0": {
+      "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+      "id": "oracle-smartless-2026-05-25-quot-nick-jonas-quot-0",
+      "note": "",
+      "proposed_end_seconds": 90.1,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-15T18:03:03Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-smartless-2026-05-25-quot-nick-jonas-quot-1474": {
+      "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+      "id": "oracle-smartless-2026-05-25-quot-nick-jonas-quot-1474",
+      "note": "",
+      "proposed_end_seconds": 1540.1,
+      "proposed_start_seconds": 1447.0,
+      "reviewed_at": "2026-07-15T18:09:41Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-smartless-2026-05-25-quot-nick-jonas-quot-2737": {
+      "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+      "id": "oracle-smartless-2026-05-25-quot-nick-jonas-quot-2737",
+      "note": "",
+      "proposed_end_seconds": 2833.2,
+      "proposed_start_seconds": 2720.7,
+      "reviewed_at": "2026-07-15T18:10:14Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1": {
+      "audio_fingerprint": "sha256:a3bf38876eb5fd431ab22a470055738b1964b97de629f0eb9475f3651e493597",
+      "id": "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1",
+      "note": "",
+      "proposed_end_seconds": 86.1,
+      "proposed_start_seconds": 4.1,
+      "reviewed_at": "2026-07-15T18:10:59Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1314": {
+      "audio_fingerprint": "sha256:a3bf38876eb5fd431ab22a470055738b1964b97de629f0eb9475f3651e493597",
+      "id": "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1314",
+      "note": "",
+      "proposed_end_seconds": 1354.6,
+      "proposed_start_seconds": 1312.0,
+      "reviewed_at": "2026-07-15T18:11:51Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-2682": {
+      "audio_fingerprint": "sha256:a3bf38876eb5fd431ab22a470055738b1964b97de629f0eb9475f3651e493597",
+      "id": "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-2682",
+      "note": "",
+      "proposed_end_seconds": 2798.5,
+      "proposed_start_seconds": 2617.3,
+      "reviewed_at": "2026-07-15T18:13:11Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-techcrunch-daily-crunch-2026-05-27-spotify-now-lets-you-stream-narrated-mag-4": {
+      "audio_fingerprint": "sha256:3d7bdf7705fc5021fa4607aadc6de27db2765ea3e8199aee60d54b97cce60672",
+      "id": "oracle-techcrunch-daily-crunch-2026-05-27-spotify-now-lets-you-stream-narrated-mag-4",
+      "note": "",
+      "proposed_end_seconds": 97.1,
+      "proposed_start_seconds": 5.7,
+      "reviewed_at": "2026-07-15T18:15:07Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-223": {
+      "audio_fingerprint": "sha256:5ded646c7ef8a845ad9464199132e207c873ff4230eec061bc0beea557609a38",
+      "id": "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-223",
+      "note": "",
+      "proposed_end_seconds": 279.3795625,
+      "proposed_start_seconds": 223.53,
+      "reviewed_at": "2026-07-15T18:16:04Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-4": {
+      "audio_fingerprint": "sha256:5ded646c7ef8a845ad9464199132e207c873ff4230eec061bc0beea557609a38",
+      "id": "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-4",
+      "note": "",
+      "proposed_end_seconds": 95.6,
+      "proposed_start_seconds": 5.7,
+      "reviewed_at": "2026-07-15T18:15:43Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-0": {
+      "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+      "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-0",
+      "note": "",
+      "proposed_end_seconds": 70.1,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-15T18:16:50Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1890": {
+      "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+      "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1890",
+      "note": "",
+      "proposed_end_seconds": 1937.8,
+      "proposed_start_seconds": 1837.2,
+      "reviewed_at": "2026-07-15T18:19:28Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-2681": {
+      "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+      "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-2681",
+      "note": "",
+      "proposed_end_seconds": 2755.68,
+      "proposed_start_seconds": 2625.6,
+      "reviewed_at": "2026-07-15T18:20:26Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-922": {
+      "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+      "id": "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-922",
+      "note": "",
+      "proposed_end_seconds": 1017.8,
+      "proposed_start_seconds": 950.5,
+      "reviewed_at": "2026-07-15T18:18:03Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-1571": {
+      "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-1571",
+      "note": "",
+      "proposed_end_seconds": 1634.0,
+      "proposed_start_seconds": 1542.9,
+      "reviewed_at": "2026-07-15T18:21:31Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3096": {
+      "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3096",
+      "note": "",
+      "proposed_end_seconds": 3143.2,
+      "proposed_start_seconds": 3052.0,
+      "reviewed_at": "2026-07-15T18:21:55Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3127": {
+      "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3127",
+      "note": "",
+      "proposed_end_seconds": 3143.3,
+      "proposed_start_seconds": 3051.8,
+      "reviewed_at": "2026-07-15T18:22:50Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-4268": {
+      "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-4268",
+      "note": "",
+      "proposed_end_seconds": 4433.711,
+      "proposed_start_seconds": 4338.1,
+      "reviewed_at": "2026-07-15T18:24:29Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1154": {
+      "audio_fingerprint": "sha256:48619d606a3b97775dc4e58c5956680fa4da93255cd07e9adfaef8afbb666d3f",
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1154",
+      "note": "",
+      "proposed_end_seconds": 1306.8,
+      "proposed_start_seconds": 1215.6,
+      "reviewed_at": "2026-07-15T18:26:16Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1273": {
+      "audio_fingerprint": "sha256:48619d606a3b97775dc4e58c5956680fa4da93255cd07e9adfaef8afbb666d3f",
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1273",
+      "note": "",
+      "proposed_end_seconds": 1306.8,
+      "proposed_start_seconds": 1215.6,
+      "reviewed_at": "2026-07-15T18:27:03Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1290": {
+      "audio_fingerprint": "sha256:48619d606a3b97775dc4e58c5956680fa4da93255cd07e9adfaef8afbb666d3f",
+      "id": "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1290",
+      "note": "",
+      "proposed_end_seconds": 1306.8,
+      "proposed_start_seconds": 1215.4,
+      "reviewed_at": "2026-07-15T18:27:37Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-1186": {
+      "audio_fingerprint": "sha256:2889b75d09332f7f59a68a2b7d3058b620c90eefbf6788218e5248ffebdfebbd",
+      "id": "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-1186",
+      "note": "",
+      "proposed_end_seconds": 1263.6,
+      "proposed_start_seconds": 1157.4,
+      "reviewed_at": "2026-07-15T18:29:42Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-4208": {
+      "audio_fingerprint": "sha256:2889b75d09332f7f59a68a2b7d3058b620c90eefbf6788218e5248ffebdfebbd",
+      "id": "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-4208",
+      "note": "",
+      "proposed_end_seconds": 4304.521,
+      "proposed_start_seconds": 4178.8,
+      "reviewed_at": "2026-07-15T18:30:14Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leadin-0": {
+      "audio_fingerprint": "sha256:8ebccf85ddd47602a2846203f5f16e888da874b0868385948a3afdfb53fd1e58",
+      "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leadin-0",
+      "note": "",
+      "proposed_end_seconds": 50.2,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-15T18:30:39Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-old-0": {
+      "audio_fingerprint": "sha256:02c7ba5dbf214e72a36b3dc8e79eed6fcbbd912f0665ce57e7ad42e899b8d7b3",
+      "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-old-0",
+      "note": "",
+      "proposed_end_seconds": 44.2,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-15T18:31:02Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-0": {
+      "audio_fingerprint": "sha256:fa8902d8f25d447e33a153b81d410f10db403d2156d1dd63f071bba33a72f8cb",
+      "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-0",
+      "note": "",
+      "proposed_end_seconds": 59.2,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-15T18:31:16Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-1302": {
+      "audio_fingerprint": "sha256:fa8902d8f25d447e33a153b81d410f10db403d2156d1dd63f071bba33a72f8cb",
+      "id": "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-1302",
+      "note": "",
+      "proposed_end_seconds": 1343.7,
+      "proposed_start_seconds": 1221.7,
+      "reviewed_at": "2026-07-15T18:32:25Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    }
+  },
+  "schema_version": 2
+}
