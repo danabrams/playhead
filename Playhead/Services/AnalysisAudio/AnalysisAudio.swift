@@ -193,10 +193,11 @@ private struct ShardManifestEntry: Codable, Sendable {
 /// cache `AnalysisAudioService` already persists for every fully-decoded
 /// episode (`Application Support/AnalysisShards/<episodeID>/shard_<N>.pcm`,
 /// 30 s of raw Float32 each): reading the 6–7 shard files overlapping the
-/// request range is a few MB of file IO and NO second decode of the episode. When the cache is
-/// absent (episode never fully decoded, or already evicted) the reader
-/// returns nil and the refinement for that edge silently no-ops — the
-/// refiner treats "no PCM" as "cannot snap", never as an error.
+/// request range is a few MB of file IO and NO second decode of the
+/// episode. When the cache is absent (episode never fully decoded, or
+/// already evicted) the reader returns nil and the refinement for that edge
+/// silently no-ops — the refiner treats "no PCM" as "cannot snap", never as
+/// an error.
 enum AnalysisShardPCMReader {
 
     /// Load the decoded samples covering `[startSeconds, endSeconds)`,

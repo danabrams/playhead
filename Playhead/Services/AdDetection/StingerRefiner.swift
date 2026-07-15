@@ -82,8 +82,11 @@ enum StingerEnvelope {
 
 /// Per-window refinement trace. Mirrors the offline prototype's trace dict
 /// so the Catalyst dump and the gold scorer can attribute movement to the
-/// same fields the spike reported.
-struct StingerRefinementTrace: Sendable, Equatable, Codable {
+/// same fields the spike reported. Deliberately NOT Codable: the dump wire
+/// shape is owned by the dedicated `DumpStingerRefinement` mirror in
+/// `PipelineDumpLiveTests`, so a trace refactor breaks there first instead
+/// of silently rewriting the dump schema.
+struct StingerRefinementTrace: Sendable, Equatable {
     /// The break-start edge snapped to a qualifying pre-stinger peak.
     var startSnapped = false
     /// The break-end edge snapped to a qualifying post-stinger peak.

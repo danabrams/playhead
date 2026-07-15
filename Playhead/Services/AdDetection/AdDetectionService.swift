@@ -830,21 +830,6 @@ struct BracketRefinementCounts: Sendable, Equatable {
     var legacyBypass: Int = 0
 }
 
-// MARK: - Pending Backfill Decision
-
-/// playhead-xsdz.10: a per-span decision captured AFTER the per-span scoring
-/// (DecisionMapper → FM-suppression → content-chapter demotion → xsdz.7
-/// fragility penalty → xsdz.9 negative-bank suppression) but BEFORE the hard
-/// auto-skip gate and the side-effect emission (window build, catalog /
-/// RepeatedAdCache ingress, decision events / log).
-///
-/// The backfill loop collects these so the lightweight temporal-regularization
-/// pass can see ALL of an episode's candidate detections together — neighbor
-/// context is required to tell a clustered ad break from a lonely false
-/// positive. With `temporalRegularizationEnabled == false` the collected
-/// `decision` is passed through to the emission loop UNCHANGED, so the output
-/// is byte-identical to pre-xsdz.10. The two-loop shape is the only structural
-/// change; each emission step is verbatim the code that previously ran inline.
 // MARK: - Stinger refinement plumbing (playhead-l2f.6)
 
 /// Ranged PCM source for stinger search envelopes: `(episodeID, from, to)`
@@ -866,6 +851,21 @@ private struct StingerRefinementRunContext {
     let episodeID: String?
 }
 
+// MARK: - Pending Backfill Decision
+
+/// playhead-xsdz.10: a per-span decision captured AFTER the per-span scoring
+/// (DecisionMapper → FM-suppression → content-chapter demotion → xsdz.7
+/// fragility penalty → xsdz.9 negative-bank suppression) but BEFORE the hard
+/// auto-skip gate and the side-effect emission (window build, catalog /
+/// RepeatedAdCache ingress, decision events / log).
+///
+/// The backfill loop collects these so the lightweight temporal-regularization
+/// pass can see ALL of an episode's candidate detections together — neighbor
+/// context is required to tell a clustered ad break from a lonely false
+/// positive. With `temporalRegularizationEnabled == false` the collected
+/// `decision` is passed through to the emission loop UNCHANGED, so the output
+/// is byte-identical to pre-xsdz.10. The two-loop shape is the only structural
+/// change; each emission step is verbatim the code that previously ran inline.
 private struct PendingBackfillDecision {
     /// playhead-p56a: `var` (was `let`) so the SpanFinalizer wire-in can
     /// substitute time-adjusted `DecodedSpan`s into the pending record after

@@ -115,6 +115,20 @@ struct StingerBankTests {
         #expect(floorGate.snapGate == 0.50)
     }
 
+    @Test("requiredPCMSampleRate matches the analysis pipeline's decode rate")
+    func pcmSampleRateMatchesAnalysisPipeline() {
+        // `StingerBank.requiredPCMSampleRate` documents that it must equal
+        // `AnalysisAudioService.targetSampleRate` (bank templates and the
+        // runtime shard PCM must share one acoustic space for NCC parity).
+        // Pin the invariant so a retune of either constant fails here
+        // instead of silently degrading every snap.
+        #expect(
+            Double(StingerBank.requiredPCMSampleRate)
+                == AnalysisAudioService.targetSampleRate,
+            "bank sample rate must equal the analysis shard decode rate"
+        )
+    }
+
     // MARK: - Loud rejection of malformed payloads
 
     @Test("Syntactically invalid JSON is rejected loudly")
