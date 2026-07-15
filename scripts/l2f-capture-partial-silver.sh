@@ -131,6 +131,11 @@ trap 'exit 143' TERM
 developer_dir="/Applications/Xcode-beta.app/Contents/Developer"
 xcode_version_actual="$(DEVELOPER_DIR="$developer_dir" xcodebuild -version | paste -sd ' ' -)"
 
+# A reused derived-data path can hold xctestruns from earlier builds whose
+# scheme state named the test plan differently; clear them so the glob
+# below can only match the file this build just emitted.
+rm -f "$derived_data"/Build/Products/*.xctestrun
+
 DEVELOPER_DIR="$developer_dir" xcodebuild build-for-testing \
   -project Playhead.xcodeproj \
   -scheme Playhead \

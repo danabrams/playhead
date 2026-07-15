@@ -220,6 +220,14 @@ exec /usr/bin/shasum "$@"
         output = self.output_dir / (
             "playhead-partial-silver-baseline-baseline-run-1.json"
         )
+        # A reused derived-data path may hold an xctestrun from an earlier
+        # build whose scheme state named the plan differently; the wrapper
+        # must clear it rather than fail the exactly-one-xctestrun check.
+        stale_products = self.root / "derived/Build/Products"
+        stale_products.mkdir(parents=True)
+        (stale_products / "Playhead_Playhead_macosx27.0-arm64.xctestrun").write_bytes(
+            b"stale xctestrun from a prior scheme state"
+        )
         result = self._capture(output, FAKE_STAGED_BYTES="exact raw bytes")
 
         self.assertEqual(result.returncode, 0, result.stderr)
