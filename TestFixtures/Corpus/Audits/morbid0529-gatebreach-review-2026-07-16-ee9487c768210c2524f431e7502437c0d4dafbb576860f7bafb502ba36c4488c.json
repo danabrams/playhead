@@ -1,0 +1,60 @@
+{
+  "history": [
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+        "id": "morbid0529-opener-pod",
+        "note": "",
+        "proposed_end_seconds": 89.1,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-16T00:29:23Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T00:29:23Z",
+      "before": null,
+      "id": "morbid0529-opener-pod",
+      "sequence": 1
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+        "id": "morbid0529-late-pod",
+        "note": "",
+        "proposed_end_seconds": 2843.1,
+        "proposed_start_seconds": 2753.1,
+        "reviewed_at": "2026-07-16T00:29:50Z",
+        "reviewer": "Dan",
+        "status": "approved"
+      },
+      "at": "2026-07-16T00:29:50Z",
+      "before": null,
+      "id": "morbid0529-late-pod",
+      "sequence": 2
+    }
+  ],
+  "next_sequence": 3,
+  "reviews": {
+    "morbid0529-late-pod": {
+      "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+      "id": "morbid0529-late-pod",
+      "note": "",
+      "proposed_end_seconds": 2843.1,
+      "proposed_start_seconds": 2753.1,
+      "reviewed_at": "2026-07-16T00:29:50Z",
+      "reviewer": "Dan",
+      "status": "approved"
+    },
+    "morbid0529-opener-pod": {
+      "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+      "id": "morbid0529-opener-pod",
+      "note": "",
+      "proposed_end_seconds": 89.1,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-16T00:29:23Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    }
+  },
+  "schema_version": 2
+}
