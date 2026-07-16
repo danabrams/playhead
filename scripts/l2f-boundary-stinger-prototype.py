@@ -291,6 +291,15 @@ def learn_show_model(
         ]
         if len(on_grid) / len(widths) >= GRID_MIN_FRACTION:
             model["grid"] = GRID_SECONDS
+            # Largest observed on-grid pod multiple (xsdz.38): Dan's morbid
+            # audits found pods at 30s multiples UP TO 90s. The joint mode
+            # treats widths beyond the show's observed maximum as off-grid
+            # so the pair bonus cannot stitch neighboring breaks' stingers
+            # into one super-window. `refine_edges` (shipped recipe) and
+            # the bank emitter never read this key.
+            model["grid_max_multiple"] = max(
+                int(round(w / GRID_SECONDS)) for w in on_grid
+            )
     return model
 
 
@@ -352,6 +361,375 @@ def refine_edges(
     new_start = max(0.0, min(new_start, duration - 1.0))
     new_end = max(new_start + 1.0, min(new_end, duration))
     # Sanity: refinement must not abandon the presence evidence entirely.
+    if SCORE.overlap(new_start, new_end, proposal["start"], proposal["end"]) <= 0:
+        return proposal["start"], proposal["end"], {
+            **trace,
+            "reverted_no_overlap": True,
+            "start_snapped": False,
+            "end_snapped": False,
+            "grid_applied": False,
+        }
+    return new_start, new_end, trace
+
+
+# ---------------------------------------------------------------------------
+# playhead-xsdz.38: JOINT candidate-based refinement (offline experimentation
+# mode, selected by --joint). `refine_edges` above stays byte-identical to the
+# shipped v3 recipe; everything in this section is additive.
+#
+# Design (2026-07-16 landscape probes, morbid-05-29 opener vs morbid-05-21):
+# the live content-eat defect class is a LONE low-peak snap whose resulting
+# width is inconsistent with the show's pod grid AND which has no qualifying
+# partner-edge candidate that would make the pair grid-consistent. Peak
+# thresholds provably cannot separate it from correct same-band snaps
+# (0.525 wrong vs 0.531 right), but joint pair evidence can: the correct
+# +43.7s morbid-05-21 end snap has a strong on-grid partner peak
+# (0.808 @ width 59.05 ~= 2*30s), while the wrong +66.5s opener snap has no
+# qualifying partner at any grid-consistent width.
+
+JOINT_TIEBREAK_MOVE_RATE = 1e-4  # pure tie-break: prefer less edge movement
+
+
+class JointConfig:
+    """Tunable term parameters for `refine_edges_joint`.
+
+    Defaults are the xsdz.38 sweep winner (see
+    playhead-baselines/xsdz38-joint-sweep-20260716.md). A plain class (not a
+    dataclass) because the repo convention loads this module through
+    importlib without registering it in sys.modules, which breaks dataclass
+    field resolution on Python 3.9.
+
+    Terms:
+    - grid_bonus: added when the show has a pod grid, the pair width sits
+      within GRID_SNAP_TOLERANCE of a positive grid multiple, and the bonus
+      scope is satisfied. Tied to SNAP_NCC_FLOOR: an on-grid partner is
+      worth as much as a gate-floor acoustic peak.
+    - grid_bonus_scope: 'both' requires both edges to carry evidence
+      (peak/derived/structural — never the untouched proposal edge, whose
+      width against a snap is proposal noise, not structure); 'any' also
+      grants the bonus to (peak, no-snap) pairs.
+    - offgrid_move_rate: off-grid movement penalty (grid shows only) —
+      pairs whose width is NOT grid-consistent pay this per second of
+      applied edge movement. Kills the eat at 0.008+, but between two
+      qualifying off-grid candidates it trades peak against movement and
+      picks the nearer one — which flipped the CORRECT morbid-05-21
+      +43.7s snap (0.531) to a wrong nearer peak (0.524) in the sweep.
+      Kept as a sweepable term; 0 disables.
+    - grid_inconsistency_rate: the product eat killer (grid shows only) —
+      off-grid pairs pay `rate * grid_distance * widening / move-cap`,
+      where grid_distance is how far the pair width sits from the nearest
+      positive grid multiple and widening is the content territory claimed
+      beyond the proposal (outward movement only). Separates the defect
+      cleanly: the wrong opener snap (grid distance 13.2s, widening 66.5s)
+      dies at any rate above 0.045 while the correct 05-21 snap (grid
+      distance 3.9s — a 60s pod seen through a 4s-late proposal start —
+      widening 43.7s) survives up to 0.23. Inward (narrowing) moves pay
+      nothing: the defect class is eating content, and narrowing is
+      already governed by the peak terms. 0 disables.
+    - derived_candidates / derived_anchor_min_peak: grid-derived candidates
+      for an edge with no qualifying peak, injected at k*grid from each
+      CONFIDENT partner-edge peak (the v2 production grid rule, generalized
+      to all k). Anchors below GRID_MIN_PEAK are refused — deriving from a
+      barely-gated peak is how v1 breached the false-widening budget.
+    - structural_anchors: episode-edge anchor candidates (start at 0.0 /
+      end at duration) when the search span clamps against the episode
+      boundary. Pre-roll pods start at 0.0 and post-roll pods end at
+      duration (both occur in gold v2). Off by default pending more corpus
+      evidence.
+    - peak_margin: near-equal multi-peak flattening — peaks within this
+      margin of their edge's strongest peak score AS the strongest peak,
+      letting the movement tie-break choose among near-equal repeats of an
+      identical stinger. 0 disables (a 0.08 margin hurt nikki starts in the
+      spike; only smaller margins are worth sweeping).
+    """
+
+    def __init__(
+        self,
+        grid_bonus: float = SNAP_NCC_FLOOR,
+        grid_bonus_scope: str = "both",
+        offgrid_move_rate: float = 0.0,
+        grid_inconsistency_rate: float = 0.08,
+        derived_candidates: bool = True,
+        derived_anchor_min_peak: float = GRID_MIN_PEAK,
+        structural_anchors: bool = False,
+        peak_margin: float = 0.0,
+    ):
+        if grid_bonus_scope not in ("both", "any"):
+            raise ValueError(f"unknown grid_bonus_scope {grid_bonus_scope!r}")
+        self.grid_bonus = grid_bonus
+        self.grid_bonus_scope = grid_bonus_scope
+        self.offgrid_move_rate = offgrid_move_rate
+        self.grid_inconsistency_rate = grid_inconsistency_rate
+        self.derived_candidates = derived_candidates
+        self.derived_anchor_min_peak = derived_anchor_min_peak
+        self.structural_anchors = structural_anchors
+        self.peak_margin = peak_margin
+
+    def asdict(self) -> dict:
+        return dict(vars(self))
+
+
+def ncc_qualifying_maxima(
+    curve: np.ndarray, gate: float
+) -> list[tuple[int, float]]:
+    """All qualifying local maxima of an NCC curve: (index, value) where the
+    value clears `gate` and is a local maximum (plateaus report their right
+    edge)."""
+    out: list[tuple[int, float]] = []
+    for i in range(curve.size):
+        left = curve[i - 1] if i > 0 else -np.inf
+        right = curve[i + 1] if i + 1 < curve.size else -np.inf
+        if curve[i] >= gate and curve[i] >= left and curve[i] > right:
+            out.append((i, float(curve[i])))
+    return out
+
+
+def joint_peak_candidates(
+    entry: dict,
+    envelopes: EnvelopeCache,
+    episode_id: str,
+    center: float,
+    duration: float,
+) -> list[dict]:
+    """Peak candidates for one edge: every qualifying local maximum of the
+    NCC curve (>= the per-show gate) whose snapped time honors the move
+    cap. Same search span, gate, and time mapping as `refine_edges`."""
+    span_start = max(0.0, center - SEARCH_RADIUS_SECONDS)
+    span_end = min(duration, center + SEARCH_RADIUS_SECONDS)
+    window = envelopes.get(episode_id, span_start, span_end)
+    gate = max(SNAP_NCC_FLOOR, entry["confidence"] - SNAP_NCC_MARGIN)
+    curve = ncc_curve(entry["template"], window)
+    if curve is None:
+        return []
+    candidates = []
+    for index, peak in ncc_qualifying_maxima(curve, gate):
+        snapped = (
+            span_start
+            + (index + entry["edge_sample"]) / ENVELOPE_HZ
+            + entry["offset"]
+        )
+        if abs(snapped - center) <= MAX_EDGE_MOVE_SECONDS:
+            candidates.append({"time": snapped, "peak": peak, "kind": "peak"})
+    return candidates
+
+
+def _joint_derived_candidates(
+    anchors: list[dict],
+    grid: float,
+    max_multiple: int | None,
+    direction: int,
+    center: float,
+    duration: float,
+    min_anchor_peak: float,
+) -> list[dict]:
+    """Grid-derived candidates for one edge: k*grid from each confident
+    partner-edge peak (direction -1 derives a start from end anchors, +1 an
+    end from start anchors), k capped at the show's observed pod multiple.
+    Zero peak contribution — they earn their place only through the pair's
+    grid consistency."""
+    derived: dict[float, dict] = {}
+    for anchor in anchors:
+        if anchor["kind"] != "peak" or anchor["peak"] < min_anchor_peak:
+            continue
+        k = 1
+        while k * grid <= MAX_EDGE_MOVE_SECONDS + SEARCH_RADIUS_SECONDS and (
+            max_multiple is None or k <= max_multiple
+        ):
+            time = anchor["time"] + direction * k * grid
+            k += 1
+            if not 0.0 <= time <= duration:
+                continue
+            if abs(time - center) > MAX_EDGE_MOVE_SECONDS:
+                continue
+            key = round(time, 3)
+            if key not in derived:
+                derived[key] = {"time": time, "peak": 0.0, "kind": "derived"}
+    return list(derived.values())
+
+
+def refine_edges_joint(
+    proposal: dict,
+    model: dict,
+    envelopes: EnvelopeCache,
+    episode_id: str,
+    duration: float,
+    config: JointConfig | None = None,
+) -> tuple[float, float, dict]:
+    """Joint candidate-based twin of `refine_edges`: instead of independent
+    per-edge argmax snaps, enumerate candidate (start, end) pairs and pick
+    the highest-scoring feasible pair.
+
+    score = effective peak sum
+          + grid_bonus                       (grid shows, on-grid, scope met)
+          - offgrid_move_rate * mv           (grid shows, OFF-grid width)
+          - grid_inconsistency_rate * gd * widen / MAX_EDGE_MOVE_SECONDS
+                                             (grid shows, OFF-grid width)
+          - JOINT_TIEBREAK_MOVE_RATE * mv    (always; pure tie-break)
+
+    where mv is the total applied movement of evidence-carrying edges, gd
+    is the pair width's distance from the nearest positive grid multiple,
+    and widen is the pair's outward movement beyond the proposal. The
+    no-snap pair scores exactly 0, so any pair driven negative by the
+    off-grid penalties loses to leaving the proposal alone."""
+    config = config or JointConfig()
+    trace: dict = {
+        "start_snapped": False,
+        "end_snapped": False,
+        "grid_applied": False,
+        "joint": True,
+    }
+
+    start_candidates: list[dict] = [
+        {"time": proposal["start"], "peak": 0.0, "kind": "none"}
+    ]
+    end_candidates: list[dict] = [
+        {"time": proposal["end"], "peak": 0.0, "kind": "none"}
+    ]
+    for side, key, candidates in (
+        ("pre", "start", start_candidates),
+        ("post", "end", end_candidates),
+    ):
+        entry = model.get(side)
+        if entry:
+            candidates.extend(
+                joint_peak_candidates(
+                    entry, envelopes, episode_id, proposal[key], duration
+                )
+            )
+
+    if config.structural_anchors:
+        if (
+            proposal["start"] - SEARCH_RADIUS_SECONDS < 0.0
+            and abs(proposal["start"]) <= MAX_EDGE_MOVE_SECONDS
+        ):
+            start_candidates.append(
+                {"time": 0.0, "peak": 0.0, "kind": "structural"}
+            )
+        if (
+            proposal["end"] + SEARCH_RADIUS_SECONDS > duration
+            and abs(duration - proposal["end"]) <= MAX_EDGE_MOVE_SECONDS
+        ):
+            end_candidates.append(
+                {"time": duration, "peak": 0.0, "kind": "structural"}
+            )
+
+    grid = model.get("grid")
+    max_multiple = model.get("grid_max_multiple")
+    if config.derived_candidates and grid:
+        start_candidates.extend(
+            _joint_derived_candidates(
+                end_candidates, grid, max_multiple, -1, proposal["start"],
+                duration, config.derived_anchor_min_peak,
+            )
+        )
+        end_candidates.extend(
+            _joint_derived_candidates(
+                start_candidates, grid, max_multiple, +1, proposal["end"],
+                duration, config.derived_anchor_min_peak,
+            )
+        )
+
+    def effective_peaks(candidates: list[dict]) -> dict[int, float]:
+        peaks = [c["peak"] for c in candidates if c["kind"] == "peak"]
+        strongest = max(peaks) if peaks else 0.0
+        effective = {}
+        for i, c in enumerate(candidates):
+            value = c["peak"]
+            if (
+                config.peak_margin > 0
+                and c["kind"] == "peak"
+                and strongest - value <= config.peak_margin
+            ):
+                value = strongest
+            effective[i] = value
+        return effective
+
+    start_effective = effective_peaks(start_candidates)
+    end_effective = effective_peaks(end_candidates)
+
+    best_key: tuple | None = None
+    best_pair: tuple[dict, dict] | None = None
+    for si, s in enumerate(start_candidates):
+        for ei, e in enumerate(end_candidates):
+            if e["time"] - s["time"] < 1.0:
+                continue
+            # Derived candidates must anchor on a real partner peak; a
+            # derived-vs-derived (or derived-vs-structural) pair would be
+            # structure hallucinated from structure.
+            if s["kind"] == "derived" and e["kind"] != "peak":
+                continue
+            if e["kind"] == "derived" and s["kind"] != "peak":
+                continue
+            # Feasibility mirrors the revert guard: refinement must not
+            # abandon the presence evidence.
+            if SCORE.overlap(
+                s["time"], e["time"], proposal["start"], proposal["end"]
+            ) <= 0:
+                continue
+            moved = 0.0
+            if s["kind"] != "none":
+                moved += abs(s["time"] - proposal["start"])
+            if e["kind"] != "none":
+                moved += abs(e["time"] - proposal["end"])
+            score = start_effective[si] + end_effective[ei]
+            has_peak = s["kind"] == "peak" or e["kind"] == "peak"
+            if grid:
+                width = e["time"] - s["time"]
+                multiple = max(1, round(width / grid))
+                if max_multiple is not None:
+                    # Widths beyond the show's largest observed pod are
+                    # off-grid by construction: the whole episode layout is
+                    # grid-quantized, so an uncapped bonus would stitch
+                    # neighboring breaks' stingers into one super-window.
+                    multiple = min(multiple, max_multiple)
+                grid_distance = abs(width - multiple * grid)
+                on_grid = grid_distance <= GRID_SNAP_TOLERANCE
+                if on_grid and has_peak and (
+                    config.grid_bonus_scope == "any"
+                    or (s["kind"] != "none" and e["kind"] != "none")
+                ):
+                    score += config.grid_bonus
+                if not on_grid and has_peak:
+                    if config.offgrid_move_rate > 0:
+                        score -= config.offgrid_move_rate * moved
+                    if config.grid_inconsistency_rate > 0:
+                        widening = max(
+                            0.0, proposal["start"] - s["time"]
+                        ) + max(0.0, e["time"] - proposal["end"])
+                        score -= (
+                            config.grid_inconsistency_rate
+                            * grid_distance
+                            * widening
+                            / MAX_EDGE_MOVE_SECONDS
+                        )
+            score -= JOINT_TIEBREAK_MOVE_RATE * moved
+            key = (score, -moved, s["time"], e["time"])
+            if best_key is None or key > best_key:
+                best_key = key
+                best_pair = (s, e)
+
+    if best_pair is None:
+        return proposal["start"], proposal["end"], {
+            **trace, "no_feasible_pair": True,
+        }
+
+    s, e = best_pair
+    new_start, new_end = s["time"], e["time"]
+    trace["start_snapped"] = s["kind"] == "peak"
+    trace["end_snapped"] = e["kind"] == "peak"
+    trace["grid_applied"] = "derived" in (s["kind"], e["kind"])
+    trace["start_kind"] = s["kind"]
+    trace["end_kind"] = e["kind"]
+    trace["pair_score"] = round(float(best_key[0]), 4)
+    if s["kind"] == "peak":
+        trace["start_peak"] = round(s["peak"], 3)
+    if e["kind"] == "peak":
+        trace["end_peak"] = round(e["peak"], 3)
+
+    new_start = max(0.0, min(new_start, duration - 1.0))
+    new_end = max(new_start + 1.0, min(new_end, duration))
+    # Parity with refine_edges: the clamps cannot create a non-overlapping
+    # window out of a feasible pair, but keep the guard for safety.
     if SCORE.overlap(new_start, new_end, proposal["start"], proposal["end"]) <= 0:
         return proposal["start"], proposal["end"], {
             **trace,
@@ -551,6 +929,32 @@ def main(argv: list[str] | None = None) -> int:
             "recorded in the bank's provenance"
         ),
     )
+    joint = parser.add_argument_group("joint refinement (playhead-xsdz.38)")
+    joint.add_argument(
+        "--joint",
+        action="store_true",
+        help=(
+            "use the joint candidate-pair refinement (refine_edges_joint) "
+            "instead of the shipped per-edge argmax recipe"
+        ),
+    )
+    joint_defaults = JointConfig()
+    joint.add_argument("--joint-grid-bonus", type=float,
+                       default=joint_defaults.grid_bonus)
+    joint.add_argument("--joint-bonus-scope", choices=["both", "any"],
+                       default=joint_defaults.grid_bonus_scope)
+    joint.add_argument("--joint-offgrid-move-rate", type=float,
+                       default=joint_defaults.offgrid_move_rate)
+    joint.add_argument("--joint-grid-inconsistency-rate", type=float,
+                       default=joint_defaults.grid_inconsistency_rate)
+    joint.add_argument("--joint-peak-margin", type=float,
+                       default=joint_defaults.peak_margin)
+    joint.add_argument("--joint-derived-min-peak", type=float,
+                       default=joint_defaults.derived_anchor_min_peak)
+    joint.add_argument("--joint-no-derived", action="store_true",
+                       help="disable grid-derived candidates")
+    joint.add_argument("--joint-structural-anchors", action="store_true",
+                       help="enable episode-edge anchor candidates")
     args = parser.parse_args(argv)
 
     if args.emit_bank:
@@ -571,6 +975,16 @@ def main(argv: list[str] | None = None) -> int:
     for asset in evaluation["assets"]:
         durations[asset["episode_id"]] = asset["duration_seconds"]
 
+    joint_config = JointConfig(
+        grid_bonus=args.joint_grid_bonus,
+        grid_bonus_scope=args.joint_bonus_scope,
+        offgrid_move_rate=args.joint_offgrid_move_rate,
+        grid_inconsistency_rate=args.joint_grid_inconsistency_rate,
+        derived_candidates=not args.joint_no_derived,
+        derived_anchor_min_peak=args.joint_derived_min_peak,
+        structural_anchors=args.joint_structural_anchors,
+        peak_margin=args.joint_peak_margin,
+    )
     refined = {
         eid: [dict(p) for p in spans]
         for eid, spans in SCORE.predictions_from_dump(args.dump).items()
@@ -591,9 +1005,14 @@ def main(argv: list[str] | None = None) -> int:
                     best, best_overlap = span, o
             if best is None:
                 continue
-            new_start, new_end, trace = refine_edges(
-                best, model, envelopes, eid, durations[eid]
-            )
+            if args.joint:
+                new_start, new_end, trace = refine_edges_joint(
+                    best, model, envelopes, eid, durations[eid], joint_config
+                )
+            else:
+                new_start, new_end, trace = refine_edges(
+                    best, model, envelopes, eid, durations[eid]
+                )
             trace.update(
                 {
                     "show": show,
@@ -633,8 +1052,11 @@ def main(argv: list[str] | None = None) -> int:
         cohort["end_after"].append(abs(t["after"][1] - gold_break["end_seconds"]))
     report = {
         "recipe": (
-            "leave-one-out per-show stinger anchors (envelope NCC) + learned "
-            "offsets + 30s grid"
+            "leave-one-out joint candidate-pair refinement "
+            f"({joint_config.asdict()})"
+            if args.joint
+            else "leave-one-out per-show stinger anchors (envelope NCC) + "
+            "learned offsets + 30s grid"
         ),
         "breaks_touched": len(traces),
         "breaks_snapped": snapped,
