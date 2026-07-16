@@ -505,6 +505,26 @@ struct AdDetectionConfig: Sendable {
     /// windows and can never produce `end <= start` (see `LexicalAnchorRefiner`).
     let lexicalAnchorRefinementEnabled: Bool
 
+    /// playhead-fl4j: master kill switch for eligibility-side SELF-PROMO
+    /// suppression. When `false` (the DEFAULT — this cut ships OFF; the spike's
+    /// self-promo phrases were mostly single-show, so cross-show generalisation
+    /// needs validation on a larger labeled set before any production flip),
+    /// `runBackfill` never loads the bundled `SelfPromoBank.json`, never builds
+    /// the transcript word stream for it, and never invokes `PromoSuppressor` —
+    /// so per-span gates, persisted rows, and every downstream field are
+    /// byte-identical to pre-fl4j behaviour (same OFF invariant
+    /// `lexicalAnchorRefinementEnabled` holds).
+    ///
+    /// When `true`, each candidate ad span whose transcript contains a curated
+    /// show-agnostic self-promo ACTION phrase (rate/review/subscribe, follow us,
+    /// be a guest, live-show / get-tickets plugs, "new ways to watch", …) has
+    /// its eligibility gate DEMOTED to `.markOnly` — routing it to a
+    /// play-by-default suggest banner instead of auto-skipping. This is an
+    /// ELIGIBILITY change only (boundaries and scores are untouched), and it is
+    /// severity-guarded so it can ONLY relax a fully-`.eligible` span; it never
+    /// overrides a harder block and never promotes.
+    let selfPromoSuppressionEnabled: Bool
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -592,7 +612,8 @@ struct AdDetectionConfig: Sendable {
         rediffSlotOwnershipEnabled: Bool = false,
         rediffSlotShadowEnabled: Bool = false,
         stingerRefinementEnabled: Bool = true,
-        lexicalAnchorRefinementEnabled: Bool = false
+        lexicalAnchorRefinementEnabled: Bool = false,
+        selfPromoSuppressionEnabled: Bool = false
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -651,6 +672,7 @@ struct AdDetectionConfig: Sendable {
         self.rediffSlotShadowEnabled = rediffSlotShadowEnabled
         self.stingerRefinementEnabled = stingerRefinementEnabled
         self.lexicalAnchorRefinementEnabled = lexicalAnchorRefinementEnabled
+        self.selfPromoSuppressionEnabled = selfPromoSuppressionEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -699,7 +721,8 @@ struct AdDetectionConfig: Sendable {
         rediffSlotOwnershipEnabled: false,
         rediffSlotShadowEnabled: false,
         stingerRefinementEnabled: true,
-        lexicalAnchorRefinementEnabled: false
+        lexicalAnchorRefinementEnabled: false,
+        selfPromoSuppressionEnabled: false
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -1571,6 +1594,25 @@ actor AdDetectionService {
     /// bundled resource). Production leaves this nil.
     private let lexicalAnchorBankOverride: LexicalAnchorBank?
 
+    /// playhead-fl4j: lazily-loaded bundled `SelfPromoBank`, cached with the
+    /// same `.notLoaded`/`.loaded`/`.failed` fail-once contract as the lexical
+    /// and stinger banks. Never touched when
+    /// `config.selfPromoSuppressionEnabled == false`.
+    private var selfPromoBankCacheState: SelfPromoBankLoadState = .notLoaded
+
+    private enum SelfPromoBankLoadState {
+        case notLoaded
+        case loaded(SelfPromoBank)
+        case failed
+    }
+
+    /// playhead-fl4j: test-injectable self-promo bank override (wins over the
+    /// bundled resource). Production leaves this nil. The resolver still gates
+    /// on `config.selfPromoSuppressionEnabled` BEFORE consulting the override,
+    /// so an injected bank stays unreachable on the flag-OFF path — the flag
+    /// gate alone keeps the suppressor inert (the fl4j byte-identity contract).
+    private let selfPromoBankOverride: SelfPromoBank?
+
     /// playhead-l2f.6: lazily-loaded bundled `StingerBank`. `.notLoaded`
     /// until the first flag-ON backfill on a show; a load failure is
     /// remembered (`.failed`) so a malformed bundle logs loudly ONCE and
@@ -1713,6 +1755,7 @@ actor AdDetectionService {
         stingerBank: StingerBank? = nil,
         stingerPCMProvider: StingerPCMProvider? = nil,
         lexicalAnchorBank: LexicalAnchorBank? = nil,
+        selfPromoBank: SelfPromoBank? = nil,
         chapterGenerationPhaseFactory: (@Sendable () -> ChapterGenerationPhase)? = nil,
         chapterPlanCache: ChapterPlanCache? = nil,
         chapterPhaseInstallIDProvider: @escaping @Sendable () -> UUID = { UUID() },
@@ -1772,6 +1815,10 @@ actor AdDetectionService {
         // stream the pipeline already carries (no PCM), so it needs only the
         // optional bank override — nil ⇒ bundle load on first flag-ON use.
         self.lexicalAnchorBankOverride = lexicalAnchorBank
+        // playhead-fl4j: self-promo suppression reads the transcript word stream
+        // the pipeline already carries (no PCM), so it needs only the optional
+        // bank override — nil ⇒ bundle load on first flag-ON use.
+        self.selfPromoBankOverride = selfPromoBank
         self.chapterGenerationPhaseFactory = chapterGenerationPhaseFactory
         self.chapterPlanCache = chapterPlanCache
         self.chapterPhaseInstallIDProvider = chapterPhaseInstallIDProvider
@@ -2148,6 +2195,36 @@ actor AdDetectionService {
             endTime: result.endTime,
             anchorProvenance: span.anchorProvenance
         )
+    }
+
+    // MARK: - playhead-fl4j: Self-promo suppression helpers
+
+    /// Resolve the self-promo bank: OFF-path short-circuits WITHOUT touching the
+    /// bank or the override (byte-identical to pre-fl4j — the flag gate alone
+    /// keeps an injected bank unreachable). On the ON path the test override
+    /// wins; otherwise lazily load the bundled resource once, remembering
+    /// failure so a malformed asset logs loudly exactly once and then degrades
+    /// to "no bank" (suppression silently disabled — never a crash).
+    private func selfPromoSuppressionBankIfEnabled() -> SelfPromoBank? {
+        guard config.selfPromoSuppressionEnabled else { return nil }
+        if let selfPromoBankOverride { return selfPromoBankOverride }
+        switch selfPromoBankCacheState {
+        case .loaded(let bank):
+            return bank
+        case .failed:
+            return nil
+        case .notLoaded:
+            do {
+                let bank = try SelfPromoBank.load()
+                selfPromoBankCacheState = .loaded(bank)
+                logger.info("[fl4j] SelfPromoBank loaded: \(bank.phrases.count) phrases")
+                return bank
+            } catch {
+                logger.error("[fl4j] SelfPromoBank load failed — self-promo suppression disabled: \(String(describing: error), privacy: .public)")
+                selfPromoBankCacheState = .failed
+                return nil
+            }
+        }
     }
 
     // MARK: - playhead-l2f.6: Stinger refinement helpers
@@ -3639,6 +3716,19 @@ actor AdDetectionService {
         let lexicalWords: [LexicalWord] = lexicalContext == nil
             ? []
             : LexicalAnchorRefiner.buildWordStream(chunks: finalChunks)
+        // playhead-fl4j: resolve the show-agnostic self-promo bank ONCE per run.
+        // Flag OFF ⇒ nil without touching the bank (byte-identical to pre-fl4j).
+        // The word stream is built lazily only when the bank resolved, so the
+        // OFF path never scans the transcript for self-promo phrases. It is the
+        // SAME `LexicalWord` stream the lexical refiner consumes (built from
+        // `finalChunks`); it lives on its own gate so self-promo suppression is
+        // independent of `lexicalAnchorRefinementEnabled` — the only cost of
+        // both flags being ON at once is one extra pure word-stream build, never
+        // in production (both default OFF).
+        let selfPromoBank = selfPromoSuppressionBankIfEnabled()
+        let selfPromoWords: [LexicalWord] = selfPromoBank == nil
+            ? []
+            : LexicalAnchorRefiner.buildWordStream(chunks: finalChunks)
         let bracketShowTrust: Double
         if config.bracketRefinementEnabled, !podcastId.isEmpty {
             let trustStore = bracketTrustStoreLazy()
@@ -4211,6 +4301,48 @@ actor AdDetectionService {
                     proposalConfidence: decision.proposalConfidence,
                     skipConfidence: decision.skipConfidence,
                     eligibilityGate: .blockedByPolicy,
+                    promotionTrack: decision.promotionTrack
+                )
+            }
+
+            // playhead-fl4j: SELF-PROMO suppression (eligibility-side precision
+            // signal). When a candidate ad span's transcript contains a curated
+            // show-agnostic self-promo ACTION phrase (rate/review/subscribe,
+            // follow us, be a guest, live-show / get-tickets plugs, "new ways to
+            // watch", …), demote the gate to `.markOnly` so the span surfaces as
+            // a play-by-default SUGGEST banner instead of auto-skipping — the
+            // show promoting ITSELF is not an ad the user wants removed. This is
+            // an ELIGIBILITY change only: scoring stays honest (the confidences
+            // and promotion track are forwarded verbatim), mirroring the
+            // creator-chapter suppressor above.
+            //
+            // Severity-guarded to `< SkipEligibilityGate.markOnly.severity`
+            // (i.e. only `.eligible`, severity 0): the demotion can ONLY relax a
+            // fully-eligible span down to banner-only. It never overrides a
+            // harder block (`.blockedBy*`, severity ≥ 2 — e.g. a user correction
+            // or the creator-chapter demotion just above), never re-touches an
+            // equal-severity gate (`.markOnly` / `.cappedByFMSuppression`,
+            // severity 1), and never promotes.
+            //
+            // Flag-OFF (or the bundled bank failing to load) resolves
+            // `selfPromoBank` to nil, so the `let` binding short-circuits before
+            // `PromoSuppressor` is ever consulted — a zero-cost no-op that is
+            // byte-identical to pre-fl4j for episodes the bead doesn't apply to.
+            if config.selfPromoSuppressionEnabled,
+               let selfPromoBank,
+               decision.eligibilityGate.severity < SkipEligibilityGate.markOnly.severity,
+               PromoSuppressor.shouldSuppress(
+                   span: refinedSpan,
+                   transcriptWords: selfPromoWords,
+                   bank: selfPromoBank
+               ) {
+                logger.info(
+                    "Backfill: [fl4j] self-promo suppression demoting span=\(refinedSpan.id, privacy: .public) from gate=\(decision.eligibilityGate.rawValue, privacy: .public) → markOnly"
+                )
+                decision = DecisionResult(
+                    proposalConfidence: decision.proposalConfidence,
+                    skipConfidence: decision.skipConfidence,
+                    eligibilityGate: .markOnly,
                     promotionTrack: decision.promotionTrack
                 )
             }

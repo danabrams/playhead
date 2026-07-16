@@ -1,0 +1,146 @@
+// PromoSuppressorTests.swift
+// playhead-fl4j: unit tests for the pure `PromoSuppressor.shouldSuppress`
+// evaluator — self-promo ACTION phrases fire; bare sponsor phrases and bare
+// show-name self-reference do NOT (the precision guards the spike proved
+// necessary); normalisation (curly apostrophes / casing / punctuation) is
+// parity-identical to the shared word-stream normaliser; and a phrase OUTSIDE
+// the span's time geometry is correctly excluded.
+
+import Foundation
+import Testing
+@testable import Playhead
+
+@Suite("PromoSuppressor (playhead-fl4j)")
+struct PromoSuppressorTests {
+
+    // MARK: - Fixtures
+
+    /// Build the episode word stream the suppressor consumes, using the SAME
+    /// `LexicalAnchorRefiner.buildWordStream` path production uses (so casing /
+    /// punctuation / apostrophe normalisation is exercised end-to-end, not
+    /// hand-normalised).
+    private func words(_ text: String, start: Double = 0, end: Double = 30) -> [LexicalWord] {
+        let chunk = TranscriptChunk(
+            id: "c0",
+            analysisAssetId: "asset-fl4j",
+            segmentFingerprint: "fp0",
+            chunkIndex: 0,
+            startTime: start,
+            endTime: end,
+            text: text,
+            normalizedText: text.lowercased(),
+            pass: "final",
+            modelVersion: "test-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+        return LexicalAnchorRefiner.buildWordStream(chunks: [chunk])
+    }
+
+    /// Build a bank from display phrases through the real decode/validate path.
+    private func bank(_ phrases: [String]) throws -> SelfPromoBank {
+        let payload: [String: Any] = [
+            "schemaVersion": 1,
+            "phrases": phrases.map { ["phrase": $0] },
+        ]
+        return try SelfPromoBank.decode(JSONSerialization.data(withJSONObject: payload))
+    }
+
+    private func span(start: Double = 0, end: Double = 30) -> DecodedSpan {
+        DecodedSpan(
+            id: DecodedSpan.makeId(assetId: "asset-fl4j", firstAtomOrdinal: 0, lastAtomOrdinal: 9),
+            assetId: "asset-fl4j",
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: 9,
+            startTime: start,
+            endTime: end,
+            anchorProvenance: []
+        )
+    }
+
+    /// The curated shipping phrase set, so the unit tests exercise the real bank.
+    private func shippedBank() throws -> SelfPromoBank {
+        try SelfPromoBank.load()
+    }
+
+    // MARK: - Positive: self-promo action phrases fire
+
+    @Test("A self-promo action phrase in the span fires")
+    func actionPhraseFires() throws {
+        let w = words("Thanks so much for listening. Please rate review and subscribe wherever you get your podcasts.")
+        #expect(PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: try shippedBank()))
+    }
+
+    @Test("A live-show / tickets plug fires")
+    func liveShowPlugFires() throws {
+        let w = words("We are going on tour this fall, get tickets at the box office.")
+        #expect(PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: try shippedBank()))
+    }
+
+    @Test("A be-a-guest / contact-the-show plug fires")
+    func beAGuestFires() throws {
+        let w = words("Want to be a guest on the show? Follow us for details.")
+        #expect(PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: try shippedBank()))
+    }
+
+    // MARK: - Precision guards: must NOT fire
+
+    @Test("A bare sponsor phrase does NOT fire (fires on real 3rd-party ads)")
+    func bareSponsorDoesNotFire() throws {
+        // The exact ad-copy the spike showed bare-sponsor matching false-fires on.
+        let w = words("This episode is brought to you by Squarespace. Use code SHOW for 10 percent off at squarespace dot com slash show.")
+        #expect(!PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: try shippedBank()))
+    }
+
+    @Test("Bare show-name self-reference does NOT fire (contaminated by underwriting reads)")
+    func bareShowNameDoesNotFire() throws {
+        // "<Show> is supported by <external brand>" — show name co-occurs with a
+        // real sponsor. No self-promo ACTION verb ⇒ must not suppress.
+        let w = words("WNYC Studios is supported by Proof on Broadway. Welcome back to On The Media with Brooke Gladstone.")
+        #expect(!PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: try shippedBank()))
+    }
+
+    // MARK: - Normalisation parity
+
+    @Test("Curly apostrophes, casing, and punctuation normalise to a match")
+    func normalisationParity() throws {
+        let b = try bank(["we're on tour"]) // tokens: were, on, tour
+        // U+2019 curly apostrophe + upper-casing + trailing punctuation.
+        let curly = words("We\u{2019}re ON TOUR!")
+        #expect(PromoSuppressor.shouldSuppress(span: span(), transcriptWords: curly, bank: b),
+                "curly-apostrophe transcript must fold to the same tokens as the bank phrase")
+        // Straight ASCII apostrophe folds identically.
+        let straight = words("we're on tour")
+        #expect(PromoSuppressor.shouldSuppress(span: span(), transcriptWords: straight, bank: b))
+    }
+
+    // MARK: - No-op cases
+
+    @Test("Empty word stream is a no-op")
+    func emptyWordsNoOp() throws {
+        #expect(!PromoSuppressor.shouldSuppress(span: span(), transcriptWords: [], bank: try shippedBank()))
+    }
+
+    @Test("A span with no self-promo phrase is a no-op")
+    func noMatchNoOp() throws {
+        let w = words("Today we discuss the history of aviation and the future of flight.")
+        #expect(!PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: try shippedBank()))
+    }
+
+    @Test("A phrase OUTSIDE the span's time geometry is excluded")
+    func outOfSpanGeometryExcluded() throws {
+        // The self-promo phrase lives at t≈[0,30]; the span is [40,50], so the
+        // slice is empty and the phrase must NOT suppress this span.
+        let w = words("Please rate review and subscribe.", start: 0, end: 30)
+        let farSpan = span(start: 40, end: 50)
+        #expect(!PromoSuppressor.shouldSuppress(span: farSpan, transcriptWords: w, bank: try shippedBank()))
+        // Sanity: the SAME words DO fire for a span that overlaps them.
+        #expect(PromoSuppressor.shouldSuppress(span: span(start: 0, end: 30), transcriptWords: w, bank: try shippedBank()))
+    }
+
+    @Test("A zero-duration span is a conservative no-op")
+    func zeroDurationNoOp() throws {
+        let w = words("Please rate review and subscribe.")
+        #expect(!PromoSuppressor.shouldSuppress(span: span(start: 10, end: 10), transcriptWords: w, bank: try shippedBank()))
+    }
+}
