@@ -485,6 +485,26 @@ struct AdDetectionConfig: Sendable {
     /// `end <= start` (see `StingerRefiner`).
     let stingerRefinementEnabled: Bool
 
+    /// playhead-xsdz.37: master kill switch for lexical-anchor boundary
+    /// refinement. When `false` (the DEFAULT — this cut ships OFF and is
+    /// measured via Catalyst dump before any flip), `runBackfill` never loads
+    /// the bundled `LexicalAnchorBank.json`, never builds the transcript word
+    /// stream for it, and never invokes `LexicalAnchorRefiner` — so per-span
+    /// bounds, persisted rows, and both lexical trace maps are byte-identical
+    /// to pre-xsdz.37 behaviour (same OFF invariant `stingerRefinementEnabled`
+    /// holds).
+    ///
+    /// When `true`, each candidate ad span on a show WITH a bank entry is
+    /// refined inside the inline boundary-refinement block, AFTER the stinger
+    /// snap: an EXACT match of a curated pre/attribution phrase near the start
+    /// edge (or a resume phrase near the end edge) snaps that edge to the
+    /// matched-phrase position plus the anchor's learned onset offset. An exact
+    /// lexical match takes precedence on the specific edge it fires; every
+    /// other edge keeps the prior stinger/acoustic result. The move cap and the
+    /// revert-on-zero-overlap guard hold; the refiner never splits or merges
+    /// windows and can never produce `end <= start` (see `LexicalAnchorRefiner`).
+    let lexicalAnchorRefinementEnabled: Bool
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -571,7 +591,8 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: Bool = false,
         rediffSlotOwnershipEnabled: Bool = false,
         rediffSlotShadowEnabled: Bool = false,
-        stingerRefinementEnabled: Bool = true
+        stingerRefinementEnabled: Bool = true,
+        lexicalAnchorRefinementEnabled: Bool = false
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -629,6 +650,7 @@ struct AdDetectionConfig: Sendable {
         self.rediffSlotOwnershipEnabled = rediffSlotOwnershipEnabled
         self.rediffSlotShadowEnabled = rediffSlotShadowEnabled
         self.stingerRefinementEnabled = stingerRefinementEnabled
+        self.lexicalAnchorRefinementEnabled = lexicalAnchorRefinementEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -676,7 +698,8 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: false,
         rediffSlotOwnershipEnabled: false,
         rediffSlotShadowEnabled: false,
-        stingerRefinementEnabled: true
+        stingerRefinementEnabled: true,
+        lexicalAnchorRefinementEnabled: false
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -844,6 +867,16 @@ typealias StingerPCMProvider = @Sendable (
 private struct StingerRefinementRunContext {
     let entry: StingerShowEntry
     let episodeID: String?
+}
+
+// MARK: - Lexical-anchor refinement plumbing (playhead-xsdz.37)
+
+/// Per-run lexical context resolved once per `runBackfill` (flag ON + the show
+/// has a bank entry). `anchors` is the show's EFFECTIVE anchor set (its
+/// family-(a) attribution templates plus the generic family-(b) framing
+/// phrases). Nil for an unknown show ⇒ never consulted.
+private struct LexicalRefinementRunContext {
+    let anchors: [LexicalAnchor]
 }
 
 // MARK: - Pending Backfill Decision
@@ -1505,6 +1538,39 @@ actor AdDetectionService {
     /// `stingerRefinementTraceByWindowIdForTesting()`.
     private var lastStingerRefinementTraceByWindowId: [String: StingerRefinementTrace] = [:]
 
+    /// playhead-xsdz.37: per-spanId lexical refinement trace from the most
+    /// recent `runBackfill`. Keys are `DecodedSpan.id` for spans the lexical
+    /// refiner was consulted on (flag ON + the show had a bank entry —
+    /// including spans where nothing snapped, so the no-snap outcome is
+    /// observable). Empty when `config.lexicalAnchorRefinementEnabled == false`.
+    /// Reset at the start of every backfill run. Test-observable via
+    /// `lexicalRefinementTraceBySpanIdForTesting()`.
+    private var lastLexicalRefinementTraceBySpanId: [String: LexicalRefinementTrace] = [:]
+
+    /// playhead-xsdz.37: per-AdWindow lexical refinement trace, pre-resolved
+    /// per window in the emission loop (same convention as the stinger and
+    /// finalizer trace maps). Empty when
+    /// `config.lexicalAnchorRefinementEnabled == false`. Reset at the start of
+    /// every backfill run. Test-observable via
+    /// `lexicalRefinementTraceByWindowIdForTesting()`.
+    private var lastLexicalRefinementTraceByWindowId: [String: LexicalRefinementTrace] = [:]
+
+    /// playhead-xsdz.37: lazily-loaded bundled `LexicalAnchorBank`, cached with
+    /// the same `.notLoaded`/`.loaded`/`.failed` fail-once contract as the
+    /// stinger bank. Never touched when
+    /// `config.lexicalAnchorRefinementEnabled == false`.
+    private var lexicalAnchorBankCacheState: LexicalAnchorBankLoadState = .notLoaded
+
+    private enum LexicalAnchorBankLoadState {
+        case notLoaded
+        case loaded(LexicalAnchorBank)
+        case failed
+    }
+
+    /// playhead-xsdz.37: test-injectable lexical bank override (wins over the
+    /// bundled resource). Production leaves this nil.
+    private let lexicalAnchorBankOverride: LexicalAnchorBank?
+
     /// playhead-l2f.6: lazily-loaded bundled `StingerBank`. `.notLoaded`
     /// until the first flag-ON backfill on a show; a load failure is
     /// remembered (`.failed`) so a malformed bundle logs loudly ONCE and
@@ -1646,6 +1712,7 @@ actor AdDetectionService {
         repeatedAdCache: RepeatedAdCacheService? = nil,
         stingerBank: StingerBank? = nil,
         stingerPCMProvider: StingerPCMProvider? = nil,
+        lexicalAnchorBank: LexicalAnchorBank? = nil,
         chapterGenerationPhaseFactory: (@Sendable () -> ChapterGenerationPhase)? = nil,
         chapterPlanCache: ChapterPlanCache? = nil,
         chapterPhaseInstallIDProvider: @escaping @Sendable () -> UUID = { UUID() },
@@ -1701,6 +1768,10 @@ actor AdDetectionService {
                 to: end
             )
         }
+        // playhead-xsdz.37: lexical refinement reads the transcript word
+        // stream the pipeline already carries (no PCM), so it needs only the
+        // optional bank override — nil ⇒ bundle load on first flag-ON use.
+        self.lexicalAnchorBankOverride = lexicalAnchorBank
         self.chapterGenerationPhaseFactory = chapterGenerationPhaseFactory
         self.chapterPlanCache = chapterPlanCache
         self.chapterPhaseInstallIDProvider = chapterPhaseInstallIDProvider
@@ -1981,6 +2052,102 @@ actor AdDetectionService {
     /// `spanFinalizerConstraintsByWindowIdForTesting()` convention.
     func stingerRefinementTraceByWindowIdForTesting() -> [String: StingerRefinementTrace] {
         lastStingerRefinementTraceByWindowId
+    }
+
+    // MARK: - playhead-xsdz.37: Lexical refinement trace telemetry
+
+    /// Test seam: per-spanId lexical refinement trace from the most recent
+    /// `runBackfill`. Keys are `DecodedSpan.id` for every span the refiner was
+    /// consulted on (flag ON + show has a bank entry — including no-snap
+    /// consults). Empty when `config.lexicalAnchorRefinementEnabled == false`.
+    func lexicalRefinementTraceBySpanIdForTesting() -> [String: LexicalRefinementTrace] {
+        lastLexicalRefinementTraceBySpanId
+    }
+
+    /// Test seam: per-AdWindow lexical refinement trace from the most recent
+    /// `runBackfill`. Keys are `AdWindow.id`; values mirror what the spanId map
+    /// carries for the underlying span. Empty when the flag is OFF.
+    func lexicalRefinementTraceByWindowIdForTesting() -> [String: LexicalRefinementTrace] {
+        lastLexicalRefinementTraceByWindowId
+    }
+
+    // MARK: - playhead-xsdz.37: Lexical refinement helpers
+
+    /// Resolve the lexical bank: the test override wins; otherwise lazily load
+    /// the bundled resource once, remembering failure so a malformed asset logs
+    /// loudly exactly once and then degrades to "no bank" (refinement silently
+    /// disabled — never a crash). Only reached when
+    /// `config.lexicalAnchorRefinementEnabled == true`.
+    private func lexicalAnchorBankIfEnabled() -> LexicalAnchorBank? {
+        if let lexicalAnchorBankOverride { return lexicalAnchorBankOverride }
+        switch lexicalAnchorBankCacheState {
+        case .loaded(let bank):
+            return bank
+        case .failed:
+            return nil
+        case .notLoaded:
+            do {
+                let bank = try LexicalAnchorBank.load()
+                lexicalAnchorBankCacheState = .loaded(bank)
+                logger.info("[xsdz37] LexicalAnchorBank loaded: \(bank.shows.count) shows, \(bank.genericAnchors.count) generic anchors")
+                return bank
+            } catch {
+                logger.error("[xsdz37] LexicalAnchorBank load failed — lexical refinement disabled: \(String(describing: error), privacy: .public)")
+                lexicalAnchorBankCacheState = .failed
+                return nil
+            }
+        }
+    }
+
+    /// Resolve the per-run lexical context: flag ON + known show + bank entry.
+    /// Returns nil on the OFF path without touching the bank (byte-identical to
+    /// pre-xsdz.37). The effective anchor set is the show's family-(a)
+    /// templates plus the generic family-(b) framing phrases.
+    private func resolveLexicalRefinementContext(
+        showKey: String?
+    ) -> LexicalRefinementRunContext? {
+        guard config.lexicalAnchorRefinementEnabled,
+              let bank = lexicalAnchorBankIfEnabled(),
+              let anchors = bank.effectiveAnchors(forShowKey: showKey),
+              !anchors.isEmpty else {
+            return nil
+        }
+        logger.info("[xsdz37] lexical context resolved: anchors=\(anchors.count)")
+        return LexicalRefinementRunContext(anchors: anchors)
+    }
+
+    /// Apply lexical refinement to one decoded span (flag ON, bank entry
+    /// resolved). Runs the pure `LexicalAnchorRefiner` against the episode word
+    /// stream, records the per-span trace, and returns the span with refined
+    /// bounds (identity, ordinals, and provenance preserved — the refiner never
+    /// splits or merges).
+    private func applyLexicalRefinement(
+        span: DecodedSpan,
+        context: LexicalRefinementRunContext,
+        words: [LexicalWord],
+        episodeDuration: Double
+    ) -> DecodedSpan {
+        let result = LexicalAnchorRefiner.refine(
+            proposalStart: span.startTime,
+            proposalEnd: span.endTime,
+            anchors: context.anchors,
+            words: words,
+            episodeDuration: episodeDuration
+        )
+        lastLexicalRefinementTraceBySpanId[span.id] = result.trace
+        guard result.startTime != span.startTime || result.endTime != span.endTime else {
+            return span
+        }
+        logger.info("[xsdz37] lexical snap: spanId=\(span.id, privacy: .public) [\(span.startTime, format: .fixed(precision: 2)), \(span.endTime, format: .fixed(precision: 2))] -> [\(result.startTime, format: .fixed(precision: 2)), \(result.endTime, format: .fixed(precision: 2))] startSnapped=\(result.trace.startSnapped) endSnapped=\(result.trace.endSnapped)")
+        return DecodedSpan(
+            id: span.id,
+            assetId: span.assetId,
+            firstAtomOrdinal: span.firstAtomOrdinal,
+            lastAtomOrdinal: span.lastAtomOrdinal,
+            startTime: result.startTime,
+            endTime: result.endTime,
+            anchorProvenance: span.anchorProvenance
+        )
     }
 
     // MARK: - playhead-l2f.6: Stinger refinement helpers
@@ -3446,6 +3613,11 @@ actor AdDetectionService {
         // them empty for the rest of the run.
         lastStingerRefinementTraceBySpanId = [:]
         lastStingerRefinementTraceByWindowId = [:]
+        // playhead-xsdz.37: same reset contract for the lexical trace maps.
+        // The OFF path (`config.lexicalAnchorRefinementEnabled == false`)
+        // leaves them empty for the rest of the run.
+        lastLexicalRefinementTraceBySpanId = [:]
+        lastLexicalRefinementTraceByWindowId = [:]
         // playhead-l2f.6: resolve the per-show stinger context ONCE per run
         // (bank entry + episode identity for shard-cache PCM). Flag OFF ⇒
         // nil without touching the bank, the store, or the filesystem —
@@ -3454,6 +3626,19 @@ actor AdDetectionService {
             analysisAssetId: analysisAssetId,
             showKey: catalogShowId
         )
+        // playhead-xsdz.37: resolve the per-show lexical context ONCE per run
+        // (bank entry ⇒ effective anchor set). Flag OFF (or unknown show) ⇒
+        // nil without touching the bank — byte-identical to pre-xsdz.37. The
+        // word stream is built lazily only when a context resolved, so the OFF
+        // path never scans the transcript for anchors. It is built from
+        // `finalChunks` (the same final-pass stream the atomizer and the
+        // transcript boundary-cue builder consume) so a fast-pass duplicate of
+        // the same audio cannot double-count candidates or bind the snap to a
+        // fast-pass phrase interpolation.
+        let lexicalContext = resolveLexicalRefinementContext(showKey: catalogShowId)
+        let lexicalWords: [LexicalWord] = lexicalContext == nil
+            ? []
+            : LexicalAnchorRefiner.buildWordStream(chunks: finalChunks)
         let bracketShowTrust: Double
         if config.bracketRefinementEnabled, !podcastId.isEmpty {
             let trustStore = bracketTrustStoreLazy()
@@ -3726,6 +3911,25 @@ actor AdDetectionService {
                 refinedSpan = await applyStingerRefinement(
                     span: refinedSpan,
                     context: stingerContext,
+                    episodeDuration: episodeDuration
+                )
+            }
+
+            // playhead-xsdz.37: lexical-anchor refinement, applied AFTER the
+            // stinger snap so a high-precision EXACT lexical match takes
+            // precedence on the specific edge it fires; edges the lexical
+            // refiner does not fire on keep the prior stinger/acoustic result
+            // (the refiner leaves un-matched edges untouched). Flag OFF ⇒
+            // `lexicalContext` is nil and this is a zero-cost no-op
+            // (byte-identical). WIDTH-owned spans (acoustic splice / rediff)
+            // are exempt for the same reason as the stinger block: the slot
+            // pass locked their physical edges and no snap may blur them.
+            if let lexicalContext,
+               !span.anchorProvenance.contains(where: { $0.isWidthOwnership }) {
+                refinedSpan = applyLexicalRefinement(
+                    span: refinedSpan,
+                    context: lexicalContext,
+                    words: lexicalWords,
                     episodeDuration: episodeDuration
                 )
             }
@@ -4443,6 +4647,15 @@ actor AdDetectionService {
             // and the window-keyed map stays empty — byte-identical OFF.
             if let stingerTrace = lastStingerRefinementTraceBySpanId[refinedSpan.id] {
                 lastStingerRefinementTraceByWindowId[window.id] = stingerTrace
+            }
+
+            // playhead-xsdz.37: resolve the per-window lexical refinement trace
+            // from the spanId map populated inside the boundary-refinement
+            // block. Same stamp point and rationale as the stinger trace above;
+            // when the flag is off the spanId map is empty (top-of-run reset)
+            // so the window-keyed map stays empty — byte-identical OFF.
+            if let lexicalTrace = lastLexicalRefinementTraceBySpanId[refinedSpan.id] {
+                lastLexicalRefinementTraceByWindowId[window.id] = lexicalTrace
             }
 
             // playhead-gtt9.17: catalog ingress. When a span gates to
