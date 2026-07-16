@@ -230,9 +230,11 @@ struct StingerRefinementWireInTests {
         // synthetic transcript. The first runs with the flag explicitly
         // OFF but a LIVE bank (keyed to this very podcastId) and a PCM
         // provider that WOULD snap the start edge to 20.0s if the refiner
-        // were ever consulted. The second leaves the config at its (OFF)
-        // default with nothing injected. If any persisted field diverges,
-        // the flag gate is leaking.
+        // were ever consulted. The second leaves the config at its default
+        // (ON since the 2026-07-16 dogfood flip) with nothing injected —
+        // inert because the bundled bank has no entry for this test's
+        // podcastId. If any persisted field diverges, a gate is leaking on
+        // one arm or the other.
         let storeExplicit = try await makeTestStore()
         let storeDefault = try await makeTestStore()
         let assetId = "asset-l2f6-off"

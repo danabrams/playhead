@@ -2645,12 +2645,14 @@ private extension PipelineDumpLiveTests {
         // trace, matching the default-encoder convention for nil optionals.
         let spanFinalizerConstraintsByWindowId =
             await service.spanFinalizerConstraintsByWindowIdForTesting()
-        // playhead-l2f.6: per-AdWindow stinger refinement trace. Empty map
-        // when `config.stingerRefinementEnabled == false` (the production
-        // .default this dump runs under — see `productionConfigStateIsHeld`).
-        // Each entry surfaces in the dump's `stingerRefinement` key when
-        // present; nil/missing otherwise, matching the default-encoder
-        // convention for nil optionals.
+        // playhead-l2f.6: per-AdWindow stinger refinement trace. The
+        // production .default this dump runs under ships the flag ON
+        // (2026-07-16 dogfood flip — see `productionConfigStateIsHeld`),
+        // so bank-show windows carry live v4 traces here; the map is empty
+        // only when the flag is OFF or no window's show resolved a bank
+        // entry. Each entry surfaces in the dump's `stingerRefinement` key
+        // when present; nil/missing otherwise, matching the
+        // default-encoder convention for nil optionals.
         let stingerRefinementByWindowId =
             await service.stingerRefinementTraceByWindowIdForTesting()
 
@@ -2704,8 +2706,10 @@ private extension PipelineDumpLiveTests {
                 let trace = spanFinalizerConstraintsByWindowId[window.id]
                 let spanFinalizerConstraints: [String]? =
                     (trace?.isEmpty ?? true) ? nil : trace
-                // playhead-l2f.6: nil under the production .default (flag
-                // OFF) so the key is omitted from the encoded object.
+                // playhead-l2f.6: nil (key omitted from the encoded
+                // object) when this window recorded no trace — flag OFF,
+                // or no bank entry for the show. Present with live v4
+                // fields under the shipping flag-ON default.
                 let stingerRefinement = stingerRefinementByWindowId[window.id]
                     .map(DumpStingerRefinement.init)
                 return DumpAdWindow(
