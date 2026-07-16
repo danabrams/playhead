@@ -287,11 +287,11 @@ struct StingerBankTests {
         #expect(bank.schemaVersion == 1)
         #expect(bank.envelopeHz == 50)
         #expect(bank.pcmSampleRate == 16_000)
-        #expect(bank.shows.count == 4, "bank must cover exactly the 4 shows the full-corpus learner qualified")
+        #expect(bank.shows.count == 2, "v3 bank: morbid + nikki (smartless curated out; OTM support-gated out post-dedupe)")
 
         // Show order is deterministic (sorted by show_name at emit time).
         let slugs = bank.shows.map { $0.showKeys[0] }
-        #expect(slugs == ["morbid", "on-the-media", "smartless", "the-nikki-glaser-podcast"])
+        #expect(slugs == ["morbid", "the-nikki-glaser-podcast"])
 
         for show in bank.shows {
             // Every entry carries at least one production feed-URL alias
@@ -303,20 +303,15 @@ struct StingerBankTests {
             )
             // Full-width templates (7s × 50 Hz), pre edge at frame 300 /
             // post edge at frame 50 (the offline TEMPLATE_INNER/OUTER
-            // geometry). Recipe v2 (2026-07-16): smartless ships PRE-ONLY —
-            // its post edge is a spoken framing phrase, not music, and the
-            // v1 measurement showed the post template dragging a window off
-            // its gold break (curated exclusion, recorded in provenance).
+            // geometry). Recipe v3 (2026-07-16): smartless is FULLY curated
+            // out (both edges are spoken framing phrases — the pre template
+            // grabbed a resume-side stinger and cost a gold break; lexical
+            // anchors are xsdz.37); on-the-media dropped to 2 unique gold
+            // breaks after dedupe, below the >=3 learning support gate.
             let pre = try #require(show.pre, "\(show.showName): pre side expected")
-            var sides = [(pre, "pre")]
-            if show.showKeys.contains("smartless") {
-                #expect(show.post == nil, "smartless post is a curated exclusion (lexical edge)")
-            } else {
-                let post = try #require(show.post, "\(show.showName): post side expected")
-                #expect(post.edgeSampleIndex == 50)
-                sides.append((post, "post"))
-            }
-            for (side, name) in sides {
+            let post = try #require(show.post, "\(show.showName): post side expected")
+            #expect(post.edgeSampleIndex == 50)
+            for (side, name) in [(pre, "pre"), (post, "post")] {
                 #expect(side.template.count == 350, "\(show.showName) \(name): template must be 350 frames")
                 #expect(side.confidence > 0 && side.confidence <= 1)
                 #expect(side.support >= 2)
@@ -325,16 +320,16 @@ struct StingerBankTests {
             #expect(pre.edgeSampleIndex == 300)
         }
 
-        // Grid values: morbid and on-the-media earned the 30s pod grid;
-        // smartless and nikki-glaser did not (full-corpus width fractions
-        // below the 0.6 on-grid threshold).
+        // Grid values: morbid earned the 30s pod grid; nikki-glaser did
+        // not (full-corpus width fractions below the 0.6 on-grid threshold).
         #expect(bank.entry(forShowKey: "morbid")?.podWidthGridSeconds == 30.0)
-        #expect(bank.entry(forShowKey: "on-the-media")?.podWidthGridSeconds == 30.0)
-        #expect(bank.entry(forShowKey: "smartless")?.podWidthGridSeconds == nil)
         #expect(bank.entry(forShowKey: "the-nikki-glaser-podcast")?.podWidthGridSeconds == nil)
+        #expect(bank.entry(forShowKey: "smartless") == nil, "smartless is fully curated out (lexical edges; see provenance)")
+        #expect(bank.entry(forShowKey: "on-the-media") == nil, "OTM has only 2 unique gold breaks post-dedupe — below the learning support gate")
 
         // The expected-coverage contract from the bead: morbid pre+post+
-        // grid shipped; smartless post curated OUT (v2); TED Business validated OUT
+        // grid shipped; smartless fully curated OUT and OTM support-gated
+        // OUT (v3); TED Business validated OUT
         // (offset spread 4.4s > 2.0s learning gate) so it must NOT ship
         // until a future corpus qualifies it.
         #expect(bank.entry(forShowKey: "ted-business") == nil, "TED Business failed the full-corpus learning gates and must not ship")

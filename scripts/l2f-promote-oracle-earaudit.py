@@ -88,7 +88,7 @@ def load_rows(ledger_path: pathlib.Path, review_path: pathlib.Path) -> list[dict
     for row_id, entry in ledger.items():
         review = reviews[row_id]
         status = review.get("status")
-        if status not in {"rebounded", "rejected"}:
+        if status not in {"rebounded", "rejected", "approved"}:
             raise PromotionError(f"unsupported review status {status!r} on {row_id}")
         rows.append({**entry, **review})
     rows.sort(key=lambda r: (r["episode_id"], r["current_start_seconds"]))
@@ -134,7 +134,7 @@ def apply_merges(rows: list[dict]) -> list[dict]:
 
 def build_artifact(rows: list[dict], sources: dict) -> dict:
     assets: dict[str, dict] = {}
-    review_counts = {"rebounded": 0, "rejected": 0}
+    review_counts = {"rebounded": 0, "rejected": 0, "approved": 0}
     for row in rows:
         asset = assets.setdefault(
             row["episode_id"],
@@ -162,10 +162,14 @@ def build_artifact(rows: list[dict], sources: dict) -> dict:
                 }
             )
             continue
-        start = row.get("proposed_start_seconds")
-        end = row.get("proposed_end_seconds")
+        if row["status"] == "approved":
+            # Approval endorses the EMITTED bounds as gold truth.
+            start, end = row["current_start_seconds"], row["current_end_seconds"]
+        else:
+            start = row.get("proposed_start_seconds")
+            end = row.get("proposed_end_seconds")
         if start is None or end is None or not end > start:
-            raise PromotionError(f"rebounded row {row['id']} lacks valid bounds")
+            raise PromotionError(f"{row['status']} row {row['id']} lacks valid bounds")
         asset["full_breaks"].append(
             {
                 "boundary_tolerance_seconds": tolerance_for(row["episode_id"]),
@@ -175,6 +179,31 @@ def build_artifact(rows: list[dict], sources: dict) -> dict:
                 "start_seconds": round(start, 3),
             }
         )
+    # Dedupe: distinct source slots can be audited onto the SAME break
+    # (identical pods heard twice; re-audits). Bounds agreeing within 1.0s
+    # are one break — keep the first (primary-audit precedence), union the
+    # provenance ids. Without this, scoring double-counts identical breaks
+    # (the l2f.8 no-double-count criterion).
+    for asset in assets.values():
+        deduped: list[dict] = []
+        for break_ in sorted(asset["full_breaks"], key=lambda b: (b["start_seconds"], b["end_seconds"])):
+            merged = False
+            for kept in deduped:
+                if (
+                    abs(kept["start_seconds"] - break_["start_seconds"]) <= 1.0
+                    and abs(kept["end_seconds"] - break_["end_seconds"]) <= 1.0
+                ):
+                    kept["source_ledger_ids"] = sorted(
+                        set(kept["source_ledger_ids"]) | set(break_["source_ledger_ids"])
+                    )
+                    kept["source_review_ids"] = sorted(
+                        set(kept["source_review_ids"]) | set(break_["source_review_ids"])
+                    )
+                    merged = True
+                    break
+            if not merged:
+                deduped.append(break_)
+        asset["full_breaks"] = deduped
     asset_list = [assets[key] for key in sorted(assets)]
     full_breaks = sum(len(a["full_breaks"]) for a in asset_list)
     vetoes = sum(len(a["content_vetoes"]) for a in asset_list)
@@ -224,16 +253,41 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ledger", type=pathlib.Path, default=DEFAULT_LEDGER)
     parser.add_argument("--review", type=pathlib.Path, default=DEFAULT_REVIEW)
+    parser.add_argument(
+        "--extra-ledger", type=pathlib.Path, action="append", default=[],
+        help="additional audit ledger (pair positionally with --extra-review)",
+    )
+    parser.add_argument(
+        "--extra-review", type=pathlib.Path, action="append", default=[],
+        help="additional review file (pair positionally with --extra-ledger)",
+    )
     parser.add_argument("--output-dir", type=pathlib.Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    rows = apply_merges(load_rows(args.ledger, args.review))
+    if len(args.extra_ledger) != len(args.extra_review):
+        raise PromotionError("--extra-ledger and --extra-review must pair up")
+    pairs = [(args.ledger, args.review)] + list(zip(args.extra_ledger, args.extra_review))
+    rows = []
+    seen_ids: set[str] = set()
+    for ledger_path, review_path in pairs:
+        for row in load_rows(ledger_path, review_path):
+            if row["id"] in seen_ids:
+                raise PromotionError(f"duplicate row id across pairs: {row['id']}")
+            seen_ids.add(row["id"])
+            rows.append(row)
+    rows.sort(key=lambda r: (r["episode_id"], r["current_start_seconds"]))
+    rows = apply_merges(rows)
     sources = {
-        "ledger": args.ledger.name,
-        "ledger_sha256": hashlib.sha256(args.ledger.read_bytes()).hexdigest(),
-        "review": args.review.name,
-        "review_sha256": hashlib.sha256(args.review.read_bytes()).hexdigest(),
+        "pairs": [
+            {
+                "ledger": ledger_path.name,
+                "ledger_sha256": hashlib.sha256(ledger_path.read_bytes()).hexdigest(),
+                "review": review_path.name,
+                "review_sha256": hashlib.sha256(review_path.read_bytes()).hexdigest(),
+            }
+            for ledger_path, review_path in pairs
+        ],
     }
     artifact = build_artifact(rows, sources)
     data, digest = content_addressed_bytes(artifact)

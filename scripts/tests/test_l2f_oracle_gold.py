@@ -129,6 +129,39 @@ class PromotionTests(unittest.TestCase):
         data, digest = PROMOTE.content_addressed_bytes(artifact)
         self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
 
+    def test_approved_rows_promote_at_current_bounds(self):
+        rows = [_ledger_row("ok", "approve-show-ep", 40.0, 100.0, 900.0)]
+        reviews = {"ok": _review("approved")}
+        ledger, review = self._write_inputs(rows, reviews)
+        loaded = PROMOTE.load_rows(ledger, review)
+        artifact = PROMOTE.build_artifact(loaded, {})
+        asset = artifact["assets"][0]
+        self.assertEqual(
+            (asset["full_breaks"][0]["start_seconds"], asset["full_breaks"][0]["end_seconds"]),
+            (40.0, 100.0),
+        )
+        self.assertEqual(artifact["summary"]["review_status_counts"]["approved"], 1)
+
+    def test_near_duplicate_breaks_dedupe_with_union_provenance(self):
+        rows = [
+            _ledger_row("first", "dupe-show-ep", 100.0, 190.0, 900.0),
+            _ledger_row("second", "dupe-show-ep", 100.4, 190.6, 900.0),
+            _ledger_row("distinct", "dupe-show-ep", 400.0, 460.0, 900.0),
+        ]
+        reviews = {
+            "first": _review("rebounded", 99.0, 189.0),
+            "second": _review("rebounded", 99.2, 189.8),
+            "distinct": _review("rebounded", 401.0, 459.0),
+        }
+        ledger, review = self._write_inputs(rows, reviews)
+        artifact = PROMOTE.build_artifact(PROMOTE.load_rows(ledger, review), {})
+        breaks = artifact["assets"][0]["full_breaks"]
+        self.assertEqual(len(breaks), 2, "bounds within 1.0s are one break")
+        merged = breaks[0]
+        self.assertEqual(merged["start_seconds"], 99.0, "primary-audit bounds win")
+        self.assertEqual(sorted(merged["source_review_ids"]), ["first", "second"])
+        self.assertEqual(artifact["summary"]["full_breaks"], 2)
+
     def test_review_ledger_mismatch_rejected(self):
         rows, reviews = self._fixture()
         del reviews["plain"]

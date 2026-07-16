@@ -143,8 +143,28 @@ def measure_pair(dep: dict[str, Any], s_start: float, s_end: float) -> dict[str,
     }
 
 
+def load_gold_breaks(path: str) -> dict[str, list[tuple[float, float]]]:
+    """episode_id -> gold full-break intervals from an earaudit-oracle-gold
+    artifact. Evidence-aware false-widening (playhead-xsdz.32): gold-attested
+    ad regions count as TRUE ad audio even where tier-a disagrees — the
+    2026-07-16 gate breach was ~2/3 tier-a edge noise on regions Dan's gold
+    labels endorse."""
+    with open(path, "r", encoding="utf-8") as handle:
+        artifact = json.load(handle)
+    if artifact.get("artifact_kind") != "oracle_earaudit_gold_boundary_evaluation":
+        raise SystemExit(f"--gold-evaluation: unexpected artifact_kind in {path}")
+    return {
+        asset["episode_id"]: [
+            (float(b["start_seconds"]), float(b["end_seconds"]))
+            for b in asset.get("full_breaks", [])
+        ]
+        for asset in artifact.get("assets", [])
+    }
+
+
 def compare(baseline_eps: list[dict[str, Any]], treatment_eps: list[dict[str, Any]],
-            rediff_eps: list[dict[str, Any]]) -> dict[str, Any]:
+            rediff_eps: list[dict[str, Any]],
+            gold_breaks: dict[str, list[tuple[float, float]]] | None = None) -> dict[str, Any]:
     base_by_id = {e["episodeId"]: e for e in baseline_eps}
     treat_by_id = {e["episodeId"]: e for e in treatment_eps}
     only_baseline = sorted(set(base_by_id) - set(treat_by_id))
@@ -202,8 +222,9 @@ def compare(baseline_eps: list[dict[str, Any]], treatment_eps: list[dict[str, An
         bep, tep = base_by_id.get(ep_id), treat_by_id.get(ep_id)
         if bep is None or tep is None:
             continue
-        fb = episode_false_widening(bep, slots)
-        ft = episode_false_widening(tep, slots)
+        truth = slots + (gold_breaks or {}).get(ep_id, [])
+        fb = episode_false_widening(bep, truth)
+        ft = episode_false_widening(tep, truth)
         fw_base_total += fb["falseWideningSeconds"]
         fw_treat_total += ft["falseWideningSeconds"]
         fw_rows.append({
@@ -403,6 +424,18 @@ def run_self_test() -> int:
         ("fw worst is D", fw_res["worstEpisodes"][0]["episodeId"] == "D"),
     ]
 
+    # Evidence-aware gate (playhead-xsdz.32): gold full-breaks on D cover
+    # its widened region entirely -> D's enclosed seconds drop to 0 while
+    # F (no gold) is unchanged.
+    gold = {"D": [(0.0, 200.0)]}
+    fw_gold = compare(fw_dump, fw_dump, fw_rediff, gold_breaks=gold)["falseWidening"]
+    fw_gold_by = {row["episodeId"]: row for row in fw_gold["worstEpisodes"]}
+    checks += [
+        ("fw-gold D=0s (gold acquits)", abs(fw_gold_by["D"]["treatment"]["falseWideningSeconds"] - 0.0) < 1e-6),
+        ("fw-gold F=10s (unchanged, no gold)", abs(fw_gold_by["F"]["treatment"]["falseWideningSeconds"] - 10.0) < 1e-6),
+        ("fw-gold total=10s", abs(fw_gold["treatmentTotalSeconds"] - 10.0) < 1e-6),
+    ]
+
     failures = [name for name, ok in checks if not ok]
     if failures:
         print("SELF-TEST FAIL: " + ", ".join(failures), file=sys.stderr)
@@ -422,6 +455,9 @@ def main() -> int:
                     help="HARD GATE (playhead-xsdz.32): fail (exit 3) if any treatment episode's "
                          "content-seconds-enclosed (false-widening) exceeds this. The activation "
                          "go/no-go must set this — eating content is the product's worst outcome.")
+    ap.add_argument("--gold-evaluation", default=None,
+                    help="earaudit-oracle-gold artifact: gold full-breaks count as TRUE ad "
+                         "audio in the false-widening computation (evidence-aware gate)")
     ap.add_argument("--self-test", action="store_true", help="run synthetic self-test and exit")
     args = ap.parse_args()
 
@@ -449,7 +485,13 @@ def main() -> int:
     if treat_eps is None:
         print(f"treatment dump has no 'episodes' array: {args.treatment}", file=sys.stderr)
         return 2
-    result = compare(base_eps, treat_eps, rediff.get("episodes", []))
+    gold_breaks = load_gold_breaks(args.gold_evaluation) if args.gold_evaluation else None
+    result = compare(base_eps, treat_eps, rediff.get("episodes", []), gold_breaks=gold_breaks)
+    if gold_breaks is not None:
+        result["falseWidening"]["evidenceAware"] = {
+            "goldEvaluation": os.path.basename(args.gold_evaluation),
+            "goldEpisodes": sum(1 for e in gold_breaks.values() if e),
+        }
     if args.json:
         print(json.dumps(result, indent=2))
     else:
