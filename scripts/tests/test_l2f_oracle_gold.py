@@ -9,6 +9,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -168,6 +169,67 @@ class PromotionTests(unittest.TestCase):
         ledger, review = self._write_inputs(rows, reviews)
         with self.assertRaises(PROMOTE.PromotionError):
             PROMOTE.load_rows(ledger, review)
+
+
+class SupersessionTests(unittest.TestCase):
+    def _row(self, row_id, episode, status, start, end, cur_start=None, cur_end=None):
+        row = {
+            "id": row_id,
+            "episode_id": episode,
+            "current_start_seconds": cur_start if cur_start is not None else start,
+            "current_end_seconds": cur_end if cur_end is not None else end,
+            "status": status,
+        }
+        if status == "rebounded":
+            row["proposed_start_seconds"] = start
+            row["proposed_end_seconds"] = end
+        return row
+
+    def test_supersede_drops_stale_and_records_replacement(self):
+        rows = [
+            self._row("old", "ep", "rebounded", 0.0, 70.1),
+            self._row("new", "ep", "approved", 0.0, 101.3),
+            self._row("other", "ep", "rebounded", 900.0, 950.0),
+        ]
+        spec = {
+            "old": {
+                "episode_id": "ep",
+                "replacement_start_seconds": 0.0,
+                "reason": "re-listen",
+            }
+        }
+        with mock.patch.dict(PROMOTE.SUPERSEDED_LEDGER_IDS, spec, clear=True):
+            remaining, records = PROMOTE.apply_supersessions(rows)
+        self.assertEqual({r["id"] for r in remaining}, {"new", "other"})
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["superseded_ledger_id"], "old")
+        self.assertEqual(records[0]["replaced_by_ledger_id"], "new")
+
+    def test_supersede_missing_id_raises(self):
+        rows = [self._row("present", "ep", "rebounded", 0.0, 101.3)]
+        spec = {"absent": {"episode_id": "ep", "replacement_start_seconds": 0.0, "reason": "x"}}
+        with mock.patch.dict(PROMOTE.SUPERSEDED_LEDGER_IDS, spec, clear=True):
+            with self.assertRaises(PROMOTE.PromotionError):
+                PROMOTE.apply_supersessions(rows)
+
+    def test_supersede_without_replacement_raises(self):
+        # The stale row is dropped but nothing covers the opener -> loud failure,
+        # never a silently-erased break.
+        rows = [
+            self._row("old", "ep", "rebounded", 0.0, 70.1),
+            self._row("far", "ep", "rebounded", 900.0, 950.0),
+        ]
+        spec = {"old": {"episode_id": "ep", "replacement_start_seconds": 0.0, "reason": "x"}}
+        with mock.patch.dict(PROMOTE.SUPERSEDED_LEDGER_IDS, spec, clear=True):
+            with self.assertRaises(PROMOTE.PromotionError):
+                PROMOTE.apply_supersessions(rows)
+
+    def test_no_supersessions_is_identity(self):
+        rows = [self._row("a", "ep", "rebounded", 0.0, 101.3)]
+        with mock.patch.dict(PROMOTE.SUPERSEDED_LEDGER_IDS, {}, clear=True):
+            remaining, records = PROMOTE.apply_supersessions(rows)
+        self.assertEqual(remaining, rows)
+        self.assertEqual(records, [])
 
 
 class ScoringTests(unittest.TestCase):

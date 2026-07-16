@@ -56,6 +56,27 @@ MERGE_GROUPS = [
 NIKKI_TOLERANCE_SECONDS = 0.5
 DEFAULT_TOLERANCE_SECONDS = 0.3
 
+# Earlier gold labels corrected by a deliberate later re-audit. The named row
+# is DROPPED from promotion; a superseding pair (passed via --extra-*) must
+# supply the corrected break at ~replacement_start_seconds, or promotion fails
+# loudly. Mirrors MERGE_GROUPS: hand-curated, provenance-preserving corrections
+# keyed to a specific ledger id. Never silently drops a break.
+SUPERSEDED_LEDGER_IDS = {
+    "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-0": {
+        "episode_id": (
+            "ted-business-2026-05-25-the-secret-to-making-the-right-career-de"
+        ),
+        "replacement_start_seconds": 0.0,
+        "reason": (
+            "2026-07-16 re-listen adjudication: TED opener break ends at "
+            "101.3s (return sting), superseding the 2026-07-15 oracle label "
+            "of 70.1s"
+        ),
+    },
+}
+
+REPLACEMENT_START_TOLERANCE_SECONDS = 5.0
+
 
 class PromotionError(RuntimeError):
     pass
@@ -93,6 +114,61 @@ def load_rows(ledger_path: pathlib.Path, review_path: pathlib.Path) -> list[dict
         rows.append({**entry, **review})
     rows.sort(key=lambda r: (r["episode_id"], r["current_start_seconds"]))
     return rows
+
+
+def produced_bounds(row: dict) -> tuple[float | None, float | None]:
+    """The (start, end) a row contributes to gold, regardless of status.
+    Approved rows endorse the emitted bounds; rebounded rows use Dan's proposed
+    bounds; rejected rows veto the emitted slot."""
+    if row["status"] in {"approved", "rejected"}:
+        return row["current_start_seconds"], row["current_end_seconds"]
+    return row.get("proposed_start_seconds"), row.get("proposed_end_seconds")
+
+
+def apply_supersessions(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Drop rows named in SUPERSEDED_LEDGER_IDS, requiring each to be replaced by
+    a live row covering the same opener so a correction never erases a break."""
+    remaining: list[dict] = []
+    dropped: set[str] = set()
+    for row in rows:
+        if row["id"] in SUPERSEDED_LEDGER_IDS:
+            dropped.add(row["id"])
+            continue
+        remaining.append(row)
+    missing = set(SUPERSEDED_LEDGER_IDS) - dropped
+    if missing:
+        raise PromotionError(
+            f"superseded ledger ids not present in inputs: {sorted(missing)}"
+        )
+    records: list[dict] = []
+    for sid in sorted(dropped):
+        spec = SUPERSEDED_LEDGER_IDS[sid]
+        target = spec["replacement_start_seconds"]
+        replacement = next(
+            (
+                r
+                for r in remaining
+                if r["episode_id"] == spec["episode_id"]
+                and r["status"] in {"rebounded", "approved"}
+                and produced_bounds(r)[0] is not None
+                and abs(produced_bounds(r)[0] - target)
+                <= REPLACEMENT_START_TOLERANCE_SECONDS
+            ),
+            None,
+        )
+        if replacement is None:
+            raise PromotionError(
+                f"superseding {sid}: no replacement break near start {target}s "
+                f"for {spec['episode_id']}; would drop the break entirely"
+            )
+        records.append(
+            {
+                "reason": spec["reason"],
+                "replaced_by_ledger_id": replacement["id"],
+                "superseded_ledger_id": sid,
+            }
+        )
+    return remaining, records
 
 
 def apply_merges(rows: list[dict]) -> list[dict]:
@@ -278,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
             seen_ids.add(row["id"])
             rows.append(row)
     rows.sort(key=lambda r: (r["episode_id"], r["current_start_seconds"]))
+    rows, supersessions = apply_supersessions(rows)
     rows = apply_merges(rows)
     sources = {
         "pairs": [
@@ -289,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
             }
             for ledger_path, review_path in pairs
         ],
+        "supersessions": supersessions,
     }
     artifact = build_artifact(rows, sources)
     data, digest = content_addressed_bytes(artifact)

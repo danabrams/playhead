@@ -1,0 +1,216 @@
+{
+  "history": [
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+        "id": "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1231",
+        "note": "This is genuine content, introduction to a news magazine story",
+        "proposed_end_seconds": 1250.84,
+        "proposed_start_seconds": 1231.14,
+        "reviewed_at": "2026-07-16T13:58:25Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:58:25Z",
+      "before": null,
+      "id": "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1231",
+      "sequence": 1
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+        "id": "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-2350",
+        "note": "You correctly got the start of the last ad in the break, but I expanded it to include the earlier ad (single ad) in the break. Two ads total in this break",
+        "proposed_end_seconds": 2380.2,
+        "proposed_start_seconds": 2323.3,
+        "reviewed_at": "2026-07-16T13:59:43Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:59:43Z",
+      "before": null,
+      "id": "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-2350",
+      "sequence": 2
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+        "id": "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-3185",
+        "note": "The first part of this is the end of a genuine story (real content) and then the credits for the show, as well as a vintage song to provide color. The rebounded end is a bit of a grey area (it's NPR asking for sponsors), but i classify it an ad",
+        "proposed_end_seconds": 3271.1695625,
+        "proposed_start_seconds": 3256.3,
+        "reviewed_at": "2026-07-16T14:02:00Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T14:02:00Z",
+      "before": null,
+      "id": "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-3185",
+      "sequence": 3
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-78",
+        "note": "",
+        "proposed_end_seconds": 101.3,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-16T14:02:45Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T14:02:45Z",
+      "before": null,
+      "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-78",
+      "sequence": 4
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-922",
+        "note": "This is the end of the actual content, but some music playing it out.",
+        "proposed_end_seconds": 950.5,
+        "proposed_start_seconds": 922.39,
+        "reviewed_at": "2026-07-16T14:03:24Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T14:03:24Z",
+      "before": null,
+      "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-922",
+      "sequence": 5
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1017",
+        "note": "This is bounded at the start of the musical sting that comes back from the ad break, then the genuine content (an interview)",
+        "proposed_end_seconds": 1071.48,
+        "proposed_start_seconds": 1017.8,
+        "reviewed_at": "2026-07-16T14:04:18Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T14:04:18Z",
+      "before": null,
+      "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1017",
+      "sequence": 6
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1937",
+        "note": "This is just a few seconds of silence after the musical sting that follows an ad break before the content resumes",
+        "proposed_end_seconds": 1941.82,
+        "proposed_start_seconds": 1937.8,
+        "reviewed_at": "2026-07-16T14:05:01Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T14:05:01Z",
+      "before": null,
+      "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1937",
+      "sequence": 7
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1972",
+        "note": "This is genuine content, an interview",
+        "proposed_end_seconds": 1987.67,
+        "proposed_start_seconds": 1972.68,
+        "reviewed_at": "2026-07-16T14:05:24Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T14:05:24Z",
+      "before": null,
+      "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1972",
+      "sequence": 8
+    }
+  ],
+  "next_sequence": 9,
+  "reviews": {
+    "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1231": {
+      "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+      "id": "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1231",
+      "note": "This is genuine content, introduction to a news magazine story",
+      "proposed_end_seconds": 1250.84,
+      "proposed_start_seconds": 1231.14,
+      "reviewed_at": "2026-07-16T13:58:25Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-2350": {
+      "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+      "id": "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-2350",
+      "note": "You correctly got the start of the last ad in the break, but I expanded it to include the earlier ad (single ad) in the break. Two ads total in this break",
+      "proposed_end_seconds": 2380.2,
+      "proposed_start_seconds": 2323.3,
+      "reviewed_at": "2026-07-16T13:59:43Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-3185": {
+      "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+      "id": "requalify-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-3185",
+      "note": "The first part of this is the end of a genuine story (real content) and then the credits for the show, as well as a vintage song to provide color. The rebounded end is a bit of a grey area (it's NPR asking for sponsors), but i classify it an ad",
+      "proposed_end_seconds": 3271.1695625,
+      "proposed_start_seconds": 3256.3,
+      "reviewed_at": "2026-07-16T14:02:00Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1017": {
+      "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+      "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1017",
+      "note": "This is bounded at the start of the musical sting that comes back from the ad break, then the genuine content (an interview)",
+      "proposed_end_seconds": 1071.48,
+      "proposed_start_seconds": 1017.8,
+      "reviewed_at": "2026-07-16T14:04:18Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1937": {
+      "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+      "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1937",
+      "note": "This is just a few seconds of silence after the musical sting that follows an ad break before the content resumes",
+      "proposed_end_seconds": 1941.82,
+      "proposed_start_seconds": 1937.8,
+      "reviewed_at": "2026-07-16T14:05:01Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1972": {
+      "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+      "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1972",
+      "note": "This is genuine content, an interview",
+      "proposed_end_seconds": 1987.67,
+      "proposed_start_seconds": 1972.68,
+      "reviewed_at": "2026-07-16T14:05:24Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-78": {
+      "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+      "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-78",
+      "note": "",
+      "proposed_end_seconds": 101.3,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-16T14:02:45Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-922": {
+      "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+      "id": "requalify-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-922",
+      "note": "This is the end of the actual content, but some music playing it out.",
+      "proposed_end_seconds": 950.5,
+      "proposed_start_seconds": 922.39,
+      "reviewed_at": "2026-07-16T14:03:24Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    }
+  },
+  "schema_version": 2
+}

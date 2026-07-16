@@ -1,0 +1,34 @@
+{
+  "history": [
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+        "id": "ted0525-opener-end-adjudication",
+        "note": "",
+        "proposed_end_seconds": 101.3,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-16T14:10:10Z",
+        "reviewer": "Dan",
+        "status": "approved"
+      },
+      "at": "2026-07-16T14:10:10Z",
+      "before": null,
+      "id": "ted0525-opener-end-adjudication",
+      "sequence": 1
+    }
+  ],
+  "next_sequence": 2,
+  "reviews": {
+    "ted0525-opener-end-adjudication": {
+      "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+      "id": "ted0525-opener-end-adjudication",
+      "note": "",
+      "proposed_end_seconds": 101.3,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-16T14:10:10Z",
+      "reviewer": "Dan",
+      "status": "approved"
+    }
+  },
+  "schema_version": 2
+}
