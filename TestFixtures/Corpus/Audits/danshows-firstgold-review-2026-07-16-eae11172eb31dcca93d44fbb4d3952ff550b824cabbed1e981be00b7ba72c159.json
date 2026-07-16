@@ -1,0 +1,1305 @@
+{
+  "history": [
+    {
+      "after": {
+        "audio_fingerprint": "sha256:8c67534bd264392c9ec08faad4daed0792cfb5346b2760b0aecb2d03429a0665",
+        "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-49",
+        "note": "",
+        "proposed_end_seconds": 59.8,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-16T12:37:33Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T12:37:33Z",
+      "before": null,
+      "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-49",
+      "sequence": 1
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:8c67534bd264392c9ec08faad4daed0792cfb5346b2760b0aecb2d03429a0665",
+        "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2888",
+        "note": "",
+        "proposed_end_seconds": 2958.9,
+        "proposed_start_seconds": 2819.2,
+        "reviewed_at": "2026-07-16T12:40:22Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T12:40:22Z",
+      "before": null,
+      "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2888",
+      "sequence": 2
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:8c67534bd264392c9ec08faad4daed0792cfb5346b2760b0aecb2d03429a0665",
+        "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2946",
+        "note": "",
+        "proposed_end_seconds": 2958.08,
+        "proposed_start_seconds": 2819.8,
+        "reviewed_at": "2026-07-16T12:52:43Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T12:52:43Z",
+      "before": null,
+      "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2946",
+      "sequence": 3
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:8c67534bd264392c9ec08faad4daed0792cfb5346b2760b0aecb2d03429a0665",
+        "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2946",
+        "note": "Appears to be the same ad break as previous",
+        "proposed_end_seconds": 2958.08,
+        "proposed_start_seconds": 2819.8,
+        "reviewed_at": "2026-07-16T12:53:03Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T12:53:03Z",
+      "before": {
+        "audio_fingerprint": "sha256:8c67534bd264392c9ec08faad4daed0792cfb5346b2760b0aecb2d03429a0665",
+        "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2946",
+        "note": "",
+        "proposed_end_seconds": 2958.08,
+        "proposed_start_seconds": 2819.8,
+        "reviewed_at": "2026-07-16T12:52:43Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2946",
+      "sequence": 4
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:8c67534bd264392c9ec08faad4daed0792cfb5346b2760b0aecb2d03429a0665",
+        "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-4026",
+        "note": "",
+        "proposed_end_seconds": 4036.5,
+        "proposed_start_seconds": 3976.2,
+        "reviewed_at": "2026-07-16T12:54:43Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T12:54:43Z",
+      "before": null,
+      "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-4026",
+      "sequence": 5
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1096bfa558a9e7778c30455b27ec42036398fcff30d42c42b157a37b53d6c8b7",
+        "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-49",
+        "note": "",
+        "proposed_end_seconds": 59.9,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-16T12:59:11Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T12:59:11Z",
+      "before": null,
+      "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-49",
+      "sequence": 6
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1096bfa558a9e7778c30455b27ec42036398fcff30d42c42b157a37b53d6c8b7",
+        "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-2439",
+        "note": "",
+        "proposed_end_seconds": 2514.55,
+        "proposed_start_seconds": 2398.3,
+        "reviewed_at": "2026-07-16T13:00:10Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:00:10Z",
+      "before": null,
+      "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-2439",
+      "sequence": 7
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1096bfa558a9e7778c30455b27ec42036398fcff30d42c42b157a37b53d6c8b7",
+        "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-4427",
+        "note": "",
+        "proposed_end_seconds": 4437.45,
+        "proposed_start_seconds": 4373.99,
+        "reviewed_at": "2026-07-16T13:01:08Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:01:08Z",
+      "before": null,
+      "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-4427",
+      "sequence": 8
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:1096bfa558a9e7778c30455b27ec42036398fcff30d42c42b157a37b53d6c8b7",
+        "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-7144",
+        "note": "This is a guest doing a plug, not really an ad",
+        "proposed_end_seconds": 7151.36,
+        "proposed_start_seconds": 7144.0,
+        "reviewed_at": "2026-07-16T13:01:42Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:01:42Z",
+      "before": null,
+      "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-7144",
+      "sequence": 9
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:66f59de90430fcc18a8fd4da563350a6f80cb82914baf1ea3434fe6be8ccd554",
+        "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-2661",
+        "note": "",
+        "proposed_end_seconds": 2699.1,
+        "proposed_start_seconds": 2619.1,
+        "reviewed_at": "2026-07-16T13:02:45Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:02:45Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-2661",
+      "sequence": 10
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:66f59de90430fcc18a8fd4da563350a6f80cb82914baf1ea3434fe6be8ccd554",
+        "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3103",
+        "note": "This is a short read sponsorship but has relevant context for the episode so I think keep it.",
+        "proposed_end_seconds": 3118.66,
+        "proposed_start_seconds": 3109.0,
+        "reviewed_at": "2026-07-16T13:04:03Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:04:03Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3103",
+      "sequence": 11
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:66f59de90430fcc18a8fd4da563350a6f80cb82914baf1ea3434fe6be8ccd554",
+        "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3454",
+        "note": "This is a contest sponsored by a company, not really an ad. The move is hard this way. It’s a lot of product placement.",
+        "proposed_end_seconds": 3467.5,
+        "proposed_start_seconds": 3454.9,
+        "reviewed_at": "2026-07-16T13:04:40Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:04:40Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3454",
+      "sequence": 12
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:66f59de90430fcc18a8fd4da563350a6f80cb82914baf1ea3434fe6be8ccd554",
+        "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3663",
+        "note": "",
+        "proposed_end_seconds": 3682.8,
+        "proposed_start_seconds": 3620.8,
+        "reviewed_at": "2026-07-16T13:05:58Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:05:58Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3663",
+      "sequence": 13
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+        "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-44",
+        "note": "",
+        "proposed_end_seconds": 74.0,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-16T13:07:09Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:07:09Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-44",
+      "sequence": 14
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+        "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-68",
+        "note": "This is the same as break as the previous",
+        "proposed_end_seconds": 74.32,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-16T13:07:48Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:07:48Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-68",
+      "sequence": 15
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+        "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-44",
+        "note": "",
+        "proposed_end_seconds": 74.3,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-16T13:07:59Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:07:59Z",
+      "before": {
+        "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+        "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-44",
+        "note": "",
+        "proposed_end_seconds": 74.0,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-16T13:07:09Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-44",
+      "sequence": 16
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+        "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-1566",
+        "note": "",
+        "proposed_end_seconds": 1700.1,
+        "proposed_start_seconds": 1516.2,
+        "reviewed_at": "2026-07-16T13:09:58Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:09:58Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-1566",
+      "sequence": 17
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+        "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-1685",
+        "note": "Same as break as previous",
+        "proposed_end_seconds": 1700.0,
+        "proposed_start_seconds": 1516.2,
+        "reviewed_at": "2026-07-16T13:11:21Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:11:21Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-1685",
+      "sequence": 18
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+        "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2434",
+        "note": "This is sponsored, relevant content, not really an ad break keep.",
+        "proposed_end_seconds": 2441.38,
+        "proposed_start_seconds": 2434.25,
+        "reviewed_at": "2026-07-16T13:11:49Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:11:49Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2434",
+      "sequence": 19
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+        "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2626",
+        "note": "This is a sponsored trivia contest, product placement but keep in.",
+        "proposed_end_seconds": 2639.38,
+        "proposed_start_seconds": 2626.34,
+        "reviewed_at": "2026-07-16T13:12:14Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:12:14Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2626",
+      "sequence": 20
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+        "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2812",
+        "note": "",
+        "proposed_end_seconds": 2853.3,
+        "proposed_start_seconds": 2779.7,
+        "reviewed_at": "2026-07-16T13:13:16Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:13:16Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2812",
+      "sequence": 21
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:b39bb82b77204b983d01536f928de482563bf1ab48571e42b72d6699c9976610",
+        "id": "danshow-themove-2026-07-15-uno-x-keeps-their-five-star-tour-rolling-930",
+        "note": "These are hard. They are host read ads that are done live during the recording every show. The copy often is the same, but the host tends to improvise changes and anecdotes.",
+        "proposed_end_seconds": 1071.5,
+        "proposed_start_seconds": 897.2,
+        "reviewed_at": "2026-07-16T13:16:12Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:16:12Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-15-uno-x-keeps-their-five-star-tour-rolling-930",
+      "sequence": 22
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:b39bb82b77204b983d01536f928de482563bf1ab48571e42b72d6699c9976610",
+        "id": "danshow-themove-2026-07-15-uno-x-keeps-their-five-star-tour-rolling-2952",
+        "note": "This is a sponsored trivia content, not an ad.",
+        "proposed_end_seconds": 2964.08,
+        "proposed_start_seconds": 2952.32,
+        "reviewed_at": "2026-07-16T13:16:38Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:16:38Z",
+      "before": null,
+      "id": "danshow-themove-2026-07-15-uno-x-keeps-their-five-star-tour-rolling-2952",
+      "sequence": 23
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+        "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--189",
+        "note": "This is the host promoting new ways to watch the show. Promotional but not an ad break",
+        "proposed_end_seconds": 207.9,
+        "proposed_start_seconds": 189.88,
+        "reviewed_at": "2026-07-16T13:17:21Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:17:21Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--189",
+      "sequence": 24
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+        "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--1724",
+        "note": "This is a really long ad break with several ads in it",
+        "proposed_end_seconds": 1829.0,
+        "proposed_start_seconds": 1582.8,
+        "reviewed_at": "2026-07-16T13:19:20Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:19:20Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--1724",
+      "sequence": 25
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+        "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2389",
+        "note": "The host is telling users how to send questions and promotion the shows social media. Not an ad.",
+        "proposed_end_seconds": 2410.0,
+        "proposed_start_seconds": 2389.92,
+        "reviewed_at": "2026-07-16T13:20:03Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:20:03Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2389",
+      "sequence": 26
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+        "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2532",
+        "note": "",
+        "proposed_end_seconds": 2627.1,
+        "proposed_start_seconds": 2481.1,
+        "reviewed_at": "2026-07-16T13:22:41Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:22:41Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2532",
+      "sequence": 27
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+        "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2532",
+        "note": "",
+        "proposed_end_seconds": 2634.5,
+        "proposed_start_seconds": 2481.1,
+        "reviewed_at": "2026-07-16T13:23:42Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:23:42Z",
+      "before": {
+        "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+        "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2532",
+        "note": "",
+        "proposed_end_seconds": 2627.1,
+        "proposed_start_seconds": 2481.1,
+        "reviewed_at": "2026-07-16T13:22:41Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2532",
+      "sequence": 28
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+        "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2564",
+        "note": "",
+        "proposed_end_seconds": 2635.2,
+        "proposed_start_seconds": 2481.0,
+        "reviewed_at": "2026-07-16T13:24:24Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:24:24Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2564",
+      "sequence": 29
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+        "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--152",
+        "note": "",
+        "proposed_end_seconds": 163.2,
+        "proposed_start_seconds": 0.0,
+        "reviewed_at": "2026-07-16T13:25:36Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:25:36Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--152",
+      "sequence": 30
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+        "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--229",
+        "note": "This is a promotion for a live version of the show, not really an ad.",
+        "proposed_end_seconds": 251.24,
+        "proposed_start_seconds": 229.96,
+        "reviewed_at": "2026-07-16T13:25:59Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:25:59Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--229",
+      "sequence": 31
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+        "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--716",
+        "note": "Again, very long ad breaks on this show",
+        "proposed_end_seconds": 882.85,
+        "proposed_start_seconds": 659.4,
+        "reviewed_at": "2026-07-16T13:27:21Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:27:21Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--716",
+      "sequence": 32
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+        "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--803",
+        "note": "This might be same as break as previous, not sure",
+        "proposed_end_seconds": 882.7,
+        "proposed_start_seconds": 659.2,
+        "reviewed_at": "2026-07-16T13:28:47Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:28:47Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--803",
+      "sequence": 33
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+        "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--1912",
+        "note": "Weird break here. It sounds like the ad break was inserted incorrectly mid sentence not at the appropriate time.",
+        "proposed_end_seconds": 2081.8,
+        "proposed_start_seconds": 1831.4,
+        "reviewed_at": "2026-07-16T13:30:51Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:30:51Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--1912",
+      "sequence": 34
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+        "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--2765",
+        "note": "Promotion of the shows social media, not really an ad.",
+        "proposed_end_seconds": 2770.28,
+        "proposed_start_seconds": 2765.28,
+        "reviewed_at": "2026-07-16T13:31:14Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:31:14Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--2765",
+      "sequence": 35
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+        "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--2871",
+        "note": "",
+        "proposed_end_seconds": 2941.9,
+        "proposed_start_seconds": 2785.5,
+        "reviewed_at": "2026-07-16T13:31:54Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:31:54Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--2871",
+      "sequence": 36
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:5b3a4e81d27c04f3d206fa348fe70aad41b12afb579f57e97903ff9735b55752",
+        "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--742",
+        "note": "",
+        "proposed_end_seconds": 837.8,
+        "proposed_start_seconds": 683.4,
+        "reviewed_at": "2026-07-16T13:32:38Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:32:38Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--742",
+      "sequence": 37
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:5b3a4e81d27c04f3d206fa348fe70aad41b12afb579f57e97903ff9735b55752",
+        "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--838",
+        "note": "This is the musical stinger coming back into the show.",
+        "proposed_end_seconds": 842.0,
+        "proposed_start_seconds": 838.0,
+        "reviewed_at": "2026-07-16T13:33:10Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:33:10Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--838",
+      "sequence": 38
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:5b3a4e81d27c04f3d206fa348fe70aad41b12afb579f57e97903ff9735b55752",
+        "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--1712",
+        "note": "",
+        "proposed_end_seconds": 1718.0,
+        "proposed_start_seconds": 1526.9,
+        "reviewed_at": "2026-07-16T13:35:09Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:35:09Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--1712",
+      "sequence": 39
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:5b3a4e81d27c04f3d206fa348fe70aad41b12afb579f57e97903ff9735b55752",
+        "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--2477",
+        "note": "This the host telling listeners how to get in touch and promoting the shows social media, not an ad.",
+        "proposed_end_seconds": 2508.9,
+        "proposed_start_seconds": 2477.46,
+        "reviewed_at": "2026-07-16T13:36:00Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:36:00Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--2477",
+      "sequence": 40
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:5b3a4e81d27c04f3d206fa348fe70aad41b12afb579f57e97903ff9735b55752",
+        "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--2598",
+        "note": "",
+        "proposed_end_seconds": 2636.6,
+        "proposed_start_seconds": 2509.9,
+        "reviewed_at": "2026-07-16T13:36:36Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:36:36Z",
+      "before": null,
+      "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--2598",
+      "sequence": 41
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:7b79dd69ec0a16cf4988b75212b2b2f9893d6c31dede70ff40e4a052150652c1",
+        "id": "danshow-conan-2026-07-06-danny-mcbride-returns-1397",
+        "note": "Consistent musical sting into and out of ads",
+        "proposed_end_seconds": 1410.6,
+        "proposed_start_seconds": 1320.1,
+        "reviewed_at": "2026-07-16T13:37:38Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:37:38Z",
+      "before": null,
+      "id": "danshow-conan-2026-07-06-danny-mcbride-returns-1397",
+      "sequence": 42
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:7b79dd69ec0a16cf4988b75212b2b2f9893d6c31dede70ff40e4a052150652c1",
+        "id": "danshow-conan-2026-07-06-danny-mcbride-returns-3175",
+        "note": "",
+        "proposed_end_seconds": 3196.4,
+        "proposed_start_seconds": 3097.1,
+        "reviewed_at": "2026-07-16T13:38:26Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:38:26Z",
+      "before": null,
+      "id": "danshow-conan-2026-07-06-danny-mcbride-returns-3175",
+      "sequence": 43
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:7b79dd69ec0a16cf4988b75212b2b2f9893d6c31dede70ff40e4a052150652c1",
+        "id": "danshow-conan-2026-07-06-danny-mcbride-returns-3666",
+        "note": "",
+        "proposed_end_seconds": 3673.28,
+        "proposed_start_seconds": 3666.96,
+        "reviewed_at": "2026-07-16T13:38:55Z",
+        "reviewer": "Dan",
+        "status": "approved"
+      },
+      "at": "2026-07-16T13:38:55Z",
+      "before": null,
+      "id": "danshow-conan-2026-07-06-danny-mcbride-returns-3666",
+      "sequence": 44
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:83475f2275d2a7a297ff1a521322db665697fc750d31ae98374687b3a114cb53",
+        "id": "danshow-conan-2026-07-09-the-wedding-ringer-63",
+        "note": "This is telling the listeners how to contact the show to be a guest—definitely not an ad",
+        "proposed_end_seconds": 71.0,
+        "proposed_start_seconds": 63.8,
+        "reviewed_at": "2026-07-16T13:39:24Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:39:24Z",
+      "before": null,
+      "id": "danshow-conan-2026-07-09-the-wedding-ringer-63",
+      "sequence": 45
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:83475f2275d2a7a297ff1a521322db665697fc750d31ae98374687b3a114cb53",
+        "id": "danshow-conan-2026-07-09-the-wedding-ringer-797",
+        "note": "",
+        "proposed_end_seconds": 804.9,
+        "proposed_start_seconds": 660.7,
+        "reviewed_at": "2026-07-16T13:40:25Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:40:25Z",
+      "before": null,
+      "id": "danshow-conan-2026-07-09-the-wedding-ringer-797",
+      "sequence": 46
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:83475f2275d2a7a297ff1a521322db665697fc750d31ae98374687b3a114cb53",
+        "id": "danshow-conan-2026-07-09-the-wedding-ringer-1376",
+        "note": "This is just telling people to listen to the show, not an ad",
+        "proposed_end_seconds": 1384.0,
+        "proposed_start_seconds": 1376.84,
+        "reviewed_at": "2026-07-16T13:40:48Z",
+        "reviewer": "Dan",
+        "status": "rejected"
+      },
+      "at": "2026-07-16T13:40:48Z",
+      "before": null,
+      "id": "danshow-conan-2026-07-09-the-wedding-ringer-1376",
+      "sequence": 47
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:6971a43cf165a8812b30437104f2e104657db72aa23b5c69e4f4bf0e5b305119",
+        "id": "danshow-conan-2026-07-13-mick-jagger-1281",
+        "note": "",
+        "proposed_end_seconds": 1315.1,
+        "proposed_start_seconds": 1201.8,
+        "reviewed_at": "2026-07-16T13:41:31Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:41:31Z",
+      "before": null,
+      "id": "danshow-conan-2026-07-13-mick-jagger-1281",
+      "sequence": 48
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:6971a43cf165a8812b30437104f2e104657db72aa23b5c69e4f4bf0e5b305119",
+        "id": "danshow-conan-2026-07-13-mick-jagger-2726",
+        "note": "",
+        "proposed_end_seconds": 2767.7,
+        "proposed_start_seconds": 2677.4,
+        "reviewed_at": "2026-07-16T13:45:07Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:45:07Z",
+      "before": null,
+      "id": "danshow-conan-2026-07-13-mick-jagger-2726",
+      "sequence": 49
+    },
+    {
+      "after": {
+        "audio_fingerprint": "sha256:6971a43cf165a8812b30437104f2e104657db72aa23b5c69e4f4bf0e5b305119",
+        "id": "danshow-conan-2026-07-13-mick-jagger-3850",
+        "note": "",
+        "proposed_end_seconds": 3854.0,
+        "proposed_start_seconds": 3850.16,
+        "reviewed_at": "2026-07-16T13:45:27Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T13:45:27Z",
+      "before": null,
+      "id": "danshow-conan-2026-07-13-mick-jagger-3850",
+      "sequence": 50
+    }
+  ],
+  "next_sequence": 51,
+  "reviews": {
+    "danshow-conan-2026-07-06-danny-mcbride-returns-1397": {
+      "audio_fingerprint": "sha256:7b79dd69ec0a16cf4988b75212b2b2f9893d6c31dede70ff40e4a052150652c1",
+      "id": "danshow-conan-2026-07-06-danny-mcbride-returns-1397",
+      "note": "Consistent musical sting into and out of ads",
+      "proposed_end_seconds": 1410.6,
+      "proposed_start_seconds": 1320.1,
+      "reviewed_at": "2026-07-16T13:37:38Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-conan-2026-07-06-danny-mcbride-returns-3175": {
+      "audio_fingerprint": "sha256:7b79dd69ec0a16cf4988b75212b2b2f9893d6c31dede70ff40e4a052150652c1",
+      "id": "danshow-conan-2026-07-06-danny-mcbride-returns-3175",
+      "note": "",
+      "proposed_end_seconds": 3196.4,
+      "proposed_start_seconds": 3097.1,
+      "reviewed_at": "2026-07-16T13:38:26Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-conan-2026-07-06-danny-mcbride-returns-3666": {
+      "audio_fingerprint": "sha256:7b79dd69ec0a16cf4988b75212b2b2f9893d6c31dede70ff40e4a052150652c1",
+      "id": "danshow-conan-2026-07-06-danny-mcbride-returns-3666",
+      "note": "",
+      "proposed_end_seconds": 3673.28,
+      "proposed_start_seconds": 3666.96,
+      "reviewed_at": "2026-07-16T13:38:55Z",
+      "reviewer": "Dan",
+      "status": "approved"
+    },
+    "danshow-conan-2026-07-09-the-wedding-ringer-1376": {
+      "audio_fingerprint": "sha256:83475f2275d2a7a297ff1a521322db665697fc750d31ae98374687b3a114cb53",
+      "id": "danshow-conan-2026-07-09-the-wedding-ringer-1376",
+      "note": "This is just telling people to listen to the show, not an ad",
+      "proposed_end_seconds": 1384.0,
+      "proposed_start_seconds": 1376.84,
+      "reviewed_at": "2026-07-16T13:40:48Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-conan-2026-07-09-the-wedding-ringer-63": {
+      "audio_fingerprint": "sha256:83475f2275d2a7a297ff1a521322db665697fc750d31ae98374687b3a114cb53",
+      "id": "danshow-conan-2026-07-09-the-wedding-ringer-63",
+      "note": "This is telling the listeners how to contact the show to be a guest—definitely not an ad",
+      "proposed_end_seconds": 71.0,
+      "proposed_start_seconds": 63.8,
+      "reviewed_at": "2026-07-16T13:39:24Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-conan-2026-07-09-the-wedding-ringer-797": {
+      "audio_fingerprint": "sha256:83475f2275d2a7a297ff1a521322db665697fc750d31ae98374687b3a114cb53",
+      "id": "danshow-conan-2026-07-09-the-wedding-ringer-797",
+      "note": "",
+      "proposed_end_seconds": 804.9,
+      "proposed_start_seconds": 660.7,
+      "reviewed_at": "2026-07-16T13:40:25Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-conan-2026-07-13-mick-jagger-1281": {
+      "audio_fingerprint": "sha256:6971a43cf165a8812b30437104f2e104657db72aa23b5c69e4f4bf0e5b305119",
+      "id": "danshow-conan-2026-07-13-mick-jagger-1281",
+      "note": "",
+      "proposed_end_seconds": 1315.1,
+      "proposed_start_seconds": 1201.8,
+      "reviewed_at": "2026-07-16T13:41:31Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-conan-2026-07-13-mick-jagger-2726": {
+      "audio_fingerprint": "sha256:6971a43cf165a8812b30437104f2e104657db72aa23b5c69e4f4bf0e5b305119",
+      "id": "danshow-conan-2026-07-13-mick-jagger-2726",
+      "note": "",
+      "proposed_end_seconds": 2767.7,
+      "proposed_start_seconds": 2677.4,
+      "reviewed_at": "2026-07-16T13:45:07Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-conan-2026-07-13-mick-jagger-3850": {
+      "audio_fingerprint": "sha256:6971a43cf165a8812b30437104f2e104657db72aa23b5c69e4f4bf0e5b305119",
+      "id": "danshow-conan-2026-07-13-mick-jagger-3850",
+      "note": "",
+      "proposed_end_seconds": 3854.0,
+      "proposed_start_seconds": 3850.16,
+      "reviewed_at": "2026-07-16T13:45:27Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2888": {
+      "audio_fingerprint": "sha256:8c67534bd264392c9ec08faad4daed0792cfb5346b2760b0aecb2d03429a0665",
+      "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2888",
+      "note": "",
+      "proposed_end_seconds": 2958.9,
+      "proposed_start_seconds": 2819.2,
+      "reviewed_at": "2026-07-16T12:40:22Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2946": {
+      "audio_fingerprint": "sha256:8c67534bd264392c9ec08faad4daed0792cfb5346b2760b0aecb2d03429a0665",
+      "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-2946",
+      "note": "Appears to be the same ad break as previous",
+      "proposed_end_seconds": 2958.08,
+      "proposed_start_seconds": 2819.8,
+      "reviewed_at": "2026-07-16T12:53:03Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-4026": {
+      "audio_fingerprint": "sha256:8c67534bd264392c9ec08faad4daed0792cfb5346b2760b0aecb2d03429a0665",
+      "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-4026",
+      "note": "",
+      "proposed_end_seconds": 4036.5,
+      "proposed_start_seconds": 3976.2,
+      "reviewed_at": "2026-07-16T12:54:43Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-49": {
+      "audio_fingerprint": "sha256:8c67534bd264392c9ec08faad4daed0792cfb5346b2760b0aecb2d03429a0665",
+      "id": "danshow-doac-2026-07-09-neil-degrasse-tyson-on-aliens-simulation-49",
+      "note": "",
+      "proposed_end_seconds": 59.8,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-16T12:37:33Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-2439": {
+      "audio_fingerprint": "sha256:1096bfa558a9e7778c30455b27ec42036398fcff30d42c42b157a37b53d6c8b7",
+      "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-2439",
+      "note": "",
+      "proposed_end_seconds": 2514.55,
+      "proposed_start_seconds": 2398.3,
+      "reviewed_at": "2026-07-16T13:00:10Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-4427": {
+      "audio_fingerprint": "sha256:1096bfa558a9e7778c30455b27ec42036398fcff30d42c42b157a37b53d6c8b7",
+      "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-4427",
+      "note": "",
+      "proposed_end_seconds": 4437.45,
+      "proposed_start_seconds": 4373.99,
+      "reviewed_at": "2026-07-16T13:01:08Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-49": {
+      "audio_fingerprint": "sha256:1096bfa558a9e7778c30455b27ec42036398fcff30d42c42b157a37b53d6c8b7",
+      "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-49",
+      "note": "",
+      "proposed_end_seconds": 59.9,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-16T12:59:11Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-7144": {
+      "audio_fingerprint": "sha256:1096bfa558a9e7778c30455b27ec42036398fcff30d42c42b157a37b53d6c8b7",
+      "id": "danshow-doac-2026-07-13-openai-whistleblower-finally-speaks-ai-h-7144",
+      "note": "This is a guest doing a plug, not really an ad",
+      "proposed_end_seconds": 7151.36,
+      "proposed_start_seconds": 7144.0,
+      "reviewed_at": "2026-07-16T13:01:42Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-2661": {
+      "audio_fingerprint": "sha256:66f59de90430fcc18a8fd4da563350a6f80cb82914baf1ea3434fe6be8ccd554",
+      "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-2661",
+      "note": "",
+      "proposed_end_seconds": 2699.1,
+      "proposed_start_seconds": 2619.1,
+      "reviewed_at": "2026-07-16T13:02:45Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3103": {
+      "audio_fingerprint": "sha256:66f59de90430fcc18a8fd4da563350a6f80cb82914baf1ea3434fe6be8ccd554",
+      "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3103",
+      "note": "This is a short read sponsorship but has relevant context for the episode so I think keep it.",
+      "proposed_end_seconds": 3118.66,
+      "proposed_start_seconds": 3109.0,
+      "reviewed_at": "2026-07-16T13:04:03Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3454": {
+      "audio_fingerprint": "sha256:66f59de90430fcc18a8fd4da563350a6f80cb82914baf1ea3434fe6be8ccd554",
+      "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3454",
+      "note": "This is a contest sponsored by a company, not really an ad. The move is hard this way. It’s a lot of product placement.",
+      "proposed_end_seconds": 3467.5,
+      "proposed_start_seconds": 3454.9,
+      "reviewed_at": "2026-07-16T13:04:40Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3663": {
+      "audio_fingerprint": "sha256:66f59de90430fcc18a8fd4da563350a6f80cb82914baf1ea3434fe6be8ccd554",
+      "id": "danshow-themove-2026-07-14-rest-day-hotels-cause-a-stir-amp-poga-ar-3663",
+      "note": "",
+      "proposed_end_seconds": 3682.8,
+      "proposed_start_seconds": 3620.8,
+      "reviewed_at": "2026-07-16T13:05:58Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-1566": {
+      "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-1566",
+      "note": "",
+      "proposed_end_seconds": 1700.1,
+      "proposed_start_seconds": 1516.2,
+      "reviewed_at": "2026-07-16T13:09:58Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-1685": {
+      "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-1685",
+      "note": "Same as break as previous",
+      "proposed_end_seconds": 1700.0,
+      "proposed_start_seconds": 1516.2,
+      "reviewed_at": "2026-07-16T13:11:21Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2434": {
+      "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2434",
+      "note": "This is sponsored, relevant content, not really an ad break keep.",
+      "proposed_end_seconds": 2441.38,
+      "proposed_start_seconds": 2434.25,
+      "reviewed_at": "2026-07-16T13:11:49Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2626": {
+      "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2626",
+      "note": "This is a sponsored trivia contest, product placement but keep in.",
+      "proposed_end_seconds": 2639.38,
+      "proposed_start_seconds": 2626.34,
+      "reviewed_at": "2026-07-16T13:12:14Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2812": {
+      "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-2812",
+      "note": "",
+      "proposed_end_seconds": 2853.3,
+      "proposed_start_seconds": 2779.7,
+      "reviewed_at": "2026-07-16T13:13:16Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-44": {
+      "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-44",
+      "note": "",
+      "proposed_end_seconds": 74.3,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-16T13:07:59Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-68": {
+      "audio_fingerprint": "sha256:244a3d602d54e398aa2d35c81fbcd3f000ad8bc4083f19e8493c25d4cc40e78e",
+      "id": "danshow-themove-2026-07-15-how-an-ultra-fast-stage-led-to-a-shockin-68",
+      "note": "This is the same as break as the previous",
+      "proposed_end_seconds": 74.32,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-16T13:07:48Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-themove-2026-07-15-uno-x-keeps-their-five-star-tour-rolling-2952": {
+      "audio_fingerprint": "sha256:b39bb82b77204b983d01536f928de482563bf1ab48571e42b72d6699c9976610",
+      "id": "danshow-themove-2026-07-15-uno-x-keeps-their-five-star-tour-rolling-2952",
+      "note": "This is a sponsored trivia content, not an ad.",
+      "proposed_end_seconds": 2964.08,
+      "proposed_start_seconds": 2952.32,
+      "reviewed_at": "2026-07-16T13:16:38Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-themove-2026-07-15-uno-x-keeps-their-five-star-tour-rolling-930": {
+      "audio_fingerprint": "sha256:b39bb82b77204b983d01536f928de482563bf1ab48571e42b72d6699c9976610",
+      "id": "danshow-themove-2026-07-15-uno-x-keeps-their-five-star-tour-rolling-930",
+      "note": "These are hard. They are host read ads that are done live during the recording every show. The copy often is the same, but the host tends to improvise changes and anecdotes.",
+      "proposed_end_seconds": 1071.5,
+      "proposed_start_seconds": 897.2,
+      "reviewed_at": "2026-07-16T13:16:12Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--1724": {
+      "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--1724",
+      "note": "This is a really long ad break with several ads in it",
+      "proposed_end_seconds": 1829.0,
+      "proposed_start_seconds": 1582.8,
+      "reviewed_at": "2026-07-16T13:19:20Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--189": {
+      "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--189",
+      "note": "This is the host promoting new ways to watch the show. Promotional but not an ad break",
+      "proposed_end_seconds": 207.9,
+      "proposed_start_seconds": 189.88,
+      "reviewed_at": "2026-07-16T13:17:21Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2389": {
+      "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2389",
+      "note": "The host is telling users how to send questions and promotion the shows social media. Not an ad.",
+      "proposed_end_seconds": 2410.0,
+      "proposed_start_seconds": 2389.92,
+      "reviewed_at": "2026-07-16T13:20:03Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2532": {
+      "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2532",
+      "note": "",
+      "proposed_end_seconds": 2634.5,
+      "proposed_start_seconds": 2481.1,
+      "reviewed_at": "2026-07-16T13:23:42Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2564": {
+      "audio_fingerprint": "sha256:001b05e309c6cb105346c7ae73e526a1ecbe3156590343ee69331a3fc3dcda8c",
+      "id": "danshow-unexplained-2026-06-26-season-09-episode-26-in-through-the-out--2564",
+      "note": "",
+      "proposed_end_seconds": 2635.2,
+      "proposed_start_seconds": 2481.0,
+      "reviewed_at": "2026-07-16T13:24:24Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--152": {
+      "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--152",
+      "note": "",
+      "proposed_end_seconds": 163.2,
+      "proposed_start_seconds": 0.0,
+      "reviewed_at": "2026-07-16T13:25:36Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--1912": {
+      "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--1912",
+      "note": "Weird break here. It sounds like the ad break was inserted incorrectly mid sentence not at the appropriate time.",
+      "proposed_end_seconds": 2081.8,
+      "proposed_start_seconds": 1831.4,
+      "reviewed_at": "2026-07-16T13:30:51Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--229": {
+      "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--229",
+      "note": "This is a promotion for a live version of the show, not really an ad.",
+      "proposed_end_seconds": 251.24,
+      "proposed_start_seconds": 229.96,
+      "reviewed_at": "2026-07-16T13:25:59Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--2765": {
+      "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--2765",
+      "note": "Promotion of the shows social media, not really an ad.",
+      "proposed_end_seconds": 2770.28,
+      "proposed_start_seconds": 2765.28,
+      "reviewed_at": "2026-07-16T13:31:14Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--2871": {
+      "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--2871",
+      "note": "",
+      "proposed_end_seconds": 2941.9,
+      "proposed_start_seconds": 2785.5,
+      "reviewed_at": "2026-07-16T13:31:54Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--716": {
+      "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--716",
+      "note": "Again, very long ad breaks on this show",
+      "proposed_end_seconds": 882.85,
+      "proposed_start_seconds": 659.4,
+      "reviewed_at": "2026-07-16T13:27:21Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--803": {
+      "audio_fingerprint": "sha256:53aeb734bf21d4c0de9ea48248e4d333c112331bd85cbfa8eff96ad67fb74383",
+      "id": "danshow-unexplained-2026-07-03-season-09-episode-27-death-in-vegas-the--803",
+      "note": "This might be same as break as previous, not sure",
+      "proposed_end_seconds": 882.7,
+      "proposed_start_seconds": 659.2,
+      "reviewed_at": "2026-07-16T13:28:47Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--1712": {
+      "audio_fingerprint": "sha256:5b3a4e81d27c04f3d206fa348fe70aad41b12afb579f57e97903ff9735b55752",
+      "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--1712",
+      "note": "",
+      "proposed_end_seconds": 1718.0,
+      "proposed_start_seconds": 1526.9,
+      "reviewed_at": "2026-07-16T13:35:09Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--2477": {
+      "audio_fingerprint": "sha256:5b3a4e81d27c04f3d206fa348fe70aad41b12afb579f57e97903ff9735b55752",
+      "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--2477",
+      "note": "This the host telling listeners how to get in touch and promoting the shows social media, not an ad.",
+      "proposed_end_seconds": 2508.9,
+      "proposed_start_seconds": 2477.46,
+      "reviewed_at": "2026-07-16T13:36:00Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    },
+    "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--2598": {
+      "audio_fingerprint": "sha256:5b3a4e81d27c04f3d206fa348fe70aad41b12afb579f57e97903ff9735b55752",
+      "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--2598",
+      "note": "",
+      "proposed_end_seconds": 2636.6,
+      "proposed_start_seconds": 2509.9,
+      "reviewed_at": "2026-07-16T13:36:36Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--742": {
+      "audio_fingerprint": "sha256:5b3a4e81d27c04f3d206fa348fe70aad41b12afb579f57e97903ff9735b55752",
+      "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--742",
+      "note": "",
+      "proposed_end_seconds": 837.8,
+      "proposed_start_seconds": 683.4,
+      "reviewed_at": "2026-07-16T13:32:38Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    },
+    "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--838": {
+      "audio_fingerprint": "sha256:5b3a4e81d27c04f3d206fa348fe70aad41b12afb579f57e97903ff9735b55752",
+      "id": "danshow-unexplained-2026-07-10-season-09-episode-27-death-in-vegas-the--838",
+      "note": "This is the musical stinger coming back into the show.",
+      "proposed_end_seconds": 842.0,
+      "proposed_start_seconds": 838.0,
+      "reviewed_at": "2026-07-16T13:33:10Z",
+      "reviewer": "Dan",
+      "status": "rejected"
+    }
+  },
+  "schema_version": 2
+}

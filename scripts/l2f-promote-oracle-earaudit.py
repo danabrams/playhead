@@ -224,9 +224,10 @@ def build_artifact(rows: list[dict], sources: dict) -> dict:
             "presence_anchors": "none in this artifact",
             "quality": "gold",
             "attestation": (
-                "Dan Abrams, single listener, explicit gold attestation "
-                "2026-07-15; declared care to +-0.3s (+-0.5s nikki-glaser "
-                "stinger seam)"
+                "Dan Abrams, single listener, explicit gold attestations "
+                "2026-07-15 (oracle audit) and 2026-07-16 (morbid gate "
+                "adjudications; new-shows first-gold); declared care to "
+                "+-0.3s (+-0.5s nikki-glaser stinger seam)"
             ),
             "unlabeled_audio": "unknown_elsewhere",
         },
