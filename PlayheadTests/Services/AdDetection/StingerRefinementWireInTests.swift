@@ -174,12 +174,16 @@ struct StingerRefinementWireInTests {
 
     // MARK: - (a) Config defaults
 
-    @Test("AdDetectionConfig.default keeps stinger refinement OFF")
-    func configDefaultsAreOff() {
+    @Test("AdDetectionConfig.default ships stinger refinement ON")
+    func configDefaultsAreOn() {
+        // Dan explicitly flipped the dogfood default ON (2026-07-16): the
+        // v3 arm passed the evidence-aware 90s false-widening gate (max
+        // 73.1s/ep) with 41/41 gold breaks matched; he is the sole user and
+        // accepted the known morbid-05-29-class eat pending xsdz.38.
         let config = AdDetectionConfig.default
         #expect(
-            config.stingerRefinementEnabled == false,
-            "OFF-by-default is load-bearing: production must stay behavior-neutral until the Catalyst dump + gold-scorer measurement confirms the lift"
+            config.stingerRefinementEnabled == true,
+            "ON-by-default per the recorded 2026-07-16 dogfood decision (playhead-xsdz.38 notes)"
         )
     }
 
@@ -206,7 +210,7 @@ struct StingerRefinementWireInTests {
         #expect(on.stingerRefinementEnabled == true)
 
         // The init's default value MUST match `.default` so callers that
-        // omit the arg get the OFF path.
+        // omit the arg get production behavior.
         let omitted = AdDetectionConfig(
             candidateThreshold: 0.40,
             confirmationThreshold: 0.70,
@@ -214,7 +218,7 @@ struct StingerRefinementWireInTests {
             hotPathLookahead: 90.0,
             detectorVersion: "test-v1"
         )
-        #expect(omitted.stingerRefinementEnabled == false, "init default must match .default")
+        #expect(omitted.stingerRefinementEnabled == true, "init default must match .default")
     }
 
     // MARK: - (b) Flag-OFF byte-identity

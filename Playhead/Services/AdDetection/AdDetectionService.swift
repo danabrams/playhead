@@ -576,7 +576,7 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: Bool = false,
         rediffSlotOwnershipEnabled: Bool = false,
         rediffSlotShadowEnabled: Bool = false,
-        stingerRefinementEnabled: Bool = false
+        stingerRefinementEnabled: Bool = true
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -681,7 +681,7 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: false,
         rediffSlotOwnershipEnabled: false,
         rediffSlotShadowEnabled: false,
-        stingerRefinementEnabled: false
+        stingerRefinementEnabled: true
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip

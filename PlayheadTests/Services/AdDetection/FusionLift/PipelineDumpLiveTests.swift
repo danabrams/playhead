@@ -3591,7 +3591,7 @@ extension PipelineDumpHermeticTests {
         // JSON key is absent on every window relies on the production
         // .default keeping stinger refinement OFF — same rationale as the
         // spanFinalizer pin above.
-        #expect(cfg.stingerRefinementEnabled == false, "stingerRefinementEnabled must be off in production .default")
+        #expect(cfg.stingerRefinementEnabled == true, "ships ON per the recorded 2026-07-16 dogfood flip; xsdz.38 tracks the eat-class fix")
 
         let narrowing = NarrowingConfig.default
         #expect(narrowing.perAnchorPaddingSegments == 5)
