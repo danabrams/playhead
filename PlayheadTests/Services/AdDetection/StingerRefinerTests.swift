@@ -982,6 +982,79 @@ struct StingerRefinerTests {
         #expect(abs(pairScore - 0.998) < 0.001, "oracle pair_score 0.998 (got \(pairScore))")
     }
 
+    @Test("Parity P10: an off-grid NARROWING snap pays no inconsistency penalty (inward exemption)")
+    func parityInwardNarrowingPaysNoPenalty() throws {
+        // The penalty scales with WIDENING (content claimed beyond the
+        // proposal), never with movement per se: an inward 24 s end snap
+        // to an off-grid width (56 → 4 s from the 2×30 pod) pays exactly
+        // zero — "Inward (narrowing) moves pay nothing" (JointConfig
+        // docstring; narrowing is already governed by the peak terms).
+        // Every other penalty fixture moves its edge OUTWARD only, where
+        // widening == total movement — this is the scenario that
+        // separates the two: a moved-based mis-port would score
+        // 0.6 − 0.08·4·24/75 − 0.0024 = 0.4952, not 0.5976.
+        // Oracle P10: [50, 130] → [50, 106.0]; end_snapped;
+        // grid_applied false; pair_score 0.5976.
+        var world = PlantedWorld(duration: 600)
+        let post = PlantedWorld.pattern(seed: 4)
+        world.plant(post, at: 106.0, cosine: 0.6)
+        let result = StingerRefiner.refine(
+            proposalStart: 50.0,
+            proposalEnd: 130.0,
+            entry: Self.entry(post: Self.parityTemplate(post, confidence: 0.6), grid: 30.0),
+            startEnvelope: nil,
+            endEnvelope: world.envelope(center: 130.0),
+            episodeDuration: world.duration
+        )
+        #expect(result.startTime == 50.0)
+        #expect(abs(result.endTime - 106.0) < 0.05, "the narrowing snap must stand (got \(result.endTime))")
+        #expect(result.trace.endSnapped)
+        #expect(!result.trace.gridApplied)
+        #expect(result.trace.gridTermApplied == nil, "zero widening ⇒ zero penalty ⇒ no grid term recorded")
+        #expect(result.trace.endCandidateCount == 1)
+        let pairScore = try #require(result.trace.pairScore)
+        #expect(abs(pairScore - 0.5976) < 0.001, "oracle pair_score 0.5976 (got \(pairScore))")
+    }
+
+    @Test("Parity P11: widening sums OUTWARD movement across both edges — the narrowing edge contributes zero")
+    func parityWideningSumsOutwardMovementOnly() throws {
+        // Mixed pair: the start widens 9 s (50 → 41) while the end
+        // narrows 24 s (130 → 106); width 65 sits 5 s off the 2×30 pod.
+        // The penalty charges ONLY the 9 s of claimed content:
+        // 0.08·5·9/75 = 0.048. A total-movement mis-port would charge
+        // 33 s (score 1.0207); an end-edge-only-widening mis-port would
+        // charge nothing (score 1.1967) — both outside the ±0.001 pin.
+        // Oracle P11: [50, 130] → [41.0, 106.0]; both snapped;
+        // grid_applied false; pair_score 1.1487.
+        var world = PlantedWorld(duration: 600)
+        let pre = PlantedWorld.pattern(seed: 7)
+        let post = PlantedWorld.pattern(seed: 4)
+        world.plant(pre, at: 41.0, cosine: 0.6)
+        world.plant(post, at: 106.0, cosine: 0.6)
+        let result = StingerRefiner.refine(
+            proposalStart: 50.0,
+            proposalEnd: 130.0,
+            entry: Self.entry(
+                pre: Self.parityTemplate(pre, confidence: 0.6),
+                post: Self.parityTemplate(post, confidence: 0.6),
+                grid: 30.0
+            ),
+            startEnvelope: world.envelope(center: 50.0),
+            endEnvelope: world.envelope(center: 130.0),
+            episodeDuration: world.duration
+        )
+        #expect(abs(result.startTime - 41.0) < 0.05, "got \(result.startTime)")
+        #expect(abs(result.endTime - 106.0) < 0.05, "got \(result.endTime)")
+        #expect(result.trace.startSnapped)
+        #expect(result.trace.endSnapped)
+        #expect(!result.trace.gridApplied)
+        #expect(result.trace.gridTermApplied == "penalty", "the off-grid pair pays a nonzero (start-widening-only) penalty")
+        #expect(result.trace.startCandidateCount == 1)
+        #expect(result.trace.endCandidateCount == 1)
+        let pairScore = try #require(result.trace.pairScore)
+        #expect(abs(pairScore - 1.1487) < 0.001, "oracle pair_score 1.1487 (got \(pairScore))")
+    }
+
     // MARK: - Envelope computation
 
     @Test("StingerEnvelope computes 50 Hz log1p(rms*100) frames and drops the partial tail")

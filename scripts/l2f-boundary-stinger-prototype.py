@@ -787,8 +787,9 @@ def build_bank(
     """Build the production StingerBank payload (FULL-CORPUS models).
 
     A show ships in the bank only when the learner produced at least one
-    stinger side — a pod-width grid alone is inert at runtime (the grid
-    only applies after exactly one edge snapped, which requires a stinger).
+    stinger side — a pod-width grid alone is inert at runtime (v4 joint:
+    every grid term and derived candidate engages only through qualifying
+    stinger peaks, so no templates ⇒ no peaks ⇒ no grid effect).
     """
     shows = []
     for show, show_breaks in sorted(group_breaks_by_show(evaluation).items()):

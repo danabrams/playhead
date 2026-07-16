@@ -4064,9 +4064,11 @@ struct PipelineDumpEncodingTests {
 
     @Test("DumpAdWindow omits stingerRefinement when nil (flag-OFF)")
     func dumpAdWindowOmitsStingerRefinementWhenNil() throws {
-        // Flag OFF — the production `.default` arm. The live dump never
-        // populates the field; the default `JSONEncoder` strategy omits
-        // the key entirely (does NOT emit explicit `null`), matching the
+        // The no-trace arm: flag explicitly OFF, or — under the shipping
+        // flag-ON default (2026-07-16 dogfood flip) — a window whose show
+        // resolved no bank entry. Either way the live dump leaves the
+        // field nil and the default `JSONEncoder` strategy omits the key
+        // entirely (does NOT emit explicit `null`), matching the
         // pre-existing optional-field convention used by every dump
         // shipped so far.
         let window = DumpAdWindow(
@@ -4090,7 +4092,7 @@ struct PipelineDumpEncodingTests {
         #expect(!parsed.keys.contains("stingerRefinement"))
         // Defense in depth: the raw JSON text must not contain the key in
         // any form so downstream `dict.get("stingerRefinement")` readers
-        // see None on the OFF arm.
+        // see None on no-trace windows.
         let json = try #require(String(data: data, encoding: .utf8))
         #expect(!json.contains("stingerRefinement"))
     }
