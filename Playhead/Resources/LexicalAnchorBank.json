@@ -1,0 +1,299 @@
+{
+  "schemaVersion": 1,
+  "generator": "scripts/xsdz37-emit-lexical-anchor-bank.py",
+  "provenance": "playhead-baselines/xsdz37-lexical-prototype-20260716.md (GO verdict)",
+  "shows": [
+    {
+      "showKeys": [
+        "on-the-media",
+        "https://feeds.simplecast.com/o4jAFXaw"
+      ],
+      "showName": "On The Media",
+      "anchors": [
+        {
+          "phrase": "On The Media is brought to you by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "On The Media is sponsored by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "On The Media is supported by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "On The Media is presented by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "support for On The Media comes from",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC is brought to you by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC is sponsored by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC is supported by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC is presented by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "support for WNYC comes from",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC Studios is brought to you by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC Studios is sponsored by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC Studios is supported by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC Studios is presented by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "support for WNYC Studios comes from",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        }
+      ]
+    },
+    {
+      "showKeys": [
+        "radiolab",
+        "https://feeds.simplecast.com/EmVW7VGp"
+      ],
+      "showName": "Radiolab",
+      "anchors": [
+        {
+          "phrase": "Radiolab is brought to you by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "Radiolab is sponsored by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "Radiolab is supported by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "Radiolab is presented by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "support for Radiolab comes from",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC is brought to you by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC is sponsored by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC is supported by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC is presented by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "support for WNYC comes from",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC Studios is brought to you by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC Studios is sponsored by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC Studios is supported by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "WNYC Studios is presented by",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        },
+        {
+          "phrase": "support for WNYC Studios comes from",
+          "side": "pre",
+          "matchPolicy": "exact",
+          "edgeOffsetSeconds": -1.0,
+          "confidence": 0.9,
+          "support": 2
+        }
+      ]
+    }
+  ],
+  "genericAnchors": [
+    {
+      "phrase": "we'll be right back",
+      "side": "pre",
+      "matchPolicy": "exact",
+      "edgeOffsetSeconds": 2.0,
+      "confidence": 0.9,
+      "support": 2
+    },
+    {
+      "phrase": "we will be right back",
+      "side": "pre",
+      "matchPolicy": "exact",
+      "edgeOffsetSeconds": 2.0,
+      "confidence": 0.9,
+      "support": 2
+    },
+    {
+      "phrase": "and now back to the show",
+      "side": "post",
+      "matchPolicy": "exact",
+      "edgeOffsetSeconds": -0.6,
+      "confidence": 0.9,
+      "support": 2
+    },
+    {
+      "phrase": "and back to the show",
+      "side": "post",
+      "matchPolicy": "exact",
+      "edgeOffsetSeconds": -0.6,
+      "confidence": 0.9,
+      "support": 2
+    }
+  ]
+}
