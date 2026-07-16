@@ -1,0 +1,172 @@
+// SelfPromoBank.swift
+// playhead-fl4j: bundled, curated, SHOW-AGNOSTIC self-promo ACTION phrase bank
+// for the eligibility-side self-promo suppression signal.
+//
+// The bank is CURATED OFFLINE from the fl4j spike's candidate bank
+// (`playhead-baselines/fl4j-negative-anchor-bank-candidate.json`,
+// `self_promo_action_phrases`) and prototype report
+// (`playhead-baselines/fl4j-negative-anchor-prototype-2026-07-16.md`). There is
+// no on-device learning and no network fetch; the JSON ships in the app bundle
+// and is versioned by `schemaVersion`.
+//
+// Scope of the curation (per the spike verdict + the bead brief):
+//   • KEEP universal self-promo ACTION phrases — a show promoting ITSELF:
+//     rate/review/subscribe, follow us, find us on, be a guest, send us your
+//     questions, "wherever you get your podcasts", live-show / get-tickets / on
+//     tour, "new ways to watch". These carry self-referential CALLS TO ACTION
+//     and no third-party brand, so they are the lexically-distinctive subclass
+//     the spike GO'd (C2 precision 0.78).
+//   • DROP show-specific tokens ("subscribe to conan", "talk to conan",
+//     "visit teamcoco") — those never generalise.
+//   • EXCLUDE the `ambiguous_sponsor_phrases` family ("brought to you by",
+//     "sponsored by", "supported by", …). The spike proved these fire on real
+//     third-party ads too (C1 precision 0.14) and MUST NOT be used bare.
+//   • EXCLUDE bare show-name self-reference — the "<Show/Network> is supported
+//     by <external brand>" underwriting construction makes the show name
+//     co-occur with genuine sponsors, so a bare self-reference gate false-fires
+//     on real ads (C3/C5). The working signal is the self-promo ACTION verb.
+//
+// Both the bank and the consuming `PromoSuppressor` match EXACT normalised
+// token sequences only (via `LexicalAnchorNormalizer`) — no fuzzy matching.
+//
+// Loading follows the `LexicalAnchorBank` / `StingerBank` fail-loud precedent:
+// malformed JSON throws a typed error with a field-identifying reason. The
+// service-side consumer (`AdDetectionService.selfPromoSuppressionBankIfEnabled`)
+// catches, logs at `.error`, and degrades to "no bank" — suppression silently
+// disabled, never a crash — but the loader itself never papers over a bad
+// asset.
+
+import Foundation
+
+// MARK: - Errors
+
+enum SelfPromoBankError: Error, Equatable, CustomStringConvertible {
+    /// `SelfPromoBank.json` is not present in the bundle.
+    case missingResource
+    /// The resource exists but failed to decode or validate.
+    case malformed(String)
+
+    var description: String {
+        switch self {
+        case .missingResource:
+            return "SelfPromoBank.json missing from bundle"
+        case .malformed(let reason):
+            return "SelfPromoBank.json malformed: \(reason)"
+        }
+    }
+}
+
+// MARK: - Phrase value type
+
+/// One curated self-promo action phrase: the display phrase (provenance + the
+/// hermetic-pin key) plus its normalised token sequence — the exact tokens the
+/// suppressor matches word-for-word.
+struct SelfPromoPhrase: Sendable, Equatable {
+    /// Human-readable phrase (provenance + the hermetic-pin key).
+    let phrase: String
+    /// `phrase` run through `LexicalAnchorNormalizer.normalizePhrase` — the
+    /// exact token sequence `PromoSuppressor` matches contiguously.
+    let tokens: [String]
+}
+
+// MARK: - SelfPromoBank
+
+/// Decoded, validated self-promo action-phrase bank. Show-agnostic: one flat
+/// phrase set applied to every episode (the signal is the self-referential
+/// action verb, not a per-show entity — see the file header).
+struct SelfPromoBank: Sendable, Equatable {
+    /// The bank schema version this binary understands.
+    static let supportedSchemaVersion = 1
+    /// Bundle resource name (no extension).
+    static let resourceName = "SelfPromoBank"
+
+    let schemaVersion: Int
+    /// The curated self-promo action phrases (never empty; validated).
+    let phrases: [SelfPromoPhrase]
+
+    // MARK: - Loading
+
+    /// Load and validate the bundled bank. Throws `SelfPromoBankError` on a
+    /// missing resource, undecodable JSON, or a payload that fails validation —
+    /// malformed data is rejected loudly, never coerced.
+    static func load(bundle: Bundle = .main) throws -> SelfPromoBank {
+        guard let url = bundle.url(
+            forResource: resourceName,
+            withExtension: "json"
+        ) else {
+            throw SelfPromoBankError.missingResource
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw SelfPromoBankError.malformed("read failed: \(error.localizedDescription)")
+        }
+        return try decode(data)
+    }
+
+    /// Decode + validate a bank payload. Exposed separately from `load(bundle:)`
+    /// so tests can feed malformed bytes directly.
+    static func decode(_ data: Data) throws -> SelfPromoBank {
+        let payload: Payload
+        do {
+            payload = try JSONDecoder().decode(Payload.self, from: data)
+        } catch {
+            throw SelfPromoBankError.malformed("decode failed: \(error)")
+        }
+        return try SelfPromoBank(payload: payload)
+    }
+
+    // MARK: - Raw payload (JSON mirror)
+
+    /// Direct JSON mirror; validation happens in `init(payload:)`.
+    private struct Payload: Decodable {
+        struct Phrase: Decodable {
+            let phrase: String
+        }
+        let schemaVersion: Int
+        let phrases: [Phrase]
+    }
+
+    private init(payload: Payload) throws {
+        guard payload.schemaVersion == Self.supportedSchemaVersion else {
+            throw SelfPromoBankError.malformed(
+                "schemaVersion \(payload.schemaVersion) (expected \(Self.supportedSchemaVersion))"
+            )
+        }
+        guard !payload.phrases.isEmpty else {
+            throw SelfPromoBankError.malformed("no phrases — an empty bank is inert")
+        }
+
+        // Dedupe by NORMALISED token sequence: two display phrases that fold to
+        // the same tokens would match identically, so the second is a silent
+        // dead entry — reject loudly instead.
+        var seenTokenKeys = Set<String>()
+        var validated: [SelfPromoPhrase] = []
+        validated.reserveCapacity(payload.phrases.count)
+        for raw in payload.phrases {
+            guard !raw.phrase.isEmpty else {
+                throw SelfPromoBankError.malformed("empty phrase")
+            }
+            let tokens = LexicalAnchorNormalizer.normalizePhrase(raw.phrase)
+            // Minimum 2 tokens: a single-token self-promo match is a precision
+            // liability (bare social/keyword tokens false-fired on real ads in
+            // the spike), so the bank only trusts multi-word action phrases.
+            guard tokens.count >= 2 else {
+                throw SelfPromoBankError.malformed(
+                    "phrase \"\(raw.phrase)\": normalized token count \(tokens.count) below minimum 2"
+                )
+            }
+            let tokenKey = tokens.joined(separator: " ")
+            guard seenTokenKeys.insert(tokenKey).inserted else {
+                throw SelfPromoBankError.malformed(
+                    "duplicate phrase \"\(raw.phrase)\" (normalises to \"\(tokenKey)\") — a second identical matcher is inert"
+                )
+            }
+            validated.append(SelfPromoPhrase(phrase: raw.phrase, tokens: tokens))
+        }
+
+        self.schemaVersion = payload.schemaVersion
+        self.phrases = validated
+    }
+}

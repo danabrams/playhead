@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "provenance": "playhead-baselines/fl4j-negative-anchor-prototype-2026-07-16.md (PARTIAL verdict: GO for the self-promo/social subclass only). Curated from self_promo_action_phrases in playhead-baselines/fl4j-negative-anchor-bank-candidate.json — show-specific names dropped; ambiguous_sponsor_phrases and bare show self-reference EXCLUDED. Ships FLAG-OFF (selfPromoSuppressionEnabled) pending multi-show generalisation validation.",
+  "phrases": [
+    { "phrase": "rate review and subscribe" },
+    { "phrase": "rate and review" },
+    { "phrase": "rate review" },
+    { "phrase": "please rate" },
+    { "phrase": "subscribe to the show" },
+    { "phrase": "subscribe to our channel" },
+    { "phrase": "follow us" },
+    { "phrase": "find us on" },
+    { "phrase": "reach us online" },
+    { "phrase": "be a guest" },
+    { "phrase": "send us your questions" },
+    { "phrase": "you can find the podcast" },
+    { "phrase": "wherever you get your podcasts" },
+    { "phrase": "wherever fine podcasts" },
+    { "phrase": "get tickets" },
+    { "phrase": "live show" },
+    { "phrase": "live version" },
+    { "phrase": "on tour" },
+    { "phrase": "new ways to watch" }
+  ]
+}
