@@ -151,19 +151,31 @@ enum LexicalAnchorRefiner {
             return Result(startTime: proposalStart, endTime: proposalEnd, trace: trace)
         }
 
+        // Independent per-edge snaps can CROSS: a pre snap can land at or after
+        // a post snap (a start edge dragged past an end edge on contradictory
+        // evidence — e.g. a resume phrase transcribed before an opener phrase).
+        // The minimum-width clamp below would otherwise "rescue" such a crossing
+        // into a degenerate `minimumRefinedWidthSeconds` sliver that STILL
+        // overlaps the proposal, hiding the crossing from the overlap check and
+        // emitting an unsupported window with a misleading (endSnapped) trace.
+        // Detect the crossing on the RAW snapped edges (pre-clamp) so it reverts
+        // both edges, honouring the revert-on-crossing contract.
+        let crossedRaw = newEnd <= newStart
+
         // Clamp to the episode. Order is load-bearing: the end clamp's
         // `max(newStart + minimumRefinedWidthSeconds, …)` floor runs after the
         // start clamp, so `end > start` holds unconditionally.
         newStart = max(0.0, min(newStart, episodeDuration - minimumRefinedWidthSeconds))
         newEnd = max(newStart + minimumRefinedWidthSeconds, min(newEnd, episodeDuration))
 
-        // Revert guard: refinement must not abandon overlap with the proposal
-        // evidence. With both edges independently snapped (e.g. a start snapped
-        // forward crossing an end snapped back on a narrow proposal), the clamp
-        // can leave a window that no longer overlaps the proposal — then BOTH
-        // edges revert (a one-sided keep would fabricate an unsupported window).
+        // Revert guard: refinement must not emit a crossed window (caught on the
+        // raw edges above) nor abandon overlap with the proposal evidence (an
+        // out-of-range proposal the clamp can push clear of the proposal). With
+        // both edges independently snapped (e.g. a start snapped forward crossing
+        // an end snapped back on a narrow proposal), either condition reverts
+        // BOTH edges (a one-sided keep would fabricate an unsupported window).
         let overlap = min(newEnd, proposalEnd) - max(newStart, proposalStart)
-        if overlap <= 0 {
+        if crossedRaw || overlap <= 0 {
             trace.revertedNoOverlap = true
             trace.startSnapped = false
             trace.endSnapped = false

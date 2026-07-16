@@ -167,6 +167,34 @@ struct LexicalAnchorRefinerTests {
         #expect(result.trace.startCandidateCount == 2, "both occurrences counted as candidates")
     }
 
+    // MARK: - Multi-anchor same-edge tie-break
+
+    @Test("When two pre anchors snap the same start edge the more specific (longer) phrase wins deterministically")
+    func multiAnchorSameEdgeLongerPhraseWins() {
+        // A 5-token opener and a 4-token attribution fragment both snap to the
+        // SAME edge (105) at zero distance from the proposal. The tie-break
+        // (nearest → earliest → LONGER phrase → phrase text) must
+        // deterministically prefer the more specific (longer) phrase regardless
+        // of anchor-array order — so the shorter fragment is listed FIRST to
+        // catch a comparator that merely keeps the first candidate.
+        let longAnchor = LexicalAnchor.exact(phrase: "we will be right back", side: .pre, edgeOffsetSeconds: 5.0)
+        let shortAnchor = LexicalAnchor.exact(phrase: "brought to you by", side: .pre, edgeOffsetSeconds: 0.0)
+        // onsets: opener first word at 100 → edge 100+5=105; fragment first word
+        // at 105 → edge 105+0=105.
+        let stream = Self.words("we will be right back brought to you by now", firstWordStart: 100)
+        let result = LexicalAnchorRefiner.refine(
+            proposalStart: 105, proposalEnd: 160,
+            anchors: [shortAnchor, longAnchor], words: stream, episodeDuration: Self.episodeDuration
+        )
+        #expect(abs(result.startTime - 105.0) < 1e-9)
+        #expect(result.trace.startSnapped)
+        #expect(
+            result.trace.startAnchorPhrase == "we will be right back",
+            "the longer phrase must win the same-edge tie (got \(result.trace.startAnchorPhrase ?? "nil"))"
+        )
+        #expect(result.trace.startCandidateCount == 2, "both same-edge matches are counted as candidates")
+    }
+
     // MARK: - No-match no-op
 
     @Test("No qualifying phrase near either edge is a pristine no-op")
@@ -205,6 +233,34 @@ struct LexicalAnchorRefinerTests {
         #expect(result.trace.revertedNoOverlap)
         #expect(!result.trace.startSnapped)
         #expect(!result.trace.endSnapped)
+        #expect(result.endTime > result.startTime)
+    }
+
+    @Test("A crossing rescued by the min-width clamp into a sliver reverts instead of emitting a degenerate window")
+    func crossingSliverReverts() {
+        // Proposal [100, 110]. A pre match snaps the START forward to 108 while
+        // a post match snaps the END back to 105 — the raw edges CROSS
+        // (105 < 108). Unlike `crossingSnapsRevert`, the snapped start (108) is
+        // still LEFT of the proposal end (110), so the min-width clamp would
+        // rescue the crossing into a [108, 109] sliver that still overlaps the
+        // proposal (overlap 1.0 > 0) — the post-clamp overlap check alone would
+        // MISS it and emit the degenerate window with a bogus endSnapped trace.
+        // The raw-crossing guard must revert both edges.
+        let pre = LexicalAnchor.exact(phrase: "we will be right back", side: .pre, edgeOffsetSeconds: 8.0)
+        let post = LexicalAnchor.exact(phrase: "and back to the show", side: .post, edgeOffsetSeconds: -1.0)
+        var stream = Self.words("we will be right back", firstWordStart: 100)   // pre onset 100 → 108
+        stream += Self.words("and back to the show", firstWordStart: 106)        // post onset 106 → 105
+        let result = LexicalAnchorRefiner.refine(
+            proposalStart: 100, proposalEnd: 110,
+            anchors: [pre, post], words: stream, episodeDuration: Self.episodeDuration
+        )
+        #expect(result.startTime == 100.0, "a raw crossing must revert the start to the proposal, not emit a sliver")
+        #expect(result.endTime == 110.0, "a raw crossing must revert the end to the proposal, not emit a sliver")
+        #expect(result.trace.revertedNoOverlap)
+        #expect(!result.trace.startSnapped, "the crossed start snap must not be reported as applied")
+        #expect(!result.trace.endSnapped, "the crossed end snap must not be reported as applied")
+        #expect(result.trace.startDeltaSeconds == nil)
+        #expect(result.trace.endDeltaSeconds == nil)
         #expect(result.endTime > result.startTime)
     }
 
