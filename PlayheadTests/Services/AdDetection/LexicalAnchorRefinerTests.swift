@@ -100,6 +100,45 @@ struct LexicalAnchorRefinerTests {
         #expect(result.trace.startAnchorPhrase == "WNYC is brought to you by")
     }
 
+    // MARK: - Both edges snap (the two-sided happy path)
+
+    @Test("A pre opener AND a resume phrase bracketing a wide ad snap BOTH edges and record BOTH deltas")
+    func bothEdgesSnapOnWideProposalRecordBothDeltas() {
+        // The representative real-world break: an opener frames the start and a
+        // resume phrase frames the end of a wide ad. Every OTHER two-anchor test
+        // in this suite is a REVERT (crossing / sub-min-width sliver); this pins
+        // the SUCCESS path where both snaps survive the collapse + overlap guards
+        // and the result carries startSnapped && endSnapped && !revertedNoOverlap
+        // with both deltas populated — the branch combination no revert test can
+        // reach.
+        let pre = LexicalAnchor.exact(phrase: "we will be right back", side: .pre, edgeOffsetSeconds: 2.0)
+        let post = LexicalAnchor.exact(phrase: "and back to the show", side: .post, edgeOffsetSeconds: -0.6)
+        // pre onset 100 → start edge 100 + 2 = 102 (|102 - 100| = 2 ≤ 15 cap).
+        var stream = Self.words("we will be right back", firstWordStart: 100)
+        // post onset 198 → end edge 198 − 0.6 = 197.4 (|197.4 − 200| = 2.6 ≤ 15).
+        stream += Self.words("and back to the show", firstWordStart: 198)
+        let result = LexicalAnchorRefiner.refine(
+            proposalStart: 100, proposalEnd: 200,
+            anchors: [pre, post], words: stream, episodeDuration: Self.episodeDuration
+        )
+        // Raw window [102, 197.4] is 95.4 s wide (≥ min width) and overlaps the
+        // proposal, so neither guard fires and both snaps stand.
+        #expect(abs(result.startTime - 102.0) < 1e-6, "start snaps to opener onset + offset")
+        #expect(abs(result.endTime - 197.4) < 1e-6, "end snaps to resume onset + offset")
+        #expect(result.trace.startSnapped)
+        #expect(result.trace.endSnapped)
+        #expect(!result.trace.revertedNoOverlap, "a wide, overlapping two-sided snap must NOT revert")
+        #expect(result.trace.startAnchorPhrase == "we will be right back")
+        #expect(result.trace.endAnchorPhrase == "and back to the show")
+        #expect(result.trace.startCandidateCount == 1)
+        #expect(result.trace.endCandidateCount == 1)
+        let startDelta = result.trace.startDeltaSeconds ?? .nan
+        let endDelta = result.trace.endDeltaSeconds ?? .nan
+        #expect(abs(startDelta - 2.0) < 1e-6, "start delta = 102 − 100")
+        #expect(abs(endDelta - (-2.6)) < 1e-6, "end delta = 197.4 − 200")
+        #expect(result.endTime > result.startTime)
+    }
+
     // MARK: - NEGATIVE traps (exact policy must reject near-misses)
 
     @Test("'welcome to the show' must NOT match a resume phrase under exact policy")
