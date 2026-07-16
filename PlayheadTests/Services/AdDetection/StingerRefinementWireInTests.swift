@@ -4,16 +4,17 @@
 //
 // Mirrors the `SpanFinalizerWireInTests` (playhead-p56a) structure:
 //   (a) Flag default / config-init plumbing — `stingerRefinementEnabled`
-//       defaults to `false` in `AdDetectionConfig.default`, and the init
-//       carries the arg through.
+//       defaults to `true` in `AdDetectionConfig.default` (Dan's recorded
+//       2026-07-16 dogfood flip), and the init carries the arg through.
 //   (b) Flag-OFF byte-identity — running `runBackfill` twice on the same
 //       deterministic fixture (once with the flag explicitly OFF AND a
 //       live bank + snapping PCM provider injected, once with the config
-//       left at its default and nothing injected) produces identical
-//       persisted AdWindow rows. Injecting the bank on the OFF arm is the
-//       stronger contract: even with everything wired, the flag gate alone
-//       must keep the refiner unreachable. Also pins that both stinger
-//       trace maps stay empty when the flag is OFF.
+//       left at its default and nothing injected — the default-ON arm
+//       resolves no bank entry for this show, so refinement cannot fire)
+//       produces identical persisted AdWindow rows. Injecting the bank on
+//       the OFF arm is the stronger contract: even with everything wired,
+//       the flag gate alone must keep the refiner unreachable. Also pins
+//       that both stinger trace maps stay empty when the flag is OFF.
 //   (c) Flag-ON wire-up — a synthetic bank entry keyed to the runBackfill
 //       `podcastId` (the production join key) plus a deterministic PCM
 //       provider drives a real end-to-end snap: the persisted window's
@@ -251,7 +252,9 @@ struct StingerRefinementWireInTests {
             hotPathLookahead: 90.0,
             detectorVersion: "test-detection-v1",
             fmBackfillMode: .off
-            // stingerRefinementEnabled omitted → init default applies → false
+            // stingerRefinementEnabled omitted → init default applies →
+            // true (post-flip); this arm stays inert because the bundled
+            // bank has no entry for this test's podcastId.
         )
         let serviceDefault = AdDetectionService(
             store: storeDefault,

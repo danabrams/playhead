@@ -247,8 +247,13 @@ class BuildBankTests(unittest.TestCase):
     def test_grid_detection(self):
         # Show A widths: 60, 90, 60, 60 → all on the 30s grid.
         self.assertEqual(self.bank["shows"][0]["podWidthGridSeconds"], 30.0)
-        # Show B widths: 45, 52, 47 → off-grid.
+        # xsdz.38: the largest observed on-grid multiple ships beside the
+        # grid (90s pod → 3), typed as a JSON int for the Swift loader.
+        self.assertEqual(self.bank["shows"][0]["gridMaxPodMultiple"], 3)
+        self.assertIsInstance(self.bank["shows"][0]["gridMaxPodMultiple"], int)
+        # Show B widths: 45, 52, 47 → off-grid; neither grid key ships.
         self.assertNotIn("podWidthGridSeconds", self.bank["shows"][1])
+        self.assertNotIn("gridMaxPodMultiple", self.bank["shows"][1])
 
     def test_truncated_edge_template_never_ships(self):
         # The 2.0s break would produce a 255-frame pre template; the
@@ -354,6 +359,10 @@ class EmitBankCLITests(unittest.TestCase):
             [e["showKeys"] for e in bank["shows"]],
             [["show-a", "https://feeds.example.com/a"]],
         )
+        # xsdz.38: widths 90, 60, 60 → 30s grid with max multiple 3, both
+        # emitted through the end-to-end CLI path.
+        self.assertEqual(bank["shows"][0]["podWidthGridSeconds"], 30.0)
+        self.assertEqual(bank["shows"][0]["gridMaxPodMultiple"], 3)
         # Content-addressed provenance: sha256 of the exact input bytes.
         self.assertEqual(bank["sources"]["evaluation"], "gold.json")
         self.assertEqual(
