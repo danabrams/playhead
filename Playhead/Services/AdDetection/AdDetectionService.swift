@@ -515,10 +515,14 @@ struct AdDetectionConfig: Sendable {
     /// byte-identical to pre-fl4j behaviour (same OFF invariant
     /// `lexicalAnchorRefinementEnabled` holds).
     ///
-    /// When `true`, each candidate ad span whose transcript contains a curated
-    /// show-agnostic self-promo ACTION phrase (rate/review/subscribe, follow us,
-    /// be a guest, live-show / get-tickets plugs, "new ways to watch", …) has
-    /// its eligibility gate DEMOTED to `.markOnly` — routing it to a
+    /// When `true`, each candidate ad span runs through the ATTENTION →
+    /// VERIFICATION suppressor: a curated show-agnostic self-promo phrase match
+    /// is only a CLUE, and the eligibility gate is DEMOTED to `.markOnly` only
+    /// when a verifier corroborates the show is promoting ITSELF (a STRONG
+    /// phrase like "follow us" is self-corroborating; an AMBIGUOUS event plug
+    /// like "get tickets" / "on tour" demotes only with a first-person /
+    /// show-identity self-reference marker in its local window — a bare match on
+    /// a third-party event ad is NOT demoted). Demotion routes the span to a
     /// play-by-default suggest banner instead of auto-skipping. This is an
     /// ELIGIBILITY change only (boundaries and scores are untouched), and it is
     /// severity-guarded so it can ONLY relax a fully-`.eligible` span; it never
@@ -3729,6 +3733,20 @@ actor AdDetectionService {
         let selfPromoWords: [LexicalWord] = selfPromoBank == nil
             ? []
             : LexicalAnchorRefiner.buildWordStream(chunks: finalChunks)
+        // playhead-fl4j (attention→verification): resolve the show's OWN identity
+        // tokens ONCE per run so an AMBIGUOUS self-promo phrase ("get tickets",
+        // "on tour") can be corroborated by the show naming itself, not only by a
+        // first-person pronoun. Sourced from the cached podcast profile (title +
+        // network) the service already holds; generic filler tokens are dropped
+        // inside `SelfPromoShowIdentity`. Gated on `selfPromoBank == nil` (same as
+        // the word stream) so the flag-OFF path builds nothing — byte-identical
+        // to pre-fl4j.
+        let selfPromoShowIdentity: SelfPromoShowIdentity = selfPromoBank == nil
+            ? .none
+            : SelfPromoShowIdentity(
+                title: currentPodcastProfile?.title,
+                networkId: currentPodcastProfile?.networkId
+            )
         let bracketShowTrust: Double
         if config.bracketRefinementEnabled, !podcastId.isEmpty {
             let trustStore = bracketTrustStoreLazy()
@@ -4306,14 +4324,21 @@ actor AdDetectionService {
             }
 
             // playhead-fl4j: SELF-PROMO suppression (eligibility-side precision
-            // signal). When a candidate ad span's transcript contains a curated
-            // show-agnostic self-promo ACTION phrase (rate/review/subscribe,
-            // follow us, be a guest, live-show / get-tickets plugs, "new ways to
-            // watch", …), demote the gate to `.markOnly` so the span surfaces as
-            // a play-by-default SUGGEST banner instead of auto-skipping — the
-            // show promoting ITSELF is not an ad the user wants removed. This is
-            // an ELIGIBILITY change only: scoring stays honest (the confidences
-            // and promotion track are forwarded verbatim), mirroring the
+            // signal) on an ATTENTION → VERIFICATION shape. A curated
+            // show-agnostic self-promo phrase matching a candidate ad span's
+            // transcript is only ATTENTION ("look here") — a CLUE, not a verdict.
+            // `PromoSuppressor.shouldSuppress` demotes ONLY when a verifier
+            // corroborates that the segment is the show promoting ITSELF: a
+            // STRONG phrase ("follow us", "rate review and subscribe") is
+            // self-corroborating, while an AMBIGUOUS phrase ("get tickets", "on
+            // tour" — which collide with THIRD-PARTY event ads) demotes only when
+            // a first-person / show-identity self-reference marker sits in its
+            // local window. A bare AMBIGUOUS match with no self-reference is a
+            // clue that FAILED verification and is left `.eligible`. On demotion
+            // the gate moves to `.markOnly` so the span surfaces as a
+            // play-by-default SUGGEST banner instead of auto-skipping. This is an
+            // ELIGIBILITY change only: scoring stays honest (the confidences and
+            // promotion track are forwarded verbatim), mirroring the
             // creator-chapter suppressor above.
             //
             // Severity-guarded to `< SkipEligibilityGate.markOnly.severity`
@@ -4334,7 +4359,8 @@ actor AdDetectionService {
                PromoSuppressor.shouldSuppress(
                    span: refinedSpan,
                    transcriptWords: selfPromoWords,
-                   bank: selfPromoBank
+                   bank: selfPromoBank,
+                   showIdentity: selfPromoShowIdentity
                ) {
                 logger.info(
                     "Backfill: [fl4j] self-promo suppression demoting span=\(refinedSpan.id, privacy: .public) from gate=\(decision.eligibilityGate.rawValue, privacy: .public) → markOnly"

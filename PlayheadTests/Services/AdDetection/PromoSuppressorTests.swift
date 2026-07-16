@@ -37,13 +37,19 @@ struct PromoSuppressorTests {
         return LexicalAnchorRefiner.buildWordStream(chunks: [chunk])
     }
 
-    /// Build a bank from display phrases through the real decode/validate path.
-    private func bank(_ phrases: [String]) throws -> SelfPromoBank {
+    /// Build a bank from `(phrase, selfReference-class)` pairs through the real
+    /// decode/validate path.
+    private func bank(_ phrases: [(String, String)]) throws -> SelfPromoBank {
         let payload: [String: Any] = [
-            "schemaVersion": 1,
-            "phrases": phrases.map { ["phrase": $0] },
+            "schemaVersion": 2,
+            "phrases": phrases.map { ["phrase": $0.0, "selfReference": $0.1] },
         ]
         return try SelfPromoBank.decode(JSONSerialization.data(withJSONObject: payload))
+    }
+
+    /// Convenience: build a bank of STRONG (self-evident) phrases.
+    private func bank(_ phrases: [String]) throws -> SelfPromoBank {
+        try bank(phrases.map { ($0, "selfEvident") })
     }
 
     private func span(start: Double = 0, end: Double = 30) -> DecodedSpan {
@@ -71,8 +77,11 @@ struct PromoSuppressorTests {
         #expect(PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: try shippedBank()))
     }
 
-    @Test("A live-show / tickets plug fires")
+    @Test("An ambiguous live-show / tickets plug fires WHEN self-reference corroborates")
     func liveShowPlugFires() throws {
+        // "on tour" / "get tickets" are AMBIGUOUS (they collide with third-party
+        // event ads). Here the first-person "we" in the local window corroborates
+        // that it is the SHOW promoting itself, so it fires.
         let w = words("We are going on tour this fall, get tickets at the box office.")
         #expect(PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: try shippedBank()))
     }
@@ -98,6 +107,82 @@ struct PromoSuppressorTests {
         // real sponsor. No self-promo ACTION verb ⇒ must not suppress.
         let w = words("WNYC Studios is supported by Proof on Broadway. Welcome back to On The Media with Brooke Gladstone.")
         #expect(!PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: try shippedBank()))
+    }
+
+    // MARK: - Attention → verification: the ambiguous class
+
+    /// THE crux of the rework: an AMBIGUOUS phrase is a CLUE, not a verdict. The
+    /// SAME phrase is NOT suppressed in a real third-party event ad (attention
+    /// without verification) but IS suppressed when a first-person self-reference
+    /// corroborates it (attention verified).
+    @Test("Ambiguous phrase: a third-party event ad does NOT fire; self-reference DOES")
+    func ambiguousPhraseRequiresSelfReference() throws {
+        let b = try bank([
+            ("get tickets", "requiresCorroboration"),
+            ("on tour", "requiresCorroboration"),
+        ])
+        // Real THIRD-PARTY event ad — no first-person, no show identity. A bare
+        // lexical hit that MUST NOT demote (this is the precision risk reviewers
+        // flagged and the whole reason for verification).
+        let thirdParty = words("Get tickets to see Taylor Swift on tour at Ticketmaster dot com.")
+        #expect(
+            !PromoSuppressor.shouldSuppress(span: span(), transcriptWords: thirdParty, bank: b),
+            "a real third-party event ad (ambiguous phrase, no self-reference) must NOT be suppressed"
+        )
+        // The SAME ambiguous phrase, now with a first-person self-reference in
+        // the local window ("our") — the show promoting ITSELF — DOES demote.
+        let selfPromo = words("Get tickets to our live show this weekend.")
+        #expect(
+            PromoSuppressor.shouldSuppress(span: span(), transcriptWords: selfPromo, bank: b),
+            "the same ambiguous phrase WITH a first-person self-reference must be suppressed"
+        )
+    }
+
+    /// STRONG phrases carry their own self-reference — they fire with NO
+    /// surrounding first-person marker and NO show identity (self-corroborating).
+    @Test("Strong (self-evident) phrase fires with no surrounding self-reference")
+    func strongPhraseSelfCorroborates() throws {
+        let b = try bank([("rate review and subscribe", "selfEvident")])
+        let w = words("Rate review and subscribe for more episodes.")
+        #expect(
+            PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: b),
+            "a STRONG phrase is self-corroborating — it needs no external self-reference"
+        )
+    }
+
+    /// An ambiguous phrase can also be corroborated by the show naming ITSELF
+    /// (a show-identity token), not only by a first-person pronoun — proving the
+    /// show identity is threaded into verification.
+    @Test("Ambiguous phrase corroborated by a show-identity token fires")
+    func ambiguousCorroboratedByShowIdentity() throws {
+        let b = try bank([("on tour", "requiresCorroboration")])
+        let identity = SelfPromoShowIdentity(title: "Conan O'Brien Needs a Friend")
+        let w = words("Conan is going on tour this fall.")
+        #expect(
+            PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: b, showIdentity: identity),
+            "the show naming itself ('Conan') corroborates an ambiguous plug"
+        )
+        // Without the show identity (and with no first-person marker) the same
+        // words are a clue that FAILS verification.
+        #expect(
+            !PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: b),
+            "without show identity and no first-person marker, the ambiguous plug is NOT suppressed"
+        )
+    }
+
+    /// A self-reference OUTSIDE the local window does not corroborate — the
+    /// window is genuinely local (bounds the precision claim).
+    @Test("A self-reference beyond the local window does NOT corroborate an ambiguous phrase")
+    func selfReferenceOutsideWindowDoesNotCorroborate() throws {
+        let b = try bank([("on tour", "requiresCorroboration")])
+        // "we" at token 0, then 20 filler tokens, then "on tour" — pushing the
+        // pronoun beyond the ±window radius of the match.
+        let filler = Array(repeating: "and", count: 20).joined(separator: " ")
+        let w = words("we \(filler) going on tour")
+        #expect(
+            !PromoSuppressor.shouldSuppress(span: span(), transcriptWords: w, bank: b),
+            "a first-person marker beyond the local window must not corroborate"
+        )
     }
 
     // MARK: - Normalisation parity

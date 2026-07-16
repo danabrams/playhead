@@ -26,6 +26,20 @@
 //     co-occur with genuine sponsors, so a bare self-reference gate false-fires
 //     on real ads (C3/C5). The working signal is the self-promo ACTION verb.
 //
+// ATTENTION → VERIFICATION (schema v2): every phrase is TAGGED with a
+// `selfReference` class that drives whether a bare lexical match is trusted:
+//   • `.selfEvident` (STRONG) — the phrase is inherently the show promoting
+//     ITSELF ("follow us", "rate review and subscribe", "be a guest", "send us
+//     your questions"). It carries the self-reference in the phrase itself, so
+//     the self-reference verifier corroborates it unconditionally.
+//   • `.requiresCorroboration` (AMBIGUOUS) — an event/watch plug that collides
+//     with THIRD-PARTY ads ("get tickets", "on tour", "live show", "live
+//     version", "new ways to watch"). It is NOT inherently self-referential; a
+//     verifier must find an explicit self-reference marker in the local window
+//     before it can demote. A lexical hit alone is a CLUE, never a verdict.
+// The tag is a REQUIRED schema field: a curator adding a phrase must classify
+// it, and an unknown/missing value fails loud (never a silent default).
+//
 // Both the bank and the consuming `PromoSuppressor` match EXACT normalised
 // token sequences only (via `LexicalAnchorNormalizer`) — no fuzzy matching.
 //
@@ -56,17 +70,45 @@ enum SelfPromoBankError: Error, Equatable, CustomStringConvertible {
     }
 }
 
+// MARK: - Self-reference class
+
+/// Whether a bank phrase carries its own self-reference (STRONG, self-evident)
+/// or needs an external self-reference marker to corroborate before it can
+/// demote (AMBIGUOUS). This is the schema tag that drives the
+/// attention→verification split (see the file header and `SelfReferenceVerifier`).
+///
+/// Modelled as a `String`-backed enum like `LexicalAnchorMatchPolicy`: the case
+/// set is closed, and a future class is a fail-loud schema addition rather than
+/// a silent behaviour change.
+enum SelfReferenceClass: String, Sendable, Equatable {
+    /// STRONG. The phrase is inherently the show promoting ITSELF — a
+    /// self-referential call to action ("follow us", "rate review and
+    /// subscribe", "be a guest", "send us your questions"). It carries the
+    /// self-reference in the phrase itself, so `SelfReferenceVerifier`
+    /// corroborates it unconditionally (self-corroborating).
+    case selfEvident
+    /// AMBIGUOUS. The phrase is an event/watch plug that collides with
+    /// THIRD-PARTY ads ("get tickets", "on tour", "live show", "live version",
+    /// "new ways to watch"). It is NOT inherently self-referential, so it must
+    /// be corroborated by an explicit self-reference marker in its local window
+    /// before it can demote.
+    case requiresCorroboration
+}
+
 // MARK: - Phrase value type
 
 /// One curated self-promo action phrase: the display phrase (provenance + the
-/// hermetic-pin key) plus its normalised token sequence — the exact tokens the
-/// suppressor matches word-for-word.
+/// hermetic-pin key), its normalised token sequence — the exact tokens the
+/// suppressor matches word-for-word — and its self-reference class.
 struct SelfPromoPhrase: Sendable, Equatable {
     /// Human-readable phrase (provenance + the hermetic-pin key).
     let phrase: String
     /// `phrase` run through `LexicalAnchorNormalizer.normalizePhrase` — the
     /// exact token sequence `PromoSuppressor` matches contiguously.
     let tokens: [String]
+    /// Whether this phrase is self-corroborating (STRONG) or needs an external
+    /// self-reference marker to corroborate before demoting (AMBIGUOUS).
+    let selfReference: SelfReferenceClass
 }
 
 // MARK: - SelfPromoBank
@@ -75,8 +117,10 @@ struct SelfPromoPhrase: Sendable, Equatable {
 /// phrase set applied to every episode (the signal is the self-referential
 /// action verb, not a per-show entity — see the file header).
 struct SelfPromoBank: Sendable, Equatable {
-    /// The bank schema version this binary understands.
-    static let supportedSchemaVersion = 1
+    /// The bank schema version this binary understands. Bumped 1 → 2 for the
+    /// attention→verification rework: every phrase now carries a REQUIRED
+    /// `selfReference` class (`.selfEvident` / `.requiresCorroboration`).
+    static let supportedSchemaVersion = 2
     /// Bundle resource name (no extension).
     static let resourceName = "SelfPromoBank"
 
@@ -119,10 +163,15 @@ struct SelfPromoBank: Sendable, Equatable {
 
     // MARK: - Raw payload (JSON mirror)
 
-    /// Direct JSON mirror; validation happens in `init(payload:)`.
+    /// Direct JSON mirror; validation happens in `init(payload:)`. The
+    /// `selfReference` class is decoded as a raw `String` here and validated
+    /// into `SelfReferenceClass` in `init(payload:)` so an unknown value yields
+    /// a field-identifying `.malformed` reason rather than a generic decode
+    /// error, and a MISSING field fails loud (the property is non-optional).
     private struct Payload: Decodable {
         struct Phrase: Decodable {
             let phrase: String
+            let selfReference: String
         }
         let schemaVersion: Int
         let phrases: [Phrase]
@@ -163,7 +212,19 @@ struct SelfPromoBank: Sendable, Equatable {
                     "duplicate phrase \"\(raw.phrase)\" (normalises to \"\(tokenKey)\") — a second identical matcher is inert"
                 )
             }
-            validated.append(SelfPromoPhrase(phrase: raw.phrase, tokens: tokens))
+            // The self-reference class is REQUIRED and must be a known value.
+            // An unknown/typo'd class fails loud with the phrase named — a
+            // curator adding a phrase MUST classify it (never a silent default).
+            guard let selfReference = SelfReferenceClass(rawValue: raw.selfReference) else {
+                throw SelfPromoBankError.malformed(
+                    "phrase \"\(raw.phrase)\": unknown selfReference \"\(raw.selfReference)\" (expected \"selfEvident\" or \"requiresCorroboration\")"
+                )
+            }
+            validated.append(SelfPromoPhrase(
+                phrase: raw.phrase,
+                tokens: tokens,
+                selfReference: selfReference
+            ))
         }
 
         self.schemaVersion = payload.schemaVersion

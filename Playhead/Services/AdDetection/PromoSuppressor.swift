@@ -8,6 +8,25 @@
 // `.markOnly` so it surfaces as a play-by-default SUGGEST banner instead of
 // auto-skipping.
 //
+// ATTENTION → VERIFICATION (the design principle, Dan): a lexical hit is a CLUE
+// about where to look, NOT a final determination. This evaluator does NOT treat
+// a bare bank-phrase match as the verdict. Instead:
+//
+//   1. ATTENTION. A bank phrase whose normalised tokens appear contiguously in
+//      the span's token slice is a CANDIDATE ("look here") — never a demotion on
+//      its own.
+//   2. VERIFICATION. Each candidate is handed to a list of `SelfPromoVerifier`s
+//      (see `SelfPromoVerifier.swift`) that must independently corroborate that
+//      the segment is the show promoting ITSELF. The one verifier that ships
+//      today (`SelfReferenceVerifier`) confirms a STRONG (`.selfEvident`) phrase
+//      unconditionally (it carries its own self-reference) and confirms an
+//      AMBIGUOUS (`.requiresCorroboration`) phrase ONLY when a first-person or
+//      show-identity marker sits in its local window. A bare AMBIGUOUS match
+//      with no corroboration is a clue that FAILED verification — no demotion.
+//   3. DECISION. The evaluator returns `true` (suppress) iff SOME candidate is
+//      corroborated by SOME verifier (OR composition — a future semantic /
+//      position verifier is additive; see the seam in `SelfPromoVerifier.swift`).
+//
 // Design (mirrors `CreatorChapterSuppressionEvaluator`):
 //
 // 1. Pure value type, no I/O. Stateless — every entry point is `static`. Lives
@@ -18,7 +37,8 @@
 //
 // 2. Reads only the span geometry and the transcript word stream the ledger
 //    already carries (`LexicalWord`, built from the same `TranscriptChunk`s the
-//    `LexicalScanner` consumes via `LexicalAnchorRefiner.buildWordStream`). No
+//    `LexicalScanner` consumes via `LexicalAnchorRefiner.buildWordStream`), plus
+//    the show identity threaded from the podcast profile at the call site. No
 //    audio decode.
 //
 // 3. EXACT normalised-token matching only. A bank phrase fires iff its
@@ -35,15 +55,25 @@
 
 import Foundation
 
-/// Decides whether a decoded span's transcript contains a curated self-promo
-/// action phrase — the signal to demote its eligibility gate to `.markOnly`.
+/// Decides whether a decoded span's transcript is the show promoting ITSELF —
+/// the signal to demote its eligibility gate to `.markOnly`. A curated bank
+/// phrase matching is only ATTENTION; a `SelfPromoVerifier` must corroborate the
+/// candidate before this returns `true`.
 ///
 /// Stateless: every entry point is `static`. Lives as an enum namespace to
 /// match `CreatorChapterSuppressionEvaluator`'s pattern.
 enum PromoSuppressor {
 
+    /// The verifier list applied to each attention candidate. Ships with the one
+    /// verifier the bead builds — self-reference (first-person / show identity).
+    /// The seam is explicit: appending a future `SelfPromoVerifier` (semantic
+    /// topic-continuity, bead playhead-rqu6; or a position/fusion corroborator)
+    /// adds a corroborator without touching the attention loop below.
+    static let defaultVerifiers: [any SelfPromoVerifier] = [SelfReferenceVerifier()]
+
     /// Whether `span` should have its eligibility gate demoted because its
-    /// transcript contains a self-promo action phrase from `bank`.
+    /// transcript is the show promoting ITSELF: a curated self-promo phrase
+    /// matches (ATTENTION) AND a verifier corroborates it (VERIFICATION).
     ///
     /// Returns `false` (no suppression) when:
     ///   * `bank.phrases` is empty (inert bank — defensive; the loader rejects
@@ -52,18 +82,29 @@ enum PromoSuppressor {
     ///     undefined, so we conservatively decline.
     ///   * No transcript word overlaps the span's `[startTime, endTime]`.
     ///   * No bank phrase's normalised token sequence appears contiguously in
-    ///     the span's word slice.
+    ///     the span's word slice (no candidate).
+    ///   * A candidate matches but NO verifier corroborates it — i.e. an
+    ///     AMBIGUOUS phrase with no self-reference marker in its local window.
+    ///     The lexical hit was a clue that failed verification.
     ///
     /// - Parameters:
     ///   - span: the decoded span whose gate is being decided (geometry only).
     ///   - transcriptWords: the episode word stream (whole episode is fine — it
     ///     is sliced to the span here, so a self-promo phrase ELSEWHERE in the
     ///     episode does not suppress THIS span).
-    ///   - bank: the curated show-agnostic self-promo action-phrase bank.
+    ///   - bank: the curated show-agnostic, class-tagged self-promo phrase bank.
+    ///   - showIdentity: the show's own identity tokens (title / network /
+    ///     handle), threaded from the podcast profile at the call site so an
+    ///     AMBIGUOUS phrase can be corroborated by the show naming itself.
+    ///     Defaults to `.none` (only first-person markers can corroborate).
+    ///   - verifiers: the corroboration steps (default: self-reference). Injected
+    ///     for tests and for the extensibility seam.
     static func shouldSuppress(
         span: DecodedSpan,
         transcriptWords: [LexicalWord],
-        bank: SelfPromoBank
+        bank: SelfPromoBank,
+        showIdentity: SelfPromoShowIdentity = .none,
+        verifiers: [any SelfPromoVerifier] = PromoSuppressor.defaultVerifiers
     ) -> Bool {
         guard !bank.phrases.isEmpty else { return false }
 
@@ -78,36 +119,43 @@ enum PromoSuppressor {
             .map(\.norm)
         guard !spanTokens.isEmpty else { return false }
 
-        for phrase in bank.phrases where containsSubsequence(spanTokens, phrase.tokens) {
-            return true
+        let context = SelfPromoContext(spanTokens: spanTokens, showIdentity: showIdentity)
+
+        // ATTENTION: walk every contiguous match of every bank phrase. Each is a
+        // candidate ("look here"), NEVER a verdict on its own. A phrase can match
+        // at several positions with different local windows, so all positions are
+        // considered — the demotion fires on the FIRST corroborated candidate.
+        for phrase in bank.phrases {
+            let n = phrase.tokens.count
+            guard n >= 1, spanTokens.count >= n else { continue }
+            let lastStart = spanTokens.count - n
+            var i = 0
+            while i <= lastStart {
+                if matches(spanTokens, phrase.tokens, at: i) {
+                    let candidate = SelfPromoCandidate(phrase: phrase, matchRange: i..<(i + n))
+                    // VERIFICATION: a bare lexical match demotes ONLY if some
+                    // verifier corroborates it (OR composition — the seam).
+                    if verifiers.contains(where: { $0.corroborates(candidate, in: context) }) {
+                        return true
+                    }
+                }
+                i += 1
+            }
         }
         return false
     }
 
     // MARK: - Private
 
-    /// Whether `needle` appears as a CONTIGUOUS subsequence of `haystack` (exact
-    /// per-token match). Same sliding-window scan `LexicalAnchorRefiner`'s
-    /// `edgeMatches` uses; `needle` is guaranteed non-empty by the bank loader's
-    /// `>= 2` token floor, but the `>= 1` guard keeps this total for any caller.
-    private static func containsSubsequence(_ haystack: [String], _ needle: [String]) -> Bool {
-        let n = needle.count
-        guard n >= 1, haystack.count >= n else { return false }
-        let lastStart = haystack.count - n
-        var i = 0
-        while i <= lastStart {
-            var matched = true
-            var k = 0
-            while k < n {
-                if haystack[i + k] != needle[k] {
-                    matched = false
-                    break
-                }
-                k += 1
-            }
-            if matched { return true }
-            i += 1
+    /// Whether `needle` matches `haystack` exactly, token-for-token, starting at
+    /// `start`. Same per-token compare `LexicalAnchorRefiner`'s `edgeMatches`
+    /// uses; the caller has already bounds-checked `start + needle.count`.
+    private static func matches(_ haystack: [String], _ needle: [String], at start: Int) -> Bool {
+        var k = 0
+        while k < needle.count {
+            if haystack[start + k] != needle[k] { return false }
+            k += 1
         }
-        return false
+        return true
     }
 }
