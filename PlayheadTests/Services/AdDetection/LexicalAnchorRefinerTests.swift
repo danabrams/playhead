@@ -374,6 +374,29 @@ struct LexicalAnchorRefinerTests {
         #expect(result.endTime > result.startTime, "clamp preserves a non-degenerate window")
     }
 
+    @Test("A preroll match whose snapped start goes negative is clamped to 0, preserving end > start")
+    func prerollMatchedStartClampsToZero() {
+        // Symmetric to `matchedEdgeSnapClampsToEpisodeEnd` but on the LOW edge:
+        // a preroll pre-opener near t=0 with a negative offset drives the raw
+        // snapped start below 0; the `max(0.0, …)` clamp must pin it to 0 while
+        // leaving the (unmatched) end untouched and the window non-degenerate.
+        let anchor = LexicalAnchor.exact(phrase: "we will be right back", side: .pre, edgeOffsetSeconds: -2.0)
+        // First word "we" at 1.0 ⇒ raw snapped start = 1 + (-2) = -1 < 0.
+        // Move cap: |-1 - 3| = 4 ≤ 15, so the match qualifies.
+        let stream = Self.words("we will be right back", firstWordStart: 1.0)
+        let result = LexicalAnchorRefiner.refine(
+            proposalStart: 3, proposalEnd: 60,
+            anchors: [anchor], words: stream, episodeDuration: Self.episodeDuration
+        )
+        #expect(result.trace.startSnapped, "the in-cap preroll opener snaps the start")
+        #expect(result.startTime == 0.0, "the negative snapped start is clamped to 0")
+        #expect(result.endTime == 60.0, "end has no post match and is untouched")
+        #expect(!result.trace.endSnapped)
+        #expect(result.endTime > result.startTime, "clamp preserves a non-degenerate window")
+        let delta = result.trace.startDeltaSeconds ?? .nan
+        #expect(abs(delta - (0.0 - 3.0)) < 1e-6, "recorded start delta is 0 − proposalStart")
+    }
+
     @Test("An empty word stream is a pristine no-op that does not clamp an out-of-range proposal")
     func emptyWordStreamNoOp() {
         // Empty stream ⇒ no snap on either edge. The proposal END also sits past

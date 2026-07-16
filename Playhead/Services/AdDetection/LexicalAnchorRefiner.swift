@@ -48,8 +48,11 @@ struct LexicalRefinementTrace: Sendable, Equatable {
     var startSnapped = false
     /// The break-end edge snapped to a matched post-side anchor.
     var endSnapped = false
-    /// Refinement abandoned overlap with the proposal — both edges reverted
-    /// (snap flags/phrases/deltas are cleared when this is set).
+    /// Refinement was abandoned and both edges reverted to the proposal —
+    /// either the snapped window collapsed below `minimumRefinedWidthSeconds`
+    /// (raw pre-clamp width, added in R4) or it abandoned overlap with the
+    /// proposal. Snap flags/phrases/deltas are cleared when this is set. Field
+    /// name kept for parity with `StingerRefinementTrace.revertedNoOverlap`.
     var revertedNoOverlap = false
     /// Display phrase of the pre anchor the start edge snapped to (nil unless
     /// `startSnapped`).
