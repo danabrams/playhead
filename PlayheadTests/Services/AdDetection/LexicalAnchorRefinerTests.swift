@@ -264,6 +264,61 @@ struct LexicalAnchorRefinerTests {
         #expect(result.endTime > result.startTime)
     }
 
+    @Test("A NON-crossing snap whose raw width is below the min-width floor reverts instead of emitting a rescued sliver")
+    func subMinWidthSnapReverts() {
+        // Proposal [100, 110]. A pre match snaps the START to 108.0 and a post
+        // match snaps the END to 108.5 — the raw edges do NOT cross (108.5 >
+        // 108.0), so the `<= 0` crossing test alone would pass them through, but
+        // the raw width (0.5s) is below the 1.0s min-width floor. Without the
+        // sub-min-width guard the clamp would rescue this into a [108.0, 109.0]
+        // sliver that NEITHER anchor supports (the post anchor pointed at 108.5,
+        // not the 109.0 clamp floor) and that still overlaps the proposal
+        // (overlap 1.0 > 0) — the post-clamp overlap check would MISS it and
+        // emit the degenerate window with a bogus both-snapped trace. This is the
+        // same pathology as `crossingSliverReverts`, one step to the right of the
+        // crossing point; both edges must revert.
+        let pre = LexicalAnchor.exact(phrase: "we will be right back", side: .pre, edgeOffsetSeconds: 8.0)
+        let post = LexicalAnchor.exact(phrase: "and back to the show", side: .post, edgeOffsetSeconds: -0.5)
+        var stream = Self.words("we will be right back", firstWordStart: 100)   // pre onset 100 → 108.0
+        stream += Self.words("and back to the show", firstWordStart: 109)        // post onset 109 → 108.5
+        let result = LexicalAnchorRefiner.refine(
+            proposalStart: 100, proposalEnd: 110,
+            anchors: [pre, post], words: stream, episodeDuration: Self.episodeDuration
+        )
+        #expect(result.startTime == 100.0, "a sub-min-width raw window must revert the start, not emit a sliver")
+        #expect(result.endTime == 110.0, "a sub-min-width raw window must revert the end, not emit a sliver")
+        #expect(result.trace.revertedNoOverlap)
+        #expect(!result.trace.startSnapped, "the collapsed start snap must not be reported as applied")
+        #expect(!result.trace.endSnapped, "the collapsed end snap must not be reported as applied")
+        #expect(result.trace.startDeltaSeconds == nil)
+        #expect(result.trace.endDeltaSeconds == nil)
+        #expect(result.endTime > result.startTime)
+    }
+
+    @Test("A single-edge snap that lands within the min-width floor of the fixed opposite edge reverts (no unattributed widening)")
+    func singleEdgeSnapWithinMinWidthReverts() {
+        // Proposal [100, 110]. Only a pre match fires, snapping the START forward
+        // to 109.5 — within 0.5s of the FIXED proposal end (110), so the raw
+        // window is 0.5s wide. Pre-fix the min-width clamp rescued this to
+        // [109.5, 110.5], silently moving the UNSNAPPED end forward +0.5s and
+        // recording an endDelta with endSnapped=false (an unattributed edge
+        // movement). The sub-min-width guard reverts instead, so an unmatched
+        // edge is never dragged by the min-width floor.
+        let pre = LexicalAnchor.exact(phrase: "we will be right back", side: .pre, edgeOffsetSeconds: 9.5)
+        let stream = Self.words("we will be right back", firstWordStart: 100)   // pre onset 100 → 109.5
+        let result = LexicalAnchorRefiner.refine(
+            proposalStart: 100, proposalEnd: 110,
+            anchors: [pre], words: stream, episodeDuration: Self.episodeDuration
+        )
+        #expect(result.startTime == 100.0, "start reverts (raw window below min width)")
+        #expect(result.endTime == 110.0, "the unsnapped end must NOT be dragged forward by the min-width clamp")
+        #expect(result.trace.revertedNoOverlap)
+        #expect(!result.trace.startSnapped)
+        #expect(result.trace.endDeltaSeconds == nil, "no unattributed end delta")
+        #expect(result.trace.startDeltaSeconds == nil)
+        #expect(result.endTime > result.startTime)
+    }
+
     @Test("Degenerate inputs (end <= start, non-finite, tiny episode) are pass-through no-ops")
     func degenerateInputsNoOp() {
         let anchor = LexicalAnchor.exact(phrase: "we will be right back", side: .pre, edgeOffsetSeconds: 0.0)

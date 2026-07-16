@@ -151,16 +151,22 @@ enum LexicalAnchorRefiner {
             return Result(startTime: proposalStart, endTime: proposalEnd, trace: trace)
         }
 
-        // Independent per-edge snaps can CROSS: a pre snap can land at or after
-        // a post snap (a start edge dragged past an end edge on contradictory
-        // evidence — e.g. a resume phrase transcribed before an opener phrase).
-        // The minimum-width clamp below would otherwise "rescue" such a crossing
-        // into a degenerate `minimumRefinedWidthSeconds` sliver that STILL
-        // overlaps the proposal, hiding the crossing from the overlap check and
-        // emitting an unsupported window with a misleading (endSnapped) trace.
-        // Detect the crossing on the RAW snapped edges (pre-clamp) so it reverts
-        // both edges, honouring the revert-on-crossing contract.
-        let crossedRaw = newEnd <= newStart
+        // Independent per-edge snaps can COLLAPSE the window: a pre snap can land
+        // at, past, or within `minimumRefinedWidthSeconds` of a post snap (a start
+        // edge dragged toward/past an end edge on contradictory evidence — e.g. a
+        // resume phrase transcribed at, before, or barely after an opener phrase).
+        // The minimum-width clamp below would otherwise "rescue" such a collapse
+        // into a degenerate `minimumRefinedWidthSeconds` sliver that STILL overlaps
+        // the proposal, hiding the collapse from the overlap check and emitting a
+        // window NEITHER anchor supports (the clamp floor, not the snapped edge)
+        // with a misleading (both-snapped) trace. Detect it on the RAW snapped
+        // edges (pre-clamp): a raw width below the min-width floor — the SAME
+        // feasibility threshold the stinger pair enumerator applies (`end - start
+        // < minimumRefinedWidthSeconds`) — reverts both edges, honouring the
+        // revert-on-collapse contract. A bare `<= 0` crossing test would miss the
+        // non-crossing `(0, minimumRefinedWidthSeconds)` slivers the clamp
+        // silently widens into the same unsupported window.
+        let rawWidthBelowMinimum = newEnd - newStart < minimumRefinedWidthSeconds
 
         // Clamp to the episode. Order is load-bearing: the end clamp's
         // `max(newStart + minimumRefinedWidthSeconds, …)` floor runs after the
@@ -168,14 +174,14 @@ enum LexicalAnchorRefiner {
         newStart = max(0.0, min(newStart, episodeDuration - minimumRefinedWidthSeconds))
         newEnd = max(newStart + minimumRefinedWidthSeconds, min(newEnd, episodeDuration))
 
-        // Revert guard: refinement must not emit a crossed window (caught on the
+        // Revert guard: refinement must not emit a collapsed window (caught on the
         // raw edges above) nor abandon overlap with the proposal evidence (an
         // out-of-range proposal the clamp can push clear of the proposal). With
-        // both edges independently snapped (e.g. a start snapped forward crossing
-        // an end snapped back on a narrow proposal), either condition reverts
+        // both edges independently snapped (e.g. a start snapped forward colliding
+        // with an end snapped back on a narrow proposal), either condition reverts
         // BOTH edges (a one-sided keep would fabricate an unsupported window).
         let overlap = min(newEnd, proposalEnd) - max(newStart, proposalStart)
-        if crossedRaw || overlap <= 0 {
+        if rawWidthBelowMinimum || overlap <= 0 {
             trace.revertedNoOverlap = true
             trace.startSnapped = false
             trace.endSnapped = false
