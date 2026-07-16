@@ -77,6 +77,22 @@ SUPERSEDED_LEDGER_IDS = {
 
 REPLACEMENT_START_TOLERANCE_SECONDS = 5.0
 
+# Rows reclassified OUT of skip-scope entirely — neither a gold break nor a
+# content veto, just unlabeled and deferred to the ad-gradient/banner work.
+# Keyed by ledger id -> reason. Unlike SUPERSEDED_LEDGER_IDS these need no
+# replacement (the region becomes unknown_elsewhere). Each id must be present
+# in the inputs or promotion fails loudly (guards against a stale typo).
+EXCLUDED_LEDGER_IDS = {
+    "danshow-conan-2026-07-06-danny-mcbride-returns-3666": (
+        "6.3s SiriusXM network self-promo inside end credits — banner-not-skip "
+        "ad-gradient grey area, tracked in playhead-fl4j (2026-07-16)"
+    ),
+    "danshow-conan-2026-07-13-mick-jagger-3850": (
+        "3.8s SiriusXM network self-promo inside end credits — banner-not-skip "
+        "ad-gradient grey area, tracked in playhead-fl4j (2026-07-16)"
+    ),
+}
+
 
 class PromotionError(RuntimeError):
     pass
@@ -168,6 +184,28 @@ def apply_supersessions(rows: list[dict]) -> tuple[list[dict], list[dict]]:
                 "superseded_ledger_id": sid,
             }
         )
+    return remaining, records
+
+
+def apply_exclusions(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Drop rows named in EXCLUDED_LEDGER_IDS (reclassified out of skip-scope).
+    Each named id must be present or promotion fails loudly."""
+    remaining: list[dict] = []
+    dropped: set[str] = set()
+    for row in rows:
+        if row["id"] in EXCLUDED_LEDGER_IDS:
+            dropped.add(row["id"])
+            continue
+        remaining.append(row)
+    missing = set(EXCLUDED_LEDGER_IDS) - dropped
+    if missing:
+        raise PromotionError(
+            f"excluded ledger ids not present in inputs: {sorted(missing)}"
+        )
+    records = [
+        {"excluded_ledger_id": sid, "reason": EXCLUDED_LEDGER_IDS[sid]}
+        for sid in sorted(dropped)
+    ]
     return remaining, records
 
 
@@ -354,9 +392,11 @@ def main(argv: list[str] | None = None) -> int:
             seen_ids.add(row["id"])
             rows.append(row)
     rows.sort(key=lambda r: (r["episode_id"], r["current_start_seconds"]))
+    rows, exclusions = apply_exclusions(rows)
     rows, supersessions = apply_supersessions(rows)
     rows = apply_merges(rows)
     sources = {
+        "exclusions": exclusions,
         "pairs": [
             {
                 "ledger": ledger_path.name,

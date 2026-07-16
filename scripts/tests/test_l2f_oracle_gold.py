@@ -231,6 +231,29 @@ class SupersessionTests(unittest.TestCase):
         self.assertEqual(remaining, rows)
         self.assertEqual(records, [])
 
+    def test_exclusion_drops_and_records(self):
+        rows = [
+            self._row("promo", "ep", "rebounded", 3850.0, 3854.0),
+            self._row("real", "ep", "rebounded", 100.0, 190.0),
+        ]
+        with mock.patch.dict(PROMOTE.EXCLUDED_LEDGER_IDS, {"promo": "banner"}, clear=True):
+            remaining, records = PROMOTE.apply_exclusions(rows)
+        self.assertEqual({r["id"] for r in remaining}, {"real"})
+        self.assertEqual(records, [{"excluded_ledger_id": "promo", "reason": "banner"}])
+
+    def test_exclusion_missing_id_raises(self):
+        rows = [self._row("real", "ep", "rebounded", 100.0, 190.0)]
+        with mock.patch.dict(PROMOTE.EXCLUDED_LEDGER_IDS, {"absent": "x"}, clear=True):
+            with self.assertRaises(PROMOTE.PromotionError):
+                PROMOTE.apply_exclusions(rows)
+
+    def test_no_exclusions_is_identity(self):
+        rows = [self._row("a", "ep", "rebounded", 0.0, 101.3)]
+        with mock.patch.dict(PROMOTE.EXCLUDED_LEDGER_IDS, {}, clear=True):
+            remaining, records = PROMOTE.apply_exclusions(rows)
+        self.assertEqual(remaining, rows)
+        self.assertEqual(records, [])
+
 
 class ScoringTests(unittest.TestCase):
     def _evaluation(self):
