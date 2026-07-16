@@ -6,6 +6,7 @@
  "schemaVersion": 1,
  "shows": [
   {
+   "gridMaxPodMultiple": 3,
    "podWidthGridSeconds": 30.0,
    "post": {
     "confidence": 0.654,
@@ -1461,6 +1462,6 @@
   "evaluation": "earaudit-oracle-gold-c45c86fced101048e0ecc747d57fc27d170fc910844dce96a8cfbacc906f3565.json",
   "evaluationSha256": "c45c86fced101048e0ecc747d57fc27d170fc910844dce96a8cfbacc906f3565",
   "snapshotsManifest": "TestFixtures/Corpus/Snapshots/manifest.json",
-  "snapshotsManifestSha256": "d22877f3e7e4d4ca6e546a7005259ff0c1ac709867c00cbed8e98873150c406a"
+  "snapshotsManifestSha256": "19ee542b48b04660d6e8d154a718b72b60f2f233857c1008c032c064c65a4236"
  }
 }

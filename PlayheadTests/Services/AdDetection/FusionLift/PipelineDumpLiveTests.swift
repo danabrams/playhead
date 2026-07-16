@@ -994,6 +994,16 @@ private struct DumpAdWindow: Encodable {
 /// keeps the dump schema locked in this file alongside every other wire
 /// shape, so a production-side trace refactor breaks here first instead of
 /// silently in a downstream Python reader.
+///
+/// playhead-xsdz.38 (v4 joint recipe) adds four optional fields explaining
+/// the joint decision: per-edge evidence-candidate counts, the chosen
+/// pair's score, and which grid term (`"bonus"`/`"penalty"`) the winning
+/// pair carried. All follow the absent-when-nil convention. NOTE for
+/// offline comparators diffing dumps against oracle traces: the oracle
+/// records `pair_score` (0.0) even on zero-evidence consults, while the
+/// port keeps the trace pristine there (preserving the OFF-vs-no-snap
+/// distinction the wire-in pins) — treat an absent `pairScore` with no
+/// candidate counts as oracle `pair_score == 0.0`.
 private struct DumpStingerRefinement: Encodable {
     let startSnapped: Bool
     let endSnapped: Bool
@@ -1003,6 +1013,10 @@ private struct DumpStingerRefinement: Encodable {
     let endPeak: Double?
     let startDeltaSeconds: Double?
     let endDeltaSeconds: Double?
+    let startCandidateCount: Int?
+    let endCandidateCount: Int?
+    let pairScore: Double?
+    let gridTermApplied: String?
 
     init(_ trace: StingerRefinementTrace) {
         startSnapped = trace.startSnapped
@@ -1013,6 +1027,10 @@ private struct DumpStingerRefinement: Encodable {
         endPeak = trace.endPeak
         startDeltaSeconds = trace.startDeltaSeconds
         endDeltaSeconds = trace.endDeltaSeconds
+        startCandidateCount = trace.startCandidateCount
+        endCandidateCount = trace.endCandidateCount
+        pairScore = trace.pairScore
+        gridTermApplied = trace.gridTermApplied
     }
 
     init(
@@ -1023,7 +1041,11 @@ private struct DumpStingerRefinement: Encodable {
         startPeak: Double?,
         endPeak: Double?,
         startDeltaSeconds: Double?,
-        endDeltaSeconds: Double?
+        endDeltaSeconds: Double?,
+        startCandidateCount: Int?,
+        endCandidateCount: Int?,
+        pairScore: Double?,
+        gridTermApplied: String?
     ) {
         self.startSnapped = startSnapped
         self.endSnapped = endSnapped
@@ -1033,6 +1055,10 @@ private struct DumpStingerRefinement: Encodable {
         self.endPeak = endPeak
         self.startDeltaSeconds = startDeltaSeconds
         self.endDeltaSeconds = endDeltaSeconds
+        self.startCandidateCount = startCandidateCount
+        self.endCandidateCount = endCandidateCount
+        self.pairScore = pairScore
+        self.gridTermApplied = gridTermApplied
     }
 }
 
@@ -2619,12 +2645,14 @@ private extension PipelineDumpLiveTests {
         // trace, matching the default-encoder convention for nil optionals.
         let spanFinalizerConstraintsByWindowId =
             await service.spanFinalizerConstraintsByWindowIdForTesting()
-        // playhead-l2f.6: per-AdWindow stinger refinement trace. Empty map
-        // when `config.stingerRefinementEnabled == false` (the production
-        // .default this dump runs under — see `productionConfigStateIsHeld`).
-        // Each entry surfaces in the dump's `stingerRefinement` key when
-        // present; nil/missing otherwise, matching the default-encoder
-        // convention for nil optionals.
+        // playhead-l2f.6: per-AdWindow stinger refinement trace. The
+        // production .default this dump runs under ships the flag ON
+        // (2026-07-16 dogfood flip — see `productionConfigStateIsHeld`),
+        // so bank-show windows carry live v4 traces here; the map is empty
+        // only when the flag is OFF or no window's show resolved a bank
+        // entry. Each entry surfaces in the dump's `stingerRefinement` key
+        // when present; nil/missing otherwise, matching the
+        // default-encoder convention for nil optionals.
         let stingerRefinementByWindowId =
             await service.stingerRefinementTraceByWindowIdForTesting()
 
@@ -2678,8 +2706,10 @@ private extension PipelineDumpLiveTests {
                 let trace = spanFinalizerConstraintsByWindowId[window.id]
                 let spanFinalizerConstraints: [String]? =
                     (trace?.isEmpty ?? true) ? nil : trace
-                // playhead-l2f.6: nil under the production .default (flag
-                // OFF) so the key is omitted from the encoded object.
+                // playhead-l2f.6: nil (key omitted from the encoded
+                // object) when this window recorded no trace — flag OFF,
+                // or no bank entry for the show. Present with live v4
+                // fields under the shipping flag-ON default.
                 let stingerRefinement = stingerRefinementByWindowId[window.id]
                     .map(DumpStingerRefinement.init)
                 return DumpAdWindow(
@@ -4034,9 +4064,11 @@ struct PipelineDumpEncodingTests {
 
     @Test("DumpAdWindow omits stingerRefinement when nil (flag-OFF)")
     func dumpAdWindowOmitsStingerRefinementWhenNil() throws {
-        // Flag OFF — the production `.default` arm. The live dump never
-        // populates the field; the default `JSONEncoder` strategy omits
-        // the key entirely (does NOT emit explicit `null`), matching the
+        // The no-trace arm: flag explicitly OFF, or — under the shipping
+        // flag-ON default (2026-07-16 dogfood flip) — a window whose show
+        // resolved no bank entry. Either way the live dump leaves the
+        // field nil and the default `JSONEncoder` strategy omits the key
+        // entirely (does NOT emit explicit `null`), matching the
         // pre-existing optional-field convention used by every dump
         // shipped so far.
         let window = DumpAdWindow(
@@ -4060,21 +4092,23 @@ struct PipelineDumpEncodingTests {
         #expect(!parsed.keys.contains("stingerRefinement"))
         // Defense in depth: the raw JSON text must not contain the key in
         // any form so downstream `dict.get("stingerRefinement")` readers
-        // see None on the OFF arm.
+        // see None on no-trace windows.
         let json = try #require(String(data: data, encoding: .utf8))
         #expect(!json.contains("stingerRefinement"))
     }
 
     @Test("DumpAdWindow encodes stingerRefinement as a JSON object when present (flag-ON)")
     func dumpAdWindowEncodesStingerRefinementWhenPresent() throws {
-        // Flag ON — the experimental arm. The live dump pulls the
+        // Flag ON — the production arm. The live dump pulls the
         // per-window trace from
         // `AdDetectionService.stingerRefinementTraceByWindowIdForTesting()`
-        // and surfaces it as a nested object. A grid-applied one-sided
-        // snap is used so all four booleans plus the optional peak/delta
-        // fields are exercised in one shape: startPeak present +
-        // endPeak absent (only the start side snapped), both deltas
-        // present (the grid moved the end edge too).
+        // and surfaces it as a nested object. A derived-partner one-sided
+        // snap (v4 joint shape) is used so the booleans plus every
+        // optional-field group are exercised in one object: startPeak
+        // present + endPeak absent (only the start side snapped), both
+        // deltas present (the derived candidate moved the end edge too),
+        // both candidate counts + pairScore + gridTermApplied present
+        // (playhead-xsdz.38 joint-decision fields).
         let window = DumpAdWindow(
             startTime: 100.0,
             endTime: 130.5,
@@ -4094,7 +4128,11 @@ struct PipelineDumpEncodingTests {
                 startPeak: 0.874,
                 endPeak: nil,
                 startDeltaSeconds: -6.42,
-                endDeltaSeconds: 2.08
+                endDeltaSeconds: 2.08,
+                startCandidateCount: 2,
+                endCandidateCount: 4,
+                pairScore: 1.4992,
+                gridTermApplied: "bonus"
             )
         )
         let data = try JSONEncoder().encode(window)
@@ -4114,10 +4152,60 @@ struct PipelineDumpEncodingTests {
         #expect(!refinement.keys.contains("endPeak"))
         #expect((refinement["startDeltaSeconds"] as? Double) == -6.42)
         #expect((refinement["endDeltaSeconds"] as? Double) == 2.08)
+        // playhead-xsdz.38 joint-decision fields: counts as JSON ints,
+        // score as Double, grid term as a plain string.
+        #expect((refinement["startCandidateCount"] as? Int) == 2)
+        #expect((refinement["endCandidateCount"] as? Int) == 4)
+        #expect((refinement["pairScore"] as? Double) == 1.4992)
+        #expect((refinement["gridTermApplied"] as? String) == "bonus")
         // Defense in depth: raw wire form carries the nested key names.
         let json = try #require(String(data: data, encoding: .utf8))
         #expect(json.contains("\"stingerRefinement\""))
         #expect(json.contains("\"startSnapped\":true"))
         #expect(!json.contains("\"endPeak\""))
+        #expect(json.contains("\"gridTermApplied\":\"bonus\""))
+    }
+
+    @Test("DumpAdWindow omits the nil xsdz.38 joint fields inside stingerRefinement (no-evidence consult)")
+    func dumpAdWindowOmitsNilJointFieldsInsideStingerRefinement() throws {
+        // A flag-ON consult with no evidence candidates anywhere (e.g. no
+        // PCM) records a pristine trace: the four xsdz.38 fields are nil
+        // and must be ABSENT from the nested object, so downstream
+        // `refinement.get("pairScore")` readers see None on no-evidence
+        // windows exactly as they do on pre-v4 dumps (schema-compatible
+        // extension).
+        let window = DumpAdWindow(
+            startTime: 100.0,
+            endTime: 130.5,
+            skipConfidence: 0.92,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: false,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: DumpStingerRefinement(StingerRefinementTrace())
+        )
+        let data = try JSONEncoder().encode(window)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let refinement = try #require(
+            parsed["stingerRefinement"] as? [String: Any]
+        )
+        // Booleans stay present (non-optional), all optionals absent.
+        #expect((refinement["startSnapped"] as? Bool) == false)
+        #expect((refinement["revertedNoOverlap"] as? Bool) == false)
+        for absentKey in [
+            "startPeak", "endPeak", "startDeltaSeconds", "endDeltaSeconds",
+            "startCandidateCount", "endCandidateCount", "pairScore",
+            "gridTermApplied",
+        ] {
+            #expect(!refinement.keys.contains(absentKey), "\(absentKey) must be omitted when nil")
+        }
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("pairScore"))
+        #expect(!json.contains("gridTermApplied"))
     }
 }

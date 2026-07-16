@@ -92,9 +92,16 @@ struct StingerShowEntry: Sendable, Equatable {
     /// Anchor for the break END edge, when learned.
     let post: StingerTemplate?
     /// Pod-width grid (seconds, e.g. 30.0) when the show's break widths
-    /// cluster on multiples of it. Applied only when exactly one edge
-    /// snapped.
+    /// cluster on multiples of it. Feeds the joint recipe's grid terms
+    /// (on-grid pair bonus, off-grid inconsistency penalty, derived
+    /// candidates).
     let podWidthGridSeconds: Double?
+    /// playhead-xsdz.38: the show's largest observed on-grid pod multiple
+    /// (morbid = 3 ⇒ pods ≤ 90 s). The joint refiner caps the grid multiple
+    /// here so the pair bonus cannot stitch neighboring breaks' stingers
+    /// into one super-window. `nil` = uncapped (legacy banks); only ever
+    /// present alongside `podWidthGridSeconds`.
+    let gridMaxPodMultiple: Int?
 }
 
 // MARK: - StingerBank
@@ -177,6 +184,7 @@ struct StingerBank: Sendable, Equatable {
             let pre: Side?
             let post: Side?
             let podWidthGridSeconds: Double?
+            let gridMaxPodMultiple: Int?
         }
 
         let schemaVersion: Int
@@ -235,12 +243,25 @@ struct StingerBank: Sendable, Equatable {
                     )
                 }
             }
+            if let maxMultiple = show.gridMaxPodMultiple {
+                guard show.podWidthGridSeconds != nil else {
+                    throw StingerBankError.malformed(
+                        "show \(show.showName): gridMaxPodMultiple without podWidthGridSeconds — a multiple cap is meaningless without a grid"
+                    )
+                }
+                guard maxMultiple >= 1 else {
+                    throw StingerBankError.malformed(
+                        "show \(show.showName): gridMaxPodMultiple \(maxMultiple) must be >= 1"
+                    )
+                }
+            }
             entries.append(StingerShowEntry(
                 showKeys: show.showKeys,
                 showName: show.showName,
                 pre: try Self.validatedTemplate(show.pre, show: show.showName, side: "pre"),
                 post: try Self.validatedTemplate(show.post, show: show.showName, side: "post"),
-                podWidthGridSeconds: show.podWidthGridSeconds
+                podWidthGridSeconds: show.podWidthGridSeconds,
+                gridMaxPodMultiple: show.gridMaxPodMultiple
             ))
         }
 

@@ -295,8 +295,10 @@ def learn_show_model(
             # audits found pods at 30s multiples UP TO 90s. The joint mode
             # treats widths beyond the show's observed maximum as off-grid
             # so the pair bonus cannot stitch neighboring breaks' stingers
-            # into one super-window. `refine_edges` (shipped recipe) and
-            # the bank emitter never read this key.
+            # into one super-window. `refine_edges` (shipped v3 recipe)
+            # never reads this key; the joint mode scores with it and
+            # `build_bank` ships it as `gridMaxPodMultiple` for the Swift
+            # v4 port.
             model["grid_max_multiple"] = max(
                 int(round(w / GRID_SECONDS)) for w in on_grid
             )
@@ -785,8 +787,9 @@ def build_bank(
     """Build the production StingerBank payload (FULL-CORPUS models).
 
     A show ships in the bank only when the learner produced at least one
-    stinger side — a pod-width grid alone is inert at runtime (the grid
-    only applies after exactly one edge snapped, which requires a stinger).
+    stinger side — a pod-width grid alone is inert at runtime (v4 joint:
+    every grid term and derived candidate engages only through qualifying
+    stinger peaks, so no templates ⇒ no peaks ⇒ no grid effect).
     """
     shows = []
     for show, show_breaks in sorted(group_breaks_by_show(evaluation).items()):
@@ -823,6 +826,11 @@ def build_bank(
             continue
         if model["grid"]:
             entry["podWidthGridSeconds"] = float(model["grid"])
+            # xsdz.38: the show's largest observed on-grid pod multiple,
+            # always learned alongside the grid. The v4 joint refiner caps
+            # the grid multiple here so the pair bonus cannot stitch
+            # neighboring breaks' stingers into one super-window.
+            entry["gridMaxPodMultiple"] = int(model["grid_max_multiple"])
         shows.append(entry)
     return {
         "schemaVersion": BANK_SCHEMA_VERSION,

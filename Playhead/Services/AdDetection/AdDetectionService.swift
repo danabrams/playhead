@@ -462,32 +462,27 @@ struct AdDetectionConfig: Sendable {
     let rediffSlotShadowEnabled: Bool
 
     /// playhead-l2f.6: master kill switch for StingerBank boundary
-    /// refinement. When `false` (the production default), `runBackfill`
-    /// never loads the bundled `StingerBank.json`, never fetches the
-    /// asset's episode identity, never reads shard PCM, and never invokes
-    /// `StingerRefiner` — so the per-span bounds, persisted rows, and both
-    /// stinger trace maps are byte-identical to pre-l2f.6 behaviour (same
-    /// invariant `spanFinalizerEnabled` holds for the finalizer).
+    /// refinement. When `false`, `runBackfill` never loads the bundled
+    /// `StingerBank.json`, never fetches the asset's episode identity,
+    /// never reads shard PCM, and never invokes `StingerRefiner` — so the
+    /// per-span bounds, persisted rows, and both stinger trace maps are
+    /// byte-identical to pre-l2f.6 behaviour (same invariant
+    /// `spanFinalizerEnabled` holds for the finalizer).
     ///
-    /// Flip to `true` to enable the per-show stinger-anchored edge snap
-    /// inside the inline boundary-refinement block: for each candidate ad
-    /// span on a show with a bank entry, a 50 Hz log-RMS envelope over a
-    /// ±90 s search span around each edge (read from the persisted 16 kHz
-    /// analysis-shard cache — no second decode) is matched against the
-    /// show's learned stinger template by normalized cross-correlation.
-    /// The strongest peak clearing the per-show gate
-    /// (`max(0.50, learning_confidence − 0.15)`) snaps the edge; snaps
-    /// moving an edge > 75 s are refused; when exactly one edge snapped and
-    /// the show has a pod-width grid the other edge follows the grid; a
-    /// refined window that no longer overlaps the proposal reverts both
-    /// edges. The refiner never splits or merges windows and can never
-    /// produce `end <= start` (see `StingerRefiner`).
-    ///
-    /// Gated OFF by default per the OFF-by-default mandate: main stays
-    /// behavior-neutral and the refiner is never wired into a production
-    /// config or A/B arm until the Catalyst dump + gold-scorer measurement
-    /// (`scripts/l2f-score-oracle-gold.py`) confirms the lift. The bank +
-    /// refiner stay fully built and unit-tested, just inert in production.
+    /// When `true` (the production default since Dan's recorded 2026-07-16
+    /// dogfood flip), each candidate ad span on a show with a bank entry
+    /// is refined inside the inline boundary-refinement block: a 50 Hz
+    /// log-RMS envelope over a ±90 s search span around each edge (read
+    /// from the persisted 16 kHz analysis-shard cache — no second decode)
+    /// is matched against the show's learned stinger template by
+    /// normalized cross-correlation, and the JOINT candidate-pair recipe
+    /// (v4, playhead-xsdz.38 — qualifying peaks + grid-derived partners,
+    /// on-grid pair bonus, off-grid inconsistency penalty, movement
+    /// tie-break) picks the best feasible (start, end) pair. Per-show
+    /// gates (`max(0.50, learning_confidence − 0.15)`), the 75 s move cap
+    /// on every candidate, and the revert-on-zero-overlap guard all hold.
+    /// The refiner never splits or merges windows and can never produce
+    /// `end <= start` (see `StingerRefiner`).
     let stingerRefinementEnabled: Bool
 
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
