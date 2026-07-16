@@ -146,6 +146,13 @@ struct LexicalAnchorBankTests {
         #expect(LexicalAnchorNormalizer.normalizeWord("don't") == "dont")
         #expect(LexicalAnchorNormalizer.normalizePhrase("we'll be right back")
             == ["well", "be", "right", "back"])
+        // Curly/typographic apostrophes the Python prototype folds explicitly
+        // (’‘ʼ`´) must fold identically here (dropped as non-ASCII), so a
+        // smart-quoted transcript normalises to the same tokens as an ASCII one.
+        #expect(LexicalAnchorNormalizer.normalizeWord("We\u{2019}ll") == "well", "U+2019 right single quote")
+        #expect(LexicalAnchorNormalizer.normalizeWord("we\u{02BC}ll") == "well", "U+02BC modifier apostrophe")
+        #expect(LexicalAnchorNormalizer.normalizePhrase("we\u{2019}ll be right back")
+            == ["well", "be", "right", "back"])
         // Non-[a-z0-9] (punctuation, non-ASCII) dropped; digits kept.
         #expect(LexicalAnchorNormalizer.normalizePhrase("10% OFF, now!") == ["10", "off", "now"])
     }

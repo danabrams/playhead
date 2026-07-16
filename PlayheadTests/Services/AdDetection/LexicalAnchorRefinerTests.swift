@@ -227,6 +227,56 @@ struct LexicalAnchorRefinerTests {
         #expect(tiny.trace == LexicalRefinementTrace())
     }
 
+    @Test("A no-match consult must not perturb an out-of-episode-range proposal via the clamp")
+    func noMatchDoesNotClampOutOfRangeProposal() {
+        // Phrase is absent from the stream ⇒ no snap on either edge. The
+        // proposal END sits past the episode; the episode clamp WOULD pull it to
+        // 100 if it ran. A consulted-but-no-match span must instead be a true
+        // no-op (byte-identical to flag OFF, which never clamps), leaving a
+        // pristine trace with no phantom delta.
+        let anchor = LexicalAnchor.exact(phrase: "we will be right back", side: .pre, edgeOffsetSeconds: 0.0)
+        let stream = Self.words("ordinary talk with no framing phrases at all", firstWordStart: 10)
+        let result = LexicalAnchorRefiner.refine(
+            proposalStart: 90, proposalEnd: 120,
+            anchors: [anchor], words: stream, episodeDuration: 100.0
+        )
+        #expect(result.startTime == 90.0, "no match ⇒ start untouched")
+        #expect(result.endTime == 120.0, "no match ⇒ end untouched even though it exceeds the episode")
+        #expect(result.trace == LexicalRefinementTrace(), "no match ⇒ pristine trace, no phantom delta")
+    }
+
+    @Test("A matched edge snapped past the episode end is clamped, preserving end > start")
+    func matchedEdgeSnapClampsToEpisodeEnd() {
+        // Resume phrase near the episode end with an offset that would drive the
+        // snapped end past the episode duration; the clamp must pin it to the
+        // duration while keeping the window non-degenerate.
+        let anchor = LexicalAnchor.exact(phrase: "and back to the show", side: .post, edgeOffsetSeconds: 8.0)
+        // Phrase first word at 96 ⇒ raw snapped end = 96 + 8 = 104 > 100.
+        let stream = Self.words("and back to the show", firstWordStart: 96)
+        let result = LexicalAnchorRefiner.refine(
+            proposalStart: 90, proposalEnd: 98,
+            anchors: [anchor], words: stream, episodeDuration: 100.0
+        )
+        #expect(result.trace.endSnapped, "the in-cap resume match snaps the end")
+        #expect(result.endTime == 100.0, "the snapped end is clamped to the episode duration")
+        #expect(result.startTime == 90.0, "start has no pre match and is untouched")
+        #expect(result.endTime > result.startTime, "clamp preserves a non-degenerate window")
+    }
+
+    @Test("An empty word stream is a pristine no-op")
+    func emptyWordStreamNoOp() {
+        let anchors = [
+            LexicalAnchor.exact(phrase: "we will be right back", side: .pre, edgeOffsetSeconds: 0.0),
+            LexicalAnchor.exact(phrase: "and now back to the show", side: .post, edgeOffsetSeconds: 0.0),
+        ]
+        let result = LexicalAnchorRefiner.refine(
+            proposalStart: 100, proposalEnd: 130,
+            anchors: anchors, words: [], episodeDuration: Self.episodeDuration
+        )
+        #expect(result.startTime == 100.0 && result.endTime == 130.0)
+        #expect(result.trace == LexicalRefinementTrace())
+    }
+
     // MARK: - Word-stream construction
 
     @Test("buildWordStream interpolates per-word times across chunks and normalises")

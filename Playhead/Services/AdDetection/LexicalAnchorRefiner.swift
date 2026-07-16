@@ -140,6 +140,17 @@ enum LexicalAnchorRefiner {
             trace.endAnchorPhrase = best.anchor.phrase
         }
 
+        // No qualifying snap on EITHER edge ⇒ leave the proposal untouched and
+        // return a pristine trace. Mirrors StingerRefiner's early return before
+        // the clamp: the clamp exists only to keep a *snapped* edge inside the
+        // episode, so an unmatched consult must not perturb a proposal that the
+        // pipeline handed in already outside `[0, episodeDuration]` (which would
+        // otherwise silently move an edge and record a phantom delta, breaking
+        // the consulted-no-match == OFF byte-identity contract).
+        guard trace.startSnapped || trace.endSnapped else {
+            return Result(startTime: proposalStart, endTime: proposalEnd, trace: trace)
+        }
+
         // Clamp to the episode. Order is load-bearing: the end clamp's
         // `max(newStart + minimumRefinedWidthSeconds, …)` floor runs after the
         // start clamp, so `end > start` holds unconditionally.
