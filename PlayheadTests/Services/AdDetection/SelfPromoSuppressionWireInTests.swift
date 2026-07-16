@@ -209,18 +209,32 @@ struct SelfPromoSuppressionWireInTests {
             windowsExplicit.count == windowsDefault.count,
             "explicit-OFF \(windowsExplicit.count) vs default \(windowsDefault.count) — flag OFF must be byte-identical"
         )
+        // Exhaustive persisted-field sweep: every `AdWindow` stored field EXCEPT
+        // the intentionally-random `id` must be byte-identical under flag OFF.
+        // The demotion can only move `eligibilityGate` (cascading to
+        // `decisionState`), but a complete sweep future-proofs the byte-identity
+        // contract against any new field a later change might let diverge.
         for (a, b) in zip(windowsExplicit, windowsDefault) {
+            #expect(a.analysisAssetId == b.analysisAssetId, "analysisAssetId mismatch under flag OFF")
             #expect(a.startTime == b.startTime, "startTime mismatch under flag OFF")
             #expect(a.endTime == b.endTime, "endTime mismatch under flag OFF")
             #expect(a.confidence == b.confidence, "confidence mismatch under flag OFF")
-            #expect(a.decisionState == b.decisionState, "decisionState mismatch under flag OFF")
-            #expect(a.eligibilityGate == b.eligibilityGate, "eligibilityGate mismatch under flag OFF")
-            #expect(a.wasSkipped == b.wasSkipped, "wasSkipped mismatch under flag OFF")
             #expect(a.boundaryState == b.boundaryState, "boundaryState mismatch under flag OFF")
+            #expect(a.decisionState == b.decisionState, "decisionState mismatch under flag OFF")
             #expect(a.detectorVersion == b.detectorVersion, "detectorVersion mismatch under flag OFF")
+            #expect(a.advertiser == b.advertiser, "advertiser mismatch under flag OFF")
+            #expect(a.product == b.product, "product mismatch under flag OFF")
+            #expect(a.adDescription == b.adDescription, "adDescription mismatch under flag OFF")
+            #expect(a.evidenceText == b.evidenceText, "evidenceText mismatch under flag OFF")
+            #expect(a.evidenceStartTime == b.evidenceStartTime, "evidenceStartTime mismatch under flag OFF")
             #expect(a.metadataSource == b.metadataSource, "metadataSource mismatch under flag OFF")
             #expect(a.metadataConfidence == b.metadataConfidence, "metadataConfidence mismatch under flag OFF")
-            #expect(a.evidenceStartTime == b.evidenceStartTime, "evidenceStartTime mismatch under flag OFF")
+            #expect(a.metadataPromptVersion == b.metadataPromptVersion, "metadataPromptVersion mismatch under flag OFF")
+            #expect(a.wasSkipped == b.wasSkipped, "wasSkipped mismatch under flag OFF")
+            #expect(a.userDismissedBanner == b.userDismissedBanner, "userDismissedBanner mismatch under flag OFF")
+            #expect(a.evidenceSources == b.evidenceSources, "evidenceSources mismatch under flag OFF")
+            #expect(a.eligibilityGate == b.eligibilityGate, "eligibilityGate mismatch under flag OFF")
+            #expect(a.catalogStoreMatchSimilarity == b.catalogStoreMatchSimilarity, "catalogStoreMatchSimilarity mismatch under flag OFF")
         }
 
         // The self-promo span stays eligible under flag OFF — the gate did not move.
@@ -273,6 +287,14 @@ struct SelfPromoSuppressionWireInTests {
         // Eligibility change only — geometry is untouched.
         #expect(on.startTime == off.startTime, "boundaries must not move (eligibility-only change)")
         #expect(on.endTime == off.endTime, "boundaries must not move (eligibility-only change)")
+        // "Scoring stays honest": the demotion touches ONLY the gate. The
+        // persisted confidences must be byte-identical to the undemoted OFF
+        // baseline — a regression that clamped a score on the suppression path
+        // (instead of forwarding it verbatim) would move these.
+        #expect(on.confidence == off.confidence,
+                "skipConfidence must be preserved through the demotion (eligibility-only change)")
+        #expect(on.metadataConfidence == off.metadataConfidence,
+                "proposalConfidence must be preserved through the demotion (eligibility-only change)")
 
         // Routing: the persisted markOnly window lands in the SkipOrchestrator
         // suggest tier (play-by-default banner), NOT the auto-skip path.
