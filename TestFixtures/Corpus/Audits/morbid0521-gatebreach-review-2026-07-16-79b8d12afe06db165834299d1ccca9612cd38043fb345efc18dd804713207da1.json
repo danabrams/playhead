@@ -1,0 +1,34 @@
+{
+  "history": [
+    {
+      "after": {
+        "audio_fingerprint": "sha256:b81865e6c4088082ec385752a6c48eb0987d6083f3a767c75106a76ca187d11d",
+        "id": "morbid0521-midshow-pod",
+        "note": "",
+        "proposed_end_seconds": 2597.6,
+        "proposed_start_seconds": 2538.8,
+        "reviewed_at": "2026-07-16T11:56:46Z",
+        "reviewer": "Dan",
+        "status": "rebounded"
+      },
+      "at": "2026-07-16T11:56:46Z",
+      "before": null,
+      "id": "morbid0521-midshow-pod",
+      "sequence": 1
+    }
+  ],
+  "next_sequence": 2,
+  "reviews": {
+    "morbid0521-midshow-pod": {
+      "audio_fingerprint": "sha256:b81865e6c4088082ec385752a6c48eb0987d6083f3a767c75106a76ca187d11d",
+      "id": "morbid0521-midshow-pod",
+      "note": "",
+      "proposed_end_seconds": 2597.6,
+      "proposed_start_seconds": 2538.8,
+      "reviewed_at": "2026-07-16T11:56:46Z",
+      "reviewer": "Dan",
+      "status": "rebounded"
+    }
+  },
+  "schema_version": 2
+}

@@ -1,0 +1,775 @@
+{
+ "artifact_kind": "oracle_earaudit_gold_boundary_evaluation",
+ "assets": [
+  {
+   "audio_fingerprint": "sha256:e8c6b4be730ea982ac42829555edef5c716d67ba31dd9f5f3b173d1ee581b262",
+   "content_vetoes": [],
+   "duration_seconds": 2611.0,
+   "episode_id": "business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 212.4,
+     "source_ledger_ids": [
+      "oracle-business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4-200"
+     ],
+     "source_review_ids": [
+      "oracle-business-wars-2026-05-28-f1-vs-nascar-f1-roars-into-the-u-s-4-200"
+     ],
+     "start_seconds": 132.7
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Business Wars"
+  },
+  {
+   "audio_fingerprint": "sha256:29d88dd9a187e0b2fbe267406d64f8619c9ed6ae87484d29660d2d6c49295978",
+   "content_vetoes": [],
+   "duration_seconds": 6061.6,
+   "episode_id": "casefile-true-crime-2026-05-30-case-340-elisabeth-membrey",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 73.5,
+     "source_ledger_ids": [
+      "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-38"
+     ],
+     "source_review_ids": [
+      "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-38"
+     ],
+     "start_seconds": 10.9
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 2054.8,
+     "source_ledger_ids": [
+      "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-1912"
+     ],
+     "source_review_ids": [
+      "oracle-casefile-true-crime-2026-05-30-case-340-elisabeth-membrey-1912"
+     ],
+     "start_seconds": 1912.7
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Casefile True Crime"
+  },
+  {
+   "audio_fingerprint": "sha256:b9dc85a6a7e8dc2beef8565adbee2949f6d70892ac6f0995f18f8e6efb06143e",
+   "content_vetoes": [],
+   "duration_seconds": 3233.4,
+   "episode_id": "fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 152.1,
+     "source_ledger_ids": [
+      "oracle-fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros-71"
+     ],
+     "source_review_ids": [
+      "oracle-fresh-air-2026-05-30-best-of-boroughs-actor-alfre-woodard-ros-71"
+     ],
+     "start_seconds": 73.85
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Fresh Air"
+  },
+  {
+   "audio_fingerprint": "sha256:4c213fd42aaba6c1fb234321c0143d77aaabdfc3007a8058f75321ddb009dd1b",
+   "content_vetoes": [],
+   "duration_seconds": 3845.0,
+   "episode_id": "hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 3780.5,
+     "source_ledger_ids": [
+      "oracle-hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi-3671"
+     ],
+     "source_review_ids": [
+      "oracle-hard-fork-2026-05-29-interesting-times-why-are-we-still-drivi-3671"
+     ],
+     "start_seconds": 3684.6
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Hard Fork"
+  },
+  {
+   "audio_fingerprint": "sha256:b81865e6c4088082ec385752a6c48eb0987d6083f3a767c75106a76ca187d11d",
+   "content_vetoes": [],
+   "duration_seconds": 3765.9,
+   "episode_id": "morbid-2026-05-21-the-matamoros-devil-murders-part-1",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 2597.6,
+     "source_ledger_ids": [
+      "morbid0521-midshow-pod"
+     ],
+     "source_review_ids": [
+      "morbid0521-midshow-pod"
+     ],
+     "start_seconds": 2538.8
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Morbid"
+  },
+  {
+   "audio_fingerprint": "sha256:fe46c5cbfa34db7742fd6ce67cbd55f53619570c29d0ef5891916c224fb6580d",
+   "content_vetoes": [],
+   "duration_seconds": 3465.7,
+   "episode_id": "morbid-2026-05-25-the-matamoros-devil-murders-part-2",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1134.7,
+     "source_ledger_ids": [
+      "oracle-morbid-2026-05-25-the-matamoros-devil-murders-part-2-1097"
+     ],
+     "source_review_ids": [
+      "oracle-morbid-2026-05-25-the-matamoros-devil-murders-part-2-1097"
+     ],
+     "start_seconds": 1106.0
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Morbid"
+  },
+  {
+   "audio_fingerprint": "sha256:4f07a8c048660fc6a1e437caf5a00d2c21add19b727b02e0519a1e6991324f19",
+   "content_vetoes": [],
+   "duration_seconds": 3435.1,
+   "episode_id": "morbid-2026-05-28-listener-tales-110-playdates-with-the-pa",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1123.5,
+     "source_ledger_ids": [
+      "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-1076"
+     ],
+     "source_review_ids": [
+      "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-1076"
+     ],
+     "start_seconds": 1064.1
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 2195.4,
+     "source_ledger_ids": [
+      "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-2163"
+     ],
+     "source_review_ids": [
+      "oracle-morbid-2026-05-28-listener-tales-110-playdates-with-the-pa-2163"
+     ],
+     "start_seconds": 2144.7
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Morbid"
+  },
+  {
+   "audio_fingerprint": "sha256:c20edfb897158cfe08aa98e2e0f84c23a5cbd7ffd7cbdf85cbca35b13269c9dd",
+   "content_vetoes": [],
+   "duration_seconds": 6780.8,
+   "episode_id": "morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 88.9,
+     "source_ledger_ids": [
+      "morbid0529-opener-pod",
+      "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-57"
+     ],
+     "source_review_ids": [
+      "morbid0529-opener-pod",
+      "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-57"
+     ],
+     "start_seconds": 0.0
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1446.0,
+     "source_ledger_ids": [
+      "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-1403"
+     ],
+     "source_review_ids": [
+      "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-1403"
+     ],
+     "start_seconds": 1355.4
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 2843.2,
+     "source_ledger_ids": [
+      "morbid0529-late-pod",
+      "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2741",
+      "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2831"
+     ],
+     "source_review_ids": [
+      "morbid0529-late-pod",
+      "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2741",
+      "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-2831"
+     ],
+     "start_seconds": 2753.0
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 4096.5,
+     "source_ledger_ids": [
+      "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-4021"
+     ],
+     "source_review_ids": [
+      "oracle-morbid-2026-05-29-may-bonus-episode-breaking-dawn-part-1-4021"
+     ],
+     "start_seconds": 4035.9
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Morbid"
+  },
+  {
+   "audio_fingerprint": "sha256:a20315663590429df4ad2931ac3d923c4d03bfe28d98cff9a613e0ce902207d2",
+   "content_vetoes": [],
+   "duration_seconds": 3271.2,
+   "episode_id": "on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 141.8,
+     "source_ledger_ids": [
+      "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-89"
+     ],
+     "source_review_ids": [
+      "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-89"
+     ],
+     "start_seconds": 59.0
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1205.6,
+     "source_ledger_ids": [
+      "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1123",
+      "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1199"
+     ],
+     "source_review_ids": [
+      "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1123",
+      "oracle-on-the-media-2026-05-29-trump-sued-himself-and-settled-for-a-1-8-1199"
+     ],
+     "start_seconds": 1114.1
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "On The Media"
+  },
+  {
+   "audio_fingerprint": "sha256:5f48e429a62faf8165ad0cf8655f47b26d1c0f9663fe3569a9081db6549737e3",
+   "content_vetoes": [],
+   "duration_seconds": 2391.9,
+   "episode_id": "planet-money-2026-05-29-the-sneaky-way-companies-get-new-chemica",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 596.7,
+     "source_ledger_ids": [
+      "oracle-planet-money-2026-05-29-the-sneaky-way-companies-get-new-chemica-500"
+     ],
+     "source_review_ids": [
+      "oracle-planet-money-2026-05-29-the-sneaky-way-companies-get-new-chemica-500"
+     ],
+     "start_seconds": 502.7
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Planet Money"
+  },
+  {
+   "audio_fingerprint": "sha256:c64612d0f451ce1cec9265cb882967f2c023a85255ec5c5136c81aee50774ba5",
+   "content_vetoes": [],
+   "duration_seconds": 2498.7,
+   "episode_id": "radiolab-2026-05-29-this-american-roach",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1330.7,
+     "source_ledger_ids": [
+      "oracle-radiolab-2026-05-29-this-american-roach-1263"
+     ],
+     "source_review_ids": [
+      "oracle-radiolab-2026-05-29-this-american-roach-1263"
+     ],
+     "start_seconds": 1147.8
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Radiolab"
+  },
+  {
+   "audio_fingerprint": "sha256:ae5c389210587a60eeb48ae72a5a42ee6f0e5636bd612531ed65f013444c722c",
+   "content_vetoes": [],
+   "duration_seconds": 3907.0,
+   "episode_id": "smartless-2026-05-18-quot-sting-quot",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 74.4,
+     "source_ledger_ids": [
+      "oracle-smartless-2026-05-18-quot-sting-quot-0"
+     ],
+     "source_review_ids": [
+      "oracle-smartless-2026-05-18-quot-sting-quot-0"
+     ],
+     "start_seconds": 0.0
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1429.8,
+     "source_ledger_ids": [
+      "oracle-smartless-2026-05-18-quot-sting-quot-1376"
+     ],
+     "source_review_ids": [
+      "oracle-smartless-2026-05-18-quot-sting-quot-1376"
+     ],
+     "start_seconds": 1353.4
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Smartless"
+  },
+  {
+   "audio_fingerprint": "sha256:b46d1f2f52ce1abc38158e6ebaa8177dee2a2371b65b4e797e2bca0f90f6ea54",
+   "content_vetoes": [],
+   "duration_seconds": 3463.5,
+   "episode_id": "smartless-2026-05-21-quot-re-release-nate-bargatze-quot",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1201.4,
+     "source_ledger_ids": [
+      "oracle-smartless-2026-05-21-quot-re-release-nate-bargatze-quot-1179"
+     ],
+     "source_review_ids": [
+      "oracle-smartless-2026-05-21-quot-re-release-nate-bargatze-quot-1179"
+     ],
+     "start_seconds": 1154.4
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Smartless"
+  },
+  {
+   "audio_fingerprint": "sha256:c00a1228d932dd6539847624cd3239540378267ef94d15478c26720bd5332250",
+   "content_vetoes": [],
+   "duration_seconds": 4107.8,
+   "episode_id": "smartless-2026-05-25-quot-nick-jonas-quot",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 90.1,
+     "source_ledger_ids": [
+      "oracle-smartless-2026-05-25-quot-nick-jonas-quot-0"
+     ],
+     "source_review_ids": [
+      "oracle-smartless-2026-05-25-quot-nick-jonas-quot-0"
+     ],
+     "start_seconds": 0.0
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1540.1,
+     "source_ledger_ids": [
+      "oracle-smartless-2026-05-25-quot-nick-jonas-quot-1474"
+     ],
+     "source_review_ids": [
+      "oracle-smartless-2026-05-25-quot-nick-jonas-quot-1474"
+     ],
+     "start_seconds": 1447.0
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 2833.2,
+     "source_ledger_ids": [
+      "oracle-smartless-2026-05-25-quot-nick-jonas-quot-2737"
+     ],
+     "source_review_ids": [
+      "oracle-smartless-2026-05-25-quot-nick-jonas-quot-2737"
+     ],
+     "start_seconds": 2720.7
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Smartless"
+  },
+  {
+   "audio_fingerprint": "sha256:a3bf38876eb5fd431ab22a470055738b1964b97de629f0eb9475f3651e493597",
+   "content_vetoes": [],
+   "duration_seconds": 3894.7,
+   "episode_id": "stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 86.1,
+     "source_ledger_ids": [
+      "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1"
+     ],
+     "source_review_ids": [
+      "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1"
+     ],
+     "start_seconds": 4.1
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1354.6,
+     "source_ledger_ids": [
+      "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1314"
+     ],
+     "source_review_ids": [
+      "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-1314"
+     ],
+     "start_seconds": 1312.0
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 2798.5,
+     "source_ledger_ids": [
+      "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-2682"
+     ],
+     "source_review_ids": [
+      "oracle-stuff-you-should-know-2026-05-30-selects-did-shakespeare-really-write-all-2682"
+     ],
+     "start_seconds": 2617.3
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Stuff You Should Know"
+  },
+  {
+   "audio_fingerprint": "sha256:3d7bdf7705fc5021fa4607aadc6de27db2765ea3e8199aee60d54b97cce60672",
+   "content_vetoes": [],
+   "duration_seconds": 330.3,
+   "episode_id": "techcrunch-daily-crunch-2026-05-27-spotify-now-lets-you-stream-narrated-mag",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 97.1,
+     "source_ledger_ids": [
+      "oracle-techcrunch-daily-crunch-2026-05-27-spotify-now-lets-you-stream-narrated-mag-4"
+     ],
+     "source_review_ids": [
+      "oracle-techcrunch-daily-crunch-2026-05-27-spotify-now-lets-you-stream-narrated-mag-4"
+     ],
+     "start_seconds": 5.7
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Techcrunch Daily Crunch"
+  },
+  {
+   "audio_fingerprint": "sha256:5ded646c7ef8a845ad9464199132e207c873ff4230eec061bc0beea557609a38",
+   "content_vetoes": [
+    {
+     "end_seconds": 279.38,
+     "source_ledger_ids": [
+      "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-223"
+     ],
+     "source_review_ids": [
+      "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-223"
+     ],
+     "start_seconds": 223.53
+    }
+   ],
+   "duration_seconds": 279.4,
+   "episode_id": "techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 95.6,
+     "source_ledger_ids": [
+      "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-4"
+     ],
+     "source_review_ids": [
+      "oracle-techcrunch-daily-crunch-2026-05-29-google-engineer-charged-with-insider-tra-4"
+     ],
+     "start_seconds": 5.7
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Techcrunch Daily Crunch"
+  },
+  {
+   "audio_fingerprint": "sha256:1733727435cb68b696d838ce8d7f86c2e0e5faf289ba6eb8a293ef8832b1c033",
+   "content_vetoes": [],
+   "duration_seconds": 2755.7,
+   "episode_id": "ted-business-2026-05-25-the-secret-to-making-the-right-career-de",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 70.1,
+     "source_ledger_ids": [
+      "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-0"
+     ],
+     "source_review_ids": [
+      "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-0"
+     ],
+     "start_seconds": 0.0
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1017.8,
+     "source_ledger_ids": [
+      "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-922"
+     ],
+     "source_review_ids": [
+      "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-922"
+     ],
+     "start_seconds": 950.5
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1937.8,
+     "source_ledger_ids": [
+      "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1890"
+     ],
+     "source_review_ids": [
+      "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-1890"
+     ],
+     "start_seconds": 1837.2
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 2755.68,
+     "source_ledger_ids": [
+      "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-2681"
+     ],
+     "source_review_ids": [
+      "oracle-ted-business-2026-05-25-the-secret-to-making-the-right-career-de-2681"
+     ],
+     "start_seconds": 2625.6
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Ted Business"
+  },
+  {
+   "audio_fingerprint": "sha256:7d4622bf3c94acd71c711ffd6f06cdf2e1961bdbfa80d99c1f1ae3ce20cb44cb",
+   "content_vetoes": [],
+   "duration_seconds": 4433.7,
+   "episode_id": "the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.5,
+     "end_seconds": 1634.0,
+     "source_ledger_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-1571"
+     ],
+     "source_review_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-1571"
+     ],
+     "start_seconds": 1542.9
+    },
+    {
+     "boundary_tolerance_seconds": 0.5,
+     "end_seconds": 3143.3,
+     "source_ledger_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3096",
+      "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3127"
+     ],
+     "source_review_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3096",
+      "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-3127"
+     ],
+     "start_seconds": 3051.8
+    },
+    {
+     "boundary_tolerance_seconds": 0.5,
+     "end_seconds": 4433.711,
+     "source_ledger_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-4268"
+     ],
+     "source_review_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-02-27-513-food-noise-achieving-greatness-amp-t-4268"
+     ],
+     "start_seconds": 4338.1
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "The Nikki Glaser Podcast"
+  },
+  {
+   "audio_fingerprint": "sha256:48619d606a3b97775dc4e58c5956680fa4da93255cd07e9adfaef8afbb666d3f",
+   "content_vetoes": [],
+   "duration_seconds": 4514.9,
+   "episode_id": "the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.5,
+     "end_seconds": 1306.8,
+     "source_ledger_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1154",
+      "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1273",
+      "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1290"
+     ],
+     "source_review_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-02-28-514-an-elevated-gift-restaurant-pet-peev-1154"
+     ],
+     "start_seconds": 1215.6
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "The Nikki Glaser Podcast"
+  },
+  {
+   "audio_fingerprint": "sha256:2889b75d09332f7f59a68a2b7d3058b620c90eefbf6788218e5248ffebdfebbd",
+   "content_vetoes": [],
+   "duration_seconds": 4304.5,
+   "episode_id": "the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.5,
+     "end_seconds": 1263.6,
+     "source_ledger_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-1186"
+     ],
+     "source_review_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-1186"
+     ],
+     "start_seconds": 1157.4
+    },
+    {
+     "boundary_tolerance_seconds": 0.5,
+     "end_seconds": 4304.521,
+     "source_ledger_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-4208"
+     ],
+     "source_review_ids": [
+      "oracle-the-nikki-glaser-podcast-2025-03-06-515-nikki-s-unforgettable-weekend-the-os-4208"
+     ],
+     "start_seconds": 4178.8
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "The Nikki Glaser Podcast"
+  },
+  {
+   "audio_fingerprint": "sha256:8ebccf85ddd47602a2846203f5f16e888da874b0868385948a3afdfb53fd1e58",
+   "content_vetoes": [],
+   "duration_seconds": 3841.0,
+   "episode_id": "why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leading-the-way-wi",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 50.2,
+     "source_ledger_ids": [
+      "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leadin-0"
+     ],
+     "source_review_ids": [
+      "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-05-the-ai-end-game-who-s-leadin-0"
+     ],
+     "start_seconds": 0.0
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Why Is This Happening The Chris Hayes Po"
+  },
+  {
+   "audio_fingerprint": "sha256:02c7ba5dbf214e72a36b3dc8e79eed6fcbbd912f0665ce57e7ad42e899b8d7b3",
+   "content_vetoes": [],
+   "duration_seconds": 3501.1,
+   "episode_id": "why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-olds-vs-ai-with",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 44.2,
+     "source_ledger_ids": [
+      "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-old-0"
+     ],
+     "source_review_ids": [
+      "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-19-the-ai-end-game-two-year-old-0"
+     ],
+     "start_seconds": 0.0
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Why Is This Happening The Chris Hayes Po"
+  },
+  {
+   "audio_fingerprint": "sha256:fa8902d8f25d447e33a153b81d410f10db403d2156d1dd63f071bba33a72f8cb",
+   "content_vetoes": [],
+   "duration_seconds": 3550.8,
+   "episode_id": "why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-of-ai-with-ti",
+   "full_breaks": [
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 59.2,
+     "source_ledger_ids": [
+      "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-0"
+     ],
+     "source_review_ids": [
+      "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-0"
+     ],
+     "start_seconds": 0.0
+    },
+    {
+     "boundary_tolerance_seconds": 0.3,
+     "end_seconds": 1343.7,
+     "source_ledger_ids": [
+      "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-1302"
+     ],
+     "source_review_ids": [
+      "oracle-why-is-this-happening-the-chris-hayes-po-2026-05-26-the-ai-end-game-the-ethics-o-1302"
+     ],
+     "start_seconds": 1221.7
+    }
+   ],
+   "presence_anchors": [],
+   "show_name": "Why Is This Happening The Chris Hayes Po"
+  }
+ ],
+ "label_semantics": {
+  "attestation": "Dan Abrams, single listener, explicit gold attestation 2026-07-15; declared care to +-0.3s (+-0.5s nikki-glaser stinger seam)",
+  "content_vetoes": "the exact emitted interval was heard and is human-labeled content; surrounding audio is not labeled",
+  "coverage": "partial",
+  "full_breaks": "gold human-reviewed complete ad-break boundaries (rebound bounds from the 2026-07-15 oracle-emission ear audit); errors within boundary_tolerance_seconds score as zero",
+  "presence_anchors": "none in this artifact",
+  "quality": "gold",
+  "unlabeled_audio": "unknown_elsewhere"
+ },
+ "schema_version": 1,
+ "sources": {
+  "pairs": [
+   {
+    "ledger": "oracle-earaudit-ledger-2026-07-15-a31899a7964d149a306fd161ef402e93b7b03460018ae4fea24f6df8bceeec8d.jsonl",
+    "ledger_sha256": "a31899a7964d149a306fd161ef402e93b7b03460018ae4fea24f6df8bceeec8d",
+    "review": "oracle-earaudit-review-2026-07-15-9e826c081d1969b8e6ed8cc405d3d6f5a50fbff77844f2baca38b5f5acea0925.json",
+    "review_sha256": "9e826c081d1969b8e6ed8cc405d3d6f5a50fbff77844f2baca38b5f5acea0925"
+   },
+   {
+    "ledger": "morbid0529-gatebreach-ledger-2026-07-16-0ac6c48e2c67bf67d3fad4b3d421c4bdfbfd2b12f060b2ee688cc35a0337f79c.jsonl",
+    "ledger_sha256": "0ac6c48e2c67bf67d3fad4b3d421c4bdfbfd2b12f060b2ee688cc35a0337f79c",
+    "review": "morbid0529-gatebreach-review-2026-07-16-ee9487c768210c2524f431e7502437c0d4dafbb576860f7bafb502ba36c4488c.json",
+    "review_sha256": "ee9487c768210c2524f431e7502437c0d4dafbb576860f7bafb502ba36c4488c"
+   },
+   {
+    "ledger": "morbid0521-gatebreach-ledger-2026-07-16-75b1fb76f6e81fa20cc542a2037fe06b9abe7437aeb227749381d2f1f78b7dce.jsonl",
+    "ledger_sha256": "75b1fb76f6e81fa20cc542a2037fe06b9abe7437aeb227749381d2f1f78b7dce",
+    "review": "morbid0521-gatebreach-review-2026-07-16-79b8d12afe06db165834299d1ccca9612cd38043fb345efc18dd804713207da1.json",
+    "review_sha256": "79b8d12afe06db165834299d1ccca9612cd38043fb345efc18dd804713207da1"
+   }
+  ]
+ },
+ "summary": {
+  "assets": 24,
+  "content_vetoes": 1,
+  "full_break_assets": 24,
+  "full_breaks": 42,
+  "labeled_regions": 43,
+  "merged_break_groups": 1,
+  "review_status_counts": {
+   "approved": 1,
+   "rebounded": 46,
+   "rejected": 1
+  }
+ }
+}
