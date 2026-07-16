@@ -321,19 +321,23 @@ struct StingerBankTests {
         #expect(bank.schemaVersion == 1)
         #expect(bank.envelopeHz == 50)
         #expect(bank.pcmSampleRate == 16_000)
-        #expect(bank.shows.count == 5, "xsdz.39 bank: morbid+nikki (both edges) + conan/OTM/TED (return-sting post-only, gold v6); smartless & themove curated out")
+        #expect(bank.shows.count == 6, "xsdz.39 bank: morbid+nikki (both edges) + conan/OTM/TED/smartless (return-sting post-only, gold v6); themove curated out")
 
         // Show order is deterministic (sorted by show_name at emit time).
         let slugs = bank.shows.map { $0.showKeys[0] }
-        #expect(slugs == ["conan", "morbid", "on-the-media", "ted-business", "the-nikki-glaser-podcast"])
+        #expect(slugs == ["conan", "morbid", "on-the-media", "smartless", "ted-business", "the-nikki-glaser-podcast"])
 
         // Return-sting (post-only) shows: the reliable acoustic signal on
-        // these talk/news shows is the music cue EXITING the ad, not
+        // these talk/news shows is the pre-recorded cue EXITING the ad, not
         // entering it. conan ships post-only because its pre template
         // false-matched content and collapsed a real pod (danny-mcbride
         // @3097); OTM/TED never qualified a pre side under the offset-spread
-        // gate. Music-bumper shows (morbid, nikki) carry both edges.
-        let postOnly: Set = ["conan", "on-the-media", "ted-business"]
+        // gate; smartless's cue is a CONSISTENT pre-recorded spoken bit
+        // ("…and now back to the show") — its post side snaps within ~0.6s
+        // of gold on all 3 breaks, but its pre side (documented resume-bit
+        // false-match) is excluded. Music-bumper shows (morbid, nikki) carry
+        // both edges.
+        let postOnly: Set = ["conan", "on-the-media", "smartless", "ted-business"]
         let bothSides: Set = ["morbid", "the-nikki-glaser-podcast"]
 
         for show in bank.shows {
@@ -373,16 +377,16 @@ struct StingerBankTests {
         // threshold, so no grid ⇒ no cap.
         #expect(bank.entry(forShowKey: "morbid")?.podWidthGridSeconds == 30.0)
         #expect(bank.entry(forShowKey: "morbid")?.gridMaxPodMultiple == 3)
-        for slug in ["conan", "on-the-media", "ted-business", "the-nikki-glaser-podcast"] {
+        for slug in ["conan", "on-the-media", "smartless", "ted-business", "the-nikki-glaser-podcast"] {
             #expect(bank.entry(forShowKey: slug)?.podWidthGridSeconds == nil, "\(slug): no pod grid")
             #expect(bank.entry(forShowKey: slug)?.gridMaxPodMultiple == nil, "\(slug): no grid ⇒ no cap")
         }
 
-        // Curated OUT: smartless (both edges are spoken framing phrases —
-        // acoustic templates false-match; lexical anchors are xsdz.37) and
-        // themove (live host-read ads with no consistent acoustic stinger —
-        // the 0.517 template never fired in the offline eval).
-        #expect(bank.entry(forShowKey: "smartless") == nil, "smartless curated out (spoken framing; lexical anchors are xsdz.37)")
-        #expect(bank.entry(forShowKey: "themove") == nil, "themove curated out (live host-reads; no acoustic stinger)")
+        // Curated OUT: themove (live host-read ads with no consistent
+        // acoustic stinger — the copy is improvised every show, so the 0.517
+        // template never fired in the offline eval). smartless, by contrast,
+        // IS in the bank: its cue is a fixed pre-recorded bit, so it has a
+        // stable acoustic signature despite being spoken (Dan, 2026-07-16).
+        #expect(bank.entry(forShowKey: "themove") == nil, "themove curated out (live host-reads; no repeatable acoustic signature)")
     }
 }
