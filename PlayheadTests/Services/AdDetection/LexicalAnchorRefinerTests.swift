@@ -263,18 +263,24 @@ struct LexicalAnchorRefinerTests {
         #expect(result.endTime > result.startTime, "clamp preserves a non-degenerate window")
     }
 
-    @Test("An empty word stream is a pristine no-op")
+    @Test("An empty word stream is a pristine no-op that does not clamp an out-of-range proposal")
     func emptyWordStreamNoOp() {
+        // Empty stream ⇒ no snap on either edge. The proposal END also sits past
+        // the episode, so this doubles as a regression lock on the no-match
+        // early-return: without it the episode clamp WOULD pull the end to 100,
+        // recording a phantom delta. A consulted-but-empty-stream span must be a
+        // true no-op (byte-identical to flag OFF, which never clamps).
         let anchors = [
             LexicalAnchor.exact(phrase: "we will be right back", side: .pre, edgeOffsetSeconds: 0.0),
             LexicalAnchor.exact(phrase: "and now back to the show", side: .post, edgeOffsetSeconds: 0.0),
         ]
         let result = LexicalAnchorRefiner.refine(
-            proposalStart: 100, proposalEnd: 130,
-            anchors: anchors, words: [], episodeDuration: Self.episodeDuration
+            proposalStart: 90, proposalEnd: 120,
+            anchors: anchors, words: [], episodeDuration: 100.0
         )
-        #expect(result.startTime == 100.0 && result.endTime == 130.0)
-        #expect(result.trace == LexicalRefinementTrace())
+        #expect(result.startTime == 90.0, "empty stream ⇒ start untouched")
+        #expect(result.endTime == 120.0, "empty stream ⇒ end untouched even though it exceeds the episode")
+        #expect(result.trace == LexicalRefinementTrace(), "empty stream ⇒ pristine trace, no phantom delta")
     }
 
     // MARK: - Word-stream construction
