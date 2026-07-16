@@ -533,6 +533,10 @@ struct StingerRefinerTests {
         let proposals: [(Double, Double)] = [
             (0.5, 2.0), (10.0, 11.5), (50.0, 60.0), (0.0, 90.0),
             (598.0, 599.5), (14.0, 15.0),
+            // Sub-1s proposal: the no-snap pair itself fails the 1s
+            // minimum-width rule (same as the oracle), so any winning
+            // pair here is snap-driven — the invariant must still hold.
+            (50.0, 50.4),
         ]
         for entry in entries {
             for (start, end) in proposals {
@@ -1053,6 +1057,118 @@ struct StingerRefinerTests {
         #expect(result.trace.endCandidateCount == 1)
         let pairScore = try #require(result.trace.pairScore)
         #expect(abs(pairScore - 1.1487) < 0.001, "oracle pair_score 1.1487 (got \(pairScore))")
+    }
+
+    @Test("Parity P12: an on-grid width against the UNTOUCHED proposal edge earns NO bonus (scope requires both edges)")
+    func parityBonusScopeExcludesUntouchedProposalEdge() throws {
+        // The mirror arm of `gridApplicationWhenOneEdgeSnaps` (which pins
+        // the scope on the START side): a lone END snap whose width
+        // against the untouched proposal START lands EXACTLY on the grid
+        // (60 = 2×30, distance 0). Scope "both" refuses the bonus — the
+        // width against a proposal edge is proposal noise, not structure —
+        // so the score is peak − tie-break only. An "any"-scope (or
+        // end-evidence-only) mis-port scores 1.095 instead of 0.595;
+        // oracle run at grid_bonus_scope="any" confirms exactly that
+        // split. Bounds agree either way — the pairScore pin is the
+        // load-bearing assertion.
+        // Oracle P12: [50, 60] → [50, 110]; end_snapped; grid_applied
+        // false; pair_score 0.595 (scope "any" control run: 1.095).
+        var world = PlantedWorld(duration: 600)
+        let post = PlantedWorld.pattern(seed: 4)
+        world.plant(post, at: 110.0, cosine: 0.6)
+        let result = StingerRefiner.refine(
+            proposalStart: 50.0,
+            proposalEnd: 60.0,
+            entry: Self.entry(post: Self.parityTemplate(post, confidence: 0.6), grid: 30.0),
+            startEnvelope: nil,
+            endEnvelope: world.envelope(center: 60.0),
+            episodeDuration: world.duration
+        )
+        #expect(result.startTime == 50.0)
+        #expect(abs(result.endTime - 110.0) < 0.05, "the on-grid snap itself must stand (got \(result.endTime))")
+        #expect(result.trace.endSnapped)
+        #expect(!result.trace.gridApplied)
+        #expect(result.trace.gridTermApplied == nil, "no bonus (start edge carries no evidence) and no penalty (on-grid)")
+        #expect(result.trace.startCandidateCount == nil)
+        #expect(result.trace.endCandidateCount == 1)
+        let pairScore = try #require(result.trace.pairScore)
+        #expect(abs(pairScore - 0.595) < 0.001, "oracle pair_score 0.595 — a bonus-scope mis-port scores 1.095 (got \(pairScore))")
+    }
+
+    @Test("Parity P13: derived candidates from multiple anchors dedupe to one candidate per grid slot")
+    func parityMultiAnchorDerivedDedupe() throws {
+        // Two confident end peaks one grid step apart (130 @ 0.9,
+        // 160 @ 0.85) derive OVERLAPPING start ladders: {100, 70, 40}
+        // from 130 and {130, 100, 70, 40} from 160. The first-insertion
+        // millisecond dedupe collapses the union to FOUR start candidates
+        // — a port that dropped the dedupe would enumerate seven and
+        // misreport `startCandidateCount` in the Catalyst dump. The
+        // winning pair is (derived 100, peak 130): same 0.9 peak and
+        // bonus as its (70, 130) rival, separated only by exact movement
+        // arithmetic (moved 15 vs 35 → 1.3985 vs 1.3965).
+        // Oracle P13: [95, 120] → [100, 130]; start_kind=derived;
+        // grid_applied; startCandidateCount 4, endCandidateCount 2;
+        // pair_score 1.3985.
+        var world = PlantedWorld(duration: 600)
+        let post = PlantedWorld.pattern(seed: 4)
+        world.plant(post, at: 130.0, cosine: 0.9)
+        world.plant(post, at: 160.0, cosine: 0.85)
+        let result = StingerRefiner.refine(
+            proposalStart: 95.0,
+            proposalEnd: 120.0,
+            entry: Self.entry(post: Self.parityTemplate(post, confidence: 0.6), grid: 30.0),
+            startEnvelope: nil,
+            endEnvelope: world.envelope(center: 120.0),
+            episodeDuration: world.duration
+        )
+        #expect(abs(result.startTime - 100.0) < 0.001, "got \(result.startTime)")
+        #expect(abs(result.endTime - 130.0) < 0.05, "got \(result.endTime)")
+        #expect(!result.trace.startSnapped)
+        #expect(result.trace.endSnapped)
+        #expect(result.trace.gridApplied, "the winning start is grid-derived")
+        #expect(result.trace.startCandidateCount == 4, "the overlapping derived ladders must dedupe (7 without the first-insertion dedupe)")
+        #expect(result.trace.endCandidateCount == 2)
+        #expect(result.trace.gridTermApplied == "bonus")
+        let pairScore = try #require(result.trace.pairScore)
+        #expect(abs(pairScore - 1.3985) < 0.001, "oracle pair_score 1.3985 (got \(pairScore))")
+    }
+
+    @Test("Parity P14: a bitwise (score, -moved) tie between derived starts resolves by the THIRD key arm — later start wins")
+    func parityThirdKeyArmResolvesStartTimeTie() throws {
+        // The arm-3 twin of `jointKeyOrderingResolvesExactTies` (which
+        // pins arm 4, the end time): one confident end peak at 160
+        // derives starts at 130/100/70/40; the pairs (130, 160) and
+        // (100, 160) are EXACTLY symmetric around the proposal start
+        // (start movement 15 s each, total moved 25 with the shared end
+        // snap; both on-grid; identical peak sum) — a
+        // bitwise key tie through arms 1–2 that only the ascending
+        // start-time arm separates. A mis-port preferring the smaller
+        // start (or a negated arm) lands 100 instead of 130.
+        // Oracle P14: [115, 150] → [130, 160]; start_kind=derived;
+        // grid_applied; startCandidateCount 4, endCandidateCount 1;
+        // pair_score 1.3975.
+        var world = PlantedWorld(duration: 600)
+        let post = PlantedWorld.pattern(seed: 4)
+        world.plant(post, at: 160.0, cosine: 0.9)
+        let result = StingerRefiner.refine(
+            proposalStart: 115.0,
+            proposalEnd: 150.0,
+            entry: Self.entry(post: Self.parityTemplate(post, confidence: 0.6), grid: 30.0),
+            startEnvelope: nil,
+            endEnvelope: world.envelope(center: 150.0),
+            episodeDuration: world.duration
+        )
+        #expect(
+            abs(result.startTime - 130.0) < 0.001,
+            "the exact tie must resolve to the larger start time like the oracle (got \(result.startTime))"
+        )
+        #expect(abs(result.endTime - 160.0) < 0.05, "got \(result.endTime)")
+        #expect(result.trace.gridApplied)
+        #expect(result.trace.endSnapped)
+        #expect(result.trace.startCandidateCount == 4)
+        #expect(result.trace.endCandidateCount == 1)
+        let pairScore = try #require(result.trace.pairScore)
+        #expect(abs(pairScore - 1.3975) < 0.001, "oracle pair_score 1.3975 (got \(pairScore))")
     }
 
     // MARK: - Envelope computation
