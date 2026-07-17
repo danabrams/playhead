@@ -123,6 +123,11 @@ targets:
           - com.playhead.app.analysis.continued
           - com.playhead.app.preanalysis.recovery
           - com.playhead.app.feed-refresh
+          # playhead-xsdz.28: rediff re-fetch policy (WiFi+charging).
+          # Permitted-but-unregistered until activation (xsdz.36); the
+          # entry ships now so flipping the flag ON never crashes at
+          # BGTaskScheduler.register (registering an unpermitted id traps).
+          - com.playhead.app.rediff-refetch
         # playhead-m8v7: register the `playhead://` URL scheme for
         # transcript-share deep links. `CFBundleURLName` uses the
         # bundle id as a uniqueness key (Apple's documented

@@ -8,6 +8,7 @@
 		<string>com.playhead.app.analysis.continued</string>
 		<string>com.playhead.app.preanalysis.recovery</string>
 		<string>com.playhead.app.feed-refresh</string>
+		<string>com.playhead.app.rediff-refetch</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
