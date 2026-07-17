@@ -295,6 +295,60 @@ struct RediffByteAlignerTests {
         #expect(slot.aStartByte == spliceAt)
     }
 
+    /// ADVERSARIAL (R1, xsdz.57): the primary safety question — can the byte
+    /// path re-introduce the 88 s content-eating overshoot on genuine CBR audio?
+    ///
+    /// This builds the exact condition the implementer's fixture hardening (ID3
+    /// separators + `pinTailByte`) neutralizes elsewhere, and deliberately OMITS
+    /// both: a pure `removed_in_B` splice where the content flanks are B-ADJACENT
+    /// (the ad exists only in A). EVERY synthetic frame carries the identical
+    /// 128 kbps CBR header `FF FB 90 C0`, so at the splice the head run's greedy
+    /// extension bleeds the shared 4-byte header into the ad — its B-end passes
+    /// the B-adjacent tail run's B-start. The two runs then overlap in B and
+    /// cannot both chain → one is DROPPED → the alignment is NOT monotonic-clean.
+    ///
+    /// The proof this is fixture-determinism (not a masked defect): the raw
+    /// 1-run chain WOULD emit a slot spanning the ad AND real content — the
+    /// overshoot class — but `gateAndDiffBytes` REJECTS the non-monotonic
+    /// alignment BEFORE any slot is built, so the service falls back to chroma
+    /// and NO edge is ever pushed into content. Byte extension is exact-equality,
+    /// so a real splice halts it byte-precisely; the ONLY imprecision is the
+    /// handful of coincidentally-identical boundary bytes, and in the B-adjacent
+    /// case those tip the run into an overlap the gate catches. The 88 s fuzzy-
+    /// chroma failure mode has no analogue here.
+    @Test("un-hardened CBR removed_in_B: header-bleed overlap → non-monotonic → gate rejects (chroma fallback), never eats content")
+    func unhardenedCBRRemovedInBRejectsWithoutEatingContent() throws {
+        let headFrames = 40, adFrames = 20, tailFrames = 40
+        let head = SyntheticMP3.frames(count: headFrames, seed: 0xA11CE)
+        let ad = SyntheticMP3.frames(count: adFrames, seed: 0xB0B_CAFE)
+        let tail = SyntheticMP3.frames(count: tailFrames, seed: 0xD00D_F00D)
+        let aData = SyntheticMP3.file(head + ad + tail)  // played copy: ad present
+        let bData = SyntheticMP3.file(head + tail)        // re-fetch: ad removed
+
+        let alignment = RediffByteAligner.align(
+            aData: aData, bData: bData, config: SyntheticMP3.smallRunConfig)
+
+        // Two content runs are found (head delta 0, tail delta = adFrames*frameLen)…
+        #expect(alignment.runsFound == 2)
+        // …but the shared 4-byte CBR header bleeds the head run past the splice,
+        // overlapping the B-adjacent tail run → one dropped → NOT monotonic-clean.
+        #expect(!alignment.monotonicClean)
+        #expect(alignment.runsDroppedNonMonotonic >= 1)
+        #expect(alignment.chain.count == 1)
+
+        // The raw (pre-gate) 1-run chain's surviving gap OVER-spans the true ad
+        // into content — exactly the overshoot the gate must suppress.
+        let trueAdSeconds = Double(adFrames) * SyntheticMP3.secondsPerFrame
+        #expect(alignment.slots.contains { $0.aSeconds > trueAdSeconds * 1.5 },
+                "the surviving 1-run chain's raw gap over-spans the true ad into content")
+
+        // SAFETY NET: the gate rejects the non-monotonic alignment BEFORE building
+        // any played slot, so no content-eating edge reaches auto-skip; the service
+        // falls back to the chroma differ exactly as pre-xsdz.57.
+        #expect(RediffSlotOwnership.gateAndDiffBytes(alignment: alignment)
+                == .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic))
+    }
+
     @Test("common regions below minRunBytes yield no runs (gate falls back)")
     func belowMinRunBytes() {
         // Only 3 common frames (1251 bytes) < 2048 minRunBytes.
