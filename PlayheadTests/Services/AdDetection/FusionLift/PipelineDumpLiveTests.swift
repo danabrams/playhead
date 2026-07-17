@@ -2924,14 +2924,16 @@ private extension PipelineDumpLiveTests {
 private extension PipelineDumpLiveTests {
     // MARK: - Single-episode run
 
-    /// Run `runBackfill` once for a single manifest entry under production
-    /// `.default` config, then return a populated `DumpEpisode` row. Mirrors
-    /// the sibling harness's `runArm(...)` setup (fresh store, asset,
-    /// transcript chunks, feature windows, seeded planner state, live FM
-    /// runner factory) — the only differences are: (a) one config (the
-    /// shipped `.default`) instead of a per-arm config matrix; (b) the
-    /// optional `FragilityDiagnosticObserver` is attached so we can report
-    /// the decoded-span count.
+    /// Run `runBackfill` once for a single manifest entry under the lane's
+    /// `config` (the baseline/legacy lanes pass the shipped `.default`; the
+    /// rediff-treatment lane passes `makeRediffTreatmentConfig()` plus a live
+    /// B-side provider — playhead-xsdz.36.1), then return a populated
+    /// `DumpEpisode` row. Mirrors the sibling harness's `runArm(...)` setup
+    /// (fresh store, asset, transcript chunks, feature windows, seeded planner
+    /// state, live FM runner factory) — the only differences are: (a) one
+    /// config per lane instead of a per-arm config matrix; (b) the optional
+    /// `FragilityDiagnosticObserver` is attached so we can report the
+    /// decoded-span count.
     @available(iOS 26.0, *)
     private func runSingleEpisode(
         entry: PipelineDumpSnapshotEntry,
@@ -3145,7 +3147,9 @@ private extension PipelineDumpLiveTests {
             "episode=\(episodeId): planner is not in targetedWithAudit (observed=\(seededContext.observedEpisodeCount) stableRecall=\(seededContext.stableRecall)) — FM scan would not match production"
         )
 
-        // SCORED RUN: a single backfill under the shipped `.default`.
+        // SCORED RUN: a single backfill under the lane's `config` (shipped
+        // `.default` in the baseline/legacy lanes; rediff-ON treatment config
+        // in the treatment lane).
         try await service.runBackfill(
             chunks: chunks,
             analysisAssetId: assetId,
