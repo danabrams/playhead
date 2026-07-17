@@ -956,6 +956,11 @@ def main():
                     help="Skip re-download; assume <audioPath>.fresh.mp3 already exists. Useful for re-running alignment.")
     ap.add_argument("--episode", action="append",
                     help="Only process episode IDs containing this substring (repeatable).")
+    ap.add_argument("--retain-audio", action="store_true",
+                    help="On rotated episodes, keep the re-downloaded B-side audio at "
+                         "<audioPath>.fresh.mp3 (the path --dry-run reads and the Swift rediff "
+                         "treatment harness feeds as the B-side) instead of deleting it. "
+                         "playhead-xsdz.36.1.")
     args = ap.parse_args()
 
     if args.self_test:
@@ -1103,8 +1108,19 @@ def main():
                 )
             rotated_count += 1
         if not args.dry_run:
-            try: fresh_path.unlink()
-            except Exception: pass
+            if args.retain_audio and record.get("rotated") and record.get("ok"):
+                retained = snapshot_path.with_suffix(".fresh.mp3")
+                try:
+                    os.replace(fresh_path, retained)
+                    record["retainedFreshPath"] = str(retained.relative_to(REPO))
+                    print(f"  [RETAIN] {ep}: kept B-side audio at {retained.relative_to(REPO)}")
+                except Exception as exc:
+                    print(f"  [WARN] {ep}: could not retain fresh audio ({exc}); deleting")
+                    try: fresh_path.unlink()
+                    except Exception: pass
+            else:
+                try: fresh_path.unlink()
+                except Exception: pass
         per_episode.append(record)
 
     summary = {

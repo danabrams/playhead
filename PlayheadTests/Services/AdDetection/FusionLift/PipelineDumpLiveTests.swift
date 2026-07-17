@@ -2070,6 +2070,142 @@ enum BaselineSourceIdentity {
 
 }
 
+// MARK: - Rediff treatment support (playhead-xsdz.36.1)
+
+/// Real `RediffBSideProvider` for the Catalyst rediff-treatment lane. Resolves
+/// the offline-staged fresh B-side at
+/// `TestFixtures/Corpus/Audio/<assetId>.fresh.mp3` (the offline re-fetch step
+/// stages these for rotated episodes — this provider only CONSUMES them, it
+/// never fetches), decodes it via the SAME 16 kHz `AnalysisAudioService` path
+/// the A-side uses, concatenates shards in `startTime` order into one mono
+/// `[Float]`, and caches per assetId.
+///
+/// Deliberately NOT `CorpusAudioFixtures.decodeMono11025`: that pre-resamples to
+/// 11025 Hz, but `RediffSlotOwnership.gateAndDiff` fingerprints the B-side with
+/// the SAME resample(16k→11025)→ChromaFingerprint extractor it applies to the
+/// A-side (the `(resampler+fingerprinter)` versioned unit), so the provider must
+/// hand it RAW 16 kHz PCM — the analysis pipeline's decode rate.
+///
+/// Returns `nil` for an assetId with no staged `.fresh.mp3` — the correct no-op
+/// for a non-rotated episode (the rediff pass then falls through to status-quo
+/// width, exactly as in production where no provider is injected).
+private actor CorpusFreshBSideProvider: RediffBSideProvider {
+    private let audioDirectory: URL
+    private var cache: [String: [Float]?] = [:]
+
+    init(repoRoot: URL) {
+        audioDirectory = repoRoot
+            .appendingPathComponent("TestFixtures/Corpus/Audio", isDirectory: true)
+    }
+
+    func refetchedBSideMono16kHz(assetId: String) async -> [Float]? {
+        if let cached = cache[assetId] { return cached }
+        let samples = await Self.decodeFresh(assetId: assetId, audioDirectory: audioDirectory)
+        cache[assetId] = samples
+        return samples
+    }
+
+    private static func decodeFresh(assetId: String, audioDirectory: URL) async -> [Float]? {
+        let freshURL = audioDirectory
+            .appendingPathComponent("\(assetId).fresh.mp3", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: freshURL.path),
+              let localURL = LocalAudioURL(freshURL) else {
+            return nil
+        }
+        // DISTINCT decode episodeID: `AnalysisAudioService.decode` persists to a
+        // file-backed ShardCache keyed by episodeID, and the A-side decode in
+        // `runSingleEpisode` already populated the cache under the bare `assetId`
+        // with the ORIGINAL played audio. Reusing that key here would return the
+        // A-side shards for the fresh B-side (B == A ⇒ no diff ⇒ no widening — the
+        // treatment would silently degrade to the baseline). A `.fresh`-suffixed
+        // key isolates the B-side; evicting first guarantees the CURRENT fresh
+        // bytes are decoded even if a prior run cached a superseded re-fetch.
+        let bSideEpisodeID = "\(assetId).fresh"
+        let audio = AnalysisAudioService()
+        await audio.evictCache(episodeID: bSideEpisodeID)
+        do {
+            let shards = try await audio.decode(
+                fileURL: localURL,
+                episodeID: bSideEpisodeID,
+                shardDuration: AnalysisAudioService.defaultShardDuration
+            )
+            let samples = shards
+                .sorted { $0.startTime < $1.startTime }
+                .flatMap { $0.samples }
+            return samples.isEmpty ? nil : samples
+        } catch {
+            // A STAGED fresh file that fails to decode is a staging problem, not
+            // a non-rotated episode. Still return nil (status-quo width — that
+            // episode degrades to baseline rather than crashing the 90-min run),
+            // but say so in the transcript so a silent treatment==baseline
+            // outcome is diagnosable.
+            print("[xsdz.36.1] fresh B-side decode FAILED for \(assetId): \(error)")
+            return nil
+        }
+    }
+}
+
+/// Build the rediff TREATMENT config: literally `AdDetectionConfig.default` in
+/// every output-affecting field EXCEPT `rediffSlotOwnershipEnabled`, flipped ON.
+/// Reads each value from `.default` (single source of truth) so the treatment
+/// and baseline lanes differ ONLY by the rediff flag + the injected B-side
+/// provider — no hand-copied constant can drift from the shipped default.
+/// `spliceSlotOwnershipEnabled` keeps its `.default` value (OFF): the two are
+/// mutually-exclusive width setters and the config init preconditions on it.
+private func makeRediffTreatmentConfig() -> AdDetectionConfig {
+    let base = AdDetectionConfig.default
+    return AdDetectionConfig(
+        candidateThreshold: base.candidateThreshold,
+        confirmationThreshold: base.confirmationThreshold,
+        suppressionThreshold: base.suppressionThreshold,
+        hotPathLookahead: base.hotPathLookahead,
+        detectorVersion: base.detectorVersion,
+        fmBackfillMode: base.fmBackfillMode,
+        fmScanBudgetSeconds: base.fmScanBudgetSeconds,
+        fmConsensusThreshold: base.fmConsensusThreshold,
+        markOnlyThreshold: base.markOnlyThreshold,
+        autoSkipConfidenceThreshold: base.autoSkipConfidenceThreshold,
+        classifierSeedQualifiedThreshold: base.classifierSeedQualifiedThreshold,
+        lexicalAutoAdQualifiedThreshold: base.lexicalAutoAdQualifiedThreshold,
+        lexicalAutoAdEnabled: base.lexicalAutoAdEnabled,
+        segmentUICandidateThreshold: base.segmentUICandidateThreshold,
+        segmentAutoSkipThreshold: base.segmentAutoSkipThreshold,
+        bracketRefinementEnabled: base.bracketRefinementEnabled,
+        bracketRefinementMinTrust: base.bracketRefinementMinTrust,
+        bracketRefinementMinCoarseScore: base.bracketRefinementMinCoarseScore,
+        bracketRefinementMinFineConfidence: base.bracketRefinementMinFineConfidence,
+        transcriptBoundaryCueEnabled: base.transcriptBoundaryCueEnabled,
+        evidenceFragilityPenaltyEnabled: base.evidenceFragilityPenaltyEnabled,
+        fragilityThreshold: base.fragilityThreshold,
+        fragilityPenalty: base.fragilityPenalty,
+        chapterSignalMode: base.chapterSignalMode,
+        audioForensicsEnabled: base.audioForensicsEnabled,
+        crossEpisodeMemoryEnabled: base.crossEpisodeMemoryEnabled,
+        rhetoricalGrammarEnabled: base.rhetoricalGrammarEnabled,
+        crossShowSyndicationEnabled: base.crossShowSyndicationEnabled,
+        temporalRegularizationEnabled: base.temporalRegularizationEnabled,
+        temporalNeighborWindowSeconds: base.temporalNeighborWindowSeconds,
+        temporalHighConfidenceNeighborThreshold: base.temporalHighConfidenceNeighborThreshold,
+        temporalIsolationPenaltyFactor: base.temporalIsolationPenaltyFactor,
+        temporalMinDwellSeconds: base.temporalMinDwellSeconds,
+        temporalMinDwellPenaltyFactor: base.temporalMinDwellPenaltyFactor,
+        perShowThresholdControlEnabled: base.perShowThresholdControlEnabled,
+        perShowThresholdProportionalGain: base.perShowThresholdProportionalGain,
+        perShowThresholdIntegralGain: base.perShowThresholdIntegralGain,
+        perShowThresholdMaxOffset: base.perShowThresholdMaxOffset,
+        perShowThresholdMinSamples: base.perShowThresholdMinSamples,
+        spanFinalizerEnabled: base.spanFinalizerEnabled,
+        spliceSlotOwnershipEnabled: base.spliceSlotOwnershipEnabled,
+        spliceSlotShadowEnabled: base.spliceSlotShadowEnabled,
+        rediffSlotOwnershipEnabled: true,
+        rediffSlotShadowEnabled: base.rediffSlotShadowEnabled,
+        userCorrectionReadSideEnabled: base.userCorrectionReadSideEnabled,
+        stingerRefinementEnabled: base.stingerRefinementEnabled,
+        lexicalAnchorRefinementEnabled: base.lexicalAnchorRefinementEnabled,
+        selfPromoSuppressionEnabled: base.selfPromoSuppressionEnabled
+    )
+}
+
 // MARK: - Live test
 
 final class PipelineDumpLiveTests: XCTestCase {
@@ -2089,16 +2225,25 @@ final class PipelineDumpLiveTests: XCTestCase {
         ProcessInfo.processInfo.environment["PLAYHEAD_BASELINE_DEVICE_PREFLIGHT"] == "1"
     }
 
+    /// playhead-xsdz.36.1: opt-in for the rediff-ACTIVATION (treatment) dump —
+    /// the sibling lane that captures the A-side, injects the fresh-B-side
+    /// provider + `rediffSlotOwnershipEnabled`, and dumps the WIDENED windows.
+    private static var rediffTreatmentEnabled: Bool {
+        ProcessInfo.processInfo.environment["PLAYHEAD_PIPELINE_DUMP_REDIFF"] == "1"
+    }
+
     override func setUp() async throws {
         try await super.setUp()
         try XCTSkipUnless(
-            Self.dumpEnabled || Self.partialSilverBaselineEnabled || Self.devicePreflightEnabled,
+            Self.dumpEnabled || Self.partialSilverBaselineEnabled
+                || Self.devicePreflightEnabled || Self.rediffTreatmentEnabled,
             """
             Live production-path capture is opt-in and slow. Set either \
             PLAYHEAD_PIPELINE_DUMP=1 for the legacy snapshot dump or \
             PLAYHEAD_PARTIAL_SILVER_BASELINE=1 for the immutable 27-asset \
-            baseline, or PLAYHEAD_BASELINE_DEVICE_PREFLIGHT=1 for the bounded \
-            physical-device transport check.
+            baseline, PLAYHEAD_BASELINE_DEVICE_PREFLIGHT=1 for the bounded \
+            physical-device transport check, or PLAYHEAD_PIPELINE_DUMP_REDIFF=1 \
+            for the rediff-activation treatment dump.
             """
         )
     }
@@ -2109,6 +2254,18 @@ final class PipelineDumpLiveTests: XCTestCase {
         guard #available(iOS 26.0, *) else {
             throw XCTSkip("Live FM BackfillJobRunner requires iOS 26+ / FoundationModels.")
         }
+        // This is the BASELINE lane. `setUp` also admits the sibling
+        // rediff-treatment var (a separate test method owns it); skip here when
+        // that is the only reason we ran, so a treatment request never triggers a
+        // full baseline dump. Behavior under the three pre-existing vars is
+        // unchanged.
+        guard Self.dumpEnabled || Self.partialSilverBaselineEnabled
+            || Self.devicePreflightEnabled else {
+            throw XCTSkip(
+                "Baseline snapshot dump not requested (PLAYHEAD_PIPELINE_DUMP_REDIFF "
+                    + "selects the sibling rediff-treatment lane)."
+            )
+        }
 
         if Self.partialSilverBaselineEnabled {
             try await capturePartialSilverProductionBaseline()
@@ -2116,6 +2273,26 @@ final class PipelineDumpLiveTests: XCTestCase {
         }
 
         try await captureLegacySnapshotDump()
+    }
+
+    /// playhead-xsdz.36.1 (Piece B): the rediff-ACTIVATION treatment lane. Same
+    /// per-episode setup as the baseline dump, but each episode ALSO captures its
+    /// played-copy (A-side) fingerprint stream and the service is handed a live
+    /// `RediffBSideProvider` (fresh re-fetched audio staged offline at
+    /// `TestFixtures/Corpus/Audio/<episodeId>.fresh.mp3`) plus a config with
+    /// `rediffSlotOwnershipEnabled` ON. For a rotated episode whose fresh B-side
+    /// diverges from the played copy, the in-app `RediffSlotOwnership` oracle
+    /// widens the ad slots; the WIDENED windows are dumped to a DISTINCT file so
+    /// the orchestrator can diff treatment vs. baseline. Opt-in via
+    /// `PLAYHEAD_PIPELINE_DUMP_REDIFF=1`; the baseline lane is untouched.
+    func testRediffTreatmentPipelineDumpOnNewEpisodes() async throws {
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("Live FM BackfillJobRunner requires iOS 26+ / FoundationModels.")
+        }
+        guard Self.rediffTreatmentEnabled else {
+            throw XCTSkip("Rediff-treatment dump is opt-in via PLAYHEAD_PIPELINE_DUMP_REDIFF=1.")
+        }
+        try await captureRediffTreatmentDump()
     }
 
     @available(iOS 26.0, *)
@@ -2219,11 +2396,47 @@ final class PipelineDumpLiveTests: XCTestCase {
     }
 
     private func captureLegacySnapshotDump() async throws {
+        try await captureDumpLane(
+            config: .default,
+            rediffBSideProvider: nil,
+            outputFilename: "playhead-dogfood-diagnostics-pipeline-dump-new9.json",
+            configLabel: "production .default (all xsdz flags off, fmBackfillMode .full)"
+        )
+    }
+
+    /// playhead-xsdz.36.1: the rediff-ACTIVATION treatment lane. Constructs the
+    /// fresh-B-side provider (rooted at the repo corpus) and the rediff-ON config,
+    /// then runs the SAME shared lane. Writes to a DISTINCT dump file so the
+    /// orchestrator can diff treatment vs. baseline widths.
+    private func captureRediffTreatmentDump() async throws {
+        let repoRoot = PipelineDumpManifestLoader.repoRoot()
+        let provider = CorpusFreshBSideProvider(repoRoot: repoRoot)
+        try await captureDumpLane(
+            config: makeRediffTreatmentConfig(),
+            rediffBSideProvider: provider,
+            outputFilename: "playhead-dogfood-diagnostics-pipeline-dump-rediff-treatment.json",
+            configLabel: "treatment: .default + rediffSlotOwnershipEnabled + fresh-B-side provider"
+        )
+    }
+
+    /// Shared body for both dump lanes. Reads the snapshot manifest, runs one
+    /// backfill per entry under `config` (with an optional rediff B-side
+    /// provider), rolls up the summary, and writes the JSON dump to
+    /// `outputFilename` at the repo root. The baseline lane passes `.default` +
+    /// nil provider (byte-identical to the pre-xsdz.36.1 behaviour); the treatment
+    /// lane passes the rediff-ON config + the fresh-B-side provider. Extracted so
+    /// the two lanes share ONE schema/roll-up/guard code path and cannot drift.
+    private func captureDumpLane(
+        config: AdDetectionConfig,
+        rediffBSideProvider: RediffBSideProvider?,
+        outputFilename: String,
+        configLabel: String
+    ) async throws {
         let repoRoot = PipelineDumpManifestLoader.repoRoot()
 
-        // Read the 9 NEW snapshot entries from the manifest. Missing or
-        // malformed manifest is a HARD failure — the snapshot pipeline
-        // should have produced it before this dump runs.
+        // Read the NEW snapshot entries from the manifest. Missing or malformed
+        // manifest is a HARD failure — the snapshot pipeline should have produced
+        // it before this dump runs.
         let entries: [PipelineDumpSnapshotEntry]
         do {
             entries = try PipelineDumpManifestLoader.load(repoRoot: repoRoot)
@@ -2242,7 +2455,12 @@ final class PipelineDumpLiveTests: XCTestCase {
 
         for entry in entries {
             do {
-                let result = try await runSingleEpisode(entry: entry, repoRoot: repoRoot)
+                let result = try await runSingleEpisode(
+                    entry: entry,
+                    repoRoot: repoRoot,
+                    config: config,
+                    rediffBSideProvider: rediffBSideProvider
+                )
                 dumpEpisodes.append(result.episode)
             } catch let error as PipelineDumpRunError {
                 switch error.severity {
@@ -2271,7 +2489,7 @@ final class PipelineDumpLiveTests: XCTestCase {
         }()
 
         let payload = DumpPayload(
-            config: "production .default (all xsdz flags off, fmBackfillMode .full)",
+            config: configLabel,
             runUtc: runUtc,
             episodes: dumpEpisodes,
             summary: DumpSummary(
@@ -2285,7 +2503,7 @@ final class PipelineDumpLiveTests: XCTestCase {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(payload)
         let dumpURL = repoRoot.appendingPathComponent(
-            "playhead-dogfood-diagnostics-pipeline-dump-new9.json",
+            outputFilename,
             isDirectory: false
         )
         try data.write(to: dumpURL, options: .atomic)
@@ -2304,8 +2522,8 @@ final class PipelineDumpLiveTests: XCTestCase {
         } else if dumpEpisodes.isEmpty {
             XCTFail(
                 """
-                PLAYHEAD_PIPELINE_DUMP=1 was set but no episodes scored — \
-                every manifest entry landed in `skipped` because audio or the \
+                A pipeline dump was requested but no episodes scored — every \
+                manifest entry landed in `skipped` because audio or the \
                 transcript sidecar is not staged. See the file header.
                 """
             )
@@ -2441,7 +2659,9 @@ private extension PipelineDumpLiveTests {
     private func runSingleEpisode(
         entry: PipelineDumpSnapshotEntry,
         repoRoot: URL,
-        musicBoundaryEdges: [Double] = []
+        musicBoundaryEdges: [Double] = [],
+        config: AdDetectionConfig = .default,
+        rediffBSideProvider: RediffBSideProvider? = nil
     ) async throws -> ProductionEpisodeRunResult {
         let episodeId = entry.episodeId
 
@@ -2511,12 +2731,17 @@ private extension PipelineDumpLiveTests {
         try await store.migrate()
 
         // Asset row. `analysisAssetId == episodeId` so the scored ad
-        // windows read back under the id we report on.
+        // windows read back under the id we report on. `assetFingerprint` is
+        // hoisted into a single local so the A-side fingerprint capture in the
+        // rediff-treatment lane persists the SAME `sourceAudioIdentity` the
+        // asset row carries (identity gate (b) in RediffSlotOwnership.gateAndDiff
+        // requires stored identity == the asset's current assetFingerprint).
         let assetId = episodeId
+        let assetFingerprint = "pipeline-dump-fp-\(episodeId)"
         try await store.insertAsset(AnalysisAsset(
             id: assetId,
             episodeId: episodeId,
-            assetFingerprint: "pipeline-dump-fp-\(episodeId)",
+            assetFingerprint: assetFingerprint,
             weakFingerprint: nil,
             sourceURL: localURL.absoluteString,
             featureCoverageEndTime: nil,
@@ -2553,6 +2778,25 @@ private extension PipelineDumpLiveTests {
         }
         try await store.insertFeatureWindows(featureWindows)
 
+        // playhead-xsdz.36.1 (rediff TREATMENT lane only): persist the played-copy
+        // (A-side) fingerprint stream so the in-app rediff pass has a stored stream
+        // to diff the re-fetched B-side against. Gated on the rediff-ownership flag,
+        // so the baseline lane (flag OFF) never writes the row and is byte-identical.
+        // `sourceAudioIdentity` MUST equal the asset's `assetFingerprint` (identity
+        // gate (b)); the fingerprints are stamped with the current
+        // `ChromaFingerprinter.algorithmVersion` (gate (a)). This is the SAME static
+        // helper + 16 kHz shards `EpisodeFingerprintCaptureTests` pins; the
+        // `captureEnabledByDefault` flag gates only the LIVE `AnalysisJobRunner`
+        // branch, NOT this static call, so no production flag is flipped.
+        if config.rediffSlotOwnershipEnabled {
+            try await EpisodeFingerprintCapture.captureAndPersist(
+                shards: shards,
+                assetId: assetId,
+                sourceAudioIdentity: assetFingerprint,
+                store: store
+            )
+        }
+
         // Episode duration from the decoded shard span (last shard end).
         let episodeDuration = shards.reduce(0.0) { max($0, $1.startTime + $1.duration) }
 
@@ -2567,10 +2811,12 @@ private extension PipelineDumpLiveTests {
             podcastId: podcastId
         )
 
-        // Production config: the shipped `.default`. No flags toggled. No
-        // narrowing override. We hold a reference so the hermetic test can
-        // verify identity with `AdDetectionConfig.default`.
-        let config = AdDetectionConfig.default
+        // Detection config. The baseline lane passes the shipped `.default`
+        // (every activation flag off — the `productionConfigStateIsHeld` hermetic
+        // test pins that identity). The rediff-treatment lane passes a config that
+        // is `.default` in every field EXCEPT `rediffSlotOwnershipEnabled`, flipped
+        // ON (see `makeRediffTreatmentConfig`), so treatment and baseline differ
+        // ONLY by the rediff flag + the injected B-side provider.
 
         // Behavior-neutral diagnostic observer: counts every decoded span
         // so we can report `candidateDecodedSpans`. The observer is the
@@ -2586,6 +2832,10 @@ private extension PipelineDumpLiveTests {
             backfillJobRunnerFactory: Self.makeLiveRunnerFactory(),
             canUseFoundationModelsProvider: { true }, // avoid silent FM demotion
             fragilityDiagnosticObserver: observer,
+            // Rediff B-side source. `nil` in the baseline lane → the rediff pass
+            // no-ops (byte-identical). In the treatment lane, the real provider
+            // supplies the re-fetched fresh audio the pass diffs against.
+            rediffBSideProvider: rediffBSideProvider,
             approvedCohortRegistry: nil // avoid cohort-gated FM demotion
         )
 
@@ -4207,5 +4457,206 @@ struct PipelineDumpEncodingTests {
         let json = try #require(String(data: data, encoding: .utf8))
         #expect(!json.contains("pairScore"))
         #expect(!json.contains("gridTermApplied"))
+    }
+}
+
+// MARK: - Rediff treatment harness wiring (playhead-xsdz.36.1)
+
+/// Hermetic, sim-runnable proof of the rediff-treatment glue, WITHOUT the
+/// 90-minute live FM backfill: (1) the treatment config differs from the shipped
+/// `.default` ONLY by the rediff flag; (2) the A-side `captureAndPersist` +
+/// `fetchEpisodeFingerprints` round-trip carries the exact identity that makes
+/// `RediffSlotOwnership.gateAndDiff` return `.accepted` (both identity gates plus
+/// the re-encode guard). The one heavy check — decoding a real staged
+/// `.fresh.mp3` through the provider — is env-gated so it never burdens
+/// `PlayheadFastTests`.
+@Suite("Rediff treatment harness wiring (playhead-xsdz.36.1)")
+struct RediffTreatmentHarnessWiringTests {
+
+    /// A varying multi-tone waveform so the chroma fingerprinter sees real
+    /// spectral content and emits a non-empty subfingerprint stream.
+    private static func syntheticTone16k(seconds: Double) -> [Float] {
+        let n = Int(seconds * 16_000)
+        guard n > 0 else { return [] }
+        var out = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            let t = Double(i) / 16_000.0
+            let v = sin(2 * .pi * 220 * t) * 0.5
+                + sin(2 * .pi * 440 * t) * 0.3
+                + sin(2 * .pi * 660 * t) * 0.2
+            out[i] = Float(v)
+        }
+        return out
+    }
+
+    @Test("treatment config differs from production .default ONLY by the rediff flag")
+    func treatmentConfigDiffersOnlyByRediffFlag() {
+        let base = AdDetectionConfig.default
+        let treatment = makeRediffTreatmentConfig()
+
+        // The single intended difference.
+        #expect(treatment.rediffSlotOwnershipEnabled == true)
+        #expect(base.rediffSlotOwnershipEnabled == false)
+        // Mutually-exclusive width setter stays OFF (gateAndDiff / config init
+        // precondition).
+        #expect(treatment.spliceSlotOwnershipEnabled == false)
+
+        // Every other output-affecting field must equal the shipped default.
+        #expect(treatment.fmBackfillMode == base.fmBackfillMode)
+        #expect(treatment.chapterSignalMode == base.chapterSignalMode)
+        #expect(treatment.candidateThreshold == base.candidateThreshold)
+        #expect(treatment.confirmationThreshold == base.confirmationThreshold)
+        #expect(treatment.suppressionThreshold == base.suppressionThreshold)
+        #expect(treatment.autoSkipConfidenceThreshold == base.autoSkipConfidenceThreshold)
+        #expect(treatment.markOnlyThreshold == base.markOnlyThreshold)
+        #expect(treatment.detectorVersion == base.detectorVersion)
+        #expect(treatment.hotPathLookahead == base.hotPathLookahead)
+        #expect(treatment.lexicalAutoAdEnabled == base.lexicalAutoAdEnabled)
+        #expect(treatment.audioForensicsEnabled == base.audioForensicsEnabled)
+        #expect(treatment.crossEpisodeMemoryEnabled == base.crossEpisodeMemoryEnabled)
+        #expect(treatment.rhetoricalGrammarEnabled == base.rhetoricalGrammarEnabled)
+        #expect(treatment.crossShowSyndicationEnabled == base.crossShowSyndicationEnabled)
+        #expect(treatment.temporalRegularizationEnabled == base.temporalRegularizationEnabled)
+        #expect(treatment.perShowThresholdControlEnabled == base.perShowThresholdControlEnabled)
+        #expect(treatment.spanFinalizerEnabled == base.spanFinalizerEnabled)
+        #expect(treatment.spliceSlotShadowEnabled == base.spliceSlotShadowEnabled)
+        #expect(treatment.rediffSlotShadowEnabled == base.rediffSlotShadowEnabled)
+        #expect(treatment.stingerRefinementEnabled == base.stingerRefinementEnabled)
+        #expect(treatment.lexicalAnchorRefinementEnabled == base.lexicalAnchorRefinementEnabled)
+        #expect(treatment.selfPromoSuppressionEnabled == base.selfPromoSuppressionEnabled)
+        #expect(treatment.userCorrectionReadSideEnabled == base.userCorrectionReadSideEnabled)
+        #expect(treatment.bracketRefinementEnabled == base.bracketRefinementEnabled)
+        #expect(treatment.transcriptBoundaryCueEnabled == base.transcriptBoundaryCueEnabled)
+        #expect(treatment.evidenceFragilityPenaltyEnabled == base.evidenceFragilityPenaltyEnabled)
+        #expect(treatment.fmScanBudgetSeconds == base.fmScanBudgetSeconds)
+        #expect(treatment.fmConsensusThreshold == base.fmConsensusThreshold)
+    }
+
+    @Test("A-side capture round-trips the identity the rediff gate accepts")
+    func aSideCaptureIdentityRoundTrips() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "rediff-treatment-identity-ep"
+        // The EXACT identity the treatment lane persists: assetFingerprint ==
+        // "pipeline-dump-fp-<id>" == the gate's currentAssetFingerprint.
+        let assetFingerprint = "pipeline-dump-fp-\(episodeId)"
+        try await store.insertAsset(AnalysisAsset(
+            id: episodeId,
+            episodeId: episodeId,
+            assetFingerprint: assetFingerprint,
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/\(episodeId).mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "new",
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        ))
+
+        let mono = Self.syntheticTone16k(seconds: 12)
+        let shard = AnalysisShard(
+            id: 0, episodeID: episodeId, startTime: 0, duration: 12, samples: mono
+        )
+        // Same static helper + sourceAudioIdentity the treatment lane uses. The
+        // `captureEnabledByDefault` flag gates only the live pipeline branch, not
+        // this static call — no production flag flipped.
+        try await EpisodeFingerprintCapture.captureAndPersist(
+            shards: [shard],
+            assetId: episodeId,
+            sourceAudioIdentity: assetFingerprint,
+            store: store
+        )
+
+        // Round-trip: identity gate (a) [algorithmVersion] + (b) [sourceAudioIdentity].
+        let fetched = try await store.fetchEpisodeFingerprints(assetId: episodeId)
+        let record = try #require(
+            fetched,
+            "capture must persist a fetchable record at the current algorithmVersion"
+        )
+        #expect(record.algorithmVersion == ChromaFingerprinter.algorithmVersion)
+        #expect(record.sourceAudioIdentity == assetFingerprint)
+        #expect(!record.fingerprints.isEmpty)
+
+        // The EXACT gate the service applies. Matching identity + B == A ⇒ neither
+        // identity rejection fires and the re-encode guard passes ⇒ .accepted.
+        let outcome = RediffSlotOwnership.gateAndDiff(
+            storedASide: record,
+            refetchedBSideSamples16kHz: mono,
+            currentAssetFingerprint: assetFingerprint
+        )
+        guard case .accepted = outcome else {
+            Issue.record("rediff gate rejected a matching-identity A/B pair: \(outcome)")
+            return
+        }
+    }
+
+    @Test("gate rejects a mismatched sourceAudioIdentity (identity gate (b))")
+    func gateRejectsIdentityMismatch() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "rediff-treatment-mismatch-ep"
+        try await store.insertAsset(AnalysisAsset(
+            id: episodeId, episodeId: episodeId,
+            assetFingerprint: "pipeline-dump-fp-\(episodeId)",
+            weakFingerprint: nil, sourceURL: "file:///tmp/\(episodeId).mp3",
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil
+        ))
+        let mono = Self.syntheticTone16k(seconds: 12)
+        // Persist under a DIFFERENT identity than the gate will assert.
+        try await EpisodeFingerprintCapture.captureAndPersist(
+            shards: [AnalysisShard(id: 0, episodeID: episodeId, startTime: 0, duration: 12, samples: mono)],
+            assetId: episodeId,
+            sourceAudioIdentity: "some-other-audio-identity",
+            store: store
+        )
+        let fetched = try await store.fetchEpisodeFingerprints(assetId: episodeId)
+        let record = try #require(fetched)
+        let outcome = RediffSlotOwnership.gateAndDiff(
+            storedASide: record,
+            refetchedBSideSamples16kHz: mono,
+            currentAssetFingerprint: "pipeline-dump-fp-\(episodeId)"
+        )
+        guard case .rejectedAudioIdentityMismatch = outcome else {
+            Issue.record("expected identity-mismatch rejection, got \(outcome)")
+            return
+        }
+    }
+
+    /// Real decode of an offline-staged `.fresh.mp3` through the provider. Heavy
+    /// (decodes a full episode), so it is env-gated OFF in `PlayheadFastTests` and
+    /// exercised on demand:
+    ///   PLAYHEAD_REDIFF_PROVIDER_DECODE_CHECK=1 \
+    ///     -only-testing:'PlayheadTests/RediffTreatmentHarnessWiringTests/freshBSideProviderDecodesStagedAudio()'
+    @Test("fresh B-side provider decodes a staged .fresh.mp3 to non-empty 16 kHz PCM")
+    func freshBSideProviderDecodesStagedAudio() async throws {
+        guard ProcessInfo.processInfo.environment["PLAYHEAD_REDIFF_PROVIDER_DECODE_CHECK"] == "1"
+        else { return }
+
+        let repoRoot = PipelineDumpManifestLoader.repoRoot()
+        let audioDir = repoRoot
+            .appendingPathComponent("TestFixtures/Corpus/Audio", isDirectory: true)
+        let freshFiles = (try? FileManager.default.contentsOfDirectory(atPath: audioDir.path))?
+            .filter { $0.hasSuffix(".fresh.mp3") }
+            .sorted() ?? []
+        guard let firstFresh = freshFiles.first else {
+            Issue.record("decode-check enabled but no .fresh.mp3 is staged under \(audioDir.path)")
+            return
+        }
+        let assetId = String(firstFresh.dropLast(".fresh.mp3".count))
+
+        let provider = CorpusFreshBSideProvider(repoRoot: repoRoot)
+        let bSide = await provider.refetchedBSideMono16kHz(assetId: assetId)
+        let decoded = try #require(
+            bSide,
+            "provider returned nil for a staged fresh B-side (\(assetId))"
+        )
+        // At least a second of 16 kHz PCM — a real episode is far longer.
+        #expect(decoded.count > 16_000)
+        // A non-rotated id (no staged .fresh.mp3) is a correct no-op.
+        let absent = await provider.refetchedBSideMono16kHz(
+            assetId: "definitely-not-a-real-staged-episode-id"
+        )
+        #expect(absent == nil)
     }
 }
