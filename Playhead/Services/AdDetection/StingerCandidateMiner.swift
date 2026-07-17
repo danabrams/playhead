@@ -329,7 +329,6 @@ enum StingerCandidateMiner {
         let sourceIndex: Int
         let sourceEpisodeId: String
         let side: MinedStingerSide
-        let anchorFrame: Int
         let refStartFrame: Int
         let anchorSeconds: Double
         let centerSeconds: Double
@@ -433,7 +432,6 @@ enum StingerCandidateMiner {
                         sourceIndex: sourceIndex,
                         sourceEpisodeId: source.id,
                         side: anchor.side,
-                        anchorFrame: anchor.frame,
                         refStartFrame: startFrame,
                         anchorSeconds: roundTo(Double(anchor.frame) / Double(hz), places: 1),
                         centerSeconds: roundTo(Double(center) / Double(hz), places: 1),
@@ -488,7 +486,6 @@ enum StingerCandidateMiner {
                 sourceIndex: proto.sourceIndex,
                 sourceEpisodeId: proto.sourceEpisodeId,
                 side: proto.side,
-                anchorFrame: proto.anchorFrame,
                 refStartFrame: proto.refStartFrame,
                 anchorSeconds: proto.anchorSeconds,
                 centerSeconds: proto.centerSeconds,
@@ -509,7 +506,6 @@ enum StingerCandidateMiner {
         let sourceIndex: Int
         let sourceEpisodeId: String
         let side: MinedStingerSide
-        let anchorFrame: Int
         let refStartFrame: Int
         let anchorSeconds: Double
         let centerSeconds: Double
