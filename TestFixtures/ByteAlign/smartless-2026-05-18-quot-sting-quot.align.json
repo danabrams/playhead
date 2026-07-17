@@ -1,0 +1,56 @@
+{
+  "_provenance": "Reference output of the validated python byte-run aligner for the xsdz.57 Swift-port parity test (RediffByteAlignerParityTests).",
+  "_regenerate": "From the repo root, with the staged pair present under TestFixtures/Corpus/Audio: python3 scripts/l2f-mp3-forensics.py align --a TestFixtures/Corpus/Audio/smartless-2026-05-18-quot-sting-quot.mp3 --b TestFixtures/Corpus/Audio/smartless-2026-05-18-quot-sting-quot.fresh.mp3 --out /tmp/align.json  — then copy runs_found/runs_chained/runs_dropped_nonmonotonic/monotonic_clean/chained_bytes/a_duration/b_duration/slots verbatim (generated 2026-07-17 at scripts revision 943a698f).",
+  "a": "smartless-2026-05-18-quot-sting-quot.mp3",
+  "b": "smartless-2026-05-18-quot-sting-quot.fresh.mp3",
+  "min_run_bytes": 65536,
+  "runs_found": 3,
+  "runs_chained": 3,
+  "runs_dropped_nonmonotonic": 0,
+  "monotonic_clean": true,
+  "chained_bytes": 58433276,
+  "a_duration": 3906.952,
+  "b_duration": 4013.767,
+  "slots": [
+    {
+      "kind": "head",
+      "aStartByte": 105,
+      "aEndByte": 1190869,
+      "aStartSec": 0.0,
+      "aEndSec": 74.423,
+      "aBytes": 1190764,
+      "bBytes": 1446554,
+      "aSeconds": 74.423
+    },
+    {
+      "kind": "replaced",
+      "aStartByte": 21671291,
+      "aEndByte": 22875236,
+      "aStartSec": 1354.449,
+      "aEndSec": 1429.696,
+      "aBytes": 1203945,
+      "bBytes": 1929519,
+      "aSeconds": 75.247
+    },
+    {
+      "kind": "replaced",
+      "aStartByte": 40571825,
+      "aEndByte": 42014328,
+      "aStartSec": 2535.733,
+      "aEndSec": 2625.889,
+      "aBytes": 1442503,
+      "bBytes": 1447098,
+      "aSeconds": 90.156
+    },
+    {
+      "kind": "tail",
+      "aStartByte": 62270593,
+      "aEndByte": 62511331,
+      "aStartSec": 3891.906,
+      "aEndSec": 3906.952,
+      "aBytes": 240738,
+      "bBytes": 963806,
+      "aSeconds": 15.046
+    }
+  ]
+}

@@ -201,15 +201,29 @@ enum RediffSlotOwnership {
         from slotsA: [RediffDiffer.Slot],
         config: Configuration = .default
     ) -> [PlayedSlot] {
-        guard !slotsA.isEmpty else { return [] }
+        mergedAndCapped(
+            slotsA.map { PlayedSlot(
+                startSeconds: $0.startSeconds,
+                endSeconds: $0.endSeconds,
+                leftRunSeconds: $0.leftRunSeconds,
+                rightRunSeconds: $0.rightRunSeconds
+            ) },
+            config: config
+        )
+    }
+
+    /// The shared fragment-merge + duration-cap over played slots, applied
+    /// IDENTICALLY to chroma-derived (`cleanedPlayedSlots`) and byte-derived
+    /// (`gateAndDiffBytes`) slots so both differs feed the downstream
+    /// candidate/veto/disposition machinery the same slot shape.
+    static func mergedAndCapped(
+        _ slots: [PlayedSlot],
+        config: Configuration = .default
+    ) -> [PlayedSlot] {
+        guard !slots.isEmpty else { return [] }
         // Sort by start (differ output is already ordered, but be defensive).
-        let sorted = slotsA.sorted { ($0.startSeconds, $0.endSeconds) < ($1.startSeconds, $1.endSeconds) }
-        var merged: [PlayedSlot] = [PlayedSlot(
-            startSeconds: sorted[0].startSeconds,
-            endSeconds: sorted[0].endSeconds,
-            leftRunSeconds: sorted[0].leftRunSeconds,
-            rightRunSeconds: sorted[0].rightRunSeconds
-        )]
+        let sorted = slots.sorted { ($0.startSeconds, $0.endSeconds) < ($1.startSeconds, $1.endSeconds) }
+        var merged: [PlayedSlot] = [sorted[0]]
         for slot in sorted.dropFirst() {
             let last = merged[merged.count - 1]
             // Merge when the inter-slot gap is a short aligned-run dropout. The
@@ -236,6 +250,92 @@ enum RediffSlotOwnership {
         // an alignment breakdown, not a real ad, so the span falls to status-quo
         // width rather than being widened to a suspect fragment).
         return merged.filter { $0.durationSeconds <= config.maxSlotSeconds }
+    }
+
+    // MARK: - Byte-path gate (playhead-xsdz.57 — PRIMARY differ)
+
+    /// Why a byte alignment did or did not yield trustworthy slots. EVERY
+    /// rejection is a FALLBACK TRIGGER (the service then runs the chroma differ
+    /// exactly as pre-xsdz.57), never an error: a re-encoding CDN
+    /// (nikki-glaser) legitimately produces near-zero common bytes.
+    ///
+    /// IDENTITY GATES (why the chroma double-gate does NOT apply here): the
+    /// chroma path diffs a PERSISTED fingerprint stream whose staleness the
+    /// `algorithmVersion` / `sourceAudioIdentity` gates guard against. The byte
+    /// path consumes NO persisted stream — its A input is the asset row's live
+    /// audio file, read at diff time — so there is nothing to go stale. The
+    /// service instead anchors both file inputs with the regular-unaliased-file
+    /// check (bf4a2383 precedent) before any bytes are read.
+    enum ByteGateOutcome: Sendable, Equatable {
+        /// No chained runs — zero anchors (a wholesale re-encode collapses the
+        /// unique-frame anchor set toward 0) or nothing survived min-run.
+        case rejectedNoChainedRuns
+        /// The chain dropped runs (python `monotonic_clean == false`) — an
+        /// out-of-order byte structure the slot semantics cannot trust.
+        case rejectedNonMonotonic(dropped: Int)
+        /// `chainedFractionB` below the re-encode floor (the byte analogue of
+        /// the chroma `alignedFractionB` guard, SAME `minAlignedFractionB`).
+        case rejectedLowChainedFraction(Double)
+        /// Accepted: A-time played slots + scalar diagnostics.
+        case accepted(ByteAcceptance)
+    }
+
+    /// A gate-accepted byte alignment. A-TIME ONLY (xsdz.28 never-persist-B):
+    /// deliberately carries NO `RediffByteAligner.Run` values and NO B-side
+    /// byte coordinates — only played-timeline slots and scalar diagnostics —
+    /// so no B coordinate can outlive the diff through this surface.
+    struct ByteAcceptance: Sendable, Equatable {
+        let chainedFractionB: Double
+        let runsFound: Int
+        let runsChained: Int
+        /// Played-timeline (A-side) DAI ad slots AFTER the A-width ≥
+        /// `minAdSeconds` filter, fragment-merge, and duration-cap — the SAME
+        /// cleaning the chroma acceptance applies. These feed the SAME
+        /// `candidates(...)` → `resolveSpan(...)` → disposition flow, so the
+        /// xsdz.34 §5 veto gate and all grading apply identically.
+        let playedSlots: [PlayedSlot]
+    }
+
+    /// Gate a byte alignment (the PRIMARY differ) into played slots, mirroring
+    /// the python reference's `monotonic_clean` / quality gates:
+    ///   • empty chain          → `.rejectedNoChainedRuns` (fallback)
+    ///   • dropped runs         → `.rejectedNonMonotonic` (fallback)
+    ///   • low chained fraction → `.rejectedLowChainedFraction` (fallback —
+    ///     the re-encode-CDN case, byte analogue of the chroma guard)
+    /// Accepted slots are filtered to A-width ≥ `minAdSeconds` (the byte
+    /// analogue of the chroma differ's `minGapFps` floor — pure-B insertions
+    /// have zero A-width and drop out here), then fragment-merged and
+    /// duration-capped by the SAME `mergedAndCapped` the chroma path uses.
+    static func gateAndDiffBytes(
+        alignment: RediffByteAligner.Alignment,
+        config: Configuration = .default
+    ) -> ByteGateOutcome {
+        guard !alignment.chain.isEmpty else {
+            return .rejectedNoChainedRuns
+        }
+        guard alignment.monotonicClean else {
+            return .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic)
+        }
+        guard alignment.chainedFractionB >= config.minAlignedFractionB else {
+            return .rejectedLowChainedFraction(alignment.chainedFractionB)
+        }
+        let playedSlots = mergedAndCapped(
+            alignment.slots
+                .filter { $0.aSeconds >= config.minAdSeconds }
+                .map { PlayedSlot(
+                    startSeconds: $0.aStartSeconds,
+                    endSeconds: $0.aEndSeconds,
+                    leftRunSeconds: $0.leftFlankSeconds,
+                    rightRunSeconds: $0.rightFlankSeconds
+                ) },
+            config: config
+        )
+        return .accepted(ByteAcceptance(
+            chainedFractionB: alignment.chainedFractionB,
+            runsFound: alignment.runsFound,
+            runsChained: alignment.chain.count,
+            playedSlots: playedSlots
+        ))
     }
 
     // MARK: - Per-span candidate synthesis (pure)
@@ -416,6 +516,21 @@ protocol RediffBSideProvider: Sendable {
     /// The re-fetched B-side copy as mono 16 kHz PCM for `assetId`, or `nil` when
     /// no re-fetch is available (the common production case today → no-op).
     func refetchedBSideMono16kHz(assetId: String) async -> [Float]?
+
+    /// playhead-xsdz.57: the re-fetched B-side copy as its RAW on-disk file for
+    /// `assetId`, or `nil` when no byte-level re-fetch is available. Feeds the
+    /// byte-run aligner — the PRIMARY differ — which needs the container bytes,
+    /// not PCM. Defaulted to `nil` (see the extension below) so chroma-only
+    /// providers compile unchanged and simply never engage the byte path.
+    /// The service anchors the returned URL (regular, unaliased, non-empty
+    /// file — bf4a2383 precedent) before reading a byte, and the bytes NEVER
+    /// outlive the diff (xsdz.28 never-persist-B).
+    func refetchedBSideFileURL(assetId: String) async -> URL?
+}
+
+extension RediffBSideProvider {
+    /// Default: no byte-level B-side — the byte path falls back to chroma.
+    func refetchedBSideFileURL(assetId: String) async -> URL? { nil }
 }
 
 // MARK: - Rediff shadow breadcrumb (distinct tag; reuses the frozen row type)

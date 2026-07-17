@@ -2258,6 +2258,26 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
         return samples
     }
 
+    /// playhead-xsdz.57: the raw staged `.fresh.mp3` for the BYTE-PRIMARY
+    /// differ. Gated by the SAME `probeStagedFresh` acceptance predicate the
+    /// PCM decode path applies (regular, unaliased, non-empty file), so the
+    /// byte path and the chroma-fallback decode agree on what counts as
+    /// staged. `.absent` is the correct non-rotated no-op; `.irregular` is a
+    /// staging problem, called out in the transcript exactly like the decode
+    /// path does.
+    func refetchedBSideFileURL(assetId: String) async -> URL? {
+        let url = Self.freshURL(assetId: assetId, audioDirectory: audioDirectory)
+        switch Self.probeStagedFresh(assetId: assetId, audioDirectory: audioDirectory) {
+        case .absent:
+            return nil
+        case .irregular:
+            print("[xsdz.57] fresh B-side at \(url.path) is not a usable staged file (symlink, non-regular, empty, or unreadable) — byte differ treating as unstaged")
+            return nil
+        case .staged:
+            return url
+        }
+    }
+
     private static func decodeFresh(assetId: String, audioDirectory: URL) async -> [Float]? {
         let freshURL = Self.freshURL(assetId: assetId, audioDirectory: audioDirectory)
         // R1: same regular-file / no-symlink anchor the A-side audio check in
@@ -5178,6 +5198,33 @@ struct RediffTreatmentHarnessWiringTests {
         )
         #expect(allUnstaged.unstagedEpisodeIds == ["ep-a", "ep-b"])
         #expect(allUnstaged.irregularEpisodeIds.isEmpty)
+    }
+
+    /// playhead-xsdz.57: the provider serves the raw staged `.fresh.mp3` URL to
+    /// the BYTE-PRIMARY differ, gated by the SAME acceptance predicate the PCM
+    /// decode path applies — a staged file yields its URL; an absent or
+    /// irregular (symlink/empty) staging yields nil (the byte path then falls
+    /// back to chroma). Hermetic against a temp repo root (real `FileManager`
+    /// semantics, no corpus dependency).
+    @Test("fresh B-side provider serves the staged file URL to the byte path (and nil for absent/irregular)")
+    func freshBSideProviderServesFileURLForBytePath() async throws {
+        let repoRoot = try makeTempDir(prefix: "RediffByteURL")
+        let audioDir = CorpusFreshBSideProvider.audioDirectory(repoRoot: repoRoot)
+        try FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
+        // Staged: a regular, non-empty file → the provider hands back its URL.
+        try Data("b-side-bytes".utf8).write(
+            to: CorpusFreshBSideProvider.freshURL(assetId: "ep-staged", audioDirectory: audioDir)
+        )
+        // Irregular: an empty file the decode path refuses → nil (chroma fallback).
+        try Data().write(
+            to: CorpusFreshBSideProvider.freshURL(assetId: "ep-empty", audioDirectory: audioDir)
+        )
+        let provider = CorpusFreshBSideProvider(repoRoot: repoRoot)
+
+        let stagedURL = await provider.refetchedBSideFileURL(assetId: "ep-staged")
+        #expect(stagedURL == CorpusFreshBSideProvider.freshURL(assetId: "ep-staged", audioDirectory: audioDir))
+        #expect(await provider.refetchedBSideFileURL(assetId: "ep-empty") == nil)
+        #expect(await provider.refetchedBSideFileURL(assetId: "ep-absent") == nil)
     }
 
     /// R6: pin the probe's read-error mapping directly. The filesystem states

@@ -5840,6 +5840,15 @@ actor AdDetectionService {
     /// alignedFraction guard rejected the comparison. `nil` ⇒ the caller leaves
     /// `decodedSpans` untouched (status-quo width — the rediff-sole-setter
     /// contract's fall-through).
+    ///
+    /// playhead-xsdz.57: the BYTE-RUN aligner is the PRIMARY differ. When the
+    /// provider serves a raw B-side file AND the asset row points at a readable
+    /// played-copy file, the byte path produces the played slots (0.02 s median
+    /// end-edge error vs the chroma differ's multi-second edge overshoots —
+    /// the 88 s Mick Jagger incident). When byte inputs are unavailable or the
+    /// byte gate rejects (no runs / non-monotonic / re-encode CDN), the chroma
+    /// path below runs EXACTLY as pre-xsdz.57. Either way the slots flow into
+    /// the SAME candidates → resolveSpan (veto gate) → disposition machinery.
     private func computeRediffSlotPass(
         decodedSpans: [DecodedSpan],
         atoms: [TranscriptAtom],
@@ -5852,41 +5861,56 @@ actor AdDetectionService {
         // pass is inert until the re-fetch scheduler / as-played tap lands).
         guard let provider = rediffBSideProvider else { return nil }
 
-        // Stored played-copy (A-side) fingerprint stream. The store's fetch
-        // already gates on `algorithmVersion` (returns nil on a version mismatch);
-        // the sourceAudioIdentity double-gate is applied by `gateAndDiff` below.
-        let storedASide: EpisodeFingerprintRecord
+        // The asset row, needed by BOTH differ paths: the byte path reads the
+        // played copy from `sourceURL`; the chroma path gates on the CURRENT
+        // `assetFingerprint` (sourceAudioIdentity double-gate).
+        let asset: AnalysisAsset
         do {
-            guard let record = try await store.fetchEpisodeFingerprints(assetId: analysisAssetId) else { return nil }
-            storedASide = record
-        } catch {
-            logger.warning("[xsdz.29] fetchEpisodeFingerprints failed: \(error.localizedDescription)")
-            return nil
-        }
-
-        // The asset's CURRENT assetFingerprint, for the sourceAudioIdentity gate.
-        let currentAssetFingerprint: String
-        do {
-            guard let asset = try await store.fetchAsset(id: analysisAssetId) else { return nil }
-            currentAssetFingerprint = asset.assetFingerprint
+            guard let fetched = try await store.fetchAsset(id: analysisAssetId) else { return nil }
+            asset = fetched
         } catch {
             logger.warning("[xsdz.29] fetchAsset failed: \(error.localizedDescription)")
             return nil
         }
 
-        // Re-fetched B-side as mono 16 kHz PCM. Absent → no rediff signal this run.
-        guard let bSideSamples = await provider.refetchedBSideMono16kHz(assetId: analysisAssetId) else { return nil }
+        let playedSlots: [RediffSlotOwnership.PlayedSlot]
+        if let byteSlots = await computeByteAlignedPlayedSlots(
+            provider: provider,
+            asset: asset,
+            analysisAssetId: analysisAssetId
+        ) {
+            // ── BYTE PRIMARY (xsdz.57) ── the chroma differ is NOT invoked.
+            playedSlots = byteSlots
+        } else {
+            // ── CHROMA FALLBACK ── the pre-xsdz.57 path, unchanged.
+            // Stored played-copy (A-side) fingerprint stream. The store's fetch
+            // already gates on `algorithmVersion` (returns nil on a version
+            // mismatch); the sourceAudioIdentity double-gate is applied by
+            // `gateAndDiff` below.
+            let storedASide: EpisodeFingerprintRecord
+            do {
+                guard let record = try await store.fetchEpisodeFingerprints(assetId: analysisAssetId) else { return nil }
+                storedASide = record
+            } catch {
+                logger.warning("[xsdz.29] fetchEpisodeFingerprints failed: \(error.localizedDescription)")
+                return nil
+            }
 
-        let outcome = RediffSlotOwnership.gateAndDiff(
-            storedASide: storedASide,
-            refetchedBSideSamples16kHz: bSideSamples,
-            currentAssetFingerprint: currentAssetFingerprint
-        )
-        guard case .accepted(let acceptance) = outcome else {
-            logger.info(
-                "[xsdz.29] rediff gate rejected asset=\(analysisAssetId, privacy: .public): \(String(describing: outcome), privacy: .public)"
+            // Re-fetched B-side as mono 16 kHz PCM. Absent → no rediff signal this run.
+            guard let bSideSamples = await provider.refetchedBSideMono16kHz(assetId: analysisAssetId) else { return nil }
+
+            let outcome = RediffSlotOwnership.gateAndDiff(
+                storedASide: storedASide,
+                refetchedBSideSamples16kHz: bSideSamples,
+                currentAssetFingerprint: asset.assetFingerprint
             )
-            return nil
+            guard case .accepted(let acceptance) = outcome else {
+                logger.info(
+                    "[xsdz.29] rediff gate rejected asset=\(analysisAssetId, privacy: .public): \(String(describing: outcome), privacy: .public)"
+                )
+                return nil
+            }
+            playedSlots = acceptance.playedSlots
         }
 
         // playhead-xsdz.34 §5: the user-veto ranges (same set the acoustic pass
@@ -5905,7 +5929,7 @@ actor AdDetectionService {
         let bundle = RediffSlotOwnership.candidates(
             decodedSpans: decodedSpans,
             atomEvidence: atomEvidence,
-            playedSlots: acceptance.playedSlots,
+            playedSlots: playedSlots,
             vetoedRanges: vetoedRanges,
             coreBankMatch: allFalse,
             slotBankMatch: allFalse
@@ -5937,6 +5961,93 @@ actor AdDetectionService {
             diagnostics: bundle.diagnostics,
             result: result
         )
+    }
+
+    /// playhead-xsdz.57: the BYTE-PRIMARY differ attempt. Returns the cleaned
+    /// played slots when the byte path fully succeeds, or `nil` for ANY miss —
+    /// no B-side file from the provider, no anchored A-side file at the asset's
+    /// `sourceURL`, unreadable bytes, or a byte-gate rejection (no runs /
+    /// non-monotonic / re-encode CDN) — in which case the caller falls back to
+    /// the chroma differ exactly as pre-xsdz.57.
+    ///
+    /// IDENTITY GATES: the chroma path's `algorithmVersion` /
+    /// `sourceAudioIdentity` double-gate guards a PERSISTED fingerprint stream
+    /// against staleness. The byte path consumes no persisted stream — its A
+    /// input is the asset row's live audio file read at diff time — so those
+    /// gates do not apply; instead both file inputs are anchored as regular,
+    /// unaliased, non-empty files (bf4a2383 precedent) before a byte is read.
+    ///
+    /// NEVER-PERSIST-B (xsdz.28): the B bytes live only inside this call; the
+    /// returned slots and every log line are A-time scalars only.
+    private func computeByteAlignedPlayedSlots(
+        provider: RediffBSideProvider,
+        asset: AnalysisAsset,
+        analysisAssetId: String
+    ) async -> [RediffSlotOwnership.PlayedSlot]? {
+        guard let bSideURL = await provider.refetchedBSideFileURL(assetId: analysisAssetId) else {
+            return nil
+        }
+        guard let aSideURL = Self.byteDifferASideURL(sourceURL: asset.sourceURL) else {
+            logger.info(
+                "[xsdz.57] byte differ unavailable asset=\(analysisAssetId, privacy: .public): no anchored A-side file — falling back to chroma"
+            )
+            return nil
+        }
+        guard Self.isAnchoredRegularFile(bSideURL) else {
+            logger.info(
+                "[xsdz.57] byte differ unavailable asset=\(analysisAssetId, privacy: .public): B-side URL is not an anchored regular file — falling back to chroma"
+            )
+            return nil
+        }
+        let aData: Data
+        let bData: Data
+        do {
+            aData = try Data(contentsOf: aSideURL, options: .mappedIfSafe)
+            bData = try Data(contentsOf: bSideURL, options: .mappedIfSafe)
+        } catch {
+            logger.warning(
+                "[xsdz.57] byte differ read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription) — falling back to chroma"
+            )
+            return nil
+        }
+        let alignment = RediffByteAligner.align(aData: aData, bData: bData)
+        let outcome = RediffSlotOwnership.gateAndDiffBytes(alignment: alignment)
+        switch outcome {
+        case .accepted(let acceptance):
+            logger.info(
+                "[xsdz.57] byte differ accepted asset=\(analysisAssetId, privacy: .public) slots=\(acceptance.playedSlots.count) runsChained=\(acceptance.runsChained) chainedFractionB=\(String(format: "%.3f", acceptance.chainedFractionB), privacy: .public)"
+            )
+            return acceptance.playedSlots
+        case .rejectedNoChainedRuns, .rejectedNonMonotonic, .rejectedLowChainedFraction:
+            logger.info(
+                "[xsdz.57] byte differ rejected asset=\(analysisAssetId, privacy: .public): \(String(describing: outcome), privacy: .public) — falling back to chroma"
+            )
+            return nil
+        }
+    }
+
+    /// The played-copy (A-side) file for the byte differ, derived from the
+    /// asset row's `sourceURL` (the downloaded episode file in production; the
+    /// snapshotted corpus copy in the dump harness). `nil` unless it is a
+    /// file URL pointing at an anchored regular file.
+    static func byteDifferASideURL(sourceURL: String) -> URL? {
+        guard !sourceURL.isEmpty,
+              let url = URL(string: sourceURL),
+              url.isFileURL,
+              isAnchoredRegularFile(url) else { return nil }
+        return url
+    }
+
+    /// The bf4a2383 filesystem anchor: the URL itself (no symlink traversal)
+    /// must be a regular, unaliased, NON-EMPTY file. Mirrors the dump
+    /// harness's staged-fresh probe semantics.
+    static func isAnchoredRegularFile(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        ) else { return false }
+        return values.isRegularFile == true
+            && values.isSymbolicLink != true
+            && (values.fileSize ?? 0) > 0
     }
 
     /// Flag-ON rediff OWNERSHIP pass: materialize the rediff dispositions via the
