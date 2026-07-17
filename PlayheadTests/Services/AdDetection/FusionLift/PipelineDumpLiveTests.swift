@@ -4171,10 +4171,13 @@ extension PipelineDumpHermeticTests {
         // flagOffMatchesDefaultBaseline`) would catch the AdWindow drift
         // but the dump-schema drift would land here.
         #expect(cfg.spanFinalizerEnabled == false, "spanFinalizerEnabled must be off in production .default")
-        // playhead-l2f.6: the dump's contract that the `stingerRefinement`
-        // JSON key is absent on every window relies on the production
-        // .default keeping stinger refinement OFF — same rationale as the
-        // spanFinalizer pin above.
+        // playhead-l2f.6 (+ 2026-07-16 dogfood flip): stinger refinement
+        // ships ON in production `.default`, so — unlike the finalizer key
+        // above — the dump's `stingerRefinement` key IS populated on
+        // bank-show windows (see the flag-ON encoding test). The pin
+        // records that flipped state: a silent revert to OFF would flip
+        // the dump schema back to key-absent-everywhere and invalidate
+        // readers expecting live v4 traces — fail loud here instead.
         #expect(cfg.stingerRefinementEnabled == true, "ships ON per the recorded 2026-07-16 dogfood flip; xsdz.38 tracks the eat-class fix")
 
         let narrowing = NarrowingConfig.default
@@ -4503,11 +4506,16 @@ struct PipelineDumpEncodingTests {
         // far). Lock the "absent, not null" wire form so a future change
         // to JSONEncoder strategy (e.g. forced-null encoding) is caught.
         #expect(!parsed.keys.contains("promotionTrack"))
-        // playhead-p56a: spanFinalizerConstraintsFired: nil → key absent
-        // (matches the production .default OFF state this dump runs under).
+        // playhead-p56a: spanFinalizerConstraintsFired: nil → key absent.
+        // The flag is OFF in `.default` and EVERY lane's config keeps that
+        // value (the treatment config differs from `.default` only by the
+        // rediff flag), so live dumps never carry this key.
         #expect(!parsed.keys.contains("spanFinalizerConstraintsFired"))
-        // playhead-l2f.6: stingerRefinement: nil → key absent (same
-        // production .default OFF rationale).
+        // playhead-l2f.6: stingerRefinement: nil → key absent. Unlike the
+        // finalizer, stinger refinement ships ON in `.default` (2026-07-16
+        // dogfood flip), so live dumps DO carry this key on bank-show
+        // windows — it is absent here only because this constructed window
+        // records no trace (non-bank show, or flag off).
         #expect(!parsed.keys.contains("stingerRefinement"))
         // New values round-trip (mixed nil/non-nil pair — encoded
         // independently, not as a 2-tuple).

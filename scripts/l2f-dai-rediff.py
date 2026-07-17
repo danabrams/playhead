@@ -31,9 +31,11 @@ Algorithm (v1 — keep it understandable; ~200 lines):
      then merge overlapping/adjacent runs.
   5. GAPS: any range in A NOT covered by a run is a REMOVED segment (usually
      the old dynamic ad). We emit removed-from-A segments ≥ MIN_AD_SECONDS
-     because A is the retained corpus asset. Emitting B intervals after the
-     temporary B download is deleted would attach coordinates to audio that
-     no longer exists and is therefore forbidden.
+     because A is the retained corpus asset. B coordinates are forbidden —
+     the B download is deleted after the diff by default (--retain-audio
+     keeps it at <audioPath>.fresh.mp3 as rediff-treatment-harness input,
+     not a corpus asset), so B intervals would attach coordinates to audio
+     the corpus does not retain.
   6. CONFIDENCE: derived from the matched-run quality on either side of the
      gap. A gap flanked by two long high-density runs scores high. A gap that
      trails off into low-density alignment scores lower. v1 formula:
@@ -56,9 +58,15 @@ Outputs:
 
 Modes:
   * default: re-download every manifest entry and rediff.
-  * --dry-run: skip the re-download; assume <audioPath>.fresh.mp3 (or
-    <audioPath>) already exists on disk. Useful for re-running the alignment
-    on a manually staged pair.
+  * --dry-run: skip the re-download; requires a pre-staged
+    <audioPath>.fresh.mp3 beside the snapshot (the plain <audioPath> is NOT
+    accepted as the fresh side). Useful for re-running the alignment on a
+    manually staged pair.
+  * --retain-audio (playhead-xsdz.36.1): on a rotated episode whose rediff
+    succeeded, keep the fresh B-side at <audioPath>.fresh.mp3 — the exact
+    path --dry-run reads and the Swift rediff treatment harness
+    (CorpusFreshBSideProvider) feeds as the B-side — instead of deleting it.
+    Failure paths still delete the temp download; --dry-run is unaffected.
   * --self-test: synthesize a known-splice pair via ffmpeg from the FIRST
     existing snapshot, splicing in 30 SECONDS of pink-noise (anoisesrc) at
     t=120s so the insert is acoustically distinct from any podcast content
