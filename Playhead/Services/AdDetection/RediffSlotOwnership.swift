@@ -421,8 +421,35 @@ enum RediffSlotOwnership {
     ///   • degenerate core             → (nil, .degenerateCore, pair=nil)
     ///   • no overlapping rediff slot  → (nil, .noCandidatePairs, pair=nil)
     ///   • overlap but coverage < min  → (nil, .coreCoverageBelowMinimum, pair=slot)
+    ///     — UNLESS the FIX A containment clip below applies.
     ///   • slot NEWLY encloses a veto  → (nil, .vetoNewlyEnclosed, pair=slot)
     ///   • qualifying                  → (slot, nil, pair=slot)
+    ///
+    /// FIX A (playhead-xsdz.58): byte-slot CONTAINMENT CLIP. When Foundation Model
+    /// OVER-ANCHORS a span (e.g. conan intro `[0,88.32]` for a true DAI ad of
+    /// `[0,60.369]`), the rediff slot holds the byte-exact truth but sits INSIDE
+    /// the bloated core, so its `coreCoverage` (`60.369/88.32 = 0.684`) falls below
+    /// `minCoreCoverage` and the ordinary gate would DISCARD the correct answer.
+    /// This carve-out bypasses the coverage gate — QUALIFYING the slot so the
+    /// span CLIPS to the byte-exact extent — but ONLY when the best slot is fully
+    /// CONTAINED in the core (`slot.start >= core.start && slot.end <= core.end`)
+    /// AND it is the SOLE slot overlapping the core. That double condition makes
+    /// the fix safe by construction:
+    ///   • A slot that POKES OUT of the core (`start < core.start` OR
+    ///     `end > core.end`) is a genuine mis-association → the EXISTING
+    ///     `.coreCoverageBelowMinimum` rejection stands, unchanged.
+    ///   • A core with NO overlapping slot never reaches here (`.noCandidatePairs`
+    ///     above) → baked-in / host-read ad spans the byte differ cannot see keep
+    ///     STATUS-QUO width, untouched.
+    ///   • A core overlapping 2+ slots (whether contained or poking out) does NOT
+    ///     clip — clipping to one slot could DROP a byte-confirmed ad, and the
+    ///     one-slot-per-span downstream machinery (`candidates` → disposition →
+    ///     rewrite is index-aligned per decoded span) cannot split a span without
+    ///     restructuring. So a multi-slot core falls to STATUS-QUO (keeps its full
+    ///     minted width, which still ENCLOSES every contained slot → nothing
+    ///     dropped). See the multi-slot test / xsdz.58 report for the rationale.
+    /// Mid-rolls are UNAFFECTED — they qualify via the ordinary `coverage >= min`
+    /// branch and never reach this carve-out.
     static func resolveSpan(
         core: TimeRange,
         playedSlots: [PlayedSlot],
@@ -433,11 +460,15 @@ enum RediffSlotOwnership {
             return (nil, SpliceSlotDiagnostics(bestGeometryValidPair: nil, failureReason: .degenerateCore))
         }
         // Best OVERLAPPING slot: max positive overlap, ties → earliest start/end.
+        // `overlappingCount` gates the FIX A clip to the unambiguous single-slot
+        // case (a 2+-slot core must NOT clip to one and drop the others).
         var best: (slot: PlayedSlot, overlap: Double)?
+        var overlappingCount = 0
         for played in playedSlots {
             let range = TimeRange(start: played.startSeconds, end: played.endSeconds)
             let overlap = core.overlapLength(with: range)
             guard overlap > 0 else { continue }
+            overlappingCount += 1
             if let current = best {
                 if overlap > current.overlap
                     || (overlap == current.overlap && played.startSeconds < current.slot.startSeconds)
@@ -453,8 +484,16 @@ enum RediffSlotOwnership {
             return (nil, SpliceSlotDiagnostics(bestGeometryValidPair: nil, failureReason: .noCandidatePairs))
         }
         let slot = synthesizeSlot(from: match.slot, core: core, overlap: match.overlap)
-        guard slot.coreCoverage >= config.minCoreCoverage else {
-            return (nil, SpliceSlotDiagnostics(bestGeometryValidPair: slot, failureReason: .coreCoverageBelowMinimum))
+        if slot.coreCoverage < config.minCoreCoverage {
+            // FIX A (playhead-xsdz.58): bypass the coverage gate ONLY for a single
+            // byte-exact slot fully contained in an over-anchored core; otherwise
+            // keep the existing `.coreCoverageBelowMinimum` rejection verbatim.
+            let containedInCore =
+                match.slot.startSeconds >= core.start && match.slot.endSeconds <= core.end
+            let soleOverlappingSlot = overlappingCount == 1
+            guard containedInCore && soleOverlappingSlot else {
+                return (nil, SpliceSlotDiagnostics(bestGeometryValidPair: slot, failureReason: .coreCoverageBelowMinimum))
+            }
         }
         // playhead-xsdz.34 §5: the SAME newly-enclosed rule `SpliceSlotResolver`
         // applies (`SpliceSlotResolver.swift`, `.vetoNewlyEnclosed`). If the

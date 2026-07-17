@@ -286,6 +286,68 @@ struct RediffSlotOwnershipTests {
         #expect(slot?.startTime == 12 && slot?.endTime == 32)
     }
 
+    // MARK: - FIX A (playhead-xsdz.58): byte-slot containment clip
+
+    @Test("FIX A: over-anchored core fully containing a sole byte slot → clips to the slot (conan [0,88.32]→[0,60.369])")
+    func resolveContainedOverrunClipsToSlot() {
+        // Conan repro: FM over-anchors the intro to [0,88.32]; the byte differ
+        // held the true DAI ad [0,60.369]. coverage = 60.369/88.32 = 0.684 < 0.8,
+        // but the slot is CONTAINED (0>=0 && 60.369<=88.32) and is the SOLE
+        // overlapping slot → the coverage gate is bypassed and the span clips.
+        let core = TimeRange(start: 0, end: 88.32)
+        let (slot, diag) = RediffSlotOwnership.resolveSpan(
+            core: core, playedSlots: [Self.played(0, 60.369, left: 300, right: 45)])
+        guard let s = slot else { Issue.record("FIX A: expected the contained byte slot to qualify"); return }
+        #expect(diag.failureReason == nil, "the contained clip QUALIFIES — no rejection")
+        #expect(s.startTime == 0 && s.endTime == 60.369, "span clips to the byte-exact slot extent")
+        // The slot's recorded coverage is still the true (sub-threshold) value —
+        // FIX A bypasses the GATE, it does not fabricate coverage.
+        #expect(abs(s.coreCoverage - (60.369 / 88.32)) < 1e-9)
+        #expect(s.coreCoverage < 0.8, "coverage really is below the gate; FIX A is why it survived")
+    }
+
+    @Test("FIX A guard (over-fire): a slot that POKES OUT of the core stays .coreCoverageBelowMinimum")
+    func resolveContainedGuardSlotPokesOut() {
+        // Same over-anchored core, but the slot [40,100] runs PAST the core end
+        // (100 > 88.32) — a genuine mis-association, NOT a containment. FIX A must
+        // NOT fire: the existing coverage rejection stands unchanged.
+        let core = TimeRange(start: 0, end: 88.32)
+        let (slot, diag) = RediffSlotOwnership.resolveSpan(
+            core: core, playedSlots: [Self.played(40, 100)])
+        #expect(slot == nil, "a poke-out slot must NOT clip")
+        #expect(diag.failureReason == .coreCoverageBelowMinimum)
+        #expect(diag.bestGeometryValidPair != nil)
+    }
+
+    @Test("FIX A guard (baked-in-ad pin): a core with NO overlapping byte slot stays status-quo, untouched")
+    func resolveNoByteSlotStaysStatusQuo() {
+        // casefile-style baked-in / host-read ad [6.7,77.1] the byte differ CANNOT
+        // see. Even with a real (distant) mid-roll byte slot present in the pass,
+        // this core has NO overlapping slot → .noCandidatePairs → status-quo width.
+        // This is the "don't break baked-in-ad shows" pin: FIX A NEVER fires here.
+        let core = TimeRange(start: 6.7, end: 77.1)
+        let (slot, diag) = RediffSlotOwnership.resolveSpan(
+            core: core, playedSlots: [Self.played(150, 210)])
+        #expect(slot == nil, "no byte slot ⇒ FIX A never fires; span stays as decoded")
+        #expect(diag.failureReason == .noCandidatePairs)
+        #expect(diag.bestGeometryValidPair == nil)
+    }
+
+    @Test("FIX A multi-slot: a core containing TWO byte slots does NOT clip → status-quo (neither ad dropped)")
+    func resolveMultipleContainedSlotsStayStatusQuo() {
+        // Core [0,200] strictly contains byte slots [10,60] and [100,160]. Clipping
+        // to a single slot would DROP the other byte-confirmed ad, and the
+        // one-slot-per-span machinery cannot split. So FIX A DELIBERATELY does not
+        // fire: the span falls to status-quo (its full minted width, which still
+        // ENCLOSES both slots → nothing dropped). The full-flow test
+        // `multiContainedSlotsKeepFullWidthNeitherDropped` proves the enclosure.
+        let core = TimeRange(start: 0, end: 200)
+        let (slot, diag) = RediffSlotOwnership.resolveSpan(
+            core: core, playedSlots: [Self.played(10, 60), Self.played(100, 160)])
+        #expect(slot == nil, "2+ contained slots ⇒ no single-slot clip")
+        #expect(diag.failureReason == .coreCoverageBelowMinimum)
+    }
+
     // MARK: - candidates: index alignment + rediff-sole-setter
 
     private static func atom(_ ordinal: Int, _ start: Double, _ end: Double) -> AtomEvidence {
@@ -376,6 +438,74 @@ struct RediffSlotOwnershipTests {
         #expect(unchanged1 != nil)
         #expect(unchanged1?.anchorProvenance.isEmpty == true)
         #expect(unchanged1?.startTime == 200 && unchanged1?.endTime == 210)
+    }
+
+    @Test("FIX A integration: over-anchored [0,88.32] + byte slot [0,60.369] → single ad [0,60.369], nothing in (60.4,100), mid-roll byte-exact")
+    func containedOverrunClipsToSingleAdWindowEndToEnd() {
+        // s0: FM over-anchored the conan intro to [0,88.32]; the byte slot is the
+        // true DAI ad [0,60.369]. s1: a byte-exact mid-roll [100,160] (coverage
+        // 1.0 → ordinary qualify) — the control that FIX A leaves mid-rolls alone.
+        let spans = [
+            Self.span("s0", 0, 88.32, 1, 3),
+            Self.span("s1", 100, 160, 9, 10),
+        ]
+        let atoms = [
+            Self.atom(1, 0, 30), Self.atom(2, 30, 58),   // inside the clipped [0,60.369]
+            Self.atom(3, 62, 85),                        // FM over-anchor TAIL, outside the clip
+            Self.atom(9, 100, 130), Self.atom(10, 130, 158),
+        ]
+        let bundle = RediffSlotOwnership.candidates(
+            decodedSpans: spans, atomEvidence: atoms,
+            playedSlots: [Self.played(0, 60.369), Self.played(100, 160)],
+            coreBankMatch: [false, false], slotBankMatch: [false, false])
+        let result = SpliceSlotDispositionEngine.computeDispositions(bundle.candidates)
+        let rewrite = SpliceSlotRewriter.apply(
+            decodedSpans: spans, dispositions: result.dispositions,
+            atomEvidence: atoms, provenance: .rediffSlot)
+
+        // Exactly two ad windows: the clipped intro ad and the untouched mid-roll.
+        #expect(rewrite.finalSpans.count == 2)
+        // s0 clipped to the byte-exact slot [0,60.369] (NOT the [0,88.32] overrun).
+        let clipped = rewrite.finalSpans.first { $0.startTime == 0 }
+        #expect(clipped?.endTime == 60.369, "clips at the real ad boundary, not the FM overrun")
+        #expect(clipped?.anchorProvenance.contains(.rediffSlot) == true)
+        // NO ad window remains in (60.369, 100) — the vacated FM over-anchor tail.
+        for span in rewrite.finalSpans {
+            let overlapsTail = span.startTime < 100 && span.endTime > 60.369
+            #expect(!overlapsTail || span.startTime == 0,
+                    "no span (other than the clip itself) survives in the vacated tail, got [\(span.startTime),\(span.endTime)]")
+        }
+        // Mid-roll width is byte-exact and unchanged.
+        let midroll = rewrite.finalSpans.first { $0.startTime == 100 }
+        #expect(midroll?.endTime == 160, "mid-roll width unchanged")
+    }
+
+    @Test("FIX A multi-slot integration: a core containing TWO byte slots keeps full width — neither byte-confirmed ad dropped")
+    func multiContainedSlotsKeepFullWidthNeitherDropped() {
+        // Core [0,200] strictly contains byte slots [10,60] and [100,160]. FIX A
+        // does not clip (would drop one). Status-quo keeps the full minted width,
+        // which ENCLOSES both slots → both ad regions remain covered.
+        let spans = [Self.span("s0", 0, 200, 1, 2)]
+        let atoms = [Self.atom(1, 10, 60), Self.atom(2, 100, 160)]
+        let bundle = RediffSlotOwnership.candidates(
+            decodedSpans: spans, atomEvidence: atoms,
+            playedSlots: [Self.played(10, 60), Self.played(100, 160)],
+            coreBankMatch: [false], slotBankMatch: [false])
+        #expect(bundle.synthesizedSlots[0] == nil, "no single-slot clip for a multi-slot core")
+        #expect(bundle.diagnostics[0].failureReason == .coreCoverageBelowMinimum)
+
+        let result = SpliceSlotDispositionEngine.computeDispositions(bundle.candidates)
+        #expect(result.dispositions[0] == .noSlot, "status-quo — the span is carried through unchanged")
+        let rewrite = SpliceSlotRewriter.apply(
+            decodedSpans: spans, dispositions: result.dispositions,
+            atomEvidence: atoms, provenance: .rediffSlot)
+        guard let s0 = rewrite.finalSpans.first else { Issue.record("expected the status-quo span"); return }
+        #expect(rewrite.finalSpans.count == 1)
+        #expect(s0.startTime == 0 && s0.endTime == 200, "full minted width retained")
+        // Both byte-confirmed ad regions are still enclosed by the retained span.
+        #expect(s0.startTime <= 10 && s0.endTime >= 60, "encloses byte slot [10,60]")
+        #expect(s0.startTime <= 100 && s0.endTime >= 160, "encloses byte slot [100,160]")
+        #expect(!s0.anchorProvenance.contains(.rediffSlot), "status-quo sets no rediff width")
     }
 
     @Test("the acoustic rewrite path is unchanged (default provenance stays .spliceSlot)")
