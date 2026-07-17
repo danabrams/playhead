@@ -221,6 +221,15 @@ enum StingerCandidateMiner {
         episodes: [StingerMinerEpisode],
         config: StingerMinerConfig = .default
     ) -> [MinedStingerCandidate] {
+        // The shipped NCC primitive bakes in `StingerEnvelope.envelopeHz` (50) as
+        // its 1 s min-length gate; every second<->frame conversion below assumes
+        // the same rate. A divergent `config.envelopeHz` would run to completion
+        // and emit silently-wrong offsets/anchors, so reject it loudly instead.
+        precondition(
+            config.envelopeHz == StingerEnvelope.envelopeHz,
+            "StingerCandidateMiner requires \(StingerEnvelope.envelopeHz) Hz envelopes "
+            + "(config.envelopeHz was \(config.envelopeHz)) to match the shipped NCC primitive."
+        )
         let hz = config.envelopeHz
         let templateLength = config.templateFrames
         let half = templateLength / 2
