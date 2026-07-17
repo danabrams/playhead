@@ -1121,9 +1121,10 @@ private struct DumpBSideCoverage: Encodable {
     let manifestEntryCount: Int
     /// Sorted; absent OR irregular (the decode path treats both as unstaged).
     let unstagedEpisodeIds: [String]
-    /// Sorted subset of `unstagedEpisodeIds`: something exists at the staged
-    /// path but the decode path refuses it (symlink — including dangling —
-    /// non-regular, or empty file).
+    /// Sorted subset of `unstagedEpisodeIds`: something exists (or may exist)
+    /// at the staged path but the decode path refuses it (symlink — including
+    /// dangling — non-regular, empty file, or a path whose metadata cannot be
+    /// read for any reason other than not existing; R6 fails those closed).
     let irregularEpisodeIds: [String]
 }
 
@@ -2370,10 +2371,11 @@ private struct RediffTreatmentBSideClassification {
     /// Entries the decode path would treat as unstaged (absent OR irregular) —
     /// status-quo width for these episodes. Manifest order.
     var unstagedEpisodeIds: [String] = []
-    /// Subset of `unstagedEpisodeIds`: something EXISTS at the staged path but
-    /// the decode path refuses it (symlink — including dangling — non-regular,
-    /// or empty file) — a staging PROBLEM worth calling out separately from a
-    /// plain non-rotated episode.
+    /// Subset of `unstagedEpisodeIds`: something EXISTS (or may exist) at the
+    /// staged path but the decode path refuses it (symlink — including dangling
+    /// — non-regular, empty file, or a path whose metadata cannot be read for
+    /// any reason other than not existing; R6 fails those closed) — a staging
+    /// PROBLEM worth calling out separately from a plain non-rotated episode.
     var irregularEpisodeIds: [String] = []
 }
 
