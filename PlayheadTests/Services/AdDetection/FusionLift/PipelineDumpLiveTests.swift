@@ -1,14 +1,33 @@
 // PipelineDumpLiveTests.swift
 // One-shot exploratory pipeline-dump harness for the 9 NEW corpus episodes
-// snapshotted under `TestFixtures/Corpus/Snapshots/manifest.json`. This is
-// NOT an A/B and NOT a lift measurement — it runs the PRODUCTION
-// `AdDetectionService.runBackfill` once per episode under the shipped
-// `AdDetectionConfig.default` (every activation flag off, `fmBackfillMode:
-// .full`, `chapterSignalMode: .off`) and dumps the persisted `AdWindow`s so
-// the orchestrator can cross-validate them against the drafter's candidate
-// spans.
+// snapshotted under `TestFixtures/Corpus/Snapshots/manifest.json`. The
+// ORIGINAL legacy dump lane this header describes is NOT an A/B and NOT a
+// lift measurement — it runs the PRODUCTION `AdDetectionService.runBackfill`
+// once per episode under the shipped `AdDetectionConfig.default` (every
+// activation flag off, `fmBackfillMode: .full`, `chapterSignalMode: .off`)
+// and dumps the persisted `AdWindow`s so the orchestrator can cross-validate
+// them against the drafter's candidate spans.
 //
-// CONTRACT (mirrors the sibling live harnesses in this directory):
+// LANES: this file now hosts FOUR env-gated lanes. The CONTRACT and Output
+// sections below describe the legacy dump lane; the other three are
+// documented on their own test/capture methods:
+//   * `PLAYHEAD_PIPELINE_DUMP=1` — the legacy snapshot dump (this header;
+//     `testProductionPipelineDumpOnNewEpisodes`).
+//   * `PLAYHEAD_PARTIAL_SILVER_BASELINE=1` — the immutable 27-asset baseline
+//     (`capturePartialSilverProductionBaseline`).
+//   * `PLAYHEAD_BASELINE_DEVICE_PREFLIGHT=1` — the bounded physical-device
+//     transport check (`testPhysicalDeviceBaselinePreflight`).
+//   * `PLAYHEAD_PIPELINE_DUMP_REDIFF=1` — playhead-xsdz.36.1: the
+//     rediff-ACTIVATION TREATMENT dump, which IS the treatment half of a
+//     lift measurement. Same per-episode setup, but the config is `.default`
+//     with `rediffSlotOwnershipEnabled` flipped ON plus an injected
+//     fresh-B-side provider, written to the DISTINCT
+//     `playhead-dogfood-diagnostics-pipeline-dump-rediff-treatment.json` so
+//     the orchestrator can diff treatment vs. baseline
+//     (`captureRediffTreatmentDump`).
+//
+// CONTRACT (legacy dump lane; mirrors the sibling live harnesses in this
+// directory):
 //   * Env-gated. `PLAYHEAD_PIPELINE_DUMP=1` MUST be set in the test process
 //     environment. The default `PlayheadFastTests` plan does NOT set it, so
 //     the test body skips on Cmd-U (via `XCTSkipUnless`) — no FM, no audio
@@ -3168,18 +3187,20 @@ private extension PipelineDumpLiveTests {
         // investigation (see DumpDecodedSpan docstring above).
         let decodedSpanRows = await observer.spanRows(for: assetId) ?? []
         // playhead-p56a: per-AdWindow finalizer constraint trace. Empty
-        // map when `config.spanFinalizerEnabled == false` (the production
-        // .default this dump runs under — see `PipelineDumpHermeticTests`'s
-        // `productionConfigStateIsHeld` pin). Each map entry surfaces in
+        // map when `config.spanFinalizerEnabled == false` — the flag is OFF
+        // in `.default` (see `PipelineDumpHermeticTests`'s
+        // `productionConfigStateIsHeld` pin) and EVERY lane's config keeps
+        // that value (the treatment config differs from `.default` only by
+        // the rediff flag). Each map entry surfaces in
         // the dump's `spanFinalizerConstraintsFired` key when present and
         // non-empty; nil/missing when the underlying lookup yielded no
         // trace, matching the default-encoder convention for nil optionals.
         let spanFinalizerConstraintsByWindowId =
             await service.spanFinalizerConstraintsByWindowIdForTesting()
-        // playhead-l2f.6: per-AdWindow stinger refinement trace. The
-        // production .default this dump runs under ships the flag ON
-        // (2026-07-16 dogfood flip — see `productionConfigStateIsHeld`),
-        // so bank-show windows carry live v4 traces here; the map is empty
+        // playhead-l2f.6: per-AdWindow stinger refinement trace. The flag
+        // ships ON in `.default` (2026-07-16 dogfood flip — see
+        // `productionConfigStateIsHeld`) and every lane's config keeps that
+        // value, so bank-show windows carry live v4 traces here; the map is empty
         // only when the flag is OFF or no window's show resolved a bank
         // entry. Each entry surfaces in the dump's `stingerRefinement` key
         // when present; nil/missing otherwise, matching the
@@ -3529,9 +3550,11 @@ private struct PipelineDumpRunError: Error {
 
 /// Hermetic, sim-runnable tests that guard the two pieces of glue most
 /// likely to silently regress: (a) the manifest read returns the expected
-/// 9 entries, and (b) the dump test uses literally `AdDetectionConfig.default`
-/// (no shadow copy, no flag drift). These run in `PlayheadFastTests` on the
-/// simulator with NO env var — they neither read audio nor hit FM.
+/// 9 entries, and (b) the BASELINE dump lanes use literally
+/// `AdDetectionConfig.default` (no shadow copy, no flag drift; the
+/// treatment lane's single-flag delta from `.default` is pinned separately
+/// by `RediffTreatmentHarnessWiringTests`). These run in `PlayheadFastTests`
+/// on the simulator with NO env var — they neither read audio nor hit FM.
 struct PipelineDumpHermeticTests {
 
     @Test("physical app-container checks begin at standard app directories")
