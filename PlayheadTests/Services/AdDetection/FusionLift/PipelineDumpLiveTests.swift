@@ -2078,7 +2078,8 @@ enum BaselineSourceIdentity {
 /// stages these for rotated episodes — this provider only CONSUMES them, it
 /// never fetches), decodes it via the SAME 16 kHz `AnalysisAudioService` path
 /// the A-side uses, concatenates shards in `startTime` order into one mono
-/// `[Float]`, and caches per assetId.
+/// `[Float]`, and memoizes the MOST RECENT assetId only (see the memo note on
+/// the stored properties).
 ///
 /// Deliberately NOT `CorpusAudioFixtures.decodeMono11025`: that pre-resamples to
 /// 11025 Hz, but `RediffSlotOwnership.gateAndDiff` fingerprints the B-side with
@@ -2091,7 +2092,14 @@ enum BaselineSourceIdentity {
 /// width, exactly as in production where no provider is injected).
 private actor CorpusFreshBSideProvider: RediffBSideProvider {
     private let audioDirectory: URL
-    private var cache: [String: [Float]?] = [:]
+    /// Single-entry memo (R1): the lane visits episodes SEQUENTIALLY and each
+    /// asks for its own assetId, so memoization only needs to absorb repeat
+    /// calls within one episode. A grow-forever `[assetId: [Float]?]` dictionary
+    /// would instead pin EVERY decoded B-side (~230 MB of PCM per hour-long
+    /// episode) for the whole 90-minute lane — multi-GB on the 16 GB capture
+    /// machine that is also running FM inference.
+    private var lastAssetId: String?
+    private var lastSamples: [Float]?
 
     init(repoRoot: URL) {
         audioDirectory = repoRoot
@@ -2099,9 +2107,10 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
     }
 
     func refetchedBSideMono16kHz(assetId: String) async -> [Float]? {
-        if let cached = cache[assetId] { return cached }
+        if lastAssetId == assetId { return lastSamples }
         let samples = await Self.decodeFresh(assetId: assetId, audioDirectory: audioDirectory)
-        cache[assetId] = samples
+        lastAssetId = assetId
+        lastSamples = samples
         return samples
     }
 
@@ -2110,6 +2119,19 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
             .appendingPathComponent("\(assetId).fresh.mp3", isDirectory: false)
         guard FileManager.default.fileExists(atPath: freshURL.path),
               let localURL = LocalAudioURL(freshURL) else {
+            return nil
+        }
+        // R1: same regular-file / no-symlink anchor the A-side audio check in
+        // `runSingleEpisode` applies (bf4a2383 precedent) — a staged B-side must
+        // be a real file, not an alias into arbitrary bytes. Unlike an UNSTAGED
+        // id (silent nil = correct non-rotated no-op), an irregular staged path
+        // is a staging problem, so say so in the transcript.
+        guard let freshValues = try? freshURL.resourceValues(
+                  forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+              ),
+              freshValues.isRegularFile == true,
+              freshValues.isSymbolicLink != true else {
+            print("[xsdz.36.1] fresh B-side at \(freshURL.path) is not a regular unaliased file — treating as unstaged")
             return nil
         }
         // DISTINCT decode episodeID: `AnalysisAudioService.decode` persists to a
@@ -2132,6 +2154,11 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
             let samples = shards
                 .sorted { $0.startTime < $1.startTime }
                 .flatMap { $0.samples }
+            // R1: the `.fresh` shard cache is WRITE-only — the evict-first above
+            // means no later run ever reads it — so drop it now rather than leave
+            // ~230 MB/episode of dead PCM under Application Support for the
+            // lane's whole corpus (disk-hygiene mandate).
+            await audio.evictCache(episodeID: bSideEpisodeID)
             return samples.isEmpty ? nil : samples
         } catch {
             // A STAGED fresh file that fails to decode is a staging problem, not
@@ -4532,6 +4559,32 @@ struct RediffTreatmentHarnessWiringTests {
         #expect(treatment.fmConsensusThreshold == base.fmConsensusThreshold)
     }
 
+    /// R1: reflection-exhaustive twin of the field-by-field check above. The
+    /// explicit `#expect` list can only cover fields that existed when it was
+    /// written; if a FUTURE `AdDetectionConfig` field ships with an init default
+    /// that differs from the `.default` static's value, `makeRediffTreatmentConfig`
+    /// still compiles without it and the treatment arm silently drifts —
+    /// invalidating the A/B comparison. Mirroring every STORED property and
+    /// requiring exactly one difference (the rediff flag) makes the
+    /// differs-only-by-flag invariant structurally future-proof.
+    @Test("treatment config differs from .default in EXACTLY one stored property (reflection-exhaustive)")
+    func treatmentConfigDiffersInExactlyOneStoredProperty() {
+        let baseChildren = Array(Mirror(reflecting: AdDetectionConfig.default).children)
+        let treatmentChildren = Array(Mirror(reflecting: makeRediffTreatmentConfig()).children)
+        #expect(baseChildren.count == treatmentChildren.count)
+
+        var differing: [String] = []
+        for (base, treatment) in zip(baseChildren, treatmentChildren) {
+            #expect(base.label == treatment.label)
+            // Every stored property is Bool/Int/Double/String or a simple enum,
+            // for which `String(describing:)` is a faithful equality proxy.
+            if String(describing: base.value) != String(describing: treatment.value) {
+                differing.append(base.label ?? "<unlabeled>")
+            }
+        }
+        #expect(differing == ["rediffSlotOwnershipEnabled"])
+    }
+
     @Test("A-side capture round-trips the identity the rediff gate accepts")
     func aSideCaptureIdentityRoundTrips() async throws {
         let store = try await makeTestStore()
@@ -4625,14 +4678,23 @@ struct RediffTreatmentHarnessWiringTests {
 
     /// Real decode of an offline-staged `.fresh.mp3` through the provider. Heavy
     /// (decodes a full episode), so it is env-gated OFF in `PlayheadFastTests` and
-    /// exercised on demand:
-    ///   PLAYHEAD_REDIFF_PROVIDER_DECODE_CHECK=1 \
-    ///     -only-testing:'PlayheadTests/RediffTreatmentHarnessWiringTests/freshBSideProviderDecodesStagedAudio()'
-    @Test("fresh B-side provider decodes a staged .fresh.mp3 to non-empty 16 kHz PCM")
+    /// exercised on demand. NOTE (R1, verified empirically): this scheme uses
+    /// test PLANS, and Xcode ignores `TEST_RUNNER_`-prefixed command-line env
+    /// overrides when a test plan is in use (both `test` and
+    /// `test-without-building`) — the SAME quirk the Catalyst capture lane hit
+    /// (env only via patched xctestrun). To exercise this test: build-for-testing,
+    /// then add `PLAYHEAD_REDIFF_PROVIDER_DECODE_CHECK=1` to every test target's
+    /// `EnvironmentVariables` dict in the produced `.xctestrun`, and run
+    /// `test-without-building -xctestrun <patched> -only-testing:'PlayheadTests/
+    /// RediffTreatmentHarnessWiringTests'`.
+    /// The `.enabled(if:)` trait (R1) makes a not-enabled run report SKIPPED —
+    /// a silent guard-return here previously looked identical to a real pass,
+    /// which is a verification trap for a measurement harness.
+    @Test(
+        "fresh B-side provider decodes a staged .fresh.mp3 to non-empty 16 kHz PCM",
+        .enabled(if: ProcessInfo.processInfo.environment["PLAYHEAD_REDIFF_PROVIDER_DECODE_CHECK"] == "1")
+    )
     func freshBSideProviderDecodesStagedAudio() async throws {
-        guard ProcessInfo.processInfo.environment["PLAYHEAD_REDIFF_PROVIDER_DECODE_CHECK"] == "1"
-        else { return }
-
         let repoRoot = PipelineDumpManifestLoader.repoRoot()
         let audioDir = repoRoot
             .appendingPathComponent("TestFixtures/Corpus/Audio", isDirectory: true)
