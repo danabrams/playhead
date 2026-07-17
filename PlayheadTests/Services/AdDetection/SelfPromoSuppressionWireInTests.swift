@@ -161,11 +161,11 @@ struct SelfPromoSuppressionWireInTests {
 
     // MARK: - (a) Config defaults
 
-    @Test("AdDetectionConfig.default ships self-promo suppression OFF")
-    func configDefaultsAreOff() {
+    @Test("AdDetectionConfig.default ships self-promo suppression ON")
+    func configDefaultsAreOn() {
         #expect(
-            AdDetectionConfig.default.selfPromoSuppressionEnabled == false,
-            "this cut ships OFF; the production flip needs multi-show validation (out of scope)"
+            AdDetectionConfig.default.selfPromoSuppressionEnabled == true,
+            "flipped ON 2026-07-16 (playhead-fl4j): attention→verification rework measured 0/70 false-fires on real ad breaks; a false-fire only demotes a real ad to a play-by-default banner"
         )
     }
 
@@ -185,12 +185,12 @@ struct SelfPromoSuppressionWireInTests {
         )
         #expect(off.selfPromoSuppressionEnabled == false)
 
-        // Omitting the arg must match `.default` (OFF).
+        // Omitting the arg must match `.default` (now ON post-flip).
         let omitted = AdDetectionConfig(
             candidateThreshold: 0.40, confirmationThreshold: 0.70, suppressionThreshold: 0.25,
             hotPathLookahead: 90.0, detectorVersion: "test-v1"
         )
-        #expect(omitted.selfPromoSuppressionEnabled == false, "init default must match .default")
+        #expect(omitted.selfPromoSuppressionEnabled == true, "init default must match .default")
     }
 
     // MARK: - (b) Flag-OFF byte-identity
@@ -211,15 +211,18 @@ struct SelfPromoSuppressionWireInTests {
             selfPromoEnabled: false,
             selfPromoBank: try Self.makeBank()
         )
-        // Default arm: config default (self-promo OFF), nothing injected.
+        // Baseline arm: self-promo EXPLICITLY OFF, nothing injected. (The
+        // production `.default` now ships this flag ON, so the flag-OFF
+        // no-op invariant is pinned against an explicit-OFF config, not
+        // `.default`.)
         let defaultConfig = AdDetectionConfig(
             candidateThreshold: 0.40,
             confirmationThreshold: 0.70,
             suppressionThreshold: 0.25,
             hotPathLookahead: 90.0,
             detectorVersion: "fl4j-test",
-            fmBackfillMode: .off
-            // selfPromoSuppressionEnabled omitted → default OFF.
+            fmBackfillMode: .off,
+            selfPromoSuppressionEnabled: false
         )
         let serviceDefault = AdDetectionService(
             store: storeDefault,

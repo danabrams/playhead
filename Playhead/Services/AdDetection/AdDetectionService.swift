@@ -617,7 +617,7 @@ struct AdDetectionConfig: Sendable {
         rediffSlotShadowEnabled: Bool = false,
         stingerRefinementEnabled: Bool = true,
         lexicalAnchorRefinementEnabled: Bool = false,
-        selfPromoSuppressionEnabled: Bool = false
+        selfPromoSuppressionEnabled: Bool = true
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -726,7 +726,7 @@ struct AdDetectionConfig: Sendable {
         rediffSlotShadowEnabled: false,
         stingerRefinementEnabled: true,
         lexicalAnchorRefinementEnabled: false,
-        selfPromoSuppressionEnabled: false
+        selfPromoSuppressionEnabled: true  // playhead-fl4j: flipped ON 2026-07-16 — attention→verification rework measured 0/70 false-fires on real ads
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
