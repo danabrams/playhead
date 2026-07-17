@@ -569,4 +569,112 @@ struct RediffByteAlignerTests {
         #expect(bundle.synthesizedSlots == [nil])
         #expect(bundle.diagnostics.first?.failureReason == .vetoNewlyEnclosed)
     }
+
+    // MARK: - Malformed / adversarial container robustness (R2, angle 2)
+    //
+    // playhead-xsdz.57 R2: the byte differ's B-side is a RE-FETCHED file that in
+    // production arrives over a flaky network — it can be truncated, byte-corrupt,
+    // or not even an MP3 (an AAC-in-`.mp3` container, an HTML error page saved as
+    // `.mp3`, a partial download, a hostile blob). `computeByteAlignedPlayedSlots`
+    // wraps ONLY the file READ in `do/catch`; a Swift TRAP (out-of-bounds index /
+    // integer overflow) inside `parse`/`align` is UNCATCHABLE and would crash the
+    // `AdDetectionService` actor. These tests pin the two safety invariants the
+    // service relies on:
+    //   (a) adversarial container bytes never trap and never emit an out-of-range
+    //       frame (the frame walk stays in bounds and terminates — the resync
+    //       scan-to-EOF cannot loop), and
+    //   (b) a garbage B (or A) never yields an ACCEPTED byte alignment, so the
+    //       service falls back to the chroma differ; and IDENTICAL garbage never
+    //       fabricates a played ad slot.
+    // The tests COMPLETING is itself the no-trap proof — a trap aborts the process.
+
+    /// Adversarial container blobs a corrupt / hostile re-fetch could produce.
+    private static func adversarialBlobs() -> [(name: String, data: Data)] {
+        // 1. Endless MPEG sync candidates — every header invalid (brIdx == 15);
+        //    forces the resync scan to walk to EOF and give up (termination).
+        let allSync = Data([UInt8](repeating: 0xFF, count: 8192))
+        // 2. Leading ID3v2 whose syncsafe size skips PAST EOF (leading pos > n):
+        //    real frames follow but are never reached → empty parse.
+        var hugeID3: [UInt8] = [0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x7F, 0x7F, 0x7F, 0x7F]
+        hugeID3.append(contentsOf: SyntheticMP3.frames(count: 4, seed: 1).flatMap { $0 })
+        // 3. Pseudo-random garbage.
+        var rng = SyntheticMP3.Noise(seed: 0xBADF00D)
+        let garbage = Data((0..<8192).map { _ in UInt8(truncatingIfNeeded: rng.next()) })
+        // 4. "ID3" prefix declaring 8192 B but the file is 10 B (size past EOF).
+        let truncID3 = Data([0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00])
+        // 5. AAC ADTS stream: sync 0xFFF but layer bits 0 → every header rejected.
+        var adts: [UInt8] = []
+        for _ in 0..<64 {
+            adts.append(contentsOf: [0xFF, 0xF1, 0x50, 0x80, 0x00, 0x1F, 0xFC])
+            adts.append(contentsOf: [UInt8](repeating: 0x42, count: 100))
+        }
+        // 6. Valid frames interleaved with 0xFF sync-looking junk (resync stress).
+        var mixed: [UInt8] = []
+        for f in SyntheticMP3.frames(count: 6, seed: 2) {
+            mixed.append(contentsOf: f)
+            mixed.append(contentsOf: [UInt8](repeating: 0xFF, count: 37))
+        }
+        // 7. Degenerate tiny inputs (below/at header size).
+        let oneByte = Data([0xFF])
+        let loneHeader = Data([0xFF, 0xFB, 0x90, 0xC0])  // valid header, no room for its frame
+        return [
+            ("allSync", allSync),
+            ("hugeLeadingID3", Data(hugeID3)),
+            ("garbage", garbage),
+            ("truncatedID3", truncID3),
+            ("aacAdts", Data(adts)),
+            ("framesWithSyncJunk", Data(mixed)),
+            ("oneByte", oneByte),
+            ("loneHeader", loneHeader),
+        ]
+    }
+
+    private func gateIsRejected(_ outcome: RediffSlotOwnership.ByteGateOutcome) -> Bool {
+        if case .accepted = outcome { return false }
+        return true
+    }
+
+    private func acceptedPlayedSlotCount(_ alignment: RediffByteAligner.Alignment) -> Int {
+        if case .accepted(let acc) = RediffSlotOwnership.gateAndDiffBytes(alignment: alignment) {
+            return acc.playedSlots.count
+        }
+        return 0
+    }
+
+    @Test("parse stays in bounds and terminates on adversarial container bytes (no OOB frame, no runaway resync)")
+    func parseAdversarialInBounds() {
+        for (name, data) in Self.adversarialBlobs() {
+            let parsed = RediffByteAligner.parse(data)
+            #expect(parsed.sizeBytes == data.count, "\(name): sizeBytes")
+            #expect(parsed.frameOffsets.count == parsed.frameLengths.count, "\(name): parallel arrays")
+            #expect(parsed.frameOffsets.count == parsed.frameTimes.count, "\(name): parallel arrays")
+            var prevEnd = 0
+            for (off, len) in zip(parsed.frameOffsets, parsed.frameLengths) {
+                #expect(off >= prevEnd && len > 0 && off + len <= data.count,
+                        "\(name): frame [\(off),\(off + len)) escapes [\(prevEnd),\(data.count))")
+                prevEnd = off + len
+            }
+        }
+    }
+
+    @Test("adversarial A/B never traps in align and never yields an accepted alignment (→ chroma fallback)")
+    func adversarialAlignRejectsSafely() {
+        // A real, self-consistent A the garbage is diffed against.
+        let realA = SyntheticMP3.file(SyntheticMP3.frames(count: 300, seed: 100))
+        for (name, blob) in Self.adversarialBlobs() {
+            // Real A vs garbage B: zero cross-file anchors → reject → chroma fallback.
+            let ab = RediffByteAligner.align(aData: realA, bData: blob, config: SyntheticMP3.smallRunConfig)
+            #expect(gateIsRejected(RediffSlotOwnership.gateAndDiffBytes(alignment: ab)),
+                    "realA vs \(name) must reject (no accepted byte slots)")
+            // Garbage A vs real B: symmetric.
+            let ba = RediffByteAligner.align(aData: blob, bData: realA, config: SyntheticMP3.smallRunConfig)
+            #expect(gateIsRejected(RediffSlotOwnership.gateAndDiffBytes(alignment: ba)),
+                    "\(name) vs realB must reject (no accepted byte slots)")
+            // Identical garbage vs itself: an all-common alignment has NO gaps, so
+            // even when accepted it must NOT fabricate a played ad slot.
+            let aa = RediffByteAligner.align(aData: blob, bData: blob, config: SyntheticMP3.smallRunConfig)
+            #expect(acceptedPlayedSlotCount(aa) == 0,
+                    "\(name) vs itself must not synthesize a played ad slot")
+        }
+    }
 }
