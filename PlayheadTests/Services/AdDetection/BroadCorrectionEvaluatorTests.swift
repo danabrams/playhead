@@ -417,6 +417,140 @@ struct BroadCorrectionEvaluatorImplicitTests {
     }
 }
 
+// MARK: - Layer-B Act-Alone Suppression (playhead-xsdz.34 Part 3)
+
+/// The Dan-INCLUDED §8 carve-out: ONE explicit `.falsePositive` (suppress)
+/// veto has act-alone authority to promote a Layer-B SUPPRESSION rule — an
+/// EXPLICIT, separately-tested behavior via `shouldActAloneSuppress`, walled
+/// off from `shouldPromote`'s corroboration path (which is unchanged).
+@Suite("BroadCorrectionEvaluator — Layer-B act-alone suppression (xsdz.34)")
+struct BroadCorrectionEvaluatorActAloneTests {
+
+    private let referenceDate = Date(timeIntervalSince1970: 1_750_000_000)
+
+    @Test("ONE explicit .falsePositive suppress veto acts alone to promote a Layer-B suppression rule")
+    func explicitSuppressActsAlone() {
+        for scope in BroadCorrectionScope.allCases {
+            let entries: [CorrectionLedgerEntry] = [
+                .init(episodeId: "ep-1", correctionDate: referenceDate, feedbackKind: .explicit, direction: .suppress)
+            ]
+            #expect(
+                BroadCorrectionEvaluator.shouldActAloneSuppress(
+                    scope: scope, entries: entries, referenceDate: referenceDate
+                ),
+                "a single explicit suppress veto should act alone for \(scope)"
+            )
+        }
+    }
+
+    @Test("GUARDRAIL 1: an explicit BOOST veto never acts alone (suppress-direction only)")
+    func explicitBoostNeverActsAlone() {
+        let entries: [CorrectionLedgerEntry] = [
+            .init(episodeId: "ep-1", correctionDate: referenceDate, feedbackKind: .explicit, direction: .boost)
+        ]
+        #expect(!BroadCorrectionEvaluator.shouldActAloneSuppress(
+            scope: .sponsorOnShow, entries: entries, referenceDate: referenceDate))
+    }
+
+    @Test("GUARDRAIL 2: a single implicit suppress signal never acts alone")
+    func implicitSuppressNeverActsAlone() {
+        let entries: [CorrectionLedgerEntry] = [
+            .init(episodeId: "ep-1", correctionDate: referenceDate, feedbackKind: .implicit, direction: .suppress)
+        ]
+        #expect(!BroadCorrectionEvaluator.shouldActAloneSuppress(
+            scope: .sponsorOnShow, entries: entries, referenceDate: referenceDate))
+    }
+
+    @Test("a decayed explicit suppress veto does not act alone")
+    func decayedExplicitSuppressDoesNotActAlone() {
+        // sponsorOnShow decays at 180 days; 181 days old → excluded.
+        let entries: [CorrectionLedgerEntry] = [
+            .init(episodeId: "ep-1",
+                  correctionDate: referenceDate.addingTimeInterval(-86400 * 181),
+                  feedbackKind: .explicit, direction: .suppress)
+        ]
+        #expect(!BroadCorrectionEvaluator.shouldActAloneSuppress(
+            scope: .sponsorOnShow, entries: entries, referenceDate: referenceDate))
+    }
+
+    @Test("empty entries never act alone")
+    func emptyNeverActsAlone() {
+        #expect(!BroadCorrectionEvaluator.shouldActAloneSuppress(
+            scope: .sponsorOnShow, entries: [], referenceDate: referenceDate))
+    }
+
+    @Test("shouldPromote's corroboration path is UNCHANGED: one explicit veto still does not promote it")
+    func shouldPromoteUnchangedByActAlone() {
+        // Act-alone is a SEPARATE method. The corroboration-based `shouldPromote`
+        // must still require its full ≥count / diversity — a single explicit
+        // suppress veto does NOT promote via `shouldPromote`.
+        let entries: [CorrectionLedgerEntry] = [
+            .init(episodeId: "ep-1", correctionDate: referenceDate, feedbackKind: .explicit, direction: .suppress)
+        ]
+        #expect(!BroadCorrectionEvaluator.shouldPromote(
+            scope: .sponsorOnShow, entries: entries, referenceDate: referenceDate))
+    }
+
+    @Test("CorrectionLedgerEntry defaults to .suppress (pre-xsdz.34 call sites unchanged)")
+    func directionDefaultsToSuppress() {
+        let entry = CorrectionLedgerEntry(
+            episodeId: "ep-1", correctionDate: referenceDate, feedbackKind: .explicit)
+        #expect(entry.direction == .suppress)
+    }
+}
+
+// MARK: - Never-Act-Alone Guards (playhead-xsdz.34 T8 / guardrail 2)
+
+/// T8 (design §4.5 / §8 guardrail 2): the noisy-implicit-never-alone intent is
+/// preserved. `ImplicitFeedbackEvent.weight` stays 0.3; a single implicit
+/// signal promotes no Layer-B rule; `repeatedManualSkipForward` alone can never
+/// license a suppression rule or an auto-skip.
+@Suite("BroadCorrectionEvaluator — never-act-alone guards (xsdz.34 T8)")
+struct NeverActAloneGuardTests {
+
+    private let referenceDate = Date(timeIntervalSince1970: 1_750_000_000)
+
+    @Test("ImplicitFeedbackEvent.weight is 0.3 (weak labels never gain act-alone authority)")
+    func implicitWeightStays03() {
+        let event = ImplicitFeedbackEvent(
+            signal: .repeatedManualSkipForward, analysisAssetId: "asset-1")
+        #expect(event.weight == 0.3)
+        // The DB-hydration initializer also pins 0.3 regardless of a stale stored value.
+        let hydrated = ImplicitFeedbackEvent(
+            id: "id", signal: .repeatedManualSkipForward, analysisAssetId: "asset-1",
+            podcastId: nil, spanId: nil, timestamp: 0, storedWeight: 0.99)
+        #expect(hydrated.weight == 0.3)
+    }
+
+    @Test("a single implicit signal promotes no Layer-B rule (shouldPromote AND act-alone)")
+    func singleImplicitPromotesNothing() {
+        let entries: [CorrectionLedgerEntry] = [
+            .init(episodeId: "ep-1", correctionDate: referenceDate, feedbackKind: .implicit, direction: .suppress)
+        ]
+        for scope in BroadCorrectionScope.allCases {
+            #expect(!BroadCorrectionEvaluator.shouldPromote(
+                scope: scope, entries: entries, referenceDate: referenceDate))
+            #expect(!BroadCorrectionEvaluator.shouldActAloneSuppress(
+                scope: scope, entries: entries, referenceDate: referenceDate))
+        }
+    }
+
+    @Test("repeatedManualSkipForward (implicit → boost) alone licenses no suppression rule")
+    func repeatedManualSkipForwardNeverActsAlone() {
+        // repeatedManualSkipForward is an implicit BOOST signal. Modeled as an
+        // implicit boost-direction entry, it acts alone in NEITHER path — and
+        // this bead adds NO boost-direction act-alone authority anywhere, so it
+        // can never move a span toward auto-skip on its own.
+        let entries: [CorrectionLedgerEntry] = [
+            .init(episodeId: "ep-1", correctionDate: referenceDate, feedbackKind: .implicit, direction: .boost)
+        ]
+        #expect(!BroadCorrectionEvaluator.shouldActAloneSuppress(
+            scope: .sponsorOnShow, entries: entries, referenceDate: referenceDate))
+        #expect(!BroadCorrectionEvaluator.shouldPromote(
+            scope: .sponsorOnShow, entries: entries, referenceDate: referenceDate))
+    }
+}
+
 // MARK: - exactSpan Veto Permanence
 
 @Suite("BroadCorrectionEvaluator — exactSpan Permanence")

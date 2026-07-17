@@ -8,7 +8,11 @@
 //   (i)   an .exactSpan veto on a SLOT-OWNED (kept, rewritten) span still
 //         resolves next run after the ordinal recompute;
 //   (ii)  the synthetic-span path (negative ordinals) is untouched by the pass;
-//   (iii) v1 PINNED: absorption ORPHANS an .exactSpan veto on the absorbed span.
+//   (iii-v2) OVERTURNED (playhead-xsdz.34): a veto on a would-be-WIDENED region
+//         BLOCKS the widening (.vetoNewlyEnclosed) instead of orphaning the
+//         gesture — the vetoed span survives, the widened span is never
+//         persisted. This replaces the v1 pinned-orphan behavior; see
+//         docs/xsdz34-correction-readside-design.md §3.
 //
 // ARCHITECTURE NOTE (drives the assertions): a `.falsePositive` .exactSpan
 // correction resolves ASSET-WIDE via `correctionPassthroughFactor(for:)` — it is
@@ -158,44 +162,85 @@ struct SpliceSlotOwnershipCorrectionTests {
         #expect(survivingSynthetic == synthetic)
     }
 
-    @Test("(iii) v1 PINNED: absorption ORPHANS an .exactSpan veto on the absorbed span")
-    func absorptionOrphansExactSpanVeto() async throws {
+    // v2 (playhead-xsdz.34): an .exactSpan veto against a WOULD-BE-widened region
+    // now BLOCKS the widening instead of orphaning. Deliberate overturn of the v1
+    // pinned-orphan behavior: routing the veto into vetoedRanges makes the width
+    // oracle return .vetoNewlyEnclosed for the widening slot, so the narrow core
+    // is kept and the vetoed region is never absorbed/skipped. See
+    // docs/xsdz34-correction-readside-design.md §3.
+    //
+    // The width oracle here is the rediff path (`RediffSlotOwnership`) — the SOLE
+    // production width setter (contract 2026-07-07) and the surface xsdz.36 /
+    // auto-skip activate — so the §5 rediff veto gate is exercised end-to-end.
+    // The acoustic resolver seam is pinned separately by
+    // SpliceSlotResolverTests.vetoNewlyEnclosed (T6).
+    @Test("(iii-v2) OVERTURNED: a veto on a newly-enclosed region blocks the widening (no orphan)")
+    func vetoBlocksWideningNotOrphaned() async throws {
         let store = try await makeTestStore()
-        let assetId = "asset-corr-orphan"
+        let assetId = "asset-corr-veto-blocks"
         try await store.insertAsset(corrAsset(id: assetId))
         let corrections = PersistentUserCorrectionStore(store: store)
 
-        // A kept slot (absorber) that fully encloses a smaller absorbee span.
-        let absorber = corrSpan(assetId: assetId, first: 0, last: 4, start: 0, end: 50)
-        let absorbee = corrSpan(assetId: assetId, first: 2, last: 2, start: 20, end: 30)
-        try await store.upsertDecodedSpans([absorber, absorbee])
+        // Prior state: a NARROW true-ad core (ordinal 4, [40,50]) and a separate
+        // span at ordinal 1 ([10,20]) the user vetoed as "not an ad". The width
+        // oracle proposes a WIDE slot [0,50] that would widen the core ~5× and
+        // absorb ordinal 1.
+        let narrowCore = corrSpan(assetId: assetId, first: 4, last: 4, start: 40, end: 50)
+        let vetoedSpan = corrSpan(assetId: assetId, first: 1, last: 1, start: 10, end: 20)
+        try await store.upsertDecodedSpans([narrowCore, vetoedSpan])
 
-        // User vetoes the (soon-to-be-absorbed) absorbee → .exactSpan(asset, 2...2).
-        await corrections.recordVeto(span: absorbee)
+        // User vetoes ordinal 1 → .exactSpan(asset, 1...1), false-positive.
+        await corrections.recordVeto(span: vetoedSpan)
+        let vetoedRanges = [TimeRange(start: 10, end: 20)]
+        let playedSlots = [RediffSlotOwnership.PlayedSlot(
+            startSeconds: 0, endSeconds: 50, leftRunSeconds: 60, rightRunSeconds: 60)]
 
-        let rewrite = SpliceSlotRewriter.apply(
-            decodedSpans: [absorber, absorbee],
-            dispositions: [.keepSlot(corrSlot(0, 50)), .absorbed(absorberIndex: 0)],
-            atomEvidence: corrAtoms
+        // BASELINE (the v1 danger): absent the veto, the wide slot resolves and
+        // the core widens to [0,50] — the geometry that orphaned ordinal 1 in v1.
+        let (slotNoVeto, _) = RediffSlotOwnership.resolveSpan(
+            core: TimeRange(start: 40, end: 50), playedSlots: playedSlots, vetoedRanges: [])
+        #expect(slotNoVeto?.startTime == 0 && slotNoVeto?.endTime == 50)
+
+        // OVERTURN: the veto lands in the region the wide slot NEWLY encloses (the
+        // core [40,50] does not touch [10,20]), so the widening is blocked.
+        let (slotVetoed, diag) = RediffSlotOwnership.resolveSpan(
+            core: TimeRange(start: 40, end: 50), playedSlots: playedSlots, vetoedRanges: vetoedRanges)
+        #expect(slotVetoed == nil)
+        #expect(diag.failureReason == .vetoNewlyEnclosed)
+
+        // End-to-end: the vetoed atoms are un-anchored upstream (Part 1) so
+        // ordinal 1 is not itself a width candidate this run — the width pass
+        // sees only the narrow core. nil slot → .noSlot → the rewrite keeps the
+        // core at minted width and absorbs nothing.
+        let bundle = RediffSlotOwnership.candidates(
+            decodedSpans: [narrowCore],
+            atomEvidence: corrAtoms,
+            playedSlots: playedSlots,
+            vetoedRanges: vetoedRanges,
+            coreBankMatch: [false],
+            slotBankMatch: [false]
         )
-        #expect(rewrite.absorbedIds.contains(absorbee.id))
+        let result = SpliceSlotDispositionEngine.computeDispositions(bundle.candidates)
+        #expect(result.dispositions[0] == .noSlot)
+        let rewrite = SpliceSlotRewriter.apply(
+            decodedSpans: [narrowCore], dispositions: result.dispositions,
+            atomEvidence: corrAtoms, provenance: .rediffSlot
+        )
+        #expect(rewrite.absorbedIds.isEmpty)
         try await reconcile(rewrite, store: store)
 
         let persisted = try await store.fetchDecodedSpans(assetId: assetId)
-        // The absorbed span's row is gone…
-        #expect(!persisted.contains { $0.id == absorbee.id })
-        // …and NO surviving span carries the absorbee's exact ordinal identity
-        // (2...2): the correction's target span no longer exists → ORPHANED.
-        #expect(!persisted.contains { $0.firstAtomOrdinal == 2 && $0.lastAtomOrdinal == 2 })
+        // The vetoed span at ordinal 1 SURVIVES (row not deleted) — the v1 orphan
+        // is overturned.
+        #expect(persisted.contains { $0.firstAtomOrdinal == 1 && $0.lastAtomOrdinal == 1 })
+        // The narrow core stays at its minted width…
+        #expect(persisted.contains { $0.firstAtomOrdinal == 4 && $0.startTime == 40 && $0.endTime == 50 })
+        // …and the widened [0,50] span is NEVER persisted (no absorption).
+        #expect(!persisted.contains { $0.startTime == 0 && $0.endTime == 50 })
 
-        // v1 limitation, pinned: the correction EVENT still persists and still
-        // counts asset-wide (a not-an-ad gesture on the absorbee would even leak
-        // onto the surviving absorber). The forward path — routing not-an-ad
-        // corrections into the resolver's vetoed-time-ranges so
-        // `.vetoNewlyEnclosed` blocks the absorption — is the fix a real
-        // CorrectionMaskProvider will bring; today the gesture is orphaned.
+        // Mechanism A still holds: the asset-wide passthrough is < 1.0.
         let events = try await corrections.activeCorrections(for: assetId)
-        #expect(events.compactMap(exactSpanRange).contains(2...2))
+        #expect(events.compactMap(exactSpanRange).contains(1...1))
         let factor = await corrections.correctionPassthroughFactor(for: assetId)
         #expect(factor < 1.0)
     }

@@ -260,10 +260,18 @@ enum RediffSlotOwnership {
     /// `coreBankMatch` / `slotBankMatch` are the negative-bank verdict table
     /// (computed in the service; all-false when the bank is dormant), index-
     /// aligned with `decodedSpans`.
+    ///
+    /// `vetoedRanges` (playhead-xsdz.34 §5): time ranges the user vetoed
+    /// (`atomEvidence.filter { .userVetoed }`). Rediff is the SOLE production
+    /// width setter and BYPASSES `SpliceSlotResolver`, so it never saw the
+    /// resolver's `.vetoNewlyEnclosed` gate. Threading the vetoes here applies
+    /// the SAME newly-enclosed rule so a rediff-widened slot cannot absorb a
+    /// region the span's core did not already cover. Empty ⇒ status quo.
     static func candidates(
         decodedSpans: [DecodedSpan],
         atomEvidence: [AtomEvidence],
         playedSlots: [PlayedSlot],
+        vetoedRanges: [TimeRange] = [],
         coreBankMatch: [Bool],
         slotBankMatch: [Bool],
         config: Configuration = .default
@@ -282,7 +290,8 @@ enum RediffSlotOwnership {
 
         for (i, span) in decodedSpans.enumerated() {
             let core = TimeRange(start: span.startTime, end: span.endTime)
-            let (slot, diag) = resolveSpan(core: core, playedSlots: playedSlots, config: config)
+            let (slot, diag) = resolveSpan(
+                core: core, playedSlots: playedSlots, vetoedRanges: vetoedRanges, config: config)
             let intersects = slot.map { s -> Bool in
                 let range = TimeRange(start: s.startTime, end: s.endTime)
                 // Order-independent existence check — no sort needed.
@@ -309,13 +318,15 @@ enum RediffSlotOwnership {
 
     /// Resolve ONE span's core against the played slots. Mirrors the acoustic
     /// resolver's diagnostic contract so the shadow tooling is reused verbatim:
-    ///   • degenerate core            → (nil, .degenerateCore, pair=nil)
-    ///   • no overlapping rediff slot → (nil, .noCandidatePairs, pair=nil)
-    ///   • overlap but coverage < min → (nil, .coreCoverageBelowMinimum, pair=slot)
-    ///   • qualifying                 → (slot, nil, pair=slot)
+    ///   • degenerate core             → (nil, .degenerateCore, pair=nil)
+    ///   • no overlapping rediff slot  → (nil, .noCandidatePairs, pair=nil)
+    ///   • overlap but coverage < min  → (nil, .coreCoverageBelowMinimum, pair=slot)
+    ///   • slot NEWLY encloses a veto  → (nil, .vetoNewlyEnclosed, pair=slot)
+    ///   • qualifying                  → (slot, nil, pair=slot)
     static func resolveSpan(
         core: TimeRange,
         playedSlots: [PlayedSlot],
+        vetoedRanges: [TimeRange] = [],
         config: Configuration = .default
     ) -> (slot: SpliceSlot?, diagnostics: SpliceSlotDiagnostics) {
         guard core.length > 0 else {
@@ -344,6 +355,16 @@ enum RediffSlotOwnership {
         let slot = synthesizeSlot(from: match.slot, core: core, overlap: match.overlap)
         guard slot.coreCoverage >= config.minCoreCoverage else {
             return (nil, SpliceSlotDiagnostics(bestGeometryValidPair: slot, failureReason: .coreCoverageBelowMinimum))
+        }
+        // playhead-xsdz.34 §5: the SAME newly-enclosed rule `SpliceSlotResolver`
+        // applies (`SpliceSlotResolver.swift`, `.vetoNewlyEnclosed`). If the
+        // synthesized slot would NEWLY enclose a vetoed range the span's core
+        // does NOT already intersect, reject the widening → status-quo width (no
+        // absorption). A veto INSIDE the core (core already intersects it) does
+        // not fire — the slot is not newly enclosing anything.
+        let slotRange = TimeRange(start: slot.startTime, end: slot.endTime)
+        for veto in vetoedRanges where slotRange.intersects(veto) && !core.intersects(veto) {
+            return (nil, SpliceSlotDiagnostics(bestGeometryValidPair: slot, failureReason: .vetoNewlyEnclosed))
         }
         return (slot, SpliceSlotDiagnostics(bestGeometryValidPair: slot, failureReason: nil))
     }

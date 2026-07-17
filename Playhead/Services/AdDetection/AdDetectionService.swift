@@ -461,6 +461,19 @@ struct AdDetectionConfig: Sendable {
     /// shadow at once, to their OWN observers). Both flags OFF ⇒ byte-identical.
     let rediffSlotShadowEnabled: Bool
 
+    /// playhead-xsdz.34: master flag for the user-correction READ side (the
+    /// per-atom/per-span `.userVetoed` mask). When `false` (the production
+    /// default), both `AtomEvidenceProjector` call sites inject
+    /// `NoCorrectionMaskProvider()` — no store read, no atom carries
+    /// `.userVetoed`, and the pipeline output is byte-identical to pre-xsdz.34.
+    /// When `true` AND a `correctionStore` is wired, the projector injects a
+    /// `StoreBackedCorrectionMaskProvider` built from the asset's active
+    /// `.falsePositive` scopes, so an explicit "not an ad" veto un-anchors the
+    /// vetoed atoms AND feeds the `.vetoNewlyEnclosed` gate (splice + rediff
+    /// width passes). Suppress-direction only (guardrail 1); default OFF so the
+    /// corpus A/B and the xsdz.36 staged rollout can flip it deliberately.
+    let userCorrectionReadSideEnabled: Bool
+
     /// playhead-l2f.6: master kill switch for StingerBank boundary
     /// refinement. When `false`, `runBackfill` never loads the bundled
     /// `StingerBank.json`, never fetches the asset's episode identity,
@@ -615,6 +628,7 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: Bool = false,
         rediffSlotOwnershipEnabled: Bool = false,
         rediffSlotShadowEnabled: Bool = false,
+        userCorrectionReadSideEnabled: Bool = false,
         stingerRefinementEnabled: Bool = true,
         lexicalAnchorRefinementEnabled: Bool = false,
         selfPromoSuppressionEnabled: Bool = true
@@ -674,6 +688,7 @@ struct AdDetectionConfig: Sendable {
         self.spliceSlotShadowEnabled = spliceSlotShadowEnabled
         self.rediffSlotOwnershipEnabled = rediffSlotOwnershipEnabled
         self.rediffSlotShadowEnabled = rediffSlotShadowEnabled
+        self.userCorrectionReadSideEnabled = userCorrectionReadSideEnabled
         self.stingerRefinementEnabled = stingerRefinementEnabled
         self.lexicalAnchorRefinementEnabled = lexicalAnchorRefinementEnabled
         self.selfPromoSuppressionEnabled = selfPromoSuppressionEnabled
@@ -724,6 +739,7 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: false,
         rediffSlotOwnershipEnabled: false,
         rediffSlotShadowEnabled: false,
+        userCorrectionReadSideEnabled: false,  // playhead-xsdz.34: read side ships OFF; xsdz.36 flips it after the corpus A/B
         stingerRefinementEnabled: true,
         lexicalAnchorRefinementEnabled: false,
         selfPromoSuppressionEnabled: true  // playhead-fl4j: flipped ON 2026-07-16 — attention→verification rework measured 0/70 false-fires on real ads
@@ -3429,11 +3445,19 @@ actor AdDetectionService {
         // ── Steps 10–11: AtomEvidenceProjector + MinimalContiguousSpanDecoder ─
 
         let projector = AtomEvidenceProjector()
+        // playhead-xsdz.34: read-side veto mask. Flag-off / nil-store selects
+        // `NoCorrectionMaskProvider()` ⇒ byte-identical to pre-xsdz.34.
+        let maskProvider = await Self.makeCorrectionMaskProvider(
+            enabled: config.userCorrectionReadSideEnabled,
+            store: correctionStore,
+            analysisAssetId: analysisAssetId,
+            atoms: atoms
+        )
         let atomEvidence = await projector.project(
             regions: regionBundles,
             catalog: evidenceCatalog,
             atoms: atoms,
-            correctionMaskProvider: NoCorrectionMaskProvider()
+            correctionMaskProvider: maskProvider
         )
 
         let decoder = MinimalContiguousSpanDecoder()
@@ -5681,10 +5705,12 @@ actor AdDetectionService {
         showId: String?
     ) async -> SpliceSlotPassComputation {
         // Episode-wide vetoed time ranges (atoms the user marked "not an ad").
-        // EMPTY in production today — `runBackfill` projects with
-        // `NoCorrectionMaskProvider`, so no atom carries `.userVetoed`. The
-        // resolver's `.vetoNewlyEnclosed` gate is exercised only via synthetic
-        // vetoes in tests until a real `CorrectionMaskProvider` is wired.
+        // EMPTY unless the read side is flag-ON (playhead-xsdz.34,
+        // `userCorrectionReadSideEnabled`) AND an explicit `.falsePositive` veto
+        // masked an atom via `StoreBackedCorrectionMaskProvider`; flag-OFF (the
+        // production default) leaves this empty and the resolver's
+        // `.vetoNewlyEnclosed` gate dormant, exercised only by synthetic vetoes
+        // in tests. Rediff applies the SAME set via its own §5 gate.
         let vetoedRanges: [TimeRange] = atomEvidence
             .filter { $0.correctionMask == .userVetoed }
             .map { TimeRange(start: $0.startTime, end: $0.endTime) }
@@ -5863,6 +5889,16 @@ actor AdDetectionService {
             return nil
         }
 
+        // playhead-xsdz.34 §5: the user-veto ranges (same set the acoustic pass
+        // builds). Rediff is the SOLE production width setter and bypasses
+        // `SpliceSlotResolver`, so its candidate path must apply the
+        // `.vetoNewlyEnclosed` gate itself or a rediff-widened slot could still
+        // absorb a vetoed region. EMPTY unless the read side is flag-ON and a
+        // veto masked an atom (`AtomEvidenceProjector` sets the mask).
+        let vetoedRanges: [TimeRange] = atomEvidence
+            .filter { $0.correctionMask == .userVetoed }
+            .map { TimeRange(start: $0.startTime, end: $0.endTime) }
+
         // Phase 1: resolve per-span rediff slots (bank-agnostic — resolution does
         // not depend on the bank verdicts, only slot-token gathering does).
         let allFalse = [Bool](repeating: false, count: decodedSpans.count)
@@ -5870,6 +5906,7 @@ actor AdDetectionService {
             decodedSpans: decodedSpans,
             atomEvidence: atomEvidence,
             playedSlots: acceptance.playedSlots,
+            vetoedRanges: vetoedRanges,
             coreBankMatch: allFalse,
             slotBankMatch: allFalse
         )
@@ -6761,6 +6798,31 @@ actor AdDetectionService {
         )
     }
 
+    // MARK: - Read-side correction mask selection (playhead-xsdz.34)
+
+    /// Select the projector's `CorrectionMaskProvider` (design §2.4). Pure over
+    /// its arguments (no actor state) so both call sites — `runBackfill` and
+    /// `runPhase5ProjectorPhase` — resolve the veto mask identically and the
+    /// flag branch is directly unit-testable (T4).
+    ///
+    /// Flag-off OR no store ⇒ `NoCorrectionMaskProvider()` ⇒ the pipeline output
+    /// is byte-identical to pre-xsdz.34 (preserves the async-install race window
+    /// note at the `correctionStore` wiring: until the store lands there are no
+    /// masks — the safe default). Flag-on WITH a store ⇒ a
+    /// `StoreBackedCorrectionMaskProvider` over the asset's active
+    /// `.falsePositive` scopes (boost/`.falseNegative` excluded by the store
+    /// query, guardrail 1).
+    static func makeCorrectionMaskProvider(
+        enabled: Bool,
+        store: (any UserCorrectionStore)?,
+        analysisAssetId: String,
+        atoms: [TranscriptAtom]
+    ) async -> any CorrectionMaskProvider {
+        guard enabled, let store else { return NoCorrectionMaskProvider() }
+        let scopes = await store.activeFalsePositiveScopes(for: analysisAssetId)
+        return StoreBackedCorrectionMaskProvider(fromScopes: scopes, atoms: atoms)
+    }
+
     // MARK: - Phase 5 Projector Phase (playhead-4my.5)
 
     /// Runs AtomEvidenceProjector + MinimalContiguousSpanDecoder on the Phase 4
@@ -6797,12 +6859,20 @@ actor AdDetectionService {
         )
 
         // Project atoms.
+        // playhead-xsdz.34: same read-side selection as `runBackfill` — flag-off
+        // / nil-store ⇒ `NoCorrectionMaskProvider()` ⇒ byte-identical.
         let projector = AtomEvidenceProjector()
+        let maskProvider = await Self.makeCorrectionMaskProvider(
+            enabled: config.userCorrectionReadSideEnabled,
+            store: correctionStore,
+            analysisAssetId: analysisAssetId,
+            atoms: atoms
+        )
         let evidence = await projector.project(
             regions: bundles,
             catalog: catalog,
             atoms: atoms,
-            correctionMaskProvider: NoCorrectionMaskProvider()
+            correctionMaskProvider: maskProvider
         )
 
         // Decode spans.

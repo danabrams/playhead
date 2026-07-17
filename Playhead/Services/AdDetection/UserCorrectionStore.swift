@@ -443,6 +443,26 @@ protocol UserCorrectionStore: Sendable {
         overlapping startTime: Double,
         endTime: Double
     ) async -> Double
+
+    /// playhead-xsdz.34 (read-side wiring): the active `.falsePositive`
+    /// (suppress-direction) correction scopes for the asset, deduped, decoded
+    /// to `CorrectionScope`. Feeds `StoreBackedCorrectionMaskProvider` so an
+    /// explicit "not an ad" veto becomes a `.userVetoed` atom mask.
+    ///
+    /// MUST exclude `.falseNegative` (boost) corrections — the veto mask acts
+    /// only in the suppress direction (guardrail 1). The default implementation
+    /// returns `[]` (no corrections), so stores that don't persist corrections
+    /// (`NoOpUserCorrectionStore`, test doubles) are correct without change.
+    func activeFalsePositiveScopes(for analysisAssetId: String) async -> [CorrectionScope]
+}
+
+// MARK: - UserCorrectionStore default
+
+extension UserCorrectionStore {
+    /// Default: no corrections. Overridden by `PersistentUserCorrectionStore`.
+    func activeFalsePositiveScopes(for analysisAssetId: String) async -> [CorrectionScope] {
+        []
+    }
 }
 
 // MARK: - NoOpUserCorrectionStore
@@ -1015,6 +1035,30 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     /// Returns true if any persisted correction event targets the given scope.
     func hasActiveCorrection(scope: CorrectionScope, at now: Date = Date()) async throws -> Bool {
         try await store.hasAnyCorrectionEvent(withScope: scope.serialized)
+    }
+
+    /// playhead-xsdz.34 (read-side wiring): the deduped `.falsePositive`
+    /// correction scopes for the asset, backed by `activeCorrections(for:)`.
+    ///
+    /// Filtered to false positives with the SAME predicate
+    /// `correctionPassthroughFactor` uses (`source?.kind == .falsePositive ||
+    /// source == nil`), so legacy nil-source rows stay false-positive vetoes and
+    /// the synthetic negative-ordinal `.falseNegative` spans NEVER leak into the
+    /// veto mask. Corrupt/unknown scope strings decode to `nil` and are dropped.
+    func activeFalsePositiveScopes(for analysisAssetId: String) async -> [CorrectionScope] {
+        let events: [CorrectionEvent]
+        do {
+            events = try await activeCorrections(for: analysisAssetId)
+        } catch {
+            logger.warning(
+                "activeFalsePositiveScopes: failed to load corrections for \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return []
+        }
+        return events.compactMap { event -> CorrectionScope? in
+            guard event.source?.kind == .falsePositive || event.source == nil else { return nil }
+            return CorrectionScope.deserialize(event.scope)
+        }
     }
 
     // MARK: - Range overlap helper (playhead-rfu-sad)

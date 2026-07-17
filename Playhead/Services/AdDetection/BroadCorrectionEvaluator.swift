@@ -84,6 +84,21 @@ enum CorrectionFeedbackKind: Sendable, Equatable {
     }
 }
 
+// MARK: - CorrectionDirection
+
+/// Whether a correction argues to SUPPRESS detection ("not an ad") or BOOST it
+/// ("missed an ad"). Derived from `CorrectionKind` — `.falsePositive` →
+/// `.suppress`, `.falseNegative` → `.boost`.
+///
+/// playhead-xsdz.34 (guardrail 1): Layer-B ACT-ALONE authority is granted ONLY
+/// in the `.suppress` direction. A `.boost` entry NEVER acts alone — its worst
+/// case is a false skip eating content, the outcome the never-act-alone design
+/// exists to prevent.
+enum CorrectionDirection: Sendable, Equatable {
+    case suppress
+    case boost
+}
+
 // MARK: - CorrectionLedgerEntry
 
 /// A single correction record with resolved metadata for diversity checks.
@@ -97,6 +112,23 @@ struct CorrectionLedgerEntry: Sendable {
     let correctionDate: Date
     /// Whether this is an explicit correction or implicit feedback.
     let feedbackKind: CorrectionFeedbackKind
+    /// playhead-xsdz.34: suppress vs boost. Defaults to `.suppress` — the
+    /// existing Layer-B scopes (phrase/sponsor/domain/jingle) are all
+    /// suppression-direction, so pre-xsdz.34 call sites are semantically
+    /// unchanged.
+    let direction: CorrectionDirection
+
+    init(
+        episodeId: String,
+        correctionDate: Date,
+        feedbackKind: CorrectionFeedbackKind,
+        direction: CorrectionDirection = .suppress
+    ) {
+        self.episodeId = episodeId
+        self.correctionDate = correctionDate
+        self.feedbackKind = feedbackKind
+        self.direction = direction
+    }
 }
 
 // MARK: - BroadCorrectionEvaluator
@@ -156,5 +188,38 @@ enum BroadCorrectionEvaluator {
         }
 
         return true
+    }
+
+    /// playhead-xsdz.34 (Part 3 / design §4, Dan-INCLUDED): whether a SINGLE
+    /// explicit `.falsePositive` (suppress-direction) veto, ON ITS OWN, promotes
+    /// a Layer-B SUPPRESSION rule for `scope` — the deliberate overturn of the
+    /// "0.3× weak-labels-never-act-alone" corroboration requirement.
+    ///
+    /// This is a SEPARATE, explicitly-tested behavior — NOT an implicit side
+    /// effect of `shouldPromote` (which keeps its full ≥count / diversity
+    /// corroboration path untouched, so every prior test holds). Callers choose
+    /// this path deliberately for a one-tap show-wide suppression.
+    ///
+    /// GUARDRAILS (design §8 — a violation of any is a shipped regression):
+    ///   • Act-alone authority is granted ONLY to `.explicit` feedback in the
+    ///     `.suppress` direction. A `.boost` (`.falseNegative`) entry NEVER acts
+    ///     alone here; an `.implicit` (0.3×) entry NEVER acts alone here. Both
+    ///     fall through to the corroboration-based `shouldPromote`.
+    ///   • Suppress-only ⇒ the worst case is a MISSED skip (safe), never a false
+    ///     skip eating content. No auto-skip is ever CREATED by this path.
+    ///
+    /// Decayed entries are excluded first, using the same per-scope decay window
+    /// as `shouldPromote`.
+    static func shouldActAloneSuppress(
+        scope: BroadCorrectionScope,
+        entries: [CorrectionLedgerEntry],
+        referenceDate: Date = Date()
+    ) -> Bool {
+        let decayCutoff = referenceDate.addingTimeInterval(-Double(scope.decayDays) * 86400)
+        return entries.contains { entry in
+            entry.correctionDate >= decayCutoff
+                && entry.feedbackKind == .explicit
+                && entry.direction == .suppress
+        }
     }
 }

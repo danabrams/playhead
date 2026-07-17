@@ -130,8 +130,10 @@ enum CorrectionState: Sendable, Equatable {
 
 /// Protocol for supplying user correction masks to AtomEvidenceProjector.
 ///
-/// Phase 5 ships with NoCorrectionMaskProvider (all .none).
-/// Phase 7 will conform UserCorrectionStore to this protocol.
+/// Phase 5 ships with NoCorrectionMaskProvider (all .none). The read-side
+/// wiring (playhead-xsdz.34) supplies `StoreBackedCorrectionMaskProvider`
+/// behind the `userCorrectionReadSideEnabled` flag — an explicit `.falsePositive`
+/// veto becomes a `.userVetoed` atom mask so the veto reaches detection.
 protocol CorrectionMaskProvider: Sendable {
     func correctionMasks(
         for ordinals: ClosedRange<Int>,
@@ -148,6 +150,94 @@ struct NoCorrectionMaskProvider: CorrectionMaskProvider {
         in assetId: String
     ) async -> [Int: CorrectionState] {
         return [:]
+    }
+}
+
+// MARK: - StoreBackedCorrectionMaskProvider
+
+/// playhead-xsdz.34 (Part 1 / design §2): the real read-side adapter. A
+/// `Sendable` snapshot of an asset's explicit `.falsePositive` corrections,
+/// constructed PER backfill run at the projector injection point, that turns
+/// vetoed spans/time-ranges into `.userVetoed` atom masks.
+///
+/// Carries the atom time→ordinal index itself because the `CorrectionMaskProvider`
+/// signature only passes `(ordinals, assetId)` — a store-as-provider could serve
+/// `.exactSpan` (ordinal) vetoes but never resolve `.exactTimeSpan` (time) vetoes
+/// without the atom stream. Both scopes flow through this one path.
+///
+/// Boost / `.falseNegative` corrections NEVER reach here: the store query that
+/// feeds `fromScopes` is filtered to `.falsePositive` (guardrail 1 — the veto
+/// mask acts only in the suppress direction). Show-wide scopes carry neither
+/// ordinals nor times and are ignored (Layer-B suppression is handled separately
+/// by `BroadCorrectionEvaluator`).
+struct StoreBackedCorrectionMaskProvider: CorrectionMaskProvider {
+    /// Vetoed ordinal ranges (from `.exactSpan` corrections).
+    let vetoedOrdinalRanges: [ClosedRange<Int>]
+    /// Vetoed `[start, end)` time ranges (from `.exactTimeSpan` corrections).
+    let vetoedTimeRanges: [(start: Double, end: Double)]
+    /// Atom index for time→ordinal resolution of the time-range vetoes.
+    let atomsByOrdinal: [(ordinal: Int, start: Double, end: Double)]
+
+    /// Direct (testable) initializer.
+    init(
+        vetoedOrdinalRanges: [ClosedRange<Int>],
+        vetoedTimeRanges: [(start: Double, end: Double)],
+        atomsByOrdinal: [(ordinal: Int, start: Double, end: Double)]
+    ) {
+        self.vetoedOrdinalRanges = vetoedOrdinalRanges
+        self.vetoedTimeRanges = vetoedTimeRanges
+        self.atomsByOrdinal = atomsByOrdinal
+    }
+
+    /// Build the adapter from an asset's active `.falsePositive` scopes plus the
+    /// transcript atom stream. `.exactSpan` scopes contribute ordinal ranges,
+    /// `.exactTimeSpan` scopes contribute time ranges; every other scope
+    /// (show-wide, or the caller-excluded `.falseNegative`) contributes nothing.
+    init(fromScopes scopes: [CorrectionScope], atoms: [TranscriptAtom]) {
+        var ordinalRanges: [ClosedRange<Int>] = []
+        var timeRanges: [(start: Double, end: Double)] = []
+        for scope in scopes {
+            switch scope {
+            case .exactSpan(_, let range):
+                ordinalRanges.append(range)
+            case .exactTimeSpan(_, let start, let end):
+                // Ignore degenerate/inverted persisted ranges defensively.
+                if end > start { timeRanges.append((start: start, end: end)) }
+            case .sponsorOnShow, .phraseOnShow, .campaignOnShow,
+                 .domainOwnershipOnShow, .jingleOnShow:
+                continue
+            }
+        }
+        self.vetoedOrdinalRanges = ordinalRanges
+        self.vetoedTimeRanges = timeRanges
+        self.atomsByOrdinal = atoms.map {
+            (ordinal: $0.atomKey.atomOrdinal, start: $0.startTime, end: $0.endTime)
+        }
+    }
+
+    func correctionMasks(
+        for ordinals: ClosedRange<Int>,
+        in assetId: String
+    ) async -> [Int: CorrectionState] {
+        var out: [Int: CorrectionState] = [:]
+        // `.exactSpan`: intersect each vetoed ordinal range with the requested
+        // range (guard `lo <= hi` so a disjoint range marks nothing).
+        for range in vetoedOrdinalRanges {
+            let lo = Swift.max(range.lowerBound, ordinals.lowerBound)
+            let hi = Swift.min(range.upperBound, ordinals.upperBound)
+            guard lo <= hi else { continue }
+            for ordinal in lo...hi { out[ordinal] = .userVetoed }
+        }
+        // `.exactTimeSpan`: atoms whose `[start, end)` overlaps a vetoed time
+        // range (positive-duration overlap; touching endpoints do not count).
+        guard !vetoedTimeRanges.isEmpty else { return out }
+        for atom in atomsByOrdinal where ordinals.contains(atom.ordinal) {
+            let overlaps = vetoedTimeRanges.contains { veto in
+                atom.start < veto.end && veto.start < atom.end
+            }
+            if overlaps { out[atom.ordinal] = .userVetoed }
+        }
+        return out
     }
 }
 
