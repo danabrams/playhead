@@ -139,7 +139,8 @@ struct URLSessionRangedAudioSampler: RangedAudioSampling {
     }
 
     func sample(url: URL, headBytes: Int, tailBytes: Int) async throws -> RemoteAudioSample {
-        // HEAD request (bytes=0-(headBytes-1)) → also yields the total length.
+        // Head-sample GET (Range bytes=0-(headBytes-1)) — a ranged GET, NOT an
+        // HTTP HEAD — whose 206 `Content-Range` also yields the total length.
         let (headData, total) = try await rangedGet(url: url, start: 0, length: headBytes, expectContentRange: true)
         let totalLength = try requireTotal(total)
 
