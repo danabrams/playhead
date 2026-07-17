@@ -2158,9 +2158,11 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
         /// Nothing at the staged path — the correct non-rotated no-op.
         case absent
         /// SOMETHING is at the staged path but the decode path refuses it — a
-        /// symlink (including a DANGLING one), a non-regular file, or an empty
-        /// (zero-byte) file: a STAGING problem the pre-flight must not count
-        /// as staged.
+        /// symlink (including a DANGLING one), a non-regular file, an empty
+        /// (zero-byte) file, or a path whose metadata cannot be read for any
+        /// reason OTHER than not existing (R6: permission/I-O failures fail
+        /// closed here): a STAGING problem the pre-flight must not count as
+        /// staged.
         case irregular
         /// A regular, unaliased, non-empty file the decode path will accept.
         case staged
@@ -2172,11 +2174,21 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
         // symlink), unlike `fileExists(atPath:)`, which FOLLOWS symlinks and
         // would misfile a DANGLING symlink as `.absent` — but something IS
         // staged there and the decode path refuses it, so it must surface as
-        // `.irregular` (a staging problem), not a silent non-rotated no-op. A
-        // read failure here means nothing exists at the path at all.
-        guard let values = try? url.resourceValues(
-            forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
-        ) else { return .absent }
+        // `.irregular` (a staging problem), not a silent non-rotated no-op.
+        let values: URLResourceValues
+        do {
+            values = try url.resourceValues(
+                forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+            )
+        } catch {
+            // R6: only the no-such-file family means "nothing exists at the
+            // path" (the ordinary non-rotated `.absent` no-op). Any OTHER read
+            // failure — permission, I/O — means something MAY be staged but is
+            // unusable, so fail CLOSED to `.irregular`: loud in the pre-flight
+            // coverage guard, unstaged in the decode path. R5's `try?`
+            // collapsed every failure into the SILENT `.absent` verdict.
+            return classifyProbeReadError(error)
+        }
         // Regular + unaliased + NON-EMPTY (R5): a zero-byte "staged" file can
         // never decode, so counting it staged would let an empty-file staging
         // pass the pre-flight guard and burn the 90-minute lane on a run that
@@ -2190,6 +2202,32 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
             return .irregular
         }
         return .staged
+    }
+
+    /// R6: classify a `resourceValues` read failure. `.absent` ONLY for the
+    /// no-such-file family (Cocoa `fileReadNoSuchFile`/`fileNoSuchFile`, POSIX
+    /// `ENOENT`/`ENOTDIR` — walking the underlying-error chain, since Foundation
+    /// wraps the POSIX cause); everything else (permission, I/O) is `.irregular`
+    /// — fail closed rather than silently misfiling an unreadable staged file
+    /// as a non-rotated episode. Static + pure so the wiring suite can pin the
+    /// mapping hermetically without inducing real EACCES/EIO on disk.
+    static func classifyProbeReadError(_ error: Error) -> StagedFreshProbe {
+        var next: NSError? = error as NSError
+        var hops = 0
+        while let current = next, hops < 8 {
+            if current.domain == NSCocoaErrorDomain,
+               current.code == NSFileReadNoSuchFileError
+                   || current.code == NSFileNoSuchFileError {
+                return .absent
+            }
+            if current.domain == NSPOSIXErrorDomain,
+               current.code == Int(ENOENT) || current.code == Int(ENOTDIR) {
+                return .absent
+            }
+            next = current.userInfo[NSUnderlyingErrorKey] as? NSError
+            hops += 1
+        }
+        return .irregular
     }
 
     func refetchedBSideMono16kHz(assetId: String) async -> [Float]? {
@@ -2213,7 +2251,7 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
         case .absent:
             return nil
         case .irregular:
-            print("[xsdz.36.1] fresh B-side at \(freshURL.path) is not a regular, unaliased, non-empty file — treating as unstaged")
+            print("[xsdz.36.1] fresh B-side at \(freshURL.path) is not a usable staged file (symlink, non-regular, empty, or unreadable) — treating as unstaged")
             return nil
         case .staged:
             break
@@ -2585,6 +2623,19 @@ final class PipelineDumpLiveTests: XCTestCase {
             XCTFail("snapshot manifest read failed: \(error)")
             return
         }
+        // R6: a ZERO-entry manifest would otherwise fall through to the
+        // zero-staged guard below, whose "stage B-sides first" message sends
+        // the operator at the wrong problem — there is nothing to stage; the
+        // snapshot pipeline produced an empty manifest. (The loader accepts an
+        // empty array; `validate` only checks per-entry shape.)
+        guard !entries.isEmpty else {
+            XCTFail(
+                "snapshot manifest at \(PipelineDumpManifestLoader.manifestRelativePath) "
+                    + "has ZERO entries — nothing to measure. Regenerate the snapshot "
+                    + "manifest before requesting the rediff treatment dump (playhead-xsdz.36.1)."
+            )
+            return
+        }
         let classification = classifyRediffTreatmentBSides(
             entries: entries,
             audioDirectory: CorpusFreshBSideProvider.audioDirectory(repoRoot: repoRoot)
@@ -2601,8 +2652,8 @@ final class PipelineDumpLiveTests: XCTestCase {
         if !classification.irregularEpisodeIds.isEmpty {
             print("""
             WARNING: \(classification.irregularEpisodeIds.count) fresh B-side file(s) exist \
-            but are NOT regular unaliased non-empty files (symlink — possibly dangling — \
-            special file, or zero-byte file) — the decode path refuses these, so they \
+            but are NOT usable (symlink — possibly dangling — special file, zero-byte \
+            file, or unreadable path) — the decode path refuses these, so they \
             count as UNSTAGED: \
             \(classification.irregularEpisodeIds.sorted().joined(separator: ", "))
             """)
@@ -2611,8 +2662,8 @@ final class PipelineDumpLiveTests: XCTestCase {
             let irregularNote = classification.irregularEpisodeIds.isEmpty
                 ? ""
                 : " NOTE: \(classification.irregularEpisodeIds.count) file(s) exist at the "
-                    + "staged path but are symlinks (possibly dangling), non-regular, or "
-                    + "empty files, which the decode path refuses."
+                    + "staged path but are symlinks (possibly dangling), non-regular, "
+                    + "empty, or unreadable, which the decode path refuses."
             XCTFail(
                 """
                 PLAYHEAD_PIPELINE_DUMP_REDIFF=1 was set but NO manifest entry has a \
@@ -4719,6 +4770,11 @@ struct PipelineDumpEncodingTests {
         let treatmentParsed = try #require(
             try JSONSerialization.jsonObject(with: encoder.encode(treatment)) as? [String: Any]
         )
+        // R6: pin the treatment ROOT key set too — exactly the baseline keys
+        // plus `bSideCoverage`, symmetric with the baseline pin above.
+        #expect(Set(treatmentParsed.keys) == Set([
+            "config", "runUtc", "bSideCoverage", "episodes", "summary",
+        ]))
         let coverage = try #require(treatmentParsed["bSideCoverage"] as? [String: Any])
         // R5: pin the coverage object's exact key SET, not just the four known
         // values — a stray extra field (or a rename surviving the optional
@@ -4992,7 +5048,8 @@ struct RediffTreatmentHarnessWiringTests {
                 sha256: nil
             )
         }
-        // Stage two of seven; the plain `.mp3` A-side must NOT count as staged,
+        // Stage three of eight (two regular files + one hardlink, R6); the
+        // plain `.mp3` A-side must NOT count as staged,
         // and every degenerate staging the decode path refuses must classify
         // unstaged + irregular: a symlink to a regular file (ep-d), a DANGLING
         // symlink (ep-e — R5: `fileExists` FOLLOWS symlinks, so a bare
@@ -5027,11 +5084,19 @@ struct RediffTreatmentHarnessWiringTests {
             at: CorpusFreshBSideProvider.freshURL(assetId: "ep-g", audioDirectory: audioDir),
             withIntermediateDirectories: true
         )
+        // R6: a HARDLINK to a regular non-empty file (ep-h) completes the probe
+        // state matrix — indistinguishable from a regular file at the
+        // filesystem level (`isRegularFile` true, `isSymbolicLink` false), so
+        // both the probe and the decode path accept it as staged.
+        try FileManager.default.linkItem(
+            at: symlinkTarget,
+            to: CorpusFreshBSideProvider.freshURL(assetId: "ep-h", audioDirectory: audioDir)
+        )
 
         let classification = classifyRediffTreatmentBSides(
             entries: [
                 entry("ep-a"), entry("ep-b"), entry("ep-c"), entry("ep-d"),
-                entry("ep-e"), entry("ep-f"), entry("ep-g"),
+                entry("ep-e"), entry("ep-f"), entry("ep-g"), entry("ep-h"),
             ],
             audioDirectory: audioDir
         )
@@ -5063,6 +5128,10 @@ struct RediffTreatmentHarnessWiringTests {
             CorpusFreshBSideProvider.probeStagedFresh(assetId: "ep-g", audioDirectory: audioDir)
                 == .irregular
         )
+        #expect(
+            CorpusFreshBSideProvider.probeStagedFresh(assetId: "ep-h", audioDirectory: audioDir)
+                == .staged
+        )
 
         // Zero-staged is the guard's hard-fail condition: EVERY id unstaged.
         let emptyDir = try makeTempDir(prefix: "RediffPreflightEmpty")
@@ -5072,5 +5141,48 @@ struct RediffTreatmentHarnessWiringTests {
         )
         #expect(allUnstaged.unstagedEpisodeIds == ["ep-a", "ep-b"])
         #expect(allUnstaged.irregularEpisodeIds.isEmpty)
+    }
+
+    /// R6: pin the probe's read-error mapping directly. The filesystem states
+    /// are covered above; inducing a real EACCES/EIO on disk is root- and
+    /// platform-dependent, so this pins the pure classifier instead: ONLY the
+    /// no-such-file family may read as `.absent` (the silent non-rotated
+    /// no-op) — every other read failure must fail CLOSED to `.irregular`, or
+    /// an unreadable-but-staged file silently counts as a non-rotated episode
+    /// (the exact silent-no-lift shape the pre-flight guard exists to surface).
+    @Test("probe read-error classifier: no-such-file family is absent; everything else fails closed to irregular")
+    func probeReadErrorClassifierFailsClosed() {
+        typealias Probe = CorpusFreshBSideProvider
+        // No-such-file family → .absent.
+        #expect(Probe.classifyProbeReadError(CocoaError(.fileReadNoSuchFile)) == .absent)
+        #expect(Probe.classifyProbeReadError(CocoaError(.fileNoSuchFile)) == .absent)
+        #expect(Probe.classifyProbeReadError(
+            NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT))
+        ) == .absent)
+        #expect(Probe.classifyProbeReadError(
+            NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR))
+        ) == .absent)
+        // Foundation wraps the POSIX cause under NSUnderlyingErrorKey — the
+        // chain walk must find it.
+        #expect(Probe.classifyProbeReadError(NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSFileReadUnknownError,
+            userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT))]
+        )) == .absent)
+        // Everything else — permission, I/O, unknown — fails closed.
+        #expect(Probe.classifyProbeReadError(CocoaError(.fileReadNoPermission)) == .irregular)
+        #expect(Probe.classifyProbeReadError(
+            NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))
+        ) == .irregular)
+        #expect(Probe.classifyProbeReadError(
+            NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
+        ) == .irregular)
+        #expect(Probe.classifyProbeReadError(NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSFileReadUnknownError,
+            userInfo: [NSUnderlyingErrorKey: NSError(
+                domain: NSPOSIXErrorDomain, code: Int(EACCES)
+            )]
+        )) == .irregular)
     }
 }
