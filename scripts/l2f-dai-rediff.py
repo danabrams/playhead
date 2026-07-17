@@ -100,6 +100,16 @@ MANIFEST = REPO / "TestFixtures/Corpus/Snapshots/manifest.json"
 DRAFTS = REPO / "TestFixtures/Corpus/Drafts"
 DIAG_OUT = REPO / "playhead-dogfood-diagnostics-tier-a-rediff.json"
 
+
+def fresh_sibling(snapshot_path: pathlib.Path) -> pathlib.Path:
+    """The staged fresh-B-side path for a snapshot: `<audioPath stem>.fresh.mp3`
+    beside the snapshot. SINGLE derivation of the naming convention (R5) —
+    shared by the --dry-run reader and the --retain-audio writer, and mirrored
+    by `CorpusFreshBSideProvider.freshURL` on the Swift side (manifest
+    validation pins audioPath stem == episodeId, so both handoff sides agree).
+    """
+    return snapshot_path.with_suffix(".fresh.mp3")
+
 FPCALC = "/opt/homebrew/bin/fpcalc"
 FFMPEG = "/opt/homebrew/bin/ffmpeg"
 UA = "Mozilla/5.0 (Macintosh) Podcast/1.0"
@@ -996,7 +1006,7 @@ def main():
 
         if args.dry_run:
             # Look for a pre-staged fresh file alongside the snapshot.
-            fresh_path = snapshot_path.with_suffix(".fresh.mp3")
+            fresh_path = fresh_sibling(snapshot_path)
             if not fresh_path.exists():
                 record["ok"] = False
                 record["error"] = (
@@ -1109,7 +1119,7 @@ def main():
             rotated_count += 1
         if not args.dry_run:
             if args.retain_audio and record.get("rotated") and record.get("ok"):
-                retained = snapshot_path.with_suffix(".fresh.mp3")
+                retained = fresh_sibling(snapshot_path)
                 try:
                     os.replace(fresh_path, retained)
                     record["retainedFreshPath"] = str(retained.relative_to(REPO))
