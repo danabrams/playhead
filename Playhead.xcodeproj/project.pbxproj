@@ -1024,6 +1024,7 @@
 		F47A27F19E89384359A781D0 /* KellyRipaFMSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73C20EEDED5663A8AA335F50 /* KellyRipaFMSafetyTests.swift */; };
 		F4B3AFC781A33F6A2FA9DEBA /* SelfPromoBankTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FE9493C151D0983447AB461 /* SelfPromoBankTests.swift */; };
 		F4D185FDE92410E6AC0C02C9 /* CorpusExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35D48E922BF4744F38DD0C34 /* CorpusExporter.swift */; };
+		F4E6E994AFA0DA60BFACC0CB /* SelfPromoVerifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD49B929E78A3D0AE8A99816 /* SelfPromoVerifier.swift */; };
 		F50BF4625ADCA70B34BE3CA2 /* PipelineProgressStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1D3D54093F76B6ABEE2B06 /* PipelineProgressStripView.swift */; };
 		F551CC33E09E1FB8A0805056 /* Phase4ShadowBenchmarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED4E2DA89CA712CC334C564F /* Phase4ShadowBenchmarkTests.swift */; };
 		F57E7D83317923215D13A494 /* BackgroundFeedRefreshAnnouncementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45585700D7C36C8F1E57F284 /* BackgroundFeedRefreshAnnouncementTests.swift */; };
@@ -1957,6 +1958,7 @@
 		CC764FA14E6DD31DEF9826F3 /* ChapterLabelingContextSequencer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterLabelingContextSequencer.swift; sourceTree = "<group>"; };
 		CC9184D3DA00E31369764421 /* AudioForensicsTemporalRegLiveABTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioForensicsTemporalRegLiveABTests.swift; sourceTree = "<group>"; };
 		CD272EA3B2EF1BFE6A737BC8 /* BackfillJobRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillJobRunner.swift; sourceTree = "<group>"; };
+		CD49B929E78A3D0AE8A99816 /* SelfPromoVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfPromoVerifier.swift; sourceTree = "<group>"; };
 		CD745BB6950D33FBC35F30A1 /* PlaybackQueueFinishObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackQueueFinishObserver.swift; sourceTree = "<group>"; };
 		CD84B15B7B59B131C07EE219 /* AnalysisRangeRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisRangeRequest.swift; sourceTree = "<group>"; };
 		CD9A53AE05E9DD9C04755D5B /* CoverageGuardRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageGuardRecoveryTests.swift; sourceTree = "<group>"; };
@@ -3035,6 +3037,7 @@
 				2B45C93AF0D3714931265CB2 /* ScoreCalibrationProfile.swift */,
 				8A0B5BD4874AC60914F0E602 /* SegmentAggregator.swift */,
 				7F718920D30F80E7A9324813 /* SelfPromoBank.swift */,
+				CD49B929E78A3D0AE8A99816 /* SelfPromoVerifier.swift */,
 				C12FD2B7E2CD87CD2DA4001E /* SemanticScanResult.swift */,
 				CA378190100148F872E8F20D /* SemanticScanStatus.swift */,
 				117F1E41DE084B613166D952 /* SensitiveWindowRouter.swift */,
@@ -4659,6 +4662,7 @@
 				AE121566062C2AD3297F4351 /* ScoreCalibrationProfile.swift in Sources */,
 				5046FBE33D670E69E662991D /* SegmentAggregator.swift in Sources */,
 				E654599CAFB2FF0B4E11B0B8 /* SelfPromoBank.swift in Sources */,
+				F4E6E994AFA0DA60BFACC0CB /* SelfPromoVerifier.swift in Sources */,
 				9371CB1980ECE877CDB2150F /* SemanticScanResult.swift in Sources */,
 				FBF43B0C421AF26E71F54193 /* SemanticScanStatus.swift in Sources */,
 				FEFCC10CFF7EF39FD043123F /* SensitiveWindowRouter.swift in Sources */,

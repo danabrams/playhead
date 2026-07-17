@@ -64,6 +64,36 @@ struct SelfPromoSuppressionWireInTests {
         }
     }
 
+    /// Three chunks with a strong ad-copy break at [60, 90] carrying
+    /// `adBreakText` verbatim inside reliable sponsor ad copy (so the break is
+    /// always DETECTED as an eligible ad). The surrounding chunks are
+    /// deliberately FIRST-PERSON-FREE, so the only self-reference the suppressor
+    /// can see for the ad-break span is one placed inside `adBreakText`.
+    private func makeChunks(assetId: String, adBreakText: String) -> [TranscriptChunk] {
+        let adCopy = "This episode is brought to you by Squarespace. \(adBreakText) Use code SHOW for 10 percent off at squarespace dot com slash show."
+        let texts: [(Double, Double, String)] = [
+            (0.0, 30.0, "Welcome back to the show. Today the topic is technology and design."),
+            (60.0, 90.0, adCopy),
+            (90.0, 120.0, "Back to the regular conversation about interesting things and ideas."),
+        ]
+        return texts.enumerated().map { idx, triple in
+            TranscriptChunk(
+                id: "c\(idx)-\(assetId)",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-\(idx)",
+                chunkIndex: idx,
+                startTime: triple.0,
+                endTime: triple.1,
+                text: triple.2,
+                normalizedText: triple.2.lowercased(),
+                pass: "final",
+                modelVersion: "test-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
+        }
+    }
+
     private func makeAsset(id: String) -> AnalysisAsset {
         AnalysisAsset(
             id: id,
@@ -80,15 +110,22 @@ struct SelfPromoSuppressionWireInTests {
         )
     }
 
-    /// A self-promo bank carrying the fixture's action phrase, built through the
-    /// real decode/validate path. Injected so the wire-in tests are independent
-    /// of the shipped JSON curation (the shipped set is pinned separately).
-    private static func makeBank(_ phrases: [String] = ["rate review and subscribe"]) throws -> SelfPromoBank {
+    /// A self-promo bank built through the real decode/validate path from
+    /// `(phrase, selfReference-class)` pairs. Injected so the wire-in tests are
+    /// independent of the shipped JSON curation (the shipped set is pinned
+    /// separately).
+    private static func makeBank(_ phrases: [(String, String)]) throws -> SelfPromoBank {
         let payload: [String: Any] = [
-            "schemaVersion": 1,
-            "phrases": phrases.map { ["phrase": $0] },
+            "schemaVersion": 2,
+            "phrases": phrases.map { ["phrase": $0.0, "selfReference": $0.1] },
         ]
         return try SelfPromoBank.decode(JSONSerialization.data(withJSONObject: payload))
+    }
+
+    /// Convenience: a bank carrying the fixture's STRONG (self-evident) action
+    /// phrase.
+    private static func makeBank(_ phrases: [String] = ["rate review and subscribe"]) throws -> SelfPromoBank {
+        try makeBank(phrases.map { ($0, "selfEvident") })
     }
 
     private func makeService(
@@ -333,6 +370,54 @@ struct SelfPromoSuppressionWireInTests {
         let ad = try adWindow(in: windows)
         #expect(ad.eligibilityGate == SkipEligibilityGate.eligible.rawValue,
                 "a real third-party ad (bare sponsor phrase, no self-promo action verb) must NOT be demoted (got \(ad.eligibilityGate ?? "nil"))")
+    }
+
+    // MARK: - (d.2) Attention→verification: ambiguous phrase discrimination
+
+    @Test("Flag ON: an ambiguous plug demotes ONLY with self-reference (third-party stays eligible)")
+    func flagOnAmbiguousRequiresSelfReference() async throws {
+        let bank = try Self.makeBank([
+            ("get tickets", "requiresCorroboration"),
+            ("on tour", "requiresCorroboration"),
+        ])
+
+        // Arm 1 — a THIRD-PARTY event plug in real ad copy, NO self-reference.
+        // The ambiguous lexical hit is a clue that fails verification ⇒ eligible.
+        let storeTP = try await makeTestStore()
+        let assetTP = "asset-fl4j-ambig-tp"
+        try await storeTP.insertAsset(makeAsset(id: assetTP))
+        let tpChunks = makeChunks(
+            assetId: assetTP,
+            adBreakText: "Get tickets to see the band on tour at Ticketmaster."
+        )
+        let serviceTP = makeService(store: storeTP, selfPromoEnabled: true, selfPromoBank: bank)
+        try await serviceTP.runBackfill(
+            chunks: tpChunks, analysisAssetId: assetTP, podcastId: Self.podcastId, episodeDuration: 120.0
+        )
+        let tp = try adWindow(in: try await storeTP.fetchAdWindows(assetId: assetTP))
+        #expect(
+            tp.eligibilityGate == SkipEligibilityGate.eligible.rawValue,
+            "an ambiguous plug in a third-party ad (no self-reference) must NOT demote (got \(tp.eligibilityGate ?? "nil"))"
+        )
+
+        // Arm 2 — the SAME ambiguous plug, now with a first-person self-reference
+        // ("our") in the local window ⇒ verified ⇒ demotes to markOnly.
+        let storeSP = try await makeTestStore()
+        let assetSP = "asset-fl4j-ambig-sp"
+        try await storeSP.insertAsset(makeAsset(id: assetSP))
+        let spChunks = makeChunks(
+            assetId: assetSP,
+            adBreakText: "Get tickets to our live show on tour this fall."
+        )
+        let serviceSP = makeService(store: storeSP, selfPromoEnabled: true, selfPromoBank: bank)
+        try await serviceSP.runBackfill(
+            chunks: spChunks, analysisAssetId: assetSP, podcastId: Self.podcastId, episodeDuration: 120.0
+        )
+        let sp = try adWindow(in: try await storeSP.fetchAdWindows(assetId: assetSP))
+        #expect(
+            sp.eligibilityGate == SkipEligibilityGate.markOnly.rawValue,
+            "the same ambiguous plug WITH a first-person self-reference must demote to markOnly (got \(sp.eligibilityGate ?? "nil"))"
+        )
     }
 
     // MARK: - (e) Severity guard: a harder block is preserved

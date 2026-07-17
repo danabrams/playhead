@@ -15,13 +15,14 @@ struct SelfPromoBankTests {
     // MARK: - Fixture builders
 
     /// Minimal VALID bank payload; tests mutate a copy to prove each validation
-    /// rule rejects loudly.
+    /// rule rejects loudly. Schema v2: every phrase carries a REQUIRED
+    /// `selfReference` class.
     private static func validPayload() -> [String: Any] {
         [
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "phrases": [
-                ["phrase": "rate review and subscribe"],
-                ["phrase": "follow us"],
+                ["phrase": "rate review and subscribe", "selfReference": "selfEvident"],
+                ["phrase": "follow us", "selfReference": "selfEvident"],
             ],
         ]
     }
@@ -61,14 +62,29 @@ struct SelfPromoBankTests {
 
     // MARK: - Valid decode
 
-    @Test("A valid payload decodes and normalises each phrase")
+    @Test("A valid payload decodes, normalises each phrase, and carries its class")
     func validPayloadDecodes() throws {
         let bank = try SelfPromoBank.decode(Self.data(Self.validPayload()))
-        #expect(bank.schemaVersion == 1)
+        #expect(bank.schemaVersion == 2)
         #expect(bank.phrases.count == 2)
         #expect(bank.phrases.map(\.phrase) == ["rate review and subscribe", "follow us"])
         #expect(bank.phrases[0].tokens == ["rate", "review", "and", "subscribe"])
         #expect(bank.phrases[1].tokens == ["follow", "us"])
+        // The self-reference class is decoded and carried through.
+        #expect(bank.phrases[0].selfReference == .selfEvident)
+        #expect(bank.phrases[1].selfReference == .selfEvident)
+    }
+
+    @Test("The ambiguous class decodes")
+    func ambiguousClassDecodes() throws {
+        var payload = Self.validPayload()
+        payload["phrases"] = [
+            ["phrase": "get tickets", "selfReference": "requiresCorroboration"],
+            ["phrase": "follow us", "selfReference": "selfEvident"],
+        ]
+        let bank = try SelfPromoBank.decode(try Self.data(payload))
+        #expect(bank.phrases[0].selfReference == .requiresCorroboration)
+        #expect(bank.phrases[1].selfReference == .selfEvident)
     }
 
     // MARK: - Loud rejection of malformed payloads
@@ -81,8 +97,8 @@ struct SelfPromoBankTests {
     @Test("Unsupported schemaVersion is rejected loudly")
     func wrongSchemaVersionRejected() throws {
         var payload = Self.validPayload()
-        payload["schemaVersion"] = 2
-        Self.expectMalformed(try Self.data(payload), containing: "schemaVersion 2")
+        payload["schemaVersion"] = 3
+        Self.expectMalformed(try Self.data(payload), containing: "schemaVersion 3")
     }
 
     @Test("Missing required top-level keys are rejected loudly")
@@ -96,6 +112,25 @@ struct SelfPromoBankTests {
         Self.expectMalformed(try Self.data(noVersion), containing: "decode failed")
     }
 
+    @Test("A phrase missing its selfReference class is rejected loudly")
+    func missingSelfReferenceRejected() throws {
+        // Drop the REQUIRED class field — the non-optional decode fails loud.
+        Self.expectMalformed(
+            try Self.mutatedPhrases { $0[0] = ["phrase": "follow us"] },
+            containing: "decode failed"
+        )
+    }
+
+    @Test("A phrase with an unknown selfReference class is rejected loudly")
+    func unknownSelfReferenceRejected() throws {
+        Self.expectMalformed(
+            try Self.mutatedPhrases {
+                $0[0] = ["phrase": "follow us", "selfReference": "someday"]
+            },
+            containing: "unknown selfReference \"someday\""
+        )
+    }
+
     @Test("An empty phrase set is rejected loudly")
     func emptyPhraseSetRejected() throws {
         Self.expectMalformed(
@@ -107,7 +142,7 @@ struct SelfPromoBankTests {
     @Test("An empty phrase string is rejected loudly")
     func emptyPhraseRejected() throws {
         Self.expectMalformed(
-            try Self.mutatedPhrases { $0[0] = ["phrase": ""] },
+            try Self.mutatedPhrases { $0[0] = ["phrase": "", "selfReference": "selfEvident"] },
             containing: "empty phrase"
         )
     }
@@ -116,12 +151,12 @@ struct SelfPromoBankTests {
     func shortPhraseRejected() throws {
         // Single word.
         Self.expectMalformed(
-            try Self.mutatedPhrases { $0[0] = ["phrase": "subscribe"] },
+            try Self.mutatedPhrases { $0[0] = ["phrase": "subscribe", "selfReference": "selfEvident"] },
             containing: "normalized token count 1"
         )
         // All-punctuation folds to zero tokens.
         Self.expectMalformed(
-            try Self.mutatedPhrases { $0[0] = ["phrase": "!!! ---"] },
+            try Self.mutatedPhrases { $0[0] = ["phrase": "!!! ---", "selfReference": "selfEvident"] },
             containing: "normalized token count 0"
         )
     }
@@ -132,7 +167,8 @@ struct SelfPromoBankTests {
         // "rate review" prefix — but here we collide with the exact same tokens.
         Self.expectMalformed(
             try Self.mutatedPhrases {
-                $0[1] = ["phrase": "Rate Review AND subscribe"] // ≡ tokens of $0[0]
+                // ≡ tokens of $0[0]
+                $0[1] = ["phrase": "Rate Review AND subscribe", "selfReference": "selfEvident"]
             },
             containing: "duplicate phrase"
         )
@@ -156,7 +192,7 @@ struct SelfPromoBankTests {
         // self_promo_action_phrases family (see the file header). These pins
         // document exactly what shipped and force any re-curation through review.
         let bank = try SelfPromoBank.load()
-        #expect(bank.schemaVersion == 1)
+        #expect(bank.schemaVersion == 2)
 
         // Exact ordered phrase set. A reorder, add, drop, or re-word fails here,
         // not silently in a measurement run. Curation invariants below back it.
@@ -216,5 +252,31 @@ struct SelfPromoBankTests {
                 "show-specific phrase \"\(showSpecific)\" must NOT ship"
             )
         }
+
+        // Attention→verification class pin (schema v2). The AMBIGUOUS set — the
+        // event/watch plugs that collide with THIRD-PARTY ads and so MUST be
+        // corroborated by a self-reference marker before demoting — is EXACTLY
+        // these five. A curator moving a phrase between classes (e.g. mis-tagging
+        // "get tickets" as self-evident, which would let it demote a real
+        // concert ad bare) fails here.
+        let ambiguousPhrases = Set(
+            bank.phrases.filter { $0.selfReference == .requiresCorroboration }.map(\.phrase)
+        )
+        #expect(ambiguousPhrases == [
+            "get tickets", "live show", "live version", "on tour", "new ways to watch",
+        ], "the AMBIGUOUS (requires-corroboration) class must be exactly the event/watch plugs")
+        // Everything else is STRONG (self-corroborating self-promo CTA).
+        for phrase in bank.phrases {
+            let expected: SelfReferenceClass = ambiguousPhrases.contains(phrase.phrase)
+                ? .requiresCorroboration
+                : .selfEvident
+            #expect(
+                phrase.selfReference == expected,
+                "\(phrase.phrase): expected class \(expected), got \(phrase.selfReference)"
+            )
+        }
+        // Spot-pin two load-bearing classifications.
+        #expect(bank.phrases.first { $0.phrase == "follow us" }?.selfReference == .selfEvident)
+        #expect(bank.phrases.first { $0.phrase == "on tour" }?.selfReference == .requiresCorroboration)
     }
 }

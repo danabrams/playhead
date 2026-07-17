@@ -120,6 +120,35 @@ final class AdDetectionServiceSelfPromoSuppressionCanaryTests: XCTestCase {
         )
     }
 
+    /// Pin the attention→verification wiring: the fl4j branch must thread the
+    /// show identity into `PromoSuppressor.shouldSuppress(...)` via
+    /// `showIdentity:`. Without it an AMBIGUOUS self-promo phrase ("get
+    /// tickets", "on tour") could only ever be corroborated by a first-person
+    /// pronoun — the show-identity corroboration path (a show naming ITSELF)
+    /// would be silently dead, weakening the verification the precision rework
+    /// depends on.
+    func testRunBackfillThreadsShowIdentityIntoSuppressor() throws {
+        let body = try Self.runBackfillImplementationBody()
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(body)
+        let strippedRange = NSRange(stripped.startIndex..., in: stripped)
+
+        let identityRegex = try NSRegularExpression(
+            pattern: #"showIdentity\s*:\s*selfPromoShowIdentity"#
+        )
+        XCTAssertNotNil(
+            identityRegex.firstMatch(in: stripped, range: strippedRange),
+            """
+            `AdDetectionService.runBackfill` no longer threads \
+            `showIdentity: selfPromoShowIdentity` into \
+            `PromoSuppressor.shouldSuppress(...)`. The attention→verification \
+            rework requires the show's own identity tokens at the call site so \
+            an AMBIGUOUS self-promo phrase can be corroborated by the show \
+            naming itself (not only a first-person pronoun). Restore the \
+            argument or update this canary if the identity plumbing moved.
+            """
+        )
+    }
+
     /// Pin the flag gate: the self-promo branch must short-circuit on
     /// `config.selfPromoSuppressionEnabled`. Without this the branch
     /// could run on the flag-OFF path, breaking the byte-identity
