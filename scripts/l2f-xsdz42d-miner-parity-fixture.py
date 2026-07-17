@@ -155,9 +155,13 @@ def build_corpus():
         fires once per episode (multiplicity 1) -> FAILS.
 
     Consensus top-1 is therefore the once-firing outro O; the multiplicity
-    demotion must PROMOTE the mid-roll stinger S above it. All copies are
-    identical, so every partner NCC is exactly 1.000 -> no rounding-tie
-    ambiguity and the direct / FFT rankings agree exactly."""
+    demotion must PROMOTE the mid-roll stinger S above it. The copies are
+    identical, but the 1 s (50-frame) delta-hop grid lands up to half a hop
+    (~0.5 s / 25 frames) off the planted offset, so the best-aligned window is
+    a slightly shifted partial copy and the partner NCCs are ~0.998-0.999
+    (near unity, not exactly 1.000). They still sit far above every threshold,
+    so there is no threshold- or rounding-tie ambiguity and the direct / FFT
+    rankings agree exactly (asserted below)."""
     rng = np.random.default_rng(20260716)
     stinger = motif(rng)         # mid-roll stinger S (shared, identical copy)
     outro = motif(rng)           # once-per-episode outro cue O (shared)
