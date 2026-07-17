@@ -73,17 +73,33 @@ def intersect_len(a_merged: list[tuple[float, float]], b_merged: list[tuple[floa
 
 
 def episode_false_widening(ep: dict[str, Any], true_slots: list[tuple[float, float]]) -> dict[str, Any]:
-    windows = merge_intervals([
+    all_intervals = [
         (float(w.get("startTime", 0.0)), float(w.get("endTime", 0.0)))
         for w in (ep.get("adWindows") or [])
-    ])
+    ]
+    # ELIGIBLE-only = windows auto-skip actually acts on (playhead-xsdz.36.1 / Dan
+    # 2026-07-17). blocked/markOnly windows never skip, so they eat no content; they
+    # are the banner/safety tier. The eligible metric is the auto-skip go/no-go gate;
+    # the all-windows metric stays as the over-widening early-warning.
+    eligible_intervals = [
+        (float(w.get("startTime", 0.0)), float(w.get("endTime", 0.0)))
+        for w in (ep.get("adWindows") or [])
+        if w.get("eligibilityGate") == "eligible"
+    ]
     slots = merge_intervals(true_slots)
-    ad_total = total_len(windows)
-    inside = intersect_len(windows, slots)
+
+    def _fw(intervals: list[tuple[float, float]]) -> tuple[float, float]:
+        windows = merge_intervals(intervals)
+        ad_total = total_len(windows)
+        return ad_total, intersect_len(windows, slots)
+
+    ad_total, inside = _fw(all_intervals)
+    elig_total, elig_inside = _fw(eligible_intervals)
     return {
         "adWindowSeconds": ad_total,
         "adWindowSecondsInsideTrueSlots": inside,
-        "falseWideningSeconds": ad_total - inside,   # adWindow seconds outside every true DAI slot (upper bound)
+        "falseWideningSeconds": ad_total - inside,   # ALL windows outside true slots (upper bound; incl. blocked/markOnly)
+        "falseWideningSecondsEligible": elig_total - elig_inside,  # AUTO-SKIP relevant: only eligibilityGate==eligible
         "trueSlotSeconds": total_len(slots),
     }
 # ---------------------------------------------------------------------------
@@ -218,6 +234,7 @@ def compare(baseline_eps: list[dict[str, Any]], treatment_eps: list[dict[str, An
 
     fw_rows: list[dict[str, Any]] = []
     fw_base_total = fw_treat_total = 0.0
+    fw_treat_total_elig = 0.0
     for ep_id, slots in sorted(ep_true_slots.items()):
         bep, tep = base_by_id.get(ep_id), treat_by_id.get(ep_id)
         if bep is None or tep is None:
@@ -227,6 +244,7 @@ def compare(baseline_eps: list[dict[str, Any]], treatment_eps: list[dict[str, An
         ft = episode_false_widening(tep, truth)
         fw_base_total += fb["falseWideningSeconds"]
         fw_treat_total += ft["falseWideningSeconds"]
+        fw_treat_total_elig += ft["falseWideningSecondsEligible"]
         fw_rows.append({
             "episodeId": ep_id,
             "showSlug": (tep.get("showSlug") or bep.get("showSlug") or ""),
@@ -238,6 +256,7 @@ def compare(baseline_eps: list[dict[str, Any]], treatment_eps: list[dict[str, An
     for row in fw_rows:
         fw_by_show[row["showSlug"]] = fw_by_show.get(row["showSlug"], 0.0) + row["treatment"]["falseWideningSeconds"]
     fw_worst = sorted(fw_rows, key=lambda r: r["treatment"]["falseWideningSeconds"], reverse=True)
+    fw_worst_elig = sorted(fw_rows, key=lambda r: r["treatment"]["falseWideningSecondsEligible"], reverse=True)
 
     matrix: dict[str, dict[str, int]] = {v: {w: 0 for w in VERDICTS} for v in VERDICTS}
     base_win = treat_win = base_cand = treat_cand = 0.0
@@ -284,8 +303,13 @@ def compare(baseline_eps: list[dict[str, Any]], treatment_eps: list[dict[str, An
             "baselineMeanSecondsPerEpisode": (fw_base_total / len(fw_rows)) if fw_rows else 0.0,
             "treatmentMeanSecondsPerEpisode": (fw_treat_total / len(fw_rows)) if fw_rows else 0.0,
             "treatmentMaxSecondsPerEpisode": (fw_worst[0]["treatment"]["falseWideningSeconds"] if fw_worst else 0.0),
+            # ELIGIBLE-only = the auto-skip go/no-go metric (Dan 2026-07-17). All-windows
+            # above is the tracked over-widening early-warning (counts blocked/markOnly too).
+            "treatmentMeanSecondsPerEpisodeEligible": (fw_treat_total_elig / len(fw_rows)) if fw_rows else 0.0,
+            "treatmentMaxSecondsPerEpisodeEligible": (fw_worst_elig[0]["treatment"]["falseWideningSecondsEligible"] if fw_worst_elig else 0.0),
             "perShowTreatmentSeconds": dict(sorted(fw_by_show.items(), key=lambda kv: kv[1], reverse=True)),
             "worstEpisodes": fw_worst[:8],
+            "worstEpisodesEligible": fw_worst_elig[:8],
             "note": "UPPER BOUND: rediff truth is DAI-only, so this also counts legitimate baked-in "
                     "host-read detections. Evidence-proxy variant (subtract windows carrying "
                     "lexical/FM/chapter ad-evidence) is a TODO pending per-window evidence in the dump.",
@@ -458,6 +482,11 @@ def main() -> int:
     ap.add_argument("--gold-evaluation", default=None,
                     help="earaudit-oracle-gold artifact: gold full-breaks count as TRUE ad "
                          "audio in the false-widening computation (evidence-aware gate)")
+    ap.add_argument("--gate-metric", choices=["eligible", "all"], default="eligible",
+                    help="which false-widening metric the HARD GATE checks (Dan 2026-07-17): "
+                         "'eligible' = only skip-eligible windows (auto-skip go/no-go, the default); "
+                         "'all' = every adWindow incl. blocked/markOnly (conservative over-widening bound). "
+                         "The other metric is always reported alongside as an early-warning.")
     ap.add_argument("--self-test", action="store_true", help="run synthetic self-test and exit")
     args = ap.parse_args()
 
@@ -500,18 +529,27 @@ def main() -> int:
     # False-widening HARD GATE (playhead-xsdz.32): activation must not eat content.
     if args.max_fp_seconds_per_episode is not None:
         fw = result["falseWidening"]
-        over = [row for row in fw["worstEpisodes"]
-                if row["treatment"]["falseWideningSeconds"] > args.max_fp_seconds_per_episode]
-        # worstEpisodes is truncated to 8; re-scan the pinned max to be safe.
-        if fw["treatmentMaxSecondsPerEpisode"] > args.max_fp_seconds_per_episode:
-            worst = fw["worstEpisodes"][0] if fw["worstEpisodes"] else None
+        gate_eligible = args.gate_metric == "eligible"
+        gate_max = fw["treatmentMaxSecondsPerEpisodeEligible"] if gate_eligible else fw["treatmentMaxSecondsPerEpisode"]
+        gate_worst = (fw["worstEpisodesEligible"] if gate_eligible else fw["worstEpisodes"])
+        gate_key = "falseWideningSecondsEligible" if gate_eligible else "falseWideningSeconds"
+        label = "ELIGIBLE / auto-skip" if gate_eligible else "ALL windows"
+        # Always report the OTHER metric as an early-warning (over-widening tendency).
+        ew_max = fw["treatmentMaxSecondsPerEpisode"] if gate_eligible else fw["treatmentMaxSecondsPerEpisodeEligible"]
+        ew_label = "all-windows" if gate_eligible else "eligible-only"
+        if gate_max > args.max_fp_seconds_per_episode:
+            worst = gate_worst[0] if gate_worst else None
             wid = worst["episodeId"] if worst else "?"
-            print(f"\nGATE FAIL (false-widening): max {fw['treatmentMaxSecondsPerEpisode']:.1f}s/ep "
+            print(f"\nGATE FAIL (false-widening, {label}): max {gate_max:.1f}s/ep "
                   f"({wid}) exceeds the {args.max_fp_seconds_per_episode:.1f}s/ep budget. "
-                  f"Activation would eat content — do NOT flip.", file=sys.stderr)
+                  f"Auto-skip would eat content — do NOT flip.", file=sys.stderr)
+            print(f"  early-warning ({ew_label} over-widening): max {ew_max:.1f}s/ep.", file=sys.stderr)
             return 3
-        print(f"\nGATE PASS (false-widening): max {fw['treatmentMaxSecondsPerEpisode']:.1f}s/ep "
+        print(f"\nGATE PASS (false-widening, {label}): max {gate_max:.1f}s/ep "
               f"<= {args.max_fp_seconds_per_episode:.1f}s/ep budget.", file=sys.stderr)
+        print(f"  early-warning ({ew_label} over-widening): max {ew_max:.1f}s/ep "
+              f"{'(also under budget)' if ew_max <= args.max_fp_seconds_per_episode else '(OVER budget — over-widening tendency to watch)'}.",
+              file=sys.stderr)
     return 0
 
 
