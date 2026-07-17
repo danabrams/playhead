@@ -2102,8 +2102,24 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
     private var lastSamples: [Float]?
 
     init(repoRoot: URL) {
-        audioDirectory = repoRoot
-            .appendingPathComponent("TestFixtures/Corpus/Audio", isDirectory: true)
+        audioDirectory = Self.audioDirectory(repoRoot: repoRoot)
+    }
+
+    /// The corpus audio directory this provider resolves against. Static so the
+    /// treatment lane's pre-flight B-side coverage guard (R3) and the env-gated
+    /// decode test consult the SAME root the decode path uses — a drift between
+    /// the guard's lookup and the provider's lookup would defeat the guard.
+    static func audioDirectory(repoRoot: URL) -> URL {
+        repoRoot.appendingPathComponent("TestFixtures/Corpus/Audio", isDirectory: true)
+    }
+
+    /// The exact staged-fresh-B-side URL the decode path consults for `assetId`.
+    /// Single source of truth for the `<assetId>.fresh.mp3` naming convention
+    /// (the retention side lives in `scripts/l2f-dai-rediff.py --retain-audio`,
+    /// whose manifest validation pins `audioPath` stem == episodeId, so both
+    /// sides of the handoff agree on this name).
+    static func freshURL(assetId: String, audioDirectory: URL) -> URL {
+        audioDirectory.appendingPathComponent("\(assetId).fresh.mp3", isDirectory: false)
     }
 
     func refetchedBSideMono16kHz(assetId: String) async -> [Float]? {
@@ -2115,8 +2131,7 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
     }
 
     private static func decodeFresh(assetId: String, audioDirectory: URL) async -> [Float]? {
-        let freshURL = audioDirectory
-            .appendingPathComponent("\(assetId).fresh.mp3", isDirectory: false)
+        let freshURL = Self.freshURL(assetId: assetId, audioDirectory: audioDirectory)
         guard FileManager.default.fileExists(atPath: freshURL.path),
               let localURL = LocalAudioURL(freshURL) else {
             return nil
@@ -2231,6 +2246,28 @@ private func makeRediffTreatmentConfig() -> AdDetectionConfig {
         lexicalAnchorRefinementEnabled: base.lexicalAnchorRefinementEnabled,
         selfPromoSuppressionEnabled: base.selfPromoSuppressionEnabled
     )
+}
+
+/// R3 (measurement-integrity guard): which manifest entries have NO staged
+/// fresh B-side, by the provider's EXACT lookup rule
+/// (`CorpusFreshBSideProvider.freshURL`). The treatment lane fails fast when
+/// this covers the whole manifest — a zero-B-side treatment run would still
+/// complete after ~90 minutes and write a dump whose widths are
+/// baseline-identical, and the orchestrator's treatment-vs-baseline diff would
+/// read "no lift" with nothing actually measured. Pure over its inputs
+/// (filesystem read only) so the wiring suite can pin it hermetically.
+private func rediffTreatmentUnstagedEpisodeIds(
+    entries: [PipelineDumpSnapshotEntry],
+    audioDirectory: URL
+) -> [String] {
+    entries.map(\.episodeId).filter { episodeId in
+        !FileManager.default.fileExists(
+            atPath: CorpusFreshBSideProvider.freshURL(
+                assetId: episodeId,
+                audioDirectory: audioDirectory
+            ).path
+        )
+    }
 }
 
 // MARK: - Live test
@@ -2437,6 +2474,48 @@ final class PipelineDumpLiveTests: XCTestCase {
     /// orchestrator can diff treatment vs. baseline widths.
     private func captureRediffTreatmentDump() async throws {
         let repoRoot = PipelineDumpManifestLoader.repoRoot()
+
+        // R3 pre-flight (before the ~90-minute lane): at least ONE manifest
+        // entry must have a staged `<episodeId>.fresh.mp3`, or the treatment
+        // dump is structurally guaranteed to equal the baseline (every episode
+        // falls through to status-quo width) while LOOKING like a valid
+        // measurement — the exact silent-no-lift failure a go/no-go must not
+        // absorb. Partial staging is fine by design (unstaged == non-rotated);
+        // print the coverage so the run transcript records it. The manifest is
+        // re-loaded inside `captureDumpLane` (shared with the baseline lane,
+        // whose signature this guard must not disturb); the double read is
+        // deterministic and cheap.
+        let entries: [PipelineDumpSnapshotEntry]
+        do {
+            entries = try PipelineDumpManifestLoader.load(repoRoot: repoRoot)
+        } catch {
+            XCTFail("snapshot manifest read failed: \(error)")
+            return
+        }
+        let unstagedIds = rediffTreatmentUnstagedEpisodeIds(
+            entries: entries,
+            audioDirectory: CorpusFreshBSideProvider.audioDirectory(repoRoot: repoRoot)
+        )
+        let stagedCount = entries.count - unstagedIds.count
+        print("""
+        Rediff treatment B-side coverage: \(stagedCount)/\(entries.count) manifest \
+        entries have a staged .fresh.mp3\
+        \(unstagedIds.isEmpty
+            ? ""
+            : "; unstaged (status-quo width by design): \(unstagedIds.sorted().joined(separator: ", "))")
+        """)
+        guard stagedCount > 0 else {
+            XCTFail(
+                """
+                PLAYHEAD_PIPELINE_DUMP_REDIFF=1 was set but NO manifest entry has a \
+                staged fresh B-side (TestFixtures/Corpus/Audio/<episodeId>.fresh.mp3). \
+                The treatment dump would silently equal the baseline. Stage B-sides \
+                first: scripts/l2f-dai-rediff.py --retain-audio (playhead-xsdz.36.1).
+                """
+            )
+            return
+        }
+
         let provider = CorpusFreshBSideProvider(repoRoot: repoRoot)
         try await captureDumpLane(
             config: makeRediffTreatmentConfig(),
@@ -4696,8 +4775,9 @@ struct RediffTreatmentHarnessWiringTests {
     )
     func freshBSideProviderDecodesStagedAudio() async throws {
         let repoRoot = PipelineDumpManifestLoader.repoRoot()
-        let audioDir = repoRoot
-            .appendingPathComponent("TestFixtures/Corpus/Audio", isDirectory: true)
+        // R3: the provider's OWN directory resolution, so this check cannot
+        // drift from the decode path's lookup.
+        let audioDir = CorpusFreshBSideProvider.audioDirectory(repoRoot: repoRoot)
         let freshFiles = (try? FileManager.default.contentsOfDirectory(atPath: audioDir.path))?
             .filter { $0.hasSuffix(".fresh.mp3") }
             .sorted() ?? []
@@ -4720,5 +4800,50 @@ struct RediffTreatmentHarnessWiringTests {
             assetId: "definitely-not-a-real-staged-episode-id"
         )
         #expect(absent == nil)
+    }
+
+    /// R3: the treatment lane's pre-flight coverage guard must classify staged
+    /// vs unstaged entries by the provider's EXACT `<episodeId>.fresh.mp3`
+    /// lookup rule — a zero-staged treatment run silently equals the baseline,
+    /// so `captureRediffTreatmentDump` fails fast on `unstaged == all`. Pinned
+    /// hermetically against a temp directory (real `FileManager` semantics, no
+    /// corpus dependency).
+    @Test("treatment pre-flight classifies staged fresh B-sides by the provider's lookup rule")
+    func preflightUnstagedIdsMatchProviderLookup() async throws {
+        let audioDir = try makeTempDir(prefix: "RediffPreflight")
+        func entry(_ id: String) -> PipelineDumpSnapshotEntry {
+            PipelineDumpSnapshotEntry(
+                show: "Show",
+                showSlug: "show",
+                episodeId: id,
+                publishDate: "2026-07-01",
+                audioPath: "TestFixtures/Corpus/Audio/\(id).mp3",
+                sha256: nil
+            )
+        }
+        // Stage two of three; the plain `.mp3` A-side must NOT count as staged.
+        try Data("b-side".utf8).write(
+            to: CorpusFreshBSideProvider.freshURL(assetId: "ep-a", audioDirectory: audioDir)
+        )
+        try Data("a-side".utf8).write(
+            to: audioDir.appendingPathComponent("ep-b.mp3", isDirectory: false)
+        )
+        try Data("b-side".utf8).write(
+            to: CorpusFreshBSideProvider.freshURL(assetId: "ep-c", audioDirectory: audioDir)
+        )
+
+        let unstaged = rediffTreatmentUnstagedEpisodeIds(
+            entries: [entry("ep-a"), entry("ep-b"), entry("ep-c")],
+            audioDirectory: audioDir
+        )
+        #expect(unstaged == ["ep-b"])
+
+        // Zero-staged is the guard's hard-fail condition: EVERY id unstaged.
+        let emptyDir = try makeTempDir(prefix: "RediffPreflightEmpty")
+        let allUnstaged = rediffTreatmentUnstagedEpisodeIds(
+            entries: [entry("ep-a"), entry("ep-b")],
+            audioDirectory: emptyDir
+        )
+        #expect(allUnstaged == ["ep-a", "ep-b"])
     }
 }
