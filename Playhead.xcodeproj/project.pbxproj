@@ -446,6 +446,7 @@
 		64A045A6DDADF133C9E9F8F4 /* SpeakerShiftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63FB6008B66212162F2A894C /* SpeakerShiftTests.swift */; };
 		64D765CE5191A7BE13071BD6 /* BackfillFusionPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4E0357D75C0C693154820C8 /* BackfillFusionPipelineTests.swift */; };
 		64D799D278498F6761153A25 /* SelfPromoSuppressionWireInTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E43208CD79799B25FF9F6EC /* SelfPromoSuppressionWireInTests.swift */; };
+		64F03153EED96CD0E777859B /* AcousticMusicProbabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D80AFA130C8BF3532AEBCE3 /* AcousticMusicProbabilityTests.swift */; };
 		65318ABBE016D7F9E76FD722 /* NarlApprovalIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58DEF50912731230285F2055 /* NarlApprovalIntegrationTests.swift */; };
 		65400347C4D02C7B06CC90EB /* DiagnosticsOptInResetPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 343C65A38BB0EB9001C584F4 /* DiagnosticsOptInResetPolicyTests.swift */; };
 		656149A34B5C6643D098882A /* fixture-06-30min-chapter-rich.wav in Resources */ = {isa = PBXBuildFile; fileRef = 214B75E0FEC1F75ABF14FBF9 /* fixture-06-30min-chapter-rich.wav */; };
@@ -1160,6 +1161,7 @@
 		0CB4273BCA157C9EB6BF96AD /* ChromaFingerprinter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChromaFingerprinter.swift; sourceTree = "<group>"; };
 		0CF1DA7B24F73A15707905F3 /* FeatureExtractionSignalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureExtractionSignalTests.swift; sourceTree = "<group>"; };
 		0D5F7B8ED66A153BCA010DEE /* ChapterEvidencePipelineRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChapterEvidencePipelineRegressionTests.swift; sourceTree = "<group>"; };
+		0D80AFA130C8BF3532AEBCE3 /* AcousticMusicProbabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcousticMusicProbabilityTests.swift; sourceTree = "<group>"; };
 		0DA19901D2031F5C5C63045A /* CorpusAnnotation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorpusAnnotation.swift; sourceTree = "<group>"; };
 		0DACFD11619B35EF54C49854 /* CrossEpisodeMemoryWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossEpisodeMemoryWiringTests.swift; sourceTree = "<group>"; };
 		0DF127595E6DA91734B40618 /* ShowMusicBedProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowMusicBedProfile.swift; sourceTree = "<group>"; };
@@ -2807,6 +2809,7 @@
 		4E4788849E96C337DA695CF0 /* FeatureExtraction */ = {
 			isa = PBXGroup;
 			children = (
+				0D80AFA130C8BF3532AEBCE3 /* AcousticMusicProbabilityTests.swift */,
 				0CF1DA7B24F73A15707905F3 /* FeatureExtractionSignalTests.swift */,
 			);
 			path = FeatureExtraction;
@@ -4835,6 +4838,7 @@
 				56E1C065BF78F07AEC700CBF /* AcousticLedgerBreakAlignmentTests.swift in Sources */,
 				490BD5391DE948235CEE1E48 /* AcousticLedgerMusicBedTests.swift in Sources */,
 				E98C094BD0B069334B992BD4 /* AcousticLikelihoodScorerTests.swift in Sources */,
+				64F03153EED96CD0E777859B /* AcousticMusicProbabilityTests.swift in Sources */,
 				98E67096EAE8DBC26A621DAC /* AcousticTranscriptGateTests.swift in Sources */,
 				48CEBBD672E4111BDCA128D9 /* ActempoArmConfigTests.swift in Sources */,
 				E923AB099370887DCA663E97 /* ActivitySnapshotProviderSourceCanaryTests.swift in Sources */,
