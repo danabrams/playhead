@@ -205,15 +205,167 @@ enum FeatureSignalExtraction {
         #endif
     }
 
-    static func acousticMusicProbability(
-        magnitudes: [Float],
-        rms: Float,
-        spectralFlux: Float
-    ) -> Double {
-        acousticMusicProbability(
-            magnitudes: magnitudes,
+    // MARK: - Music-playout discriminator (playhead-riiz)
+
+    /// Sub-frame acoustic features that separate a sustained music PLAY-OUT
+    /// from speech and music-under-speech. Computed with 1024-sample Hann
+    /// sub-FFTs at a 512-sample hop *inside* one analysis window (≈61 sub-frames
+    /// per 2 s @ 16 kHz window). Ports the reference `features.py` extractor.
+    ///
+    /// These are the real separators: the old spectral-flatness→tonalness
+    /// signal saturated near 1.0 on all podcast audio (music 0.738 ≈ speech
+    /// 0.722, AUC 0.576 = chance), whereas `pauseFraction` + `subflux` score
+    /// AUC 0.997 at this window (2 s recalibration verdict GO_PORT_AS_IS).
+    struct SubFrameMusicFeatures: Sendable, Equatable {
+        /// Fraction of sub-frames whose raw RMS is below the pause threshold
+        /// (0.03). Speech has micro-gaps between phrases; sustained music ≈ 0.
+        let pauseFraction: Double
+        /// Mean fine spectral flux between consecutive sub-frame magnitude
+        /// spectra, each L1-normalized: `mean(0.5 * Σ|normᵢ − normᵢ₋₁|)`.
+        /// Speech jumps between phonemes (high); music glides (low). 0 when
+        /// fewer than 2 sub-frames exist.
+        let subflux: Double
+        /// Coefficient of variation (std/mean) of sub-frame RMS. 0 when the
+        /// mean is ≈0 or there are no sub-frames.
+        let rmsCoV: Double
+        /// Number of 1024-sample sub-frames analyzed. A window too short to
+        /// yield ≥2 sub-frames carries no pause/flux evidence for the composite.
+        let subFrameCount: Int
+
+        static let empty = SubFrameMusicFeatures(
+            pauseFraction: 0, subflux: 0, rmsCoV: 0, subFrameCount: 0
+        )
+    }
+
+    /// Fixed sub-frame FFT geometry — deliberately independent of
+    /// `FeatureExtractionConfig.fftSize`. The composite was validated with
+    /// 1024/512 sub-FFTs regardless of the window-level FFT size, so these
+    /// mirror `features.py` exactly and never scale with config.
+    private static let subFrameFFTSize = 1024
+    private static let subFrameHop = 512
+    /// Matches `FeatureExtractionConfig.default.pauseRmsThreshold` and the
+    /// reference `PAUSE_RMS`. Kept local so the pure feature function needs
+    /// no config injection.
+    private static let subFramePauseRmsThreshold: Double = 0.03
+
+    /// Extract the three sub-frame music-playout features from a raw window
+    /// of samples (16 kHz mono Float32). Pure DSP, no allocation of the input.
+    /// Returns `.empty` (all zero, `subFrameCount == 0`) when the window is
+    /// shorter than a single 1024-sample sub-FFT.
+    static func subFrameMusicFeatures(samples: [Float]) -> SubFrameMusicFeatures {
+        let n = subFrameFFTSize
+        let halfN = n / 2
+        let hop = subFrameHop
+        guard samples.count >= n else { return .empty }
+
+        let log2n = vDSP_Length(log2(Double(n)))
+        guard let fft = vDSP.FFT(log2n: log2n, radix: .radix2, ofType: DSPSplitComplex.self) else {
+            return .empty
+        }
+
+        var hann = [Float](repeating: 0, count: n)
+        vDSP_hann_window(&hann, vDSP_Length(n), Int32(vDSP_HANN_NORM))
+
+        // Reused across every sub-frame — this runs on the extraction hot path.
+        var windowed = [Float](repeating: 0, count: n)
+        var realPart = [Float](repeating: 0, count: halfN)
+        var imagPart = [Float](repeating: 0, count: halfN)
+        var magnitudes = [Float](repeating: 0, count: halfN)
+        var previousNorm = [Double](repeating: 0, count: halfN)
+        var currentNorm = [Double](repeating: 0, count: halfN)
+        var hasPrevious = false
+
+        var subRms: [Double] = []
+        subRms.reserveCapacity((samples.count - n) / hop + 1)
+        var fluxSum = 0.0
+        var fluxPairs = 0
+
+        var start = 0
+        while start + n <= samples.count {
+            samples.withUnsafeBufferPointer { buf in
+                let base = buf.baseAddress! + start
+                // RAW-sample RMS drives pauseFraction / rmsCoV (no window).
+                var frameRms: Float = 0
+                vDSP_rmsqv(base, 1, &frameRms, vDSP_Length(n))
+                subRms.append(Double(frameRms))
+                // Hann-windowed magnitude spectrum drives subflux.
+                vDSP_vmul(base, 1, hann, 1, &windowed, 1, vDSP_Length(n))
+            }
+
+            realPart.withUnsafeMutableBufferPointer { realBuf in
+                imagPart.withUnsafeMutableBufferPointer { imagBuf in
+                    var split = DSPSplitComplex(
+                        realp: realBuf.baseAddress!,
+                        imagp: imagBuf.baseAddress!
+                    )
+                    windowed.withUnsafeBufferPointer { inBuf in
+                        inBuf.baseAddress!.withMemoryRebound(
+                            to: DSPComplex.self, capacity: halfN
+                        ) { complexPtr in
+                            vDSP_ctoz(complexPtr, 2, &split, 1, vDSP_Length(halfN))
+                        }
+                    }
+                    fft.forward(input: split, output: &split)
+                    vDSP_zvabs(&split, 1, &magnitudes, 1, vDSP_Length(halfN))
+                }
+            }
+
+            // L1-normalize the magnitude spectrum, then accumulate fine flux
+            // against the previous sub-frame's normalized spectrum.
+            var magSum: Float = 0
+            vDSP_sve(magnitudes, 1, &magSum, vDSP_Length(halfN))
+            let denom = Double(magSum) + epsilon
+            for k in 0..<halfN { currentNorm[k] = Double(magnitudes[k]) / denom }
+
+            if hasPrevious {
+                var delta = 0.0
+                for k in 0..<halfN { delta += abs(currentNorm[k] - previousNorm[k]) }
+                fluxSum += 0.5 * delta
+                fluxPairs += 1
+            }
+            swap(&previousNorm, &currentNorm)
+            hasPrevious = true
+
+            start += hop
+        }
+
+        let count = subRms.count
+        guard count > 0 else { return .empty }
+
+        let pauseFraction =
+            Double(subRms.lazy.filter { $0 < subFramePauseRmsThreshold }.count) / Double(count)
+        let mean = subRms.reduce(0, +) / Double(count)
+        let rmsCoV: Double
+        if mean > 1e-6 {
+            let variance = subRms.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / Double(count)
+            rmsCoV = variance.squareRoot() / mean
+        } else {
+            rmsCoV = 0
+        }
+        let subflux = fluxPairs > 0 ? fluxSum / Double(fluxPairs) : 0
+
+        return SubFrameMusicFeatures(
+            pauseFraction: pauseFraction,
+            subflux: subflux,
+            rmsCoV: rmsCoV,
+            subFrameCount: count
+        )
+    }
+
+    /// Acoustic probability that a window is sustained music PLAY-OUT.
+    ///
+    /// Convenience entry that derives everything (window magnitude spectrum,
+    /// RMS, sub-frame features) from a raw window. The extraction hot path
+    /// uses the `(magnitudes:rms:subFrameFeatures:)` variant instead to reuse
+    /// values it has already computed.
+    static func acousticMusicProbability(windowSamples: [Float]) -> Double {
+        guard !windowSamples.isEmpty else { return 0 }
+        var rms: Float = 0
+        vDSP_rmsqv(windowSamples, 1, &rms, vDSP_Length(windowSamples.count))
+        return acousticMusicProbability(
+            magnitudes: firstFrameMagnitudeSpectrum(windowSamples),
             rms: Double(rms),
-            spectralFlux: Double(spectralFlux)
+            subFrameFeatures: subFrameMusicFeatures(samples: windowSamples)
         )
     }
 
@@ -299,11 +451,20 @@ enum FeatureSignalExtraction {
         return clamp(weightedSum / totalWeight)
     }
 
-    private static func acousticMusicProbability(
+    /// Validated music-playout composite (playhead-riiz). Combines the
+    /// sub-frame pause/flux/steadiness separators with the (still-computed but
+    /// no-longer-load-bearing) tonalness and loudness. Constants ported AS-IS
+    /// from the 2 s recalibration (GO_PORT_AS_IS) — do NOT retune them.
+    ///
+    /// A window too short to yield ≥2 sub-frames carries no pause/flux
+    /// evidence, so it cannot assert sustained music and returns 0 (the
+    /// SoundAnalysis timeline still drives `musicProbability` via `max(...)`).
+    static func acousticMusicProbability(
         magnitudes: [Float],
         rms: Double,
-        spectralFlux: Double
+        subFrameFeatures: SubFrameMusicFeatures
     ) -> Double {
+        guard subFrameFeatures.subFrameCount >= 2 else { return 0 }
         guard !magnitudes.isEmpty else { return 0 }
 
         let total = Double(magnitudes.reduce(0, +))
@@ -314,10 +475,61 @@ enum FeatureSignalExtraction {
         let logMean = normalized.reduce(0.0) { $0 + log($1) } / Double(normalized.count)
         let flatness = exp(logMean) / mean
         let tonalness = clamp(1.0 - flatness)
-        let stability = clamp(1.0 - min(spectralFlux * 2.0, 1.0))
-        let energy = clamp((rms - 0.005) / 0.08)
 
-        return clamp(tonalness * 0.55 + stability * 0.30 + energy * 0.15)
+        let tonalZ = clamp((tonalness - 0.88) / 0.12)
+        let quiet = 1.0 - clamp(subFrameFeatures.pauseFraction / 0.30)
+        let lowFlux = clamp((0.42 - subFrameFeatures.subflux) / 0.14)
+        let steady = 1.0 - clamp(subFrameFeatures.rmsCoV / 1.0)
+        let loud = clamp((rms - 0.02) / 0.06)
+
+        return clamp(
+            0.28 * quiet + 0.30 * lowFlux + 0.20 * tonalZ + 0.12 * steady + 0.10 * loud
+        )
+    }
+
+    /// Hann-windowed magnitude spectrum of the first `subFrameFFTSize` samples
+    /// of a window (zero-padded if shorter) — the window-level spectrum the
+    /// flatness→tonalness term consumes. Mirrors
+    /// `FeatureExtractionService.computeMagnitudeSpectrum` at the fixed
+    /// 1024-point size so the convenience entry matches the hot path in
+    /// production (where `config.fftSize == 1024`).
+    private static func firstFrameMagnitudeSpectrum(_ samples: [Float]) -> [Float] {
+        let n = subFrameFFTSize
+        let halfN = n / 2
+        let log2n = vDSP_Length(log2(Double(n)))
+        guard let fft = vDSP.FFT(log2n: log2n, radix: .radix2, ofType: DSPSplitComplex.self) else {
+            return []
+        }
+
+        var input = [Float](repeating: 0, count: n)
+        let copyCount = min(samples.count, n)
+        if copyCount > 0 { input.replaceSubrange(0..<copyCount, with: samples[0..<copyCount]) }
+
+        var hann = [Float](repeating: 0, count: n)
+        vDSP_hann_window(&hann, vDSP_Length(n), Int32(vDSP_HANN_NORM))
+        vDSP_vmul(input, 1, hann, 1, &input, 1, vDSP_Length(n))
+
+        var realPart = [Float](repeating: 0, count: halfN)
+        var imagPart = [Float](repeating: 0, count: halfN)
+        var magnitudes = [Float](repeating: 0, count: halfN)
+        realPart.withUnsafeMutableBufferPointer { realBuf in
+            imagPart.withUnsafeMutableBufferPointer { imagBuf in
+                var split = DSPSplitComplex(
+                    realp: realBuf.baseAddress!,
+                    imagp: imagBuf.baseAddress!
+                )
+                input.withUnsafeBufferPointer { inputBuf in
+                    inputBuf.baseAddress!.withMemoryRebound(
+                        to: DSPComplex.self, capacity: halfN
+                    ) { complexPtr in
+                        vDSP_ctoz(complexPtr, 2, &split, 1, vDSP_Length(halfN))
+                    }
+                }
+                fft.forward(input: split, output: &split)
+                vDSP_zvabs(&split, 1, &magnitudes, 1, vDSP_Length(halfN))
+            }
+        }
+        return magnitudes
     }
 
     private static func spectralDistance(current: [Float], previous: [Float]) -> Double {
@@ -807,10 +1019,18 @@ actor FeatureExtractionService {
 
             // Pause probability — high when RMS is below threshold
             let pauseProb = computePauseProbability(rms: rms)
+            // Music-playout discriminator (playhead-riiz): the sub-frame
+            // pause/flux/steadiness separators come from the raw window
+            // samples, not the window-level magnitude spectrum. `flux` no
+            // longer feeds the acoustic music probability (it still drives
+            // the spectralFlux column and the speaker-change proxy below).
+            let subFrameMusicFeatures = FeatureSignalExtraction.subFrameMusicFeatures(
+                samples: windowSamples
+            )
             let acousticMusicProb = FeatureSignalExtraction.acousticMusicProbability(
                 magnitudes: magnitudes,
-                rms: rms,
-                spectralFlux: flux
+                rms: Double(rms),
+                subFrameFeatures: subFrameMusicFeatures
             )
             let musicProb = FeatureSignalExtraction.musicProbability(
                 acousticProbability: acousticMusicProb,
