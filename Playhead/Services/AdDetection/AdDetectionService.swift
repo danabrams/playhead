@@ -1598,6 +1598,20 @@ actor AdDetectionService {
     /// `lexicalRefinementTraceByWindowIdForTesting()`.
     private var lastLexicalRefinementTraceByWindowId: [String: LexicalRefinementTrace] = [:]
 
+    /// playhead-xsdz.36.1.1 (observability-only): per-AdWindow EVIDENCE
+    /// PROVENANCE captured in the emission loop so the pipeline-dump treatment
+    /// lane can settle whether an over-widened eligible window has exactly ONE
+    /// non-FM corroborating evidence kind (→ the xsdz.59 quorum fix applies) or
+    /// ≥2 distinct kinds (→ a width problem). Keys are `AdWindow.id`; each value
+    /// carries the source span's `anchorProvenance` KINDS plus the DISTINCT
+    /// scoring-ledger source kinds the FM-consensus quorum counts. Populated
+    /// UNCONDITIONALLY (the underlying provenance + ledger always exist for
+    /// every emitted window, computing the labels is cheap, and NO production
+    /// decision path ever reads this map — it is pure observability, unlike the
+    /// flag-gated trace maps above). Reset at the start of every backfill run.
+    /// Test-observable via `evidenceProvenanceByWindowIdForTesting()`.
+    private var lastEvidenceProvenanceByWindowId: [String: EvidenceProvenanceForTesting] = [:]
+
     /// playhead-xsdz.37: lazily-loaded bundled `LexicalAnchorBank`, cached with
     /// the same `.notLoaded`/`.loaded`/`.failed` fail-once contract as the
     /// stinger bank. Never touched when
@@ -2119,6 +2133,55 @@ actor AdDetectionService {
     /// `spanFinalizerConstraintsByWindowIdForTesting()` convention.
     func stingerRefinementTraceByWindowIdForTesting() -> [String: StingerRefinementTrace] {
         lastStingerRefinementTraceByWindowId
+    }
+
+    // MARK: - playhead-xsdz.36.1.1: Evidence-provenance telemetry (observability-only)
+
+    /// Per-AdWindow evidence provenance surfaced by
+    /// `evidenceProvenanceByWindowIdForTesting()`. A behaviour-neutral
+    /// observability payload — never read by any production decision path.
+    struct EvidenceProvenanceForTesting: Sendable, Equatable {
+        /// The source span's `anchorProvenance` KINDS
+        /// (`AnchorRef.provenanceKind`), in span order.
+        let anchorProvenanceKinds: [String]
+        /// The DISTINCT scoring-ledger source kinds the FM-consensus quorum
+        /// counts (`EvidenceSourceType.rawValue`, sorted).
+        let evidenceSourceKinds: [String]
+    }
+
+    /// The DISTINCT corroborating evidence source kinds a run's
+    /// `effectiveLedger` carries, computed with the EXACT formula
+    /// `DecisionMapper.quorumGateForFMConsensus` uses for its
+    /// `corroboratingSources` set: filter to the scoring ledger (drop
+    /// `isObservabilityOnly` sources — `scoringLedger`), then drop the
+    /// always-present zero-weight `.classifier` entry, and take the distinct
+    /// `EvidenceSourceType.rawValue`s (sorted for a stable dump).
+    ///
+    /// PURE and behaviour-neutral — a re-derivation for the pipeline-dump test
+    /// seam only. It is NOT called from the gate and changes no decision, but
+    /// it MUST stay in sync with `quorumGateForFMConsensus`; the
+    /// `corroboratingEvidenceSourceKindsMatchesQuorumFormula` test pins the
+    /// contract against a synthetic ledger.
+    static func corroboratingEvidenceSourceKinds(
+        _ effectiveLedger: [EvidenceLedgerEntry]
+    ) -> [String] {
+        let scoringLedger = effectiveLedger.filter { !$0.source.isObservabilityOnly }
+        let kinds = Set(scoringLedger.compactMap { entry -> EvidenceSourceType? in
+            if entry.source == .classifier, entry.weight == 0 { return nil }
+            return entry.source
+        })
+        return kinds.map(\.rawValue).sorted()
+    }
+
+    /// Test seam: per-AdWindow evidence provenance from the most recent
+    /// `runBackfill`. Keys are `AdWindow.id` (the UUID stamped by
+    /// `buildFusionAdWindow`); each value carries the source span's
+    /// anchor-provenance KINDS and the DISTINCT scoring-ledger source kinds the
+    /// FM-consensus quorum counts. The live pipeline-dump treatment lane reads
+    /// this to record per-window provenance for the xsdz.59 quorum-vs-width
+    /// diagnosis. Behaviour-neutral: no production path reads it.
+    func evidenceProvenanceByWindowIdForTesting() -> [String: EvidenceProvenanceForTesting] {
+        lastEvidenceProvenanceByWindowId
     }
 
     // MARK: - playhead-xsdz.37: Lexical refinement trace telemetry
@@ -3723,6 +3786,11 @@ actor AdDetectionService {
         // leaves them empty for the rest of the run.
         lastLexicalRefinementTraceBySpanId = [:]
         lastLexicalRefinementTraceByWindowId = [:]
+        // playhead-xsdz.36.1.1: reset the observability-only evidence
+        // provenance map so a prior run's entries cannot bleed into this one.
+        // Unlike the trace maps above it is repopulated unconditionally in the
+        // emission loop (the provenance + ledger always exist).
+        lastEvidenceProvenanceByWindowId = [:]
         // playhead-l2f.6: resolve the per-show stinger context ONCE per run
         // (bank entry + episode identity for shard-cache PCM). Flag OFF ⇒
         // nil without touching the bank, the store, or the filesystem —
@@ -4839,6 +4907,21 @@ actor AdDetectionService {
             if let lexicalTrace = lastLexicalRefinementTraceBySpanId[refinedSpan.id] {
                 lastLexicalRefinementTraceByWindowId[window.id] = lexicalTrace
             }
+
+            // playhead-xsdz.36.1.1 (observability-only): stamp the per-window
+            // evidence provenance — the source span's anchor-provenance kinds
+            // plus the DISTINCT scoring-ledger source kinds the FM-consensus
+            // quorum counts (`Self.corroboratingEvidenceSourceKinds` re-derives
+            // that set from `effectiveLedger`, the SAME ledger `DecisionMapper`
+            // received). Captured UNCONDITIONALLY: the provenance + ledger
+            // always exist for an emitted window and no decision path reads this
+            // map, so this is behaviour-neutral for every config. Same stamp
+            // point as the trace maps above so the fresh window id correlates to
+            // its source span.
+            lastEvidenceProvenanceByWindowId[window.id] = EvidenceProvenanceForTesting(
+                anchorProvenanceKinds: refinedSpan.anchorProvenance.map(\.provenanceKind),
+                evidenceSourceKinds: Self.corroboratingEvidenceSourceKinds(effectiveLedger)
+            )
 
             // playhead-gtt9.17: catalog ingress. When a span gates to
             // `.autoSkipEligible`, store its fingerprint so future episodes
