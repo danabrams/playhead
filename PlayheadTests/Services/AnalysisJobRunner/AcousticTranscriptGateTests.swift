@@ -110,7 +110,7 @@ private func cleanSpeechWindow(
         pauseProbability: 0.1,
         speakerClusterId: 1,
         jingleHash: nil,
-        featureVersion: 4
+        featureVersion: 5
     )
 }
 
@@ -137,7 +137,7 @@ private func adOnsetWindow(
         pauseProbability: 0.2,
         speakerClusterId: 2,
         jingleHash: "ad-jingle-x",
-        featureVersion: 4
+        featureVersion: 5
     )
 }
 

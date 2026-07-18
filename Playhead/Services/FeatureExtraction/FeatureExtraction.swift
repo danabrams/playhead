@@ -65,11 +65,17 @@ struct FeatureExtractionConfig: Sendable {
         //   v4: persist seam-state checkpoints and retro-correct shard-boundary
         //       smoothing so resumed extraction does not keep the old v3
         //       boundary bias.
+        //   v5: replace the saturating music-probability formula with a
+        //       discriminating music-bed composite (playhead-riiz). Persisted
+        //       v4 rows hold music-probabilities from the old formula, so the
+        //       bump makes the `featureVersion >= default` filter treat them as
+        //       stale — they re-extract with the new formula instead of being
+        //       stitched together with fresh v5 rows.
         //
         // Consumers only serve rows at the current feature version, and
         // extraction rewinds coverage to the earliest stale window before
         // reprocessing so older rows are replaced incrementally.
-        featureVersion: 4
+        featureVersion: 5
     )
 }
 

@@ -35,7 +35,7 @@ enum AcousticFeatureFixtures {
             pauseProbability: pauseProbability,
             speakerClusterId: speakerClusterId,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         )
     }
 

@@ -70,7 +70,7 @@ struct RepeatedAdCacheWiringTests {
                 pauseProbability: 0.05,
                 speakerClusterId: 0,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         // Silence bumper.
@@ -88,7 +88,7 @@ struct RepeatedAdCacheWiringTests {
             pauseProbability: 0.9,
             speakerClusterId: 0,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         ))
         // Ad block (62..82s).
         let adStart = out.count
@@ -108,7 +108,7 @@ struct RepeatedAdCacheWiringTests {
                 pauseProbability: 0.02,
                 speakerClusterId: 9,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         let closeStart = out.count
@@ -127,7 +127,7 @@ struct RepeatedAdCacheWiringTests {
             pauseProbability: 0.9,
             speakerClusterId: 0,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         ))
         let tailStart = out.count
         for i in tailStart..<(tailStart + 30) {
@@ -146,7 +146,7 @@ struct RepeatedAdCacheWiringTests {
                 pauseProbability: 0.05,
                 speakerClusterId: 0,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         return out

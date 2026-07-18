@@ -42,7 +42,7 @@ private func bracketWindow(
         pauseProbability: pauseProbability,
         speakerClusterId: nil,
         jingleHash: nil,
-        featureVersion: 4
+        featureVersion: 5
     )
 }
 

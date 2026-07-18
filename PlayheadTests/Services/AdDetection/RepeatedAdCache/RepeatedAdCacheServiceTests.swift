@@ -780,7 +780,7 @@ struct RepeatedAdFingerprintTests {
                 pauseProbability: Double(i % 9) * 0.10,
                 speakerClusterId: i % 4,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         let fp = RepeatedAdFingerprint.from(featureWindows: windows)
@@ -827,7 +827,7 @@ struct RepeatedAdFingerprintTests {
                     pauseProbability: pause,
                     speakerClusterId: i % 2,
                     jingleHash: nil,
-                    featureVersion: 4
+                    featureVersion: 5
                 )
                 out.append(window)
             }
