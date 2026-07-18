@@ -82,6 +82,15 @@ enum RegionShadowPhase {
         /// Thresholds for the sustained-music-offset proposer. Inert unless
         /// `sustainedMusicProposerEnabled` is on.
         let sustainedMusicProposerConfig: SustainedMusicOffsetProposer.Config
+        /// playhead-eki3 (PR1): master switch for the lexical ad-cue GATE over
+        /// the sustained-music-offset proposer's music-ONLY spans. DEFAULT
+        /// `false` — when off, the built proposals are passed through verbatim
+        /// (byte-identical no-op) and the gate is inert. INDEPENDENT of
+        /// `sustainedMusicProposerEnabled`: the gate only ever acts on
+        /// `.sustainedMusic`-origin proposals, which exist only when the
+        /// proposer is also on, so a gate-on / proposer-off combination is a
+        /// safe no-op as well. See `MusicOffsetLexicalGate`.
+        let musicOffsetLexicalGateEnabled: Bool
 
         init(
             analysisAssetId: String,
@@ -96,7 +105,8 @@ enum RegionShadowPhase {
             podcastId: String? = nil,
             classifierResults: [ClassifierResult] = [],
             sustainedMusicProposerEnabled: Bool = false,
-            sustainedMusicProposerConfig: SustainedMusicOffsetProposer.Config = .default
+            sustainedMusicProposerConfig: SustainedMusicOffsetProposer.Config = .default,
+            musicOffsetLexicalGateEnabled: Bool = false
         ) {
             self.analysisAssetId = analysisAssetId
             self.chunks = chunks
@@ -111,6 +121,7 @@ enum RegionShadowPhase {
             self.classifierResults = classifierResults
             self.sustainedMusicProposerEnabled = sustainedMusicProposerEnabled
             self.sustainedMusicProposerConfig = sustainedMusicProposerConfig
+            self.musicOffsetLexicalGateEnabled = musicOffsetLexicalGateEnabled
         }
     }
 
@@ -185,7 +196,25 @@ enum RegionShadowPhase {
             proposedMusicSpans: proposedMusicSpans
         )
 
-        let proposals = RegionProposalBuilder.build(proposalInput)
+        let builtProposals = RegionProposalBuilder.build(proposalInput)
+
+        // playhead-eki3 (PR1): lexical ad-cue GATE over t1py's music-ONLY
+        // proposals. DEFAULT-OFF and INDEPENDENT of the proposer flag — when
+        // off, `proposals` is `builtProposals` verbatim, so this seam is a
+        // byte-identical no-op versus today. When on, drop every UNCORROBORATED
+        // `.sustainedMusic`-only region whose onset window carries NO
+        // third-party ad-cue (the cue-less content / credits / theme /
+        // host-intro false-banner class the 2026-07-18 audit isolated).
+        // Corroborated music regions (music + FM / lexical / sponsor /
+        // fingerprint / classifier) and every non-music origin pass through
+        // untouched, so auto-skip is never affected (music-only can never
+        // auto-skip regardless — see `DecisionMapper.isMusicOnlyProvenance`).
+        // The suppressed set is the single seam playhead-r2vz (PR2) will
+        // re-route to an FM recovery pass instead of dropping.
+        let proposals = input.musicOffsetLexicalGateEnabled
+            ? MusicOffsetLexicalGate.filter(builtProposals, chunks: input.chunks)
+            : builtProposals
+
         guard !proposals.isEmpty else {
             logger.debug("Region shadow phase: no proposals for asset \(input.analysisAssetId, privacy: .public)")
             return []
