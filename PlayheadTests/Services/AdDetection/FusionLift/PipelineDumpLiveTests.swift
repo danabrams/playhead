@@ -5148,6 +5148,7 @@ struct PipelineDumpEncodingTests {
             (.fmAcousticCorroborated(regionId: "r", breakStrength: 0.5), "fmAcousticCorroborated"),
             (.userCorrection(correctionId: "c", reportedTime: 12.0), "userCorrection"),
             (.classifierSeed(regionId: "r", score: 0.7), "classifierSeed"),
+            (.sustainedMusicOffset(regionId: "r", confidence: 0.8), "sustainedMusicOffset"),
             (.spliceSlot, "spliceSlot"),
             (.rediffSlot, "rediffSlot"),
         ]

@@ -199,6 +199,11 @@ enum CausalInference {
                 break
             case .classifierSeed:
                 classifierCount += 1
+            case .sustainedMusicOffset:
+                // Sustained-music-offset is an acoustic-music PRESENCE signal
+                // (playhead-t1py) — attribute a correction on it to the
+                // acoustic source, like its RMS-drop `.acoustic` siblings.
+                acousticCount += 1
             case .spliceSlot:
                 // Width-ownership marker (playhead-xsdz.22) — attribution-neutral,
                 // like `.userCorrection`. It carries no causal-source signal, so

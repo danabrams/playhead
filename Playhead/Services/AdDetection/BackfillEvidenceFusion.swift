@@ -858,6 +858,22 @@ struct DecisionMapper: Sendable {
             gate = .markOnly
         }
 
+        // playhead-xtpf / playhead-t1py (Decision #4): a span whose ONLY
+        // presence anchor is `.sustainedMusicOffset` is a TARGETING signal
+        // ("an ad likely begins right after this music"), never a verdict — a
+        // false music proposal must cost a banner, not a wrong skip. Demote any
+        // otherwise-`.eligible` music-only span to `.markOnly`. This is an
+        // UNCONDITIONAL (not flag-gated) additive, post-gate demotion: it never
+        // promotes (only an already-`.eligible` gate is inspected) and never
+        // modifies any score, and it is INERT unless `.sustainedMusicOffset` is
+        // present — which only happens when the sustained-music proposer flag is
+        // on — so the flag-OFF path stays byte-identical. Ordered independently
+        // of the wraj demotion above: both only demote `.eligible → .markOnly`,
+        // and `.markOnly` is a fixed point, so the two compose commutatively.
+        if gate == .eligible, isMusicOnlyProvenance {
+            gate = .markOnly
+        }
+
         // playhead-fqc8: Promotion-track selection. Computed AFTER the
         // gate so the score-mapping pipeline above is unchanged. The
         // track is read by the AdDetectionService auto-skip gate to
@@ -990,6 +1006,32 @@ struct DecisionMapper: Sendable {
             entry.source == .breakAlignment
         }
         return hasBreakAlignment
+    }
+
+    /// playhead-xtpf / playhead-t1py (Decision #4): `true` IFF this span's
+    /// anchor provenance carries a `.sustainedMusicOffset` PRESENCE hint AND no
+    /// corroborating presence anchor (FM consensus / FM-acoustic / evidence
+    /// catalog / classifier seed / user correction). Such a span is anchored
+    /// ONLY by the sustained-music proposer — a targeting cue, not a verdict —
+    /// so it must never auto-skip. The bare width markers (`.spliceSlot` /
+    /// `.rediffSlot`) are deliberately NOT treated as corroboration here: they
+    /// set WIDTH, not PRESENCE, so a music+slot span still has no presence
+    /// evidence beyond the music hint.
+    private var isMusicOnlyProvenance: Bool {
+        var hasMusic = false
+        var hasCorroboratingPresence = false
+        for ref in span.anchorProvenance {
+            switch ref {
+            case .sustainedMusicOffset:
+                hasMusic = true
+            case .fmConsensus, .fmAcousticCorroborated, .evidenceCatalog,
+                 .classifierSeed, .userCorrection:
+                hasCorroboratingPresence = true
+            case .spliceSlot, .rediffSlot:
+                break
+            }
+        }
+        return hasMusic && !hasCorroboratingPresence
     }
 
     /// Determine the eligibility gate by reading `anchorProvenance` directly.

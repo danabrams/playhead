@@ -72,6 +72,16 @@ enum RegionShadowPhase {
         /// classifier-origin proposals. When empty (legacy callers), no
         /// classifier-origin regions are seeded.
         let classifierResults: [ClassifierResult]
+        /// playhead-t1py / playhead-xtpf: master switch for the
+        /// sustained-music-offset PROPOSER. DEFAULT `false` — when off, the
+        /// proposer is NOT called, so `proposedMusicSpans` stays `[]` and the
+        /// whole seam is a byte-identical no-op versus today. When on, `run`
+        /// scans `featureWindows` for sustained-music runs and seeds
+        /// atom-range-WIDE `.sustainedMusic`-origin regions.
+        let sustainedMusicProposerEnabled: Bool
+        /// Thresholds for the sustained-music-offset proposer. Inert unless
+        /// `sustainedMusicProposerEnabled` is on.
+        let sustainedMusicProposerConfig: SustainedMusicOffsetProposer.Config
 
         init(
             analysisAssetId: String,
@@ -84,7 +94,9 @@ enum RegionShadowPhase {
             fmWindows: [FMRefinementWindowOutput] = [],
             fingerprintStore: AdCopyFingerprintStore? = nil,
             podcastId: String? = nil,
-            classifierResults: [ClassifierResult] = []
+            classifierResults: [ClassifierResult] = [],
+            sustainedMusicProposerEnabled: Bool = false,
+            sustainedMusicProposerConfig: SustainedMusicOffsetProposer.Config = .default
         ) {
             self.analysisAssetId = analysisAssetId
             self.chunks = chunks
@@ -97,6 +109,8 @@ enum RegionShadowPhase {
             self.fingerprintStore = fingerprintStore
             self.podcastId = podcastId
             self.classifierResults = classifierResults
+            self.sustainedMusicProposerEnabled = sustainedMusicProposerEnabled
+            self.sustainedMusicProposerConfig = sustainedMusicProposerConfig
         }
     }
 
@@ -128,6 +142,17 @@ enum RegionShadowPhase {
         // types — no persistence, no side effects.
         let acousticBreaks = AcousticBreakDetector.detectBreaks(in: input.featureWindows)
 
+        // playhead-t1py: sustained-music-offset PROPOSER. Only runs when the
+        // flag is enabled; otherwise `proposedMusicSpans` stays `[]` and the
+        // whole seam is a byte-identical no-op. Pure computation on value types.
+        let proposedMusicSpans: [ProposedSpan] = input.sustainedMusicProposerEnabled
+            ? SustainedMusicOffsetProposer.propose(
+                featureWindows: input.featureWindows,
+                episodeDuration: input.episodeDuration,
+                config: input.sustainedMusicProposerConfig
+            )
+            : []
+
         // Phase 8 sponsor matcher: stub (returns []) when no store provided.
         let sponsorMatches = SponsorKnowledgeMatcher.match(atoms: atoms)
 
@@ -156,7 +181,8 @@ enum RegionShadowPhase {
             // `RegionShadowPhase.Input.fmWindows`. Empty when shadow FM
             // was not run (off mode, no factory, or zero spans).
             fmWindows: input.fmWindows,
-            classifierResults: input.classifierResults
+            classifierResults: input.classifierResults,
+            proposedMusicSpans: proposedMusicSpans
         )
 
         let proposals = RegionProposalBuilder.build(proposalInput)
