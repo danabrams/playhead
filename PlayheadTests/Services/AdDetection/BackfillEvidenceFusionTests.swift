@@ -133,6 +133,9 @@ struct BackfillEvidenceFusionTests {
         #expect(config.lexicalCap == 0.2)
         #expect(config.acousticCap == 0.2)
         #expect(config.catalogCap == 0.2)
+        // playhead-wraj: certainty-tiered gate defaults are inert (flag off).
+        #expect(config.certaintyTieredEnabled == false)
+        #expect(config.hostReadConfidenceFloor == 0.9)
     }
 
     // MARK: - BackfillEvidenceFusion — basic ledger accumulation
@@ -678,6 +681,142 @@ struct BackfillEvidenceFusionTests {
         #expect(result.eligibilityGate != .blockedByUserCorrection,
                 "effectiveConfidence >= 0.40 must not be blocked by correction factor")
         #expect(result.skipConfidence >= 0.40)
+    }
+
+    // MARK: - Certainty-tiered auto-skip gate (playhead-wraj)
+
+    /// Non-FM, non-rediff provenance so `computeGate()` routes through
+    /// `metadataCorroborationGate()` and (with no `.metadata` ledger entry)
+    /// returns `.eligible`. `.classifierSeed` is deliberately NOT `.rediffSlot`.
+    private func makeHostReadSpan() -> DecodedSpan {
+        makeSpan(anchorProvenance: [.classifierSeed(regionId: "cs", score: 0.7)])
+    }
+
+    /// Same shape as `makeHostReadSpan()` but WIDTH-owned by the rediff oracle.
+    private func makeRediffSpan() -> DecodedSpan {
+        makeSpan(anchorProvenance: [.rediffSlot])
+    }
+
+    /// Ledger summing to skipConfidence ≈ 0.70 under the default v0 (identity)
+    /// calibration, unit correction factor, and identity duration prior.
+    private func belowFloorLedger() -> [EvidenceLedgerEntry] {
+        [
+            .init(source: .classifier, weight: 0.30, detail: .classifier(score: 0.7)),
+            .init(source: .lexical, weight: 0.20, detail: .lexical(matchedCategories: ["url"])),
+            .init(source: .acoustic, weight: 0.20, detail: .acoustic(breakStrength: 0.7)),
+        ]
+    }
+
+    /// Ledger producing skipConfidence == 0.90 bit-exactly: a SINGLE weight of
+    /// `0.9` compiles to the same IEEE-754 double as the config's `0.9` floor
+    /// literal, so `skipConfidence < floor` is unambiguously `false` at the
+    /// boundary. (A multi-entry sum like `0.3+0.2+0.2+0.2` rounds to
+    /// `0.8999999999999999`, which is genuinely — and correctly — below floor.)
+    private func atFloorLedger() -> [EvidenceLedgerEntry] {
+        [
+            .init(source: .classifier, weight: 0.90, detail: .classifier(score: 0.9)),
+        ]
+    }
+
+    @Test("Flag OFF: non-rediff below-floor eligible span stays eligible with scores untouched")
+    func certaintyTieredFlagOffIsByteIdentical() {
+        let span = makeHostReadSpan()
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: belowFloorLedger(),
+            config: defaultConfig(), // certaintyTieredEnabled defaults to false
+            transcriptQuality: .good
+        )
+        let result = mapper.map()
+        // Today's behavior: a non-FM span with in-audio corroboration is eligible.
+        #expect(result.eligibilityGate == .eligible)
+        // Scores are the honest weight sum, NOT touched by the (disabled) gate.
+        #expect(abs(result.proposalConfidence - 0.70) < 0.001)
+        #expect(abs(result.skipConfidence - 0.70) < 0.001)
+    }
+
+    @Test("Flag ON: non-rediff eligible span below floor is downgraded to markOnly")
+    func certaintyTieredFlagOnDowngradesHostReadBelowFloor() {
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: belowFloorLedger(),
+            config: config,
+            transcriptQuality: .good
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .markOnly)
+        // Invariant: the downgrade must NOT touch either score.
+        #expect(abs(result.proposalConfidence - 0.70) < 0.001)
+        #expect(abs(result.skipConfidence - 0.70) < 0.001)
+    }
+
+    @Test("Flag ON: rediff-anchored eligible span below floor bypasses the floor and stays eligible")
+    func certaintyTieredFlagOnRediffBypassesFloor() {
+        let span = makeRediffSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: belowFloorLedger(),
+            config: config,
+            transcriptQuality: .good
+        )
+        let result = mapper.map()
+        // Identical inputs to the host-read downgrade case EXCEPT `.rediffSlot`.
+        #expect(result.eligibilityGate == .eligible)
+        #expect(abs(result.skipConfidence - 0.70) < 0.001)
+    }
+
+    @Test("Flag ON: non-rediff eligible span at/above floor stays eligible")
+    func certaintyTieredFlagOnAtFloorStaysEligible() {
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: config,
+            transcriptQuality: .good
+        )
+        let result = mapper.map()
+        // skipConfidence == 0.9 == floor → `0.9 < 0.9` is false → not downgraded.
+        #expect(abs(result.skipConfidence - 0.90) < 0.001)
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    @Test("Flag ON: a blockedByEvidenceQuorum span is never promoted or otherwise touched")
+    func certaintyTieredFlagOnLeavesBlockedGateUntouched() {
+        // FM-acoustic provenance with only an FM entry → blockedByEvidenceQuorum.
+        // It is also non-rediff and below-floor, so if the downgrade fired on a
+        // non-eligible gate it would (wrongly) rewrite it. It must not.
+        let span = makeSpanWithFMAcoustic(startTime: 10.0, endTime: 40.0)
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.35, detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1"))
+        ]
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: entries,
+            config: config,
+            transcriptQuality: .good
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .blockedByEvidenceQuorum)
+    }
+
+    @Test("Flag ON: hostReadConfidenceFloor is read, not hardcoded (custom floor 0.6 keeps 0.7 eligible)")
+    func certaintyTieredCustomFloorIsHonored() {
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true, hostReadConfidenceFloor: 0.6)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: belowFloorLedger(), // skipConfidence ≈ 0.70
+            config: config,
+            transcriptQuality: .good
+        )
+        let result = mapper.map()
+        // 0.70 >= 0.60 → clears the custom floor → stays eligible.
+        #expect(result.eligibilityGate == .eligible)
     }
 
     // MARK: - FM Positive-Only Rule
