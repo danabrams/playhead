@@ -213,10 +213,28 @@ enum PermissiveAdGrammar {
 
         The transcript below has these line refs: \(lineRefList). Use ONLY these line refs in your answer.
 
+        An AD is any PAID PROMOTION of a THIRD PARTY — a company, product, service, app, or another company's show that paid to appear in this episode. This includes hard sells, but ALSO soft ones: sponsor reads, "brought to you by" / "this episode is sponsored by" spots, public-radio underwriting ("support for this show comes from [company]..."), prescription-drug ads (a medication named with the condition it treats, dosing, and side-effect warnings), and cross-promotions of ANOTHER company's or network's show or app ("[show], available now on the [platform] app"). A promotion does NOT need a purchase call-to-action, a URL, or a promo code to be an ad — naming a paying third party in a promotional slot is enough.
+
+        COMMIT TO A VERDICT. If the window clearly PROMOTES a third party — it names a sponsor, a product with a website / phone number / promo code / price / discount, "sponsored by", "support comes from", or a drug with dosing and side effects — output AD, EVEN IF the window starts mid-sentence, is full of legal disclaimers ("terms apply", "discounts not available in all states"), or the sponsor read is surrounded by other material. Do NOT retreat to UNCERTAIN just because an ad is messy, partial, or legalese-heavy. Reserve UNCERTAIN for windows where you genuinely cannot tell whether ANY third party is being promoted — not for ads that are simply hard to read.
+
+        A NAMED BRAND IS NOT AUTOMATICALLY AN AD — use the VOICE to decide. It is an ad when the brand speaks in its OWN promotional voice: first-person "we / our / us" corporate copy ("At IBM, we work with our employees...", "we can help companies get smarter"), a value proposition or slogan, a website / promo code / price / phone number, or "sponsored by" / "support comes from". It is NOT an ad when the show talks ABOUT a company in the third person as part of a story or analysis — a sports team ("Red Bull went all in", "Christian Horner's team"), a company in the news being reported on, a product the hosts are reviewing or debating. First-person brand pitch = AD; third-person narrative about a brand = content.
+
+        THE DECIDING TEST FOR OWNERSHIP IS WHO THE PROMOTION IS FOR:
+          - FOR A THIRD PARTY (a sponsor, underwriter, or a DIFFERENT company/network's product, app, or show) -> AD, even if it is soft, factual, and has no buy-now link.
+          - FOR THIS SHOW, its host, or its creator (their own book, tour, merch, app, or their own other podcasts) -> NOT an ad, EVEN WITH a strong "buy it now / available on Amazon" call-to-action.
+
+        The following are NOT ads. Output NO_AD when the window is only these:
+          - the show's opening theme song, musical sting, or cold-open teaser bit
+          - the show's or network's own ID ("from WNYC, this is On the Media")
+          - the host's monologue, introduction, or narration of the episode's OWN content, including a story that happens to name real companies or brands
+          - the host asking listeners to subscribe to, rate, follow, review, or comment on THIS show
+          - the host or creator promoting THEIR OWN book, tour, merchandise, app, or their OWN other shows — even with a "buy it / available now" call-to-action
+          - the host reacting to or recommending a GUEST's (or any third party's) creative work AS PART OF THE CONVERSATION — first-person editorial like "I love this album, you have to check it out." The tell: it is woven into the discussion, not delivered as a discrete sponsor or underwriting announcement.
+
         Output exactly one line. Choose ONE of these forms:
 
-          NO_AD                              (window contains no ad)
-          UNCERTAIN                          (you cannot tell)
+          NO_AD                              (window contains no third-party ad)
+          UNCERTAIN                          (you genuinely cannot tell if any third party is promoted)
           AD L<start>-L<end>                 (one ad span)
           AD L<n1>-L<m1>,L<n2>-L<m2>         (multiple non-contiguous ad spans)
 
@@ -225,10 +243,14 @@ enum PermissiveAdGrammar {
         Do NOT explain your reasoning.
         Do NOT use line refs that are not in the transcript.
 
-        Examples (these are illustrative, not part of your input):
-          Transcript with L0, L1 → if both lines are an ad, output "AD L0-L1"
-          Transcript with L4, L5 → if neither is an ad, output "NO_AD"
-          Transcript with L10, L11, L12 → if L10-L11 is one ad and L12 is unrelated, output "AD L10-L11"
+        Examples (illustrative, not part of your input):
+          Transcript with L0, L1 -> a third-party sponsor read, even mid-sentence with disclaimers -> "AD L0-L1"
+          Transcript with L2, L3 -> "support for this program comes from [a company]..." underwriting -> "AD L2-L3" (soft third-party, no CTA needed)
+          Transcript with L4, L5 -> a prescription drug named with dosing and side effects -> "AD L4-L5"
+          Transcript with L6, L7 -> the host's own monologue, theme song, or a story that names a company -> "NO_AD"
+          Transcript with L8, L9 -> the creator's OWN book "available on Amazon" -> "NO_AD" (first-party, ownership beats the call-to-action)
+          Transcript with L10, L11 -> a DIFFERENT network's show "available now on their app" -> "AD L10-L11" (third-party cross-promo)
+          Transcript with L12, L13 -> the host reacting to a guest's album, "I love it, check it out" -> "NO_AD" (editorial, not a paid slot)
 
         Now classify this transcript:
 
