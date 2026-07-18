@@ -2708,6 +2708,23 @@ final class PipelineDumpLiveTests: XCTestCase {
         )
     }
 
+    /// playhead-xsdz.60: resolve the `PLAYHEAD_FM_GREEDY` runtime override for
+    /// the dump treatment lane. "1" → greedy (deterministic), "0" → stochastic
+    /// (`samplingMode` nil, byte-identical to pre-xsdz.60); unset or any other
+    /// value → nil, meaning "use the FM `Config` default" (greedy). Env-gated
+    /// and treatment-lane-only so PRODUCTION behavior is exactly the Config
+    /// default. Takes the environment as an argument so it is unit-testable
+    /// hermetically (no `setenv`).
+    static func fmGreedyDecodingOverrideFromEnvironment(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool? {
+        switch environment["PLAYHEAD_FM_GREEDY"] {
+        case "1": return true
+        case "0": return false
+        default: return nil
+        }
+    }
+
     /// playhead-xsdz.36.1: the rediff-ACTIVATION treatment lane. Constructs the
     /// fresh-B-side provider (rooted at the repo corpus) and the rediff-ON config,
     /// then runs the SAME shared lane. Writes to a DISTINCT dump file so the
@@ -2788,12 +2805,28 @@ final class PipelineDumpLiveTests: XCTestCase {
             return
         }
 
+        // playhead-xsdz.60: the FM decoding mode defaults to greedy (Config
+        // default `true`). The orchestrator can flip it per-run WITHOUT a
+        // rebuild via PLAYHEAD_FM_GREEDY ("1" greedy, "0" stochastic) so both
+        // modes' run-to-run reproducibility can be measured from ONE build.
+        // Absent → nil → the Config default (greedy). Treatment lane ONLY —
+        // the baseline/legacy lanes never read this env var and always use the
+        // shipped Config default.
+        let fmGreedyOverride = Self.fmGreedyDecodingOverrideFromEnvironment()
+        let greedyLabel: String = {
+            switch fmGreedyOverride {
+            case .some(true): return " + PLAYHEAD_FM_GREEDY=1 (greedy)"
+            case .some(false): return " + PLAYHEAD_FM_GREEDY=0 (stochastic)"
+            case .none: return "" // Config default (greedy)
+            }
+        }()
+
         let provider = CorpusFreshBSideProvider(repoRoot: repoRoot)
         try await captureDumpLane(
             config: makeRediffTreatmentConfig(),
             rediffBSideProvider: provider,
             outputFilename: "playhead-dogfood-diagnostics-pipeline-dump-rediff-treatment.json",
-            configLabel: "treatment: .default + rediffSlotOwnershipEnabled + fresh-B-side provider",
+            configLabel: "treatment: .default + rediffSlotOwnershipEnabled + fresh-B-side provider\(greedyLabel)",
             bSideCoverage: DumpBSideCoverage(
                 stagedEntryCount: stagedCount,
                 manifestEntryCount: entries.count,
@@ -2803,7 +2836,8 @@ final class PipelineDumpLiveTests: XCTestCase {
             // playhead-xsdz.36.1.1: treatment lane emits per-window evidence
             // provenance (anchorProvenance + evidenceSources). The baseline/
             // legacy lane leaves this false so its dump bytes are unchanged.
-            emitEvidenceProvenance: true
+            emitEvidenceProvenance: true,
+            fmGreedyDecodingOverride: fmGreedyOverride
         )
     }
 
@@ -2820,7 +2854,10 @@ final class PipelineDumpLiveTests: XCTestCase {
         outputFilename: String,
         configLabel: String,
         bSideCoverage: DumpBSideCoverage? = nil,
-        emitEvidenceProvenance: Bool = false
+        emitEvidenceProvenance: Bool = false,
+        // playhead-xsdz.60: treatment-lane-only FM decoding override. Baseline/
+        // legacy callers omit it → nil → the shipped `Config.default`.
+        fmGreedyDecodingOverride: Bool? = nil
     ) async throws {
         let repoRoot = PipelineDumpManifestLoader.repoRoot()
 
@@ -2850,7 +2887,8 @@ final class PipelineDumpLiveTests: XCTestCase {
                     repoRoot: repoRoot,
                     config: config,
                     rediffBSideProvider: rediffBSideProvider,
-                    emitEvidenceProvenance: emitEvidenceProvenance
+                    emitEvidenceProvenance: emitEvidenceProvenance,
+                    fmGreedyDecodingOverride: fmGreedyDecodingOverride
                 )
                 dumpEpisodes.append(result.episode)
             } catch let error as PipelineDumpRunError {
@@ -3056,7 +3094,8 @@ private extension PipelineDumpLiveTests {
         musicBoundaryEdges: [Double] = [],
         config: AdDetectionConfig = .default,
         rediffBSideProvider: RediffBSideProvider? = nil,
-        emitEvidenceProvenance: Bool = false
+        emitEvidenceProvenance: Bool = false,
+        fmGreedyDecodingOverride: Bool? = nil
     ) async throws -> ProductionEpisodeRunResult {
         let episodeId = entry.episodeId
 
@@ -3224,7 +3263,9 @@ private extension PipelineDumpLiveTests {
             store: store,
             metadataExtractor: FallbackExtractor(),
             config: config,
-            backfillJobRunnerFactory: Self.makeLiveRunnerFactory(),
+            backfillJobRunnerFactory: Self.makeLiveRunnerFactory(
+                fmGreedyDecodingOverride: fmGreedyDecodingOverride
+            ),
             canUseFoundationModelsProvider: { true }, // avoid silent FM demotion
             fragilityDiagnosticObserver: observer,
             // Rediff B-side source. `nil` in the baseline lane → the rediff pass
@@ -3592,7 +3633,14 @@ private extension PipelineDumpLiveTests {
     /// shipped production narrowing config — same as the sibling
     /// harnesses' production-default arm). The `mode` argument is supplied
     /// by `AdDetectionService` (the effective FM mode, `.full` here).
-    private static func makeLiveRunnerFactory()
+    /// - Parameter fmGreedyDecodingOverride: playhead-xsdz.60 — when non-nil,
+    ///   the live FM classifier is built with `Config.default.withFMGreedyDecoding(_)`
+    ///   so the dump treatment lane can flip the FM decoding mode at runtime
+    ///   (via `PLAYHEAD_FM_GREEDY`) from ONE build. `nil` (the baseline/legacy
+    ///   default) uses the shipped `Config.default` — byte-identical to today.
+    private static func makeLiveRunnerFactory(
+        fmGreedyDecodingOverride: Bool? = nil
+    )
         -> (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)
     {
         { store, mode in
@@ -3609,12 +3657,22 @@ private extension PipelineDumpLiveTests {
             } else {
                 permissiveClassifierBox = nil
             }
+            let fmClassifier: FoundationModelClassifier
+            if let fmGreedyDecodingOverride {
+                fmClassifier = PlayheadRuntime.makeFoundationModelClassifier(
+                    redactor: redactor,
+                    config: FoundationModelClassifier.Config.default
+                        .withFMGreedyDecoding(fmGreedyDecodingOverride)
+                )
+            } else {
+                fmClassifier = PlayheadRuntime.makeFoundationModelClassifier(
+                    redactor: redactor
+                )
+            }
             return BackfillJobRunner(
                 store: store,
                 admissionController: AdmissionController(),
-                classifier: PlayheadRuntime.makeFoundationModelClassifier(
-                    redactor: redactor
-                ),
+                classifier: fmClassifier,
                 coveragePlanner: CoveragePlanner(),
                 mode: mode,
                 capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },

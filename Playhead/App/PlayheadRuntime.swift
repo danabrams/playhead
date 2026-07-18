@@ -2359,9 +2359,11 @@ final class PlayheadRuntime {
     /// construct a classifier.
     nonisolated static func makeFoundationModelClassifier(
         redactor: PromptRedactor,
-        feedbackStore: FoundationModelsFeedbackStore? = nil
+        feedbackStore: FoundationModelsFeedbackStore? = nil,
+        config: FoundationModelClassifier.Config = .default
     ) -> FoundationModelClassifier {
         FoundationModelClassifier(
+            config: config,
             feedbackStore: feedbackStore,
             redactor: redactor
         )
