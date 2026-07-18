@@ -872,6 +872,20 @@ struct FoundationModelClassifier: Sendable {
         let minimumZoomSpanLines: Int
         let maximumRefinementSpansPerWindow: Int
 
+        // playhead-xsdz.60: pin the live anchoring session's FoundationModels
+        // decoding to greedy (deterministic argmax) so the FM's
+        // `evidenceAnchors` list is reproducible run-to-run — fixing the
+        // eligible-gate coin-flip where the same window yielded 8↔49 atoms
+        // across runs. Default `true` (greedy in production, approved
+        // 2026-07). Reversible: `false` restores the pre-xsdz.60 stochastic
+        // default (`samplingMode` left nil), which is byte-identical
+        // (Equatable-equal) to the shipped `GenerationOptions` call sites.
+        // Only the three live `GenerationOptions` sites in `LiveSessionActor`
+        // read it; the stubbed test runtimes never do. This flag changes
+        // REPRODUCIBILITY, not correctness — the FM still over-anchors, just
+        // consistently (over-anchoring is xsdz.63/xsdz.59, out of scope here).
+        let fmGreedyDecoding: Bool
+
         // bd-3h2 (2026-04-06): On-device run on iOS 26.4 produced a
         // refinement decode failure with the FM emitting valid JSON
         // truncated mid-string (the second span's `"certainty"` field
@@ -902,7 +916,8 @@ struct FoundationModelClassifier: Sendable {
             refinementMaximumResponseTokens: Int,
             zoomAmbiguityBudget: Int = 1,
             minimumZoomSpanLines: Int = 2,
-            maximumRefinementSpansPerWindow: Int = 2
+            maximumRefinementSpansPerWindow: Int = 2,
+            fmGreedyDecoding: Bool = true
         ) {
             self.safetyMarginTokens = safetyMarginTokens
             self.coarseMaximumResponseTokens = coarseMaximumResponseTokens
@@ -910,6 +925,24 @@ struct FoundationModelClassifier: Sendable {
             self.zoomAmbiguityBudget = max(0, zoomAmbiguityBudget)
             self.minimumZoomSpanLines = max(1, minimumZoomSpanLines)
             self.maximumRefinementSpansPerWindow = max(1, maximumRefinementSpansPerWindow)
+            self.fmGreedyDecoding = fmGreedyDecoding
+        }
+
+        /// playhead-xsdz.60: return a copy of `self` with `fmGreedyDecoding`
+        /// overridden. The dump treatment lane uses this to honor the
+        /// `PLAYHEAD_FM_GREEDY` runtime override so the orchestrator can run
+        /// both decoding modes from ONE build — without a second `Config`
+        /// literal that could silently drift from `.default`.
+        func withFMGreedyDecoding(_ value: Bool) -> Config {
+            Config(
+                safetyMarginTokens: safetyMarginTokens,
+                coarseMaximumResponseTokens: coarseMaximumResponseTokens,
+                refinementMaximumResponseTokens: refinementMaximumResponseTokens,
+                zoomAmbiguityBudget: zoomAmbiguityBudget,
+                minimumZoomSpanLines: minimumZoomSpanLines,
+                maximumRefinementSpansPerWindow: maximumRefinementSpansPerWindow,
+                fmGreedyDecoding: value
+            )
         }
 
         init(
@@ -5018,8 +5051,33 @@ final actor SessionBox {
 
 #if canImport(FoundationModels)
 @available(iOS 26.0, *)
+extension FoundationModelClassifier {
+    /// playhead-xsdz.60: build the live anchoring session's `GenerationOptions`.
+    /// `greedy == true` pins `samplingMode: .greedy` (deterministic argmax) so
+    /// the FM's evidence-anchor list is reproducible run-to-run; `greedy ==
+    /// false` leaves `samplingMode` nil, which is byte-identical
+    /// (Equatable-equal) to the pre-xsdz.60
+    /// `GenerationOptions(maximumResponseTokens:)` call sites. The three
+    /// `LiveSessionActor` respond paths route through this so the flag has
+    /// exactly ONE decision point — and exactly one test seam.
+    static func liveGenerationOptions(greedy: Bool, maximumResponseTokens: Int) -> GenerationOptions {
+        GenerationOptions(
+            samplingMode: greedy ? .greedy : nil,
+            maximumResponseTokens: maximumResponseTokens
+        )
+    }
+}
+
+@available(iOS 26.0, *)
 final actor LiveSessionActor {
     private let session: LanguageModelSession
+
+    // playhead-xsdz.60: when `true`, the three respond paths pin the session's
+    // decoding to greedy so anchoring is reproducible run-to-run; when
+    // `false`, sampling is left at the framework default (`samplingMode` nil),
+    // byte-identical to the pre-xsdz.60 call sites. Threaded from
+    // `Config.fmGreedyDecoding` via `liveRuntime(logger:config:)`.
+    private let fmGreedyDecoding: Bool
 
     // playhead-994 (graduated to default 2026-04-09): the session is always
     // created with a one-shot example in `Instructions` so the model
@@ -5044,7 +5102,8 @@ final actor LiveSessionActor {
         If there are no ads, return: {"spans":[]}
         """
 
-    init() {
+    init(fmGreedyDecoding: Bool) {
+        self.fmGreedyDecoding = fmGreedyDecoding
         self.session = LanguageModelSession(
             model: SystemLanguageModel.default,
             instructions: Instructions { Self.oneShotExample }
@@ -5059,7 +5118,10 @@ final actor LiveSessionActor {
         let response = try await session.respond(
             to: prompt,
             generating: CoarseScreeningSchema.self,
-            options: GenerationOptions(maximumResponseTokens: maximumResponseTokens)
+            options: FoundationModelClassifier.liveGenerationOptions(
+                greedy: fmGreedyDecoding,
+                maximumResponseTokens: maximumResponseTokens
+            )
         )
         return response.content
     }
@@ -5074,7 +5136,10 @@ final actor LiveSessionActor {
             to: prompt,
             generating: RefinementWindowSchema.self,
             includeSchemaInPrompt: false,
-            options: GenerationOptions(maximumResponseTokens: maximumResponseTokens)
+            options: FoundationModelClassifier.liveGenerationOptions(
+                greedy: fmGreedyDecoding,
+                maximumResponseTokens: maximumResponseTokens
+            )
         )
         return response.content
     }
@@ -5089,7 +5154,10 @@ final actor LiveSessionActor {
             to: prompt,
             generating: FMBoundarySchema.self,
             includeSchemaInPrompt: true,
-            options: GenerationOptions(maximumResponseTokens: maximumResponseTokens)
+            options: FoundationModelClassifier.liveGenerationOptions(
+                greedy: fmGreedyDecoding,
+                maximumResponseTokens: maximumResponseTokens
+            )
         )
         return response.content
     }
@@ -5221,7 +5289,7 @@ private extension FoundationModelClassifier {
                 // H8: Confine the FoundationModels session to a small actor so
                 // it never crosses concurrency boundaries via @Sendable closure
                 // capture. The closures call into the actor instead.
-                let live = LiveSessionActor()
+                let live = LiveSessionActor(fmGreedyDecoding: config.fmGreedyDecoding)
                 return Runtime.Session(
                     prewarm: { promptPrefix in
                         await live.prewarm(promptPrefix)

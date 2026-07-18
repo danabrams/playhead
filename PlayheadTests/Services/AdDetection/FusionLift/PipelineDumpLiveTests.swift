@@ -157,6 +157,22 @@
 // service stamps the trace inside the emission loop at the same iteration
 // that produces the window.
 //
+// `anchorProvenance` + `evidenceSources` were added by playhead-xsdz.36.1.1
+// (evidence-provenance instrumentation) and are emitted ONLY in the rediff
+// TREATMENT lane (`captureRediffTreatmentDump`), so baseline/legacy dump
+// bytes are byte-identical. Both are `[String]?`; `nil` → key omitted
+// (baseline lanes), a concrete array — POSSIBLY EMPTY — in the treatment lane
+// (mirrors the treatment-only `bSideCoverage` convention). `anchorProvenance`
+// is the source span's `AnchorRef.provenanceKind`s in span order;
+// `evidenceSources` is the DISTINCT scoring-ledger source kinds the
+// FM-consensus quorum counts (`quorumGateForFMConsensus`'s
+// `corroboratingSources` — drops the always-present zero-weight `.classifier`
+// entry; `EvidenceSourceType.rawValue`, sorted). Together they settle whether
+// an over-widened eligible window has exactly ONE non-FM evidence kind (→ the
+// xsdz.59 quorum fix applies) or ≥2 (→ a width problem). Read via
+// `AdDetectionService.evidenceProvenanceByWindowIdForTesting()`, keyed by the
+// live `AdWindow.id` — same exact per-window stamp point as the traces above.
+//
 // NOTE on `promotionTrack`: `PromotionTrack` is NOT persisted on the
 // `AdWindow` row — it lives on the in-flight `DecisionResult`. The store can
 // surface `decisionState` / `eligibilityGate` / `confidence` (== the gate's
@@ -1006,6 +1022,60 @@ private struct DumpAdWindow: Encodable {
     /// consult still records a trace so the OFF-vs-no-snap distinction is
     /// observable downstream).
     let stingerRefinement: DumpStingerRefinement?
+    /// playhead-xsdz.36.1.1 (observability-only): the source span's
+    /// anchor-provenance KINDS (`AnchorRef.provenanceKind` — e.g.
+    /// `"fmConsensus"`, `"fmAcousticCorroborated"`, `"classifierSeed"`,
+    /// `"spliceSlot"`, `"rediffSlot"`), in span order, AS REPORTED BY
+    /// `AdDetectionService.evidenceProvenanceByWindowIdForTesting()`. `nil`
+    /// (key omitted from the encoded object — matching the pre-existing
+    /// `promotionTrack` / `boundaryRefinement*` / `bSideCoverage` convention)
+    /// in the baseline/legacy lanes, whose bytes stay unchanged. Populated
+    /// (concrete array, possibly empty) ONLY in the rediff TREATMENT lane,
+    /// where an empty array is itself diagnostic (a span with zero anchor
+    /// provenance).
+    let anchorProvenance: [String]?
+    /// playhead-xsdz.36.1.1 (observability-only): the DISTINCT scoring-ledger
+    /// source kinds that corroborated this window — the EXACT set
+    /// `DecisionMapper.quorumGateForFMConsensus` counts (drops the
+    /// always-present zero-weight `.classifier` entry;
+    /// `EvidenceSourceType.rawValue`, sorted — e.g. `"fm"`, `"lexical"`,
+    /// `"acoustic"`, `"catalog"`, `"musicBed"`). This is the field the
+    /// xsdz.59 diagnosis reads: subtract `"fm"` and count the remainder —
+    /// exactly ONE non-FM kind → the quorum fix applies; ≥2 → a width
+    /// problem. `nil` (key omitted) in the baseline/legacy lanes; populated
+    /// (possibly empty) ONLY in the treatment lane, where an empty set means
+    /// "zero corroborating sources", distinct from the absent baseline key.
+    let evidenceSources: [String]?
+
+    init(
+        startTime: Double,
+        endTime: Double,
+        skipConfidence: Double,
+        decisionState: String,
+        eligibilityGate: String?,
+        promotionTrack: String?,
+        wasSkipped: Bool,
+        boundaryRefinementStartAdjustment: Double?,
+        boundaryRefinementEndAdjustment: Double?,
+        spanFinalizerConstraintsFired: [String]?,
+        stingerRefinement: DumpStingerRefinement?,
+        anchorProvenance: [String]? = nil,
+        evidenceSources: [String]? = nil
+    ) {
+        self.startTime = startTime
+        self.endTime = endTime
+        self.skipConfidence = skipConfidence
+        self.decisionState = decisionState
+        self.eligibilityGate = eligibilityGate
+        self.promotionTrack = promotionTrack
+        self.wasSkipped = wasSkipped
+        self.boundaryRefinementStartAdjustment = boundaryRefinementStartAdjustment
+        self.boundaryRefinementEndAdjustment = boundaryRefinementEndAdjustment
+        self.spanFinalizerConstraintsFired = spanFinalizerConstraintsFired
+        self.stingerRefinement = stingerRefinement
+        self.anchorProvenance = anchorProvenance
+        self.evidenceSources = evidenceSources
+    }
 }
 
 /// playhead-l2f.6: dump mirror of `StingerRefinementTrace`. A dedicated
@@ -2638,6 +2708,23 @@ final class PipelineDumpLiveTests: XCTestCase {
         )
     }
 
+    /// playhead-xsdz.60: resolve the `PLAYHEAD_FM_GREEDY` runtime override for
+    /// the dump treatment lane. "1" → greedy (deterministic), "0" → stochastic
+    /// (`samplingMode` nil, byte-identical to pre-xsdz.60); unset or any other
+    /// value → nil, meaning "use the FM `Config` default" (greedy). Env-gated
+    /// and treatment-lane-only so PRODUCTION behavior is exactly the Config
+    /// default. Takes the environment as an argument so it is unit-testable
+    /// hermetically (no `setenv`).
+    static func fmGreedyDecodingOverrideFromEnvironment(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool? {
+        switch environment["PLAYHEAD_FM_GREEDY"] {
+        case "1": return true
+        case "0": return false
+        default: return nil
+        }
+    }
+
     /// playhead-xsdz.36.1: the rediff-ACTIVATION treatment lane. Constructs the
     /// fresh-B-side provider (rooted at the repo corpus) and the rediff-ON config,
     /// then runs the SAME shared lane. Writes to a DISTINCT dump file so the
@@ -2718,18 +2805,39 @@ final class PipelineDumpLiveTests: XCTestCase {
             return
         }
 
+        // playhead-xsdz.60: the FM decoding mode defaults to greedy (Config
+        // default `true`). The orchestrator can flip it per-run WITHOUT a
+        // rebuild via PLAYHEAD_FM_GREEDY ("1" greedy, "0" stochastic) so both
+        // modes' run-to-run reproducibility can be measured from ONE build.
+        // Absent → nil → the Config default (greedy). Treatment lane ONLY —
+        // the baseline/legacy lanes never read this env var and always use the
+        // shipped Config default.
+        let fmGreedyOverride = Self.fmGreedyDecodingOverrideFromEnvironment()
+        let greedyLabel: String = {
+            switch fmGreedyOverride {
+            case .some(true): return " + PLAYHEAD_FM_GREEDY=1 (greedy)"
+            case .some(false): return " + PLAYHEAD_FM_GREEDY=0 (stochastic)"
+            case .none: return "" // Config default (greedy)
+            }
+        }()
+
         let provider = CorpusFreshBSideProvider(repoRoot: repoRoot)
         try await captureDumpLane(
             config: makeRediffTreatmentConfig(),
             rediffBSideProvider: provider,
             outputFilename: "playhead-dogfood-diagnostics-pipeline-dump-rediff-treatment.json",
-            configLabel: "treatment: .default + rediffSlotOwnershipEnabled + fresh-B-side provider",
+            configLabel: "treatment: .default + rediffSlotOwnershipEnabled + fresh-B-side provider\(greedyLabel)",
             bSideCoverage: DumpBSideCoverage(
                 stagedEntryCount: stagedCount,
                 manifestEntryCount: entries.count,
                 unstagedEpisodeIds: unstagedIds.sorted(),
                 irregularEpisodeIds: classification.irregularEpisodeIds.sorted()
-            )
+            ),
+            // playhead-xsdz.36.1.1: treatment lane emits per-window evidence
+            // provenance (anchorProvenance + evidenceSources). The baseline/
+            // legacy lane leaves this false so its dump bytes are unchanged.
+            emitEvidenceProvenance: true,
+            fmGreedyDecodingOverride: fmGreedyOverride
         )
     }
 
@@ -2745,7 +2853,11 @@ final class PipelineDumpLiveTests: XCTestCase {
         rediffBSideProvider: RediffBSideProvider?,
         outputFilename: String,
         configLabel: String,
-        bSideCoverage: DumpBSideCoverage? = nil
+        bSideCoverage: DumpBSideCoverage? = nil,
+        emitEvidenceProvenance: Bool = false,
+        // playhead-xsdz.60: treatment-lane-only FM decoding override. Baseline/
+        // legacy callers omit it → nil → the shipped `Config.default`.
+        fmGreedyDecodingOverride: Bool? = nil
     ) async throws {
         let repoRoot = PipelineDumpManifestLoader.repoRoot()
 
@@ -2774,7 +2886,9 @@ final class PipelineDumpLiveTests: XCTestCase {
                     entry: entry,
                     repoRoot: repoRoot,
                     config: config,
-                    rediffBSideProvider: rediffBSideProvider
+                    rediffBSideProvider: rediffBSideProvider,
+                    emitEvidenceProvenance: emitEvidenceProvenance,
+                    fmGreedyDecodingOverride: fmGreedyDecodingOverride
                 )
                 dumpEpisodes.append(result.episode)
             } catch let error as PipelineDumpRunError {
@@ -2979,7 +3093,9 @@ private extension PipelineDumpLiveTests {
         repoRoot: URL,
         musicBoundaryEdges: [Double] = [],
         config: AdDetectionConfig = .default,
-        rediffBSideProvider: RediffBSideProvider? = nil
+        rediffBSideProvider: RediffBSideProvider? = nil,
+        emitEvidenceProvenance: Bool = false,
+        fmGreedyDecodingOverride: Bool? = nil
     ) async throws -> ProductionEpisodeRunResult {
         let episodeId = entry.episodeId
 
@@ -3147,7 +3263,9 @@ private extension PipelineDumpLiveTests {
             store: store,
             metadataExtractor: FallbackExtractor(),
             config: config,
-            backfillJobRunnerFactory: Self.makeLiveRunnerFactory(),
+            backfillJobRunnerFactory: Self.makeLiveRunnerFactory(
+                fmGreedyDecodingOverride: fmGreedyDecodingOverride
+            ),
             canUseFoundationModelsProvider: { true }, // avoid silent FM demotion
             fragilityDiagnosticObserver: observer,
             // Rediff B-side source. `nil` in the baseline lane → the rediff pass
@@ -3227,6 +3345,15 @@ private extension PipelineDumpLiveTests {
         // default-encoder convention for nil optionals.
         let stingerRefinementByWindowId =
             await service.stingerRefinementTraceByWindowIdForTesting()
+        // playhead-xsdz.36.1.1: per-AdWindow evidence provenance (anchor
+        // provenance kinds + the distinct scoring-ledger source kinds the
+        // FM-consensus quorum counts). Read UNCONDITIONALLY (the service
+        // populates it every run) but EMITTED into the dump only in the
+        // treatment lane (`emitEvidenceProvenance`), so the baseline/legacy
+        // dump bytes are byte-identical — mirrors the `bSideCoverage`
+        // treatment-only convention.
+        let evidenceProvenanceByWindowId =
+            await service.evidenceProvenanceByWindowIdForTesting()
 
         let dumpWindows: [DumpAdWindow] = windows
             .sorted {
@@ -3284,6 +3411,20 @@ private extension PipelineDumpLiveTests {
                 // fields under the shipping flag-ON default.
                 let stingerRefinement = stingerRefinementByWindowId[window.id]
                     .map(DumpStingerRefinement.init)
+                // playhead-xsdz.36.1.1: treatment lane only. `nil` (→ key
+                // omitted) in the baseline/legacy lanes keeps their bytes
+                // unchanged. In the treatment lane emit a CONCRETE array even
+                // when empty (an over-widened window with zero corroborating
+                // sources is the exact case the xsdz.59 diagnosis must see) —
+                // `?? []` because every persisted (emitted) window is stamped
+                // in the service map, and the empty fallback stays diagnostic.
+                let provenance = emitEvidenceProvenance
+                    ? evidenceProvenanceByWindowId[window.id]
+                    : nil
+                let anchorProvenanceKinds: [String]? =
+                    emitEvidenceProvenance ? (provenance?.anchorProvenanceKinds ?? []) : nil
+                let evidenceSourceKinds: [String]? =
+                    emitEvidenceProvenance ? (provenance?.evidenceSourceKinds ?? []) : nil
                 return DumpAdWindow(
                     startTime: window.startTime,
                     endTime: window.endTime,
@@ -3295,7 +3436,9 @@ private extension PipelineDumpLiveTests {
                     boundaryRefinementStartAdjustment: dumpStartAdj,
                     boundaryRefinementEndAdjustment: dumpEndAdj,
                     spanFinalizerConstraintsFired: spanFinalizerConstraints,
-                    stingerRefinement: stingerRefinement
+                    stingerRefinement: stingerRefinement,
+                    anchorProvenance: anchorProvenanceKinds,
+                    evidenceSources: evidenceSourceKinds
                 )
             }
 
@@ -3490,7 +3633,14 @@ private extension PipelineDumpLiveTests {
     /// shipped production narrowing config — same as the sibling
     /// harnesses' production-default arm). The `mode` argument is supplied
     /// by `AdDetectionService` (the effective FM mode, `.full` here).
-    private static func makeLiveRunnerFactory()
+    /// - Parameter fmGreedyDecodingOverride: playhead-xsdz.60 — when non-nil,
+    ///   the live FM classifier is built with `Config.default.withFMGreedyDecoding(_)`
+    ///   so the dump treatment lane can flip the FM decoding mode at runtime
+    ///   (via `PLAYHEAD_FM_GREEDY`) from ONE build. `nil` (the baseline/legacy
+    ///   default) uses the shipped `Config.default` — byte-identical to today.
+    private static func makeLiveRunnerFactory(
+        fmGreedyDecodingOverride: Bool? = nil
+    )
         -> (@Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner)
     {
         { store, mode in
@@ -3507,12 +3657,22 @@ private extension PipelineDumpLiveTests {
             } else {
                 permissiveClassifierBox = nil
             }
+            let fmClassifier: FoundationModelClassifier
+            if let fmGreedyDecodingOverride {
+                fmClassifier = PlayheadRuntime.makeFoundationModelClassifier(
+                    redactor: redactor,
+                    config: FoundationModelClassifier.Config.default
+                        .withFMGreedyDecoding(fmGreedyDecodingOverride)
+                )
+            } else {
+                fmClassifier = PlayheadRuntime.makeFoundationModelClassifier(
+                    redactor: redactor
+                )
+            }
             return BackfillJobRunner(
                 store: store,
                 admissionController: AdmissionController(),
-                classifier: PlayheadRuntime.makeFoundationModelClassifier(
-                    redactor: redactor
-                ),
+                classifier: fmClassifier,
                 coveragePlanner: CoveragePlanner(),
                 mode: mode,
                 capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
@@ -4844,6 +5004,164 @@ struct PipelineDumpEncodingTests {
         #expect((coverage["manifestEntryCount"] as? Int) == 5)
         #expect((coverage["unstagedEpisodeIds"] as? [String]) == ["ep-b", "ep-c", "ep-d"])
         #expect((coverage["irregularEpisodeIds"] as? [String]) == ["ep-d"])
+    }
+
+    // MARK: - playhead-xsdz.36.1.1 evidence-provenance fields
+    //
+    // The next two tests lock the treatment-only `anchorProvenance` +
+    // `evidenceSources` wire shape — nil (baseline/legacy lanes) → key
+    // absent; a concrete array (treatment lane, POSSIBLY EMPTY) → key present
+    // as a JSON string array. The following two pin the two string mappings
+    // the live seam feeds those fields from
+    // (`AdDetectionService.corroboratingEvidenceSourceKinds` and
+    // `AnchorRef.provenanceKind`).
+
+    @Test("DumpAdWindow omits anchorProvenance and evidenceSources when nil (baseline/legacy lanes)")
+    func dumpAdWindowOmitsEvidenceProvenanceWhenNil() throws {
+        // anchorProvenance / evidenceSources default to nil — the baseline and
+        // legacy lanes never pass them, so their dump bytes stay unchanged.
+        let window = DumpAdWindow(
+            startTime: 100.0,
+            endTime: 130.5,
+            skipConfidence: 0.92,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: true,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: nil
+        )
+        let data = try JSONEncoder().encode(window)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(!parsed.keys.contains("anchorProvenance"))
+        #expect(!parsed.keys.contains("evidenceSources"))
+        let json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("anchorProvenance"))
+        #expect(!json.contains("evidenceSources"))
+    }
+
+    @Test("DumpAdWindow encodes anchorProvenance and evidenceSources as JSON string arrays when present (treatment lane), including empty")
+    func dumpAdWindowEncodesEvidenceProvenanceWhenPresent() throws {
+        // Populated case: an FM-consensus span whose ledger corroborated with
+        // fm + lexical + acoustic (evidenceSources arrives already sorted by
+        // the seam); a rediff-widened span carries the rediffSlot marker.
+        let window = DumpAdWindow(
+            startTime: 100.0,
+            endTime: 130.5,
+            skipConfidence: 0.92,
+            decisionState: "confirmed",
+            eligibilityGate: "autoSkip",
+            promotionTrack: nil,
+            wasSkipped: true,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: nil,
+            anchorProvenance: ["fmConsensus", "rediffSlot"],
+            evidenceSources: ["acoustic", "fm", "lexical"]
+        )
+        let data = try JSONEncoder().encode(window)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect((parsed["anchorProvenance"] as? [String]) == ["fmConsensus", "rediffSlot"])
+        #expect((parsed["evidenceSources"] as? [String]) == ["acoustic", "fm", "lexical"])
+        #expect(parsed.keys.contains("anchorProvenance"))
+        #expect(parsed.keys.contains("evidenceSources"))
+
+        // EMPTY-but-present case: an over-widened treatment window with zero
+        // corroborating sources — the exact signal the xsdz.59 diagnosis reads
+        // ("0 non-FM kinds"). An empty array MUST encode as `[]` (present),
+        // NOT collapse to an omitted key like the finalizer/stinger traces do,
+        // so it stays distinct from the ABSENT baseline key.
+        let empty = DumpAdWindow(
+            startTime: 200.0,
+            endTime: 260.0,
+            skipConfidence: 0.10,
+            decisionState: "candidate",
+            eligibilityGate: "blockedByEvidenceQuorum",
+            promotionTrack: nil,
+            wasSkipped: false,
+            boundaryRefinementStartAdjustment: nil,
+            boundaryRefinementEndAdjustment: nil,
+            spanFinalizerConstraintsFired: nil,
+            stingerRefinement: nil,
+            anchorProvenance: [],
+            evidenceSources: []
+        )
+        let emptyData = try JSONEncoder().encode(empty)
+        let emptyParsed = try #require(
+            try JSONSerialization.jsonObject(with: emptyData) as? [String: Any]
+        )
+        #expect((emptyParsed["anchorProvenance"] as? [String]) == [])
+        #expect((emptyParsed["evidenceSources"] as? [String]) == [])
+        #expect(emptyParsed.keys.contains("anchorProvenance"))
+        #expect(emptyParsed.keys.contains("evidenceSources"))
+    }
+
+    @Test("corroboratingEvidenceSourceKinds mirrors quorumGateForFMConsensus's corroboratingSources set")
+    func corroboratingEvidenceSourceKindsMatchesQuorumFormula() throws {
+        // The helper reads ONLY `entry.source` + `entry.weight` (never the
+        // detail), so the details below are simple placeholders.
+        let ledger: [EvidenceLedgerEntry] = [
+            // Always-present zero-weight `.classifier` sentinel — EXCLUDED by
+            // the quorum, so it must NOT appear in the set.
+            EvidenceLedgerEntry(source: .classifier, weight: 0.0, detail: .classifier(score: 0.0)),
+            // A non-zero `.classifier` DOES count.
+            EvidenceLedgerEntry(source: .classifier, weight: 0.3, detail: .classifier(score: 0.8)),
+            EvidenceLedgerEntry(source: .fm, weight: 0.5, detail: .classifier(score: 0.9)),
+            EvidenceLedgerEntry(source: .lexical, weight: 0.2, detail: .lexical(matchedCategories: ["sponsor"])),
+            // Duplicate `.lexical` — the DISTINCT set dedups it.
+            EvidenceLedgerEntry(source: .lexical, weight: 0.1, detail: .lexical(matchedCategories: ["cta"])),
+            EvidenceLedgerEntry(source: .acoustic, weight: 0.2, detail: .acoustic(breakStrength: 0.6)),
+            // Observability-only source — filtered out BEFORE the quorum
+            // (matches DecisionMapper's `scoringLedger`), despite a fat weight.
+            EvidenceLedgerEntry(source: .audit, weight: 0.9, detail: .classifier(score: 0.0)),
+        ]
+        #expect(
+            AdDetectionService.corroboratingEvidenceSourceKinds(ledger)
+                == ["acoustic", "classifier", "fm", "lexical"]
+        )
+        // A ledger whose ONLY entry is the zero-weight classifier sentinel has
+        // zero corroborating kinds — the sole-FM-signal case the quorum blocks
+        // and the xsdz.59 diagnosis reads as "0 non-FM kinds".
+        #expect(
+            AdDetectionService.corroboratingEvidenceSourceKinds([
+                EvidenceLedgerEntry(source: .classifier, weight: 0.0, detail: .classifier(score: 0.0)),
+            ]) == []
+        )
+        #expect(AdDetectionService.corroboratingEvidenceSourceKinds([]) == [])
+    }
+
+    @Test("AnchorRef.provenanceKind matches the Codable type discriminator for every case")
+    func anchorRefProvenanceKindMatchesCodableDiscriminator() throws {
+        let cases: [(AnchorRef, String)] = [
+            (.fmConsensus(regionId: "r", consensusStrength: 0.8), "fmConsensus"),
+            (.evidenceCatalog(entry: EvidenceEntry(
+                evidenceRef: 0, category: .url, matchedText: "x",
+                normalizedText: "x", atomOrdinal: 0, startTime: 0, endTime: 1
+            )), "evidenceCatalog"),
+            (.fmAcousticCorroborated(regionId: "r", breakStrength: 0.5), "fmAcousticCorroborated"),
+            (.userCorrection(correctionId: "c", reportedTime: 12.0), "userCorrection"),
+            (.classifierSeed(regionId: "r", score: 0.7), "classifierSeed"),
+            (.spliceSlot, "spliceSlot"),
+            (.rediffSlot, "rediffSlot"),
+        ]
+        for (ref, expected) in cases {
+            // The label the dump surfaces...
+            #expect(ref.provenanceKind == expected)
+            // ...must equal the Codable `type` the persisted span encodes, so
+            // a discriminator rename can never silently desync the dump.
+            let data = try JSONEncoder().encode(ref)
+            let obj = try #require(
+                try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            )
+            #expect((obj["type"] as? String) == ref.provenanceKind)
+        }
     }
 }
 

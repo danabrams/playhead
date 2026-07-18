@@ -121,6 +121,28 @@ extension AnchorRef: Codable {
     }
 }
 
+extension AnchorRef {
+    /// playhead-xsdz.36.1.1 (observability-only): the stable discriminator
+    /// string for this provenance case — IDENTICAL to the `type` value the
+    /// `Codable` conformance above encodes. Surfaced by the pipeline-dump test
+    /// seam (`AdDetectionService.evidenceProvenanceByWindowIdForTesting()`) so a
+    /// span's anchor-provenance KINDS can be recorded without exposing the
+    /// associated values. Behaviour-neutral: no production decision path reads
+    /// it. MUST stay in sync with the `Codable` `type` strings above — the
+    /// `anchorRefProvenanceKindMatchesCodableDiscriminator` test pins that.
+    var provenanceKind: String {
+        switch self {
+        case .fmConsensus: return "fmConsensus"
+        case .evidenceCatalog: return "evidenceCatalog"
+        case .fmAcousticCorroborated: return "fmAcousticCorroborated"
+        case .userCorrection: return "userCorrection"
+        case .classifierSeed: return "classifierSeed"
+        case .spliceSlot: return "spliceSlot"
+        case .rediffSlot: return "rediffSlot"
+        }
+    }
+}
+
 /// Per-element tolerant wrapper around `AnchorRef` used when decoding arrays
 /// from persistence: if an older binary reads a newer-written span that carries
 /// an unknown `type` string, that element becomes `nil` instead of throwing
