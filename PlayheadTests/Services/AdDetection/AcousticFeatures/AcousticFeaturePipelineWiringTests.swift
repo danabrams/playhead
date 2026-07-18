@@ -61,7 +61,7 @@ struct AcousticFeaturePipelineWiringTests {
                 pauseProbability: 0.05,
                 speakerClusterId: 0,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         // Silence bumper.
@@ -79,7 +79,7 @@ struct AcousticFeaturePipelineWiringTests {
             pauseProbability: 0.9,
             speakerClusterId: 0,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         ))
         // 10 ad-block windows (loud, music bed, different speaker).
         let adStart = out.count
@@ -99,7 +99,7 @@ struct AcousticFeaturePipelineWiringTests {
                 pauseProbability: 0.02,
                 speakerClusterId: 9,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         // Closing silence.
@@ -119,7 +119,7 @@ struct AcousticFeaturePipelineWiringTests {
             pauseProbability: 0.9,
             speakerClusterId: 0,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         ))
         // Tail host.
         let tailStart = out.count
@@ -139,7 +139,7 @@ struct AcousticFeaturePipelineWiringTests {
                 pauseProbability: 0.05,
                 speakerClusterId: 0,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         return out
@@ -166,7 +166,7 @@ struct AcousticFeaturePipelineWiringTests {
                 pauseProbability: 0.0,
                 speakerClusterId: nil,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
             t += step
         }

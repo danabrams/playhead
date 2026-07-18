@@ -434,7 +434,7 @@ struct AdCatalogStoreMatchTelemetryTests {
                 pauseProbability: 0.05,
                 speakerClusterId: 0,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         out.append(FeatureWindow(
@@ -451,7 +451,7 @@ struct AdCatalogStoreMatchTelemetryTests {
             pauseProbability: 0.9,
             speakerClusterId: 0,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         ))
         let adStart = out.count
         for i in adStart..<(adStart + 10) {
@@ -470,7 +470,7 @@ struct AdCatalogStoreMatchTelemetryTests {
                 pauseProbability: 0.05,
                 speakerClusterId: 1,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         out.append(FeatureWindow(
@@ -487,7 +487,7 @@ struct AdCatalogStoreMatchTelemetryTests {
             pauseProbability: 0.9,
             speakerClusterId: 0,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         ))
         for i in 0..<30 {
             let t = 84 + Double(i) * 2
@@ -505,7 +505,7 @@ struct AdCatalogStoreMatchTelemetryTests {
                 pauseProbability: 0.05,
                 speakerClusterId: 0,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         return out

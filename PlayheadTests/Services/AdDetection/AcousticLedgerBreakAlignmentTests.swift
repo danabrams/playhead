@@ -31,7 +31,7 @@ struct AcousticLedgerBreakAlignmentTests {
             pauseProbability: 0,
             speakerClusterId: nil,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         )
     }
 

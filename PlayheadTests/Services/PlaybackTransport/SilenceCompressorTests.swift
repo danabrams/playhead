@@ -54,7 +54,7 @@ struct SilenceCompressorDecisionTests {
             pauseProbability: pauseProbability,
             speakerClusterId: speakerClusterId,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         )
     }
 
@@ -283,7 +283,7 @@ struct SilenceCompressorStateMachineTests {
                 pauseProbability: 0.0,
                 speakerClusterId: nil,
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             )
         }
     }

@@ -285,7 +285,7 @@ struct TimeBoundaryResolverTests {
             pauseProbability: pause,
             speakerClusterId: nil,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         )
     }
 

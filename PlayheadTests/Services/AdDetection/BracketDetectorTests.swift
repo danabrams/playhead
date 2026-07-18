@@ -34,7 +34,7 @@ private func syntheticWindow(
         pauseProbability: pauseProbability,
         speakerClusterId: nil,
         jingleHash: nil,
-        featureVersion: 4
+        featureVersion: 5
     )
 }
 

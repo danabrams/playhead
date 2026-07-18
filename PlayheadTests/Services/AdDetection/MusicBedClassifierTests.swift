@@ -413,7 +413,7 @@ struct FeatureWindowMusicBedFieldsTests {
             pauseProbability: 0.1,
             speakerClusterId: nil,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         )
         #expect(window.musicBedOnsetScore == 0)
         #expect(window.musicBedOffsetScore == 0)
@@ -438,7 +438,7 @@ struct FeatureWindowMusicBedFieldsTests {
             pauseProbability: 0.1,
             speakerClusterId: nil,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         )
         #expect(window.musicBedOnsetScore == 0.6)
         #expect(window.musicBedOffsetScore == 0.0)
@@ -577,7 +577,7 @@ struct TimeBoundaryResolverDirectionalMusicTests {
             pauseProbability: pause,
             speakerClusterId: nil,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         )
     }
 }

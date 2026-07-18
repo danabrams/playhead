@@ -85,11 +85,11 @@ struct PrecisionGateCatalogMatchWiringTests {
                 speakerClusterId: cluster,
                 jingleHash: nil,
                 // Default `FeatureExtractionConfig.default.featureVersion` is
-                // 4; lower versions cause `fetchFeatureWindows` to silently
+                // 5; lower versions cause `fetchFeatureWindows` to silently
                 // return [] (its `minimumFeatureVersion` filter), which
                 // makes downstream fingerprints zero — see B7 history in
                 // AcousticFeaturePipeline tests.
-                featureVersion: 4
+                featureVersion: 5
             ))
             t = end
         }
@@ -294,7 +294,7 @@ struct PrecisionGateCatalogMatchWiringTests {
                 pauseProbability: 0.5,
                 speakerClusterId: 0,       // distinct from cluster=1
                 jingleHash: nil,
-                featureVersion: 4
+                featureVersion: 5
             ))
         }
         try await store.insertFeatureWindows(noiseWindows)

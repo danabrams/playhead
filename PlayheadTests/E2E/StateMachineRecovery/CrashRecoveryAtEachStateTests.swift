@@ -166,7 +166,7 @@ struct CrashRecoveryAtEachStateTests {
             pauseProbability: 0.1,
             speakerClusterId: nil,
             jingleHash: nil,
-            featureVersion: 4
+            featureVersion: 5
         )
     }
 
