@@ -189,6 +189,25 @@ struct FusionWeightConfig: Sendable {
     /// `.crossEpisodeMemory` / `.rhetoricalGrammar` per-source carve-outs.
     let crossShowSyndicationCap: Double
 
+    /// playhead-wraj: Certainty-tiered auto-skip gate master switch. DEFAULT
+    /// `false` — production behavior is byte-identical to today until a caller
+    /// opts in. When `true`, `DecisionMapper.map()` applies a single additive,
+    /// post-gate downgrade: an `.eligible` span whose WIDTH is NOT owned by the
+    /// rediff oracle (no `.rediffSlot` in `anchorProvenance`) and whose
+    /// `skipConfidence` sits below `hostReadConfidenceFloor` is demoted to
+    /// `.markOnly` (banner, not auto-skip). High-certainty rediff-anchored DAI
+    /// spans bypass the floor and stay `.eligible`; host-read (non-rediff) spans
+    /// must clear the floor to auto-skip. The downgrade NEVER promotes (only an
+    /// already-`.eligible` gate is touched) and NEVER modifies any score.
+    let certaintyTieredEnabled: Bool
+
+    /// playhead-wraj: Minimum `skipConfidence` a NON-rediff (host-read) span
+    /// must reach to remain auto-skip-`.eligible` when `certaintyTieredEnabled`
+    /// is on. DEFAULT `0.9` — the auto-skip threshold the pipeline's per-window
+    /// `skipConfidence` was calibrated against. Inert unless
+    /// `certaintyTieredEnabled == true`. Rediff-anchored spans are exempt.
+    let hostReadConfidenceFloor: Double
+
     init(
         fmCap: Double = 0.4,
         classifierCap: Double = 0.3,
@@ -203,7 +222,9 @@ struct FusionWeightConfig: Sendable {
         audioForensicsCap: Double = 0.2,
         crossEpisodeMemoryCap: Double = 0.2,
         rhetoricalGrammarCap: Double = 0.2,
-        crossShowSyndicationCap: Double = 0.2
+        crossShowSyndicationCap: Double = 0.2,
+        certaintyTieredEnabled: Bool = false,
+        hostReadConfidenceFloor: Double = 0.9
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
@@ -219,6 +240,8 @@ struct FusionWeightConfig: Sendable {
         self.crossEpisodeMemoryCap = crossEpisodeMemoryCap
         self.rhetoricalGrammarCap = rhetoricalGrammarCap
         self.crossShowSyndicationCap = crossShowSyndicationCap
+        self.certaintyTieredEnabled = certaintyTieredEnabled
+        self.hostReadConfidenceFloor = hostReadConfidenceFloor
 
         // playhead-2hpn R4 (+R5): enforce the musicBedCap >=
         // musicBedConfirmedJingleWeight invariant at construction time, not
@@ -807,13 +830,33 @@ struct DecisionMapper: Sendable {
         // skipMinimum/proposalMinimum, gate the score before correction factor.
         let rawSkipConfidence = calibrate(proposalConfidence)
         let effectiveConfidence = min(1.0, rawSkipConfidence * max(0.0, correctionFactor))
-        let gate: SkipEligibilityGate
+        var gate: SkipEligibilityGate
         if correctionFactor < 1.0 && effectiveConfidence < 0.40 {
             gate = .blockedByUserCorrection
         } else {
             gate = computeGate()
         }
         let skipConfidence = effectiveConfidence
+
+        // playhead-wraj: Certainty-tiered auto-skip downgrade. A SINGLE additive,
+        // flag-gated, post-gate demotion — it never re-runs or mutates
+        // `computeGate()`'s internals, never promotes (only an already-`.eligible`
+        // gate is inspected, so `.markOnly` / `.blockedBy*` decisions are
+        // untouched), and never modifies `proposalConfidence` / `skipConfidence`
+        // (the score-does-not-follow-the-gate invariant above at :666/:822).
+        //
+        // Policy: auto-SKIP high-certainty DAI whose WIDTH is owned by the rediff
+        // oracle (`.rediffSlot` in `anchorProvenance`) regardless of score; for
+        // host-read (non-rediff) spans, only stay auto-skip-`.eligible` when
+        // `skipConfidence` clears `hostReadConfidenceFloor`, else demote to
+        // `.markOnly` (banner). `skipConfidence` here IS `effectiveConfidence` —
+        // the exact field the floor (default 0.9) was calibrated against.
+        if config.certaintyTieredEnabled,
+           gate == .eligible,
+           !span.anchorProvenance.contains(where: { if case .rediffSlot = $0 { return true } else { return false } }),
+           skipConfidence < config.hostReadConfidenceFloor {
+            gate = .markOnly
+        }
 
         // playhead-fqc8: Promotion-track selection. Computed AFTER the
         // gate so the score-mapping pipeline above is unchanged. The
