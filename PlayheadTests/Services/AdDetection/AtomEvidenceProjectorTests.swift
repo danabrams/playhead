@@ -198,6 +198,66 @@ struct AtomEvidenceProjectorTests {
         )
     }
 
+    /// A `.sustainedMusic`-origin bundle with NO FM / lexical / other anchor —
+    /// exactly the anchor-chokepoint case the projector Path 5 must resolve.
+    private func makeSustainedMusicBundle(
+        assetId: String = "test-asset",
+        firstOrdinal: Int,
+        lastOrdinal: Int,
+        startTime: Double,
+        endTime: Double,
+        confidence: Double = 0.85
+    ) -> RegionFeatureBundle {
+        let region = ProposedRegion(
+            analysisAssetId: assetId,
+            transcriptVersion: "tv1",
+            firstAtomOrdinal: firstOrdinal,
+            lastAtomOrdinal: lastOrdinal,
+            startTime: startTime,
+            endTime: endTime,
+            origins: .sustainedMusic,
+            fmConsensusStrength: .none,
+            lexicalCandidates: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            acousticBreaks: [],
+            foundationModelSpans: [],
+            proposedMusicSpans: [
+                ProposedSpan(startTime: startTime, endTime: endTime, confidence: confidence)
+            ],
+            resolvedEvidenceAnchors: [],
+            fmEvidence: nil
+        )
+        return RegionFeatureBundle(
+            region: region,
+            lexicalScore: 0,
+            lexicalHitCount: 0,
+            lexicalCategories: [],
+            lexicalEvidenceText: nil,
+            rmsDropScore: 0,
+            spectralChangeScore: 0,
+            musicScore: 0.9,
+            speakerChangeScore: 0,
+            priorScore: 0,
+            transcriptQuality: RegionTranscriptQuality(
+                quality: .good,
+                qualityScore: 1.0,
+                source: .heuristic
+            ),
+            fmEvidence: RegionFeatureFMEvidence(
+                commercialIntent: .organic,
+                ownership: .unknown,
+                consensusStrength: .none,
+                certainty: .weak,
+                boundaryPrecision: .usable,
+                memoryWriteEligible: false,
+                alternativeExplanation: .none,
+                reasonTags: [],
+                resolvedEvidenceAnchors: []
+            )
+        )
+    }
+
     private func makeEvidenceEntry(
         ref: Int,
         category: EvidenceCategory,
@@ -592,5 +652,75 @@ struct AtomEvidenceProjectorTests {
 
         // Without acoustic corroboration, single-window FM alone doesn't anchor.
         #expect(!evidence[2].isAnchored)
+    }
+
+    // MARK: - Path 5: sustained-music independent anchoring (t1py / xtpf)
+
+    @Test("a sustainedMusic region with NO FM anchors its atoms independently via .sustainedMusicOffset (anchor-chokepoint regression)")
+    func sustainedMusicRegionAnchorsAtomsWithoutFM() async {
+        let atoms = makeAtoms(count: 8)
+        // A music region covering atoms 3..6, no FM/lexical/other evidence.
+        let bundle = makeSustainedMusicBundle(
+            firstOrdinal: 3, lastOrdinal: 6,
+            startTime: 3, endTime: 7,
+            confidence: 0.88
+        )
+        let projector = AtomEvidenceProjector()
+        let evidence = await projector.project(
+            regions: [bundle],
+            catalog: EvidenceCatalog(analysisAssetId: "test-asset", transcriptVersion: "tv1", entries: []),
+            atoms: atoms,
+            correctionMaskProvider: NoCorrectionMaskProvider()
+        )
+
+        // The whole music-covered range anchors INDEPENDENTLY of FM.
+        #expect(!evidence[2].isAnchored, "ordinal 2 is outside the music region")
+        for ordinal in 3...6 {
+            #expect(evidence[ordinal].isAnchored, "ordinal \(ordinal) must anchor on music alone")
+            let hasMusic = evidence[ordinal].anchorProvenance.contains {
+                if case .sustainedMusicOffset = $0 { return true }
+                return false
+            }
+            #expect(hasMusic, "ordinal \(ordinal) provenance must carry .sustainedMusicOffset")
+        }
+        #expect(!evidence[7].isAnchored, "ordinal 7 is outside the music region")
+
+        // The confidence carried onto the anchor is the region's peak run
+        // confidence.
+        if case .sustainedMusicOffset(_, let confidence)? = evidence[3].anchorProvenance.first(where: {
+            if case .sustainedMusicOffset = $0 { return true }
+            return false
+        }) {
+            #expect(confidence == 0.88)
+        } else {
+            Issue.record("Expected a .sustainedMusicOffset anchor on ordinal 3")
+        }
+    }
+
+    @Test("a userVetoed atom inside a sustainedMusic region does NOT anchor")
+    func sustainedMusicRespectsUserVeto() async {
+        let atoms = makeAtoms(count: 6)
+        let bundle = makeSustainedMusicBundle(
+            firstOrdinal: 1, lastOrdinal: 4,
+            startTime: 1, endTime: 5
+        )
+        // Veto ordinal 2 inside the region.
+        let provider = StoreBackedCorrectionMaskProvider(
+            vetoedOrdinalRanges: [2...2],
+            vetoedTimeRanges: [],
+            atomsByOrdinal: atoms.map {
+                (ordinal: $0.atomKey.atomOrdinal, start: $0.startTime, end: $0.endTime)
+            }
+        )
+        let projector = AtomEvidenceProjector()
+        let evidence = await projector.project(
+            regions: [bundle],
+            catalog: EvidenceCatalog(analysisAssetId: "test-asset", transcriptVersion: "tv1", entries: []),
+            atoms: atoms,
+            correctionMaskProvider: provider
+        )
+        #expect(evidence[1].isAnchored)
+        #expect(!evidence[2].isAnchored, "user-vetoed atom must not anchor even under a music region")
+        #expect(evidence[3].isAnchored)
     }
 }

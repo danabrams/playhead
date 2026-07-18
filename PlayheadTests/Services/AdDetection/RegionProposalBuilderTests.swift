@@ -742,6 +742,126 @@ struct RegionProposalBuilderTests {
         #expect(standalone?.acousticBreaks.count == 1)
         #expect(standalone?.acousticBreaks.first?.time == 10.5)
     }
+
+    // MARK: - Sustained-music proposer seam (playhead-t1py / playhead-xtpf)
+
+    @Test("a sustainedMusic proposal overlapping an FM proposal merges into one region carrying BOTH origin bits at full ad-width")
+    func sustainedMusicMergesWithOverlappingFM() {
+        // makeAtoms: atom N spans [N, N+1). An FM span at atoms 2..4 and a music
+        // span at [2.0, 5.0) (→ atoms 2..4) overlap, so the merge loop folds
+        // them into a single region carrying both `.foundationModel` and
+        // `.sustainedMusic`.
+        let atoms = makeAtoms(count: 12)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [],
+            acousticBreaks: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: [
+                makeFMWindow(
+                    windowIndex: 0,
+                    sourceWindowIndex: 0,
+                    lineRefs: [2, 3, 4],
+                    spans: [
+                        makeRefinedSpan(
+                            firstAtomOrdinal: 2,
+                            lastAtomOrdinal: 4,
+                            anchors: [makeResolvedAnchor(lineRef: 3, evidenceRef: 301)]
+                        )
+                    ]
+                )
+            ],
+            proposedMusicSpans: [
+                ProposedSpan(startTime: 2.0, endTime: 5.0, confidence: 0.9)
+            ]
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.count == 1, "overlapping FM + music proposals must merge into one region")
+        let region = regions[0]
+        #expect(region.origins.contains(.foundationModel))
+        #expect(region.origins.contains(.sustainedMusic))
+        #expect(region.firstAtomOrdinal == 2)
+        #expect(region.lastAtomOrdinal == 4)
+        // The music provenance must survive the overlap-merge (field-drop guard).
+        #expect(region.proposedMusicSpans.count == 1)
+        #expect(region.proposedMusicSpans.first?.confidence == 0.9)
+    }
+
+    @Test("a disjoint sustainedMusic proposal survives standalone at full ad-width (NOT 1-atom-wide like an acoustic break)")
+    func sustainedMusicSurvivesDisjointAtFullWidth() {
+        // A music span at [7.0, 11.0) → atoms 7..10, with no FM/lexical/etc.
+        // anywhere. Unlike `makeAcousticProposals` (which anchors a break to a
+        // SINGLE atom and needs a neighbor to gain width), this must PROPOSE a
+        // first-class, atom-range-WIDE candidate on its own.
+        let atoms = makeAtoms(count: 12)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [],
+            acousticBreaks: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: [],
+            proposedMusicSpans: [
+                ProposedSpan(startTime: 7.0, endTime: 11.0, confidence: 0.82)
+            ]
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+
+        #expect(regions.count == 1)
+        let region = regions[0]
+        #expect(region.origins == [.sustainedMusic], "no other origin should be present")
+        #expect(region.firstAtomOrdinal == 7)
+        #expect(region.lastAtomOrdinal == 10)
+        // Width proof: 4 atoms wide, not a degenerate 1-atom anchor.
+        #expect(region.lastAtomOrdinal - region.firstAtomOrdinal == 3)
+        #expect(region.proposedMusicSpans.count == 1)
+    }
+
+    @Test("a music span with NO overlapping transcript atoms is dropped (atom-based-architecture limitation, pinned explicitly)")
+    func sustainedMusicWithNoOverlappingAtomsIsDropped() {
+        // makeAtoms(count:) spans [0, count). A music run entirely PAST the
+        // transcript (a purely instrumental outro with no ASR atoms) has no
+        // overlapping atoms, so canonicalRange returns nil and the proposal is
+        // dropped — no span can exist without transcript coverage. This pins the
+        // documented limitation so a green integration test (whose synthetic
+        // transcript covers the run) cannot hide it.
+        let atoms = makeAtoms(count: 6)  // atoms cover [0, 6)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [],
+            acousticBreaks: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: [],
+            proposedMusicSpans: [
+                ProposedSpan(startTime: 100.0, endTime: 114.0, confidence: 0.9)
+            ]
+        )
+        let regions = RegionProposalBuilder.build(input)
+        #expect(regions.isEmpty, "a music run with no overlapping atoms yields no candidate (safe degrade)")
+    }
+
+    @Test("no proposedMusicSpans ⇒ no sustainedMusic origin appears (flag-off no-op at the builder)")
+    func noMusicSpansProducesNoMusicOrigin() {
+        let atoms = makeAtoms(count: 8)
+        let input = RegionProposalInput(
+            atoms: atoms,
+            lexicalCandidates: [makeLexicalCandidate(startTime: 1.1, endTime: 3.9)],
+            acousticBreaks: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            fmWindows: []
+            // proposedMusicSpans omitted → defaults to [].
+        )
+
+        let regions = RegionProposalBuilder.build(input)
+        #expect(regions.allSatisfy { !$0.origins.contains(.sustainedMusic) })
+        #expect(regions.allSatisfy { $0.proposedMusicSpans.isEmpty })
+    }
 }
 
 private func makeAtoms(count: Int) -> [TranscriptAtom] {

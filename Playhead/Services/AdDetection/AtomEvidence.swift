@@ -33,6 +33,22 @@ enum AnchorRef: Sendable {
     /// fusion `metadataCorroborationGate` treats this as an in-audio signal
     /// (ledger surfaces a `.classifier` entry separately with the score).
     case classifierSeed(regionId: String, score: Double)
+    /// Sustained-music-offset PRESENCE anchor (playhead-t1py / playhead-xtpf):
+    /// a first-class `SustainedMusicOffsetProposer` region — a long
+    /// (>= `minRunSeconds`) high-`musicProbability` run whose trailing edge is
+    /// a candidate music→speech ad boundary — covered this atom. Unlike the
+    /// 1-atom-wide `.acoustic` break hint, the sustained-music proposal is
+    /// atom-range WIDE, so it can independently anchor the atoms of an ad the
+    /// FM grid missed (the projector Path 5 chokepoint fix).
+    ///
+    /// It is PRESENCE evidence, NOT a width oracle: `isWidthOwnership` is
+    /// `false`. It is a TARGETING signal ("an ad likely begins right after this
+    /// music"), never a standalone verdict — `DecisionMapper` demotes any
+    /// span whose ONLY presence anchor is `.sustainedMusicOffset` to
+    /// `.markOnly` (banner), NEVER auto-skip. Carries `confidence` = the run
+    /// strength (mean `musicProbability` over the run) purely for the overlay
+    /// popover; no decision path reads the magnitude.
+    case sustainedMusicOffset(regionId: String, confidence: Double)
     /// Splice-slot ownership marker (playhead-xsdz.22): the acoustic splice
     /// channel owns this span's WIDTH. This case is BARE by design — unlike
     /// every sibling it carries NO associated values. Presence in
@@ -79,7 +95,7 @@ extension AnchorRef {
         case .spliceSlot, .rediffSlot:
             return true
         case .fmConsensus, .evidenceCatalog, .fmAcousticCorroborated,
-             .userCorrection, .classifierSeed:
+             .userCorrection, .classifierSeed, .sustainedMusicOffset:
             return false
         }
     }
@@ -98,6 +114,14 @@ extension AnchorRef: Equatable {
             return lid == rid && lt == rt
         case (.classifierSeed(let lid, let ls), .classifierSeed(let rid, let rs)):
             return lid == rid && ls == rs
+        case (.sustainedMusicOffset(let lid, let lc), .sustainedMusicOffset(let rid, let rc)):
+            // Associated-value case: this arm is REQUIRED. The `default: return
+            // false` below does NOT flag a missing case at compile time, so
+            // omitting it would silently make
+            // `.sustainedMusicOffset != .sustainedMusicOffset`, breaking
+            // DecodedSpan equality and
+            // `anchorProvenance.contains(.sustainedMusicOffset(...))`.
+            return lid == rid && lc == rc
         case (.spliceSlot, .spliceSlot):
             // Bare case: identity is the whole marker. This arm is REQUIRED —
             // the `default: return false` below does NOT flag a missing case

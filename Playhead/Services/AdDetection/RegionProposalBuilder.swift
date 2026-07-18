@@ -16,6 +16,31 @@ struct ProposedRegionOrigins: OptionSet, Sendable {
     /// such windows never reached `BackfillEvidenceFusion` — see
     /// `makeClassifierProposals` for the seeding contract.
     static let classifier = ProposedRegionOrigins(rawValue: 1 << 5)
+    /// A sustained-music-offset proposer firing seeded this region
+    /// (playhead-t1py / playhead-xtpf). Unlike `.acoustic` — a 1-atom-wide
+    /// break hint that only gains ad-width by MERGING into an adjacent
+    /// FM/lexical proposal — a `.sustainedMusic` region is atom-range WIDE at
+    /// birth (built via `canonicalRange`), so it PROPOSES a first-class
+    /// ad-width candidate even when FM/lexical missed the region entirely.
+    static let sustainedMusic = ProposedRegionOrigins(rawValue: 1 << 6)
+}
+
+/// A candidate music→speech span proposed by `SustainedMusicOffsetProposer`
+/// (playhead-t1py). `[startTime, endTime)` is the sustained-music run whose
+/// trailing edge is a candidate post-roll / mid-roll ad boundary; `confidence`
+/// is the run strength (mean `musicProbability` over the run). Consumed by
+/// `RegionProposalBuilder.makeSustainedMusicProposals` to seed atom-range-WIDE
+/// `.sustainedMusic`-origin regions.
+struct ProposedSpan: Sendable {
+    let startTime: Double
+    let endTime: Double
+    let confidence: Double
+
+    init(startTime: Double, endTime: Double, confidence: Double) {
+        self.startTime = startTime
+        self.endTime = endTime
+        self.confidence = confidence
+    }
 }
 
 enum FMConsensusStrength: Double, Sendable, Comparable {
@@ -63,6 +88,12 @@ struct ProposedRegion: Sendable {
     /// downstream consumers (`AtomEvidenceProjector`, evidence-ledger
     /// construction) can read classifier provenance off the region.
     let classifierResults: [ClassifierResult]
+    /// Sustained-music-offset spans that seeded or merged into this region
+    /// (playhead-t1py). Mirrors the other source-provenance fields: when a
+    /// `.sustainedMusic`-origin proposal seeded the region, its `ProposedSpan`s
+    /// are preserved here so `AtomEvidenceProjector` (Path 5) can read the run
+    /// confidence off the region and emit `.sustainedMusicOffset` anchors.
+    let proposedMusicSpans: [ProposedSpan]
     let resolvedEvidenceAnchors: [ResolvedEvidenceAnchor]
     let fmEvidence: ProposedRegionFMEvidence?
 
@@ -81,6 +112,7 @@ struct ProposedRegion: Sendable {
         acousticBreaks: [AcousticBreak],
         foundationModelSpans: [RefinedAdSpan],
         classifierResults: [ClassifierResult] = [],
+        proposedMusicSpans: [ProposedSpan] = [],
         resolvedEvidenceAnchors: [ResolvedEvidenceAnchor],
         fmEvidence: ProposedRegionFMEvidence?
     ) {
@@ -98,6 +130,7 @@ struct ProposedRegion: Sendable {
         self.acousticBreaks = acousticBreaks
         self.foundationModelSpans = foundationModelSpans
         self.classifierResults = classifierResults
+        self.proposedMusicSpans = proposedMusicSpans
         self.resolvedEvidenceAnchors = resolvedEvidenceAnchors
         self.fmEvidence = fmEvidence
     }
@@ -131,6 +164,13 @@ struct RegionProposalInput: Sendable {
     /// produce a region; sub-threshold results are dropped silently.
     /// Defaults to `[]` so existing callers compile unchanged.
     let classifierResults: [ClassifierResult]
+    /// Sustained-music-offset candidate spans emitted by
+    /// `SustainedMusicOffsetProposer` (playhead-t1py). Each seeds an
+    /// atom-range-WIDE `.sustainedMusic`-origin proposal via
+    /// `makeSustainedMusicProposals`. Defaults to `[]` so existing callers
+    /// compile unchanged AND so the flag-OFF path (proposer not called) is a
+    /// byte-identical no-op — no music spans, no music proposals.
+    let proposedMusicSpans: [ProposedSpan]
 
     init(
         atoms: [TranscriptAtom],
@@ -139,7 +179,8 @@ struct RegionProposalInput: Sendable {
         sponsorMatches: [SponsorMatch],
         fingerprintMatches: [FingerprintMatch],
         fmWindows: [FMRefinementWindowOutput],
-        classifierResults: [ClassifierResult] = []
+        classifierResults: [ClassifierResult] = [],
+        proposedMusicSpans: [ProposedSpan] = []
     ) {
         self.atoms = atoms
         self.lexicalCandidates = lexicalCandidates
@@ -148,6 +189,7 @@ struct RegionProposalInput: Sendable {
         self.fingerprintMatches = fingerprintMatches
         self.fmWindows = fmWindows
         self.classifierResults = classifierResults
+        self.proposedMusicSpans = proposedMusicSpans
     }
 }
 
@@ -206,6 +248,10 @@ enum RegionProposalBuilder {
             atoms: sortedAtoms,
             config: config
         ))
+        proposals.append(contentsOf: makeSustainedMusicProposals(
+            input.proposedMusicSpans,
+            atoms: sortedAtoms
+        ))
         proposals.sort { lhs, rhs in
             if lhs.range.firstAtomOrdinal == rhs.range.firstAtomOrdinal {
                 return lhs.range.lastAtomOrdinal < rhs.range.lastAtomOrdinal
@@ -254,6 +300,7 @@ enum RegionProposalBuilder {
                 acousticBreaks: mergedBreaks,
                 foundationModelSpans: proposal.foundationModelSpans,
                 classifierResults: proposal.classifierResults,
+                proposedMusicSpans: proposal.proposedMusicSpans,
                 resolvedEvidenceAnchors: proposal.resolvedEvidenceAnchors,
                 fmEvidence: aggregateFMEvidence(from: proposal)
             )
@@ -402,6 +449,49 @@ enum RegionProposalBuilder {
         }
     }
 
+    /// Promote each `ProposedSpan` (a sustained-music run from
+    /// `SustainedMusicOffsetProposer`, playhead-t1py) to an atom-range-WIDE
+    /// `.sustainedMusic`-origin proposal covering `[startTime, endTime)`.
+    ///
+    /// This is the WIDTH half of the propose-not-refine seam (playhead-xtpf).
+    /// Unlike `makeAcousticProposals` — which anchors a break to a SINGLE atom
+    /// and only gains ad-width by merging into an adjacent FM/lexical proposal
+    /// (so an FM-missed ad yields no ad-width candidate) — this maps the whole
+    /// music run to its atom span via the existing `canonicalRange`, so the
+    /// proposal is a first-class ad-width candidate on its own. Spans with no
+    /// overlapping atoms (e.g. beyond the transcript) are dropped silently,
+    /// matching the `makeLexicalProposals` / `makeClassifierProposals` contract.
+    ///
+    /// KNOWN LIMITATION (atom-based architecture): a run over a window carrying
+    /// NO transcript atoms — a purely instrumental play-out with no
+    /// speech-over-music and no ASR output — yields an empty `canonicalRange`
+    /// and is dropped. Every downstream span is an atom-ordinal range, so a
+    /// proposal MUST have transcript coverage to exist at all. In practice real
+    /// post-roll play-outs carry outro chatter / music-under-speech atoms — the
+    /// offline t1py study recovered ~9–11 of 21 post-roll misses on real
+    /// transcripts through exactly this path — and the atom-less case degrades
+    /// SAFELY to "no candidate, no banner". Pinned by
+    /// `RegionProposalBuilderTests.sustainedMusicWithNoOverlappingAtomsIsDropped`.
+    private static func makeSustainedMusicProposals(
+        _ spans: [ProposedSpan],
+        atoms: [TranscriptAtom]
+    ) -> [SourceProposal] {
+        spans.compactMap { span in
+            guard let range = canonicalRange(
+                startTime: span.startTime,
+                endTime: span.endTime,
+                atoms: atoms
+            ) else {
+                return nil
+            }
+            return SourceProposal(
+                range: range,
+                origins: .sustainedMusic,
+                proposedMusicSpans: [span]
+            )
+        }
+    }
+
     private static func makeFMProposals(
         windows: [FMRefinementWindowOutput],
         atomsByOrdinal: [Int: TranscriptAtom],
@@ -537,7 +627,8 @@ enum RegionProposalBuilder {
             fmConsensusStrength: max(existing.fmConsensusStrength, incoming.fmConsensusStrength),
             fmClusterID: existing.fmClusterID ?? incoming.fmClusterID,
             acousticBreaks: dedupAcousticBreaks(existing.acousticBreaks + incoming.acousticBreaks),
-            classifierResults: existing.classifierResults + incoming.classifierResults
+            classifierResults: existing.classifierResults + incoming.classifierResults,
+            proposedMusicSpans: existing.proposedMusicSpans + incoming.proposedMusicSpans
         )
     }
 
@@ -770,6 +861,14 @@ private struct SourceProposal: Sendable {
     /// `ProposedRegion.classifierResults` reflects every classifier firing
     /// that contributed to the merged region.
     var classifierResults: [ClassifierResult] = []
+    /// Sustained-music-offset spans carried along for provenance — set when a
+    /// music run seeds a `.sustainedMusic` proposal via
+    /// `makeSustainedMusicProposals`. Concatenated across merges so the final
+    /// `ProposedRegion.proposedMusicSpans` reflects every music run that
+    /// contributed to the merged region. MUST be carried in `merge(...)` or the
+    /// field is silently dropped on overlap-merge (same failure mode the
+    /// acoustic / classifier fields guard against).
+    var proposedMusicSpans: [ProposedSpan] = []
 }
 
 private struct FMObservation: Sendable {

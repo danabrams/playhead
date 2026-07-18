@@ -50,7 +50,7 @@ enum DecoderConstants {
 /// Used for JSON encoding/decoding of anchorProvenance in the `decoded_spans` table.
 extension AnchorRef: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, regionId, consensusStrength, entry, breakStrength, correctionId, reportedTime, score
+        case type, regionId, consensusStrength, entry, breakStrength, correctionId, reportedTime, score, confidence
     }
 
     init(from decoder: Decoder) throws {
@@ -76,6 +76,10 @@ extension AnchorRef: Codable {
             let regionId = try container.decode(String.self, forKey: .regionId)
             let score = try container.decode(Double.self, forKey: .score)
             self = .classifierSeed(regionId: regionId, score: score)
+        case "sustainedMusicOffset":
+            let regionId = try container.decode(String.self, forKey: .regionId)
+            let confidence = try container.decode(Double.self, forKey: .confidence)
+            self = .sustainedMusicOffset(regionId: regionId, confidence: confidence)
         case "spliceSlot":
             // Bare case (playhead-xsdz.22): the stable "spliceSlot" type string
             // is the entire encoding — no associated values to decode.
@@ -111,6 +115,10 @@ extension AnchorRef: Codable {
             try container.encode("classifierSeed", forKey: .type)
             try container.encode(regionId, forKey: .regionId)
             try container.encode(score, forKey: .score)
+        case .sustainedMusicOffset(let regionId, let confidence):
+            try container.encode("sustainedMusicOffset", forKey: .type)
+            try container.encode(regionId, forKey: .regionId)
+            try container.encode(confidence, forKey: .confidence)
         case .spliceSlot:
             // Bare case (playhead-xsdz.22): emit only the stable type string.
             try container.encode("spliceSlot", forKey: .type)
@@ -137,6 +145,7 @@ extension AnchorRef {
         case .fmAcousticCorroborated: return "fmAcousticCorroborated"
         case .userCorrection: return "userCorrection"
         case .classifierSeed: return "classifierSeed"
+        case .sustainedMusicOffset: return "sustainedMusicOffset"
         case .spliceSlot: return "spliceSlot"
         case .rediffSlot: return "rediffSlot"
         }

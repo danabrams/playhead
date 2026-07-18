@@ -104,6 +104,17 @@ actor AtomEvidenceProjector {
             $0.region.origins.contains(.classifier)
         }
 
+        // Sustained-music-origin regions (playhead-t1py / playhead-xtpf): a
+        // long high-musicProbability run PROPOSED a first-class ad-width span.
+        // Anchored via Path 5 below so that a sustained-music region with NO
+        // co-occurring FM signal still anchors its atoms INDEPENDENTLY — this
+        // single path breaks the anchor chokepoint that previously capped
+        // acoustic music at FM recall. Presence evidence only: the span it
+        // yields is demoted to `.markOnly` (never auto-skip) downstream.
+        let sustainedMusicRegions = regions.filter {
+            $0.region.origins.contains(.sustainedMusic)
+        }
+
         // Collect all acoustic breaks from acoustic regions for Use C proximity checks.
         // Dedupe by (time) so we don't double-count breaks that appear on multiple regions.
         var seenBreakTimes = Set<Double>()
@@ -183,6 +194,25 @@ actor AtomEvidenceProjector {
             }
         }
 
+        // Which atom ordinals are covered by sustained-music-origin regions?
+        // Store the per-ordinal anchor seed (regionId, peak run confidence) so
+        // Path 5 below can emit one `.sustainedMusicOffset` AnchorRef per atom.
+        var sustainedMusicAtoms: [Int: (regionId: String, confidence: Double)] = [:]
+        for bundle in sustainedMusicRegions {
+            let r = bundle.region
+            let regionId = Self.stableRegionId(bundle: bundle)
+            // Report the strongest (highest) run confidence for the region so
+            // the overlay surfaces the peak signal. Empty proposedMusicSpans
+            // shouldn't occur for a sustainedMusic-origin region, but guard
+            // defensively.
+            let confidence = r.proposedMusicSpans.map(\.confidence).max() ?? 0.0
+            for ordinal in r.firstAtomOrdinal ... r.lastAtomOrdinal {
+                if sustainedMusicAtoms[ordinal] == nil {
+                    sustainedMusicAtoms[ordinal] = (regionId, confidence)
+                }
+            }
+        }
+
         // Which atom ordinals have evidence catalog hits?
         var evidenceByOrdinal: [Int: [EvidenceEntry]] = [:]
         for entry in anchoringEntries {
@@ -247,6 +277,21 @@ actor AtomEvidenceProjector {
                 anchorProvenance.append(.classifierSeed(
                     regionId: seed.regionId,
                     score: seed.score
+                ))
+            }
+
+            // Path 5: Sustained-music-offset seed — a sustained-music-origin
+            // region (playhead-t1py) covered this atom. Anchors the atom
+            // INDEPENDENTLY of FM: this is the anchor-chokepoint fix. Added
+            // unconditionally when a music region covers the atom (mirrors the
+            // classifier Path 4): a sustained-music run is itself a valid
+            // PRESENCE anchor, so `MinimalContiguousSpanDecoder` emits a span
+            // even when FM missed the region entirely. The downstream
+            // `DecisionMapper` music-only clause keeps such a span `.markOnly`.
+            if let seed = sustainedMusicAtoms[ordinal] {
+                anchorProvenance.append(.sustainedMusicOffset(
+                    regionId: seed.regionId,
+                    confidence: seed.confidence
                 ))
             }
 
