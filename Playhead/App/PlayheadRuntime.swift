@@ -1044,6 +1044,19 @@ final class PlayheadRuntime {
             mode: .full
         )
 
+        // playhead-r2vz (PR2): live FM recovery dispatcher for cue-less
+        // music-only spans the lexical gate would suppress. Behind the same
+        // `!isPreviewRuntime` guard the `LiveShadowFMDispatcher` uses (below) so
+        // SwiftUI canvases skip FM machinery. `nil` in preview ⇒
+        // `runBackfill` builds no recovery closure ⇒ `RegionShadowPhase` stays
+        // byte-identical to PR1. Uses its own fresh shadow runtime (independent
+        // isolated sessions), same as `LiveShadowFMDispatcher`.
+        let fmRegionRecoveryDispatcher: FMRegionRecoveryDispatcher? = isPreviewRuntime
+            ? nil
+            : LiveFMRegionRecoveryDispatcher(
+                runtime: FoundationModelClassifier.makeLiveRuntimeForShadow()
+            )
+
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
             metadataExtractor: FallbackExtractor(),
@@ -1061,6 +1074,10 @@ final class PlayheadRuntime {
             // region observer to the service. In release builds this is
             // `nil`, which makes the Phase 4 shadow phase a no-op.
             regionShadowObserver: regionShadowObserver,
+            // playhead-r2vz (PR2): live FM recovery dispatcher (nil in preview).
+            // Inert until the Input recovery/gate flags are enabled for
+            // measurement, so production stays byte-identical to PR1.
+            fmRegionRecoveryDispatcher: fmRegionRecoveryDispatcher,
             // Phase 5 projector wire-up: hand the DEBUG-only projector
             // observer to the service. In release builds this is `nil`,
             // which makes the Phase 5 atom evidence projector a no-op.

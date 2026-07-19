@@ -91,6 +91,22 @@ enum RegionShadowPhase {
         /// proposer is also on, so a gate-on / proposer-off combination is a
         /// safe no-op as well. See `MusicOffsetLexicalGate`.
         let musicOffsetLexicalGateEnabled: Bool
+        /// playhead-r2vz (PR2): master switch for the FM RECOVERY pass over the
+        /// spans the lexical gate would SUPPRESS. DEFAULT `false`. Only has an
+        /// effect when `musicOffsetLexicalGateEnabled` is ALSO on AND
+        /// `fmRegionRecoveryClassifier` is non-nil — otherwise the gate branch
+        /// is unchanged (PR1 behavior: drop the suppressed set). When all three
+        /// hold, each gate-suppressed region gets one targeted FM look and is
+        /// re-admitted iff the classifier returns `.ad`. Re-admitted regions are
+        /// byte-identical to how the gate found them (no FM origin / evidence
+        /// stamped), so they can only ever decode to `.markOnly`.
+        let musicOffsetFMRecoveryEnabled: Bool
+        /// playhead-r2vz (PR2): injected FM recovery classifier. `nil` (tests,
+        /// preview, FM-unavailable) ⇒ the partition-and-recover branch is inert
+        /// and `run` stays byte-identical to PR1. Holds a `@Sendable` closure so
+        /// `RegionShadowPhase` stays a pure static enum — the async FM work lives
+        /// inside the closure / its backing dispatcher, NOT in this pipeline.
+        let fmRegionRecoveryClassifier: FMRegionRecoveryClassifier?
 
         init(
             analysisAssetId: String,
@@ -106,7 +122,9 @@ enum RegionShadowPhase {
             classifierResults: [ClassifierResult] = [],
             sustainedMusicProposerEnabled: Bool = false,
             sustainedMusicProposerConfig: SustainedMusicOffsetProposer.Config = .default,
-            musicOffsetLexicalGateEnabled: Bool = false
+            musicOffsetLexicalGateEnabled: Bool = false,
+            musicOffsetFMRecoveryEnabled: Bool = false,
+            fmRegionRecoveryClassifier: FMRegionRecoveryClassifier? = nil
         ) {
             self.analysisAssetId = analysisAssetId
             self.chunks = chunks
@@ -122,6 +140,8 @@ enum RegionShadowPhase {
             self.sustainedMusicProposerEnabled = sustainedMusicProposerEnabled
             self.sustainedMusicProposerConfig = sustainedMusicProposerConfig
             self.musicOffsetLexicalGateEnabled = musicOffsetLexicalGateEnabled
+            self.musicOffsetFMRecoveryEnabled = musicOffsetFMRecoveryEnabled
+            self.fmRegionRecoveryClassifier = fmRegionRecoveryClassifier
         }
     }
 
@@ -209,11 +229,63 @@ enum RegionShadowPhase {
         // fingerprint / classifier) and every non-music origin pass through
         // untouched, so auto-skip is never affected (music-only can never
         // auto-skip regardless — see `DecisionMapper.isMusicOnlyProvenance`).
-        // The suppressed set is the single seam playhead-r2vz (PR2) will
-        // re-route to an FM recovery pass instead of dropping.
-        let proposals = input.musicOffsetLexicalGateEnabled
-            ? MusicOffsetLexicalGate.filter(builtProposals, chunks: input.chunks)
-            : builtProposals
+        // The suppressed set is the single seam playhead-r2vz (PR2) re-routes
+        // to an FM recovery pass instead of dropping (see below).
+        //
+        // playhead-r2vz (PR2): PARTITION-AND-RECOVER. When the gate flag AND
+        // the recovery flag are both on AND a classifier is injected, split
+        // `builtProposals` into kept vs `shouldSuppress`-flagged, ask the
+        // injected classifier about each suppressed region, RE-ADMIT the ones
+        // it calls `.ad`, and drop `.content` / `.unavailable`. Re-admitted
+        // regions are byte-identical to how the gate found them — we re-admit
+        // the exact `ProposedRegion` value, never touching `origins` (stays
+        // `[.sustainedMusic]` ± `.acoustic`) and never attaching FM evidence,
+        // so `isMusicOnlyProvenance` still caps them at `.markOnly`. The FM
+        // verdict is an admit/drop gate ONLY. When either flag is off or the
+        // classifier is nil, the branch is unchanged (PR1: gate-on drops the
+        // suppressed set; gate-off passes `builtProposals` verbatim).
+        let proposals: [ProposedRegion]
+        if input.musicOffsetLexicalGateEnabled {
+            if input.musicOffsetFMRecoveryEnabled,
+               let recovery = input.fmRegionRecoveryClassifier {
+                var kept: [ProposedRegion] = []
+                var suppressed: [ProposedRegion] = []
+                for region in builtProposals {
+                    if MusicOffsetLexicalGate.shouldSuppress(region, chunks: input.chunks) {
+                        suppressed.append(region)
+                    } else {
+                        kept.append(region)
+                    }
+                }
+                var restored: [ProposedRegion] = []
+                for region in suppressed {
+                    let verdict = await recovery.classify(region, atoms)
+                    if verdict == .ad {
+                        restored.append(region)
+                    }
+                }
+                if restored.isEmpty {
+                    // No region recovered ⇒ identical to PR1's gate-on drop.
+                    proposals = kept
+                } else {
+                    // Re-sort the re-admitted regions back in by
+                    // `firstAtomOrdinal` (lastAtomOrdinal tiebreak) so the
+                    // ordering matches `RegionProposalBuilder.build`'s output
+                    // and downstream order stays deterministic.
+                    proposals = (kept + restored).sorted { lhs, rhs in
+                        if lhs.firstAtomOrdinal == rhs.firstAtomOrdinal {
+                            return lhs.lastAtomOrdinal < rhs.lastAtomOrdinal
+                        }
+                        return lhs.firstAtomOrdinal < rhs.firstAtomOrdinal
+                    }
+                }
+            } else {
+                // PR1 behavior: gate on, no recovery ⇒ drop the suppressed set.
+                proposals = MusicOffsetLexicalGate.filter(builtProposals, chunks: input.chunks)
+            }
+        } else {
+            proposals = builtProposals
+        }
 
         guard !proposals.isEmpty else {
             logger.debug("Region shadow phase: no proposals for asset \(input.analysisAssetId, privacy: .public)")
