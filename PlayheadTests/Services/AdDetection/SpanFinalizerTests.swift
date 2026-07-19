@@ -280,6 +280,51 @@ struct SpanFinalizerTests {
         #expect(result[0].decision.eligibilityGate == .blockedByUserCorrection)
     }
 
+    @Test("Merge-gate adoption survives a 3-span fold: eligible + markOnly + eligible → markOnly")
+    func mergeGateChainFoldKeepsDemotion() {
+        // playhead-wraj R3 review: the merge fold processes spans pairwise
+        // left-to-right, so a demotion adopted mid-chain must survive a LATER
+        // higher-confidence eligible span merging into the accumulated span.
+        // A last-writer or first-writer-only implementation would both
+        // resurface the demoted middle width as .eligible; max-severity keeps
+        // it markOnly regardless of where the demoted span sits in the chain.
+        let candidates = [
+            makeCandidate(startTime: 10, endTime: 20, skipConfidence: 0.9,
+                          eligibilityGate: .eligible, ordinalBase: 100),
+            makeCandidate(startTime: 21, endTime: 30, skipConfidence: 0.5,
+                          eligibilityGate: .markOnly, ordinalBase: 300),
+            makeCandidate(startTime: 31, endTime: 45, skipConfidence: 0.95,
+                          eligibilityGate: .eligible, ordinalBase: 500),
+        ]
+        let result = makeFinalizer().finalize(candidates)
+
+        #expect(result.count == 1)
+        #expect(result[0].span.startTime == 10)
+        #expect(result[0].span.endTime == 45)
+        #expect(result[0].decision.eligibilityGate == .markOnly)
+        // Confidence still folds to the max — scores never follow the gate.
+        #expect(result[0].decision.skipConfidence == 0.95)
+    }
+
+    @Test("Merge with equal severity keeps the first writer: markOnly + cappedByFMSuppression → markOnly")
+    func mergeEqualSeverityKeepsFirstWriter() {
+        // playhead-wraj R3 review: pins the documented equal-severity
+        // convention (matching capEligibility): equal severity never
+        // overwrites, so the earlier span's label survives — and, critically,
+        // an equal-severity merge can never resolve to .eligible.
+        let candidates = [
+            makeCandidate(startTime: 10, endTime: 30, skipConfidence: 0.6,
+                          eligibilityGate: .markOnly, ordinalBase: 100),
+            makeCandidate(startTime: 32, endTime: 50, skipConfidence: 0.8,
+                          eligibilityGate: .cappedByFMSuppression, ordinalBase: 300),
+        ]
+        let result = makeFinalizer().finalize(candidates)
+
+        #expect(result.count == 1)
+        #expect(result[0].decision.eligibilityGate == .markOnly)
+        #expect(result[0].decision.skipConfidence == 0.8)
+    }
+
     @Test("Spans with exactly 3s gap are NOT merged")
     func exactlyThreeSecondGapNotMerged() {
         let candidates = [
