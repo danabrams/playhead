@@ -209,7 +209,6 @@ struct SelfPromoBankTests {
             "be a guest",
             "send us your questions",
             "you can find the podcast",
-            "wherever you get your podcasts",
             "wherever fine podcasts",
             "get tickets",
             "live show",
@@ -229,8 +228,8 @@ struct SelfPromoBankTests {
         }
         #expect(bank.phrases.first { $0.phrase == "rate review and subscribe" }?.tokens
             == ["rate", "review", "and", "subscribe"])
-        #expect(bank.phrases.first { $0.phrase == "wherever you get your podcasts" }?.tokens
-            == ["wherever", "you", "get", "your", "podcasts"])
+        #expect(bank.phrases.first { $0.phrase == "wherever fine podcasts" }?.tokens
+            == ["wherever", "fine", "podcasts"])
 
         // Curation guard: the EXCLUDED families must NOT be present. Bare sponsor
         // phrases (fire on real 3rd-party ads — spike precision 0.14) and bare

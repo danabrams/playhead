@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "provenance": "playhead-baselines/fl4j-negative-anchor-prototype-2026-07-16.md (PARTIAL verdict: GO for the self-promo/social subclass only). Curated from self_promo_action_phrases in playhead-baselines/fl4j-negative-anchor-bank-candidate.json — show-specific names dropped; ambiguous_sponsor_phrases and bare show self-reference EXCLUDED. Schema v2 (attention→verification): each phrase is TAGGED with a selfReference class — 'selfEvident' (STRONG, self-corroborating self-promo CTA) or 'requiresCorroboration' (AMBIGUOUS event/watch plug that must be corroborated by a self-reference marker in its local window before demoting, because it collides with third-party ads). Ships FLAG-OFF (selfPromoSuppressionEnabled) pending multi-show generalisation validation.",
+  "provenance": "playhead-baselines/fl4j-negative-anchor-prototype-2026-07-16.md (PARTIAL verdict: GO for the self-promo/social subclass only). Curated from self_promo_action_phrases in playhead-baselines/fl4j-negative-anchor-bank-candidate.json — show-specific names dropped; ambiguous_sponsor_phrases and bare show self-reference EXCLUDED. Schema v2 (attention→verification): each phrase is TAGGED with a selfReference class — 'selfEvident' (STRONG, self-corroborating self-promo CTA) or 'requiresCorroboration' (AMBIGUOUS event/watch plug that must be corroborated by a self-reference marker in its local window before demoting, because it collides with third-party ads). 2026-07-19 pre-flip validation (fl4j-preflip-validation.md): DROPPED 'wherever you get your podcasts' — 7/150 refined-gold breaks false-demoted (podcast-network cross-promo/Audible pods, 4 byte-exact rediff DAI), zero measured recall cost; Dan-approved.",
   "phrases": [
     { "phrase": "rate review and subscribe", "selfReference": "selfEvident" },
     { "phrase": "rate and review", "selfReference": "selfEvident" },
@@ -14,7 +14,6 @@
     { "phrase": "be a guest", "selfReference": "selfEvident" },
     { "phrase": "send us your questions", "selfReference": "selfEvident" },
     { "phrase": "you can find the podcast", "selfReference": "selfEvident" },
-    { "phrase": "wherever you get your podcasts", "selfReference": "selfEvident" },
     { "phrase": "wherever fine podcasts", "selfReference": "selfEvident" },
     { "phrase": "get tickets", "selfReference": "requiresCorroboration" },
     { "phrase": "live show", "selfReference": "requiresCorroboration" },
