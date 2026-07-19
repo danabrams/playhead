@@ -1075,8 +1075,9 @@ final class PlayheadRuntime {
             // `nil`, which makes the Phase 4 shadow phase a no-op.
             regionShadowObserver: regionShadowObserver,
             // playhead-r2vz (PR2): live FM recovery dispatcher (nil in preview).
-            // Inert until the Input recovery/gate flags are enabled for
-            // measurement, so production stays byte-identical to PR1.
+            // Inert until `AdDetectionConfig.musicOffsetFMRecoveryEnabled` AND
+            // `musicOffsetLexicalGateEnabled` are flipped on (playhead-ncv6;
+            // both default OFF), so production stays byte-identical to PR1.
             fmRegionRecoveryDispatcher: fmRegionRecoveryDispatcher,
             // Phase 5 projector wire-up: hand the DEBUG-only projector
             // observer to the service. In release builds this is `nil`,

@@ -542,6 +542,59 @@ struct AdDetectionConfig: Sendable {
     /// overrides a harder block and never promotes.
     let selfPromoSuppressionEnabled: Bool
 
+    /// playhead-ncv6: master kill switch for the sustained-music-offset
+    /// PROPOSER (playhead-t1py / playhead-xtpf). When `false` (the production
+    /// default), `runBackfill` threads `false` into
+    /// `RegionShadowPhase.Input.sustainedMusicProposerEnabled`, the proposer is
+    /// never called, no `.sustainedMusic`-origin region is seeded, and the
+    /// pipeline output is byte-identical to pre-ncv6 behaviour. Flip to `true`
+    /// to enable: `RegionShadowPhase.run` then scans the episode's feature
+    /// windows for sustained-music runs and seeds atom-range-WIDE
+    /// `.sustainedMusic`-origin regions, which can only ever decode to
+    /// `.markOnly` (music-only provenance never auto-skips — see
+    /// `DecisionMapper.isMusicOnlyProvenance`).
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate: main stays
+    /// behavior-neutral and the proposer is never wired into a production
+    /// config or A/B arm until the flag-ON fire-rate measurement clears it.
+    /// The proposer stays fully built and unit-tested, just inert in
+    /// production.
+    let sustainedMusicProposerEnabled: Bool
+
+    /// playhead-ncv6: master kill switch for the lexical ad-cue GATE
+    /// (playhead-eki3) over the sustained-music-offset proposer's music-ONLY
+    /// spans. When `false` (the production default), `runBackfill` threads
+    /// `false` into `RegionShadowPhase.Input.musicOffsetLexicalGateEnabled`,
+    /// built proposals pass through verbatim, and the pipeline output is
+    /// byte-identical to pre-ncv6 behaviour. Flip to `true` to enable: every
+    /// UNCORROBORATED `.sustainedMusic`-only region whose onset window carries
+    /// NO third-party ad-cue is dropped (the cue-less content / credits /
+    /// theme false-banner class). INDEPENDENT of
+    /// `sustainedMusicProposerEnabled`: the gate only ever acts on
+    /// `.sustainedMusic`-origin proposals, so gate-on / proposer-off is a safe
+    /// no-op. See `MusicOffsetLexicalGate`.
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate (same invariant
+    /// `sustainedMusicProposerEnabled` holds).
+    let musicOffsetLexicalGateEnabled: Bool
+
+    /// playhead-ncv6: master kill switch for the FM RECOVERY pass
+    /// (playhead-r2vz) over the spans the lexical gate would SUPPRESS. When
+    /// `false` (the production default), `runBackfill` threads `false` into
+    /// `RegionShadowPhase.Input.musicOffsetFMRecoveryEnabled` and the
+    /// partition-and-recover branch is inert — gate-on drops the suppressed
+    /// set, gate-off passes proposals verbatim, byte-identical to pre-ncv6
+    /// behaviour. Flip to `true` to enable: when
+    /// `musicOffsetLexicalGateEnabled` is ALSO on AND an
+    /// `fmRegionRecoveryDispatcher` is wired AND FM is available, each
+    /// gate-suppressed region gets one targeted FM look and is re-admitted iff
+    /// the classifier returns `.ad`. Re-admitted regions carry no FM
+    /// origin/evidence, so they can only ever decode to `.markOnly`.
+    ///
+    /// Gated OFF by default per the OFF-by-default mandate (same invariant
+    /// `musicOffsetLexicalGateEnabled` holds).
+    let musicOffsetFMRecoveryEnabled: Bool
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -631,7 +684,10 @@ struct AdDetectionConfig: Sendable {
         userCorrectionReadSideEnabled: Bool = false,
         stingerRefinementEnabled: Bool = true,
         lexicalAnchorRefinementEnabled: Bool = false,
-        selfPromoSuppressionEnabled: Bool = true
+        selfPromoSuppressionEnabled: Bool = true,
+        sustainedMusicProposerEnabled: Bool = false,
+        musicOffsetLexicalGateEnabled: Bool = false,
+        musicOffsetFMRecoveryEnabled: Bool = false
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -692,6 +748,9 @@ struct AdDetectionConfig: Sendable {
         self.stingerRefinementEnabled = stingerRefinementEnabled
         self.lexicalAnchorRefinementEnabled = lexicalAnchorRefinementEnabled
         self.selfPromoSuppressionEnabled = selfPromoSuppressionEnabled
+        self.sustainedMusicProposerEnabled = sustainedMusicProposerEnabled
+        self.musicOffsetLexicalGateEnabled = musicOffsetLexicalGateEnabled
+        self.musicOffsetFMRecoveryEnabled = musicOffsetFMRecoveryEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -742,7 +801,10 @@ struct AdDetectionConfig: Sendable {
         userCorrectionReadSideEnabled: false,  // playhead-xsdz.34: read side ships OFF; xsdz.36 flips it after the corpus A/B
         stingerRefinementEnabled: true,
         lexicalAnchorRefinementEnabled: false,
-        selfPromoSuppressionEnabled: true  // playhead-fl4j: flipped ON 2026-07-16 — attention→verification rework measured 0/70 false-fires on real ads
+        selfPromoSuppressionEnabled: true,  // playhead-fl4j: flipped ON 2026-07-16 — attention→verification rework measured 0/70 false-fires on real ads
+        sustainedMusicProposerEnabled: false,  // playhead-ncv6: t1py proposer ships OFF; enablement is a separate product decision after the fire-rate measurement
+        musicOffsetLexicalGateEnabled: false,  // playhead-ncv6: eki3 gate ships OFF (same measurement gate as the proposer)
+        musicOffsetFMRecoveryEnabled: false  // playhead-ncv6: r2vz recovery ships OFF (same measurement gate as the proposer)
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -3498,15 +3560,22 @@ actor AdDetectionService {
         // playhead-r2vz (PR2): adapt the injected FM recovery dispatcher into
         // the `@Sendable` recovery closure `RegionShadowPhase` awaits per
         // gate-suppressed region. Gated on `canUseFoundationModelsProvider`
-        // (the `if let` short-circuits, so a nil dispatcher — the production
-        // default until measurement, and always in tests — skips the await
-        // entirely). nil dispatcher ⇒ nil closure ⇒ the partition-and-recover
-        // branch is inert (byte-identical to PR1). The `musicOffsetLexicalGate`
-        // + `musicOffsetFMRecovery` flags stay at their defaults here (Input-
-        // flag-only, per the approved scope — production is NOT wired to
-        // AdDetectionConfig; measurement flips both flags in a throwaway
-        // worktree). markOnly-only is enforced by omission: nothing here stamps
-        // an FM origin/evidence onto a restored region.
+        // (the `if let` short-circuits, so a nil dispatcher — preview, and
+        // any test that doesn't wire one — skips the await entirely).
+        // nil dispatcher ⇒ nil closure ⇒ the partition-and-recover branch is
+        // inert (byte-identical to PR1). PlayheadRuntime wires the live
+        // dispatcher unconditionally outside preview; the recovery pass still
+        // only runs when `config.musicOffsetFMRecoveryEnabled` (below) AND the
+        // gate flag are on. markOnly-only is enforced by omission: nothing
+        // here stamps an FM origin/evidence onto a restored region.
+        //
+        // playhead-ncv6: the three coverage-program flags (t1py proposer,
+        // eki3 gate, r2vz recovery) are now threaded from `AdDetectionConfig`
+        // into the `Input` below. All three default to `false` in
+        // `AdDetectionConfig.default` and in the config init, so a caller that
+        // does not opt in constructs an `Input` byte-identical to the
+        // pre-ncv6 default-parameter path. Enablement is a separate product
+        // decision; no Settings UI reads these flags.
         let fmRegionRecoveryClassifier: FMRegionRecoveryClassifier?
         if let dispatcher = fmRegionRecoveryDispatcher, await canUseFoundationModelsProvider() {
             fmRegionRecoveryClassifier = FMRegionRecoveryClassifier { region, atoms in
@@ -3526,6 +3595,9 @@ actor AdDetectionService {
             podcastProfile: currentPodcastProfile,
             fmWindows: fmRefinementWindows,
             classifierResults: classifierResults,
+            sustainedMusicProposerEnabled: config.sustainedMusicProposerEnabled,
+            musicOffsetLexicalGateEnabled: config.musicOffsetLexicalGateEnabled,
+            musicOffsetFMRecoveryEnabled: config.musicOffsetFMRecoveryEnabled,
             fmRegionRecoveryClassifier: fmRegionRecoveryClassifier
         )
         let regionBundles: [RegionFeatureBundle]
