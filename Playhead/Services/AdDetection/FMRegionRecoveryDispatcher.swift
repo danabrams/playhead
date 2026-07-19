@@ -75,6 +75,52 @@ protocol FMRegionRecoveryDispatcher: Sendable {
     func classify(region: ProposedRegion, atoms: [TranscriptAtom]) async -> FMRegionVerdict
 }
 
+// MARK: - WindowSweep
+
+/// Configures how many coarse FM windows the live dispatcher queries per
+/// gate-suppressed region, and how far apart their onset starts are stepped.
+///
+/// `windowCount == 1` (`.single`, the DEFAULT) is playhead-r2vz's Option A:
+/// exactly one window at the region's music→speech edge — byte-identical to
+/// the shipped single-window dispatcher.
+///
+/// `windowCount > 1` (playhead-vlo1, Option B) is the sliding-window sweep:
+/// `K` overlapping coarse windows, each ~one-ad-read wide (the same
+/// `onsetWindowCharacterCap` per window), whose onset starts are stepped
+/// forward from the edge by `strideSeconds` (window `i` starts at
+/// `region.endTime - padLeadSeconds + i · strideSeconds`). The dispatcher
+/// admits on the FIRST window that returns `.containsAd` and short-circuits
+/// the rest. Rationale: a single fixed window sits on the FM capability floor;
+/// offset windows catch a delayed / differently-framed ad-read (the
+/// "sliding-window recovers host-reads 5/6" evidence). Opt-in, set only for
+/// measurement — production keeps `.single`.
+///
+/// `strideSeconds` and `windowCount` are the ONLY new tuning knobs; window
+/// WIDTH still reuses the gate's `onsetWindowCharacterCap` (no invented magic).
+struct WindowSweep: Sendable, Equatable {
+    /// Number of overlapping coarse windows queried per region (clamped to ≥ 1).
+    let windowCount: Int
+    /// Forward step (seconds) between consecutive window onset starts, measured
+    /// from the music→speech edge. Ignored when `windowCount == 1`.
+    let strideSeconds: Double
+
+    init(windowCount: Int = 1, strideSeconds: Double = 15) {
+        self.windowCount = max(1, windowCount)
+        // A negative stride would step BACKWARD and collapse the sweep onto the
+        // edge window; clamp to forward-only. `windowCount > 1` only does useful
+        // work with `strideSeconds > 0`.
+        self.strideSeconds = max(0, strideSeconds)
+    }
+
+    /// Single-window Option A — the DEFAULT. One window at the music→speech
+    /// edge; byte-identical to playhead-r2vz.
+    static let single = WindowSweep(windowCount: 1, strideSeconds: 0)
+
+    /// A sensible ~3-window sliding sweep (Option B). Overlapping half-strides
+    /// stepped forward from the edge. Opt-in for measurement only.
+    static let sweep = WindowSweep(windowCount: 3, strideSeconds: 15)
+}
+
 // MARK: - LiveFMRegionRecoveryDispatcher
 
 /// Live recovery dispatcher backed by a fresh `FoundationModelClassifier.Runtime`
@@ -98,6 +144,11 @@ actor LiveFMRegionRecoveryDispatcher: FMRegionRecoveryDispatcher {
     /// gate inspected — a beat before the ad-read begins onward (see
     /// `regionSegments`).
     private let padLeadSeconds: Double
+    /// How many overlapping coarse windows to sweep per region, and their
+    /// forward stride. Defaults to `.single` — one window at the edge,
+    /// byte-identical to playhead-r2vz (Option A). `.sweep` (or any
+    /// `windowCount > 1`) enables the playhead-vlo1 sliding-window sweep.
+    private let sweep: WindowSweep
     private let logger: Logger
 
     init(
@@ -105,6 +156,7 @@ actor LiveFMRegionRecoveryDispatcher: FMRegionRecoveryDispatcher {
         redactor: PromptRedactor = .noop,
         prewarmPrefix: String = "Classify ad content.",
         padLeadSeconds: Double = MusicOffsetLexicalGate.onsetWindowLeadSeconds,
+        sweep: WindowSweep = .single,
         logger: Logger = Logger(
             subsystem: "com.playhead",
             category: "FMRegionRecoveryDispatcher"
@@ -114,41 +166,99 @@ actor LiveFMRegionRecoveryDispatcher: FMRegionRecoveryDispatcher {
         self.redactor = redactor
         self.prewarmPrefix = prewarmPrefix
         self.padLeadSeconds = padLeadSeconds
+        self.sweep = sweep
         self.logger = logger
     }
 
     // MARK: - FMRegionRecoveryDispatcher
 
     func classify(region: ProposedRegion, atoms: [TranscriptAtom]) async -> FMRegionVerdict {
-        let segments = Self.regionSegments(
-            region: region,
-            atoms: atoms,
-            padLeadSeconds: padLeadSeconds
-        )
-        // No transcript text in the region window → nothing to screen. Treat
-        // as unavailable so the region stays suppressed (PR1 behavior).
-        guard !segments.isEmpty else { return .unavailable }
-
-        // Reuse the champion `.classification` coarse prompt verbatim — do NOT
-        // hand-roll a new prompt (DECISION: PR2 charter).
-        let prompt = FoundationModelClassifier.buildPrompt(for: segments, redactor: redactor)
-
-        // Fresh session per region, prewarmed — mirrors the coarse production
-        // path and `LiveShadowFMDispatcher`. Discarded when the call returns.
-        let session = await runtime.makeSession()
-        await session.prewarm(prewarmPrefix)
-
-        do {
-            let response = try await session.respondCoarse(prompt)
-            return Self.verdict(for: response.disposition)
-        } catch {
-            // Refusal / decoding failure / throttle / runtime-unavailable —
-            // graceful degrade to `.unavailable` (region stays suppressed).
-            logger.warning(
-                "FM region recovery failed: region=\(region.firstAtomOrdinal, privacy: .public)..\(region.lastAtomOrdinal, privacy: .public) error=\(String(describing: error), privacy: .public)"
+        // Sweep K overlapping coarse windows stepped forward from the region's
+        // music→speech edge and ADMIT ON ANY `.containsAd`. `windowCount == 1`
+        // (`.single`, the default) degenerates to exactly the playhead-r2vz
+        // single-window path: one window at offset 0, one `respondCoarse` call,
+        // the same verdict. `windowCount > 1` (playhead-vlo1) adds forward-
+        // stepped windows to clear FM's single-shot capability floor.
+        //
+        // Aggregation over the sweep:
+        //   - the FIRST window that returns `.containsAd` → `.ad` (short-circuit:
+        //     later windows are NOT queried, saving FM calls);
+        //   - otherwise, if ANY window returned a real no-ad read
+        //     (`.noAds`/`.uncertain` → `.content`) → `.content` (stay suppressed);
+        //   - if EVERY window degraded (`.abstain`/throw/empty → `.unavailable`)
+        //     → `.unavailable` (graceful degrade, region stays suppressed).
+        var sawContent = false
+        var queriedSignatures = Set<[Int]>()
+        for index in 0..<max(1, sweep.windowCount) {
+            let forwardOffsetSeconds = Double(index) * sweep.strideSeconds
+            let segments = Self.regionSegments(
+                region: region,
+                atoms: atoms,
+                padLeadSeconds: padLeadSeconds,
+                forwardOffsetSeconds: forwardOffsetSeconds
             )
-            return .unavailable
+            // No transcript text in this window → nothing to screen; skip it
+            // WITHOUT a model call. When every window is empty (region carries
+            // no atoms at all) the loop falls through to `.unavailable` with
+            // zero `respondCoarse` calls — unchanged from the single-window path.
+            guard !segments.isEmpty else { continue }
+
+            // Overlapping windows can select the SAME atom set when post-edge
+            // atoms are sparse (or the sweep steps past the last atom). Query
+            // each DISTINCT window at most once: a repeat window carries
+            // identical content, so re-querying it cannot change the verdict —
+            // it would only burn an FM call (and, under any residual FM non-
+            // determinism, add a spurious re-roll to the admit-on-any race).
+            // Recall is unchanged; only genuinely different windows — the whole
+            // point of the sweep — reach the model. On real dense transcripts
+            // the K offset windows are distinct, so this trims only degenerate
+            // repeats; at `windowCount == 1` the single window always inserts,
+            // preserving the byte-identical one-call default.
+            let signature = segments
+                .flatMap { $0.atoms }
+                .map { $0.atomKey.atomOrdinal }
+                .sorted()
+            guard queriedSignatures.insert(signature).inserted else { continue }
+
+            // Reuse the champion `.classification` coarse prompt verbatim — do
+            // NOT hand-roll a new prompt (DECISION: PR2 charter).
+            let prompt = FoundationModelClassifier.buildPrompt(for: segments, redactor: redactor)
+
+            // Fresh session per window, prewarmed — mirrors the coarse
+            // production path and `LiveShadowFMDispatcher`. Sessions are
+            // serialized through this actor (concurrency = 1). Discarded when
+            // the call returns.
+            let session = await runtime.makeSession()
+            await session.prewarm(prewarmPrefix)
+
+            do {
+                let response = try await session.respondCoarse(prompt)
+                switch Self.verdict(for: response.disposition) {
+                case .ad:
+                    // Admit-on-any + short-circuit: one window says ad → done.
+                    return .ad
+                case .content:
+                    sawContent = true
+                case .unavailable:
+                    // This window degraded (abstain); keep sweeping the rest.
+                    break
+                }
+            } catch {
+                // Refusal / decoding failure / throttle / runtime-unavailable —
+                // graceful degrade for THIS window; keep sweeping the rest.
+                logger.warning(
+                    """
+                    FM region recovery failed: \
+                    region=\(region.firstAtomOrdinal, privacy: .public)..\(region.lastAtomOrdinal, privacy: .public) \
+                    window=\(index, privacy: .public) \
+                    error=\(String(describing: error), privacy: .public)
+                    """
+                )
+            }
         }
+        // No window admitted. If at least one returned a real no-ad read stay
+        // suppressed as `.content`; if every window degraded, `.unavailable`.
+        return sawContent ? .content : .unavailable
     }
 
     // MARK: - Mapping (pure, unit-tested directly)
@@ -201,13 +311,22 @@ actor LiveFMRegionRecoveryDispatcher: FMRegionRecoveryDispatcher {
     /// The restored region itself is UNMODIFIED — this window only feeds the
     /// ad/no-ad DECISION; the banner keeps the region's original music-span
     /// width (markOnly-by-omission).
+    ///
+    /// `forwardOffsetSeconds` steps the POST-EDGE onset window forward for the
+    /// sliding-window sweep (playhead-vlo1): window `i` uses
+    /// `forwardOffsetSeconds = i · strideSeconds`, so its onset start is
+    /// `region.endTime - padLeadSeconds + forwardOffsetSeconds`. `0` (the
+    /// default) is Option A's single window at the edge — byte-identical to
+    /// playhead-r2vz. The music-tail region atoms are included in EVERY window
+    /// (shared boundary context); only the post-edge onset slice slides.
     static func regionSegments(
         region: ProposedRegion,
         atoms: [TranscriptAtom],
-        padLeadSeconds: Double
+        padLeadSeconds: Double,
+        forwardOffsetSeconds: Double = 0
     ) -> [AdTranscriptSegment] {
         let sorted = atoms.sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
-        let onsetStart = region.endTime - max(0, padLeadSeconds)
+        let onsetStart = region.endTime - max(0, padLeadSeconds) + forwardOffsetSeconds
         let charCap = MusicOffsetLexicalGate.onsetWindowCharacterCap
         var selected: [TranscriptAtom] = []
         var onsetChars = 0

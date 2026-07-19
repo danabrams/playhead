@@ -204,9 +204,358 @@ struct FMRegionRecoveryDispatcherClassifyTests {
     }
 }
 
+// MARK: - Sliding-window sweep (playhead-vlo1, Option B)
+
+/// Coverage for the sliding-window FM recovery sweep — the escalation of the
+/// single-window Option-A dispatcher. All tests drive a SCRIPTED stub
+/// `Runtime` (`ScriptedCoarseRuntime`) that returns a disposition (or throws)
+/// keyed on the 1-based `respondCoarse` call index, so each test asserts BOTH
+/// the aggregated verdict AND the exact number of FM calls (proving the
+/// admit-on-any short-circuit and the byte-identical single-window default).
+/// No live model is ever touched — this proves the sweep WIRING, not real
+/// recall (the recall/FP tradeoff is the deferred measurement).
+@Suite("FMRegionRecoveryDispatcher — sliding-window sweep (playhead-vlo1)")
+struct FMRegionRecoveryDispatcherSweepTests {
+
+    private let assetId = "vlo1-sweep"
+
+    private func makeChunks(count: Int) -> [TranscriptChunk] {
+        (0..<count).map { idx in
+            TranscriptChunk(
+                id: "c\(idx)-\(assetId)",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-\(idx)",
+                chunkIndex: idx,
+                startTime: Double(idx) * 10,
+                endTime: Double(idx + 1) * 10,
+                text: "Line \(idx) of synthetic content for region recovery.",
+                normalizedText: "line \(idx) of synthetic content for region recovery.",
+                pass: "final",
+                modelVersion: "v",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
+        }
+    }
+
+    private func makeAtoms(count: Int) -> [TranscriptAtom] {
+        let (atoms, _) = TranscriptAtomizer.atomize(
+            chunks: makeChunks(count: count),
+            analysisAssetId: assetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+        return atoms
+    }
+
+    /// A `.sustainedMusic` region over `[atoms[1], atoms[hiIndex]]`, leaving
+    /// atoms past `hiIndex` as the post-edge onset material the sweep steps
+    /// through.
+    private func makeRegion(atoms: [TranscriptAtom], hiIndex: Int) -> ProposedRegion {
+        let sorted = atoms.sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
+        return ProposedRegion(
+            analysisAssetId: assetId,
+            transcriptVersion: sorted[0].atomKey.transcriptVersion,
+            firstAtomOrdinal: sorted[1].atomKey.atomOrdinal,
+            lastAtomOrdinal: sorted[hiIndex].atomKey.atomOrdinal,
+            startTime: sorted[1].startTime,
+            endTime: sorted[hiIndex].endTime,
+            origins: [.sustainedMusic],
+            fmConsensusStrength: .none,
+            lexicalCandidates: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            acousticBreaks: [],
+            foundationModelSpans: [],
+            resolvedEvidenceAnchors: [],
+            fmEvidence: nil
+        )
+    }
+
+    /// A fixture whose post-edge atoms are spread widely enough that the three
+    /// `.sweep` windows (offsets 0 / 15 / 30 s) each select a DISTINCT atom set,
+    /// so the dedup guard never collapses them — the multi-window call-count
+    /// tests can therefore assert exactly K = 3 calls. Verified below.
+    private func distinctSweepFixture() -> (atoms: [TranscriptAtom], region: ProposedRegion) {
+        let atoms = makeAtoms(count: 12)
+        // Region = [atoms[1], atoms[3]] ⇒ ~8 post-edge atoms at 10 s spacing,
+        // spanning well past 3 × 15 s of forward stride.
+        let region = makeRegion(atoms: atoms, hiIndex: 3)
+        return (atoms, region)
+    }
+
+    // MARK: - Single-window default = byte-identical Option A
+
+    @Test("windowCount == 1 (default) makes exactly ONE coarse call and returns the single-window verdict")
+    func singleWindowIsOneCallSameVerdict() async {
+        let atoms = makeAtoms(count: 6)
+        let region = makeRegion(atoms: atoms, hiIndex: 4)
+
+        let cases: [(CoarseDisposition, FMRegionVerdict)] = [
+            (.containsAd, .ad),
+            (.noAds, .content),
+            (.uncertain, .content),
+            (.abstain, .unavailable),
+        ]
+        for (disposition, expected) in cases {
+            let scripted = ScriptedCoarseRuntime { _ in
+                CoarseScreeningSchema(disposition: disposition, support: nil)
+            }
+            // Default init ⇒ `.single` ⇒ Option A.
+            let dispatcher = LiveFMRegionRecoveryDispatcher(runtime: makeScriptedRuntime(scripted))
+            let verdict = await dispatcher.classify(region: region, atoms: atoms)
+            #expect(verdict == expected, "single-window \(disposition) must map to \(expected)")
+            #expect(await scripted.callCount == 1, "single-window mode must make exactly one respondCoarse call")
+        }
+    }
+
+    // MARK: - Admit-on-any + short-circuit
+
+    @Test("sweep admits on the SECOND window's .containsAd (first .noAds) → .ad, and short-circuits before the third")
+    func sweepAdmitsOnSecondWindowAndShortCircuits() async {
+        let (atoms, region) = distinctSweepFixture()
+        let scripted = ScriptedCoarseRuntime { call in
+            switch call {
+            case 1: return CoarseScreeningSchema(disposition: .noAds, support: nil)
+            case 2: return CoarseScreeningSchema(disposition: .containsAd, support: nil)
+            default: return CoarseScreeningSchema(disposition: .noAds, support: nil) // must not be reached
+            }
+        }
+        let dispatcher = LiveFMRegionRecoveryDispatcher(
+            runtime: makeScriptedRuntime(scripted),
+            sweep: .sweep // windowCount 3
+        )
+        let verdict = await dispatcher.classify(region: region, atoms: atoms)
+        #expect(verdict == .ad, "admit-on-any: a later window's .containsAd restores the region")
+        #expect(await scripted.callCount == 2, "the sweep must short-circuit right after the first .containsAd")
+    }
+
+    // MARK: - All-content → suppressed (every window queried)
+
+    @Test("sweep with all-.noAds → .content (suppressed) and queries every one of the K windows")
+    func sweepAllNoAdsIsContentAllWindows() async {
+        let (atoms, region) = distinctSweepFixture()
+        let scripted = ScriptedCoarseRuntime { _ in
+            CoarseScreeningSchema(disposition: .noAds, support: nil)
+        }
+        let dispatcher = LiveFMRegionRecoveryDispatcher(
+            runtime: makeScriptedRuntime(scripted),
+            sweep: .sweep
+        )
+        let verdict = await dispatcher.classify(region: region, atoms: atoms)
+        #expect(verdict == .content, "no window said .containsAd ⇒ stay suppressed")
+        #expect(await scripted.callCount == 3, "with no early admit the sweep queries all K distinct windows")
+    }
+
+    // MARK: - All-unavailable → graceful degrade
+
+    @Test("sweep whose every window THROWS degrades to .unavailable (after querying all K)")
+    func sweepAllThrowIsUnavailable() async {
+        let (atoms, region) = distinctSweepFixture()
+        let scripted = ScriptedCoarseRuntime { _ in throw StubCoarseError() }
+        let dispatcher = LiveFMRegionRecoveryDispatcher(
+            runtime: makeScriptedRuntime(scripted),
+            sweep: .sweep
+        )
+        let verdict = await dispatcher.classify(region: region, atoms: atoms)
+        #expect(verdict == .unavailable, "all windows degraded ⇒ graceful .unavailable")
+        #expect(await scripted.callCount == 3)
+    }
+
+    @Test("sweep whose every window ABSTAINS degrades to .unavailable")
+    func sweepAllAbstainIsUnavailable() async {
+        let (atoms, region) = distinctSweepFixture()
+        let scripted = ScriptedCoarseRuntime { _ in
+            CoarseScreeningSchema(disposition: .abstain, support: nil)
+        }
+        let dispatcher = LiveFMRegionRecoveryDispatcher(
+            runtime: makeScriptedRuntime(scripted),
+            sweep: .sweep
+        )
+        let verdict = await dispatcher.classify(region: region, atoms: atoms)
+        #expect(verdict == .unavailable, "abstain-only ⇒ .unavailable")
+        #expect(await scripted.callCount == 3)
+    }
+
+    // MARK: - Mixed sweep: a degraded window must not clobber a later .content
+
+    @Test("sweep where the first window THROWS and a later window reads .noAds → .content (a degrade does not lose a subsequent no-ad read)")
+    func sweepDegradeThenContentIsContent() async {
+        let (atoms, region) = distinctSweepFixture()
+        let scripted = ScriptedCoarseRuntime { call in
+            switch call {
+            case 1: throw StubCoarseError()
+            case 2: return CoarseScreeningSchema(disposition: .noAds, support: nil)
+            default: return CoarseScreeningSchema(disposition: .abstain, support: nil)
+            }
+        }
+        let dispatcher = LiveFMRegionRecoveryDispatcher(
+            runtime: makeScriptedRuntime(scripted),
+            sweep: .sweep
+        )
+        let verdict = await dispatcher.classify(region: region, atoms: atoms)
+        #expect(verdict == .content, "a window that read no-ads survives an earlier degraded window")
+        #expect(await scripted.callCount == 3, "no early admit ⇒ every distinct window is queried")
+    }
+
+    // MARK: - Dedup: identical overlapping windows are queried at most once
+
+    @Test("sweep dedups identical windows — a sparse region whose later windows collapse to the same atom set makes FEWER than K calls")
+    func sweepDedupsIdenticalWindows() async {
+        // The 6-atom fixture has ONE post-edge atom (at the edge). Window 0
+        // (offset 0) selects region-tail + that atom; windows 1 and 2
+        // (offsets 15 / 30 s) step past it and collapse to region-tail ONLY —
+        // identical to each other. So the sweep queries 2 DISTINCT windows, not
+        // 3, proving the dedup guard skips the repeat rather than re-rolling it.
+        let atoms = makeAtoms(count: 6)
+        let region = makeRegion(atoms: atoms, hiIndex: 4)
+        let scripted = ScriptedCoarseRuntime { _ in
+            CoarseScreeningSchema(disposition: .noAds, support: nil)
+        }
+        let dispatcher = LiveFMRegionRecoveryDispatcher(
+            runtime: makeScriptedRuntime(scripted),
+            sweep: .sweep
+        )
+        let verdict = await dispatcher.classify(region: region, atoms: atoms)
+        #expect(verdict == .content)
+        #expect(await scripted.callCount == 2, "the two identical region-only windows must be queried only once")
+    }
+
+    // MARK: - Empty region → zero calls (unchanged)
+
+    @Test("sweep over a region with no atoms makes ZERO coarse calls and returns .unavailable")
+    func sweepEmptyRegionMakesZeroCalls() async {
+        let atoms = makeAtoms(count: 6)
+        // Ordinal range past the whole atom stream → no region atoms, no
+        // post-edge atoms in any window.
+        let region = ProposedRegion(
+            analysisAssetId: assetId,
+            transcriptVersion: atoms[0].atomKey.transcriptVersion,
+            firstAtomOrdinal: 10_000,
+            lastAtomOrdinal: 10_001,
+            startTime: 100_000,
+            endTime: 100_010,
+            origins: [.sustainedMusic],
+            fmConsensusStrength: .none,
+            lexicalCandidates: [],
+            sponsorMatches: [],
+            fingerprintMatches: [],
+            acousticBreaks: [],
+            foundationModelSpans: [],
+            resolvedEvidenceAnchors: [],
+            fmEvidence: nil
+        )
+        let scripted = ScriptedCoarseRuntime { _ in
+            CoarseScreeningSchema(disposition: .containsAd, support: nil) // would admit if consulted
+        }
+        let dispatcher = LiveFMRegionRecoveryDispatcher(
+            runtime: makeScriptedRuntime(scripted),
+            sweep: .sweep
+        )
+        let verdict = await dispatcher.classify(region: region, atoms: atoms)
+        #expect(verdict == .unavailable)
+        #expect(await scripted.callCount == 0, "an empty region must not consult the model in any window")
+    }
+
+    // MARK: - Window geometry: stepped forward from region.endTime
+
+    @Test("sweep windows step FORWARD from region.endTime: a later window drops the earliest post-edge atom, still reaches a later ad-read, and keeps the music tail")
+    func sweepWindowsStepForwardFromEdge() {
+        let atoms = makeAtoms(count: 8)
+        let sorted = atoms.sorted { $0.atomKey.atomOrdinal < $1.atomKey.atomOrdinal }
+        // Region = [atoms[1], atoms[2]] ⇒ atoms[3...] are post-edge onset material.
+        let region = makeRegion(atoms: atoms, hiIndex: 2)
+        let hi = sorted[2].atomKey.atomOrdinal
+        let padLead = MusicOffsetLexicalGate.onsetWindowLeadSeconds
+
+        let posts = sorted
+            .filter { $0.atomKey.atomOrdinal > hi }
+            .sorted { $0.startTime < $1.startTime }
+        #expect(posts.count >= 3, "fixture must have several post-edge atoms to slide over")
+        let early = posts.first!
+        let late = posts.last!
+        #expect(early.startTime < late.startTime)
+
+        // Window at the edge (offset 0 — the single-window / Option-A window).
+        let window0 = LiveFMRegionRecoveryDispatcher.regionSegments(
+            region: region,
+            atoms: atoms,
+            padLeadSeconds: padLead,
+            forwardOffsetSeconds: 0
+        )
+        // A forward-stepped window whose onset start lands mid-way through the
+        // post-edge material: it must exclude the earliest post-edge atom but
+        // still include the latest. Derived from actual atom times so the test
+        // is robust to the atomizer's exact timing.
+        let target = (early.startTime + late.startTime) / 2
+        let offsetLate = target - (region.endTime - padLead)
+        #expect(offsetLate > 0, "the later window must step strictly forward")
+        let windowLate = LiveFMRegionRecoveryDispatcher.regionSegments(
+            region: region,
+            atoms: atoms,
+            padLeadSeconds: padLead,
+            forwardOffsetSeconds: offsetLate
+        )
+
+        let ords0 = Set(window0.flatMap { $0.atoms }.map { $0.atomKey.atomOrdinal })
+        let ordsLate = Set(windowLate.flatMap { $0.atoms }.map { $0.atomKey.atomOrdinal })
+
+        #expect(ords0.contains(early.atomKey.atomOrdinal), "the edge window includes the earliest post-edge ad-read")
+        #expect(
+            !ordsLate.contains(early.atomKey.atomOrdinal),
+            "a forward-stepped window drops the earliest post-edge atom"
+        )
+        #expect(ordsLate.contains(late.atomKey.atomOrdinal), "the forward-stepped window still reaches a later ad-read")
+        #expect(
+            ords0.contains(hi) && ordsLate.contains(hi),
+            "the music-tail region atoms are shared boundary context in every window"
+        )
+    }
+}
+
 // MARK: - Test helpers (file-scoped)
 
 private struct StubCoarseError: Error {}
+
+/// Records each `respondCoarse` call and returns a scripted disposition (or
+/// throws) keyed on the 1-based call index. Lets the sweep tests assert both
+/// the aggregated verdict AND the exact number of FM calls (short-circuit).
+private actor ScriptedCoarseRuntime {
+    private(set) var callCount = 0
+    private let script: @Sendable (_ callIndex: Int) throws -> CoarseScreeningSchema
+
+    init(_ script: @escaping @Sendable (_ callIndex: Int) throws -> CoarseScreeningSchema) {
+        self.script = script
+    }
+
+    func next() throws -> CoarseScreeningSchema {
+        callCount += 1
+        return try script(callCount)
+    }
+}
+
+/// A `Runtime` whose every fresh session routes `respondCoarse` through the
+/// shared `ScriptedCoarseRuntime` (so counts accumulate across the sweep's
+/// per-window sessions). Mirrors `makeStubCoarseRuntime`.
+private func makeScriptedRuntime(_ scripted: ScriptedCoarseRuntime) -> FoundationModelClassifier.Runtime {
+    FoundationModelClassifier.Runtime(
+        availabilityStatus: { _ in nil },
+        contextSize: { 4_096 },
+        tokenCount: { prompt in
+            max(1, prompt.split(whereSeparator: \.isWhitespace).count)
+        },
+        coarseSchemaTokenCount: { 16 },
+        refinementSchemaTokenCount: { 32 },
+        boundarySchemaTokenCount: { 32 },
+        makeSession: {
+            FoundationModelClassifier.Runtime.Session(
+                prewarm: { _ in },
+                respondCoarse: { _ in try await scripted.next() },
+                respondRefinement: { _ in RefinementWindowSchema(spans: []) }
+            )
+        }
+    )
+}
 
 private actor CoarseCallCounter {
     private(set) var count = 0
