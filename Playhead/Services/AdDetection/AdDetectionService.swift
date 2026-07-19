@@ -4397,7 +4397,13 @@ actor AdDetectionService {
                 // priors (global + trait + show-local). Resolution happened
                 // once outside the per-span loop above; this is a struct-by-
                 // value pass, no recomputation.
-                durationPrior: episodeDurationPrior
+                durationPrior: episodeDurationPrior,
+                // playhead-wraj (post-roll guard): thread `runBackfill`'s
+                // episode duration so the certainty-tiered post-roll demotion
+                // can see the episode end. The service's sentinel for "unknown"
+                // is `0`; the mapper's contract is `nil` = unknown (guard
+                // inert — never guess the episode end), so normalize here.
+                episodeDuration: episodeDuration > 0 ? episodeDuration : nil
             )
             let rawDecision = mapper.map()
 

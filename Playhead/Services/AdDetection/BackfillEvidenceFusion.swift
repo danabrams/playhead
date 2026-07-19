@@ -197,8 +197,12 @@ struct FusionWeightConfig: Sendable {
     /// `skipConfidence` sits below `hostReadConfidenceFloor` is demoted to
     /// `.markOnly` (banner, not auto-skip). High-certainty rediff-anchored DAI
     /// spans bypass the floor and stay `.eligible`; host-read (non-rediff) spans
-    /// must clear the floor to auto-skip. The downgrade NEVER promotes (only an
-    /// already-`.eligible` gate is touched) and NEVER modifies any score.
+    /// must clear the floor to auto-skip. The same switch also arms the
+    /// post-roll guard (`postRollGuardSeconds`, Dan 2026-07-19): an `.eligible`
+    /// span ending within that window of a KNOWN episode duration is demoted to
+    /// `.markOnly` regardless of rediff anchoring or score. Both downgrades
+    /// NEVER promote (only an already-`.eligible` gate is touched) and NEVER
+    /// modify any score.
     let certaintyTieredEnabled: Bool
 
     /// playhead-wraj: Minimum `skipConfidence` a NON-rediff (host-read) span
@@ -207,6 +211,19 @@ struct FusionWeightConfig: Sendable {
     /// `skipConfidence` was calibrated against. Inert unless
     /// `certaintyTieredEnabled == true`. Rediff-anchored spans are exempt.
     let hostReadConfidenceFloor: Double
+
+    /// playhead-wraj (post-roll guard, Dan 2026-07-19): Width of the end-of-
+    /// episode window (seconds) inside which an `.eligible` span is demoted to
+    /// `.markOnly` when `certaintyTieredEnabled` is on. Post-roll ads are the
+    /// least important to auto-skip (the user just jumps to the next episode)
+    /// and a wrong skip near the end clips the host's closing content, so the
+    /// demotion applies REGARDLESS of rediff anchoring or `skipConfidence` —
+    /// unlike `hostReadConfidenceFloor`, there is NO rediff exemption. The
+    /// guard fires when `episodeDuration - span.endTime <= postRollGuardSeconds`
+    /// and is INERT when the episode duration is unknown
+    /// (`DecisionMapper.episodeDuration == nil` — never guess the episode end)
+    /// or `certaintyTieredEnabled` is off. DEFAULT `90.0`.
+    let postRollGuardSeconds: Double
 
     init(
         fmCap: Double = 0.4,
@@ -224,7 +241,8 @@ struct FusionWeightConfig: Sendable {
         rhetoricalGrammarCap: Double = 0.2,
         crossShowSyndicationCap: Double = 0.2,
         certaintyTieredEnabled: Bool = false,
-        hostReadConfidenceFloor: Double = 0.9
+        hostReadConfidenceFloor: Double = 0.9,
+        postRollGuardSeconds: Double = 90.0
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
@@ -242,6 +260,7 @@ struct FusionWeightConfig: Sendable {
         self.crossShowSyndicationCap = crossShowSyndicationCap
         self.certaintyTieredEnabled = certaintyTieredEnabled
         self.hostReadConfidenceFloor = hostReadConfidenceFloor
+        self.postRollGuardSeconds = postRollGuardSeconds
 
         // playhead-2hpn R4 (+R5): enforce the musicBedCap >=
         // musicBedConfirmedJingleWeight invariant at construction time, not
@@ -780,6 +799,14 @@ struct DecisionMapper: Sendable {
     /// fused ledger sum — does NOT stack as an independent voter. Defaults to
     /// `.identity` (no-op) so existing callers keep their current behavior.
     let durationPrior: DurationPrior
+    /// playhead-wraj (post-roll guard): Total episode duration in seconds,
+    /// threaded from `AdDetectionService.runBackfill`'s parameter. `nil` means
+    /// the duration is UNKNOWN and the post-roll guard is INERT — never guess
+    /// the episode end. The caller is responsible for normalizing its `0 ==
+    /// unknown` sentinel to `nil`; as a defense-in-depth belt the guard also
+    /// treats a non-positive value as unknown. Defaults to `nil` so existing
+    /// callers keep their current behavior.
+    let episodeDuration: Double?
 
     init(
         span: DecodedSpan,
@@ -788,7 +815,8 @@ struct DecisionMapper: Sendable {
         transcriptQuality: TranscriptQuality = .good,
         correctionFactor: Double = 1.0,
         calibrationProfile: ScoreCalibrationProfile = .v0,
-        durationPrior: DurationPrior = .identity
+        durationPrior: DurationPrior = .identity,
+        episodeDuration: Double? = nil
     ) {
         self.span = span
         self.ledger = ledger
@@ -797,6 +825,7 @@ struct DecisionMapper: Sendable {
         self.correctionFactor = correctionFactor
         self.calibrationProfile = calibrationProfile
         self.durationPrior = durationPrior
+        self.episodeDuration = episodeDuration
     }
 
     func map() -> DecisionResult {
@@ -843,7 +872,8 @@ struct DecisionMapper: Sendable {
         // `computeGate()`'s internals, never promotes (only an already-`.eligible`
         // gate is inspected, so `.markOnly` / `.blockedBy*` decisions are
         // untouched), and never modifies `proposalConfidence` / `skipConfidence`
-        // (the score-does-not-follow-the-gate invariant above at :666/:822).
+        // (the score-does-not-follow-the-gate invariant documented on
+        // `DecisionResult` and `computeGate()`).
         //
         // Policy: auto-SKIP high-certainty DAI whose WIDTH is owned by the rediff
         // oracle (`.rediffSlot` in `anchorProvenance`) regardless of score; for
@@ -858,6 +888,31 @@ struct DecisionMapper: Sendable {
             gate = .markOnly
         }
 
+        // playhead-wraj (post-roll guard, Dan 2026-07-19): a span whose end
+        // lands within `postRollGuardSeconds` (default 90s) of the episode's
+        // total duration is demoted `.eligible → .markOnly` REGARDLESS of
+        // rediff anchoring or `skipConfidence` — post-roll ads are the least
+        // important to auto-skip (the user just jumps to the next episode) and
+        // a wrong skip near the end clips the host's closing content. Same
+        // additive, post-gate demotion contract as the floor above: gated on
+        // `certaintyTieredEnabled`, never promotes (only an already-`.eligible`
+        // gate is inspected), never modifies any score. SAFETY DEFAULT: when
+        // `episodeDuration` is `nil` (unknown) the guard does NOT fire — never
+        // guess the episode end; a non-positive value is treated as unknown
+        // too (the caller's `0 == unknown` sentinel, defense-in-depth).
+        // Garbage input stays inert: NaN and -inf fail the `> 0` check, and a
+        // +inf duration leaves the `<=` comparison false. Ordered
+        // independently of the floor and music-only demotions: all three only
+        // demote `.eligible → .markOnly`, and `.markOnly` is a fixed point,
+        // so they compose commutatively.
+        if config.certaintyTieredEnabled,
+           gate == .eligible,
+           let episodeDuration,
+           episodeDuration > 0,
+           episodeDuration - span.endTime <= config.postRollGuardSeconds {
+            gate = .markOnly
+        }
+
         // playhead-xtpf / playhead-t1py (Decision #4): a span whose ONLY
         // presence anchor is `.sustainedMusicOffset` is a TARGETING signal
         // ("an ad likely begins right after this music"), never a verdict — a
@@ -868,8 +923,8 @@ struct DecisionMapper: Sendable {
         // modifies any score, and it is INERT unless `.sustainedMusicOffset` is
         // present — which only happens when the sustained-music proposer flag is
         // on — so the flag-OFF path stays byte-identical. Ordered independently
-        // of the wraj demotion above: both only demote `.eligible → .markOnly`,
-        // and `.markOnly` is a fixed point, so the two compose commutatively.
+        // of the wraj demotions above: all only demote `.eligible → .markOnly`,
+        // and `.markOnly` is a fixed point, so they compose commutatively.
         if gate == .eligible, isMusicOnlyProvenance {
             gate = .markOnly
         }

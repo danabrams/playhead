@@ -136,6 +136,7 @@ struct BackfillEvidenceFusionTests {
         // playhead-wraj: certainty-tiered gate defaults are inert (flag off).
         #expect(config.certaintyTieredEnabled == false)
         #expect(config.hostReadConfidenceFloor == 0.9)
+        #expect(config.postRollGuardSeconds == 90.0)
     }
 
     // MARK: - BackfillEvidenceFusion — basic ledger accumulation
@@ -817,6 +818,271 @@ struct BackfillEvidenceFusionTests {
         let result = mapper.map()
         // 0.70 >= 0.60 → clears the custom floor → stays eligible.
         #expect(result.eligibilityGate == .eligible)
+    }
+
+    @Test("Flag ON: non-rediff eligible span strictly above floor stays eligible")
+    func certaintyTieredFlagOnAboveFloorStaysEligible() {
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: [.init(source: .classifier, weight: 0.95, detail: .classifier(score: 0.95))],
+            config: config,
+            transcriptQuality: .good
+        )
+        let result = mapper.map()
+        // skipConfidence == 0.95 > 0.9 floor → not downgraded.
+        #expect(abs(result.skipConfidence - 0.95) < 0.001)
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    // MARK: - Post-roll guard (playhead-wraj, Dan 2026-07-19)
+    //
+    // All spans below use the default `makeSpan` end time of 40.0s. Episode
+    // durations are chosen relative to that end and the 90s default window:
+    //   100.0 → gap  60s  (within  → guard fires)
+    //   130.0 → gap  90s  (boundary → "within" is inclusive, guard fires;
+    //                      130.0 - 40.0 == 90.0 is exact in IEEE-754)
+    //   200.0 → gap 160s  (outside → guard inert)
+
+    @Test("Post-roll guard: eligible span ending within 90s of a known duration is demoted to markOnly, scores untouched")
+    func postRollGuardDemotesNearEndSpan() {
+        // atFloorLedger → skipConfidence 0.9 == floor, so the host-read floor
+        // does NOT demote — any markOnly here is the post-roll guard's doing.
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: 100.0
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .markOnly)
+        // Invariant: the demotion must NOT touch either score.
+        #expect(abs(result.proposalConfidence - 0.90) < 0.001)
+        #expect(abs(result.skipConfidence - 0.90) < 0.001)
+    }
+
+    @Test("Post-roll guard: fires even for a rediff-anchored span below the floor (no rediff exemption)")
+    func postRollGuardOverridesRediffBypass() {
+        // Identical inputs to certaintyTieredFlagOnRediffBypassesFloor — which
+        // proves .eligible without a duration — EXCEPT episodeDuration 100.0.
+        let span = makeRediffSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: belowFloorLedger(),
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: 100.0
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .markOnly)
+        #expect(abs(result.skipConfidence - 0.70) < 0.001)
+    }
+
+    @Test("Post-roll guard: fires even for a rediff-anchored span at/above the floor")
+    func postRollGuardOverridesRediffAtFloor() {
+        let span = makeRediffSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(), // skipConfidence 0.9 — clears the floor too
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: 100.0
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .markOnly)
+    }
+
+    @Test("Post-roll guard: nil episode duration leaves the guard inert (never guess the episode end)")
+    func postRollGuardInertWhenDurationUnknown() {
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: nil
+        )
+        let result = mapper.map()
+        // Would fire under any plausible finite duration near 40s — but the
+        // duration is UNKNOWN, so the span must stay eligible.
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    @Test("Post-roll guard: a non-positive duration is treated as unknown (defense-in-depth belt)", arguments: [0.0, -1.0])
+    func postRollGuardInertForNonPositiveDuration(bogusDuration: Double) {
+        // AdDetectionService normalizes its `0 == unknown` sentinel to nil,
+        // but the mapper must ALSO refuse to fire on a raw non-positive value
+        // from any future caller that skips that normalization — without this
+        // belt, `0 - 40 = -40 <= 90` would demote on an unknown duration.
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: bogusDuration
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    @Test("Post-roll guard: a non-finite duration stays inert (NaN and ±inf never demote)", arguments: [Double.nan, .infinity, -.infinity])
+    func postRollGuardInertForNonFiniteDuration(garbageDuration: Double) {
+        // R2 review: pins the guard's documented garbage-input contract.
+        // NaN and -inf fail the `> 0` check; +inf leaves
+        // `episodeDuration - endTime <= window` false (inf <= 90). All three
+        // must leave the span eligible — the guard fails safe-inert.
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: garbageDuration
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    @Test("Post-roll guard: a qualified promotion track survives the demotion (gate moves, track and scores stay honest)")
+    func postRollGuardPreservesPromotionTrack() {
+        // R2 review: the guard is a gate-only demotion — `promotionTrack` is
+        // computed AFTER the gate from provenance + ledger and must come
+        // through untouched, because downstream re-stamp paths (finalizer
+        // wire-in, fragility diagnostics) read it. classifierSeed provenance
+        // + classifier score >= 0.70 + a .breakAlignment entry qualify the
+        // span for .classifierSeedQualified; weights sum to 0.95 (>= 0.9
+        // floor) so any markOnly here is the post-roll guard's doing.
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .classifier, weight: 0.80, detail: .classifier(score: 0.9)),
+            .init(source: .breakAlignment, weight: 0.15, detail: .breakAlignment(breakStrength: 0.7)),
+        ]
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: entries,
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: 100.0
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .markOnly)
+        #expect(result.promotionTrack == .classifierSeedQualified)
+        #expect(abs(result.proposalConfidence - 0.95) < 0.001)
+        #expect(abs(result.skipConfidence - 0.95) < 0.001)
+    }
+
+    @Test("Post-roll guard: span ending outside the window is unaffected")
+    func postRollGuardInertOutsideWindow() {
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: 200.0 // gap 160s > 90s
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    @Test("Post-roll guard: exactly postRollGuardSeconds from the end counts as within (inclusive boundary)")
+    func postRollGuardBoundaryIsInclusive() {
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: 130.0 // 130.0 - 40.0 == 90.0 bit-exactly
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .markOnly)
+    }
+
+    @Test("Post-roll guard: span ending past the claimed episode end still counts as near-end")
+    func postRollGuardFiresWhenSpanEndExceedsDuration() {
+        // endTime 40.0 > episodeDuration 35.0 (e.g. clock skew between the
+        // transcript timeline and the asset's reported duration): the gap is
+        // negative, unambiguously "near the end" — demote, don't skip.
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: 35.0
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .markOnly)
+    }
+
+    @Test("Post-roll guard: custom postRollGuardSeconds is read, not hardcoded (narrow 30s window keeps a 60s-gap span eligible)")
+    func postRollGuardCustomWindowIsHonored() {
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(
+            certaintyTieredEnabled: true,
+            postRollGuardSeconds: 30.0
+        )
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: 100.0 // gap 60s > custom 30s; the DEFAULT 90s would fire
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    @Test("Post-roll guard: flag OFF leaves a near-end span eligible with scores untouched (byte-identical path)")
+    func postRollGuardFlagOffIsByteIdentical() {
+        let span = makeHostReadSpan()
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: belowFloorLedger(), // below floor AND near end: both demotions would fire if armed
+            config: defaultConfig(),    // certaintyTieredEnabled defaults to false
+            transcriptQuality: .good,
+            episodeDuration: 100.0
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .eligible)
+        #expect(abs(result.proposalConfidence - 0.70) < 0.001)
+        #expect(abs(result.skipConfidence - 0.70) < 0.001)
+    }
+
+    @Test("Post-roll guard: a blockedByEvidenceQuorum span near the end is never promoted or otherwise touched")
+    func postRollGuardLeavesBlockedGateUntouched() {
+        // Same shape as certaintyTieredFlagOnLeavesBlockedGateUntouched, plus a
+        // near-end duration: the guard must only ever inspect an `.eligible`
+        // gate, so the blocked gate must survive unchanged.
+        let span = makeSpanWithFMAcoustic(startTime: 10.0, endTime: 40.0)
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .fm, weight: 0.35, detail: .fm(disposition: .containsAd, band: .moderate, cohortPromptLabel: "v1"))
+        ]
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: entries,
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: 100.0
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .blockedByEvidenceQuorum)
     }
 
     // MARK: - FM Positive-Only Rule
