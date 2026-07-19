@@ -225,6 +225,61 @@ struct SpanFinalizerTests {
         #expect(result[0].constraintTrace.contains(.mergedWithAdjacent))
     }
 
+    @Test("Merge takes the more restrictive gate: eligible + markOnly → markOnly (post-roll guard shape)")
+    func mergeAdoptsMarkOnlyFromLaterSpan() {
+        // playhead-wraj R2 review: the exact bypass shape the post-roll guard
+        // must survive. An eligible span ending OUTSIDE the guard window sits
+        // < 3s before a guard-demoted markOnly span reaching toward the
+        // episode end (3600s). The merge must NOT resurrect the demoted width
+        // as auto-skippable: merged gate = max severity = markOnly.
+        let candidates = [
+            makeCandidate(startTime: 3400, endTime: 3470, skipConfidence: 0.9,
+                          eligibilityGate: .eligible, ordinalBase: 100),
+            makeCandidate(startTime: 3472, endTime: 3560, skipConfidence: 0.8,
+                          eligibilityGate: .markOnly, ordinalBase: 300),
+        ]
+        let result = makeFinalizer().finalize(candidates)
+
+        #expect(result.count == 1)
+        #expect(result[0].span.startTime == 3400)
+        #expect(result[0].span.endTime == 3560)
+        #expect(result[0].decision.eligibilityGate == .markOnly)
+        // Confidence merge stays max — scores never follow the gate.
+        #expect(result[0].decision.skipConfidence == 0.9)
+        #expect(result[0].constraintTrace.contains(.mergedWithAdjacent))
+    }
+
+    @Test("Merge takes the more restrictive gate regardless of order: markOnly + eligible → markOnly")
+    func mergeKeepsMarkOnlyFromEarlierSpan() {
+        let candidates = [
+            makeCandidate(startTime: 10, endTime: 30, skipConfidence: 0.7,
+                          eligibilityGate: .markOnly, ordinalBase: 100),
+            makeCandidate(startTime: 32, endTime: 50, skipConfidence: 0.9,
+                          eligibilityGate: .eligible, ordinalBase: 300),
+        ]
+        let result = makeFinalizer().finalize(candidates)
+
+        #expect(result.count == 1)
+        #expect(result[0].decision.eligibilityGate == .markOnly)
+        #expect(result[0].decision.skipConfidence == 0.9)
+    }
+
+    @Test("Merge preserves a hard block: eligible + blockedByUserCorrection → blockedByUserCorrection")
+    func mergePreservesUserCorrectionBlock() {
+        // A user's "not an ad" veto on the later span must survive the merge —
+        // the merged span must not auto-skip content the user corrected.
+        let candidates = [
+            makeCandidate(startTime: 10, endTime: 30, skipConfidence: 0.9,
+                          eligibilityGate: .eligible, ordinalBase: 100),
+            makeCandidate(startTime: 32, endTime: 50, skipConfidence: 0.6,
+                          eligibilityGate: .blockedByUserCorrection, ordinalBase: 300),
+        ]
+        let result = makeFinalizer().finalize(candidates)
+
+        #expect(result.count == 1)
+        #expect(result[0].decision.eligibilityGate == .blockedByUserCorrection)
+    }
+
     @Test("Spans with exactly 3s gap are NOT merged")
     func exactlyThreeSecondGapNotMerged() {
         let candidates = [

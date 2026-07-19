@@ -934,6 +934,54 @@ struct BackfillEvidenceFusionTests {
         #expect(result.eligibilityGate == .eligible)
     }
 
+    @Test("Post-roll guard: a non-finite duration stays inert (NaN and ±inf never demote)", arguments: [Double.nan, .infinity, -.infinity])
+    func postRollGuardInertForNonFiniteDuration(garbageDuration: Double) {
+        // R2 review: pins the guard's documented garbage-input contract.
+        // NaN and -inf fail the `> 0` check; +inf leaves
+        // `episodeDuration - endTime <= window` false (inf <= 90). All three
+        // must leave the span eligible — the guard fails safe-inert.
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: garbageDuration
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    @Test("Post-roll guard: a qualified promotion track survives the demotion (gate moves, track and scores stay honest)")
+    func postRollGuardPreservesPromotionTrack() {
+        // R2 review: the guard is a gate-only demotion — `promotionTrack` is
+        // computed AFTER the gate from provenance + ledger and must come
+        // through untouched, because downstream re-stamp paths (finalizer
+        // wire-in, fragility diagnostics) read it. classifierSeed provenance
+        // + classifier score >= 0.70 + a .breakAlignment entry qualify the
+        // span for .classifierSeedQualified; weights sum to 0.95 (>= 0.9
+        // floor) so any markOnly here is the post-roll guard's doing.
+        let span = makeHostReadSpan()
+        let config = FusionWeightConfig(certaintyTieredEnabled: true)
+        let entries: [EvidenceLedgerEntry] = [
+            .init(source: .classifier, weight: 0.80, detail: .classifier(score: 0.9)),
+            .init(source: .breakAlignment, weight: 0.15, detail: .breakAlignment(breakStrength: 0.7)),
+        ]
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: entries,
+            config: config,
+            transcriptQuality: .good,
+            episodeDuration: 100.0
+        )
+        let result = mapper.map()
+        #expect(result.eligibilityGate == .markOnly)
+        #expect(result.promotionTrack == .classifierSeedQualified)
+        #expect(abs(result.proposalConfidence - 0.95) < 0.001)
+        #expect(abs(result.skipConfidence - 0.95) < 0.001)
+    }
+
     @Test("Post-roll guard: span ending outside the window is unaffected")
     func postRollGuardInertOutsideWindow() {
         let span = makeHostReadSpan()

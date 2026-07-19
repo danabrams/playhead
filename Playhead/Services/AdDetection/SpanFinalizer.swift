@@ -170,7 +170,9 @@ struct SpanFinalizer: Sendable {
     // MARK: - Constraint 2: Minimum content gap
 
     /// Adjacent spans with < 3s content between them are merged.
-    /// Merged span takes the higher confidence of the two.
+    /// Merged span takes the higher confidence of the two and the MORE
+    /// RESTRICTIVE eligibility gate (max severity) — absorbing a demoted or
+    /// blocked neighbor's width must never make that width auto-skippable.
     private func enforceMinimumContentGap(_ spans: [WorkingSpan]) -> [WorkingSpan] {
         guard spans.count > 1 else { return spans }
 
@@ -384,6 +386,18 @@ private struct WorkingSpan {
         endTime = other.endTime
         skipConfidence = max(skipConfidence, other.skipConfidence)
         proposalConfidence = max(proposalConfidence, other.proposalConfidence)
+        // playhead-wraj R2 review: the merged span takes the MORE RESTRICTIVE
+        // of the two gates (max severity; equal severity → first writer wins,
+        // matching `capEligibility`'s convention). Without this, absorbing a
+        // demoted/blocked neighbor's width into an `.eligible` span silently
+        // promoted that width to auto-skippable — bypassing every upstream
+        // demotion (certainty-tiered floor + post-roll guard, music-only,
+        // self-promo, chapter suppression, FM-suppression cap, and even
+        // `.blockedByUserCorrection`). A wrong merge must cost a banner,
+        // never a wrong skip.
+        if other.eligibilityGate.severity > eligibilityGate.severity {
+            eligibilityGate = other.eligibilityGate
+        }
         addConstraint(.mergedWithAdjacent)
     }
 
