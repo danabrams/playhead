@@ -151,6 +151,41 @@ enum RegionScoring {
     /// to a known ad slot position to receive the prior boost.
     private static let slotProximityThreshold: Double = 0.05
 
+    /// Gain mapping a region's average music probability to `musicScore` on
+    /// the non-playout branch (`avgMusic <= 0.8`).
+    ///
+    /// Retuned 1.5 -> 3.0 by playhead-uxte (2026-07-19) after playhead-riiz
+    /// (#231) un-saturated `acousticMusicProbability`. Measured on the
+    /// 34-episode corpus at the pipeline's 2 s windows (3,098 30 s speech
+    /// candidates, 55 music-playout candidates):
+    ///   - OLD formula: speech avgMusic 0.725±0.033, so `min(avg * 1.5, 1)`
+    ///     saturated at 1.0 for 94% of speech candidates — the term was a
+    ///     near-constant rawScore bias (+0.10 weighted) for ALL speech,
+    ///     host-read ads included, never ad-vs-content discrimination.
+    ///   - NEW composite: speech avgMusic 0.434±0.074 -> under gain 1.5 the
+    ///     term fell to 0.651±0.111 = -0.034 rawScore / -0.065 calibrated
+    ///     adProbability at the orchestrator's 0.65 enter threshold, pushing
+    ///     borderline host-read ads (the priority class) out of eligibility.
+    ///   - Gain 3.0 restores the saturation for speech: the knee sits at
+    ///     avgMusic 1/3, the ~7th percentile of the speech candidates
+    ///     (p5 0.313), so ~93% of them saturate at 1.0 as before.
+    ///     Restoration error vs the pre-riiz operating point is
+    ///     -0.0002±0.010 adProbability, one-sided (never scores a speech
+    ///     candidate above its pre-riiz value).
+    ///   - Music playout (avgMusic 0.906±0.048, 98-100% above 0.8) takes the
+    ///     0.5 cap branch below, which this gain does not touch: no music
+    ///     segment scores higher than it did before the retune. Known tail:
+    ///     ~1-2% of speech/music-under-speech candidates whose OLD avgMusic
+    ///     exceeded 0.8 (cap, 0.5) now land below 0.8 and saturate (1.0) =
+    ///     +0.05 rawScore vs pre-riiz; mean effect on that class is neutral
+    ///     (-0.0008 adProbability).
+    /// Rejected alternative: lowering the RuleBasedClassifier `sigmoidMid`
+    /// 0.25 -> 0.216 restored the speech MEAN but only 45% of the fallen
+    /// borderline candidates (±0.023 two-sided residual) and boosted
+    /// music-playout candidates by up to +0.13 adProbability near the enter
+    /// threshold. See playhead-uxte for the measurement script and data.
+    private static let musicScoreGain: Double = 3.0
+
     /// Score based on RMS energy drops at region boundaries.
     /// Ads typically start/end with a noticeable volume change.
     static func computeRmsDropScore(windows: [FeatureWindow]) -> Double {
@@ -222,7 +257,7 @@ enum RegionScoring {
         if avgMusic > 0.8 {
             return 0.5 // Could be music content, not just ad jingle
         }
-        return min(avgMusic * 1.5, 1.0)
+        return min(avgMusic * Self.musicScoreGain, 1.0)
     }
 
     /// Score based on speaker cluster changes at region boundaries.
