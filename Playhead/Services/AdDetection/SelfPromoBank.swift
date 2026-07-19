@@ -12,10 +12,15 @@
 // Scope of the curation (per the spike verdict + the bead brief):
 //   • KEEP universal self-promo ACTION phrases — a show promoting ITSELF:
 //     rate/review/subscribe, follow us, find us on, be a guest, send us your
-//     questions, "wherever you get your podcasts", live-show / get-tickets / on
-//     tour, "new ways to watch". These carry self-referential CALLS TO ACTION
-//     and no third-party brand, so they are the lexically-distinctive subclass
-//     the spike GO'd (C2 precision 0.78).
+//     questions, live-show / get-tickets / on tour, "new ways to watch". These
+//     carry self-referential CALLS TO ACTION and no third-party brand, so they
+//     are the lexically-distinctive subclass the spike GO'd (C2 precision 0.78).
+//   • DROPPED 2026-07-19 (pre-flip validation, Dan-approved): "wherever you
+//     get your podcasts" — it false-demoted 7/150 refined-gold ad breaks
+//     (podcast-NETWORK cross-promo / Audible pods, 4 byte-exact rediff DAI
+//     that should auto-skip) at zero measured self-promo recall cost. The
+//     phrase appears in third-party network promos as readily as in a show's
+//     own outro, so it is not self-evident after all.
 //   • DROP show-specific tokens ("subscribe to conan", "talk to conan",
 //     "visit teamcoco") — those never generalise.
 //   • EXCLUDE the `ambiguous_sponsor_phrases` family ("brought to you by",
