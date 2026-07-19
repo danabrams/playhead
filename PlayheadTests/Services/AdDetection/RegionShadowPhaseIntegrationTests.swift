@@ -648,3 +648,178 @@ struct RegionShadowPhaseIntegrationTests {
         )
     }
 }
+
+// MARK: - PR2 FM recovery pass (playhead-r2vz)
+
+/// Drives the partition-and-recover branch of `RegionShadowPhase.run` with a
+/// MOCK recovery classifier (never a live model). The fixture is a single
+/// cue-less music-only post-roll span the lexical gate SUPPRESSES; the mock's
+/// verdict decides whether it is restored.
+@Suite("Region shadow phase — FM recovery pass (playhead-r2vz)")
+struct RegionShadowPhaseFMRecoveryTests {
+
+    private let assetId = "r2vz-recovery"
+    private let episodeDuration = 90.0
+    private let chunkDuration = 3.0
+
+    /// 30 contiguous 3s ad-free chunks over [0,90). The onset window after the
+    /// music edge is therefore cue-less, so the gate flags the music-only span.
+    private func makeChunks() -> [TranscriptChunk] {
+        let count = Int(episodeDuration / chunkDuration) // 30
+        return (0..<count).map { idx in
+            let start = Double(idx) * chunkDuration
+            let text = "Segment \(idx) of ordinary spoken conversation about coastal tide pools and slow patient observation."
+            return TranscriptChunk(
+                id: "c\(idx)-\(assetId)", analysisAssetId: assetId,
+                segmentFingerprint: "fp-\(idx)", chunkIndex: idx,
+                startTime: start, endTime: start + chunkDuration,
+                text: text, normalizedText: text.lowercased(),
+                pass: "final", modelVersion: "v", transcriptVersion: nil, atomOrdinal: nil
+            )
+        }
+    }
+
+    /// Flat features with a sustained high-`musicProbability` play-out in
+    /// [60, 74) — the acoustic break detector finds nothing, so the ONLY
+    /// proposal source is the music proposer and the region's origins stay
+    /// `[.sustainedMusic]`.
+    private func makeFeatureWindows() -> [FeatureWindow] {
+        var windows: [FeatureWindow] = []
+        var t: Double = 0
+        while t < episodeDuration {
+            let inMusicRun = t >= 60 && t < 74
+            windows.append(FeatureWindow(
+                analysisAssetId: assetId, startTime: t, endTime: t + 2.0,
+                rms: 0.3, spectralFlux: 0.05,
+                musicProbability: inMusicRun ? 0.9 : 0.0,
+                pauseProbability: 0.0, speakerClusterId: 1, jingleHash: nil, featureVersion: 5
+            ))
+            t += 2.0
+        }
+        return windows
+    }
+
+    private func makeInput(
+        gateEnabled: Bool,
+        recoveryEnabled: Bool,
+        classifier: FMRegionRecoveryClassifier?
+    ) -> RegionShadowPhase.Input {
+        RegionShadowPhase.Input(
+            analysisAssetId: assetId,
+            chunks: makeChunks(),
+            lexicalCandidates: [],
+            featureWindows: makeFeatureWindows(),
+            episodeDuration: episodeDuration,
+            priors: ShowPriors.from(profile: nil),
+            podcastProfile: nil,
+            fmWindows: [],
+            sustainedMusicProposerEnabled: true,
+            musicOffsetLexicalGateEnabled: gateEnabled,
+            musicOffsetFMRecoveryEnabled: recoveryEnabled,
+            fmRegionRecoveryClassifier: classifier
+        )
+    }
+
+    private func hasMusicRegion(_ bundles: [RegionFeatureBundle]) -> Bool {
+        bundles.contains { $0.region.origins.contains(.sustainedMusic) }
+    }
+
+    // MARK: - Restore
+
+    @Test("recovery ON + mock .ad ⇒ the suppressed cue-less music-only span is RESTORED")
+    func recoveryAdRestores() async throws {
+        let counter = RecoveryCallCounter()
+        let bundles = try await RegionShadowPhase.run(
+            makeInput(gateEnabled: true, recoveryEnabled: true, classifier: mockRecovery(.ad, counter: counter))
+        )
+        #expect(hasMusicRegion(bundles), "a .ad verdict must re-admit the gate-suppressed music-only span")
+        #expect(await counter.count >= 1, "the classifier must be consulted for the suppressed region")
+
+        // markOnly-by-omission guarantee: the restored region is byte-identical
+        // to how the gate found it — music-only provenance, NO FM origin or
+        // evidence stamped, so it can only ever decode to .markOnly.
+        let musicRegions = bundles.filter { $0.region.origins.contains(.sustainedMusic) }
+        #expect(musicRegions.count == 1)
+        let region = musicRegions[0].region
+        #expect(
+            region.origins.isDisjoint(with: [.lexical, .sponsor, .fingerprint, .foundationModel, .classifier]),
+            "restored region must carry NO corroborating (FM/lexical/…) origin"
+        )
+        #expect(region.foundationModelSpans.isEmpty, "restored region must carry no FM spans")
+        #expect(region.fmEvidence == nil, "restored region must carry no FM evidence")
+    }
+
+    // MARK: - Stay suppressed
+
+    @Test("recovery ON + mock .content ⇒ the span stays SUPPRESSED")
+    func recoveryContentStaysSuppressed() async throws {
+        let counter = RecoveryCallCounter()
+        let bundles = try await RegionShadowPhase.run(
+            makeInput(gateEnabled: true, recoveryEnabled: true, classifier: mockRecovery(.content, counter: counter))
+        )
+        #expect(!hasMusicRegion(bundles), "a .content verdict must leave the span suppressed (PR1 drop)")
+        #expect(await counter.count >= 1, "the classifier must be consulted before dropping")
+    }
+
+    @Test("recovery ON + mock .unavailable ⇒ the span stays SUPPRESSED (graceful degrade)")
+    func recoveryUnavailableStaysSuppressed() async throws {
+        let counter = RecoveryCallCounter()
+        let bundles = try await RegionShadowPhase.run(
+            makeInput(gateEnabled: true, recoveryEnabled: true, classifier: mockRecovery(.unavailable, counter: counter))
+        )
+        #expect(!hasMusicRegion(bundles), "an .unavailable verdict must leave the span suppressed = PR1 behavior")
+    }
+
+    // MARK: - Flag-off equivalence (mock never invoked)
+
+    @Test("recovery flag OFF ⇒ byte-identical to PR1 gate-on drop; a mock that WOULD restore is never called")
+    func recoveryFlagOffIsPR1AndMockNeverCalled() async throws {
+        let counter = RecoveryCallCounter()
+        // Recovery flag OFF, but a classifier that WOULD return .ad is present.
+        let withRecoveryOff = try await RegionShadowPhase.run(
+            makeInput(gateEnabled: true, recoveryEnabled: false, classifier: mockRecovery(.ad, counter: counter))
+        )
+        // PR1 reference: gate on, no recovery machinery at all.
+        let pr1 = try await RegionShadowPhase.run(
+            makeInput(gateEnabled: true, recoveryEnabled: false, classifier: nil)
+        )
+
+        #expect(!hasMusicRegion(withRecoveryOff), "recovery OFF must drop the cue-less span (PR1)")
+        #expect(await counter.count == 0, "the mock classifier must NEVER be invoked when the recovery flag is off")
+
+        func keys(_ bundles: [RegionFeatureBundle]) -> [String] {
+            bundles
+                .map { "\($0.region.firstAtomOrdinal)-\($0.region.lastAtomOrdinal)-\($0.region.origins.rawValue)" }
+                .sorted()
+        }
+        #expect(keys(withRecoveryOff) == keys(pr1), "recovery-flag-off region set must be byte-identical to PR1")
+    }
+
+    @Test("recovery flag ON but classifier nil ⇒ PR1 gate-on drop (branch inert)")
+    func recoveryFlagOnButNilClassifierIsPR1() async throws {
+        let bundles = try await RegionShadowPhase.run(
+            makeInput(gateEnabled: true, recoveryEnabled: true, classifier: nil)
+        )
+        #expect(!hasMusicRegion(bundles), "a nil classifier must leave the partition branch inert = PR1 drop")
+    }
+}
+
+// MARK: - PR2 test helpers (file-scoped)
+
+/// Counts how many times the mock recovery classifier was invoked, so the
+/// flag-off equivalence test can prove the mock is NEVER consulted.
+private actor RecoveryCallCounter {
+    private(set) var count = 0
+    func bump() { count += 1 }
+}
+
+/// A mock recovery classifier that always returns `verdict` and bumps `counter`.
+private func mockRecovery(
+    _ verdict: FMRegionVerdict,
+    counter: RecoveryCallCounter
+) -> FMRegionRecoveryClassifier {
+    FMRegionRecoveryClassifier { _, _ in
+        await counter.bump()
+        return verdict
+    }
+}

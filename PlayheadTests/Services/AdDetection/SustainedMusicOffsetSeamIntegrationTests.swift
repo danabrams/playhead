@@ -239,4 +239,102 @@ struct SustainedMusicOffsetSeamIntegrationTests {
 
         #expect(decision.eligibilityGate == .markOnly, "music-only span must be markOnly, never auto-skip")
     }
+
+    // MARK: - Property 3 (playhead-r2vz PR2): a FM-RESTORED region still markOnly
+
+    @Test("PR2: a cue-less music-only span the gate suppressed, then RESTORED by an FM .ad verdict, still decodes to .markOnly (never auto-skip)")
+    func fmRestoredRegionDecodesToMarkOnly() async throws {
+        // Gate ON (suppresses this cue-less music-only span) + recovery ON with
+        // a mock returning .ad (re-admits it). The recovery verdict is an
+        // admit/drop GATE ONLY — it must NOT stamp FM origin/evidence, so the
+        // restored region is byte-identical to the ungated music-only region and
+        // still caps at .markOnly.
+        let counter = SeamRecoveryCallCounter()
+        let input = RegionShadowPhase.Input(
+            analysisAssetId: assetId,
+            chunks: makeChunks(),
+            lexicalCandidates: [],
+            featureWindows: makeFeatureWindows(),
+            episodeDuration: episodeDuration,
+            priors: ShowPriors.from(profile: nil),
+            podcastProfile: nil,
+            fmWindows: [],
+            sustainedMusicProposerEnabled: true,
+            musicOffsetLexicalGateEnabled: true,
+            musicOffsetFMRecoveryEnabled: true,
+            fmRegionRecoveryClassifier: FMRegionRecoveryClassifier { _, _ in
+                await counter.bump()
+                return .ad
+            }
+        )
+        let bundles = try await RegionShadowPhase.run(input)
+        #expect(await counter.count >= 1, "the recovery classifier must be consulted for the suppressed span")
+
+        let musicRegions = bundles.filter { $0.region.origins.contains(.sustainedMusic) }
+        #expect(musicRegions.count == 1, "the .ad verdict must restore exactly the one music-only span")
+        let restored = musicRegions[0].region
+        // markOnly-by-omission: no corroborating origin, no FM provenance.
+        #expect(restored.origins.isDisjoint(with: [.lexical, .sponsor, .fingerprint, .foundationModel, .classifier]))
+        #expect(restored.foundationModelSpans.isEmpty)
+        #expect(restored.fmEvidence == nil)
+
+        // Re-atomize exactly as RegionShadowPhase.run does.
+        let (atoms, _) = TranscriptAtomizer.atomize(
+            chunks: makeChunks(),
+            analysisAssetId: assetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+        let projector = AtomEvidenceProjector()
+        let evidence = await projector.project(
+            regions: bundles,
+            catalog: EvidenceCatalog(analysisAssetId: assetId, transcriptVersion: atoms[0].atomKey.transcriptVersion, entries: []),
+            atoms: atoms,
+            correctionMaskProvider: NoCorrectionMaskProvider()
+        )
+        // No FM provenance anywhere — survival is on music alone.
+        let anyFM = evidence.contains { ev in
+            ev.anchorProvenance.contains {
+                switch $0 {
+                case .fmConsensus, .fmAcousticCorroborated: return true
+                default: return false
+                }
+            }
+        }
+        #expect(!anyFM, "a FM-restored region must still carry NO fm anchor provenance")
+
+        let decoder = MinimalContiguousSpanDecoder()
+        let spans = decoder.decode(atoms: evidence, assetId: assetId)
+        #expect(spans.count == 1, "only the restored music-anchored run should decode to a span")
+        let span = spans[0]
+        #expect(span.anchorProvenance.allSatisfy {
+            if case .sustainedMusicOffset = $0 { return true }
+            return false
+        }, "the restored span must be music-ONLY (no other anchor)")
+
+        let fusion = BackfillEvidenceFusion(
+            span: span,
+            classifierScore: 0.0,
+            fmEntries: [],
+            lexicalEntries: [],
+            acousticEntries: [],
+            catalogEntries: [],
+            mode: .off,
+            config: FusionWeightConfig()
+        )
+        let ledger = fusion.buildLedger()
+        let decision = DecisionMapper(
+            span: span,
+            ledger: ledger,
+            config: FusionWeightConfig(),
+            transcriptQuality: .good
+        ).map()
+        #expect(decision.eligibilityGate == .markOnly, "a FM-restored music-only span must be markOnly, never auto-skip")
+    }
+}
+
+/// Counts recovery-classifier invocations for the PR2 seam test.
+private actor SeamRecoveryCallCounter {
+    private(set) var count = 0
+    func bump() { count += 1 }
 }

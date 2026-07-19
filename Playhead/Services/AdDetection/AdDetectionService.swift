@@ -1166,6 +1166,18 @@ actor AdDetectionService {
     /// pipeline produced bundles.
     private let regionShadowObserver: RegionShadowObserver?
 
+    /// playhead-r2vz (PR2): optional FM recovery dispatcher for cue-less
+    /// music-only spans the lexical gate would suppress. `nil` (the production
+    /// default until measurement, and always in tests / preview / on devices
+    /// that can't run FM) ⇒ `runBackfill` builds NO recovery closure, so the
+    /// `RegionShadowPhase` partition-and-recover branch is inert and the region
+    /// pipeline is byte-identical to PR1. When non-nil, `runBackfill` adapts it
+    /// into the `@Sendable` recovery closure it hands to `RegionShadowPhase.Input`
+    /// — but only after confirming `canUseFoundationModelsProvider`. Mirrors the
+    /// `canUseFoundationModelsProvider` FM-provider injection and the observer
+    /// nil-default pattern. Wired in `PlayheadRuntime` behind `!isPreviewRuntime`.
+    private let fmRegionRecoveryDispatcher: FMRegionRecoveryDispatcher?
+
     /// playhead-4my.5 (Phase 5): optional observer for the AtomEvidenceProjector
     /// + MinimalContiguousSpanDecoder pipeline. When nil, step 11 is a no-op.
     /// Production release builds never inject this (DEBUG-only pattern, same as
@@ -1767,6 +1779,7 @@ actor AdDetectionService {
         canUseFoundationModelsProvider: @escaping @Sendable () async -> Bool = { true },
         shadowSkipMarker: @escaping @Sendable (_ sessionId: String, _ podcastId: String) async -> Void = { _, _ in },
         regionShadowObserver: RegionShadowObserver? = nil,
+        fmRegionRecoveryDispatcher: FMRegionRecoveryDispatcher? = nil,
         phase5ProjectorObserver: Phase5ProjectorObserver? = nil,
         fragilityDiagnosticObserver: FragilityDiagnosticObserver? = nil,
         brandAppearanceChannelTapObserver: BrandAppearanceChannelTapObserver? = nil,
@@ -1807,6 +1820,7 @@ actor AdDetectionService {
         self.canUseFoundationModelsProvider = canUseFoundationModelsProvider
         self.shadowSkipMarker = shadowSkipMarker
         self.regionShadowObserver = regionShadowObserver
+        self.fmRegionRecoveryDispatcher = fmRegionRecoveryDispatcher
         self.phase5ProjectorObserver = phase5ProjectorObserver
         self.fragilityDiagnosticObserver = fragilityDiagnosticObserver
         self.brandAppearanceChannelTapObserver = brandAppearanceChannelTapObserver
@@ -3481,6 +3495,27 @@ actor AdDetectionService {
         self.lastAcousticFunnel = acousticPipelineResult.funnel
         self.lastAcousticPipelineFusion = acousticPipelineResult.fusion
 
+        // playhead-r2vz (PR2): adapt the injected FM recovery dispatcher into
+        // the `@Sendable` recovery closure `RegionShadowPhase` awaits per
+        // gate-suppressed region. Gated on `canUseFoundationModelsProvider`
+        // (the `if let` short-circuits, so a nil dispatcher — the production
+        // default until measurement, and always in tests — skips the await
+        // entirely). nil dispatcher ⇒ nil closure ⇒ the partition-and-recover
+        // branch is inert (byte-identical to PR1). The `musicOffsetLexicalGate`
+        // + `musicOffsetFMRecovery` flags stay at their defaults here (Input-
+        // flag-only, per the approved scope — production is NOT wired to
+        // AdDetectionConfig; measurement flips both flags in a throwaway
+        // worktree). markOnly-only is enforced by omission: nothing here stamps
+        // an FM origin/evidence onto a restored region.
+        let fmRegionRecoveryClassifier: FMRegionRecoveryClassifier?
+        if let dispatcher = fmRegionRecoveryDispatcher, await canUseFoundationModelsProvider() {
+            fmRegionRecoveryClassifier = FMRegionRecoveryClassifier { region, atoms in
+                await dispatcher.classify(region: region, atoms: atoms)
+            }
+        } else {
+            fmRegionRecoveryClassifier = nil
+        }
+
         let regionInput = RegionShadowPhase.Input(
             analysisAssetId: analysisAssetId,
             chunks: chunks,
@@ -3490,7 +3525,8 @@ actor AdDetectionService {
             priors: showPriors,
             podcastProfile: currentPodcastProfile,
             fmWindows: fmRefinementWindows,
-            classifierResults: classifierResults
+            classifierResults: classifierResults,
+            fmRegionRecoveryClassifier: fmRegionRecoveryClassifier
         )
         let regionBundles: [RegionFeatureBundle]
         do {
