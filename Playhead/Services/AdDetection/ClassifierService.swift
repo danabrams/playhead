@@ -170,8 +170,9 @@ enum RegionScoring {
     ///     avgMusic 1/3, the ~7th percentile of the speech candidates
     ///     (p5 0.313), so ~93% of them saturate at 1.0 as before.
     ///     Restoration error vs the pre-riiz operating point is
-    ///     -0.0002±0.010 adProbability, one-sided (never scores a speech
-    ///     candidate above its pre-riiz value).
+    ///     -0.0002±0.010 adProbability — measured one-sided: no speech
+    ///     candidate scored above its pre-riiz value, with the sole
+    ///     exception of the ~1-2% cap-migration tail noted below.
     ///   - Music playout (avgMusic 0.906±0.048, 98-100% above 0.8) takes the
     ///     0.5 cap branch below, which this gain does not touch: no music
     ///     segment scores higher than it did before the retune. Known tail:

@@ -11,7 +11,7 @@
 //   - Post-riiz, speech windows carry ~0.434, so under gain 1.5 the term
 //     fell to ~0.65: a -0.034 rawScore / -0.065 calibrated drop that pushed
 //     borderline host-read ads below the orchestrator's 0.65 enter
-//     threshold (SkipOrchestrator.Config.enterThreshold — NOT changed by
+//     threshold (SkipPolicyConfig.default.enterThreshold — NOT changed by
 //     the retune; the classifier side was retuned instead).
 //   - Gain 3.0 restores the speech saturation (knee at avgMusic 1/3, the
 //     ~7th percentile of speech candidates, so ~93% saturate at 1.0 as
@@ -189,6 +189,60 @@ struct RuleBasedClassifierMusicRetuneTests {
             )
             #expect(abs(result.adProbability - mirrored) < 1e-12)
         }
+    }
+
+    @Test("mirrored constants hold with every signal channel active")
+    func constantsMirrorLiveCodeAllChannels() {
+        // The speech-shaped fixture above zeroes rmsDrop / spectralChange /
+        // speakerChange / prior, so their mirrored weights are multiplied by
+        // zero and drift in them would go unnoticed. This fixture drives all
+        // six channels to nonzero scores so every mirrored weight is
+        // load-bearing in the parity check.
+        let windows: [FeatureWindow] = (0..<15).map { index in
+            let isEdge = index == 0 || index == 14
+            return FeatureWindow(
+                analysisAssetId: "asset-uxte",
+                startTime: Double(index) * 2.0,
+                endTime: Double(index) * 2.0 + 2.0,
+                rms: isEdge ? 0.5 : 0.05,          // boundary energy steps
+                spectralFlux: isEdge ? 0.9 : 0.1,  // boundary flux spikes
+                musicProbability: postRiizSpeechMusicProb,
+                pauseProbability: 0.2,
+                speakerClusterId: isEdge ? 1 : 2,  // host -> reader -> host
+                jingleHash: nil,
+                featureVersion: 5
+            )
+        }
+        let priors = ShowPriors(
+            slotPositions: [15.0 / 3600.0], // candidate center, exact hit
+            knownSponsors: [],
+            jingleFingerprints: [],
+            trustWeight: 0.6
+        )
+        let result = RuleBasedClassifier().classify(
+            input: ClassifierInput(
+                candidate: hostReadCandidate(confidence: borderlineLexicalConfidence),
+                featureWindows: windows,
+                episodeDuration: 3600.0
+            ),
+            priors: priors
+        )
+
+        // Every channel must actually contribute, or the parity below
+        // silently stops covering that channel's weight.
+        let breakdown = result.signalBreakdown
+        #expect(breakdown.lexicalScore > 0.0)
+        #expect(breakdown.rmsDropScore > 0.0)
+        #expect(breakdown.spectralChangeScore > 0.0)
+        #expect(breakdown.musicScore > 0.0)
+        #expect(breakdown.speakerChangeScore > 0.0)
+        #expect(breakdown.priorScore > 0.0)
+
+        let mirrored = mirroredAdProbability(
+            breakdown: breakdown,
+            musicScore: breakdown.musicScore
+        )
+        #expect(abs(result.adProbability - mirrored) < 1e-12)
     }
 
     @Test("borderline host-read: eligible pre-riiz, fell under gain 1.5, restored by gain 3.0")
