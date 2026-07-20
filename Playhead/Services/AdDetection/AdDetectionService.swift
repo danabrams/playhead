@@ -609,6 +609,47 @@ struct AdDetectionConfig: Sendable {
     /// behaviour.
     let musicOffsetFMRecoveryEnabled: Bool
 
+    /// playhead-wraj: master switch that surfaces the certainty-tiered auto-skip
+    /// gate (shipped in `FusionWeightConfig` / `BackfillEvidenceFusion`'s
+    /// `DecisionMapper` in PR #237) through production config. DEFAULT `false` —
+    /// with no config change `runBackfill` threads `false` into
+    /// `FusionWeightConfig.certaintyTieredEnabled`, the post-gate downgrade never
+    /// arms, and the pipeline output is byte-identical to pre-wraj behaviour.
+    /// Flip to `true` to enable the two additive, post-gate downgrades in
+    /// `DecisionMapper.map()`: (1) a non-rediff (host-read) span whose
+    /// `skipConfidence` sits below `hostReadConfidenceFloor` demotes from
+    /// `.eligible` to `.markOnly` (banner, not auto-skip); rediff-anchored DAI
+    /// spans are exempt and keep auto-skipping. (2) a span ending within
+    /// `postRollGuardSeconds` of a KNOWN episode duration demotes to `.markOnly`
+    /// REGARDLESS of rediff anchoring or score. Both downgrades only ever touch
+    /// an already-`.eligible` gate and NEVER modify any score. Gated OFF by
+    /// default: enablement is Dan's Gate-2 decision, verified by the 2026-07-19
+    /// gate-delta measurement (32/32 windows predicted-vs-observed agree at
+    /// T=0.9 + 90s post-roll).
+    let certaintyTieredSkipEnabled: Bool
+
+    /// playhead-wraj: minimum `skipConfidence` a NON-rediff (host-read) span must
+    /// reach to stay auto-skip-`.eligible` when `certaintyTieredSkipEnabled` is
+    /// on. DEFAULT `0.9` — the T calibrated on the themove host-read fixture
+    /// (2026-07-17: T=0.9 skips the confident reads, banners the uncertain reads
+    /// and the low-confidence fragments = the safe-degradation policy). Threaded
+    /// verbatim into `FusionWeightConfig.hostReadConfidenceFloor`; inert unless
+    /// `certaintyTieredSkipEnabled == true`. Rediff-anchored spans are exempt
+    /// from this floor.
+    let hostReadConfidenceFloor: Double
+
+    /// playhead-wraj (post-roll guard, Dan 2026-07-19): width of the end-of-
+    /// episode window (seconds) inside which an `.eligible` span is demoted to
+    /// `.markOnly` when `certaintyTieredSkipEnabled` is on. Post-roll ads are the
+    /// least important to auto-skip (the user just jumps to the next episode) and
+    /// a wrong skip near the end clips the host's closing content, so this
+    /// demotion applies REGARDLESS of rediff anchoring or `skipConfidence` — no
+    /// rediff exemption, unlike `hostReadConfidenceFloor`. Threaded verbatim into
+    /// `FusionWeightConfig.postRollGuardSeconds`; inert when the episode duration
+    /// is unknown (never guess the episode end) or `certaintyTieredSkipEnabled`
+    /// is off. DEFAULT `90.0`.
+    let postRollGuardSeconds: Double
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -701,7 +742,10 @@ struct AdDetectionConfig: Sendable {
         selfPromoSuppressionEnabled: Bool = true,
         sustainedMusicProposerEnabled: Bool = true,
         musicOffsetLexicalGateEnabled: Bool = true,
-        musicOffsetFMRecoveryEnabled: Bool = true
+        musicOffsetFMRecoveryEnabled: Bool = true,
+        certaintyTieredSkipEnabled: Bool = false,
+        hostReadConfidenceFloor: Double = 0.9,
+        postRollGuardSeconds: Double = 90.0
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -768,6 +812,9 @@ struct AdDetectionConfig: Sendable {
         self.sustainedMusicProposerEnabled = sustainedMusicProposerEnabled
         self.musicOffsetLexicalGateEnabled = musicOffsetLexicalGateEnabled
         self.musicOffsetFMRecoveryEnabled = musicOffsetFMRecoveryEnabled
+        self.certaintyTieredSkipEnabled = certaintyTieredSkipEnabled
+        self.hostReadConfidenceFloor = hostReadConfidenceFloor
+        self.postRollGuardSeconds = postRollGuardSeconds
     }
 
     static let `default` = AdDetectionConfig(
@@ -821,7 +868,10 @@ struct AdDetectionConfig: Sendable {
         selfPromoSuppressionEnabled: true,  // playhead-fl4j: flipped ON 2026-07-16 — attention→verification rework measured 0/70 false-fires on real ads
         sustainedMusicProposerEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1) — certified config measured 47.5% cov / 91.7% true prec / 6.0% false-banner; markOnly-only
         musicOffsetLexicalGateEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1, same certified measurement as the proposer)
-        musicOffsetFMRecoveryEnabled: true  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1, same certified measurement as the proposer)
+        musicOffsetFMRecoveryEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1, same certified measurement as the proposer)
+        certaintyTieredSkipEnabled: false,  // playhead-wraj: certainty-tiered auto-skip gate ships OFF; enablement is Dan's Gate-2 decision (2026-07-19 gate-delta measurement 32/32 at T=0.9 + 90s post-roll)
+        hostReadConfidenceFloor: 0.9,  // playhead-wraj: T=0.9 themove host-read calibration (2026-07-17); inert while certaintyTieredSkipEnabled is false
+        postRollGuardSeconds: 90.0  // playhead-wraj: post-roll guard window (Dan 2026-07-19); inert while certaintyTieredSkipEnabled is false
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -3754,7 +3804,20 @@ actor AdDetectionService {
             semanticScanResults = []
         }
 
-        let fusionConfig = FusionWeightConfig()
+        // playhead-wraj: surface the certainty-tiered auto-skip gate (shipped in
+        // PR #237 inside `FusionWeightConfig` / `DecisionMapper`) through
+        // production config. Only these three trailing fields are threaded; every
+        // other `FusionWeightConfig` field keeps its default, so with the OFF
+        // default (`certaintyTieredSkipEnabled == false`) the constructed config
+        // is byte-identical to the pre-wraj bare `FusionWeightConfig()` and the
+        // post-gate downgrade in `DecisionMapper.map()` never arms. The other
+        // three `FusionWeightConfig()` sites (hot-path + Tier-1 + aggregator
+        // decision logs) read only `.classifierCap`, so they stay bare.
+        let fusionConfig = FusionWeightConfig(
+            certaintyTieredEnabled: config.certaintyTieredSkipEnabled,
+            hostReadConfidenceFloor: config.hostReadConfidenceFloor,
+            postRollGuardSeconds: config.postRollGuardSeconds
+        )
         // transcriptQuality is the same for every span (derived from the full atom array),
         // so compute it once outside the loop rather than redundantly per span.
         let transcriptQuality = estimateTranscriptQuality(atoms: atomEvidence)
