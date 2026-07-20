@@ -68,6 +68,24 @@ struct SpecialistVerdict: Sendable, Codable, Equatable {
         self.confidence = confidence.isNaN ? 0.0 : min(1.0, max(0.0, confidence))
         self.adClass = adClass
     }
+
+    /// Custom decode so the `0...1` invariant holds on the READ side too, not
+    /// just at construction. The synthesized `Decodable` assigns each property
+    /// verbatim, which would let a persisted / hand-edited / legacy payload
+    /// carrying `confidence: 1.5` (or a negative) slip past the clamp — exactly
+    /// the "downstream threshold comparison" this type promises to protect, and
+    /// the shadow payload's whole point is that a Phase B2+ harness decodes it.
+    /// Routing decode through the designated init keeps both paths total. (NaN /
+    /// ±∞ can't arrive via standard JSON, so this only closes the finite
+    /// out-of-range hole; `Encodable` stays synthesized and round-trips.)
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            isAd: try container.decode(Bool.self, forKey: .isAd),
+            confidence: try container.decode(Double.self, forKey: .confidence),
+            adClass: try container.decodeIfPresent(String.self, forKey: .adClass)
+        )
+    }
 }
 
 // MARK: - SpecialistAdClassifier

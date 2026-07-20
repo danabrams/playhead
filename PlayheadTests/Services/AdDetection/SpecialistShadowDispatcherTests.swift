@@ -269,6 +269,21 @@ struct SpecialistShadowDispatcherTests {
         #expect(try JSONDecoder().decode(SpecialistVerdict.self, from: data) == fromNaN)
     }
 
+    @Test("decode clamps out-of-range confidence (read side is total too)")
+    func decodeClampsConfidence() throws {
+        // A persisted / hand-edited / legacy payload carrying a finite
+        // out-of-range confidence must decode clamped — the synthesized
+        // `Decodable` would assign it verbatim and bust the `0...1` invariant.
+        let over = #"{"isAd":true,"confidence":1.5,"adClass":"dai"}"#.data(using: .utf8)!
+        #expect(try JSONDecoder().decode(SpecialistVerdict.self, from: over).confidence == 1.0)
+
+        let under = #"{"isAd":false,"confidence":-0.25}"#.data(using: .utf8)!
+        let decodedUnder = try JSONDecoder().decode(SpecialistVerdict.self, from: under)
+        #expect(decodedUnder.confidence == 0.0)
+        // adClass absent decodes to nil (round-trip parity with synthesized encode).
+        #expect(decodedUnder.adClass == nil)
+    }
+
     // MARK: - Default sink path
 
     @Test("default os_log sink dispatches without trapping (verdict returned)")
