@@ -708,8 +708,11 @@ struct AdDetectionConfig: Sendable {
         // acoustic ownership pass is retired to shadow/eval. Enabling BOTH would
         // let the acoustic pass rewrite+persist `.spliceSlot` widths and then the
         // rediff pass re-rewrite them `.rediffSlot` on top — silent double-
-        // ownership. Fail loudly at construction instead (both default OFF, so
-        // this never fires in production or any current config/test).
+        // ownership. Fail loudly at construction instead. Post Gate 1
+        // (playhead-lq6f) rediff defaults ON, so any site that enables the
+        // acoustic splice channel MUST pass `rediffSlotOwnershipEnabled: false`
+        // explicitly (splice still defaults OFF, so the default config never
+        // fires this; the splice test helpers all pass the explicit false).
         precondition(
             !(spliceSlotOwnershipEnabled && rediffSlotOwnershipEnabled),
             "spliceSlotOwnershipEnabled and rediffSlotOwnershipEnabled are mutually-exclusive width setters — enable at most one (rediff is the sole production width setter, playhead-xsdz.29)"

@@ -2467,7 +2467,10 @@ private func makeRediffTreatmentConfig() -> AdDetectionConfig {
         userCorrectionReadSideEnabled: base.userCorrectionReadSideEnabled,
         stingerRefinementEnabled: base.stingerRefinementEnabled,
         lexicalAnchorRefinementEnabled: base.lexicalAnchorRefinementEnabled,
-        selfPromoSuppressionEnabled: base.selfPromoSuppressionEnabled
+        selfPromoSuppressionEnabled: base.selfPromoSuppressionEnabled,
+        sustainedMusicProposerEnabled: base.sustainedMusicProposerEnabled,
+        musicOffsetLexicalGateEnabled: base.musicOffsetLexicalGateEnabled,
+        musicOffsetFMRecoveryEnabled: base.musicOffsetFMRecoveryEnabled
     )
 }
 
@@ -3223,9 +3226,9 @@ private extension PipelineDumpLiveTests {
         // AND an injected B-side provider: post the Gate 1 flip (playhead-lq6f)
         // `.default` carries the ownership flag ON, so the flag alone no longer
         // separates the lanes — the provider does. The baseline lane injects no
-        // provider, so it never writes the row and its behavior is unchanged
-        // from pre-flip (the in-app rediff pass no-ops without a provider, so
-        // an A-side capture would be unobservable dead weight there anyway).
+        // provider, so it never writes the row and the rediff pass stays the
+        // same no-op it was pre-flip (an A-side capture would be unobservable
+        // dead weight there — the pass no-ops without a provider).
         // `sourceAudioIdentity` MUST equal the asset's `assetFingerprint` (identity
         // gate (b)); the fingerprints are stamped with the current
         // `ChromaFingerprinter.algorithmVersion` (gate (a)). This is the SAME static
@@ -4334,9 +4337,11 @@ extension PipelineDumpHermeticTests {
 
     @Test("AdDetectionConfig.default carries the production state the dump expects")
     func productionConfigStateIsHeld() {
-        // The dump's contract: production `.default`, all activation flags
-        // off, FM full, chapter signal off. If any of these regress, the
-        // dump's "production" claim is a lie — fail loud here on the sim
+        // The dump's contract: production `.default` — FM full, chapter
+        // signal off, the still-experimental activation flags OFF, and the
+        // shipped-ON flags (stinger, self-promo, and the Gate 1 quartet
+        // below) pinned ON. If any of these regress, the dump's
+        // "production" claim is a lie — fail loud here on the sim
         // so the env-gated Catalyst run can't silently dump a different
         // shape than the orchestrator expects.
         let cfg = AdDetectionConfig.default
