@@ -442,11 +442,16 @@ actor AnalysisJobRunner {
         // COST BOUND (xsdz.36): capture is skipped beyond
         // `RediffActivation.maxASideCaptureDurationSeconds` — the resample
         // transient is ~159 MB per decoded hour (chunk-aware walk; see
-        // EpisodeFingerprintCapture). Over-cap episodes stay rediff-eligible
-        // through the byte-first differ (no chroma A-side needed there).
+        // EpisodeFingerprintCapture). NOTE (R4): skipping capture removes the
+        // episode from rediff re-fetch candidacy ENTIRELY — candidacy is
+        // keyed on a current-version A-side stream row (see
+        // `RediffActivation.maxASideCaptureDurationSeconds` for the full
+        // consequence chain) — so over-cap episodes get no rediff marks at
+        // all. The log line below must stay truthful for dogfood coverage
+        // accounting.
         if rediffASideCaptureEnabled || EpisodeFingerprintCapture.captureEnabledByDefault {
             if totalAudio > RediffActivation.maxASideCaptureDurationSeconds {
-                logger.info("Episode fingerprint capture skipped for asset \(assetId): duration \(Int(totalAudio))s exceeds the \(Int(RediffActivation.maxASideCaptureDurationSeconds))s capture cap (byte-differ-only rediff)")
+                logger.info("Episode fingerprint capture skipped for asset \(assetId): duration \(Int(totalAudio))s exceeds the \(Int(RediffActivation.maxASideCaptureDurationSeconds))s capture cap — episode forfeits rediff re-fetch candidacy")
             } else {
                 do {
                     // Skip (rather than persist a misleading empty identity) when

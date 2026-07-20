@@ -40,11 +40,19 @@ enum RediffActivation {
     /// Upper bound on episode duration for the A-side chroma capture. The
     /// capture's transient cost is ~159 MB of 11025 Hz PCM per decoded hour
     /// (see `EpisodeFingerprintCapture.captureAndPersist`); beyond ~3 h the
-    /// transient risks jetsam on top of the pipeline's own peak. Episodes
-    /// longer than this simply skip the A-side stream — they remain rediff
-    /// candidates through the BYTE-first differ (xsdz.57, the PRIMARY path,
-    /// which reads the played file directly and needs no chroma A-side);
-    /// only the chroma FALLBACK (re-encode CDNs) is forfeited.
+    /// transient risks jetsam on top of the pipeline's own peak.
+    ///
+    /// COVERAGE CONSEQUENCE (R4): skipping capture forfeits the ENTIRE
+    /// rediff lane for the episode — not just the chroma fallback. Re-fetch
+    /// candidacy is keyed on the captured A-side stream
+    /// (`AnalysisStore.fetchRediffCandidateSeeds` selects only assets with a
+    /// current-version `episode_fingerprints` row), so an over-cap episode is
+    /// never enumerated for B-side re-fetch and the byte-first differ
+    /// (xsdz.57) never receives a B-copy for it, even though that differ
+    /// itself needs no chroma A-side. Admitting over-cap episodes would
+    /// require a durable no-capture candidacy marker (a deliberate
+    /// persistence-design addition — deferred, see the R4 review note on
+    /// playhead-xsdz.36).
     static let maxASideCaptureDurationSeconds: TimeInterval = 3 * 60 * 60
 
     /// Matching bound for the B-side PCM decode in the staging provider's

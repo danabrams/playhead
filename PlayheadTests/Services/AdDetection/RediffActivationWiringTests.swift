@@ -391,7 +391,10 @@ struct RediffActivationWiringTests {
             #expect(record.sourceAudioIdentity == "fp-\(assetId)")
         }
 
-        // ON but over the duration cap: capture skipped (byte-differ-only).
+        // ON but over the duration cap: capture skipped. NOTE (R4): with no
+        // A-side stream row the episode also drops out of re-fetch candidacy
+        // entirely (candidacy = current-version row in `episode_fingerprints`)
+        // — see `RediffActivation.maxASideCaptureDurationSeconds`.
         do {
             let assetId = "asset-cap-long"
             let dir = try makeTempDir(prefix: "RediffActCap-long")
