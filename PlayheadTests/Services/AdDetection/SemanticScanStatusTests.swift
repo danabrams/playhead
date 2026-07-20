@@ -115,5 +115,51 @@ struct SemanticScanStatusTests {
         #expect(SemanticScanStatus.from(error: CancellationError()) == .cancelled)
         #expect(SemanticScanStatus.from(error: NSError(domain: "PlayheadTests", code: 7)) == .failedTransient)
     }
+
+    // playhead-l3r2: iOS/macOS 27 throws the NEW `LanguageModelError` type
+    // (not the legacy `LanguageModelSession.GenerationError`). Before the fix,
+    // `from(error:)` only cast to `GenerationError`, so every iOS-27 refusal
+    // fell through to `.failedTransient` — silently disarming the
+    // permissive-fallback (keyed on `.refusal`) and smart-shrink retry (keyed
+    // on `.exceededContextWindow`). These are the exact recovery mechanisms
+    // that ship to the user's iOS-27 device. Every assertion here goes through
+    // `from(error:)` (the production seam), so it fails at runtime on the
+    // unfixed mapping.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    @Test("language model error (iOS 27) mapping covers all published cases via from(error:)")
+    func languageModelErrorMappingViaFromError() {
+        let expectations: [(LanguageModelError, SemanticScanStatus)] = [
+            (.contextSizeExceeded(.init(contextSize: 4096, tokenCount: 8192, debugDescription: "test")), .exceededContextWindow),
+            (.rateLimited(.init(resetDate: nil, debugDescription: "test")), .rateLimited),
+            (.guardrailViolation(.init(debugDescription: "test")), .guardrailViolation),
+            (.refusal(.init(explanation: "test", debugDescription: "test")), .refusal),
+            (.unsupportedGenerationGuide(.init(schemaName: "AdSchema", debugDescription: "test")), .decodingFailure),
+            (.unsupportedLanguageOrLocale(.init(languageCode: Locale.LanguageCode("fr"), debugDescription: "test")), .unsupportedLocale),
+            (.unsupportedTranscriptContent(.init(unsupportedContent: [], debugDescription: "test")), .decodingFailure),
+            (.unsupportedCapability(.init(capability: .reasoning, debugDescription: "test")), .unavailable),
+            (.timeout(.init(debugDescription: "test")), .failedTransient),
+        ]
+
+        for (error, expected) in expectations {
+            // Direct mapping seam.
+            #expect(SemanticScanStatus.from(languageModelError: error) == expected)
+            // Production seam — the one that was disarmed on iOS 27.
+            #expect(SemanticScanStatus.from(error: error) == expected)
+        }
+    }
+
+    // playhead-l3r2: guard against a regression in the reverse direction — the
+    // legacy iOS-26 `GenerationError` path must keep mapping refusal and
+    // context-overflow correctly even after the new `LanguageModelError` cast
+    // is added ahead of it in `from(error:)`.
+    @available(iOS 26.0, *)
+    @Test("legacy generation-error refusal + context overflow still map after the iOS-27 fix")
+    func legacyGenerationErrorStillMapsAfterFix() {
+        let context = LanguageModelSession.GenerationError.Context(debugDescription: "test")
+        let refusal = LanguageModelSession.GenerationError.Refusal(transcriptEntries: [])
+
+        #expect(SemanticScanStatus.from(error: LanguageModelSession.GenerationError.refusal(refusal, context)) == .refusal)
+        #expect(SemanticScanStatus.from(error: LanguageModelSession.GenerationError.exceededContextWindowSize(context)) == .exceededContextWindow)
+    }
 #endif
 }
