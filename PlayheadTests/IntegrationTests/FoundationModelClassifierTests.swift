@@ -4541,6 +4541,81 @@ struct FoundationModelClassifierTests {
         #endif
     }
 
+    // playhead-cle1: on iOS 27, refusals throw `LanguageModelError.refusal` —
+    // a DIFFERENT `Refusal` struct than the legacy `GenerationError.Refusal`.
+    // Before the fix the refinement refusal fetcher cast ONLY to the legacy
+    // type, so on iOS 27 the model's refusal explanation was silently dropped
+    // (the diagnostic never fired at all). This drives a
+    // `LanguageModelError.refusal` end-to-end through `refinePassB` and asserts
+    // the explanation is now captured (via the iOS-27 override seam) and the
+    // reflection dump names the iOS-27 `Refusal`. Runs only on iOS 27+ (the
+    // iPhone 17 simulator), where the new error type exists at runtime.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    @Test("refinement refusal explanation is extracted from iOS-27 LanguageModelError.refusal")
+    func refinementRefusalExplanationExtractedFromLanguageModelErrorRefusal() async throws {
+        #if canImport(FoundationModels)
+        let captureBox = RefinementRefusalDiagnosticCaptureBox()
+        let previousObserver = FoundationModelClassifier.refinementRefusalDiagnosticObserver
+        let previousFetcher = FoundationModelClassifier.languageModelRefusalExplanationFetcherOverride
+        FoundationModelClassifier.refinementRefusalDiagnosticObserver = { diagnostic in
+            captureBox.append(diagnostic)
+        }
+        FoundationModelClassifier.languageModelRefusalExplanationFetcherOverride = { _ in
+            "ios27-refusal-explanation"
+        }
+        defer {
+            FoundationModelClassifier.refinementRefusalDiagnosticObserver = previousObserver
+            FoundationModelClassifier.languageModelRefusalExplanationFetcherOverride = previousFetcher
+        }
+
+        let segments = [
+            makeSegment(index: 1, startTime: 5, endTime: 10, text: "First sponsor talk."),
+            makeSegment(index: 2, startTime: 10, endTime: 15, text: "Visit example.com today.")
+        ]
+        let zoomPlan = RefinementWindowPlan(
+            windowIndex: 0,
+            sourceWindowIndex: 0,
+            lineRefs: [1, 2],
+            focusLineRefs: [1, 2],
+            focusClusters: [[1, 2]],
+            prompt: "Refine ad spans.\nL1> \"First sponsor talk.\"\nL2> \"Visit example.com today.\"",
+            promptTokenCount: 4,
+            startTime: 5,
+            endTime: 15,
+            stopReason: .minimumSpan,
+            promptEvidence: []
+        )
+        let recorder = RuntimeRecorder(
+            contextSize: 1024,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementFailures: [.languageModelRefusal(explanation: "ios27-refusal-explanation")]
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: [zoomPlan],
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+
+        let detail = try #require(captureBox.snapshot().first)
+        #expect(output.status == .refusal)
+        // The explanation, dropped before the fix, is now extracted from the
+        // iOS-27 `LanguageModelError.refusal`.
+        #expect(detail.refusalExplanation == "ios27-refusal-explanation")
+        // `String(reflecting:)` on the iOS-27 `Refusal` value names the type.
+        #expect(detail.recordReflect.contains("Refusal"))
+        #else
+        return
+        #endif
+    }
+
     // bd-fmfb: when a refinement-pass refusal fires AND a feedbackStore is
     // wired in, the classifier must invoke `Session.logFeedback` and hand
     // the resulting Data to the store BEFORE the per-window session goes
@@ -5686,6 +5761,10 @@ private enum RuntimeFailure: Sendable {
     case exceededContextWindow
     case exceededContextWindowWithDebugDescription(String)
     case refusal
+    // playhead-cle1: iOS-27 refusal thrown as `LanguageModelError.refusal`
+    // (a DIFFERENT `Refusal` struct than the legacy `GenerationError.Refusal`).
+    // The associated value is the model-generated explanation text.
+    case languageModelRefusal(explanation: String)
     case decodingFailure
     case guardrailViolation
     case rateLimited
@@ -5698,6 +5777,8 @@ private enum RuntimeFailure: Sendable {
             return description
         case .refusal:
             return "runtime-failure-refusal"
+        case .languageModelRefusal:
+            return "runtime-failure-languageModelRefusal"
         case .decodingFailure:
             return "runtime-failure-decodingFailure"
         case .guardrailViolation:
@@ -5709,6 +5790,13 @@ private enum RuntimeFailure: Sendable {
 
     var error: Error {
         #if canImport(FoundationModels)
+        // playhead-cle1: the iOS-27-only `LanguageModelError.refusal` shape.
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *),
+           case let .languageModelRefusal(explanation) = self {
+            return LanguageModelError.refusal(
+                .init(explanation: explanation, debugDescription: defaultDebugDescription)
+            )
+        }
         if #available(iOS 26.0, *) {
             let context = LanguageModelSession.GenerationError.Context(
                 debugDescription: defaultDebugDescription
@@ -5717,6 +5805,11 @@ private enum RuntimeFailure: Sendable {
             case .exceededContextWindow, .exceededContextWindowWithDebugDescription:
                 return LanguageModelSession.GenerationError.exceededContextWindowSize(context)
             case .refusal:
+                let refusal = LanguageModelSession.GenerationError.Refusal(transcriptEntries: [])
+                return LanguageModelSession.GenerationError.refusal(refusal, context)
+            case .languageModelRefusal:
+                // iOS 26 fallback (LanguageModelError unavailable): use the
+                // legacy refusal so the enum's `.error` stays total.
                 let refusal = LanguageModelSession.GenerationError.Refusal(transcriptEntries: [])
                 return LanguageModelSession.GenerationError.refusal(refusal, context)
             case .decodingFailure:

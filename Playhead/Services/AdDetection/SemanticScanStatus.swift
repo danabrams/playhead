@@ -85,6 +85,26 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
            let languageModelError = error as? LanguageModelError {
             return from(languageModelError: languageModelError)
         }
+        // playhead-cle1: iOS/macOS 27 also split THREE responsibilities the
+        // legacy `GenerationError` carried into SEPARATE new error types that
+        // `LanguageModelError` does NOT cover. Each is bridged by its own
+        // helper below. The casts are for disjoint types, so ordering among
+        // them is immaterial; they all precede the legacy iOS-26 cast so the
+        // iOS-27 shapes win on iOS 27.
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *),
+           let parsingError = error as? GeneratedContent.ParsingError {
+            return from(parsingError: parsingError)
+        }
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *),
+           let sessionError = error as? LanguageModelSession.Error {
+            return from(sessionError: sessionError)
+        }
+        // `SystemLanguageModel.Error` is unavailable on watchOS, so its guard
+        // omits watchOS (matching the SDK type's own availability).
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *),
+           let systemModelError = error as? SystemLanguageModel.Error {
+            return from(systemModelError: systemModelError)
+        }
         if #available(iOS 26.0, *),
            let generationError = error as? LanguageModelSession.GenerationError {
             return from(generationError: generationError)
@@ -142,13 +162,17 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
     /// Cases with no legacy `GenerationError` analog are documented inline.
     ///
     /// Three legacy `GenerationError` cases have NO `LanguageModelError`
-    /// analog — iOS 27 moved them to *separate* new error types that this
-    /// seam does not yet bridge (follow-up: playhead-cle1), so on iOS 27 they
-    /// currently fall through `from(error:)` to `.failedTransient`:
-    ///   - `decodingFailure` → `GeneratedContent.ParsingError`.
-    ///   - `concurrentRequests` → `LanguageModelSession.Error.concurrentRequests`.
+    /// analog — iOS 27 moved them to *separate* new error types. As of
+    /// playhead-cle1 those are bridged by the dedicated helpers below (each
+    /// wired into `from(error:)`), so they no longer fall through to
+    /// `.failedTransient` on iOS 27:
+    ///   - `decodingFailure` → `GeneratedContent.ParsingError` →
+    ///     `from(parsingError:)`.
+    ///   - `concurrentRequests` → `LanguageModelSession.Error.concurrentRequests`
+    ///     → `from(sessionError:)`.
     ///   - `assetsUnavailable` → `SystemLanguageModel.Error.assetsUnavailable`
-    ///     (a thrown error on iOS 27), in addition to the pre-flight
+    ///     (a thrown error on iOS 27) → `from(systemModelError:)`, in addition
+    ///     to the pre-flight
     ///     `SystemLanguageModel.Availability.unavailable(.modelNotReady)`
     ///     signal still handled by `from(availability:)`.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
@@ -181,6 +205,61 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
             // No legacy analog. Transient by nature — allow the standard
             // transient retry.
             .failedTransient
+        @unknown default:
+            .failedTransient
+        }
+    }
+
+    /// iOS/macOS 27 moved parse/decode failures out of
+    /// `GenerationError.decodingFailure` / `.unsupportedGuide` and into the
+    /// top-level `GeneratedContent.ParsingError` (a *struct*, not an enum —
+    /// there is nothing to switch on). Maps to `.decodingFailure` so the
+    /// `simplifySchemaAndRetryOnce` recovery and the refinement graceful-
+    /// abandon path stay armed on iOS 27, exactly as the legacy
+    /// `GenerationError.decodingFailure` → `.decodingFailure` mapping does on
+    /// iOS 26. playhead-cle1.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    static func from(parsingError: GeneratedContent.ParsingError) -> SemanticScanStatus {
+        .decodingFailure
+    }
+
+    /// iOS/macOS 27 introduced `LanguageModelSession.Error` for session-level
+    /// failures that the legacy `GenerationError` either carried differently
+    /// or did not model at all. playhead-cle1.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    static func from(sessionError: LanguageModelSession.Error) -> SemanticScanStatus {
+        switch sessionError {
+        case .concurrentRequests:
+            // Matches the legacy `GenerationError.concurrentRequests` →
+            // `.rateLimited` mapping (and its `backoffAndRetry` recovery).
+            .rateLimited
+        case .transcriptMutationWhileResponding:
+            // PRODUCT DECISION (playhead-cle1 — DAN-OVERRIDABLE): this case has
+            // NO legacy `GenerationError` analog and no dedicated
+            // `SemanticScanStatus`. It signals that the session's transcript
+            // was mutated while a response was in flight — a transient
+            // client-side race with no special recovery — so it takes the
+            // ordinary transient retry (`.retryTransiently`). If a distinct
+            // status/recovery is ever wanted, change it here.
+            .failedTransient
+        @unknown default:
+            .failedTransient
+        }
+    }
+
+    /// iOS/macOS 27 can now THROW model-asset unavailability as
+    /// `SystemLanguageModel.Error.assetsUnavailable`, in addition to the
+    /// pre-flight `SystemLanguageModel.Availability.unavailable(.modelNotReady)`
+    /// signal that `from(availability:)` still handles. Maps to
+    /// `.assetsUnavailable` so the `deferUntilAssetsReady` recovery stays
+    /// armed. `SystemLanguageModel.Error` is unavailable on watchOS, so this
+    /// helper's availability omits watchOS (matching the SDK type).
+    /// playhead-cle1.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    static func from(systemModelError: SystemLanguageModel.Error) -> SemanticScanStatus {
+        switch systemModelError {
+        case .assetsUnavailable:
+            .assetsUnavailable
         @unknown default:
             .failedTransient
         }
