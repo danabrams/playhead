@@ -75,7 +75,12 @@ struct SpliceSlotOwnershipEndToEndTests {
             suppressionThreshold: 0.25, hotPathLookahead: 90.0,
             detectorVersion: "test-detection-v1", fmBackfillMode: .off,
             audioForensicsEnabled: true,
-            spliceSlotOwnershipEnabled: slotOwnership
+            spliceSlotOwnershipEnabled: slotOwnership,
+            // playhead-lq6f (Ship Gate 1): rediff ownership now defaults ON;
+            // explicitly OFF so the slotOwnership=true arms keep testing the
+            // acoustic splice channel in isolation (mutually-exclusive width
+            // setters — the config init preconditions on it).
+            rediffSlotOwnershipEnabled: false
         )
         return AdDetectionService(
             store: store, classifier: RuleBasedClassifier(),

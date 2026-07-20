@@ -66,7 +66,12 @@ private func makeService(
         detectorVersion: "test-detection-v1",
         fmBackfillMode: .off,
         spliceSlotOwnershipEnabled: ownership,
-        spliceSlotShadowEnabled: shadow
+        spliceSlotShadowEnabled: shadow,
+        // playhead-lq6f (Ship Gate 1): rediff ownership now defaults ON;
+        // explicitly OFF here so the ownership=true arms keep testing the
+        // acoustic splice channel in isolation (the two are mutually-
+        // exclusive width setters — the config init preconditions on it).
+        rediffSlotOwnershipEnabled: false
     )
     return AdDetectionService(
         store: store,

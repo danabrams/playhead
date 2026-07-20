@@ -438,16 +438,24 @@ struct AdDetectionConfig: Sendable {
     let spliceSlotShadowEnabled: Bool
 
     /// playhead-xsdz.29: master flag for the post-decode REDIFF slot OWNERSHIP
-    /// pass (the double-fetch width oracle). When `false` (the production
-    /// default), `runBackfill` never invokes the rediff pass — no store read for
-    /// the A-side fingerprints, no B-side fetch, no differ, no span rewrite, no
-    /// `.rediffSlot` provenance — so the pipeline OUTPUT is byte-identical to
-    /// pre-xsdz.29. The rediff pass ALSO no-ops when no `RediffBSideProvider` is
-    /// injected (the production case today — the re-fetch scheduler is xsdz.28),
-    /// so flipping this flag alone changes nothing until a provider exists.
+    /// pass (the double-fetch width oracle). When `true` (the production
+    /// default since Dan's 2026-07-19 Ship Gate 1 enablement, playhead-lq6f),
+    /// a qualifying rediff of the played A-side against a re-fetched B-side
+    /// owns an ad span's WIDTH (transcript/FM keep owning PRESENCE) and stamps
+    /// `.rediffSlot` provenance. Rediff presence measured 97.8% on the
+    /// gold-audited corpus; this is the MARK-ONLY rung of the xsdz.36 staged
+    /// ladder — width marks/banners only, no auto-skip behavior change.
+    ///
+    /// When `false`, `runBackfill` never invokes the rediff pass — no store
+    /// read for the A-side fingerprints, no B-side fetch, no differ, no span
+    /// rewrite, no `.rediffSlot` provenance — so the pipeline OUTPUT is
+    /// byte-identical to pre-xsdz.29. The rediff pass ALSO no-ops when no
+    /// `RediffBSideProvider` is injected (so the flag alone changes nothing
+    /// until a provider is wired — the re-fetch scheduler is xsdz.28).
     /// Rediff is the SOLE production width setter (contract 2026-07-07); the
     /// acoustic `spliceSlotOwnershipEnabled` path is a separate, mutually-
-    /// exclusive channel and must not be ON at the same time.
+    /// exclusive channel and must not be ON at the same time (splice stays
+    /// `false` in production, so the init precondition holds).
     let rediffSlotOwnershipEnabled: Bool
 
     /// playhead-xsdz.29: master flag for the OWNERSHIP-OFF rediff SHADOW pass.
@@ -457,8 +465,11 @@ struct AdDetectionConfig: Sendable {
     /// `rediffslot.shadow` breadcrumb per span, and records structured rows to an
     /// injected observer — WITHOUT applying any rewrite (no `.rediffSlot`
     /// provenance, no re-persist). Default OFF; ON only in dogfood-capture
-    /// builds. Independent of the acoustic `spliceSlotShadowEnabled` (both can
-    /// shadow at once, to their OWN observers). Both flags OFF ⇒ byte-identical.
+    /// builds. NOTE (post Gate 1, playhead-lq6f): `rediffSlotOwnershipEnabled`
+    /// now defaults ON, so a config that wants the shadow pass must ALSO pass
+    /// ownership explicitly `false` — shadow-ON alone is silent by
+    /// construction. Independent of the acoustic `spliceSlotShadowEnabled`
+    /// (both can shadow at once, to their OWN observers).
     let rediffSlotShadowEnabled: Bool
 
     /// playhead-xsdz.34: master flag for the user-correction READ side (the
@@ -543,56 +554,59 @@ struct AdDetectionConfig: Sendable {
     let selfPromoSuppressionEnabled: Bool
 
     /// playhead-ncv6: master kill switch for the sustained-music-offset
-    /// PROPOSER (playhead-t1py / playhead-xtpf). When `false` (the production
-    /// default), `runBackfill` threads `false` into
-    /// `RegionShadowPhase.Input.sustainedMusicProposerEnabled`, the proposer is
-    /// never called, no `.sustainedMusic`-origin region is seeded, and the
-    /// pipeline output is byte-identical to pre-ncv6 behaviour. Flip to `true`
-    /// to enable: `RegionShadowPhase.run` then scans the episode's feature
-    /// windows for sustained-music runs and seeds atom-range-WIDE
-    /// `.sustainedMusic`-origin regions, which can only ever decode to
-    /// `.markOnly` (music-only provenance never auto-skips — see
-    /// `DecisionMapper.isMusicOnlyProvenance`).
+    /// PROPOSER (playhead-t1py / playhead-xtpf). When `true` (the production
+    /// default since Dan's 2026-07-19 Ship Gate 1 enablement, playhead-lq6f),
+    /// `runBackfill` threads `true` into
+    /// `RegionShadowPhase.Input.sustainedMusicProposerEnabled`:
+    /// `RegionShadowPhase.run` scans the episode's feature windows for
+    /// sustained-music runs and seeds atom-range-WIDE `.sustainedMusic`-origin
+    /// regions, which can only ever decode to `.markOnly` (music-only
+    /// provenance never auto-skips — see
+    /// `DecisionMapper.isMusicOnlyProvenance`). Enablement was measured via
+    /// the certified config path at 47.5% ad-width coverage / 91.7% true
+    /// precision / 6.0% false-banner rate — banner-only, no skip behavior
+    /// change.
     ///
-    /// Gated OFF by default per the OFF-by-default mandate: main stays
-    /// behavior-neutral and the proposer is never wired into a production
-    /// config or A/B arm until the flag-ON fire-rate measurement clears it.
-    /// The proposer stays fully built and unit-tested, just inert in
-    /// production.
+    /// When `false`, the proposer is never called, no `.sustainedMusic`-origin
+    /// region is seeded, and the pipeline output is byte-identical to
+    /// pre-ncv6 behaviour.
     let sustainedMusicProposerEnabled: Bool
 
     /// playhead-ncv6: master kill switch for the lexical ad-cue GATE
     /// (playhead-eki3) over the sustained-music-offset proposer's music-ONLY
-    /// spans. When `false` (the production default), `runBackfill` threads
-    /// `false` into `RegionShadowPhase.Input.musicOffsetLexicalGateEnabled`,
-    /// built proposals pass through verbatim, and the pipeline output is
-    /// byte-identical to pre-ncv6 behaviour. Flip to `true` to enable: every
-    /// UNCORROBORATED `.sustainedMusic`-only region whose onset window carries
-    /// NO third-party ad-cue is dropped (the cue-less content / credits /
-    /// theme false-banner class). INDEPENDENT of
+    /// spans. When `true` (the production default since Dan's 2026-07-19
+    /// Ship Gate 1 enablement, playhead-lq6f — part of the certified config
+    /// that measured 47.5% coverage / 91.7% true precision / 6.0%
+    /// false-banner), every UNCORROBORATED `.sustainedMusic`-only region
+    /// whose onset window carries NO third-party ad-cue is dropped (the
+    /// cue-less content / credits / theme false-banner class). INDEPENDENT of
     /// `sustainedMusicProposerEnabled`: the gate only ever acts on
     /// `.sustainedMusic`-origin proposals, so gate-on / proposer-off is a safe
     /// no-op. See `MusicOffsetLexicalGate`.
     ///
-    /// Gated OFF by default per the OFF-by-default mandate (same invariant
-    /// `sustainedMusicProposerEnabled` holds).
+    /// When `false`, `runBackfill` threads `false` into
+    /// `RegionShadowPhase.Input.musicOffsetLexicalGateEnabled`, built
+    /// proposals pass through verbatim, and the pipeline output is
+    /// byte-identical to pre-ncv6 behaviour.
     let musicOffsetLexicalGateEnabled: Bool
 
     /// playhead-ncv6: master kill switch for the FM RECOVERY pass
     /// (playhead-r2vz) over the spans the lexical gate would SUPPRESS. When
-    /// `false` (the production default), `runBackfill` threads `false` into
-    /// `RegionShadowPhase.Input.musicOffsetFMRecoveryEnabled` and the
-    /// partition-and-recover branch is inert — gate-on drops the suppressed
-    /// set, gate-off passes proposals verbatim, byte-identical to pre-ncv6
-    /// behaviour. Flip to `true` to enable: when
+    /// `true` (the production default since Dan's 2026-07-19 Ship Gate 1
+    /// enablement, playhead-lq6f — part of the certified config that measured
+    /// 47.5% coverage / 91.7% true precision / 6.0% false-banner): when
     /// `musicOffsetLexicalGateEnabled` is ALSO on AND an
     /// `fmRegionRecoveryDispatcher` is wired AND FM is available, each
     /// gate-suppressed region gets one targeted FM look and is re-admitted iff
     /// the classifier returns `.ad`. Re-admitted regions carry no FM
-    /// origin/evidence, so they can only ever decode to `.markOnly`.
+    /// origin/evidence, so they can only ever decode to `.markOnly` —
+    /// banner-only, no skip behavior change.
     ///
-    /// Gated OFF by default per the OFF-by-default mandate (same invariant
-    /// `musicOffsetLexicalGateEnabled` holds).
+    /// When `false`, `runBackfill` threads `false` into
+    /// `RegionShadowPhase.Input.musicOffsetFMRecoveryEnabled` and the
+    /// partition-and-recover branch is inert — gate-on drops the suppressed
+    /// set, gate-off passes proposals verbatim, byte-identical to pre-ncv6
+    /// behaviour.
     let musicOffsetFMRecoveryEnabled: Bool
 
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
@@ -679,15 +693,15 @@ struct AdDetectionConfig: Sendable {
         spanFinalizerEnabled: Bool = false,
         spliceSlotOwnershipEnabled: Bool = false,
         spliceSlotShadowEnabled: Bool = false,
-        rediffSlotOwnershipEnabled: Bool = false,
+        rediffSlotOwnershipEnabled: Bool = true,
         rediffSlotShadowEnabled: Bool = false,
         userCorrectionReadSideEnabled: Bool = false,
         stingerRefinementEnabled: Bool = true,
         lexicalAnchorRefinementEnabled: Bool = false,
         selfPromoSuppressionEnabled: Bool = true,
-        sustainedMusicProposerEnabled: Bool = false,
-        musicOffsetLexicalGateEnabled: Bool = false,
-        musicOffsetFMRecoveryEnabled: Bool = false
+        sustainedMusicProposerEnabled: Bool = true,
+        musicOffsetLexicalGateEnabled: Bool = true,
+        musicOffsetFMRecoveryEnabled: Bool = true
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -796,15 +810,15 @@ struct AdDetectionConfig: Sendable {
         spanFinalizerEnabled: false,
         spliceSlotOwnershipEnabled: false,
         spliceSlotShadowEnabled: false,
-        rediffSlotOwnershipEnabled: false,
+        rediffSlotOwnershipEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1) — rediff width marks, presence 97.8% gold-audited; the mark-only rung of the xsdz.36 ladder
         rediffSlotShadowEnabled: false,
         userCorrectionReadSideEnabled: false,  // playhead-xsdz.34: read side ships OFF; xsdz.36 flips it after the corpus A/B
         stingerRefinementEnabled: true,
         lexicalAnchorRefinementEnabled: false,
         selfPromoSuppressionEnabled: true,  // playhead-fl4j: flipped ON 2026-07-16 — attention→verification rework measured 0/70 false-fires on real ads
-        sustainedMusicProposerEnabled: false,  // playhead-ncv6: t1py proposer ships OFF; enablement is a separate product decision after the fire-rate measurement
-        musicOffsetLexicalGateEnabled: false,  // playhead-ncv6: eki3 gate ships OFF (same measurement gate as the proposer)
-        musicOffsetFMRecoveryEnabled: false  // playhead-ncv6: r2vz recovery ships OFF (same measurement gate as the proposer)
+        sustainedMusicProposerEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1) — certified config measured 47.5% cov / 91.7% true prec / 6.0% false-banner; markOnly-only
+        musicOffsetLexicalGateEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1, same certified measurement as the proposer)
+        musicOffsetFMRecoveryEnabled: true  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1, same certified measurement as the proposer)
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -3570,12 +3584,13 @@ actor AdDetectionService {
         // here stamps an FM origin/evidence onto a restored region.
         //
         // playhead-ncv6: the three coverage-program flags (t1py proposer,
-        // eki3 gate, r2vz recovery) are now threaded from `AdDetectionConfig`
-        // into the `Input` below. All three default to `false` in
-        // `AdDetectionConfig.default` and in the config init, so a caller that
-        // does not opt in constructs an `Input` byte-identical to the
-        // pre-ncv6 default-parameter path. Enablement is a separate product
-        // decision; no Settings UI reads these flags.
+        // eki3 gate, r2vz recovery) are threaded from `AdDetectionConfig`
+        // into the `Input` below. All three default to `true` in
+        // `AdDetectionConfig.default` and in the config init since Dan's
+        // 2026-07-19 Ship Gate 1 enablement (playhead-lq6f) — markOnly-only,
+        // no skip behavior change. A caller that wants the pre-ncv6
+        // byte-identical path must pass all three explicitly `false`.
+        // No Settings UI reads these flags.
         let fmRegionRecoveryClassifier: FMRegionRecoveryClassifier?
         if let dispatcher = fmRegionRecoveryDispatcher, await canUseFoundationModelsProvider() {
             fmRegionRecoveryClassifier = FMRegionRecoveryClassifier { region, atoms in
