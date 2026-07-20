@@ -41,10 +41,11 @@ struct SpecialistVerdict: Sendable, Codable, Equatable {
     let isAd: Bool
 
     /// Model confidence in the closed interval `0...1`. `init` clamps
-    /// out-of-range inputs to be defensive: a model that emits a logit-ish
-    /// value outside `[0, 1]` should never poison a downstream threshold
-    /// comparison. Callers may treat pre-clamp out-of-range values as a
-    /// model-contract violation.
+    /// out-of-range inputs (and maps NaN → 0.0) to be defensive: a model that
+    /// emits a logit-ish or non-finite value outside `[0, 1]` should never
+    /// poison a downstream threshold comparison or the payload's JSON encode.
+    /// Callers may treat pre-clamp out-of-range values as a model-contract
+    /// violation.
     let confidence: Double
 
     /// Optional coarse class label (e.g. `"dai"`, `"hostRead"`). `nil` when
@@ -54,7 +55,17 @@ struct SpecialistVerdict: Sendable, Codable, Equatable {
 
     init(isAd: Bool, confidence: Double, adClass: String? = nil) {
         self.isAd = isAd
-        self.confidence = min(1.0, max(0.0, confidence))
+        // Clamp into `0...1`, total over the whole `Double` domain:
+        //   - NaN maps to 0.0 (the SAFE extreme — never 1.0). Handled
+        //     explicitly rather than leaning on `min`/`max` NaN-comparison
+        //     ordering, which is fragile: a later refactor to
+        //     `max(0, min(1, c))` would silently flip NaN to 1.0 ("maximally
+        //     confident"), the dangerous extreme. Being explicit also keeps
+        //     `confidence` JSON-encodable (JSONEncoder throws on NaN by
+        //     default), so a rogue model output can't poison the payload's
+        //     Codable round-trip.
+        //   - +∞ → 1.0, -∞ → 0.0, finite out-of-range clamps to the edge.
+        self.confidence = confidence.isNaN ? 0.0 : min(1.0, max(0.0, confidence))
         self.adClass = adClass
     }
 }

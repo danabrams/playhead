@@ -252,11 +252,51 @@ struct SpecialistShadowDispatcherTests {
         #expect(decoded == payload)
     }
 
-    @Test("SpecialistVerdict clamps confidence into 0...1")
-    func verdictClampsConfidence() {
+    @Test("SpecialistVerdict clamps confidence into 0...1 (total: NaN/±∞ → sane)")
+    func verdictClampsConfidence() throws {
         #expect(SpecialistVerdict(isAd: true, confidence: 1.7).confidence == 1.0)
         #expect(SpecialistVerdict(isAd: false, confidence: -0.5).confidence == 0.0)
         #expect(SpecialistVerdict(isAd: true, confidence: 0.42).confidence == 0.42)
+        // Non-finite inputs clamp to the SAFE extreme (NaN and -∞ → 0.0, never
+        // the "maximally confident" 1.0) and never leave a NaN in place.
+        #expect(SpecialistVerdict(isAd: true, confidence: .nan).confidence == 0.0)
+        #expect(SpecialistVerdict(isAd: true, confidence: .infinity).confidence == 1.0)
+        #expect(SpecialistVerdict(isAd: true, confidence: -.infinity).confidence == 0.0)
+        // A NaN-origin verdict still round-trips through JSON — this would
+        // throw if the clamp left a NaN in the encoded field.
+        let fromNaN = SpecialistVerdict(isAd: true, confidence: .nan, adClass: "dai")
+        let data = try JSONEncoder().encode(fromNaN)
+        #expect(try JSONDecoder().decode(SpecialistVerdict.self, from: data) == fromNaN)
+    }
+
+    // MARK: - Default sink path
+
+    @Test("default os_log sink dispatches without trapping (verdict returned)")
+    func defaultSinkDispatches() async throws {
+        let store = try await makeTestStore()
+        try await seedSpecialistAsset(store: store, id: "asset-default-sink")
+        try await seedSpecialistChunk(
+            store: store, assetId: "asset-default-sink",
+            startTime: 0, endTime: 30, chunkIndex: 0, ordinal: 0,
+            text: "buy now"
+        )
+        let fixed = SpecialistVerdict(isAd: true, confidence: 0.9, adClass: "dai")
+        let runtime = makeStubSpecialistRuntime(classify: { _ in fixed })
+        // No `record:` override — exercises the default structured-os_log sink
+        // closure, which the injected-recorder tests never construct. Proves
+        // the default construction + sink path doesn't trap and stays inert.
+        let dispatcher = LiveSpecialistShadowDispatcher(
+            store: store,
+            runtime: runtime
+        )
+        let result = try await dispatcher.dispatchShadowCall(
+            assetId: "asset-default-sink",
+            window: ShadowWindow(start: 0, end: 30),
+            configVariant: .allEnabledShadow
+        )
+        let payload = try #require(result)
+        #expect(payload.verdict == fixed)
+        #expect(payload.errorTag == nil)
     }
 }
 
