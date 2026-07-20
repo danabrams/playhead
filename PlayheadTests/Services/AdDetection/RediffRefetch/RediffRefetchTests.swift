@@ -570,6 +570,144 @@ struct RediffRefetchTests {
         #expect(fileManager.fileExists(atPath: episode.path), "real-episode cache entries are not ours to delete")
     }
 
+    // MARK: - Service: durable run ledger (xsdz.36, R5 coverage)
+
+    @Test("an enabled fire writes one ledger run (rediff_refetch entry point, outcome + counters + bandwidth annotation); a disabled fire writes none")
+    func handlerRecordsLedgerRun() async {
+        // Disabled fire: no ledger traffic at all (OFF byte-identity).
+        do {
+            let ledger = SpyRunLedger()
+            let service = RediffRefetchService(
+                enabled: false,
+                enumerator: StubRefetchEnumerator(),
+                rangedSampler: StubRangedSampler(),
+                localSampler: StubLocalSampler(),
+                fullFetcher: StubFullFetcher(),
+                bsideFingerprinter: StubBSideFingerprinter(),
+                recorder: SpyRefetchRecorder(),
+                fileRemover: SpyTempFileRemover(),
+                taskScheduler: StubTaskScheduler(),
+                runLedger: ledger,
+                now: { 100 * Self.day }
+            )
+            await service.handleRefetchTask(StubBackgroundTask())
+            #expect(ledger.startCalls.isEmpty, "disabled fire must not touch the ledger")
+            #expect(ledger.finishCalls.isEmpty)
+        }
+
+        // Enabled fire, zero candidates → one run, .noEligibleWork, zeroed
+        // counters, the bandwidth annotation in deferReason.
+        do {
+            let ledger = SpyRunLedger()
+            let service = RediffRefetchService(
+                enabled: true,
+                enumerator: StubRefetchEnumerator(),
+                rangedSampler: StubRangedSampler(),
+                localSampler: StubLocalSampler(),
+                fullFetcher: StubFullFetcher(),
+                bsideFingerprinter: StubBSideFingerprinter(),
+                recorder: SpyRefetchRecorder(),
+                fileRemover: SpyTempFileRemover(),
+                taskScheduler: StubTaskScheduler(),
+                runLedger: ledger,
+                now: { 100 * Self.day }
+            )
+            await service.handleRefetchTask(StubBackgroundTask())
+            #expect(ledger.startCalls.count == 1)
+            #expect(ledger.startCalls.first?.entryPoint == .rediffRefetch)
+            #expect(ledger.startCalls.first?.taskIdentifier == RediffRefetchService.taskIdentifier)
+            #expect(ledger.finishCalls.count == 1)
+            let finish = ledger.finishCalls.first
+            #expect(finish?.runId == ledger.startCalls.first?.runId, "finish must resolve the run startRun opened")
+            #expect(finish?.update.outcome == .noEligibleWork)
+            #expect(finish?.update.jobsSeen == 0)
+            #expect(finish?.update.jobsAdmitted == 0)
+            #expect(finish?.update.jobsCompleted == 0)
+            #expect(finish?.update.expiration == false)
+            #expect(finish?.update.deferReason == "precheckBytes=0 fullFetchBytes=0",
+                    "bandwidth accounting rides the deferReason annotation")
+        }
+
+        // Enabled fire, one eligible UNCHANGED candidate → .admittedWork with
+        // the pre-check bytes annotated (seen 1, admitted 1, completed 0 — no
+        // rotation).
+        do {
+            let ledger = SpyRunLedger()
+            let sampler = StubRangedSampler()
+            sampler.defaultSample = RemoteAudioSample(
+                fingerprint: RediffRefetchPolicy.sampleFingerprint(head: Data("s".utf8), tail: Data("s".utf8), totalLength: 1),
+                bytesTransferred: 131_072
+            )
+            let local = StubLocalSampler()
+            local.defaultFingerprint = RediffRefetchPolicy.sampleFingerprint(head: Data("s".utf8), tail: Data("s".utf8), totalLength: 1)
+            let enumerator = StubRefetchEnumerator()
+            enumerator.candidatesToReturn = [RediffRefetchCandidate(
+                assetId: "asset-ledger",
+                enclosureURL: URL(string: "https://cdn.example.com/ledger.mp3")!,
+                downloadedAt: 0,
+                localAudioURL: URL(fileURLWithPath: "/tmp/ledger.mp3"),
+                attemptState: .initial
+            )]
+            let service = RediffRefetchService(
+                enabled: true,
+                enumerator: enumerator,
+                rangedSampler: sampler,
+                localSampler: local,
+                fullFetcher: StubFullFetcher(),
+                bsideFingerprinter: StubBSideFingerprinter(),
+                recorder: SpyRefetchRecorder(),
+                fileRemover: SpyTempFileRemover(),
+                taskScheduler: StubTaskScheduler(),
+                runLedger: ledger,
+                now: { 100 * Self.day }
+            )
+            await service.handleRefetchTask(StubBackgroundTask())
+            let finish = ledger.finishCalls.first
+            #expect(finish?.update.outcome == .admittedWork)
+            #expect(finish?.update.jobsSeen == 1)
+            #expect(finish?.update.jobsAdmitted == 1)
+            #expect(finish?.update.jobsCompleted == 0, "unchanged pre-check is not a completed rotation")
+            #expect(finish?.update.deferReason == "precheckBytes=131072 fullFetchBytes=0")
+        }
+    }
+
+    @Test("an expired fire resolves its ledger run as .expired with the expiration flag set")
+    func handlerRecordsExpiredLedgerRun() async {
+        let ledger = SpyRunLedger()
+        let gated = GatedRefetchEnumerator()
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: gated,
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: StubFullFetcher(),
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: SpyTempFileRemover(),
+            taskScheduler: StubTaskScheduler(),
+            runLedger: ledger,
+            now: { 100 * Self.day }
+        )
+
+        let task = StubBackgroundTask()
+        let fire = Task { await service.handleRefetchTask(task) }
+        // The sweep is in flight (suspended on the gate) ⇒ the expiration
+        // handler is installed and the run row is already open.
+        while !(await gated.gate.hasWaiters) { await Task.yield() }
+
+        task.simulateExpiration()
+        // Let the expiration hop land on the actor before releasing the sweep.
+        for _ in 0..<50 { await Task.yield() }
+        await gated.gate.open()
+        await fire.value
+
+        #expect(task.setTaskCompletedCallCount == 1)
+        #expect(task.completedSuccess == false)
+        let finish = ledger.finishCalls.first
+        #expect(finish?.update.outcome == .expired)
+        #expect(finish?.update.expiration == true)
+    }
+
     @Test("parseTotalLength reads the total after the slash and rejects an unknown total")
     func parseTotalLength() throws {
         #expect(try URLSessionRangedAudioSampler.parseTotalLength("bytes 0-65535/84496614") == 84_496_614)
@@ -731,6 +869,56 @@ final class SpyTempFileRemover: RediffTempFileRemoving, @unchecked Sendable {
     private(set) var orphanSweepAges: [TimeInterval] = []
     func remove(_ fileURL: URL) { removed.append(fileURL) }
     func removeOrphanedBCopies(olderThan age: TimeInterval) { orphanSweepAges.append(age) }
+}
+
+/// R5: records the `handleRefetchTask` ledger traffic (start/finish pairs)
+/// so the rediff run-row wiring — entry point, outcome mapping, counters,
+/// bandwidth annotation — is pinned by test, not just by dogfood forensics.
+final class SpyRunLedger: BackgroundTaskRunLedger, @unchecked Sendable {
+    struct StartCall {
+        let runId: String
+        let entryPoint: BackgroundTaskRunEntryPoint
+        let taskIdentifier: String
+    }
+    struct FinishCall {
+        let runId: String
+        let update: BackgroundTaskRunOutcomeUpdate
+    }
+    private(set) var startCalls: [StartCall] = []
+    private(set) var finishCalls: [FinishCall] = []
+
+    func startRun(
+        entryPoint: BackgroundTaskRunEntryPoint,
+        taskIdentifier: String,
+        taskInstanceID: String?,
+        scenePhase: String?
+    ) async -> String {
+        let runId = UUID().uuidString
+        startCalls.append(StartCall(runId: runId, entryPoint: entryPoint, taskIdentifier: taskIdentifier))
+        return runId
+    }
+
+    func recordRunStart(
+        runId: String,
+        entryPoint: BackgroundTaskRunEntryPoint,
+        taskIdentifier: String,
+        taskInstanceID: String?,
+        scenePhase: String?
+    ) async {
+        startCalls.append(StartCall(runId: runId, entryPoint: entryPoint, taskIdentifier: taskIdentifier))
+    }
+
+    @discardableResult
+    func finishRun(runId: String, update: BackgroundTaskRunOutcomeUpdate) async -> Bool {
+        finishCalls.append(FinishCall(runId: runId, update: update))
+        return true
+    }
+
+    func fetchLatestRun(for entryPoint: BackgroundTaskRunEntryPoint) async -> BackgroundTaskRunRecord? { nil }
+    func fetchRecentRuns(limit: Int) async -> [BackgroundTaskRunRecord] { [] }
+    func fetchLatestRun(forAssetId assetId: String) async -> BackgroundTaskRunRecord? { nil }
+    @discardableResult
+    func reapOrphansAtLaunch(startedBefore: Double) async -> Int { 0 }
 }
 
 /// R3: remover that snapshots an arbitrary probe (e.g. "is the task's
