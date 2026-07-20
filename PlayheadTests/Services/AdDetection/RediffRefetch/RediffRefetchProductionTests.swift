@@ -191,6 +191,22 @@ struct RediffRefetchStateV28MigrationTests {
         #expect(totals.totalBytes == Int64(3 * 131_072) + Int64(2 * 54_000_000))
     }
 
+    @Test("byte counters accept a >Int32.max per-write value (R2: no 32-bit bind trap on an oversized enclosure)")
+    func bandwidthBindsAreInt64() async throws {
+        let store = try await makeTestStore()
+        // A single CDN-controlled full fetch can exceed Int32.max; the bind
+        // must be a true 64-bit bind, not the trapping Int32 helper.
+        let oversized = Int(Int32.max) + 1_000_000
+        try await store.accumulateRediffBandwidth(
+            precheckBytes: oversized, fullFetchBytes: oversized,
+            unchangedCount: 0, rotatedCount: 0, failedCount: 1, parkedCount: 0, at: 40
+        )
+        let totals = try await store.fetchRediffBandwidthTotals()
+        #expect(totals.precheckBytesTotal == Int64(oversized))
+        #expect(totals.fullFetchBytesTotal == Int64(oversized))
+        #expect(totals.totalBytes == 2 * Int64(oversized))
+    }
+
     @Test("candidate seeds = current-version fingerprint rows minus resolved; capturedAt is the age baseline")
     func candidateSeeds() async throws {
         let store = try await makeTestStore()

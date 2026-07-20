@@ -4534,8 +4534,14 @@ actor AnalysisStore {
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, precheckBytes)
-        bind(stmt, 2, fullFetchBytes)
+        // Byte counts bind as INT64 explicitly: the `bind(_:_:Int)` helper
+        // routes through `sqlite3_bind_int` with a TRAPPING `Int32(value)`
+        // conversion, and a single full fetch's byte count is CDN-controlled
+        // (no size cap upstream) — a >2 GiB enclosure must not crash the
+        // recorder. The outcome counters are per-sweep-bounded and stay on
+        // the Int helper.
+        sqlite3_bind_int64(stmt, 1, Int64(precheckBytes))
+        sqlite3_bind_int64(stmt, 2, Int64(fullFetchBytes))
         bind(stmt, 3, unchangedCount)
         bind(stmt, 4, rotatedCount)
         bind(stmt, 5, failedCount)

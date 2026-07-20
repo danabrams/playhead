@@ -23,7 +23,9 @@
 //                 production conformer — decodes through the SAME
 //                 `AnalysisAudioService` pipeline the A-side used (extractor
 //                 identity, xsdz.27), against a synthetic episode id whose
-//                 shard-cache entry is evicted immediately after.
+//                 shard-cache entry is evicted immediately after (a process
+//                 death in between is reclaimed by the per-fire orphan
+//                 sweep — see the type's DISK NOTE).
 
 import Foundation
 import os
@@ -239,16 +241,28 @@ actor RediffBSideStagingProvider: RediffBSideProvider {
 /// EXACT decode machinery that produced the A-side shards, so A and B PCM
 /// come from one decoder (extractor identity, xsdz.27 header). Uses a unique
 /// synthetic episode id and evicts its shard-cache entry immediately, so the
-/// B-side never pollutes the pipeline's shard cache or leaks decoded PCM to
-/// disk.
+/// B-side never pollutes the pipeline's shard cache for real episodes.
+///
+/// DISK NOTE (R2): `AnalysisAudioService.decode` persists shards to the
+/// Application Support cache DURING the decode, so B-side PCM does touch
+/// disk transiently under the synthetic id — the inline `evictCache` on
+/// both exits removes it within the same call. A process death in between
+/// (jetsam mid-consume) strands the directory; the per-fire orphan sweep
+/// (`FileManagerTempFileRemover.removeOrphanedBCopies`, prefix-scoped via
+/// `syntheticEpisodeIDPrefix`) reclaims it on the next fire.
 struct AnalysisAudioBSideDecoder: AudioFileDecoding {
     let audioService: AnalysisAudioService
+
+    /// Prefix for the synthetic per-decode episode id. Shared with the
+    /// per-fire shard-cache orphan sweep so cleanup can never drift from
+    /// what this decoder actually names its cache entries.
+    static let syntheticEpisodeIDPrefix = "rediff-bside-"
 
     struct NotAFileURLError: Error, Equatable {}
 
     func decodeMono16kHz(fileURL: URL) async throws -> [Float] {
         guard let local = LocalAudioURL(fileURL) else { throw NotAFileURLError() }
-        let syntheticId = "rediff-bside-\(UUID().uuidString)"
+        let syntheticId = Self.syntheticEpisodeIDPrefix + UUID().uuidString
         do {
             let shards = try await audioService.decode(
                 fileURL: local,
@@ -322,11 +336,20 @@ struct RevalidatingRediffBSideConsumer: RediffBSideConsuming {
         let episodeDuration: Double
         if let persisted = asset.episodeDurationSec, persisted > 0 {
             episodeDuration = persisted
-        } else if let record = try? await store.fetchEpisodeFingerprints(assetId: assetId),
-                  record.secondsPerFingerprint > 0, !record.fingerprints.isEmpty {
-            episodeDuration = Double(record.fingerprints.count) * record.secondsPerFingerprint
         } else {
-            throw RediffBSideConsumeError.episodeDurationUnknown(assetId: assetId)
+            // A store READ failure here is `.transient` like the fetchAsset
+            // one above (R2): it must not masquerade as the terminal
+            // stale-asset class and walk the episode toward parking.
+            let record: EpisodeFingerprintRecord?
+            do {
+                record = try await store.fetchEpisodeFingerprints(assetId: assetId)
+            } catch {
+                throw RediffBSideConsumeError.storeUnavailable(String(describing: error))
+            }
+            guard let record, record.secondsPerFingerprint > 0, !record.fingerprints.isEmpty else {
+                throw RediffBSideConsumeError.episodeDurationUnknown(assetId: assetId)
+            }
+            episodeDuration = Double(record.fingerprints.count) * record.secondsPerFingerprint
         }
 
         // podcastId feeds show-scoped signals (stinger bank / negative bank);

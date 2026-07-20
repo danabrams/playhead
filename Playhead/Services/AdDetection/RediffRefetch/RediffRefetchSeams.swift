@@ -128,17 +128,24 @@ struct RediffBSideEmptyStreamError: RediffFailureClassifiable, Equatable {
 protocol RediffTempFileRemoving: Sendable {
     func remove(_ fileURL: URL)
 
-    /// playhead-xsdz.36 (R1 hygiene): remove ORPHANED B-copies — files the
-    /// full fetcher staged under its `rediff-bcopy-` prefix whose owning
-    /// process died between download and the `processCandidate` `defer`
-    /// deletion (jetsam mid-consume is a routine BGProcessingTask fate).
-    /// Nothing else ever cleans them: iOS purges tmp/ only opportunistically,
-    /// so a ~54 MB orphan could otherwise linger for days. Called once per BG
-    /// fire, BEFORE the sweep. `age` guards the (test-only multi-instance)
-    /// window where another service instance is mid-candidate: a live B-copy
-    /// is consumed within one fire, so anything older than `age` is
-    /// unambiguously an orphan. Default no-op so spy conformers and the
-    /// flag-OFF world are untouched.
+    /// playhead-xsdz.36 (R1 hygiene, extended in R2): remove ORPHANED rediff
+    /// B-side artifacts abandoned by a process that died mid-consume (jetsam
+    /// is a routine BGProcessingTask fate). Two artifact classes, both
+    /// prefix-scoped and age-floored:
+    ///
+    ///   * tmp/ B-copies — files the full fetcher staged under its
+    ///     `rediff-bcopy-` prefix (~54 MB each; iOS purges tmp/ only
+    ///     opportunistically);
+    ///   * shard-cache directories — the chroma fallback's transient
+    ///     `rediff-bside-<uuid>` decode entries in NON-purgeable Application
+    ///     Support (~230 MB per decoded hour; every retry mints a new uuid,
+    ///     so these accumulate with no other cleaner).
+    ///
+    /// Called once per BG fire, BEFORE the sweep. `age` guards the
+    /// (test-only multi-instance) window where another service instance is
+    /// mid-candidate: a live B-copy/decode is consumed within one fire, so
+    /// anything older than `age` is unambiguously an orphan. Default no-op
+    /// so spy conformers and the flag-OFF world are untouched.
     func removeOrphanedBCopies(olderThan age: TimeInterval)
 }
 
@@ -352,9 +359,10 @@ struct FileManagerTempFileRemover: RediffTempFileRemoving {
         }
     }
 
-    /// Sweep tmp/ for `rediff-bcopy-*` files older than `age` (see the
-    /// protocol doc). Only the fetcher's own prefix is touched — nothing else
-    /// in tmp/ is ours to delete.
+    /// Sweep tmp/ for `rediff-bcopy-*` files older than `age`, then the
+    /// shard cache for orphaned `rediff-bside-*` decode directories (see the
+    /// protocol doc). Only rediff-owned prefixes are touched — nothing else
+    /// in either location is ours to delete.
     func removeOrphanedBCopies(olderThan age: TimeInterval) {
         let fileManager = FileManager.default
         guard let entries = try? fileManager.contentsOfDirectory(
@@ -374,6 +382,20 @@ struct FileManagerTempFileRemover: RediffTempFileRemoving {
             } catch {
                 logger.error("Failed to remove orphaned B-copy \(url.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
             }
+        }
+
+        // playhead-xsdz.36 (R2): the chroma fallback decodes the B-side
+        // through the analysis shard cache under a synthetic
+        // `rediff-bside-<uuid>` id, evicted inline on both exits — but a
+        // process death in between strands the directory (~230 MB per
+        // decoded hour, non-purgeable Application Support, new uuid per
+        // retry). Same age floor, same per-fire cadence as the tmp sweep.
+        let removedDirs = AnalysisAudioService.removeOrphanedShardCacheDirectories(
+            prefix: AnalysisAudioBSideDecoder.syntheticEpisodeIDPrefix,
+            olderThan: age
+        )
+        for name in removedDirs {
+            logger.info("Removed orphaned B-side shard cache \(name, privacy: .public)")
         }
     }
 }

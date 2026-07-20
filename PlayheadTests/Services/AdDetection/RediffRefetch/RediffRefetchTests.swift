@@ -507,6 +507,37 @@ struct RediffRefetchTests {
         #expect(fileManager.fileExists(atPath: unrelated.path), "non-prefix files are not ours to delete")
     }
 
+    @Test("orphan sweep also reclaims stale rediff-bside shard-cache directories, sparing fresh + real-episode entries (R2)")
+    func orphanSweepRemovesStaleBSideShardCacheDirectories() throws {
+        let fileManager = FileManager.default
+        let root = AnalysisAudioService.shardCacheRootDirectory
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let prefix = AnalysisAudioBSideDecoder.syntheticEpisodeIDPrefix
+        let stale = root.appendingPathComponent(prefix + "test-stale-\(UUID().uuidString)", isDirectory: true)
+        let fresh = root.appendingPathComponent(prefix + "test-fresh-\(UUID().uuidString)", isDirectory: true)
+        let episode = root.appendingPathComponent("real-episode-\(UUID().uuidString)", isDirectory: true)
+        for dir in [stale, fresh, episode] {
+            try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+            try Data(repeating: 7, count: 64).write(to: dir.appendingPathComponent("shard_0.pcm"))
+        }
+        defer {
+            try? fileManager.removeItem(at: stale)
+            try? fileManager.removeItem(at: fresh)
+            try? fileManager.removeItem(at: episode)
+        }
+        // Age the stale decode dir past the floor (a dead process's leftover).
+        try fileManager.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -2 * 60 * 60)],
+            ofItemAtPath: stale.path
+        )
+
+        FileManagerTempFileRemover().removeOrphanedBCopies(olderThan: 60 * 60)
+
+        #expect(!fileManager.fileExists(atPath: stale.path), "stale B-side decode dir must be removed")
+        #expect(fileManager.fileExists(atPath: fresh.path), "a fresh decode dir (possibly live) must be spared")
+        #expect(fileManager.fileExists(atPath: episode.path), "real-episode cache entries are not ours to delete")
+    }
+
     @Test("parseTotalLength reads the total after the slash and rejects an unknown total")
     func parseTotalLength() throws {
         #expect(try URLSessionRangedAudioSampler.parseTotalLength("bytes 0-65535/84496614") == 84_496_614)

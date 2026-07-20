@@ -173,6 +173,44 @@ private struct ShardCache: Sendable {
     static func removeShards(episodeID: String) {
         try? FileManager.default.removeItem(at: episodeDirectory(episodeID: episodeID))
     }
+
+    /// The cache root, surfaced (via `AnalysisAudioService`) for the rediff
+    /// orphan sweep and its test fixtures.
+    static var rootDirectory: URL { cacheDirectory }
+
+    /// playhead-xsdz.36 (R2 hygiene): remove ORPHANED episode cache
+    /// directories whose name carries `prefix` and whose last content change
+    /// is older than `age`. The rediff B-side chroma fallback decodes through
+    /// this cache under synthetic `rediff-bside-<uuid>` ids and evicts them
+    /// inline; a process death between decode and eviction (jetsam is a
+    /// routine BGProcessingTask fate) strands up to ~230 MB/decoded-hour of
+    /// raw PCM in non-purgeable Application Support with nothing else to
+    /// clean it — every retry mints a NEW uuid, so orphans accumulate. The
+    /// age floor spares any legitimately in-flight decode (a live decode
+    /// keeps touching its directory, so its mtime stays fresh). Returns the
+    /// removed directory names so the caller can log them.
+    static func removeOrphanedDirectories(prefix: String, olderThan age: TimeInterval) -> [String] {
+        let fileManager = FileManager.default
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: cacheDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsSubdirectoryDescendants]
+        ) else { return [] }
+        let cutoff = Date(timeIntervalSinceNow: -age)
+        var removed: [String] = []
+        for url in entries where url.lastPathComponent.hasPrefix(prefix) {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            guard modified < cutoff else { continue }
+            do {
+                try fileManager.removeItem(at: url)
+                removed.append(url.lastPathComponent)
+            } catch {
+                // Best-effort: a failed removal is retried on the next fire.
+            }
+        }
+        return removed
+    }
 }
 
 /// Manifest entry for a cached shard (metadata only, PCM stored separately).
@@ -426,6 +464,27 @@ actor AnalysisAudioService {
     /// Remove persisted shards for an episode.
     func evictCache(episodeID: String) {
         ShardCache.removeShards(episodeID: episodeID)
+    }
+
+    /// playhead-xsdz.36 (R2 hygiene): the shard-cache root directory —
+    /// exposed so the rediff orphan-sweep test can stage fixtures against
+    /// the real path without duplicating the path constant.
+    nonisolated static var shardCacheRootDirectory: URL {
+        ShardCache.rootDirectory
+    }
+
+    /// playhead-xsdz.36 (R2 hygiene): remove orphaned shard-cache episode
+    /// directories whose id carries `prefix` and whose last content change
+    /// is older than `age` (see `ShardCache.removeOrphanedDirectories`).
+    /// Called once per enabled rediff re-fetch fire via
+    /// `FileManagerTempFileRemover.removeOrphanedBCopies`. Returns removed
+    /// directory names for the caller's log line.
+    @discardableResult
+    nonisolated static func removeOrphanedShardCacheDirectories(
+        prefix: String,
+        olderThan age: TimeInterval
+    ) -> [String] {
+        ShardCache.removeOrphanedDirectories(prefix: prefix, olderThan: age)
     }
 
     // MARK: - Decoding pipeline
