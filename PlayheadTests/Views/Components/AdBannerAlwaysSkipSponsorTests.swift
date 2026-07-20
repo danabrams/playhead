@@ -250,9 +250,18 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
         // by some other path — e.g. its natural lifetime expiring or
         // the user undoing). `dismiss()` clears `currentBanner` to nil
         // immediately, then schedules `showNext()` via a 350ms async
-        // sleep — wait for that so we can assert the post-advance state.
+        // sleep.
+        //
+        // playhead-dd7d: previously this waited a FIXED 500ms and then
+        // asserted — a wall-clock gamble that lost under the saturated
+        // parallel plan, where the internal 350ms `Task.sleep` dilates past
+        // the test's budget so `showNext()` hadn't run yet and
+        // `currentBanner` was still nil. Await the advance's ACTUAL
+        // completion signal instead: `advanceTaskForTesting()?.value`
+        // returns exactly when `showNext()` has advanced the queue,
+        // however long the (possibly starved) sleep actually takes.
         queue.dismiss()
-        try? await Task.sleep(for: .milliseconds(500))
+        await queue.advanceTaskForTesting()?.value
         XCTAssertEqual(
             queue.currentBanner?.id,
             "banner-B",
