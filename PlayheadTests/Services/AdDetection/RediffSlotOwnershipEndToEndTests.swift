@@ -187,7 +187,9 @@ struct RediffSlotOwnershipEndToEndTests {
 
     // MARK: - Flag-OFF / no-provider / gate-rejected NO-OPs
 
-    @Test("flag OFF (default): no rediff pass, no .rediffSlot")
+    // playhead-lq6f (Ship Gate 1, 2026-07-19): the production default is now
+    // ON, so the OFF arm pins the EXPLICIT kill switch, not the default.
+    @Test("flag OFF (explicit): no rediff pass, no .rediffSlot")
     func flagOffNoRediffSlot() async throws {
         let spans = try await runAndFetch(
             assetId: "rediff-off", rediffOwnership: false, provider: nil)

@@ -19,9 +19,10 @@
 //     transport check (`testPhysicalDeviceBaselinePreflight`).
 //   * `PLAYHEAD_PIPELINE_DUMP_REDIFF=1` — playhead-xsdz.36.1: the
 //     rediff-ACTIVATION TREATMENT dump, which IS the treatment half of a
-//     lift measurement. Same per-episode setup, but the config is `.default`
-//     with `rediffSlotOwnershipEnabled` flipped ON plus an injected
-//     fresh-B-side provider, written to the DISTINCT
+//     lift measurement. Same per-episode setup, but with an injected
+//     fresh-B-side provider (post the Gate 1 flip, playhead-lq6f, `.default`
+//     already carries `rediffSlotOwnershipEnabled` ON, so the PROVIDER is
+//     what separates treatment from baseline), written to the DISTINCT
 //     `playhead-dogfood-diagnostics-pipeline-dump-rediff-treatment.json` so
 //     the orchestrator can diff treatment vs. baseline
 //     (`captureRediffTreatmentDump`).
@@ -2405,11 +2406,15 @@ private actor CorpusFreshBSideProvider: RediffBSideProvider {
     }
 }
 
-/// Build the rediff TREATMENT config: literally `AdDetectionConfig.default` in
-/// every output-affecting field EXCEPT `rediffSlotOwnershipEnabled`, flipped ON.
-/// Reads each value from `.default` (single source of truth) so the treatment
-/// and baseline lanes differ ONLY by the rediff flag + the injected B-side
-/// provider — no hand-copied constant can drift from the shipped default.
+/// Build the rediff TREATMENT config: literally `AdDetectionConfig.default`
+/// with `rediffSlotOwnershipEnabled` pinned ON explicitly. Post the Gate 1
+/// flip (playhead-lq6f, 2026-07-19) `.default` ALREADY carries the flag ON,
+/// so this config is now byte-identical to `.default` and the treatment and
+/// baseline lanes differ ONLY by the injected B-side provider (the rediff
+/// pass no-ops without one). The explicit pin is kept so the treatment lane
+/// stays a rediff treatment even if the shipped default ever regresses.
+/// Reads each value from `.default` (single source of truth) so no
+/// hand-copied constant can drift from the shipped default.
 /// `spliceSlotOwnershipEnabled` keeps its `.default` value (OFF): the two are
 /// mutually-exclusive width setters and the config init preconditions on it.
 private func makeRediffTreatmentConfig() -> AdDetectionConfig {
@@ -2462,7 +2467,10 @@ private func makeRediffTreatmentConfig() -> AdDetectionConfig {
         userCorrectionReadSideEnabled: base.userCorrectionReadSideEnabled,
         stingerRefinementEnabled: base.stingerRefinementEnabled,
         lexicalAnchorRefinementEnabled: base.lexicalAnchorRefinementEnabled,
-        selfPromoSuppressionEnabled: base.selfPromoSuppressionEnabled
+        selfPromoSuppressionEnabled: base.selfPromoSuppressionEnabled,
+        sustainedMusicProposerEnabled: base.sustainedMusicProposerEnabled,
+        musicOffsetLexicalGateEnabled: base.musicOffsetLexicalGateEnabled,
+        musicOffsetFMRecoveryEnabled: base.musicOffsetFMRecoveryEnabled
     )
 }
 
@@ -2704,7 +2712,7 @@ final class PipelineDumpLiveTests: XCTestCase {
             config: .default,
             rediffBSideProvider: nil,
             outputFilename: "playhead-dogfood-diagnostics-pipeline-dump-new9.json",
-            configLabel: "production .default (all xsdz flags off, fmBackfillMode .full)"
+            configLabel: "production .default (post Gate 1: rediff ownership + coverage flags ON, no B-side provider, fmBackfillMode .full)"
         )
     }
 
@@ -2826,7 +2834,7 @@ final class PipelineDumpLiveTests: XCTestCase {
             config: makeRediffTreatmentConfig(),
             rediffBSideProvider: provider,
             outputFilename: "playhead-dogfood-diagnostics-pipeline-dump-rediff-treatment.json",
-            configLabel: "treatment: .default + rediffSlotOwnershipEnabled + fresh-B-side provider\(greedyLabel)",
+            configLabel: "treatment: .default (rediffSlotOwnershipEnabled ON since Gate 1) + fresh-B-side provider\(greedyLabel)",
             bSideCoverage: DumpBSideCoverage(
                 stagedEntryCount: stagedCount,
                 manifestEntryCount: entries.count,
@@ -3214,15 +3222,20 @@ private extension PipelineDumpLiveTests {
 
         // playhead-xsdz.36.1 (rediff TREATMENT lane only): persist the played-copy
         // (A-side) fingerprint stream so the in-app rediff pass has a stored stream
-        // to diff the re-fetched B-side against. Gated on the rediff-ownership flag,
-        // so the baseline lane (flag OFF) never writes the row and is byte-identical.
+        // to diff the re-fetched B-side against. Gated on the rediff-ownership flag
+        // AND an injected B-side provider: post the Gate 1 flip (playhead-lq6f)
+        // `.default` carries the ownership flag ON, so the flag alone no longer
+        // separates the lanes — the provider does. The baseline lane injects no
+        // provider, so it never writes the row and the rediff pass stays the
+        // same no-op it was pre-flip (an A-side capture would be unobservable
+        // dead weight there — the pass no-ops without a provider).
         // `sourceAudioIdentity` MUST equal the asset's `assetFingerprint` (identity
         // gate (b)); the fingerprints are stamped with the current
         // `ChromaFingerprinter.algorithmVersion` (gate (a)). This is the SAME static
         // helper + 16 kHz shards `EpisodeFingerprintCaptureTests` pins; the
         // `captureEnabledByDefault` flag gates only the LIVE `AnalysisJobRunner`
         // branch, NOT this static call, so no production flag is flipped.
-        if config.rediffSlotOwnershipEnabled {
+        if config.rediffSlotOwnershipEnabled, rediffBSideProvider != nil {
             try await EpisodeFingerprintCapture.captureAndPersist(
                 shards: shards,
                 assetId: assetId,
@@ -3246,11 +3259,12 @@ private extension PipelineDumpLiveTests {
         )
 
         // Detection config. The baseline lane passes the shipped `.default`
-        // (every activation flag off — the `productionConfigStateIsHeld` hermetic
-        // test pins that identity). The rediff-treatment lane passes a config that
-        // is `.default` in every field EXCEPT `rediffSlotOwnershipEnabled`, flipped
-        // ON (see `makeRediffTreatmentConfig`), so treatment and baseline differ
-        // ONLY by the rediff flag + the injected B-side provider.
+        // (the `productionConfigStateIsHeld` hermetic test pins that identity —
+        // post Gate 1 that includes rediff ownership + the three coverage flags
+        // ON). The rediff-treatment lane passes `makeRediffTreatmentConfig()`
+        // (now byte-identical to `.default`, with the rediff flag pinned
+        // explicitly), so treatment and baseline differ ONLY by the injected
+        // B-side provider — the rediff pass no-ops without one.
 
         // Behavior-neutral diagnostic observer: counts every decoded span
         // so we can report `candidateDecodedSpans`. The observer is the
@@ -4323,9 +4337,11 @@ extension PipelineDumpHermeticTests {
 
     @Test("AdDetectionConfig.default carries the production state the dump expects")
     func productionConfigStateIsHeld() {
-        // The dump's contract: production `.default`, all activation flags
-        // off, FM full, chapter signal off. If any of these regress, the
-        // dump's "production" claim is a lie — fail loud here on the sim
+        // The dump's contract: production `.default` — FM full, chapter
+        // signal off, the still-experimental activation flags OFF, and the
+        // shipped-ON flags (stinger, self-promo, and the Gate 1 quartet
+        // below) pinned ON. If any of these regress, the dump's
+        // "production" claim is a lie — fail loud here on the sim
         // so the env-gated Catalyst run can't silently dump a different
         // shape than the orchestrator expects.
         let cfg = AdDetectionConfig.default
@@ -4359,6 +4375,24 @@ extension PipelineDumpHermeticTests {
         // the dump schema back to key-absent-everywhere and invalidate
         // readers expecting live v4 traces — fail loud here instead.
         #expect(cfg.stingerRefinementEnabled == true, "ships ON per the recorded 2026-07-16 dogfood flip; xsdz.38 tracks the eat-class fix")
+        // playhead-lq6f (Ship Gate 1, 2026-07-19): four flags flipped
+        // production-ON — all banner/markOnly-only, no skip behavior change.
+        // The dump's "production" claim now MEANS these are ON: a silent
+        // revert would flip the dump back to the pre-Gate-1 shape (no
+        // .sustainedMusicOffset provenance, no A-side-diffable widths) and
+        // invalidate treatment-vs-baseline comparisons — fail loud here.
+        #expect(cfg.rediffSlotOwnershipEnabled == true,
+                "ships ON per Ship Gate 1 (2026-07-19): rediff width marks, presence 97.8% gold-audited, mark-only rung of the xsdz.36 ladder")
+        #expect(cfg.sustainedMusicProposerEnabled == true,
+                "ships ON per Ship Gate 1 (2026-07-19): certified config measured 47.5% cov / 91.7% true prec / 6.0% false-banner")
+        #expect(cfg.musicOffsetLexicalGateEnabled == true,
+                "ships ON per Ship Gate 1 (2026-07-19, same certified measurement)")
+        #expect(cfg.musicOffsetFMRecoveryEnabled == true,
+                "ships ON per Ship Gate 1 (2026-07-19, same certified measurement)")
+        // Mutual-exclusion partner of the rediff width setter stays OFF —
+        // the config init preconditions on the pair.
+        #expect(cfg.spliceSlotOwnershipEnabled == false,
+                "acoustic splice ownership must stay OFF while rediff owns width (mutually-exclusive setters)")
 
         let narrowing = NarrowingConfig.default
         #expect(narrowing.perAnchorPaddingSegments == 5)
@@ -4398,7 +4432,7 @@ extension PipelineDumpHermeticTests {
         )
         #expect(defaults["bracket_refinement_enabled"] as? Bool == true)
         #expect(defaults["transcript_boundary_cue_enabled"] as? Bool == true)
-        #expect(defaults["rediff_slot_ownership_enabled"] as? Bool == false)
+        #expect(defaults["rediff_slot_ownership_enabled"] as? Bool == true)  // playhead-lq6f: ON since Ship Gate 1 (2026-07-19)
     }
 }
 
@@ -5195,14 +5229,19 @@ struct RediffTreatmentHarnessWiringTests {
         return out
     }
 
-    @Test("treatment config differs from production .default ONLY by the rediff flag")
+    @Test("treatment config matches production .default field-for-field (rediff flag ON in both since Gate 1)")
     func treatmentConfigDiffersOnlyByRediffFlag() {
         let base = AdDetectionConfig.default
         let treatment = makeRediffTreatmentConfig()
 
-        // The single intended difference.
+        // Post the Gate 1 flip (playhead-lq6f, 2026-07-19) the shipped
+        // `.default` carries the rediff flag ON, so treatment == baseline for
+        // this flag and the treatment lane is distinguished SOLELY by the
+        // injected fresh-B-side provider (the rediff pass no-ops without
+        // one). Both pins stay so a silent revert of either side fails loud.
         #expect(treatment.rediffSlotOwnershipEnabled == true)
-        #expect(base.rediffSlotOwnershipEnabled == false)
+        #expect(base.rediffSlotOwnershipEnabled == true,
+                "ON since Ship Gate 1 (2026-07-19) — mark-only rung of the xsdz.36 ladder")
         // Mutually-exclusive width setter stays OFF (gateAndDiff / config init
         // precondition).
         #expect(treatment.spliceSlotOwnershipEnabled == false)
@@ -5244,9 +5283,11 @@ struct RediffTreatmentHarnessWiringTests {
     /// that differs from the `.default` static's value, `makeRediffTreatmentConfig`
     /// still compiles without it and the treatment arm silently drifts —
     /// invalidating the A/B comparison. Mirroring every STORED property and
-    /// requiring exactly one difference (the rediff flag) makes the
-    /// differs-only-by-flag invariant structurally future-proof.
-    @Test("treatment config differs from .default in EXACTLY one stored property (reflection-exhaustive)")
+    /// requiring ZERO differences (post the Gate 1 flip `.default` already
+    /// carries the rediff flag ON, so treatment must be byte-identical to the
+    /// shipped default — the lanes differ only by the injected provider)
+    /// keeps the no-config-drift invariant structurally future-proof.
+    @Test("treatment config matches .default in EVERY stored property (reflection-exhaustive)")
     func treatmentConfigDiffersInExactlyOneStoredProperty() {
         let baseChildren = Array(Mirror(reflecting: AdDetectionConfig.default).children)
         let treatmentChildren = Array(Mirror(reflecting: makeRediffTreatmentConfig()).children)
@@ -5261,7 +5302,8 @@ struct RediffTreatmentHarnessWiringTests {
                 differing.append(base.label ?? "<unlabeled>")
             }
         }
-        #expect(differing == ["rediffSlotOwnershipEnabled"])
+        #expect(differing.isEmpty,
+                "treatment config must equal the shipped .default exactly post Gate 1 — got differing fields: \(differing)")
     }
 
     @Test("A-side capture round-trips the identity the rediff gate accepts")

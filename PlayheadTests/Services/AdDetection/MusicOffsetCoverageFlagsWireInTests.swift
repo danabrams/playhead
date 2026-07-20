@@ -5,25 +5,30 @@
 // `musicOffsetFMRecoveryEnabled` (r2vz recovery) — from `AdDetectionConfig`
 // through `AdDetectionService.runBackfill` into `RegionShadowPhase.Input`.
 //
-// Mirrors the LexicalAnchorRefinementWireInTests structure:
+// Mirrors the LexicalAnchorRefinementWireInTests structure. Since Dan's
+// 2026-07-19 Ship Gate 1 enablement (playhead-lq6f) all three flags default
+// to `true` in `AdDetectionConfig.default` AND the init, so the arms pin the
+// PRODUCTION-ON state:
 //   (a) Flag default / config-init plumbing — all three flags default to
-//       `false` in `AdDetectionConfig.default` AND when omitted from the init,
-//       and the init stores each flag verbatim (one-at-a-time, so a swapped
-//       assignment cannot slip through).
-//   (b) Flag-OFF byte-identity — running `runBackfill` on the same
-//       deterministic fixture (a real ad transcript PLUS a live sustained-music
-//       run in the stored feature windows PLUS a wired recovery dispatcher)
-//       with the config left at its default vs the three flags explicitly
-//       `false` produces identical persisted AdWindow rows, no
-//       `.sustainedMusicOffset` provenance, and zero dispatcher consults.
-//       Wiring the music run + dispatcher on BOTH arms is the stronger
-//       contract: even fully wired, the config gates alone must keep the
-//       proposer / gate / recovery unreachable.
-//   (c) Flag-ON wire-up — each flag flipped in CONFIG (not at the Input site)
+//       `true` in `AdDetectionConfig.default` AND when omitted from the init,
+//       and the init stores each flag verbatim (one-at-a-time explicit-FALSE
+//       probes against the all-true default, so a swapped assignment cannot
+//       slip through).
+//   (b) Default byte-identity + OFF still works — running `runBackfill` on
+//       the same deterministic fixture (a real ad transcript PLUS a live
+//       sustained-music run in the stored feature windows PLUS a wired
+//       recovery dispatcher) with the config left at its default vs the three
+//       flags explicitly `true` produces identical persisted AdWindow rows
+//       and identical dispatcher-consult counts (default == explicit-ON). A
+//       third explicit-FALSE arm pins that OFF still works and DIFFERS: no
+//       `.sustainedMusicOffset` provenance and zero dispatcher consults even
+//       with the music run + dispatcher fully wired.
+//   (c) Flag wire-up — each flag flipped in CONFIG (not at the Input site)
 //       observably changes `runBackfill` output at the decoded-span seam:
-//       proposer-only ⇒ a music-anchored span decodes and persists; +gate ⇒
-//       the cue-less music-only span is suppressed WITHOUT consulting the
-//       wired dispatcher (recovery stays false at the Input); +recovery ⇒ the
+//       proposer-only (gate+recovery explicitly OFF) ⇒ a music-anchored span
+//       decodes and persists, and an explicit proposer-OFF arm does not;
+//       +gate (recovery explicitly OFF) ⇒ the cue-less music-only span is
+//       suppressed WITHOUT consulting the wired dispatcher; +recovery ⇒ the
 //       dispatcher is consulted and an `.ad` verdict restores the span.
 //       The gate-on/recovery-off arm doubles as the swap detector: if the
 //       call site crossed the two flags, the span would survive and the test
@@ -177,77 +182,82 @@ struct MusicOffsetCoverageFlagsWireInTests {
 
     // MARK: - (a) Config defaults
 
-    @Test("AdDetectionConfig.default ships all three coverage flags OFF")
-    func configDefaultsAreOff() {
+    @Test("AdDetectionConfig.default ships all three coverage flags ON")
+    func configDefaultsAreOn() {
         let config = AdDetectionConfig.default
-        #expect(config.sustainedMusicProposerEnabled == false,
-                "t1py proposer ships OFF; enablement is a separate product decision")
-        #expect(config.musicOffsetLexicalGateEnabled == false,
-                "eki3 gate ships OFF; enablement is a separate product decision")
-        #expect(config.musicOffsetFMRecoveryEnabled == false,
-                "r2vz recovery ships OFF; enablement is a separate product decision")
+        #expect(config.sustainedMusicProposerEnabled == true,
+                "flipped ON 2026-07-19 (playhead-lq6f, Ship Gate 1): certified config measured 47.5% cov / 91.7% true prec / 6.0% false-banner; markOnly-only")
+        #expect(config.musicOffsetLexicalGateEnabled == true,
+                "flipped ON 2026-07-19 (playhead-lq6f, Ship Gate 1, same certified measurement)")
+        #expect(config.musicOffsetFMRecoveryEnabled == true,
+                "flipped ON 2026-07-19 (playhead-lq6f, Ship Gate 1, same certified measurement)")
     }
 
-    @Test("AdDetectionConfig.init defaults all three coverage flags to false when omitted")
-    func configInitOmittedDefaultsAreOff() {
+    @Test("AdDetectionConfig.init defaults all three coverage flags to true when omitted")
+    func configInitOmittedDefaultsAreOn() {
         let omitted = AdDetectionConfig(
             candidateThreshold: 0.40, confirmationThreshold: 0.70, suppressionThreshold: 0.25,
             hotPathLookahead: 90.0, detectorVersion: "test-v1"
         )
-        #expect(omitted.sustainedMusicProposerEnabled == false, "init default must match .default")
-        #expect(omitted.musicOffsetLexicalGateEnabled == false, "init default must match .default")
-        #expect(omitted.musicOffsetFMRecoveryEnabled == false, "init default must match .default")
+        #expect(omitted.sustainedMusicProposerEnabled == true, "init default must match .default (ON post Gate 1)")
+        #expect(omitted.musicOffsetLexicalGateEnabled == true, "init default must match .default (ON post Gate 1)")
+        #expect(omitted.musicOffsetFMRecoveryEnabled == true, "init default must match .default (ON post Gate 1)")
     }
 
     @Test("AdDetectionConfig.init carries each coverage flag through verbatim, one at a time")
     func configInitCarriesEachFlagIndependently() {
-        // One flag at a time: a swapped assignment in the init (or at the
-        // runBackfill call site later) cannot pass an all-true probe, so each
-        // arm flips exactly one flag and asserts the other two stayed false.
-        let proposerOnly = AdDetectionConfig(
+        // One flag at a time, EXPLICIT-FALSE probes against the now-all-true
+        // default: a swapped assignment in the init (or at the runBackfill
+        // call site later) cannot pass an all-false probe, so each arm flips
+        // exactly one flag OFF and asserts the other two stayed true.
+        let proposerOff = AdDetectionConfig(
             candidateThreshold: 0.40, confirmationThreshold: 0.70, suppressionThreshold: 0.25,
             hotPathLookahead: 90.0, detectorVersion: "test-v1",
-            sustainedMusicProposerEnabled: true
+            sustainedMusicProposerEnabled: false
         )
-        #expect(proposerOnly.sustainedMusicProposerEnabled == true)
-        #expect(proposerOnly.musicOffsetLexicalGateEnabled == false)
-        #expect(proposerOnly.musicOffsetFMRecoveryEnabled == false)
+        #expect(proposerOff.sustainedMusicProposerEnabled == false)
+        #expect(proposerOff.musicOffsetLexicalGateEnabled == true)
+        #expect(proposerOff.musicOffsetFMRecoveryEnabled == true)
 
-        let gateOnly = AdDetectionConfig(
+        let gateOff = AdDetectionConfig(
             candidateThreshold: 0.40, confirmationThreshold: 0.70, suppressionThreshold: 0.25,
             hotPathLookahead: 90.0, detectorVersion: "test-v1",
-            musicOffsetLexicalGateEnabled: true
+            musicOffsetLexicalGateEnabled: false
         )
-        #expect(gateOnly.sustainedMusicProposerEnabled == false)
-        #expect(gateOnly.musicOffsetLexicalGateEnabled == true)
-        #expect(gateOnly.musicOffsetFMRecoveryEnabled == false)
+        #expect(gateOff.sustainedMusicProposerEnabled == true)
+        #expect(gateOff.musicOffsetLexicalGateEnabled == false)
+        #expect(gateOff.musicOffsetFMRecoveryEnabled == true)
 
-        let recoveryOnly = AdDetectionConfig(
+        let recoveryOff = AdDetectionConfig(
             candidateThreshold: 0.40, confirmationThreshold: 0.70, suppressionThreshold: 0.25,
             hotPathLookahead: 90.0, detectorVersion: "test-v1",
-            musicOffsetFMRecoveryEnabled: true
+            musicOffsetFMRecoveryEnabled: false
         )
-        #expect(recoveryOnly.sustainedMusicProposerEnabled == false)
-        #expect(recoveryOnly.musicOffsetLexicalGateEnabled == false)
-        #expect(recoveryOnly.musicOffsetFMRecoveryEnabled == true)
+        #expect(recoveryOff.sustainedMusicProposerEnabled == true)
+        #expect(recoveryOff.musicOffsetLexicalGateEnabled == true)
+        #expect(recoveryOff.musicOffsetFMRecoveryEnabled == false)
     }
 
-    // MARK: - (b) Flag-OFF byte-identity
+    // MARK: - (b) Default byte-identity (== explicit-ON) + explicit-OFF still works and differs
 
-    @Test("Default config: runBackfill is byte-identical to explicit-false flags even with a live music run and a wired dispatcher")
-    func defaultConfigMatchesExplicitFalseBaseline() async throws {
-        let assetId = "asset-ncv6-off"
+    @Test("Default config: runBackfill is byte-identical to explicit-true flags; explicit-false still works and observably differs")
+    func defaultConfigMatchesExplicitTrueAndExplicitFalseDiffers() async throws {
+        let assetId = "asset-ncv6-default"
         let storeDefault = try await makeSeededStore(assetId: assetId)
-        let storeExplicit = try await makeSeededStore(assetId: assetId)
+        let storeExplicitOn = try await makeSeededStore(assetId: assetId)
+        let storeExplicitOff = try await makeSeededStore(assetId: assetId)
 
-        // Both arms get a live dispatcher: with all three flags false at the
-        // Input, the recovery closure must be unreachable even though it is
-        // fully wired and FM availability defaults to true in tests.
+        // Every arm gets a live dispatcher. On the two ON arms the recovery
+        // path is reachable and must behave IDENTICALLY (default == explicit
+        // true). On the OFF arm the closure must stay unreachable even though
+        // it is fully wired and FM availability defaults to true in tests.
         let dispatcherDefault = CountingRecoveryDispatcher(verdict: .ad)
-        let dispatcherExplicit = CountingRecoveryDispatcher(verdict: .ad)
+        let dispatcherExplicitOn = CountingRecoveryDispatcher(verdict: .ad)
+        let dispatcherExplicitOff = CountingRecoveryDispatcher(verdict: .ad)
 
         // Default arm: the three flags OMITTED — the acceptance contract that
-        // "no config change" carries the same three false values as today.
+        // "no config change" carries the production-ON state (Ship Gate 1,
+        // playhead-lq6f, 2026-07-19).
         let defaultConfig = AdDetectionConfig(
             candidateThreshold: 0.40,
             confirmationThreshold: 0.70,
@@ -256,9 +266,20 @@ struct MusicOffsetCoverageFlagsWireInTests {
             detectorVersion: "test-detection-v1",
             fmBackfillMode: .off
             // sustainedMusicProposerEnabled / musicOffsetLexicalGateEnabled /
-            // musicOffsetFMRecoveryEnabled omitted → default OFF.
+            // musicOffsetFMRecoveryEnabled omitted → default ON post Gate 1.
         )
-        let explicitConfig = AdDetectionConfig(
+        let explicitOnConfig = AdDetectionConfig(
+            candidateThreshold: 0.40,
+            confirmationThreshold: 0.70,
+            suppressionThreshold: 0.25,
+            hotPathLookahead: 90.0,
+            detectorVersion: "test-detection-v1",
+            fmBackfillMode: .off,
+            sustainedMusicProposerEnabled: true,
+            musicOffsetLexicalGateEnabled: true,
+            musicOffsetFMRecoveryEnabled: true
+        )
+        let explicitOffConfig = AdDetectionConfig(
             candidateThreshold: 0.40,
             confirmationThreshold: 0.70,
             suppressionThreshold: 0.25,
@@ -270,67 +291,84 @@ struct MusicOffsetCoverageFlagsWireInTests {
             musicOffsetFMRecoveryEnabled: false
         )
 
-        let serviceDefault = makeService(store: storeDefault, config: defaultConfig, dispatcher: dispatcherDefault)
-        let serviceExplicit = makeService(store: storeExplicit, config: explicitConfig, dispatcher: dispatcherExplicit)
-
         let chunks = makeAdSignalChunks(assetId: assetId)
-        try await serviceDefault.runBackfill(
+        try await makeService(store: storeDefault, config: defaultConfig, dispatcher: dispatcherDefault).runBackfill(
             chunks: chunks, analysisAssetId: assetId, podcastId: Self.podcastId, episodeDuration: Self.episodeDuration
         )
-        try await serviceExplicit.runBackfill(
+        try await makeService(store: storeExplicitOn, config: explicitOnConfig, dispatcher: dispatcherExplicitOn).runBackfill(
+            chunks: chunks, analysisAssetId: assetId, podcastId: Self.podcastId, episodeDuration: Self.episodeDuration
+        )
+        try await makeService(store: storeExplicitOff, config: explicitOffConfig, dispatcher: dispatcherExplicitOff).runBackfill(
             chunks: chunks, analysisAssetId: assetId, podcastId: Self.podcastId, episodeDuration: Self.episodeDuration
         )
 
         let windowsDefault = try await storeDefault.fetchAdWindows(assetId: assetId)
             .sorted { $0.startTime < $1.startTime }
-        let windowsExplicit = try await storeExplicit.fetchAdWindows(assetId: assetId)
+        let windowsExplicitOn = try await storeExplicitOn.fetchAdWindows(assetId: assetId)
+            .sorted { $0.startTime < $1.startTime }
+        let windowsExplicitOff = try await storeExplicitOff.fetchAdWindows(assetId: assetId)
             .sorted { $0.startTime < $1.startTime }
 
         try #require(!windowsDefault.isEmpty, "fixture must produce a window so the byte-identity sweep is meaningful")
+        try #require(!windowsExplicitOff.isEmpty, "the OFF arm must still detect the transcript ad — OFF must keep working")
         #expect(
-            windowsDefault.count == windowsExplicit.count,
-            "default \(windowsDefault.count) vs explicit-false \(windowsExplicit.count) — flags OFF must be byte-identical"
+            windowsDefault.count == windowsExplicitOn.count,
+            "default \(windowsDefault.count) vs explicit-true \(windowsExplicitOn.count) — omitted flags must equal explicit-ON"
         )
-        // Same persisted-field sweep the p56a / l2f.6 / xsdz.37 byte-identity tests pin.
-        for (a, b) in zip(windowsDefault, windowsExplicit) {
-            #expect(a.startTime == b.startTime, "startTime mismatch under flags OFF")
-            #expect(a.endTime == b.endTime, "endTime mismatch under flags OFF")
-            #expect(a.confidence == b.confidence, "confidence mismatch under flags OFF")
-            #expect(a.decisionState == b.decisionState, "decisionState mismatch under flags OFF")
-            #expect(a.eligibilityGate == b.eligibilityGate, "eligibilityGate mismatch under flags OFF")
-            #expect(a.wasSkipped == b.wasSkipped, "wasSkipped mismatch under flags OFF")
-            #expect(a.boundaryState == b.boundaryState, "boundaryState mismatch under flags OFF")
-            #expect(a.detectorVersion == b.detectorVersion, "detectorVersion mismatch under flags OFF")
-            #expect(a.metadataSource == b.metadataSource, "metadataSource mismatch under flags OFF")
-            #expect(a.metadataConfidence == b.metadataConfidence, "metadataConfidence mismatch under flags OFF")
-            #expect(a.evidenceStartTime == b.evidenceStartTime, "evidenceStartTime mismatch under flags OFF")
+        // Same persisted-field sweep the p56a / l2f.6 / xsdz.37 byte-identity
+        // tests pin, now between the default and explicit-TRUE arms.
+        for (a, b) in zip(windowsDefault, windowsExplicitOn) {
+            #expect(a.startTime == b.startTime, "startTime mismatch default vs explicit-ON")
+            #expect(a.endTime == b.endTime, "endTime mismatch default vs explicit-ON")
+            #expect(a.confidence == b.confidence, "confidence mismatch default vs explicit-ON")
+            #expect(a.decisionState == b.decisionState, "decisionState mismatch default vs explicit-ON")
+            #expect(a.eligibilityGate == b.eligibilityGate, "eligibilityGate mismatch default vs explicit-ON")
+            #expect(a.wasSkipped == b.wasSkipped, "wasSkipped mismatch default vs explicit-ON")
+            #expect(a.boundaryState == b.boundaryState, "boundaryState mismatch default vs explicit-ON")
+            #expect(a.detectorVersion == b.detectorVersion, "detectorVersion mismatch default vs explicit-ON")
+            #expect(a.metadataSource == b.metadataSource, "metadataSource mismatch default vs explicit-ON")
+            #expect(a.metadataConfidence == b.metadataConfidence, "metadataConfidence mismatch default vs explicit-ON")
+            #expect(a.evidenceStartTime == b.evidenceStartTime, "evidenceStartTime mismatch default vs explicit-ON")
         }
 
-        // No music-origin span decodes on either arm — the proposer never ran.
+        // The proposer RAN on both ON arms (identically) and did NOT run on
+        // the OFF arm — this is the discriminating "ON differs from OFF"
+        // proof that keeps the byte-identity sweep above from going vacuous.
         let spansDefault = try await storeDefault.fetchDecodedSpans(assetId: assetId)
-        let spansExplicit = try await storeExplicit.fetchDecodedSpans(assetId: assetId)
-        #expect(musicAnchoredSpans(spansDefault).isEmpty,
-                "default config must not seed a .sustainedMusicOffset span")
-        #expect(musicAnchoredSpans(spansExplicit).isEmpty,
-                "explicit-false config must not seed a .sustainedMusicOffset span")
+        let spansExplicitOn = try await storeExplicitOn.fetchDecodedSpans(assetId: assetId)
+        let spansExplicitOff = try await storeExplicitOff.fetchDecodedSpans(assetId: assetId)
+        #expect(!musicAnchoredSpans(spansDefault).isEmpty,
+                "default (ON) config must seed a .sustainedMusicOffset span from the live music run")
+        #expect(musicAnchoredSpans(spansDefault).count == musicAnchoredSpans(spansExplicitOn).count,
+                "default and explicit-true arms must seed the same music-anchored spans")
+        #expect(musicAnchoredSpans(spansExplicitOff).isEmpty,
+                "explicit-false config must not seed a .sustainedMusicOffset span — OFF must keep the proposer unreachable")
 
-        // The wired dispatcher was never consulted on either arm.
-        #expect(await dispatcherDefault.callCount == 0,
-                "flags OFF must keep the recovery dispatcher unreachable (default arm)")
-        #expect(await dispatcherExplicit.callCount == 0,
-                "flags OFF must keep the recovery dispatcher unreachable (explicit arm)")
+        // Dispatcher consults: identical between the ON arms (whatever the
+        // gate decides for this fixture, it must decide it the same way), and
+        // ZERO on the OFF arm even though the dispatcher is fully wired.
+        let defaultCalls = await dispatcherDefault.callCount
+        let explicitOnCalls = await dispatcherExplicitOn.callCount
+        #expect(defaultCalls == explicitOnCalls,
+                "default (\(defaultCalls)) vs explicit-true (\(explicitOnCalls)) dispatcher consults must match")
+        #expect(await dispatcherExplicitOff.callCount == 0,
+                "flags OFF must keep the recovery dispatcher unreachable (explicit-false arm)")
     }
 
     // MARK: - (c) Flag-ON wire-up
 
-    @Test("Config proposer ON: the sustained-music run decodes to a persisted music-anchored span; default config does not")
+    @Test("Config proposer ON (gate+recovery OFF): the sustained-music run decodes to a persisted music-anchored span; proposer OFF does not")
     func configProposerOnSeedsMusicSpanEndToEnd() async throws {
         let assetId = "asset-ncv6-proposer"
         let storeOn = try await makeSeededStore(assetId: assetId)
-        let storeDefault = try await makeSeededStore(assetId: assetId)
+        let storeOff = try await makeSeededStore(assetId: assetId)
 
-        // ONLY the proposer flag flips — if the call site read a neighboring
-        // config field for this Input parameter, no span would decode.
+        // ONLY the proposer flag differs between the arms; gate + recovery
+        // are explicitly OFF on both (post Gate 1 they default ON, and the
+        // gate would suppress this cue-less music-only span with no
+        // dispatcher wired). If the call site read a neighboring config field
+        // for the proposer Input parameter, no span would decode on the ON
+        // arm and this test would fail.
         let configOn = AdDetectionConfig(
             candidateThreshold: 0.40,
             confirmationThreshold: 0.70,
@@ -338,22 +376,27 @@ struct MusicOffsetCoverageFlagsWireInTests {
             hotPathLookahead: 90.0,
             detectorVersion: "test-detection-v1",
             fmBackfillMode: .off,
-            sustainedMusicProposerEnabled: true
+            sustainedMusicProposerEnabled: true,
+            musicOffsetLexicalGateEnabled: false,
+            musicOffsetFMRecoveryEnabled: false
         )
-        let configDefault = AdDetectionConfig(
+        let configOff = AdDetectionConfig(
             candidateThreshold: 0.40,
             confirmationThreshold: 0.70,
             suppressionThreshold: 0.25,
             hotPathLookahead: 90.0,
             detectorVersion: "test-detection-v1",
-            fmBackfillMode: .off
+            fmBackfillMode: .off,
+            sustainedMusicProposerEnabled: false,
+            musicOffsetLexicalGateEnabled: false,
+            musicOffsetFMRecoveryEnabled: false
         )
 
         let chunks = makeAdFreeChunks(assetId: assetId)
         try await makeService(store: storeOn, config: configOn).runBackfill(
             chunks: chunks, analysisAssetId: assetId, podcastId: Self.podcastId, episodeDuration: Self.episodeDuration
         )
-        try await makeService(store: storeDefault, config: configDefault).runBackfill(
+        try await makeService(store: storeOff, config: configOff).runBackfill(
             chunks: chunks, analysisAssetId: assetId, podcastId: Self.podcastId, episodeDuration: Self.episodeDuration
         )
 
@@ -369,9 +412,9 @@ struct MusicOffsetCoverageFlagsWireInTests {
             }, "the decoded span must be music-ONLY (no other anchor) on the ad-free fixture")
         }
 
-        let musicSpansDefault = musicAnchoredSpans(try await storeDefault.fetchDecodedSpans(assetId: assetId))
-        #expect(musicSpansDefault.isEmpty,
-                "default config must leave the identical fixture without a music-anchored span")
+        let musicSpansOff = musicAnchoredSpans(try await storeOff.fetchDecodedSpans(assetId: assetId))
+        #expect(musicSpansOff.isEmpty,
+                "explicit proposer-OFF config must leave the identical fixture without a music-anchored span")
     }
 
     @Test("Config gate ON (recovery OFF): the cue-less music-only span is suppressed and the wired dispatcher is NOT consulted")
@@ -379,8 +422,9 @@ struct MusicOffsetCoverageFlagsWireInTests {
         let assetId = "asset-ncv6-gate"
         let store = try await makeSeededStore(assetId: assetId)
 
-        // Recovery stays FALSE in config while a live .ad dispatcher is wired:
-        // if the call site swapped the gate/recovery flags, the Input would get
+        // Recovery is EXPLICITLY false in config (post Gate 1 the omitted
+        // default is true) while a live .ad dispatcher is wired: if the call
+        // site swapped the gate/recovery flags, the Input would get
         // gate=false and the music span would survive — failing this test. If
         // the recovery flag leaked true, the dispatcher would be consulted —
         // also failing this test.
@@ -393,7 +437,8 @@ struct MusicOffsetCoverageFlagsWireInTests {
             detectorVersion: "test-detection-v1",
             fmBackfillMode: .off,
             sustainedMusicProposerEnabled: true,
-            musicOffsetLexicalGateEnabled: true
+            musicOffsetLexicalGateEnabled: true,
+            musicOffsetFMRecoveryEnabled: false
         )
 
         try await makeService(store: store, config: config, dispatcher: dispatcher).runBackfill(
