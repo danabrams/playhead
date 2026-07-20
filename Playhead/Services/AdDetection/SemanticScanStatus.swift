@@ -140,11 +140,17 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
     /// `retryPolicy`) is produced on iOS 27 as on iOS 26. playhead-l3r2.
     ///
     /// Cases with no legacy `GenerationError` analog are documented inline.
-    /// Legacy cases with no `LanguageModelError` analog:
-    ///   - `assetsUnavailable`: on iOS 27 asset readiness is surfaced through
+    ///
+    /// Three legacy `GenerationError` cases have NO `LanguageModelError`
+    /// analog — iOS 27 moved them to *separate* new error types that this
+    /// seam does not yet bridge (follow-up: playhead-cle1), so on iOS 27 they
+    /// currently fall through `from(error:)` to `.failedTransient`:
+    ///   - `decodingFailure` → `GeneratedContent.ParsingError`.
+    ///   - `concurrentRequests` → `LanguageModelSession.Error.concurrentRequests`.
+    ///   - `assetsUnavailable` → `SystemLanguageModel.Error.assetsUnavailable`
+    ///     (a thrown error on iOS 27), in addition to the pre-flight
     ///     `SystemLanguageModel.Availability.unavailable(.modelNotReady)`
-    ///     (see `from(availability:)`), not through a thrown error.
-    ///   - `concurrentRequests`: folded into `.rateLimited` in the new enum.
+    ///     signal still handled by `from(availability:)`.
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
     static func from(languageModelError: LanguageModelError) -> SemanticScanStatus {
         switch languageModelError {
