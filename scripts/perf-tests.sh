@@ -46,6 +46,15 @@ MEASUREMENT_TESTS=(
   # the same path runs deterministically in the fast suite via the injected
   # transitionSleeper seam; only this latency measurement is gated here.
   "PlayheadTests/SkipCueSmoothingTests/skipTransitionLatencyWithinProductionBudget()"
+  # playhead-vsot round 2: force-quit resume-data scan 2 s cold-launch SLA
+  # (median-of-3 wall-clock). Functional completion coverage stays in the
+  # fast suite (scanCompletesOverTenBlobCache); only the latency SLA is
+  # measured here.
+  "PlayheadTests/ScanForSuspendedTransfersTests/scanCompletesWithinSLA()"
+  # playhead-vsot round 2: at-scale span-decoder wall-clock budget (spec
+  # 200 ms device / 500 ms quiescent simulator). Functional completion
+  # stays in the fast suite (decodeAtScaleCompletes).
+  "PlayheadTests/MinimalContiguousSpanDecoderTests/performanceDecodeAtScale()"
   # Note: AnalysisWorkSchedulerOutcomeBookkeepingTests is intentionally NOT
   # here — its cancel-mid-decode tests were rewritten to be deterministic
   # (via processNextDispatchableJobForTesting) and un-gated, so they run in

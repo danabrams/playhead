@@ -15,41 +15,31 @@ import Testing
 
 // MARK: - Helpers
 
-/// Drain the given state stream until a state matching `predicate` is observed
-/// or a timeout fires. Returns the list of observed statuses. This replaces
-/// fragile `Task.sleep(...)` + `snapshot()` polling, which races with the
-/// actor's notification handler.
-/// Wraps an AsyncStream drain in a bounded wall-clock deadline. Polls the
-/// drain task with short sleep slices so we never wait indefinitely on a
-/// stream that never yields another value (which would otherwise hang).
+/// Drain the given state stream ON THE TEST'S OWN TASK until a status
+/// matching `predicate` arrives, then return everything observed.
+///
+/// playhead-vsot round 2: the previous version drained in a child task
+/// while the test polled a shared box under a 2 s wall-clock deadline —
+/// under the full parallel plan the actor's notification handler (or
+/// the drain task itself) was not scheduled inside 2 s and the tests
+/// failed with `observed=[]` at ~95 s wall (2026-07-20 gate run 2).
+/// The stream IS the actor-handled signal: the handler's `pause()` runs
+/// on PlaybackServiceActor and yields the `.paused` state to every
+/// observer, and `observeStates()` yields the current snapshot
+/// immediately on subscribe, so subscribing before the notification
+/// post cannot miss the transition. No deadline — if production stops
+/// pausing, the drain parks forever and the test's `.timeLimit` trait
+/// fails deterministically instead of load-dependently.
 private func awaitStatus(
     in stream: AsyncStream<PlaybackState>,
-    matching predicate: @Sendable @escaping (PlaybackState.Status) -> Bool,
-    timeoutNanos: UInt64 = 2_000_000_000
+    matching predicate: @Sendable @escaping (PlaybackState.Status) -> Bool
 ) async -> [PlaybackState.Status] {
-    // Convert the stream into an async iterator we can poll inside a deadline.
-    let box = ObservedBox()
-    let drain = Task {
-        for await state in stream {
-            await box.append(state.status)
-            if predicate(state.status) { return }
-        }
+    var observed: [PlaybackState.Status] = []
+    for await state in stream {
+        observed.append(state.status)
+        if predicate(state.status) { break }
     }
-    let deadline = ContinuousClock.now.advanced(by: .nanoseconds(Int(timeoutNanos)))
-    while ContinuousClock.now < deadline {
-        if await box.matches(predicate) { break }
-        try? await Task.sleep(nanoseconds: 5_000_000)
-    }
-    drain.cancel()
-    return await box.statuses
-}
-
-private actor ObservedBox {
-    var statuses: [PlaybackState.Status] = []
-    func append(_ status: PlaybackState.Status) { statuses.append(status) }
-    func matches(_ predicate: (PlaybackState.Status) -> Bool) -> Bool {
-        statuses.contains(where: predicate)
-    }
+    return observed
 }
 
 // MARK: - Interruption Handling
@@ -60,7 +50,8 @@ struct InterruptionHandlingTests {
     /// Post a fake interruption-began notification and verify PlaybackService
     /// handles it without crashing. This is the exact scenario that triggered
     /// the "Incorrect actor executor assumption" crash with Combine observers.
-    @Test("Interruption notification handled on actor without crash")
+    @Test("Interruption notification handled on actor without crash",
+          .timeLimit(.minutes(1)))
     func interruptionBegan() async throws {
         // playhead-86s: use a private NotificationCenter + fake seams so
         // parallel test instances can't clobber each other via the process
@@ -143,7 +134,8 @@ struct InterruptionHandlingTests {
         // The actor isolation assertion would have fired before reaching here.
     }
 
-    @Test("Route change notification handled on actor without crash")
+    @Test("Route change notification handled on actor without crash",
+          .timeLimit(.minutes(1)))
     func routeChange() async throws {
         let center = NotificationCenter()
         let service = await PlaybackService(

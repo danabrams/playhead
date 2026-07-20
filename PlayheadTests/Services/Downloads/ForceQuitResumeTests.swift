@@ -33,6 +33,14 @@ private actor HyhtRecorder: WorkJournalRecording {
     private(set) var failures: [Failure] = []
     private(set) var finalized: [String] = []
 
+    /// playhead-vsot round 2: tests waiting for a specific episode's
+    /// `preempted` emission. Resumed from `recordPreempted` the moment
+    /// the matching entry lands — event-driven, replacing the 2 s
+    /// `pollUntil` deadline that expired under full-suite load before
+    /// the app-delegate's async scan Task was ever scheduled.
+    private var preemptedWaiters:
+        [(episodeId: String, continuation: CheckedContinuation<Void, Never>)] = []
+
     func recordFinalized(episodeId: String) async {
         finalized.append(episodeId)
     }
@@ -58,6 +66,23 @@ private actor HyhtRecorder: WorkJournalRecording {
         metadataJSON: String
     ) async {
         preempted.append(Preempted(episodeId: episodeId, cause: cause, metadataJSON: metadataJSON))
+        let ready = preemptedWaiters.filter { $0.episodeId == episodeId }
+        preemptedWaiters.removeAll { $0.episodeId == episodeId }
+        for waiter in ready {
+            waiter.continuation.resume()
+        }
+    }
+
+    /// Suspend until a `preempted` entry for `episodeId` has been
+    /// recorded. Returns immediately if it already was. No deadline —
+    /// the test's `.timeLimit` trait is the backstop, so a genuine
+    /// "scan never ran" regression fails deterministically instead of
+    /// load-dependently.
+    func awaitPreempted(episodeId: String) async {
+        if preempted.contains(where: { $0.episodeId == episodeId }) { return }
+        await withCheckedContinuation { continuation in
+            preemptedWaiters.append((episodeId: episodeId, continuation: continuation))
+        }
     }
 }
 
@@ -210,7 +235,47 @@ struct ScanForSuspendedTransfersTests {
         #expect(preempted.isEmpty)
     }
 
-    @Test("Scan completes within the 2-second SLA specified by the bead")
+    /// Fast-suite functional pin at the SLA test's scale: the scan
+    /// COMPLETES over a 10-blob cache and reports every seeded blob.
+    /// Event-driven by construction — the wait IS the direct `await` on
+    /// `scanForSuspendedTransfers()`; a hang fails the `.timeLimit`
+    /// deterministically. No clock anywhere (playhead-vsot round 2 /
+    /// m9xk pattern: latency belongs to the serial perf lane below).
+    @Test("Scan completes over a 10-blob cache and reports every blob",
+          .timeLimit(.minutes(1)))
+    func scanCompletesOverTenBlobCache() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        for i in 0..<10 {
+            try await manager.persistResumeData(
+                episodeId: "ep-sla-\(i)",
+                data: Data(repeating: UInt8(i), count: 1024)
+            )
+        }
+
+        let outcome = try await manager.scanForSuspendedTransfers()
+        #expect(outcome.resumableTransferIds == Set((0..<10).map { "ep-sla-\($0)" }))
+        #expect(outcome.corruptedTransferIds.isEmpty)
+    }
+
+    /// Bead requirement: "scan completes within 2 s on cold launch".
+    /// This is a wall-clock LATENCY measurement — only valid on a
+    /// quiescent CPU, so it is PerfGate-gated and runs exclusively in
+    /// the serial perf pass (scripts/perf-tests.sh; listed in its
+    /// MEASUREMENT_TESTS). Under the parallel fast plan the previous
+    /// version failed the 2026-07-20 gate at ~92 s wall with a sample
+    /// past even its 30 s "hang ceiling" — pure scheduler starvation,
+    /// not a scan regression (the scan takes ~12 ms in isolation).
+    /// The functional completion coverage stays in the fast suite via
+    /// `scanCompletesOverTenBlobCache` above; the 30 s ceiling is gone
+    /// because the `.timeLimit` trait is the hang backstop.
+    @Test("Scan completes within the 2-second SLA specified by the bead",
+          .enabled(if: PerfGate.runsMeasurementTests, "perf pass only — see playhead-zx0l"),
+          .timeLimit(.minutes(1)))
     func scanCompletesWithinSLA() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -226,12 +291,7 @@ struct ScanForSuspendedTransfersTests {
             )
         }
 
-        // Cooperative-pool jitter under the parallel test plan
-        // (3000+ tests racing) routinely inflates wall-clock latency
-        // for an operation that takes ~12 ms in isolation — see
-        // commits 11ed665 / 26bca6f for the same pattern. Use median
-        // of 3 runs so a single starved sample doesn't fail the test;
-        // production SLA (2 s on cold launch) is unchanged.
+        // Median of 3 runs on the quiescent perf lane.
         var samples: [Duration] = []
         for _ in 0..<3 {
             let start = ContinuousClock.now
@@ -239,11 +299,8 @@ struct ScanForSuspendedTransfersTests {
             samples.append(ContinuousClock.now - start)
         }
         let median = samples.sorted()[1]
-        #expect(median < .seconds(2))
-        // Hang ceiling: any sample blowing past 30 s indicates a real
-        // regression (deadlock, infinite loop) rather than scheduler
-        // jitter — surface as a failure so we don't paper over it.
-        #expect(samples.allSatisfy { $0 < .seconds(30) })
+        #expect(median < .seconds(2),
+                "Cold-launch scan SLA is 2 s; median was \(median) (samples: \(samples))")
     }
 
     @Test("Corrupted (zero-length) resume-data emits failed/pipelineError and deletes the blob")
@@ -500,7 +557,8 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
 @Suite("PlayheadAppDelegate – scanForSuspendedTransfers wiring")
 struct PlayheadAppDelegateScanWiringTests {
 
-    @Test("didFinishLaunching triggers scanForSuspendedTransfers on the registered manager")
+    @Test("didFinishLaunching triggers scanForSuspendedTransfers on the registered manager",
+          .timeLimit(.minutes(1)))
     func launchTriggersScan() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -520,10 +578,13 @@ struct PlayheadAppDelegateScanWiringTests {
             didFinishLaunchingWithOptions: nil
         )
 
-        // Scan runs async; poll for the preempted emission.
-        let sawPreempted = await pollUntil(timeout: .seconds(2)) {
-            await recorder.preempted.contains { $0.episodeId == "ep-launch" }
-        }
-        #expect(sawPreempted)
+        // The scan runs on an async Task the delegate spawns. Await the
+        // ACTUAL signal — the recorder's preempted emission — instead of
+        // polling under a 2 s deadline that expires under full-suite
+        // load before that Task is even scheduled (playhead-vsot round
+        // 2; failed the 2026-07-20 parallel gate at ~84 s wall).
+        await recorder.awaitPreempted(episodeId: "ep-launch")
+        let preempted = await recorder.preempted
+        #expect(preempted.contains { $0.episodeId == "ep-launch" })
     }
 }
