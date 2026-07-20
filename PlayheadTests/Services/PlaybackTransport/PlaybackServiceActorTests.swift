@@ -261,13 +261,18 @@ struct PlaybackServiceCallbackIsolationTests {
         _ = service
     }
 
-    @Test("loadItem triggers KVO without executor assertion")
+    @Test("loadItem triggers KVO without executor assertion", .timeLimit(.minutes(1)))
     func loadItemKVOSafe() async throws {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
             nowPlayingInfo: FakeNowPlayingInfoProvider(),
             notificationCenter: NotificationCenter()
         )
+
+        // Subscribe BEFORE loadItem so we never miss the KVO-driven
+        // transition. observeStates() yields the current snapshot (.idle)
+        // immediately on subscribe.
+        let stream = await service.observeStates()
 
         // Create a player item from a progressive URL. The asset won't load
         // real audio, but AVPlayerItem will still fire status KVO (to .unknown
@@ -277,13 +282,24 @@ struct PlaybackServiceCallbackIsolationTests {
 
         await service.loadItem(item)
 
-        // Give KVO callbacks time to fire on their arbitrary queue.
-        try await Task.sleep(for: .milliseconds(100))
-
-        // If the KVO closure were actor-tainted, we would have crashed
-        // before reaching this snapshot.
-        let snapshot = await service.snapshot()
-        #expect(snapshot.status != .idle)
+        // playhead-vsot round 3: drain the state stream on the test's own
+        // task until the KVO-driven status change lands, instead of a
+        // fixed 100 ms Task.sleep that could expire before the callback
+        // fires under the parallel gate. The stream IS the signal — the
+        // nonisolated KVO closure hops to PlaybackServiceActor and yields
+        // the new state to every observer. Unbounded; the `.timeLimit`
+        // trait is the hang backstop. (If the KVO closure were
+        // actor-tainted we would have crashed before reaching here — the
+        // original isolation-safety contract still holds.)
+        var sawNonIdle = false
+        for await state in stream {
+            if state.status != .idle {
+                sawNonIdle = true
+                break
+            }
+        }
+        #expect(sawNonIdle,
+                "loadItem must drive a KVO status change off .idle")
     }
 
     @Test("State updates after play don't crash")

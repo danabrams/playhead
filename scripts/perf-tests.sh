@@ -55,6 +55,12 @@ MEASUREMENT_TESTS=(
   # 200 ms device / 500 ms quiescent simulator). Functional completion
   # stays in the fast suite (decodeAtScaleCompletes).
   "PlayheadTests/MinimalContiguousSpanDecoderTests/performanceDecodeAtScale()"
+  # playhead-vsot round 3: SpanMetrics anti-quadratic wall-clock guards
+  # (5 s ceiling on 10k-pair summary / 1k+1k pairing). Correctness
+  # (metric counts) stays unconditional in the fast suite; only the
+  # timing guard is measured here.
+  "PlayheadTests/PerformanceSmokeTests/tenKPairs()"
+  "PlayheadTests/PerformanceSmokeTests/pairingScale()"
   # Note: AnalysisWorkSchedulerOutcomeBookkeepingTests is intentionally NOT
   # here — its cancel-mid-decode tests were rewritten to be deterministic
   # (via processNextDispatchableJobForTesting) and un-gated, so they run in

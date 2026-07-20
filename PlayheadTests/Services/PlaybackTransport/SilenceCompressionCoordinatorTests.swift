@@ -76,7 +76,7 @@ private func musicWindow(
 
 // MARK: - Suite
 
-@Suite("SilenceCompressionCoordinator (playhead-epii)")
+@Suite("SilenceCompressionCoordinator (playhead-epii)", .timeLimit(.minutes(1)))
 @MainActor
 struct SilenceCompressionCoordinatorTests {
 
@@ -101,25 +101,16 @@ struct SilenceCompressionCoordinatorTests {
         let source = RecordingAnalysisSource(windows: windows)
         let coord = SilenceCompressionCoordinator(playback: playback, source: source)
         await coord.beginEpisode(assetId: "asset-1", keepFullMusic: false)
-        // First tick fires the lookahead fetch (async). Wait for it
-        // to materialize the plan, then tick from inside the plan.
+        // playhead-vsot round 3: the first tick fires the lookahead fetch
+        // (fire-and-forget). `awaitPendingRefreshForTesting()` waits for
+        // that fetch + `compressor.replaceWindows` to complete, so the
+        // plan is materialized deterministically instead of polling
+        // `source.fetchCount` / sleeping for cadence. A subsequent tick
+        // then engages synchronously (notePlayhead awaits `apply`, which
+        // awaits `beginCompression`), so no retry-tick loop is needed.
         await coord.notePlayhead(time: 0)
-        await Task.yield()
-        // Spin briefly to let the fire-and-forget refresh complete.
-        for _ in 0..<10 {
-            if await source.fetchCount > 0 { break }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        // Wait long enough for cadence to allow another tick.
-        try? await Task.sleep(for: .milliseconds(50))
+        await coord.awaitPendingRefreshForTesting()
         await coord.notePlayhead(time: 11)
-        // Coordinator may need an additional tick after the fetch
-        // completes for the plan to be visible.
-        for _ in 0..<10 {
-            if !(await playback.beginCalls.isEmpty) { break }
-            await coord.notePlayhead(time: 11)
-            try? await Task.sleep(for: .milliseconds(20))
-        }
         let calls = await playback.beginCalls
         #expect(!calls.isEmpty, "Coordinator should have engaged compression")
         #expect(calls.last?.algorithm == .varispeed)
@@ -134,10 +125,14 @@ struct SilenceCompressionCoordinatorTests {
         let source = RecordingAnalysisSource(windows: windows)
         let coord = SilenceCompressionCoordinator(playback: playback, source: source)
         await coord.beginEpisode(assetId: "asset-1", keepFullMusic: true)
+        // playhead-vsot round 3: with keepFullMusic=true, notePlayhead
+        // early-returns (the guard gates fetch AND tick), so no async
+        // work is fired and no sleep is needed — the assertion is
+        // deterministic. `awaitPendingRefreshForTesting` is a no-op here
+        // (no refresh Task) but kept for symmetry/robustness.
         await coord.notePlayhead(time: 0)
-        try? await Task.sleep(for: .milliseconds(80))
+        await coord.awaitPendingRefreshForTesting()
         await coord.notePlayhead(time: 11)
-        try? await Task.sleep(for: .milliseconds(80))
         let calls = await playback.beginCalls
         #expect(calls.isEmpty)
     }
@@ -151,17 +146,14 @@ struct SilenceCompressionCoordinatorTests {
         let source = RecordingAnalysisSource(windows: windows)
         let coord = SilenceCompressionCoordinator(playback: playback, source: source)
         await coord.beginEpisode(assetId: "asset-1", keepFullMusic: false)
+        // playhead-vsot round 3: drive to the engaged state
+        // deterministically via the refresh seam (see
+        // playheadInsidePlanEngages), then flip the override.
         await coord.notePlayhead(time: 0)
-        for _ in 0..<10 {
-            if await source.fetchCount > 0 { break }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        try? await Task.sleep(for: .milliseconds(80))
-        for _ in 0..<10 {
-            await coord.notePlayhead(time: 11)
-            if !(await playback.beginCalls.isEmpty) { break }
-            try? await Task.sleep(for: .milliseconds(20))
-        }
+        await coord.awaitPendingRefreshForTesting()
+        await coord.notePlayhead(time: 11)
+        #expect(!(await playback.beginCalls.isEmpty),
+                "Setup: compression must be engaged before the override flip")
         let preEndCount = await playback.endCallCount
         await coord.updateKeepFullMusicOverride(true)
         let postEndCount = await playback.endCallCount
@@ -177,30 +169,21 @@ struct SilenceCompressionCoordinatorTests {
         let source = RecordingAnalysisSource(windows: windows)
         let coord = SilenceCompressionCoordinator(playback: playback, source: source)
         await coord.beginEpisode(assetId: "asset-1", keepFullMusic: false)
-        // Drive into the plan (engaged state).
+        // playhead-vsot round 3: drive into the engaged state
+        // deterministically via the refresh seam.
         await coord.notePlayhead(time: 0)
-        for _ in 0..<10 {
-            if await source.fetchCount > 0 { break }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        for _ in 0..<10 {
-            await coord.notePlayhead(time: 11)
-            if !(await playback.beginCalls.isEmpty) { break }
-            try? await Task.sleep(for: .milliseconds(20))
-        }
+        await coord.awaitPendingRefreshForTesting()
+        await coord.notePlayhead(time: 11)
         let preBeginCount = await playback.beginCalls.count
         #expect(preBeginCount >= 1)
-        // Simulate user changing base speed: planner state must reset
-        // and the next tick from inside the same plan should engage
-        // again.
+        // Simulate user changing base speed: `recordUserSpeedChange`
+        // marks the planner idle and resets the refresh/tick sentinels
+        // (to `-inf`), so the very next tick refetches AND re-evaluates
+        // from a clean slate. The published windows survive `markIdle`,
+        // so that tick re-engages synchronously.
         await coord.recordUserSpeedChange()
-        // Spin a few ticks to allow the cadence-driven re-engage.
-        try? await Task.sleep(for: .milliseconds(80))
-        for _ in 0..<10 {
-            await coord.notePlayhead(time: 11)
-            if await playback.beginCalls.count > preBeginCount { break }
-            try? await Task.sleep(for: .milliseconds(20))
-        }
+        await coord.notePlayhead(time: 11)
+        await coord.awaitPendingRefreshForTesting()
         let postBeginCount = await playback.beginCalls.count
         #expect(
             postBeginCount > preBeginCount,
@@ -217,20 +200,18 @@ struct SilenceCompressionCoordinatorTests {
         let source = RecordingAnalysisSource(windows: windows)
         let coord = SilenceCompressionCoordinator(playback: playback, source: source)
         await coord.beginEpisode(assetId: "asset-1", keepFullMusic: true)
-        // Tick a few times — should NOT have fetched (override gates
-        // the fetch on the keepFullMusic guard).
+        // Tick — should NOT have fetched (the keepFullMusic guard gates
+        // the fetch). notePlayhead early-returns synchronously, so no
+        // sleep is needed to establish the zero baseline.
         await coord.notePlayhead(time: 11)
-        try? await Task.sleep(for: .milliseconds(40))
         let preFetchCount = await source.fetchCount
         // Flip override OFF: the next tick must re-fetch even if the
         // cadence hasn't elapsed since the last refresh attempt.
         await coord.updateKeepFullMusicOverride(false)
         await coord.notePlayhead(time: 11)
-        // Allow the fire-and-forget refresh to land.
-        for _ in 0..<10 {
-            if await source.fetchCount > preFetchCount { break }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        // playhead-vsot round 3: await the fire-and-forget refresh via
+        // the seam instead of polling fetchCount under a wall-clock loop.
+        await coord.awaitPendingRefreshForTesting()
         let postFetchCount = await source.fetchCount
         #expect(
             postFetchCount > preFetchCount,
@@ -248,7 +229,9 @@ struct SilenceCompressionCoordinatorTests {
         let coord = SilenceCompressionCoordinator(playback: playback, source: source)
         await coord.beginEpisode(assetId: "asset-1", keepFullMusic: false)
         await coord.notePlayhead(time: 0)
-        try? await Task.sleep(for: .milliseconds(50))
+        // playhead-vsot round 3: await the first refresh via the seam
+        // instead of a fixed settle sleep before swapping assets.
+        await coord.awaitPendingRefreshForTesting()
         await coord.beginEpisode(assetId: "asset-2", keepFullMusic: false)
         // The second beginEpisode should have ended any in-flight
         // compression on the playback side.
@@ -277,31 +260,48 @@ struct SilenceCompressionCoordinatorTests {
         // Source that suspends inside fetchWindows until `release()` is
         // called, so we can deterministically observe cancellation
         // before the Task body completes.
+        // playhead-vsot round 3: fully event-driven — `fetchWindows`
+        // fires a continuation when it ENTERS (replacing the 5 ms
+        // `waitForFetch` poll) and another when it OBSERVES cancellation
+        // (replacing the 5 ms observedCancellation poll). No wall-clock
+        // deadlines anywhere.
         actor BlockingAnalysisSource: SilenceCompressionAnalysisSourcing {
-            private var continuation: CheckedContinuation<Void, Never>?
+            private var releaseContinuation: CheckedContinuation<Void, Never>?
+            private var fetchEnteredContinuation: CheckedContinuation<Void, Never>?
+            private var cancellationContinuation: CheckedContinuation<Void, Never>?
             private(set) var fetchStarted = false
             private(set) var observedCancellation = false
 
-            func waitForFetch() async {
-                while !fetchStarted {
-                    try? await Task.sleep(for: .milliseconds(5))
-                }
+            /// Suspend until `fetchWindows` has been entered.
+            func awaitFetchEntered() async {
+                if fetchStarted { return }
+                await withCheckedContinuation { c in fetchEnteredContinuation = c }
+            }
+
+            /// Suspend until the resumed `fetchWindows` observes cancellation.
+            func awaitCancellationObserved() async {
+                if observedCancellation { return }
+                await withCheckedContinuation { c in cancellationContinuation = c }
             }
 
             func release() {
-                continuation?.resume()
-                continuation = nil
+                releaseContinuation?.resume()
+                releaseContinuation = nil
             }
 
             func fetchWindows(
                 assetId: String, from: Double, to: Double
             ) async throws -> [FeatureWindow] {
                 fetchStarted = true
+                fetchEnteredContinuation?.resume()
+                fetchEnteredContinuation = nil
                 await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-                    self.continuation = c
+                    self.releaseContinuation = c
                 }
                 if Task.isCancelled {
                     observedCancellation = true
+                    cancellationContinuation?.resume()
+                    cancellationContinuation = nil
                 }
                 return []
             }
@@ -316,10 +316,9 @@ struct SilenceCompressionCoordinatorTests {
         // `inFlightWindowsRefresh = Task { ... fetchWindows ... }` because
         // refreshDelta is treated as past-cadence on first tick.
         await coord.notePlayhead(time: 0)
-        // Wait for the Task to land inside fetchWindows (so the
-        // cancellation has someone to cancel — otherwise the test
-        // races the Task spawn).
-        await source.waitForFetch()
+        // Wait (event-driven) for the Task to land inside fetchWindows so
+        // the cancellation has someone to cancel.
+        await source.awaitFetchEntered()
 
         // Swap to a new asset; this should cancel the in-flight Task.
         await coord.beginEpisode(assetId: "asset-new", keepFullMusic: false)
@@ -328,12 +327,10 @@ struct SilenceCompressionCoordinatorTests {
         // observes Task.isCancelled.
         await source.release()
 
-        // Give the resumed Task a moment to reach the
-        // `Task.isCancelled` check inside `fetchWindows`.
-        for _ in 0..<50 {
-            if await source.observedCancellation { break }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
+        // Event-driven: resumes exactly when fetchWindows observes the
+        // cancellation. No deadline; the `.timeLimit` trait is the hang
+        // backstop.
+        await source.awaitCancellationObserved()
 
         let cancelled = await source.observedCancellation
         #expect(
@@ -382,21 +379,14 @@ struct SilenceCompressionCoordinatorTests {
         let coord = SilenceCompressionCoordinator(playback: playback, source: source)
         await coord.beginEpisode(assetId: "asset-1", keepFullMusic: false)
 
-        // First tick: lastWindowsRefreshTime is -inf so the first
-        // fetch fires unconditionally and returns the valid windows.
+        // playhead-vsot round 3: deterministic via the refresh seam.
+        // First tick: lastWindowsRefreshTime is -inf so the first fetch
+        // fires unconditionally and returns the valid windows.
         await coord.notePlayhead(time: 0)
-        for _ in 0..<10 {
-            if await source.fetchCount >= 1 { break }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        await coord.awaitPendingRefreshForTesting()
         // Tick inside the music plan; engage compression so we have
         // something to disengage if the buggy fallback path runs.
-        try? await Task.sleep(for: .milliseconds(50))
-        for _ in 0..<10 {
-            await coord.notePlayhead(time: 11)
-            if !(await playback.beginCalls.isEmpty) { break }
-            try? await Task.sleep(for: .milliseconds(20))
-        }
+        await coord.notePlayhead(time: 11)
         let preBeginCount = await playback.beginCalls.count
         let preEndCount = await playback.endCallCount
         #expect(
@@ -405,30 +395,23 @@ struct SilenceCompressionCoordinatorTests {
         )
 
         // Drive past the 5s cadence to fire the second fetch (which
-        // throws). Tick at t=12 first (resets cadence anchor for the
-        // tick-side throttle), then sleep, then tick at t=18.
-        try? await Task.sleep(for: .milliseconds(60))
+        // throws). notePlayhead(18) fires refresh #2; awaiting it lets
+        // the throw path run (the handler returns early, preserving the
+        // prior windows).
         await coord.notePlayhead(time: 18)
-        for _ in 0..<10 {
-            if await source.fetchCount >= 2 { break }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        await coord.awaitPendingRefreshForTesting()
         #expect(
             await source.fetchCount >= 2,
             "Second fetch must have fired so the throw path is exercised"
         )
 
-        // After the throwing fetch lands, tick a few more times
-        // inside the same music horizon. With the fix, the prior
-        // plan list survives and the compressor stays engaged. With
-        // the broken `(try? ...) ?? []` shape, plans collapse to []
-        // and the next tick would fire a `disengage` → endCallCount
-        // increments above the pre-throw baseline.
-        try? await Task.sleep(for: .milliseconds(50))
-        for _ in 0..<5 {
-            await coord.notePlayhead(time: 14)
-            try? await Task.sleep(for: .milliseconds(20))
-        }
+        // After the throwing fetch lands, tick again inside the same
+        // music horizon. With the fix, the prior plan list survives and
+        // the compressor stays engaged (no disengage). With the broken
+        // `(try? ...) ?? []` shape, plans collapse to [] and this tick
+        // would fire a `disengage` → endCallCount increments above the
+        // pre-throw baseline.
+        await coord.notePlayhead(time: 14)
         let postEndCount = await playback.endCallCount
         #expect(
             postEndCount == preEndCount,

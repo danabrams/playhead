@@ -309,6 +309,17 @@ final class SilenceCompressionCoordinator {
 
     var isCompressingForTesting: Bool { compressor.isCurrentlyCompressing }
     var currentPlansForTesting: [CompressionPlan] { compressor.currentPlans }
+
+    /// playhead-vsot round 3: await the in-flight lookahead-refresh Task
+    /// (the fire-and-forget fetch + `compressor.replaceWindows` spawned
+    /// by `notePlayhead` when the cadence elapses) so tests can wait for
+    /// the plan to materialize deterministically instead of polling
+    /// `source.fetchCount` under a wall-clock budget. Awaits an existing
+    /// stored `Task` handle and returns immediately when none is pending
+    /// — no production behavior change; nothing in production calls this.
+    func awaitPendingRefreshForTesting() async {
+        await inFlightWindowsRefresh?.value
+    }
 }
 
 // MARK: - Default analysis source

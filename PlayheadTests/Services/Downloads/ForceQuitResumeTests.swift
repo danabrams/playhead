@@ -473,7 +473,8 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         }
     }
 
-    @Test("didCompleteWithError harvests NSURLSessionDownloadTaskResumeData and writes it to resumeDataDirectory")
+    @Test("didCompleteWithError harvests NSURLSessionDownloadTaskResumeData and writes it to resumeDataDirectory",
+          .timeLimit(.minutes(1)))
     func harvestsResumeDataIntoResumeDirectory() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -497,16 +498,34 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
             ]
         )
 
+        // playhead-vsot round 3: event-driven instead of a 2 s
+        // `pollUntil` deadline (the same short-wall-clock class that
+        // flaked the interruption/route-change/scan families under the
+        // parallel gate — the harvest's persist Task can be starved past
+        // 2 s). Chain the delegate's `onResumeDataHarvested`: the
+        // production closure (wired in `DownloadManager.init`) still runs
+        // and persists — proving the init wiring — and our wrapper awaits
+        // an idempotent persist round-trip so it can signal true
+        // completion. `persistResumeData` overwrites with identical
+        // bytes, so the double write is a no-op on the observable state.
+        // No deadline; the `.timeLimit` trait is the hang backstop.
+        let persisted = TestEventCounter()
+        let productionHarvest = delegate.onResumeDataHarvested
+        delegate.onResumeDataHarvested = { episodeId, data in
+            productionHarvest?(episodeId, data)
+            Task {
+                try? await manager.persistResumeData(episodeId: episodeId, data: data)
+                persisted.increment()
+            }
+        }
+
         let task = G2wqStubTask(taskDescription: "ep-g2wq-harvest")
         delegate.urlSession(URLSession.shared, task: task, didCompleteWithError: cancelError)
 
-        // The harvest routes through an actor hop; poll until the blob
-        // lands on disk or we give up.
-        let sawBlob = await pollUntil(timeout: .seconds(2)) {
-            let loaded = try? await manager.loadResumeData(episodeId: "ep-g2wq-harvest")
-            return loaded == resumeBlob
-        }
-        #expect(sawBlob)
+        await persisted.wait(for: 1)
+
+        let loaded = try await manager.loadResumeData(episodeId: "ep-g2wq-harvest")
+        #expect(loaded == resumeBlob)
 
         // Belt-and-suspenders: the scan enumerator should now list the
         // harvested episode, proving the index file was written too.

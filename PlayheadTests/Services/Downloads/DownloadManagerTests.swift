@@ -308,10 +308,15 @@ struct DownloadManagerIntegrityTests {
 final class CapturingTaskScheduler: BackgroundTaskScheduling, @unchecked Sendable {
     var submitted: [BGTaskRequest] = []
     var shouldThrow: Error?
+    /// playhead-vsot round 3: fires on every successful submit so tests
+    /// can await the fire-and-forget observer→Task→submit chain instead
+    /// of polling `submitted` under a wall-clock deadline.
+    let submittedSignal = TestEventCounter()
 
     func submit(_ taskRequest: BGTaskRequest) throws {
         if let shouldThrow { throw shouldThrow }
         submitted.append(taskRequest)
+        submittedSignal.increment()
     }
 }
 
@@ -434,7 +439,8 @@ struct DownloadManagerForegroundAssistHandoffTests {
         #expect(scheduler.submitted.isEmpty)
     }
 
-    @Test("Posted willResignActive notification drives a real BG task submission end-to-end")
+    @Test("Posted willResignActive notification drives a real BG task submission end-to-end",
+          .timeLimit(.minutes(1)))
     @MainActor
     func postedWillResignActiveDrivesSubmission() async throws {
         // Review-fix Blocker 1: registerForegroundAssistLifecycleObserver
@@ -467,12 +473,10 @@ struct DownloadManagerForegroundAssistHandoffTests {
             object: nil
         )
 
-        // The observer hops into a Task; poll briefly for the submission
-        // to land rather than relying on a wall-clock sleep.
-        let deadline = Date(timeIntervalSinceNow: 5)
-        while scheduler.submitted.isEmpty && Date() < deadline {
-            try? await Task.sleep(nanoseconds: 20_000_000) // 20 ms
-        }
+        // The observer hops into a Task; await the submit signal
+        // (playhead-vsot round 3) rather than polling under a 5 s
+        // deadline that can starve under the parallel gate.
+        await scheduler.submittedSignal.wait(for: 1)
 
         #expect(!scheduler.submitted.isEmpty,
                 "Posted willResignActive must route through the registered observer to the scheduler")

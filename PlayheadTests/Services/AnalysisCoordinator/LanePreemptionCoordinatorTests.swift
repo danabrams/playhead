@@ -68,21 +68,52 @@ struct LanePreemptionCoordinatorTests {
     /// natural completion. See `pollUntil` docstring re: playhead-qtc.
     actor ShardEntrySignal {
         private(set) var enteredShard: Int? = nil
-        func recordEntered(shard: Int) { enteredShard = shard }
+        private var waiters: [(shard: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+        func recordEntered(shard: Int) {
+            enteredShard = shard
+            let ready = waiters.filter { $0.shard == shard }
+            waiters.removeAll { $0.shard == shard }
+            for waiter in ready { waiter.continuation.resume() }
+        }
+
+        /// playhead-vsot round 3: suspend until the simulated job reports
+        /// entering `shard` — event-driven, replacing the 10 s pollUntil
+        /// on `enteredShard == shard`. The job blocks at a safe point in
+        /// its shard until the test preempts, so `enteredShard` does not
+        /// advance past the awaited shard before the caller observes it.
+        func awaitEntered(shard: Int) async {
+            if enteredShard == shard { return }
+            await withCheckedContinuation { c in waiters.append((shard, c)) }
+        }
     }
 
     actor ControlledSafePoint {
         private var entered = false
         private var waiters: [CheckedContinuation<Void, Never>] = []
+        /// playhead-vsot round 3: separate waiter list for the test-side
+        /// `awaitEntered()` (distinct from the job-parking `waiters`), so
+        /// tests can event-wait for the job to reach the safe point
+        /// instead of polling `hasEntered()` under a 10 s deadline.
+        private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
 
         func enterAndWait() async {
             entered = true
+            let ready = enteredWaiters
+            enteredWaiters = []
+            for waiter in ready { waiter.resume() }
             await withCheckedContinuation { continuation in
                 waiters.append(continuation)
             }
         }
 
         func hasEntered() -> Bool { entered }
+
+        /// Suspend until the job has entered the safe point.
+        func awaitEntered() async {
+            if entered { return }
+            await withCheckedContinuation { enteredWaiters.append($0) }
+        }
 
         func release() {
             let waiters = waiters
@@ -228,7 +259,7 @@ struct LanePreemptionCoordinatorTests {
 
     // MARK: - 2. Safe-point pause
 
-    @Test("Pause occurs only at post-shard boundaries, not mid-shard")
+    @Test("Pause occurs only at post-shard boundaries, not mid-shard", .timeLimit(.minutes(1)))
     func pauseOccursOnlyAtSafePoints() async {
         let coordinator = LanePreemptionCoordinator()
         let entrySignal = ShardEntrySignal()
@@ -252,16 +283,11 @@ struct LanePreemptionCoordinatorTests {
         }
 
         // Wait for the simulated job to ENTER shard 0 — i.e. it has
-        // recorded its entry into the shard's compute window but has
-        // not yet completed it. This replaces a brittle `Task.sleep`
-        // wait whose wake-up was contention-sensitive (the original
-        // 30ms sleep could resume after shard 0 had already
-        // completed under parallel-CPU pressure, causing the test to
-        // either pause at a later shard or miss the preempt entirely).
-        let entered = await pollUntil(timeout: .seconds(10)) {
-            await entrySignal.enteredShard == 0
-        }
-        #expect(entered, "Simulated job must enter shard 0 before the test preempts")
+        // recorded its entry into the shard's compute window but has not
+        // yet completed it. playhead-vsot round 3: event-driven on the
+        // signal itself, replacing the 10 s pollUntil (which, like the
+        // 30 ms sleep before it, was contention-sensitive).
+        await entrySignal.awaitEntered(shard: 0)
 
         await coordinator.preemptLowerLanes(for: .now)
 
@@ -350,10 +376,9 @@ struct LanePreemptionCoordinatorTests {
             return nil
         }
 
-        let entered = await pollUntil(timeout: .seconds(10)) {
-            await safePoint.hasEntered()
-        }
-        #expect(entered, "Simulated job must enter the shard before preemption")
+        // playhead-vsot round 3: event-driven on the safe-point signal,
+        // replacing the 10 s pollUntil on hasEntered().
+        await safePoint.awaitEntered()
 
         await coordinator.preemptLowerLanes(for: .now)
         await safePoint.release()

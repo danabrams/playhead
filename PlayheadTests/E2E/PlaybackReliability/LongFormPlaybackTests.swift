@@ -34,9 +34,11 @@ struct LongFormPlaybackTests {
 
     // MARK: - Memory leak / retain cycle
 
-    @Test("PlaybackService deallocates after tearDown (no retain cycles)")
+    @Test("PlaybackService deallocates after tearDown (no retain cycles)",
+          .timeLimit(.minutes(1)))
     func serviceDeallocatesAfterTearDown() async {
         weak var weakService: PlaybackService?
+        var deallocLatch: DeallocLatch?
 
         // Hold the service inside an autoreleasepool, drive a long-ish
         // workload through it, then drop the strong reference. If any
@@ -49,6 +51,12 @@ struct LongFormPlaybackTests {
                 notificationCenter: NotificationCenter()
             )
             weakService = service
+            // playhead-vsot round 3: event-driven dealloc signal (round-1
+            // DeallocLatch pattern) replaces the fixed 100 ms Task.sleep
+            // budget below — under the parallel gate that budget could
+            // expire before the in-flight init/observer Tasks flushed and
+            // released the service, false-failing the retain-cycle check.
+            deallocLatch = attachDeallocLatch(to: service)
 
             // Drive a workload spanning a 90-min timeline at 2x.
             let totalDuration: TimeInterval = 5400 // 90 min
@@ -97,11 +105,13 @@ struct LongFormPlaybackTests {
             // Strong reference goes out of scope here.
         }
 
-        // Hop the actor a couple times to flush any in-flight Tasks
-        // (the configureAudioSession init Task, observer iterations).
-        for _ in 0..<5 {
-            try? await Task.sleep(for: .milliseconds(20))
-        }
+        // Event-driven: resumes exactly when the service deallocates,
+        // however long the in-flight Tasks take to flush under load. A
+        // real retain cycle keeps the latch silent and fails the
+        // `.timeLimit` deterministically. `await` genuinely suspends the
+        // test task (unlike a `Task.yield` spin), letting the executor
+        // drain the releasing work.
+        await deallocLatch?.wait()
 
         #expect(weakService == nil,
                 "PlaybackService must deallocate after tearDown; otherwise there is a retain cycle")

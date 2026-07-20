@@ -283,8 +283,21 @@ struct AnalysisWorkSchedulerThreeLaneTests {
     /// are properly serialized under Swift 6 concurrency.
     private actor CallLog {
         private(set) var calls: [AnalysisWorkScheduler.SchedulerLane] = []
+        private var waiters: [(lane: AnalysisWorkScheduler.SchedulerLane, continuation: CheckedContinuation<Void, Never>)] = []
+
         func append(_ lane: AnalysisWorkScheduler.SchedulerLane) {
             calls.append(lane)
+            let ready = waiters.filter { $0.lane == lane }
+            waiters.removeAll { $0.lane == lane }
+            for waiter in ready { waiter.continuation.resume() }
+        }
+
+        /// playhead-vsot round 3: suspend until the preemption hook has
+        /// been invoked with `lane` — event-driven, replacing the 30 s
+        /// pollUntil on `calls.contains(lane)`.
+        func awaitCall(_ lane: AnalysisWorkScheduler.SchedulerLane) async {
+            if calls.contains(lane) { return }
+            await withCheckedContinuation { waiters.append((lane, $0)) }
         }
     }
 
@@ -308,7 +321,8 @@ struct AnalysisWorkSchedulerThreeLaneTests {
         #expect(calls.isEmpty)
     }
 
-    @Test("Preemption hook is invoked with .now when a priority>=20 job is admitted")
+    @Test("Preemption hook is invoked with .now when a priority>=20 job is admitted",
+          .timeLimit(.minutes(1)))
     func testPreemptionHookCalledForNowLaneJob() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
@@ -336,12 +350,12 @@ struct AnalysisWorkSchedulerThreeLaneTests {
         await scheduler.startSchedulerLoop()
         defer { Task { await scheduler.stop() } }
 
-        let sawNow = await pollUntil {
-            await handler.log.calls.contains(.now)
-        }
+        // playhead-vsot round 3: event-driven on the hook invocation
+        // itself, replacing the 30 s pollUntil.
+        await handler.log.awaitCall(.now)
         await scheduler.stop()
         let finalCalls = await handler.log.calls
-        #expect(sawNow, "Preemption hook should be invoked with .now for a priority>=20 job")
+        #expect(finalCalls.contains(.now), "Preemption hook should be invoked with .now for a priority>=20 job")
         #expect(!finalCalls.contains(.soon),
                 "Preemption hook must not receive .soon when the admitted job is Now")
         #expect(!finalCalls.contains(.background),

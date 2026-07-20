@@ -59,7 +59,7 @@ struct BackgroundProcessingServiceTelemetryTests {
 
     // MARK: - Start / complete pair
 
-    @Test("handleBackfillTask emits matching `start` and `complete` rows")
+    @Test("handleBackfillTask emits matching `start` and `complete` rows", .timeLimit(.minutes(1)))
     func backfillEmitsStartAndComplete() async throws {
         let recorder = RecordingBGTaskTelemetryLogger()
         let bps = BackgroundProcessingService(
@@ -74,13 +74,12 @@ struct BackgroundProcessingServiceTelemetryTests {
         await bps.handleBackfillTask(task)
 
         // Wait for the background work task to finish so the `complete`
-        // row is in the recorder. The handler kicks off an unstructured
-        // Task that calls runPendingBackfill on the stub — which is
-        // synchronous and quick — then markComplete.
-        let deadline = ContinuousClock.now + .seconds(10)
-        while task.completedSuccess == nil && ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        // row is in the recorder. Event-driven (playhead-vsot round 3):
+        // await the stub's completion signal — no deadline poll to
+        // starve under the parallel gate. Same StubBackgroundTask signal
+        // the BackgroundProcessingServiceTests were converted to in
+        // round 1.
+        await task.awaitCompletion()
 
         let starts = try await recorder.eventsMatching(event: "start", timeout: .seconds(10))
         let completes = try await recorder.eventsMatching(event: "complete", timeout: .seconds(10))
@@ -96,7 +95,7 @@ struct BackgroundProcessingServiceTelemetryTests {
 
     // MARK: - Expire
 
-    @Test("backfill expirationHandler emits an `expire` row")
+    @Test("backfill expirationHandler emits an `expire` row", .timeLimit(.minutes(1)))
     func backfillEmitsExpireOnExpiration() async throws {
         let recorder = RecordingBGTaskTelemetryLogger()
         let coordinator = StubAnalysisCoordinator()
@@ -114,11 +113,9 @@ struct BackgroundProcessingServiceTelemetryTests {
             await bps.handleBackfillTask(task)
         }
 
-        // Wait for the expiration handler to be installed.
-        let setupDeadline = ContinuousClock.now + .seconds(5)
-        while task.expirationHandler == nil && ContinuousClock.now < setupDeadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        // Wait for the expiration handler to be installed — event-driven
+        // (playhead-vsot round 3), no deadline to starve under load.
+        await task.awaitExpirationHandlerInstalled()
 
         task.simulateExpiration()
         _ = await workTask.value
