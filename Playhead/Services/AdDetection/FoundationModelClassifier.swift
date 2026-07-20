@@ -1097,6 +1097,13 @@ struct FoundationModelClassifier: Sendable {
     /// without invoking the live FoundationModels backend.
     @available(iOS 26.0, *)
     nonisolated(unsafe) static var refinementRefusalExplanationFetcherOverride: (@Sendable (LanguageModelSession.GenerationError.Refusal) async throws -> String?)?
+
+    /// playhead-cle1: parallel test hook for the iOS-27
+    /// `LanguageModelError.refusal` path. iOS 27 throws a DIFFERENT `Refusal`
+    /// struct than the legacy `GenerationError.Refusal`, so its explanation
+    /// fetch needs its own override to be driven deterministically in tests.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    nonisolated(unsafe) static var languageModelRefusalExplanationFetcherOverride: (@Sendable (LanguageModelError.Refusal) async throws -> String?)?
     #endif
 
     /// bd-34e diagnostic payload emitted around every coarse-pass window
@@ -4270,17 +4277,37 @@ struct FoundationModelClassifier: Sendable {
     ) async -> String? {
         #if canImport(FoundationModels)
         guard #available(iOS 26.0, *) else { return nil }
-        guard let generationError = error as? LanguageModelSession.GenerationError,
-              case let .refusal(refusal, context) = generationError else {
+
+        // playhead-cle1: extract the refusal reflection, context description,
+        // and model-generated explanation from EITHER the iOS-27
+        // `LanguageModelError.refusal` (a NEW `Refusal` struct) or the legacy
+        // iOS-26 `LanguageModelSession.GenerationError.refusal`. New-first /
+        // legacy-fallback ordering mirrors `SemanticScanStatus.from(error:)`.
+        // Before this, the fetcher cast only to the legacy type, so on iOS 27
+        // the model's refusal explanation was silently dropped.
+        //
+        // playhead-36t: the explanation fetch is diagnostic-only and cannot
+        // block classification — the helper wraps it in a timeout guard.
+        let refusalReflect: String
+        let contextDebugDescription: String
+        let explanationText: String?
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *),
+           let languageModelError = error as? LanguageModelError,
+           case let .refusal(refusal) = languageModelError {
+            explanationText = await Self.refinementRefusalExplanationText(from: refusal)
+            refusalReflect = String(reflecting: refusal)
+            // The iOS-27 `Refusal` carries no separate `Context`; use its own
+            // debug description for the diagnostic breadcrumb.
+            contextDebugDescription = refusal.debugDescription
+        } else if let generationError = error as? LanguageModelSession.GenerationError,
+                  case let .refusal(refusal, context) = generationError {
+            explanationText = await Self.refinementRefusalExplanationText(from: refusal)
+            refusalReflect = String(reflecting: refusal)
+            contextDebugDescription = context.debugDescription
+        } else {
             return nil
         }
 
-        // playhead-36t: capture the model-generated explanation without
-        // letting a diagnostic-only FM call block classification.
-        let explanationText = await Self.refinementRefusalExplanationText(from: refusal)
-
-        let refusalReflect = String(reflecting: refusal)
-        let contextDebugDescription = context.debugDescription
         let preview = Self.coarsePromptPreview(plan.prompt)
         let diagnostic = RefinementPassRefusalDiagnostic(
             windowIndex: plan.windowIndex,
@@ -4330,6 +4357,49 @@ struct FoundationModelClassifier: Sendable {
             let fetchTask = Task {
                 #if DEBUG
                 if let override = refinementRefusalExplanationFetcherOverride {
+                    let result = try? await override(refusal)
+                    continuation.yield(result)
+                    continuation.finish()
+                    return
+                }
+                #endif
+
+                let explanation = try? await refusal.explanation
+                continuation.yield(explanation?.content)
+                continuation.finish()
+            }
+
+            let timeoutTask = Task {
+                try? await Task.sleep(for: timeout)
+                continuation.yield(nil)
+                continuation.finish()
+            }
+
+            continuation.onTermination = { @Sendable _ in
+                fetchTask.cancel()
+                timeoutTask.cancel()
+            }
+        }
+
+        var iterator = stream.makeAsyncIterator()
+        return await iterator.next() ?? nil
+    }
+
+    /// playhead-cle1: iOS-27 counterpart to the helper above. iOS 27 refusals
+    /// throw `LanguageModelError.refusal` carrying a NEW `Refusal` struct whose
+    /// `explanation` is the same `Response<String>` shape, but a distinct type
+    /// — so casting only to the legacy `GenerationError.Refusal` dropped the
+    /// model-generated explanation on iOS 27. Mirrors the legacy fetcher
+    /// exactly (same timeout guard, same DEBUG override seam).
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    private static func refinementRefusalExplanationText(
+        from refusal: LanguageModelError.Refusal
+    ) async -> String? {
+        let timeout = refinementRefusalExplanationTimeout
+        let stream = AsyncStream<String?>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let fetchTask = Task {
+                #if DEBUG
+                if let override = languageModelRefusalExplanationFetcherOverride {
                     let result = try? await override(refusal)
                     continuation.yield(result)
                     continuation.finish()
@@ -4487,13 +4557,26 @@ struct FoundationModelClassifier: Sendable {
     ) {
         #if canImport(FoundationModels)
         guard #available(iOS 26.0, *) else { return }
-        guard let generationError = error as? LanguageModelSession.GenerationError,
-              case let .refusal(refusal, context) = generationError else {
+
+        // playhead-cle1: same dual-shape handling as the refinement helper —
+        // emit the coarse refusal breadcrumb for BOTH the iOS-27
+        // `LanguageModelError.refusal` and the legacy `GenerationError.refusal`,
+        // else the diagnostic silently no-ops on iOS 27.
+        let refusalReflect: String
+        let contextDebugDescription: String
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *),
+           let languageModelError = error as? LanguageModelError,
+           case let .refusal(refusal) = languageModelError {
+            refusalReflect = String(reflecting: refusal)
+            contextDebugDescription = refusal.debugDescription
+        } else if let generationError = error as? LanguageModelSession.GenerationError,
+                  case let .refusal(refusal, context) = generationError {
+            refusalReflect = String(reflecting: refusal)
+            contextDebugDescription = context.debugDescription
+        } else {
             return
         }
 
-        let refusalReflect = String(reflecting: refusal)
-        let contextDebugDescription = context.debugDescription
         let preview = Self.coarsePromptPreview(plan.prompt)
         let diagnostic = CoarsePassWindowDiagnostic(
             kind: .refusalDetail,
@@ -4543,10 +4626,23 @@ struct FoundationModelClassifier: Sendable {
         guard let feedbackStore else { return }
         #if canImport(FoundationModels)
         guard #available(iOS 26.0, *) else { return }
-        guard let generationError = error as? LanguageModelSession.GenerationError,
-              case .refusal = generationError else {
-            return
+
+        // playhead-cle1: recognize refusals thrown as the iOS-27
+        // `LanguageModelError.refusal` too, else coarse-refusal feedback is
+        // never captured on iOS 27 (the cast to the legacy type fails).
+        let isRefusal: Bool
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *),
+           let languageModelError = error as? LanguageModelError,
+           case .refusal = languageModelError {
+            isRefusal = true
+        } else if let generationError = error as? LanguageModelSession.GenerationError,
+                  case .refusal = generationError {
+            isRefusal = true
+        } else {
+            isRefusal = false
         }
+        guard isRefusal else { return }
+
         let context = "window=\(windowIndex)_of_\(totalWindows)"
         let data = await sessionBox.logFeedback(
             desiredOutput: FoundationModelsFeedbackStore.coarseRefusalDesiredOutput,

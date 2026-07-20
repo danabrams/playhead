@@ -161,5 +161,56 @@ struct SemanticScanStatusTests {
         #expect(SemanticScanStatus.from(error: LanguageModelSession.GenerationError.refusal(refusal, context)) == .refusal)
         #expect(SemanticScanStatus.from(error: LanguageModelSession.GenerationError.exceededContextWindowSize(context)) == .exceededContextWindow)
     }
+
+    // playhead-cle1: iOS 27 split THREE more thrown-error responsibilities out
+    // of the legacy `LanguageModelSession.GenerationError` into SEPARATE new
+    // error types that l3r2's `LanguageModelError` bridge does NOT cover:
+    //   - `GeneratedContent.ParsingError` (a struct)          → `.decodingFailure`
+    //   - `LanguageModelSession.Error.concurrentRequests`     → `.rateLimited`
+    //   - `SystemLanguageModel.Error.assetsUnavailable`       → `.assetsUnavailable`
+    // Plus `LanguageModelSession.Error.transcriptMutationWhileResponding`,
+    // which has no analog and (Dan-overridable) maps to `.failedTransient`.
+    // Before the fix these all fell through `from(error:)` to
+    // `.failedTransient`, disarming decode-simplify / backoff / defer recovery
+    // on iOS 27. Every assertion here goes through the production `from(error:)`
+    // seam, so it fails at runtime on the unfixed mapping.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    @Test("iOS 27 ParsingError + session errors map via from(error:)")
+    func newIOS27ErrorTypesMapViaFromError() {
+        // GeneratedContent.ParsingError — parse/decode failure.
+        let parsingError = GeneratedContent.ParsingError(
+            rawContent: "{not json",
+            debugDescription: "test"
+        )
+        #expect(SemanticScanStatus.from(error: parsingError) == .decodingFailure)
+        #expect(SemanticScanStatus.from(parsingError: parsingError) == .decodingFailure)
+
+        // LanguageModelSession.Error — session-level failures.
+        #expect(
+            SemanticScanStatus.from(error: LanguageModelSession.Error.concurrentRequests)
+                == .rateLimited
+        )
+        #expect(SemanticScanStatus.from(sessionError: .concurrentRequests) == .rateLimited)
+        // Documented Dan-overridable decision: no analog → transient retry.
+        #expect(
+            SemanticScanStatus.from(error: LanguageModelSession.Error.transcriptMutationWhileResponding)
+                == .failedTransient
+        )
+        #expect(
+            SemanticScanStatus.from(sessionError: .transcriptMutationWhileResponding) == .failedTransient
+        )
+    }
+
+    // `SystemLanguageModel.Error` is unavailable on watchOS, so this seam is
+    // exercised separately without the watchOS availability marker.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+    @Test("iOS 27 SystemLanguageModel.Error.assetsUnavailable maps via from(error:)")
+    func systemModelAssetsUnavailableMapsViaFromError() {
+        let systemModelError = SystemLanguageModel.Error.assetsUnavailable(
+            .init(debugDescription: "model assets not staged")
+        )
+        #expect(SemanticScanStatus.from(error: systemModelError) == .assetsUnavailable)
+        #expect(SemanticScanStatus.from(systemModelError: systemModelError) == .assetsUnavailable)
+    }
 #endif
 }
