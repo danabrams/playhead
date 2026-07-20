@@ -472,6 +472,17 @@ struct AdDetectionConfig: Sendable {
     /// (both can shadow at once, to their OWN observers).
     let rediffSlotShadowEnabled: Bool
 
+    /// playhead-dsbc (Phase B1): master flag for the distilled specialist
+    /// classifier's SHADOW pass. When `true` AND a
+    /// `LiveSpecialistShadowDispatcher` with a non-nil
+    /// `SpecialistAdClassifier.Runtime` is injected, the specialist runs
+    /// alongside FM, logs a verdict, and ACTS ON NOTHING (the dispatcher owns
+    /// no store-write or decision seam). When `false` — or when no runtime is
+    /// injected (the B1 default; the live `CoreAILanguageModel`-backed runtime
+    /// is phone-gated Phase B2) — no specialist work runs and the pipeline
+    /// output is byte-identical. Default OFF; this is pure inert plumbing.
+    let specialistShadowEnabled: Bool
+
     /// playhead-xsdz.34: master flag for the user-correction READ side (the
     /// per-atom/per-span `.userVetoed` mask). When `false` (the production
     /// default), both `AtomEvidenceProjector` call sites inject
@@ -736,6 +747,7 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: Bool = false,
         rediffSlotOwnershipEnabled: Bool = true,
         rediffSlotShadowEnabled: Bool = false,
+        specialistShadowEnabled: Bool = false,
         userCorrectionReadSideEnabled: Bool = false,
         stingerRefinementEnabled: Bool = true,
         lexicalAnchorRefinementEnabled: Bool = false,
@@ -805,6 +817,7 @@ struct AdDetectionConfig: Sendable {
         self.spliceSlotShadowEnabled = spliceSlotShadowEnabled
         self.rediffSlotOwnershipEnabled = rediffSlotOwnershipEnabled
         self.rediffSlotShadowEnabled = rediffSlotShadowEnabled
+        self.specialistShadowEnabled = specialistShadowEnabled
         self.userCorrectionReadSideEnabled = userCorrectionReadSideEnabled
         self.stingerRefinementEnabled = stingerRefinementEnabled
         self.lexicalAnchorRefinementEnabled = lexicalAnchorRefinementEnabled
@@ -862,6 +875,7 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: false,
         rediffSlotOwnershipEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1) — rediff width marks, presence 97.8% gold-audited; the mark-only rung of the xsdz.36 ladder
         rediffSlotShadowEnabled: false,
+        specialistShadowEnabled: false,  // playhead-dsbc (Phase B1): specialist-shadow plumbing ships OFF and fully inert; live runtime is phone-gated Phase B2
         userCorrectionReadSideEnabled: false,  // playhead-xsdz.34: read side ships OFF; xsdz.36 flips it after the corpus A/B
         stingerRefinementEnabled: true,
         lexicalAnchorRefinementEnabled: false,

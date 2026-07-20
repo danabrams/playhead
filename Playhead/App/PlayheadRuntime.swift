@@ -178,6 +178,16 @@ final class PlayheadRuntime {
     /// `setShadowLaneTickHandler`.
     let shadowCaptureCoordinator: ShadowCaptureCoordinator?
 
+    /// playhead-dsbc (Phase B1): injection seam for the distilled specialist
+    /// classifier's shadow dispatcher. It runs the specialist alongside FM,
+    /// logs a verdict, and ACTS ON NOTHING. Default `nil` so the plumbing is
+    /// fully inert — no runtime is constructed here in B1 (the live
+    /// `CoreAILanguageModel`-backed `SpecialistAdClassifier.Runtime` is
+    /// phone-gated Phase B2). Until B2 wires a runtime and flips
+    /// `AdDetectionConfig.specialistShadowEnabled`, ad-detection behavior is
+    /// byte-identical to before this seam existed.
+    let shadowSpecialistDispatcher: SpecialistShadowDispatcher? = nil
+
     /// playhead-jzik: standalone polling coordinator that lazily fills
     /// the `episode_summaries` table for assets that have cleared the
     /// transcript-coverage threshold. `nil` in preview runtimes so the
