@@ -265,10 +265,19 @@ actor SkipOrchestrator {
     /// stamping seam for the Gate-2 provenance bead (rediff byte-exact /
     /// stinger-snap traces are not yet persisted on AdWindow rows).
     /// Absent entry ⇒ both edges `.unanchored` — the conservative default
-    /// under which flag-ON auto-skips nothing (derivation doc §8.5).
+    /// under which flag-ON auto-skips nothing (derivation doc §8.6).
     private var edgeAnchorsByWindowId: [String: (start: AutoSkipEdgeAnchor, end: AutoSkipEdgeAnchor)] = [:]
 
     /// Record the edge-anchor provenance for a window and re-evaluate.
+    ///
+    /// ORDERING CAVEAT for the Gate-2 stamping bead: stamp anchors BEFORE
+    /// a window can promote to `.applied`. Stamping after promotion cannot
+    /// retract the promotion — `evaluateAndPush`'s terminal-state branch
+    /// keeps the window `.applied` (its `auto_skip_fired` event and
+    /// `wasSkipped` persistence already happened); a downgrade-to-
+    /// `.unanchored` re-stamp only drops the CUE (via `paddedCueSpan`
+    /// returning nil in step 2), leaving decision state and audit trail
+    /// asserting a skip that will no longer fire.
     func setEdgeAnchors(
         start: AutoSkipEdgeAnchor,
         end: AutoSkipEdgeAnchor,
@@ -285,6 +294,15 @@ actor SkipOrchestrator {
     /// ("userMarked" / "userConfirmedSuggested") in
     /// `isUserInitiatedSkip(_:)`; this set covers the manual-tap path whose
     /// window is an ordinary detection row.
+    ///
+    /// SCOPE CAVEAT: this set is in-memory and per-session — a manual
+    /// skip's exemption does NOT survive relaunch. A previously
+    /// manually-skipped detection row preloads as `.applied` with its
+    /// original (non-user) `boundaryState`, so under flag-ON with no
+    /// anchors stamped its cue is suppressed like any pipeline span
+    /// (conservative direction: plays ad, never clips content). Persisting
+    /// a user-initiated marker on the AdWindow row is a schema decision
+    /// for the Gate-2 provenance bead, not this one.
     private var userInitiatedSkipWindowIds: Set<String> = []
 
     // MARK: - State
@@ -813,6 +831,13 @@ actor SkipOrchestrator {
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
         recentlyAcceptedSuggestIds.removeAll()
+        // playhead-98co: clear per-episode edge-padding state here as well
+        // as in `beginEpisode`, mirroring every sibling per-episode
+        // collection above (see the endEpisode-clears regression pattern on
+        // `emittedAutoSkipBannerWindowIds`) — stale anchor stamps or
+        // exemption ids must not outlive the episode that produced them.
+        edgeAnchorsByWindowId.removeAll()
+        userInitiatedSkipWindowIds.removeAll()
         pushSkipCues()
     }
 
@@ -2166,6 +2191,15 @@ actor SkipOrchestrator {
             // audit event, no inAdState flip. Flag OFF (the default) or a
             // user-initiated skip always passes (paddedCueSpan returns
             // the snapped span unchanged).
+            //
+            // KNOWN GATE-2 SURFACING GAP (dormant while the flag is OFF):
+            // the `.confirmed` state emits the `.autoSkipped`-tier banner
+            // ("Skipped …" copy, post-skip affordances) even though no
+            // skip will fire for this span. Honest copy/affordances for
+            // vetoed spans (suggest-style "Skip?" or a manual-skip
+            // button — `applyManualSkip` accepts `.confirmed` windows)
+            // belong to the Gate-2 blocker set ("wraj surfacing + veto
+            // masks"); do not flip the flag before that lands.
             if paddedCueSpan(for: managed) == nil {
                 let decision = SkipDecisionState.confirmed
                 logDecision(

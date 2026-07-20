@@ -3,8 +3,10 @@
 
 playhead-98co: auto-skip must be late-safe at the span start and conservative
 at the span end. This script recomputes the per-edge / per-anchor-tier signed
-error distributions that back `AutoSkipEdgePadding` and asserts the frozen
-margins still cover every observed content-clip-direction event. Run it
+error distributions that back `AutoSkipEdgePadding` and asserts, per matched
+break, that `clip-direction error + that break's gold attestation tolerance
+<= frozen margin` (the derivation formula in doc section 5 — not merely raw
+error <= margin, since labels are only good to their tolerance). Run it
 whenever the boundary stack changes (stinger bank re-learn, joint recipe
 retune) BEFORE trusting the frozen margins.
 
@@ -147,26 +149,38 @@ def check(rows: list[dict], label: str, *, apply_44_adjudication: bool) -> int:
         failures += 1
         print(f"  MARGIN VIOLATION: {msg}")
 
+    # Per-row check per the derivation formula (doc §5): the margin must
+    # cover the clip-direction error PLUS that break's gold attestation
+    # tolerance — an error inside the raw margin can still clip once label
+    # noise is charged. Safe-direction rows charge tolerance alone (the
+    # tolerance-floor rule); margins always exceed the max tolerance, so
+    # only clip-direction rows can actually fail.
     for r in start_snapped:
         if r["show"] in START_DEMOTED_SHOWS:
             continue  # per-show demotion: markOnly, margin not load-bearing
-        if r["signed_start"] < -START_MARGIN_STINGER:
+        exposure = max(0.0, -r["signed_start"]) + r["tol"]
+        if exposure > START_MARGIN_STINGER:
             fail(
-                f"snapped start {r['signed_start']:+.2f} < -{START_MARGIN_STINGER} "
+                f"snapped start {r['signed_start']:+.2f} (tol {r['tol']}) "
+                f"exposure {exposure:.2f} > {START_MARGIN_STINGER} "
                 f"({r['show']} {r['episode']})"
             )
     for r in end_snapped:
         if apply_44_adjudication and (r["episode"], r["gold_end"]) in ADJUDICATED_44_END:
             continue
-        if r["signed_end"] > END_MARGIN_STINGER:
+        exposure = max(0.0, r["signed_end"]) + r["tol"]
+        if exposure > END_MARGIN_STINGER:
             fail(
-                f"snapped end {r['signed_end']:+.2f} > {END_MARGIN_STINGER} "
+                f"snapped end {r['signed_end']:+.2f} (tol {r['tol']}) "
+                f"exposure {exposure:.2f} > {END_MARGIN_STINGER} "
                 f"({r['show']} {r['episode']})"
             )
     for r in end_unsnapped:
-        if r["signed_end"] > END_MARGIN_UNANCHORED:
+        exposure = max(0.0, r["signed_end"]) + r["tol"]
+        if exposure > END_MARGIN_UNANCHORED:
             fail(
-                f"unsnapped end {r['signed_end']:+.2f} > {END_MARGIN_UNANCHORED} "
+                f"unsnapped end {r['signed_end']:+.2f} (tol {r['tol']}) "
+                f"exposure {exposure:.2f} > {END_MARGIN_UNANCHORED} "
                 f"({r['show']} {r['episode']})"
             )
 
@@ -177,7 +191,7 @@ def check(rows: list[dict], label: str, *, apply_44_adjudication: bool) -> int:
         f"end-unsnapped n={len(end_unsnapped)} -> {ub95(len(end_unsnapped)) * 100:.1f}%"
     )
     if failures == 0:
-        print("  OK: frozen margins cover every observed clip-direction event")
+        print("  OK: frozen margins cover every clip-direction event + attestation tolerance")
     return failures
 
 

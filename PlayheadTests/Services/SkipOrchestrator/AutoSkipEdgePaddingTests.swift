@@ -411,6 +411,48 @@ struct AutoSkipEdgePaddingWiringTests {
         }
     }
 
+    @Test("ON: accepted suggestion is exempt — the user's tap skips the exact span with NO anchors stamped")
+    func onAcceptedSuggestionExempt() async throws {
+        // The load-bearing case for the "userConfirmedSuggested" exemption:
+        // acceptSuggestedSkip promotes to a fresh UUID-keyed window that
+        // never gets edge anchors stamped. Without the boundaryState
+        // exemption, the flag-ON veto would silently demote the user's own
+        // "Skip" tap back to markOnly.
+        let orchestrator = try await Self.makeAutoOrchestrator()
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { ranges in pushedCues = ranges }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1"
+        )
+        await orchestrator.setEdgePaddingEnabled(true)
+
+        let suggested = AdWindow(
+            id: "ad-suggested",
+            analysisAssetId: "asset-1",
+            startTime: 400, endTime: 460,
+            confidence: 0.9,
+            boundaryState: "lexical",
+            decisionState: "confirmed",
+            detectorVersion: "detection-v1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: "brought to you by", evidenceStartTime: 400,
+            metadataSource: "none", metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false, userDismissedBanner: false,
+            eligibilityGate: "markOnly"
+        )
+        await orchestrator.receiveAdWindows([suggested])
+        #expect(pushedCues.isEmpty, "markOnly ingest must not fire a cue")
+
+        await orchestrator.acceptSuggestedSkip(windowId: "ad-suggested")
+
+        #expect(pushedCues.count == 1, "The accepted suggestion must skip despite padding ON and no anchors")
+        if let cue = pushedCues.first {
+            #expect(Self.cueStart(cue) == 400)
+            #expect(Self.cueEnd(cue) == 459) // exact span minus trailing cushion; no padding
+        }
+    }
+
     @Test("ON: markOnly spans are untouched — suggest tier surfacing, no cue, no state change")
     func onMarkOnlyUntouched() async throws {
         let orchestrator = try await Self.makeAutoOrchestrator()

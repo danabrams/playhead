@@ -34,6 +34,18 @@
 //     orchestrator consults it only on the auto-skip path. User-initiated
 //     skips (user-marked spans, accepted suggestions, manual taps) are
 //     exempted by the caller: the user chose those edges deliberately.
+//   • CUSHION STACKING: the orchestrator's pre-existing pod-level trailing
+//     cushion (`SkipPolicyConfig.adTrailingCushionSeconds`, 1.0 s,
+//     playhead-vn7n.2) applies AFTER these margins, to each merged cue's
+//     end in `pushMergedCues`. The effective flag-ON end pull-in is
+//     therefore endMargin + 1.0 s (e.g. 11.25 s total for an unanchored
+//     end). Deliberate, same-direction stacking: the margin guarantees the
+//     cue end never passes the true ad end; the cushion cedes one extra
+//     second of ad tail (the recoverable direction). Note the 1.0 s
+//     remainder floor below is checked BEFORE the cushion — a
+//     minimum-remainder span therefore collapses to a zero-length cue
+//     (a harmless no-op skip, the pre-existing clamp in `pushMergedCues`).
+//     See derivation doc §7.
 //
 // The policy is pure and stateless: anchors are INPUTS. Per-edge anchor
 // provenance is not yet persisted on AdWindow rows (the stinger snap trace

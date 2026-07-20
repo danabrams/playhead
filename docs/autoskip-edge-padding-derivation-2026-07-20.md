@@ -110,7 +110,10 @@ Formula per (edge, tier): **worst observed clip-direction error in tier
 (post-adjudication) + that break's gold attestation tolerance, rounded UP to a
 0.25 s grid.** Where a tier has zero observed clip-direction events, the margin
 floor is the attestation tolerance rounded up (labels themselves are only good
-to ±0.3/±0.5 s).
+to ±0.3/±0.5 s). The harness enforces this per row: it asserts
+`clip-direction error + that break's tolerance ≤ margin` for every matched
+break (not just raw error ≤ margin), so a violation of the formula — not
+merely of the raw cover — fails the run.
 
 | Edge | Anchor tier | Basis | Margin |
 |---|---|---|---|
@@ -192,6 +195,28 @@ Median break width 90.1 s (44-gold). Combined margins consume:
 - stinger/stinger (1.50 s): median 98.3% (min 94.8%)
 - stinger-start / unanchored-end (11.0 s): median 87.8% (min 61.7%)
 
+### 7a. Interaction with the existing trailing cushion (flag-ON total)
+
+The orchestrator's pre-existing pod-level trailing cushion
+(`SkipPolicyConfig.adTrailingCushionSeconds` = 1.0 s, playhead-vn7n.2)
+applies **after** these margins, to each merged cue's end in
+`pushMergedCues`. The effective flag-ON end pull-in is therefore
+**endMargin + 1.0 s** (byte 1.75 s, stinger 1.75 s, unanchored 11.25 s
+total); the wiring tests pin the stacked values. This is deliberate,
+same-direction stacking, not double-counting: the margin (derived from
+predicted-end vs gold-end residuals) guarantees the cue end never passes
+the true ad end; the cushion cedes one extra second of ad tail — the
+recoverable direction. Two consequences worth naming:
+
+- The §7 cost table above describes the margins alone; add 1.0 s per pod
+  for the shipped flag-ON totals.
+- The 1.0 s degenerate-remainder floor is checked **before** the cushion,
+  so a span left with exactly the minimum remainder collapses to a
+  zero-length cue after cushioning (a harmless no-op skip — the
+  pre-existing clamp in `pushMergedCues`). Effective sub-second skips are
+  possible for remainders in (1.0, 2.0) s; raising the floor to account
+  for the cushion is a policy choice deferred to flag-ON review.
+
 ## 8. Caveats
 
 1. **n is small everywhere.** 44 primary breaks; per-tier n as low as 6. §6 is
@@ -210,7 +235,14 @@ Median break width 90.1 s (44-gold). Combined margins consume:
    margins are tolerance-dominated; the ted adjudication (§4) shows single gold
    labels can be off by 30 s. The margin formula adds the attestation tolerance
    for exactly this reason.
-5. **Anchor provenance is not yet persisted on AdWindow rows.** The stinger
+5. **Vetoed spans currently surface the auto-skip banner.** A flag-ON
+   eligibility veto keeps the window `.confirmed`, which emits the
+   `.autoSkipped`-tier banner ("Skipped …" copy, post-skip affordances)
+   for a span that will not skip. Dormant while the flag is OFF; honest
+   surfacing for vetoed spans (suggest-style "Skip?" or a manual-skip
+   affordance) is part of the Gate-2 blocker set ("wraj surfacing + veto
+   masks") and must land before flag-ON.
+6. **Anchor provenance is not yet persisted on AdWindow rows.** The stinger
    trace and rediff slot provenance live inside `AdDetectionService` today and
    never reach `SkipOrchestrator`. Until a stamping bead lands, the wiring
    classifies every pipeline edge `.unanchored` — flag-ON therefore auto-skips
