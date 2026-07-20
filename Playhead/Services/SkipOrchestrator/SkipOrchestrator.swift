@@ -246,6 +246,47 @@ actor SkipOrchestrator {
         self.perShowThresholdControllerStore = store
     }
 
+    // MARK: - playhead-98co: asymmetric auto-skip edge padding
+
+    /// Feature flag for the derived edge-padding policy (default OFF —
+    /// `AutoSkipEdgePadding.isEnabledByDefault`; auto-skip itself is held
+    /// behind Gate 2). OFF ⇒ byte-identical orchestrator behavior: skip
+    /// cues use the snapped span bounds exactly as before.
+    private(set) var edgePaddingEnabled: Bool = AutoSkipEdgePadding.isEnabledByDefault
+
+    /// Flip the edge-padding policy and re-evaluate pending windows so a
+    /// mid-episode change takes effect on the next cue push.
+    func setEdgePaddingEnabled(_ enabled: Bool) {
+        edgePaddingEnabled = enabled
+        evaluateAndPush()
+    }
+
+    /// Per-window edge-anchor provenance, keyed by adWindowId. This is the
+    /// stamping seam for the Gate-2 provenance bead (rediff byte-exact /
+    /// stinger-snap traces are not yet persisted on AdWindow rows).
+    /// Absent entry ⇒ both edges `.unanchored` — the conservative default
+    /// under which flag-ON auto-skips nothing (derivation doc §8.5).
+    private var edgeAnchorsByWindowId: [String: (start: AutoSkipEdgeAnchor, end: AutoSkipEdgeAnchor)] = [:]
+
+    /// Record the edge-anchor provenance for a window and re-evaluate.
+    func setEdgeAnchors(
+        start: AutoSkipEdgeAnchor,
+        end: AutoSkipEdgeAnchor,
+        forWindowId id: String
+    ) {
+        edgeAnchorsByWindowId[id] = (start: start, end: end)
+        evaluateAndPush()
+    }
+
+    /// Windows whose skip was explicitly user-initiated (manual "Skip Ad"
+    /// tap). User-initiated skips are exempt from edge padding: the user
+    /// chose the span deliberately. User-marked and accepted-suggestion
+    /// windows are exempted via their `boundaryState` stamps
+    /// ("userMarked" / "userConfirmedSuggested") in
+    /// `isUserInitiatedSkip(_:)`; this set covers the manual-tap path whose
+    /// window is an ordinary detection row.
+    private var userInitiatedSkipWindowIds: Set<String> = []
+
     // MARK: - State
 
     /// All managed windows for the current episode, keyed by adWindowId.
@@ -661,6 +702,9 @@ actor SkipOrchestrator {
         emittedAutoSkipBannerWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
+        // playhead-98co: per-episode edge-padding state.
+        edgeAnchorsByWindowId.removeAll()
+        userInitiatedSkipWindowIds.removeAll()
 
         // Load per-show trust mode.
         if let podcastId, let trustService {
@@ -1802,6 +1846,11 @@ actor SkipOrchestrator {
         guard var managed = windows[windowId] else { return }
         guard managed.decisionState == .confirmed else { return }
 
+        // playhead-98co: a manual "Skip Ad" tap is user-initiated — the
+        // window (an ordinary detection row) is exempt from edge padding
+        // so the user's chosen span skips exactly.
+        userInitiatedSkipWindowIds.insert(windowId)
+
         managed.decisionState = .applied
         managed.cueActive = true
         windows[windowId] = managed
@@ -1969,14 +2018,67 @@ actor SkipOrchestrator {
             }
         }
 
-        // 2. Merge adjacent windows with small gaps.
-        let merged = mergeAdjacentWindows(eligible)
+        // 2. Compute each window's playback SKIP SPAN (playhead-98co:
+        //    identity when edge padding is OFF — the default; the derived
+        //    late-safe margins when ON), then merge adjacent spans with
+        //    small gaps. Padding applies ONLY to the skip cues pushed to
+        //    playback: banners, decision records, and the applied-segment
+        //    broadcast below all keep the full snapped span.
+        let skipSpans = eligible.compactMap { paddedCueSpan(for: $0) }
+        let merged = mergeAdjacentWindows(skipSpans)
 
         // 3. Push skip cues to PlaybackService.
         pushMergedCues(merged)
 
         // 4. Broadcast updated segments to UI listeners.
         broadcastAppliedSegments()
+    }
+
+    // MARK: - playhead-98co: edge-padded skip spans
+
+    /// The playback skip span for a managed window: the snapped span when
+    /// edge padding is disabled or the skip is user-initiated; otherwise
+    /// the `AutoSkipEdgePadding` late-safe window (shrink-only), or nil
+    /// when no late-safe window exists (cue suppressed — the span keeps
+    /// its banner/marker surfacing but is never auto-skipped).
+    ///
+    /// Also consulted by `evaluateWindow`'s auto-mode veto so a span with
+    /// no late-safe window is demoted to `.confirmed` (markOnly behavior)
+    /// BEFORE the `.applied` promotion — no `auto_skip_fired` audit event
+    /// and no `inAdState` flip for a skip that will never fire.
+    private func paddedCueSpan(for managed: ManagedWindow) -> (start: Double, end: Double)? {
+        guard edgePaddingEnabled, !isUserInitiatedSkip(managed) else {
+            return (start: managed.snappedStart, end: managed.snappedEnd)
+        }
+        // Per-edge anchor provenance is not yet persisted on AdWindow rows
+        // (stinger snap traces and rediff slot provenance live inside
+        // AdDetectionService). Until the Gate-2 stamping bead lands and
+        // populates `setEdgeAnchors`, every pipeline edge classifies
+        // `.unanchored` — under the derived policy that means flag-ON
+        // auto-skips nothing, the intended conservative posture.
+        let anchors = edgeAnchorsByWindowId[managed.adWindow.id]
+            ?? (start: .unanchored, end: .unanchored)
+        return AutoSkipEdgePadding.skipWindow(
+            spanStart: managed.snappedStart,
+            spanEnd: managed.snappedEnd,
+            startAnchor: anchors.start,
+            endAnchor: anchors.end,
+            showKey: activePodcastId
+        )
+    }
+
+    /// Whether this window's skip was explicitly user-initiated — exempt
+    /// from edge padding (the user chose the span deliberately).
+    private func isUserInitiatedSkip(_ managed: ManagedWindow) -> Bool {
+        if userInitiatedSkipWindowIds.contains(managed.adWindow.id) {
+            return true
+        }
+        switch managed.adWindow.boundaryState {
+        case "userMarked", "userConfirmedSuggested":
+            return true
+        default:
+            return false
+        }
     }
 
     /// Evaluate a single window against skip policy. Returns the decision.
@@ -2056,6 +2158,23 @@ actor SkipOrchestrator {
             logDecision(managed: managed, decision: decision, reason: "Manual mode -- confirmed, awaiting user tap")
             return decision
         case .auto:
+            // playhead-98co: edge-padding eligibility veto. When the
+            // policy is enabled and this span has no late-safe skip
+            // window (start edge unanchored/demoted, or the derived
+            // margins consume the span), keep it .confirmed — markOnly
+            // behavior: banner surfaces, no skip cue, no auto_skip_fired
+            // audit event, no inAdState flip. Flag OFF (the default) or a
+            // user-initiated skip always passes (paddedCueSpan returns
+            // the snapped span unchanged).
+            if paddedCueSpan(for: managed) == nil {
+                let decision = SkipDecisionState.confirmed
+                logDecision(
+                    managed: managed,
+                    decision: decision,
+                    reason: "Edge padding: no late-safe skip window (start unanchored/demoted or margins consume span) -- markOnly"
+                )
+                return decision
+            }
             break // Proceed to auto-skip below.
         }
 
@@ -2116,24 +2235,27 @@ actor SkipOrchestrator {
 
     // MARK: - Window Merging
 
-    /// Merge adjacent applied windows with gaps smaller than mergeGapSeconds.
-    private func mergeAdjacentWindows(_ windows: [ManagedWindow]) -> [(start: Double, end: Double)] {
-        let sorted = windows.sorted { $0.snappedStart < $1.snappedStart }
+    /// Merge adjacent skip spans with gaps smaller than mergeGapSeconds.
+    /// (playhead-98co: takes the already-computed skip spans — snapped
+    /// bounds when edge padding is OFF, padded bounds when ON — so the
+    /// merge semantics are identical in both states.)
+    private func mergeAdjacentWindows(_ spans: [(start: Double, end: Double)]) -> [(start: Double, end: Double)] {
+        let sorted = spans.sorted { $0.start < $1.start }
         guard let first = sorted.first else { return [] }
 
         var merged: [(start: Double, end: Double)] = []
-        var currentStart = first.snappedStart
-        var currentEnd = first.snappedEnd
+        var currentStart = first.start
+        var currentEnd = first.end
 
-        for window in sorted.dropFirst() {
-            if window.snappedStart <= currentEnd + config.mergeGapSeconds {
+        for span in sorted.dropFirst() {
+            if span.start <= currentEnd + config.mergeGapSeconds {
                 // Merge: extend the current range.
-                currentEnd = max(currentEnd, window.snappedEnd)
+                currentEnd = max(currentEnd, span.end)
             } else {
                 // Gap too large: emit current range, start new one.
                 merged.append((start: currentStart, end: currentEnd))
-                currentStart = window.snappedStart
-                currentEnd = window.snappedEnd
+                currentStart = span.start
+                currentEnd = span.end
             }
         }
 

@@ -41,7 +41,9 @@ skipped region.
    per break, fingerprint-checked lineage) this dump **exactly reproduces the
    bead-charter numbers**: tol-adjusted start p50 24.4 s / end p50 2.8 s,
    44/44 matched. Signed errors below are raw `predicted − gold`.
-4. **Byte-rediff tier:** the xsdz.44 byte-alignment kill test
+4. **Predictions (cross-build check, §6a):** the 2026-07-17 danshows build
+   dump (`…pipeline-dump-53ep-danshows-20260717.json`), same scoring.
+5. **Byte-rediff tier:** the xsdz.44 byte-alignment kill test
    (`analysis/byte-forensics-spike-2026-07-17.md`), 11 gold breaks over 7 A/B
    pairs (SmartLess ×3, Morbid ×4).
 
@@ -117,7 +119,7 @@ to ±0.3/±0.5 s).
 | start | unanchored | required ≈ 24.7 s — see verdict below | **UNSKIPPABLE → markOnly** |
 | end | rediffByteExact | +0.22 + 0.3 = 0.52 | **0.75 s** |
 | end | stingerSnapped | +0.44 (smartless, tol 0.3) = 0.74 | **0.75 s** |
-| end | unanchored | +7.55 (conan, tol 0.3) = 7.85 | **8.00 s** |
+| end | unanchored | +9.92 (smartless 05-21, 07-17 build — §6a) + 0.3 | **10.25 s** |
 
 Degenerate rule: after padding, the remaining skip window must retain at least
 1.0 s or the span is not auto-skipped (stays markOnly). Padding can only
@@ -168,23 +170,39 @@ structural envelope-template lock), so the n=6 bound overstates practical risk
 weekly corpus loop + gold extension (playhead-xdh7) until the upper bounds
 clear the target, or revise margins from the larger sample.
 
+### 6a. Cross-build check (the margin-fragility finding)
+
+Re-running the harness against the NEWER 2026-07-17 danshows build
+(`playhead-dogfood-diagnostics-pipeline-dump-53ep-danshows-20260717.json`)
+holds every anchored-tier margin, but the UNANCHORED END tier produced a new
+tail event: smartless 05-21 at **+9.92 s** (> the reference build's +7.55).
+The unanchored tiers' tails are build-sensitive — exactly why they are either
+markOnly (start) or carry a large margin (end). The end margin was therefore
+sized across BOTH measured builds: 9.92 + 0.3 → **10.25 s**. Both builds now
+pass `scripts/l2f-derive-autoskip-padding.py` (default dump and
+`--dump …danshows-20260717.json`). Anchored-tier margins were identical
+across builds — the hard-anchor tiers are the stable ones, which is the whole
+thesis of certainty-tiered skipping.
+
 ## 7. Cost of the padding (the annoying-but-recoverable direction)
 
 Median break width 90.1 s (44-gold). Combined margins consume:
 
 - byte/byte (1.25 s): median 98.6% of the span still skipped (min 95.6%)
 - stinger/stinger (1.50 s): median 98.3% (min 94.8%)
-- stinger-start / unanchored-end (8.75 s): median 90.3% (min 69.5%)
+- stinger-start / unanchored-end (11.0 s): median 87.8% (min 61.7%)
 
 ## 8. Caveats
 
 1. **n is small everywhere.** 44 primary breaks; per-tier n as low as 6. §6 is
    the honest quantification.
-2. **Single prediction build.** All pipeline-tier numbers come from the
-   2026-07-16 xsdz39bank dump. The margins are constants versioned against this
-   derivation; if the boundary stack changes (stinger bank re-learn, joint
-   recipe retune, riiz/xtpf/t1py boundary movement), RE-DERIVE before flag-ON
-   (`scripts/l2f-derive-autoskip-padding.py` is the harness).
+2. **Build sensitivity.** Anchored-tier numbers replicated across the
+   2026-07-16 xsdz39bank and 2026-07-17 danshows builds; the unanchored end
+   tail did NOT (§6a) and the margin was widened to cover both. If the
+   boundary stack changes again (stinger bank re-learn, joint recipe retune,
+   riiz/xtpf/t1py boundary movement), RE-DERIVE before flag-ON
+   (`scripts/l2f-derive-autoskip-padding.py` is the harness; run it against
+   the current build's dump).
 3. **Byte tier is an offline proxy.** The xsdz.44 spike used the offline Python
    aligner on 2 shows; production is the clean-room Swift `RediffByteAligner`.
    Re-measure the byte tier from production output before Gate 2 flips.

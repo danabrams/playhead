@@ -48,7 +48,7 @@ DEFAULT_DUMP = pathlib.Path(
 # Frozen margins (must mirror AutoSkipEdgePadding.swift).
 START_MARGIN_STINGER = 0.75
 END_MARGIN_STINGER = 0.75
-END_MARGIN_UNANCHORED = 8.00
+END_MARGIN_UNANCHORED = 10.25
 # start unanchored: unskippable (markOnly) — no margin to verify.
 # byte tier: derived from the xsdz.44 spike (analysis/byte-forensics-
 # spike-2026-07-17.md), not recomputable from the dump; constants noted only.
