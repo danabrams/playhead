@@ -41,9 +41,72 @@
 // no-op.
 
 import Foundation
+import ObjectiveC
 import Testing
 
 @testable import Playhead
+
+// MARK: - Deinit latch (playhead-vsot)
+
+/// Event-driven deallocation signal. `DeinitSentinel` is attached to
+/// the runtime via an associated object; when the runtime deallocates,
+/// the sentinel is released with it and its `deinit` fires the latch,
+/// resuming any waiting test exactly at the moment of deallocation.
+/// Thread-safe: deallocation may happen on any thread.
+private final class DeinitLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        lock.lock()
+        if fired {
+            lock.unlock()
+            return
+        }
+        fired = true
+        let waiters = continuations
+        continuations = []
+        lock.unlock()
+        for continuation in waiters {
+            continuation.resume()
+        }
+    }
+
+    func wait() async {
+        if hasFired() { return }
+        await withCheckedContinuation { continuation in
+            register(continuation)
+        }
+    }
+
+    // NSLock lock()/unlock() are unavailable in async contexts, so the
+    // locking work lives in synchronous helpers.
+    private func hasFired() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return fired
+    }
+
+    private func register(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        if fired {
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        continuations.append(continuation)
+        lock.unlock()
+    }
+}
+
+private final class DeinitSentinel {
+    private let latch: DeinitLatch
+    init(latch: DeinitLatch) { self.latch = latch }
+    deinit { latch.signal() }
+}
+
+private nonisolated(unsafe) var deinitSentinelKey: UInt8 = 0
 
 @Suite("playhead-7h2: runtime shutdown lifecycle")
 struct RuntimeShutdownLifecycleTests {
@@ -224,6 +287,12 @@ struct RuntimeShutdownLifecycleTests {
         // instead of weakRuntime). That framing is wrong and was
         // corrected after the investigation documented in playhead-7h2.
         //
+        // playhead-vsot: the wait below is now UNBOUNDED and
+        // event-driven (deinit latch), so "needs more time" can never
+        // again be the explanation for a failure here. If this test
+        // fails now, it fails via its `.timeLimit` with the latch never
+        // fired — that is a REAL retain cycle. Work the suspect list.
+        //
         // If `weakRuntime` is non-nil here, SOMETHING owned by the
         // observer is transitively retaining the runtime. The likely
         // suspects, in rough order:
@@ -258,11 +327,40 @@ struct RuntimeShutdownLifecycleTests {
         // the loop without an async wake), so a non-nil `weakObserver`
         // would NOT be a bug — but a non-nil `weakRuntime` always is.
 
+        // playhead-vsot ROOT CAUSE of the old flake (failed even in
+        // isolation): the runtime's release is not synchronous with the
+        // closure scope ending. Init performs ObjC-bridged side effects
+        // (NotificationCenter async sequences, UIDevice, BGTaskScheduler)
+        // whose bookkeeping keeps the last reference alive until the
+        // main queue goes IDLE and its pending queue-turn/autorelease
+        // work drains. The previous wait was a fixed 200-iteration
+        // `Task.yield()` budget — but a tight yield loop itself keeps
+        // the MainActor busy, so the drain it was waiting for could not
+        // run, and the budget lost the race deterministically (~2 s of
+        // yields, release observed only once the queue idled). A
+        // 30 s diagnostic showed the runtime releases ~60 ms after the
+        // test task actually suspends — there is NO cycle.
+        //
+        // Fix: wait EVENT-DRIVEN on the actual deallocation. A sentinel
+        // is attached to the runtime as an associated object; the
+        // runtime's deallocation releases the sentinel, whose deinit
+        // fires the latch. `await latch.wait()` genuinely suspends the
+        // test task (letting the main queue idle and drain), and
+        // resumes exactly at deallocation. A REAL retain cycle keeps
+        // the latch silent and the test fails at its `.timeLimit` —
+        // deterministic, not load-dependent.
         weak var weakRuntime: PlayheadRuntime?
+        let deinitLatch = DeinitLatch()
 
         await {
             let runtime = PlayheadRuntime(isPreviewRuntime: false)
             weakRuntime = runtime
+            objc_setAssociatedObject(
+                runtime,
+                &deinitSentinelKey,
+                DeinitSentinel(latch: deinitLatch),
+                .OBJC_ASSOCIATION_RETAIN
+            )
             #expect(
                 runtime._shadowRetryObserverForTesting() != nil,
                 "non-preview runtime must construct the observer"
@@ -280,13 +378,10 @@ struct RuntimeShutdownLifecycleTests {
             // Runtime drops here.
         }()
 
-        // Bounded yield budget for ARC to settle. A real cycle would
-        // still pin the reference forever; this just gives any queued
-        // release work a few cooperative turns without sleeping.
-        for _ in 0..<200 {
-            if weakRuntime == nil { break }
-            await Task.yield()
-        }
+        // Event-driven: resumes exactly when the runtime deallocates,
+        // however long the queue-turn takes under load. No yield budget,
+        // no sleep, no deadline — `.timeLimit` is the cycle backstop.
+        await deinitLatch.wait()
 
         #expect(
             weakRuntime == nil,

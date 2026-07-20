@@ -43,12 +43,14 @@ struct BackgroundProcessingServiceLedgerTests {
         return (bps, coordinator)
     }
 
-    private func waitForCompletion(of task: StubBackgroundTask, timeout: Duration = .seconds(10)) async throws {
-        let deadline = ContinuousClock.now + timeout
-        while task.completedSuccess == nil && ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-    }
+    // playhead-vsot: waits in this file are event-driven —
+    // `awaitCompletion()` / `awaitExpirationHandlerInstalled()` on the
+    // stub task, `stopCalls.wait(for:)` on the stub coordinator, and
+    // the actor's `waitForPendingInjectionWaitersForTesting` seam. The
+    // previous 5–10 s deadline polls starved under full-suite load
+    // (the handler's ledger start task takes a MainActor hop before
+    // markComplete can run), turning behavior tests into scheduler
+    // tests. Each test's `.timeLimit` is the hang backstop.
 
     // MARK: - Backfill happy path
 
@@ -61,7 +63,7 @@ struct BackgroundProcessingServiceLedgerTests {
         let task = StubBackgroundTask()
 
         await bps.handleBackfillTask(task)
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
 
         // Give the (potentially fire-and-forget) finishRun call a tick
         // to land. handleBackfillTask awaits the work-task internally
@@ -97,25 +99,22 @@ struct BackgroundProcessingServiceLedgerTests {
         let task = StubBackgroundTask()
         let workTask = Task { await bps.handleBackfillTask(task) }
 
-        // Wait for the expiration handler to be installed.
-        let setupDeadline = ContinuousClock.now + .seconds(5)
-        while task.expirationHandler == nil && ContinuousClock.now < setupDeadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        // Wait for the expiration handler to be installed — event-driven
+        // (playhead-vsot), no deadline to starve under load.
+        await task.awaitExpirationHandlerInstalled()
 
         task.simulateExpiration()
         _ = await workTask.value
 
-        // Wait for the row to flip to terminal. The expirationHandler
-        // dispatches the finishRun call inside an unstructured Task so
-        // we poll for the terminal write up to a reasonable bound.
-        let deadline = ContinuousClock.now + .seconds(5)
-        var latest: BackgroundTaskRunRecord?
-        while ContinuousClock.now < deadline {
-            latest = await ledger.fetchLatestRun(for: .backfill)
-            if latest?.outcome == .expired { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        // The expirationHandler's unstructured Task runs, in order:
+        // emitExpire → (await row-insert) → finishRun(.expired) →
+        // handleExpiredProcessingTask → markComplete(success: false).
+        // The stub's completion signal therefore fires strictly AFTER
+        // the terminal `.expired` write — awaiting it replaces the old
+        // 5 s fetch-poll with the actual completion signal, and a
+        // single fetch afterwards is deterministic.
+        await task.awaitCompletion()
+        let latest = await ledger.fetchLatestRun(for: .backfill)
 
         #expect(latest?.outcome == .expired)
         #expect(latest?.cause == InternalMissCause.taskExpired.rawValue)
@@ -134,7 +133,7 @@ struct BackgroundProcessingServiceLedgerTests {
         let task = StubBackgroundTask()
 
         await bps.handleBackfillTask(task)
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
 
         // Capture the row BEFORE simulating a late expiration.
         let beforeLate = await ledger.fetchLatestRun(for: .backfill)
@@ -160,15 +159,12 @@ struct BackgroundProcessingServiceLedgerTests {
         //     Task { ... emitExpire ... finishRun (rejected by
         //     idempotence guard) ... handleExpiredProcessingTask →
         //     coordinator.stop() (observable!) → markComplete }
-        // Polling for stopCallCount >= 1 is the only reliable signal
-        // that the expiration handler's Task actually ran finishRun
-        // and the idempotence guard had a chance to fire. A fixed sleep
-        // could let the test pass for the wrong reason (Task never
-        // scheduled → finishRun never attempted → guard never tested).
-        let deadline = ContinuousClock.now + .seconds(5)
-        while coordinator.stopCallCount == 0 && ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        // The stop() call is the reliable signal that the expiration
+        // Task ran finishRun and the idempotence guard had a chance to
+        // fire. Event-driven (playhead-vsot): await the stub's stop
+        // signal directly — no deadline to starve, no fixed sleep to
+        // pass vacuously.
+        await coordinator.stopCalls.wait(for: 1)
         #expect(coordinator.stopCallCount >= 1,
                 "Expiration handler Task must have run end-to-end (stop() observable)")
 
@@ -195,16 +191,12 @@ struct BackgroundProcessingServiceLedgerTests {
         // deterministic timeout seam so the no-reconciler path runs
         // without a wall-clock dependency on the production timeout.
         let recoveryWork = Task { await bps.handlePreAnalysisRecovery(task) }
-        // Wait for the handler to reach the suspend point.
-        let setupDeadline = ContinuousClock.now + .seconds(5)
-        while ContinuousClock.now < setupDeadline {
-            let parked = await bps.pendingInjectionWaiterCountForTesting()
-            if parked >= 1 { break }
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        // Wait for the handler to reach the suspend point — event-driven
+        // seam (playhead-vsot), resumed the moment the waiter parks.
+        await bps.waitForPendingInjectionWaitersForTesting()
         await bps.triggerInjectionWaitTimeoutForTesting()
         _ = await recoveryWork.value
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
 
         let latest = await ledger.fetchLatestRun(for: .preAnalysisRecovery)
         #expect(latest?.outcome == .failed)

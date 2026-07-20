@@ -23,32 +23,18 @@ private func makeBPS(
     return (bps, coordinator, scheduler, battery)
 }
 
-/// Wait until a stub task is completed, with a timeout to avoid hanging.
-private func waitForCompletion(of task: StubBackgroundTask, timeout: Duration = .seconds(10)) async throws {
-    let deadline = ContinuousClock.now + timeout
-    while task.completedSuccess == nil && ContinuousClock.now < deadline {
-        try await Task.sleep(for: .milliseconds(10))
-    }
-}
-
-/// playhead-hv73: poll the actor for at least `count` parked
-/// injection-wait waiters. Used by tests that drive the deterministic
-/// timeout seam — once a handler has reached the suspend point inside
-/// `awaitPreAnalysisServicesInjected`, the test can fire
-/// `triggerInjectionWaitTimeoutForTesting()` and observe failure
-/// without any wall-clock dependency on the (15 s) default timeout.
-private func waitForParkedInjectionWaiters(
-    in bps: BackgroundProcessingService,
-    atLeast count: Int = 1,
-    timeout: Duration = .seconds(2)
-) async throws {
-    let deadline = ContinuousClock.now + timeout
-    while ContinuousClock.now < deadline {
-        let parked = await bps.pendingInjectionWaiterCountForTesting()
-        if parked >= count { return }
-        try await Task.sleep(for: .milliseconds(1))
-    }
-}
+// playhead-vsot: completion waits in this file are event-driven —
+// `await task.awaitCompletion()` suspends on the stub's
+// `setTaskCompleted` signal and has NO deadline. The previous helpers
+// polled every 1–10 ms against 2–10 s real-time deadlines; under
+// full-suite contention the awaited work (which includes a MainActor
+// hop inside the handler's ledger start task) was still in flight when
+// the deadline expired, so the assertions read `completedSuccess ==
+// nil` and failed for scheduling reasons, not behavior. Each test's
+// `.timeLimit` trait is the backstop for genuine hangs. Parked
+// injection-waiter waits go through the actor's event-driven
+// `waitForPendingInjectionWaitersForTesting(atLeast:)` seam for the
+// same reason.
 
 // MARK: - Backfill Task Handler
 
@@ -62,7 +48,7 @@ struct BackfillTaskHandlerTests {
         let task = StubBackgroundTask()
 
         await bps.handleBackfillTask(task)
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
 
         // The handler must invoke the real backfill work method, not the
         // capability-observer lifecycle method start(). See regression test
@@ -90,7 +76,7 @@ struct BackfillTaskHandlerTests {
         let task = StubBackgroundTask()
 
         await bps.handleBackfillTask(task)
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
 
         // On simulator (nominal thermal), the real work method IS called.
         #expect(coordinator.runPendingBackfillCallCount >= 1)
@@ -112,17 +98,17 @@ struct BackfillTaskHandlerTests {
         }
 
         // Wait deterministically for the expiration handler to be set.
-        // The actor method must execute through to the point where it installs
-        // the expiration handler before we can simulate iOS firing it.
-        let setupDeadline = ContinuousClock.now + .seconds(5)
-        while task.expirationHandler == nil && ContinuousClock.now < setupDeadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        // The actor method must execute through to the point where it
+        // installs the expiration handler before we can simulate iOS
+        // firing it. Event-driven (playhead-vsot): resumes exactly when
+        // the handler assigns `expirationHandler`, however long the
+        // scheduler takes to get there.
+        await task.awaitExpirationHandlerInstalled()
 
         // Simulate iOS firing expiration.
         task.simulateExpiration()
 
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
 
         workTask.cancel()
 
@@ -145,7 +131,7 @@ struct BackfillTaskHandlerTests {
         let task = StubBackgroundTask()
 
         await bps.handleBackfillTask(task)
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
 
         #expect(coordinator.runPendingBackfillCallCount >= 1,
                 "handleBackfillTask must invoke runPendingBackfill, not startCapabilityObserver()")
@@ -169,7 +155,12 @@ struct BackfillTaskHandlerTests {
         // first would silently drop the other's markComplete, leaving iOS
         // holding a BGProcessingTask that was never reported complete.
         let coordinator = StubAnalysisCoordinator()
-        coordinator.runPendingBackfillDuration = .milliseconds(300)
+        // playhead-vsot: hold runPendingBackfill open on a latch instead
+        // of a 300 ms wall-clock stall, so the "recovery fires while
+        // backfill is in-flight" overlap is GUARANTEED regardless of
+        // scheduler load — the old stall could drain before the recovery
+        // handler ever ran, silently skipping the regression scenario.
+        coordinator.runPendingBackfillHoldsUntilReleased = true
         let (bps, _, _, _) = makeBPS(coordinator: coordinator)
         // playhead-hv73: deterministic seam replaces the wall-clock
         // injection-wait timeout. The recovery handler will park on
@@ -180,12 +171,15 @@ struct BackfillTaskHandlerTests {
         let backfillTask = StubBackgroundTask()
         let recoveryTask = StubBackgroundTask()
 
-        // Start backfill — it will await runPendingBackfill for ~300ms.
+        // Start backfill — it parks inside runPendingBackfill until the
+        // release below.
         let backfillWork = Task { await bps.handleBackfillTask(backfillTask) }
 
-        // Wait just long enough for the backfill handler to have spawned
-        // its work task and installed its expiration handler.
-        try await Task.sleep(for: .milliseconds(30))
+        // Event-driven: backfill work is provably in-flight once the
+        // coordinator method has been entered, and the handler is fully
+        // armed once its expiration handler is installed.
+        await coordinator.runPendingBackfillEntries.wait(for: 1)
+        await backfillTask.awaitExpirationHandlerInstalled()
 
         // Kick off recovery while backfill is still suspended. Recovery
         // has no reconciler (none injected); the playhead-8u3i buffer
@@ -194,15 +188,18 @@ struct BackfillTaskHandlerTests {
         // We just need to verify the recovery completion doesn't
         // clobber the in-flight backfill.
         let recoveryWork = Task { await bps.handlePreAnalysisRecovery(recoveryTask) }
-        try await waitForParkedInjectionWaiters(in: bps)
+        await bps.waitForPendingInjectionWaitersForTesting()
         await bps.triggerInjectionWaitTimeoutForTesting()
         await recoveryWork.value
 
         #expect(recoveryTask.completedSuccess != nil,
                 "Recovery task must complete independently of in-flight backfill")
+        #expect(backfillTask.completedSuccess == nil,
+                "Backfill must still be in-flight when the recovery handler completes (guaranteed overlap)")
 
-        // Let backfill finish.
-        try await waitForCompletion(of: backfillTask)
+        // Release the held backfill and let it finish.
+        coordinator.runPendingBackfillReleases.increment()
+        await backfillTask.awaitCompletion()
         _ = await backfillWork.value
 
         #expect(backfillTask.completedSuccess != nil,
@@ -214,35 +211,14 @@ struct BackfillTaskHandlerTests {
 
 // MARK: - Continued Processing Handler (playhead-44h1)
 
-/// Wait for a `StubContinuedProcessingTask`'s `completedSuccess` flag
-/// to flip, with a deadline. Used by playhead-44h1 handler tests that
-/// drive the hand-off through its async work task.
-///
-/// **Cycle-22 L-4 known intermittent flake:**
-/// `expirationHandlerTriggersPauseAtNextCheckpoint` (below) has been
-/// observed to fail under heavy parallel load (full PlayheadFastTests
-/// run with 5750+ tests) with `task.completedSuccess → nil` after the
-/// 10s budget. The test passes deterministically in isolation in
-/// ~0.014s. The likely root cause is simulator-CPU starvation pushing
-/// the expiration handler's `Task` past the 10ms polling budget — not
-/// a behavioral change in the production paths the test exercises
-/// (`BackgroundFeedRefreshService` / `BackgroundProcessingService` /
-/// `AnalysisCoordinator`).
-///
-/// If this flake reappears: re-run the test in isolation with
-/// `-only-testing:'PlayheadTests/ContinuedProcessingHandlerTests/expirationHandlerTriggersPauseAtNextCheckpoint'`.
-/// A green isolated run confirms it's still the parallel-load flake;
-/// a red isolated run is a real regression that warrants bisecting
-/// recent commits to those production paths.
-private func waitForCompletion(
-    of task: StubContinuedProcessingTask,
-    timeout: Duration = .seconds(10)
-) async throws {
-    let deadline = ContinuousClock.now + timeout
-    while task.completedSuccess == nil && ContinuousClock.now < deadline {
-        try await Task.sleep(for: .milliseconds(10))
-    }
-}
+// playhead-vsot: the Cycle-22 L-4 intermittent flake documented here
+// previously (`expirationHandlerTriggersPauseAtNextCheckpoint` reading
+// `completedSuccess == nil` after a 10 s polling budget under full-suite
+// load) was a symptom of the deadline-poll wait pattern, not of the
+// production paths. Completion waits in this suite are now event-driven
+// via `StubContinuedProcessingTask.awaitCompletion()` — no deadline, so
+// simulator-CPU starvation delays the test instead of failing it. A
+// genuine hang now fails the test's `.timeLimit` deterministically.
 
 @Suite("Continued Processing Handler")
 struct ContinuedProcessingHandlerTests {
@@ -259,7 +235,7 @@ struct ContinuedProcessingHandlerTests {
         let task = StubContinuedProcessingTask(identifier: BackgroundTaskID.continuedProcessing)
 
         await bps.handleContinuedProcessingTask(task)
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
 
         #expect(task.completedSuccess == false)
         #expect(coordinator.continueForegroundAssistCalls.isEmpty,
@@ -274,7 +250,7 @@ struct ContinuedProcessingHandlerTests {
         let task = StubContinuedProcessingTask(identifier: Self.identifierPrefix + episodeId)
 
         await bps.handleContinuedProcessingTask(task)
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
 
         #expect(task.completedSuccess == true)
         #expect(coordinator.continueForegroundAssistCalls.count == 1)
@@ -297,7 +273,7 @@ struct ContinuedProcessingHandlerTests {
         let task = StubContinuedProcessingTask(identifier: Self.identifierPrefix + "ep-fail")
 
         await bps.handleContinuedProcessingTask(task)
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
 
         #expect(task.completedSuccess == false)
     }
@@ -326,10 +302,8 @@ struct ContinuedProcessingHandlerTests {
         await bps.handleContinuedProcessingTask(task)
 
         // Wait for the handler to install the expirationHandler.
-        let setupDeadline = ContinuousClock.now + .seconds(5)
-        while task.expirationHandler == nil && ContinuousClock.now < setupDeadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        // Event-driven (playhead-vsot): no deadline to starve under load.
+        await task.awaitExpirationHandlerInstalled()
 
         #expect(task.expirationHandler != nil)
         await bps.expireContinuedProcessingTaskForTesting(task)
@@ -368,7 +342,12 @@ struct ContinuedProcessingHandlerTests {
         let task = StubContinuedProcessingTask(identifier: Self.identifierPrefix + episodeId)
 
         await bps.handleContinuedProcessingTask(task)
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
+        // playhead-vsot: in this success path production intentionally
+        // calls markComplete BEFORE appendTerminal (race-gating vs the
+        // expiration path), so task completion does NOT imply the row
+        // is recorded yet. Await the journal-append signal itself.
+        await coordinator.recordedOutcomes.wait(for: 1)
 
         #expect(task.completedSuccess == true)
         let finalizedCalls = coordinator.recordForegroundAssistOutcomeCalls.filter {
@@ -395,7 +374,14 @@ struct ContinuedProcessingHandlerTests {
         let task = StubContinuedProcessingTask(identifier: Self.identifierPrefix + episodeId)
 
         await bps.handleContinuedProcessingTask(task)
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
+        // playhead-vsot: production calls markComplete BEFORE the
+        // `failed/pipelineError` appendTerminal in this path (race-gating
+        // vs the expiration path), so completion does NOT imply the row
+        // landed. Await the journal-append signal itself — this exact
+        // gap flaked the old poll-based wait too (it just usually won
+        // the 10 ms grid race).
+        await coordinator.recordedOutcomes.wait(for: 1)
 
         #expect(task.completedSuccess == false)
         let failedCalls = coordinator.recordForegroundAssistOutcomeCalls.filter {
@@ -450,7 +436,7 @@ struct PreAnalysisRecoveryHandlerTests {
         let task = StubBackgroundTask()
 
         let handler = Task { await bps.handlePreAnalysisRecovery(task) }
-        try await waitForParkedInjectionWaiters(in: bps)
+        await bps.waitForPendingInjectionWaitersForTesting()
         let resumed = await bps.triggerInjectionWaitTimeoutForTesting()
         #expect(resumed >= 1, "Expected the parked waiter to be resumed")
         await handler.value
@@ -470,7 +456,7 @@ struct PreAnalysisRecoveryHandlerTests {
         let task = StubBackgroundTask()
 
         let handler = Task { await bps.handlePreAnalysisRecovery(task) }
-        try await waitForParkedInjectionWaiters(in: bps)
+        await bps.waitForPendingInjectionWaitersForTesting()
         await bps.triggerInjectionWaitTimeoutForTesting()
         await handler.value
 
@@ -526,16 +512,8 @@ struct PreAnalysisRecoveryRaceTests {
         )
     }
 
-    /// Wait for a stub task to complete, with a deadline.
-    private func waitForCompletion(
-        of task: StubBackgroundTask,
-        timeout: Duration = .seconds(5)
-    ) async throws {
-        let deadline = ContinuousClock.now + timeout
-        while task.completedSuccess == nil && ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-    }
+    // playhead-vsot: completion waits are event-driven via
+    // `StubBackgroundTask.awaitCompletion()` — see the file-header note.
 
     @Test("Handler fired before injection completes success once injection lands",
           .timeLimit(.minutes(1)))
@@ -562,13 +540,13 @@ struct PreAnalysisRecoveryRaceTests {
 
         // Wait deterministically for the handler to park its
         // continuation inside `awaitPreAnalysisServicesInjected`.
-        try await waitForParkedInjectionWaiters(in: bps)
+        await bps.waitForPendingInjectionWaitersForTesting()
 
         // Inject; this must drain the parked continuation and let the
         // handler run reconcile() on the (empty) store.
         await bps.setPreAnalysisServices(scheduler: workScheduler, reconciler: reconciler)
 
-        try await waitForCompletion(of: task)
+        await task.awaitCompletion()
         await handlerTask.value
 
         #expect(task.completedSuccess == true,
@@ -594,12 +572,12 @@ struct PreAnalysisRecoveryRaceTests {
         }
 
         // Wait deterministically for all three to park.
-        try await waitForParkedInjectionWaiters(in: bps, atLeast: tasks.count)
+        await bps.waitForPendingInjectionWaitersForTesting(atLeast: tasks.count)
 
         await bps.setPreAnalysisServices(scheduler: workScheduler, reconciler: reconciler)
 
         for task in tasks {
-            try await waitForCompletion(of: task)
+            await task.awaitCompletion()
         }
         for handlerTask in handlerTasks {
             await handlerTask.value
@@ -626,7 +604,7 @@ struct PreAnalysisRecoveryRaceTests {
         let task = StubBackgroundTask()
 
         let handler = Task { await bps.handlePreAnalysisRecovery(task) }
-        try await waitForParkedInjectionWaiters(in: bps)
+        await bps.waitForPendingInjectionWaitersForTesting()
         await bps.triggerInjectionWaitTimeoutForTesting()
         await handler.value
 
@@ -657,7 +635,7 @@ struct PreAnalysisRecoveryRaceTests {
         // completion. The handler exits the fail path with
         // success=false.
         let handler = Task { await bps.handlePreAnalysisRecovery(task) }
-        try await waitForParkedInjectionWaiters(in: bps)
+        await bps.waitForPendingInjectionWaitersForTesting()
         await bps.triggerInjectionWaitTimeoutForTesting()
         await handler.value
         #expect(task.completedSuccess == false,
@@ -674,7 +652,7 @@ struct PreAnalysisRecoveryRaceTests {
         // the actor is still healthy after the late injection.
         let warmTask = StubBackgroundTask()
         await bps.handlePreAnalysisRecovery(warmTask)
-        try await waitForCompletion(of: warmTask)
+        await warmTask.awaitCompletion()
         #expect(warmTask.completedSuccess == true,
                 "After injection, a follow-up handler must complete success=true via the warm path")
     }
@@ -697,7 +675,7 @@ struct PreAnalysisRecoveryRaceTests {
             Task { await bps.handlePreAnalysisRecovery(task) }
         }
 
-        try await waitForParkedInjectionWaiters(in: bps, atLeast: tasks.count)
+        await bps.waitForPendingInjectionWaitersForTesting(atLeast: tasks.count)
         let beforeTrigger = await bps.pendingInjectionWaiterCountForTesting()
         #expect(beforeTrigger == tasks.count,
                 "All handlers should be parked before the trigger fires")
@@ -855,8 +833,10 @@ struct ThermalManagementTests {
 
         await bps.handleCapabilityUpdate(criticalSnapshot)
 
-        // Coordinator.stop() is called via a detached Task.
-        try await Task.sleep(for: .milliseconds(50))
+        // Coordinator.stop() is called via a detached Task — await the
+        // actual stop signal (playhead-vsot) instead of sleeping a
+        // fixed 50 ms and hoping the Task was scheduled.
+        await coordinator.stopCalls.wait(for: 1)
         #expect(coordinator.stopCallCount >= 1)
     }
 
@@ -893,10 +873,12 @@ struct ThermalManagementTests {
         await bps.playbackDidStart()
         try await Task.sleep(for: .milliseconds(50))
 
-        // Go critical -- pauses all.
+        // Go critical -- pauses all. The pause flags flip synchronously
+        // inside handleCapabilityUpdate; only coordinator.stop() runs on
+        // a detached Task, so await that signal (playhead-vsot).
         let criticalSnapshot = makeCapabilitySnapshot(thermalState: .critical)
         await bps.handleCapabilityUpdate(criticalSnapshot)
-        try await Task.sleep(for: .milliseconds(50))
+        await coordinator.stopCalls.wait(for: 1)
         #expect(coordinator.stopCallCount >= 1)
         #expect(await bps.isHotPathActive() == false)
 
@@ -1047,10 +1029,11 @@ struct BatteryManagementTests {
         await bps.playbackDidStart()
         try await Task.sleep(for: .milliseconds(50))
 
-        // Trigger critical-thermal pause-all.
+        // Trigger critical-thermal pause-all. Await the detached
+        // stop() signal (playhead-vsot) instead of a fixed sleep.
         let critical = makeCapabilitySnapshot(thermalState: .critical)
         await bps.handleCapabilityUpdate(critical)
-        try await Task.sleep(for: .milliseconds(50))
+        await coordinator.stopCalls.wait(for: 1)
         #expect(coordinator.stopCallCount >= 1)
 
         // Recover to nominal.

@@ -41,6 +41,11 @@ MEASUREMENT_TESTS=(
   # xsdz.26: 60-minute-episode fingerprinting wall-clock budget (needs the
   # staged corpus audio in the main checkout; skips cleanly without it).
   "PlayheadTests/ChromaFingerprinterPerfTests/sixtyMinuteEpisodeUnderBudget()"
+  # playhead-m9xk: skip-transition <500ms latency (real 150ms duck-settle
+  # sleep + ContinuousClock measurement). Ordering/reentrancy coverage for
+  # the same path runs deterministically in the fast suite via the injected
+  # transitionSleeper seam; only this latency measurement is gated here.
+  "PlayheadTests/SkipCueSmoothingTests/skipTransitionLatencyWithinProductionBudget()"
   # Note: AnalysisWorkSchedulerOutcomeBookkeepingTests is intentionally NOT
   # here — its cancel-mid-decode tests were rewritten to be deterministic
   # (via processNextDispatchableJobForTesting) and un-gated, so they run in

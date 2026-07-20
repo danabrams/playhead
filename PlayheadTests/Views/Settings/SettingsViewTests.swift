@@ -454,6 +454,12 @@ struct SettingsRecheckFlowTests {
     /// remain stuck on the stale verdict the user just tried to recheck
     /// (e.g. `modelAvailableNow == false`) until the user closed and
     /// reopened the Settings sheet.
+    ///
+    /// playhead-zqhz: stream-driven, not timeout-driven. The scripted
+    /// provider yields exactly one snapshot and finishes, so awaiting
+    /// `observeCapabilitySnapshots` directly processes the emission on
+    /// THIS task and returns — no child task, no polling deadline, no
+    /// dependence on MainActor scheduling latency under suite load.
     @Test func observeCapabilitySnapshotsReevaluatesOnEmission() async throws {
         let viewModel = SettingsViewModel()
         // Start with the stub returning Unavailable.
@@ -468,10 +474,9 @@ struct SettingsRecheckFlowTests {
         viewModel.refreshEligibility(using: stub)
         #expect(viewModel.eligibility?.isFullyEligible == false)
 
-        // Flip the stub to Available BEFORE starting the observation so
-        // the very first snapshot (yielded immediately by
-        // `capabilityUpdates()` per its documented contract) triggers
-        // a re-evaluation that produces the new verdict.
+        // Flip the stub to Available BEFORE the observation runs so the
+        // single scripted snapshot triggers a re-evaluation that
+        // produces the new verdict.
         stub.verdict = AnalysisEligibility(
             hardwareSupported: true,
             appleIntelligenceEnabled: true,
@@ -481,20 +486,11 @@ struct SettingsRecheckFlowTests {
             capturedAt: Date()
         )
 
-        let capabilities = CapabilitiesService()
-        let task = Task { @MainActor in
-            await viewModel.observeCapabilitySnapshots(capabilities, evaluator: stub)
-        }
-        defer { task.cancel() }
+        let provider = ScriptedCapabilitiesProvider(snapshots: [
+            makeCapabilitySnapshot(foundationModelsAvailable: true)
+        ])
+        await viewModel.observeCapabilitySnapshots(provider, evaluator: stub)
 
-        // Poll for the row to flip — the observation runs on a child
-        // task and `capabilityUpdates()` yields the current snapshot
-        // immediately on subscribe.
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
-        while ContinuousClock.now < deadline {
-            if viewModel.eligibility?.isFullyEligible == true { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
         #expect(viewModel.eligibility?.isFullyEligible == true,
                 "Snapshot emission must trigger an evaluate() that flips the row to Available")
     }
@@ -511,13 +507,17 @@ struct SettingsRecheckFlowTests {
     /// evaluating, guaranteeing a fresh provider sweep against the
     /// snapshot we just received.
     ///
-    /// R3 audit: this test now pins the ORDER of calls, not just the
+    /// R3 audit: this test pins the ORDER of calls, not just the
     /// counts. A refactor that swapped the order to
     /// `evaluate(); invalidate()` would still satisfy a count-only
     /// assertion (each iteration increments both counters), silently
-    /// breaking the race fix. The event log on the stub records the
-    /// exact arrival order; we assert the first paired (invalidate,
-    /// evaluate) sequence matches the contract.
+    /// breaking the race fix.
+    ///
+    /// playhead-zqhz: stream-driven. The scripted provider yields
+    /// exactly TWO snapshots and finishes, so after awaiting the
+    /// observation the stub's event log is complete and can be pinned
+    /// EXACTLY — a strictly stronger assertion than the previous
+    /// ">= 1 then scan" form, with no polling deadline.
     @Test func observeCapabilitySnapshotsInvalidatesEvaluatorBeforeEvaluate() async throws {
         let viewModel = SettingsViewModel()
         let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
@@ -529,57 +529,38 @@ struct SettingsRecheckFlowTests {
             capturedAt: Date()
         ))
 
-        let capabilities = CapabilitiesService()
-        let task = Task { @MainActor in
-            await viewModel.observeCapabilitySnapshots(capabilities, evaluator: stub)
-        }
-        defer { task.cancel() }
+        let provider = ScriptedCapabilitiesProvider(snapshots: [
+            makeCapabilitySnapshot(foundationModelsAvailable: true),
+            makeCapabilitySnapshot(foundationModelsAvailable: false),
+        ])
+        await viewModel.observeCapabilitySnapshots(provider, evaluator: stub)
 
-        // Wait for the seed snapshot to arrive and the observer body
-        // to run at least once.
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
-        while ContinuousClock.now < deadline {
-            if stub.invalidateCallCount >= 1, stub.evaluateCallCount >= 1 { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        #expect(stub.invalidateCallCount >= 1,
-                "Observer must invalidate the evaluator on every snapshot. Invalidate count: \(stub.invalidateCallCount)")
-        #expect(stub.evaluateCallCount >= 1,
-                "Observer must re-evaluate on every snapshot. Evaluate count: \(stub.evaluateCallCount)")
+        #expect(stub.invalidateCallCount == 2,
+                "Observer must invalidate the evaluator exactly once per snapshot. Invalidate count: \(stub.invalidateCallCount)")
+        #expect(stub.evaluateCallCount == 2,
+                "Observer must re-evaluate exactly once per snapshot. Evaluate count: \(stub.evaluateCallCount)")
 
-        // R3 audit: pin the ORDER. The first observer iteration MUST
-        // be invalidate-then-evaluate. A count-only assertion passes
-        // even if the order is reversed, silently breaking the race
-        // fix. Inspect the event log directly.
-        let events = stub.events
-        let firstInvalidateIndex = events.firstIndex(of: .invalidate)
-        let firstEvaluateIndex = events.firstIndex(of: .evaluate)
-        #expect(firstInvalidateIndex != nil && firstEvaluateIndex != nil,
-                "Observer must have called both invalidate and evaluate at least once. Events: \(events)")
-        if let inv = firstInvalidateIndex, let eval = firstEvaluateIndex {
-            #expect(inv < eval,
-                    "First invalidate must precede first evaluate (race fix). Events: \(events)")
-        }
-        // Stronger guard: every evaluate at index i must be preceded
-        // by at least one invalidate at index < i. This catches a
-        // refactor that paired the FIRST iteration correctly but
-        // reversed subsequent ones.
-        var seenInvalidate = false
-        for event in events {
-            switch event {
-            case .invalidate:
-                seenInvalidate = true
-            case .evaluate:
-                #expect(seenInvalidate,
-                        "Every evaluate must be preceded by at least one invalidate in the event log. Events: \(events)")
-            }
-        }
+        // Pin the FULL sequence: for EACH of the two emissions the
+        // observer must call invalidate before evaluate. An exact match
+        // also catches a refactor that paired the first iteration
+        // correctly but reversed subsequent ones, and any stray extra
+        // calls per emission.
+        #expect(stub.events == [.invalidate, .evaluate, .invalidate, .evaluate],
+                "Each emission must be handled as invalidate-then-evaluate (race fix). Events: \(stub.events)")
     }
 
     /// R1 audit: If a recheck is in flight when a snapshot reporting
     /// `foundationModelsUsable == true` lands, the observation loop
     /// must release the `isRecheckingModels` flag so the "Checking…"
     /// indicator does not linger past the moment the probe succeeded.
+    ///
+    /// playhead-zqhz: stream-driven. The scripted provider yields a
+    /// NON-usable snapshot first (the flag must survive it — a
+    /// non-usable verdict leaves "Checking…" up) and then a usable one
+    /// (the flag must clear). Because the stream is finite and the
+    /// observation is awaited directly, there is no polling deadline
+    /// and no UserDefaults probe-cache plumbing through the real
+    /// `CapabilitiesService`.
     @Test func observeCapabilitySnapshotsReleasesRecheckOnUsableSnapshot() async throws {
         let viewModel = SettingsViewModel()
         viewModel.isRecheckingModels = true
@@ -592,36 +573,74 @@ struct SettingsRecheckFlowTests {
             capturedAt: Date()
         ))
 
-        let capabilities = CapabilitiesService()
-        let task = Task { @MainActor in
-            await viewModel.observeCapabilitySnapshots(capabilities, evaluator: stub)
-        }
-        defer { task.cancel() }
+        let provider = ScriptedCapabilitiesProvider(snapshots: [
+            makeCapabilitySnapshot(
+                foundationModelsAvailable: true, foundationModelsUsable: false
+            ),
+            makeCapabilitySnapshot(
+                foundationModelsAvailable: true, foundationModelsUsable: true
+            ),
+        ])
+        await viewModel.observeCapabilitySnapshots(provider, evaluator: stub)
 
-        // The capture path in CapabilitiesService reads
-        // `cachedUsability() ?? false`. To pin a usable snapshot
-        // without dragging the real probe in, write a fresh
-        // `usable=true` record into the shared cache slot before the
-        // observation reads it. Belt-and-suspenders: a deferred
-        // cleanup clears the slot after the test so we don't pollute
-        // sibling tests.
-        let osBuild = FoundationModelsUsabilityProbe.osBuild()
-        let bootEpoch = FoundationModelsUsabilityProbe.bootEpochSeconds()
-        FoundationModelsUsabilityProbe.cache(
-            usable: true,
-            osBuild: osBuild,
-            bootEpochSeconds: bootEpoch
-        )
-        defer { FoundationModelsUsabilityProbe.clearCache() }
-        await capabilities.refreshSnapshot()
-
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
-        while ContinuousClock.now < deadline {
-            if viewModel.isRecheckingModels == false { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
         #expect(viewModel.isRecheckingModels == false,
                 "A usable snapshot landing during a pending recheck must clear isRecheckingModels")
+    }
+
+    /// Per-emission flag semantics, pinned directly on the extracted
+    /// snapshot handler (playhead-zqhz): a NON-usable snapshot must
+    /// leave a pending recheck's "Checking…" flag alone — only
+    /// `recheckModels` returning (or a usable snapshot) may clear it.
+    @Test func handleCapabilitySnapshotLeavesRecheckPendingOnNonUsableSnapshot() {
+        let viewModel = SettingsViewModel()
+        viewModel.isRecheckingModels = true
+        let stub = RecheckStubEligibilityEvaluator(verdict: AnalysisEligibility(
+            hardwareSupported: true,
+            appleIntelligenceEnabled: true,
+            regionSupported: true,
+            languageSupported: true,
+            modelAvailableNow: false,
+            capturedAt: Date()
+        ))
+
+        viewModel.handleCapabilitySnapshot(
+            makeCapabilitySnapshot(
+                foundationModelsAvailable: true, foundationModelsUsable: false
+            ),
+            evaluator: stub
+        )
+
+        #expect(viewModel.isRecheckingModels == true,
+                "A non-usable snapshot must NOT clear a pending recheck — the row keeps reading Checking…")
+        #expect(stub.events == [.invalidate, .evaluate],
+                "The handler must still invalidate-then-evaluate on a non-usable snapshot")
+    }
+}
+
+/// playhead-zqhz: finite, test-controlled capability stream. Yields the
+/// scripted snapshots in order and then finishes, so a test can await
+/// `observeCapabilitySnapshots` DIRECTLY — the loop processes exactly
+/// these emissions on the test's own task and returns. This removes the
+/// child-task + wall-clock-deadline pattern that flaked under full-suite
+/// MainActor contention (the seed snapshot was not processed within 1 s).
+final class ScriptedCapabilitiesProvider: CapabilitiesProviding, @unchecked Sendable {
+    private let snapshots: [CapabilitySnapshot]
+
+    init(snapshots: [CapabilitySnapshot]) {
+        self.snapshots = snapshots
+    }
+
+    var currentSnapshot: CapabilitySnapshot {
+        snapshots.first ?? makeCapabilitySnapshot()
+    }
+
+    func capabilityUpdates() -> AsyncStream<CapabilitySnapshot> {
+        AsyncStream { continuation in
+            for snapshot in snapshots {
+                continuation.yield(snapshot)
+            }
+            continuation.finish()
+        }
     }
 }
 

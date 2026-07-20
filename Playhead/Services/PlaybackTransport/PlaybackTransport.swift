@@ -95,6 +95,18 @@ final class PlaybackService: NSObject, Sendable {
     /// global or other parallel test instances.
     private let notificationCenter: NotificationCenter
 
+    /// Injectable sleep for the duck-settle pause inside skip transitions
+    /// (playhead-m9xk). Production uses the default, which is the exact
+    /// `try? await Task.sleep(for:)` call the transition previously made
+    /// inline — behavior with the default is identical. Tests inject a
+    /// controllable sleeper so duck/seek/release ORDERING and the
+    /// re-entrancy guard are verified deterministically instead of
+    /// measuring wall-clock across a real 150 ms sleep (which the host
+    /// scheduler stretches arbitrarily under full-suite load). The
+    /// <500 ms transition-latency requirement is measured with the REAL
+    /// sleeper in the serial perf pass (PerfGate / scripts/perf-tests.sh).
+    private let transitionSleeper: @Sendable (Duration) async -> Void
+
     // MARK: - State
 
     private var _state = PlaybackState()
@@ -166,10 +178,17 @@ final class PlaybackService: NSObject, Sendable {
     /// uses the no-arg convenience init, which wires in the real singletons.
     /// Tests substitute fakes to keep parallel instances isolated from each
     /// other and from the process globals. See playhead-86s.
+    ///
+    /// `transitionSleeper` (playhead-m9xk) defaults to the real
+    /// `Task.sleep` — production callers never pass it, so the shipped
+    /// duck-settle behavior is unchanged.
     nonisolated init(
         audioSession: AudioSessionProviding,
         nowPlayingInfo: NowPlayingInfoProviding,
-        notificationCenter: NotificationCenter
+        notificationCenter: NotificationCenter,
+        transitionSleeper: @escaping @Sendable (Duration) async -> Void = { duration in
+            try? await Task.sleep(for: duration)
+        }
     ) {
         let player = AVPlayer()
         player.automaticallyWaitsToMinimizeStalling = true
@@ -177,6 +196,7 @@ final class PlaybackService: NSObject, Sendable {
         self.audioSession = audioSession
         self.nowPlayingInfo = nowPlayingInfo
         self.notificationCenter = notificationCenter
+        self.transitionSleeper = transitionSleeper
 
         super.init()
 
@@ -566,8 +586,11 @@ final class PlaybackService: NSObject, Sendable {
             to: target, toleranceBefore: .zero, toleranceAfter: .zero
         )
 
-        // Brief pause for the seek to settle, then release.
-        try? await Task.sleep(for: .milliseconds(Int(Self.duckDuration * 1000)))
+        // Brief pause for the seek to settle, then release. Routed
+        // through the injectable sleeper seam (playhead-m9xk); the
+        // production default performs the identical
+        // `try? await Task.sleep(for:)` this line previously inlined.
+        await transitionSleeper(.milliseconds(Int(Self.duckDuration * 1000)))
 
         // Restore volume
         player.volume = originalVolume
@@ -791,6 +814,18 @@ final class PlaybackService: NSObject, Sendable {
     /// Used by `SkipCueSmoothingTests` to assert `setSkipCues` actually
     /// stored the ranges.
     var _testingSkipCues: [CMTimeRange] { skipCues }
+
+    /// Test-only accessor for the player's current volume. Used by
+    /// `SkipCueSmoothingTests` (playhead-m9xk) to prove duck/release
+    /// ORDERING deterministically: while a transition is parked inside
+    /// the injected sleeper, the volume must read `Self.duckVolume`;
+    /// after release it must be restored.
+    var _testingPlayerVolume: Float { player.volume }
+
+    /// Test-only mirror of the production duck level so ordering tests
+    /// compare against the real constant instead of a copied literal.
+    /// Actor-isolated like the class; tests read it with `await`.
+    static var _testingDuckVolume: Float { duckVolume }
 
     /// Test-only hook that installs a sentinel `AVPlayerItem` so calls
     /// to `play()` pass the `playerItem != nil` guard. Used by
