@@ -199,6 +199,61 @@ struct RediffByteFirstEndToEndTests {
         #expect(await provider.pcmCallCount == 0)
     }
 
+    // MARK: - playhead-hdgk: real-pipeline persistence of the rediff tier
+
+    @Test("hdgk: a byte-rediff width-owned span persists 'rediffByteExact' on BOTH ad_windows edges through the REAL runBackfill wiring")
+    func byteSuccessPersistsRediffByteExactEdgeAnchors() async throws {
+        // Closes the end-to-end wiring gap the function-level derivation pin
+        // (FusionEdgeAnchorDerivationTests) and the default-path round-trip
+        // (BackfillFusionPipelineTests) leave open: that a REAL `.rediffSlot`
+        // span flowing through `runBackfill` → `deriveFusionEdgeAnchors` →
+        // `buildFusionAdWindow` → `ad_windows` actually persists the
+        // `rediffByteExact` tier (not the default `unanchored`). A call-site
+        // that dropped, swapped, or hardcoded the derived anchors would pass
+        // every other test but fail here.
+        let assetId = "byte-primary-anchors"
+        let dir = try makeTempDir(prefix: "RediffByteFirst-\(assetId)")
+        let pair = try BytePair.stage(in: dir)
+        // NO stored fingerprint stream and NO PCM: the `.rediffSlot` can ONLY
+        // come from the byte differ (identical setup to the byte-success case).
+        let provider = RecordingBSideProvider(fileURL: pair.bURL, samples: nil)
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(AnalysisAsset(
+            id: assetId, episodeId: "ep-\(assetId)", assetFingerprint: "fp-\(assetId)",
+            weakFingerprint: nil, sourceURL: pair.aURL.absoluteString,
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil
+        ))
+        try await service(store: store, provider: provider).runBackfill(
+            chunks: chunks(assetId: assetId), analysisAssetId: assetId,
+            podcastId: "podcast-byte-first-e2e", episodeDuration: 280.0
+        )
+
+        // The ad chunk ("brought to you by Squarespace…") produces a fusion ad
+        // window; because the decoded span is byte-rediff width-owned, the
+        // derivation must stamp BOTH edges `.rediffByteExact` on the persisted
+        // row. Filter by the tier (ad_windows carry no `anchorProvenance`) —
+        // exactly the one byte-rediff ad span qualifies.
+        let windows = try await store.fetchAdWindows(assetId: assetId)
+        let rediffWindows = windows.filter {
+            $0.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+        }
+        #expect(
+            rediffWindows.count == 1,
+            "exactly the byte-rediff ad span must persist rediffByteExact; got \(windows.map { ($0.startTime, $0.startEdgeAnchor, $0.endEdgeAnchor) })"
+        )
+        let win = try #require(rediffWindows.first)
+        // BOTH edges are byte-exact for a width-owned span.
+        #expect(win.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue)
+        #expect(win.endEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue)
+        // Sanity: the persisted window sits at the byte-exact splice edges
+        // (~95, ~165) — the same slot the decoded-span assertion pins.
+        #expect(win.startTime >= 94.5 && win.startTime <= 95.5, "start ≈ 95, got \(win.startTime)")
+        #expect(win.endTime >= 164.5 && win.endTime <= 165.5, "end ≈ 165, got \(win.endTime)")
+    }
+
     @Test("byte-fail (disjoint bytes, re-encode shape) falls back to chroma, which behaves exactly as pre-xsdz.57")
     func byteFailFallsBackToChroma() async throws {
         let assetId = "byte-fallback"

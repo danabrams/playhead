@@ -364,6 +364,18 @@ struct AdWindow: Sendable {
     /// source label). Persisted on the row so a re-export of an old
     /// device DB doesn't lose the value.
     let catalogStoreMatchSimilarity: Double?
+    /// playhead-hdgk: the per-edge auto-skip anchor tier (an
+    /// `AutoSkipEdgeAnchor` raw value — `"rediffByteExact"` /
+    /// `"stingerSnapped"` / `"unanchored"`) derived at fusion/decision-build
+    /// time, so `SkipOrchestrator` can classify each edge by its real
+    /// provenance instead of defaulting to `.unanchored`. Non-optional with a
+    /// `"unanchored"` default: pre-hdgk rows and non-fusion producers (hot
+    /// path, imported shares, synthetic user marks) carry the conservative
+    /// default, under which the (dormant) edge-padding policy auto-skips
+    /// nothing. Kept as a raw String — like `eligibilityGate` — so the
+    /// persistence layer stays decoupled from the orchestrator's enum for I/O.
+    let startEdgeAnchor: String
+    let endEdgeAnchor: String
 
     init(
         id: String,
@@ -386,7 +398,9 @@ struct AdWindow: Sendable {
         userDismissedBanner: Bool,
         evidenceSources: String? = nil,
         eligibilityGate: String? = nil,
-        catalogStoreMatchSimilarity: Double? = nil
+        catalogStoreMatchSimilarity: Double? = nil,
+        startEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
+        endEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -409,6 +423,8 @@ struct AdWindow: Sendable {
         self.evidenceSources = evidenceSources
         self.eligibilityGate = eligibilityGate
         self.catalogStoreMatchSimilarity = catalogStoreMatchSimilarity
+        self.startEdgeAnchor = startEdgeAnchor
+        self.endEdgeAnchor = endEdgeAnchor
     }
 }
 
@@ -887,7 +903,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 28
+    nonisolated static let currentSchemaVersion = 29
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1558,6 +1574,10 @@ actor AnalysisStore {
             // per-episode AttemptState (the R2 failure-policy persistence)
             // plus the bandwidth ledger. Bumps schema_version to 28.
             try migrateRediffRefetchStateV28IfNeeded()
+            // playhead-hdgk: per-edge auto-skip anchor tier columns on
+            // ad_windows. Additive-only ADD COLUMN with a safe 'unanchored'
+            // default. Bumps schema_version to 29.
+            try migrateAdWindowEdgeAnchorsV29IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1831,6 +1851,11 @@ actor AnalysisStore {
         // playhead-xsdz.36 (v28): mirror the rediff re-fetch state migration
         // into the ladder seam. Helper is fully idempotent.
         try migrateRediffRefetchStateV28IfNeeded()
+        // playhead-hdgk (v29): mirror the ad_windows edge-anchor column
+        // migration into the ladder seam. Helper is fully idempotent and
+        // gated on `tableExists("ad_windows")` so seeded fixtures without the
+        // table still reach v29.
+        try migrateAdWindowEdgeAnchorsV29IfNeeded()
     }
     #endif
 
@@ -4386,6 +4411,36 @@ actor AnalysisStore {
         try setSchemaVersion(28)
     }
 
+    /// playhead-hdgk (V29): add the per-edge auto-skip anchor tier columns to
+    /// `ad_windows`. Additive-only `ALTER TABLE ADD COLUMN` with a
+    /// `NOT NULL DEFAULT 'unanchored'` clause, so every pre-V29 row is
+    /// backfilled with the conservative default and no data is lost.
+    ///
+    /// Both columns are appended at the END of the table (SQLite's only
+    /// supported ADD COLUMN position), matching the order the fresh-install
+    /// `CREATE TABLE` in `createTables()` lists them — so the positional
+    /// `SELECT * FROM ad_windows` readers see identical column indices on a
+    /// fresh install and on an upgrade. `addColumnIfNeeded` makes each ALTER
+    /// idempotent; `tableExists` guards the ladder-only seam where a seeded
+    /// fixture may omit `ad_windows`. `setSchemaVersion(29)` runs
+    /// unconditionally so the version bumps even for such fixtures.
+    private func migrateAdWindowEdgeAnchorsV29IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 29 else { return }
+        if try tableExists("ad_windows") {
+            try addColumnIfNeeded(
+                table: "ad_windows",
+                column: "startEdgeAnchor",
+                definition: "TEXT NOT NULL DEFAULT 'unanchored'"
+            )
+            try addColumnIfNeeded(
+                table: "ad_windows",
+                column: "endEdgeAnchor",
+                definition: "TEXT NOT NULL DEFAULT 'unanchored'"
+            )
+        }
+        try setSchemaVersion(29)
+    }
+
     /// Upsert the durable re-fetch attempt state for one asset.
     func upsertRediffRefetchState(_ row: RediffRefetchStateRow) throws {
         let sql = """
@@ -5057,6 +5112,15 @@ actor AnalysisStore {
         // a wired store. Appended at the END of the column list so the
         // positional `SELECT *` reader below stays correct without
         // reshuffling indices.
+        // playhead-hdgk: `startEdgeAnchor` / `endEdgeAnchor` carry the
+        // per-edge auto-skip anchor tier (an `AutoSkipEdgeAnchor` raw value).
+        // NOT NULL DEFAULT 'unanchored' so every existing row (V29 upgrade)
+        // and every non-fusion writer lands the conservative default. These
+        // land at a DIFFERENT physical index on a fresh install (here, in the
+        // CREATE) than on an upgrade (V29 `ALTER … ADD COLUMN`, appended after
+        // the ladder's model/policy/feature-schema + catalog columns), so the
+        // `SELECT *` readers resolve them BY NAME (`columnIndex`) rather than
+        // by fixed position.
         try exec("""
             CREATE TABLE IF NOT EXISTS ad_windows (
                 id                  TEXT PRIMARY KEY,
@@ -5079,7 +5143,9 @@ actor AnalysisStore {
                 userDismissedBanner INTEGER NOT NULL DEFAULT 0,
                 evidenceSources     TEXT,
                 eligibilityGate     TEXT,
-                catalogStoreMatchSimilarity REAL
+                catalogStoreMatchSimilarity REAL,
+                startEdgeAnchor     TEXT NOT NULL DEFAULT 'unanchored',
+                endEdgeAnchor       TEXT NOT NULL DEFAULT 'unanchored'
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_ad_asset ON ad_windows(analysisAssetId)")
@@ -7061,6 +7127,7 @@ actor AnalysisStore {
         // metadataSource=14 metadataConfidence=15 metadataPromptVersion=16 wasSkipped=17
         // userDismissedBanner=18 evidenceSources=19 eligibilityGate=20
         // catalogStoreMatchSimilarity=21 (playhead-epfk)
+        // startEdgeAnchor=22 endEdgeAnchor=23 (playhead-hdgk)
         // Keep bind() call indices and this comment in sync when adding columns.
         let sql = """
             INSERT INTO ad_windows
@@ -7068,8 +7135,9 @@ actor AnalysisStore {
              decisionState, detectorVersion, advertiser, product, adDescription,
              evidenceText, evidenceStartTime, metadataSource, metadataConfidence,
              metadataPromptVersion, wasSkipped, userDismissedBanner,
-             evidenceSources, eligibilityGate, catalogStoreMatchSimilarity)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             evidenceSources, eligibilityGate, catalogStoreMatchSimilarity,
+             startEdgeAnchor, endEdgeAnchor)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -7094,6 +7162,8 @@ actor AnalysisStore {
         bind(stmt, 19, ad.evidenceSources)
         bind(stmt, 20, ad.eligibilityGate)
         bind(stmt, 21, ad.catalogStoreMatchSimilarity)
+        bind(stmt, 22, ad.startEdgeAnchor)
+        bind(stmt, 23, ad.endEdgeAnchor)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -7130,7 +7200,17 @@ actor AnalysisStore {
             userDismissedBanner: sqlite3_column_int(stmt, 17) != 0,
             evidenceSources: optionalText(stmt, 18),
             eligibilityGate: optionalText(stmt, 19),
-            catalogStoreMatchSimilarity: optionalDouble(stmt, 20)
+            // playhead-hdgk: `catalogStoreMatchSimilarity` and the two anchor
+            // tiers are ALTER-appended columns whose physical index differs
+            // between a fresh install and an upgrade, so they are resolved by
+            // NAME (see `columnIndex`). Columns 0–19 are the stable base/v5
+            // set and stay positional. Missing (defensive) → the safe default.
+            catalogStoreMatchSimilarity: columnIndex(stmt, name: "catalogStoreMatchSimilarity")
+                .flatMap { optionalDouble(stmt, $0) },
+            startEdgeAnchor: columnIndex(stmt, name: "startEdgeAnchor").map { text(stmt, $0) }
+                ?? AutoSkipEdgeAnchor.unanchored.rawValue,
+            endEdgeAnchor: columnIndex(stmt, name: "endEdgeAnchor").map { text(stmt, $0) }
+                ?? AutoSkipEdgeAnchor.unanchored.rawValue
         )
     }
 
@@ -7139,6 +7219,15 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, assetId)
+        // playhead-hdgk: resolve the ALTER-appended columns by name ONCE (the
+        // result-column layout is fixed for a prepared statement), then reuse
+        // across rows. See `columnIndex` for the fresh-vs-upgrade ordering
+        // rationale — this covers `catalogStoreMatchSimilarity` too, whose
+        // fixed-index read was wrong on upgraded DBs where the model/policy/
+        // feature-schema columns precede it.
+        let catalogIdx = columnIndex(stmt, name: "catalogStoreMatchSimilarity")
+        let startAnchorIdx = columnIndex(stmt, name: "startEdgeAnchor")
+        let endAnchorIdx = columnIndex(stmt, name: "endEdgeAnchor")
         var results: [AdWindow] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             results.append(AdWindow(
@@ -7162,10 +7251,14 @@ actor AnalysisStore {
                 userDismissedBanner: sqlite3_column_int(stmt, 17) != 0,
                 evidenceSources: optionalText(stmt, 18),
                 eligibilityGate: optionalText(stmt, 19),
-                // playhead-epfk: column 20 is the new
-                // `catalogStoreMatchSimilarity` (REAL). Pre-epfk DBs that
-                // run the migration get NULL → optionalDouble returns nil.
-                catalogStoreMatchSimilarity: optionalDouble(stmt, 20)
+                // playhead-epfk / playhead-hdgk: `catalogStoreMatchSimilarity`
+                // and the anchor tiers are ALTER-appended; read by pre-resolved
+                // name index (not fixed position). Missing → nil / safe default.
+                catalogStoreMatchSimilarity: catalogIdx.flatMap { optionalDouble(stmt, $0) },
+                startEdgeAnchor: startAnchorIdx.map { text(stmt, $0) }
+                    ?? AutoSkipEdgeAnchor.unanchored.rawValue,
+                endEdgeAnchor: endAnchorIdx.map { text(stmt, $0) }
+                    ?? AutoSkipEdgeAnchor.unanchored.rawValue
             ))
         }
         return results
@@ -11245,6 +11338,32 @@ actor AnalysisStore {
     /// instead so an unexpected NULL throws `AnalysisStoreError.invalidRow`.
     private func text(_ stmt: OpaquePointer?, _ idx: Int32) -> String {
         sqlite3_column_text(stmt, idx).map { String(cString: $0) } ?? ""
+    }
+
+    /// playhead-hdgk: resolve a result column's 0-based index by NAME.
+    ///
+    /// The two `SELECT * FROM ad_windows` readers address the stable base/v5
+    /// columns (indices 0–19) by fixed position — those never move. But a
+    /// column added later by `ALTER TABLE ADD COLUMN` can land at a DIFFERENT
+    /// index on a fresh install than on an upgrade: a fresh `CREATE TABLE`
+    /// lists it mid-table, whereas an upgrade appends it AFTER whatever the
+    /// ladder appended earlier. Concretely, `addModelPolicyFeatureSchemaVersion…`
+    /// appends `model/policy/feature_schema_version` to `ad_windows` in the
+    /// ladder BEFORE the epfk `catalogStoreMatchSimilarity` and the V29 anchor
+    /// columns, so on an upgraded DB catalog and the anchors sit at higher
+    /// indices than on a fresh one. Reading those three by name is
+    /// order-independent and correct on both paths. Returns nil when the column
+    /// is absent (defensive — post-migration it always exists).
+    private func columnIndex(_ stmt: OpaquePointer?, name: String) -> Int32? {
+        let count = sqlite3_column_count(stmt)
+        var i: Int32 = 0
+        while i < count {
+            if let raw = sqlite3_column_name(stmt, i), String(cString: raw) == name {
+                return i
+            }
+            i += 1
+        }
+        return nil
     }
 
     /// M9: throwing variant of `text(_:_:)`. Throws
