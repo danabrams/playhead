@@ -370,6 +370,143 @@ struct RediffRefetchTests {
         #expect(task.completedSuccess == true)
     }
 
+    @Test("An overlapping fire completes immediately and never poisons the in-flight sweep")
+    func overlappingFireCompletesImmediately() async {
+        let gated = GatedRefetchEnumerator()
+        let scheduler = StubTaskScheduler()
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: gated,
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: StubFullFetcher(),
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: SpyTempFileRemover(),
+            taskScheduler: scheduler,
+            now: { 100 * Self.day }
+        )
+
+        let taskA = StubBackgroundTask()
+        let fireA = Task { await service.handleRefetchTask(taskA) }
+        // A suspended on the gate ⇒ it claimed the fire and rescheduled.
+        while !(await gated.gate.hasWaiters) { await Task.yield() }
+
+        // B fires while A's sweep is in flight: completed immediately (once,
+        // unsuccessfully), no second reschedule, A untouched.
+        let taskB = StubBackgroundTask()
+        await service.handleRefetchTask(taskB)
+        #expect(taskB.setTaskCompletedCallCount == 1, "overlapping fire must still be completed")
+        #expect(taskB.completedSuccess == false)
+        #expect(scheduler.submittedRequests.count == 1, "the overlapping fire must not double-schedule")
+
+        await gated.gate.open()
+        await fireA.value
+        #expect(taskA.setTaskCompletedCallCount == 1, "the in-flight fire completes exactly once")
+        #expect(taskA.completedSuccess == true, "the overlapping fire must not expire/poison A's sweep")
+    }
+
+    @Test("A late expiration from a completed fire neither double-completes it nor expires the successor fire")
+    func lateExpirationDoesNotPoisonSuccessorFire() async {
+        let gated = GatedRefetchEnumerator()
+        let scheduler = StubTaskScheduler()
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: gated,
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: StubFullFetcher(),
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: SpyTempFileRemover(),
+            taskScheduler: scheduler,
+            now: { 100 * Self.day }
+        )
+
+        // Fire A runs to normal completion.
+        await gated.gate.open()
+        let taskA = StubBackgroundTask()
+        await service.handleRefetchTask(taskA)
+        #expect(taskA.setTaskCompletedCallCount == 1)
+
+        // Fire B is mid-sweep (suspended on the gate) when A's expiration
+        // handler fires LATE. With shared per-instance flags this would
+        // double-complete A and mark B's fire expired; per-task tracking must
+        // do neither.
+        await gated.gate.close()
+        let taskB = StubBackgroundTask()
+        let fireB = Task { await service.handleRefetchTask(taskB) }
+        while !(await gated.gate.hasWaiters) { await Task.yield() }
+
+        taskA.simulateExpiration()
+        // Let the expiration hop land on the actor (B's sweep is suspended on
+        // the gate actor, so the service actor is free to run it).
+        for _ in 0..<50 { await Task.yield() }
+
+        await gated.gate.open()
+        await fireB.value
+
+        #expect(taskA.setTaskCompletedCallCount == 1, "late expiration must not double-complete A")
+        #expect(taskB.setTaskCompletedCallCount == 1)
+        #expect(taskB.completedSuccess == true, "A's late expiration must not poison B's fire")
+    }
+
+    // MARK: - Service: orphaned B-copy hygiene (xsdz.36 R1)
+
+    @Test("Each enabled fire sweeps orphaned B-copies through the remover seam; disabled fires do not")
+    func handlerSweepsOrphanedBCopies() async {
+        let remover = SpyTempFileRemover()
+        let enumerator = StubRefetchEnumerator()
+        func fire(enabled: Bool) async {
+            let service = RediffRefetchService(
+                enabled: enabled,
+                enumerator: enumerator,
+                rangedSampler: StubRangedSampler(),
+                localSampler: StubLocalSampler(),
+                fullFetcher: StubFullFetcher(),
+                bsideFingerprinter: StubBSideFingerprinter(),
+                recorder: SpyRefetchRecorder(),
+                fileRemover: remover,
+                taskScheduler: StubTaskScheduler(),
+                now: { 100 * Self.day }
+            )
+            await service.handleRefetchTask(StubBackgroundTask())
+        }
+        await fire(enabled: false)
+        #expect(remover.orphanSweepAges.isEmpty, "disabled fire must not touch the filesystem seam")
+        await fire(enabled: true)
+        #expect(remover.orphanSweepAges == [RediffRefetchService.orphanedBCopyMinimumAge])
+    }
+
+    @Test("FileManagerTempFileRemover removes stale rediff-bcopy orphans and spares fresh + unrelated files")
+    func orphanSweepRemovesOnlyStaleBCopies() throws {
+        let fileManager = FileManager.default
+        let tmp = fileManager.temporaryDirectory
+        let prefix = URLSessionFullEpisodeFetcher.bcopyFilenamePrefix
+        let stale = tmp.appendingPathComponent(prefix + "test-stale-\(UUID().uuidString)")
+        let fresh = tmp.appendingPathComponent(prefix + "test-fresh-\(UUID().uuidString)")
+        let unrelated = tmp.appendingPathComponent("rediff-unrelated-\(UUID().uuidString)")
+        try Data(repeating: 1, count: 64).write(to: stale)
+        try Data(repeating: 2, count: 64).write(to: fresh)
+        try Data(repeating: 3, count: 64).write(to: unrelated)
+        defer {
+            try? fileManager.removeItem(at: stale)
+            try? fileManager.removeItem(at: fresh)
+            try? fileManager.removeItem(at: unrelated)
+        }
+        // Age the stale one past the floor.
+        try fileManager.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -2 * 60 * 60)],
+            ofItemAtPath: stale.path
+        )
+
+        FileManagerTempFileRemover().removeOrphanedBCopies(olderThan: 60 * 60)
+
+        #expect(!fileManager.fileExists(atPath: stale.path), "stale orphan must be removed")
+        #expect(fileManager.fileExists(atPath: fresh.path), "a fresh B-copy (possibly live) must be spared")
+        #expect(fileManager.fileExists(atPath: unrelated.path), "non-prefix files are not ours to delete")
+    }
+
     @Test("parseTotalLength reads the total after the slash and rejects an unknown total")
     func parseTotalLength() throws {
         #expect(try URLSessionRangedAudioSampler.parseTotalLength("bytes 0-65535/84496614") == 84_496_614)
@@ -528,7 +665,39 @@ final class SpyRefetchRecorder: RediffRefetchRecording, @unchecked Sendable {
 
 final class SpyTempFileRemover: RediffTempFileRemoving, @unchecked Sendable {
     private(set) var removed: [URL] = []
+    private(set) var orphanSweepAges: [TimeInterval] = []
     func remove(_ fileURL: URL) { removed.append(fileURL) }
+    func removeOrphanedBCopies(olderThan age: TimeInterval) { orphanSweepAges.append(age) }
+}
+
+/// Reusable open/close latch for suspending a stub mid-call.
+actor TestGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func open() {
+        opened = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+    func close() { opened = false }
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    /// True once a caller is suspended on the gate — the race-free "the sweep
+    /// is in flight" probe for tests.
+    var hasWaiters: Bool { !waiters.isEmpty }
+}
+
+/// Enumerator whose `candidates()` suspends on a gate — lets a test hold a
+/// sweep in flight while it drives overlapping fires / late expirations.
+final class GatedRefetchEnumerator: RediffRefetchEnumerating, @unchecked Sendable {
+    let gate = TestGate()
+    var candidatesToReturn: [RediffRefetchCandidate] = []
+    func candidates() async -> [RediffRefetchCandidate] {
+        await gate.wait()
+        return candidatesToReturn
+    }
 }
 
 final class StubAudioDecoder: AudioFileDecoding, @unchecked Sendable {

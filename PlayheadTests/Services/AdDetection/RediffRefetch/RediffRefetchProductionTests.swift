@@ -270,6 +270,26 @@ struct RediffRefetchEnumeratorTests {
         #expect(candidate.attemptState.unchangedAttempts == 1)
     }
 
+    @Test("a 0-byte played copy fails the anchored-file default and is not a candidate (no doomed 54 MB fetch)")
+    func emptyPlayedCopyIsNotACandidate() async throws {
+        let store = try await makeTestStore()
+        let dir = try makeTempDir(prefix: "RediffEnumEmpty")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Present on disk, but empty — the byte differ's bf4a2383 anchor
+        // (regular, non-symlink, NON-EMPTY) would reject it as an A-side, so
+        // the enumerator must not admit it either.
+        let emptyURL = dir.appendingPathComponent("empty.mp3")
+        try Data().write(to: emptyURL)
+        try await store.insertAsset(makeAsset(id: "a-empty", episodeId: "ep-empty", sourceURL: emptyURL.absoluteString))
+        try await store.upsertEpisodeFingerprints(makeFingerprintRecord(assetId: "a-empty", capturedAt: 42))
+
+        let box = RediffEnclosureResolverBox()
+        box.resolver = { @Sendable _ in URL(string: "https://cdn.example.com/current.mp3") }
+        let enumerator = AnalysisStoreRediffRefetchEnumerator(store: store, enclosureResolver: box)
+        #expect(await enumerator.candidates().isEmpty)
+    }
+
     @Test("nil resolver (pre-attach window) yields zero candidates — a benign no-op sweep")
     func nilResolverYieldsNothing() async throws {
         let store = try await makeTestStore()

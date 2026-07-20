@@ -156,6 +156,7 @@ struct EpisodeFingerprintCaptureTests {
             [1, n - 1],                             // pathological head split
             [n / 3, n / 3, n - 2 * (n / 3)],        // thirds
             [16_000, 0, 8_000, 0, n - 24_000],      // interior EMPTY chunks
+            [0, n - 500, 500, 0, 0],                // leading + trailing EMPTY chunks
             Array(repeating: 977, count: n / 977) + [n % 977],  // prime-size chunks
         ]
         for sizes in chunkings {

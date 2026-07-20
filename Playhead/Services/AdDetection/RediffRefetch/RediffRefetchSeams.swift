@@ -127,6 +127,23 @@ struct RediffBSideEmptyStreamError: RediffFailureClassifiable, Equatable {
 /// FileManager remover can be exercised against a real temp file.
 protocol RediffTempFileRemoving: Sendable {
     func remove(_ fileURL: URL)
+
+    /// playhead-xsdz.36 (R1 hygiene): remove ORPHANED B-copies — files the
+    /// full fetcher staged under its `rediff-bcopy-` prefix whose owning
+    /// process died between download and the `processCandidate` `defer`
+    /// deletion (jetsam mid-consume is a routine BGProcessingTask fate).
+    /// Nothing else ever cleans them: iOS purges tmp/ only opportunistically,
+    /// so a ~54 MB orphan could otherwise linger for days. Called once per BG
+    /// fire, BEFORE the sweep. `age` guards the (test-only multi-instance)
+    /// window where another service instance is mid-candidate: a live B-copy
+    /// is consumed within one fire, so anything older than `age` is
+    /// unambiguously an orphan. Default no-op so spy conformers and the
+    /// flag-OFF world are untouched.
+    func removeOrphanedBCopies(olderThan age: TimeInterval)
+}
+
+extension RediffTempFileRemoving {
+    func removeOrphanedBCopies(olderThan age: TimeInterval) {}
 }
 
 // MARK: - Production conformers
@@ -249,6 +266,11 @@ struct URLSessionFullEpisodeFetcher: FullEpisodeFetching {
         case notOK(status: Int)
     }
 
+    /// Filename prefix for the caller-owned B-copy temp file. Shared with
+    /// `FileManagerTempFileRemover.removeOrphanedBCopies` so the orphan sweep
+    /// can never drift from what `download` actually names its files.
+    static let bcopyFilenamePrefix = "rediff-bcopy-"
+
     func download(url: URL) async throws -> (fileURL: URL, byteCount: Int) {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -263,7 +285,7 @@ struct URLSessionFullEpisodeFetcher: FullEpisodeFetching {
         // Move OUT of the URLSession-owned temp (which the system reclaims) into
         // a location WE control and delete after fingerprinting.
         let destination = fileManager.temporaryDirectory
-            .appendingPathComponent("rediff-bcopy-\(UUID().uuidString)")
+            .appendingPathComponent(Self.bcopyFilenamePrefix + UUID().uuidString)
         try? fileManager.removeItem(at: destination)
         try fileManager.moveItem(at: tempURL, to: destination)
         return (destination, Self.fileByteCount(at: destination))
@@ -327,6 +349,31 @@ struct FileManagerTempFileRemover: RediffTempFileRemoving {
             try fileManager.removeItem(at: fileURL)
         } catch {
             logger.error("Failed to delete B-copy \(fileURL.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Sweep tmp/ for `rediff-bcopy-*` files older than `age` (see the
+    /// protocol doc). Only the fetcher's own prefix is touched — nothing else
+    /// in tmp/ is ours to delete.
+    func removeOrphanedBCopies(olderThan age: TimeInterval) {
+        let fileManager = FileManager.default
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: fileManager.temporaryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsSubdirectoryDescendants]
+        ) else { return }
+        let cutoff = Date(timeIntervalSinceNow: -age)
+        for url in entries
+        where url.lastPathComponent.hasPrefix(URLSessionFullEpisodeFetcher.bcopyFilenamePrefix) {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            guard modified < cutoff else { continue }
+            do {
+                try fileManager.removeItem(at: url)
+                logger.info("Removed orphaned B-copy \(url.lastPathComponent, privacy: .public)")
+            } catch {
+                logger.error("Failed to remove orphaned B-copy \(url.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
         }
     }
 }

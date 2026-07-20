@@ -58,8 +58,13 @@ final class RediffEnclosureResolverBox: Sendable {
 struct AnalysisStoreRediffRefetchEnumerator: RediffRefetchEnumerating {
     let store: AnalysisStore
     let enclosureResolver: RediffEnclosureResolverBox
-    /// Seam so tests can fake the played-copy-on-disk check.
-    var fileExists: @Sendable (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+    /// Seam so tests can fake the played-copy-on-disk check. The default is
+    /// the SAME bf4a2383 anchor the byte differ applies to its A-side
+    /// (`AdDetectionService.isAnchoredRegularFile`: regular, non-symlink,
+    /// non-empty) — a bare existence check would admit a truncated/0-byte
+    /// played copy whose garbage local sample reads as "rotated", spending a
+    /// ~54 MB fetch on a candidate the byte differ is guaranteed to reject.
+    var fileExists: @Sendable (URL) -> Bool = { AdDetectionService.isAnchoredRegularFile($0) }
 
     private static let logger = Logger(subsystem: "com.playhead", category: "RediffRefetch")
 

@@ -62,6 +62,13 @@ actor RediffRefetchService {
     /// cadence, so this only bounds how often the app is woken to CHECK.
     static let minimumRefetchInterval: TimeInterval = 6 * 60 * 60
 
+    /// playhead-xsdz.36 (R1 hygiene): minimum age before a `rediff-bcopy-*`
+    /// tmp file counts as an orphan for the per-fire sweep. A LIVE B-copy
+    /// exists only inside `processCandidate`'s scope on this actor (minutes at
+    /// most — a BGProcessingTask window), so one hour is unambiguous, and the
+    /// ≥6h fire spacing means a real orphan is well past it by the next fire.
+    static let orphanedBCopyMinimumAge: TimeInterval = 60 * 60
+
     // MARK: - Dependencies
 
     private nonisolated let enabled: Bool
@@ -89,11 +96,24 @@ actor RediffRefetchService {
 
     // MARK: - Per-fire state
 
-    /// Flipped by the expiration handler so the sweep bails at the next
-    /// candidate boundary (no `Task.cancel` — the enclosing task is not ours).
+    /// Flipped by the CURRENT fire's expiration handler so the sweep bails at
+    /// the next candidate boundary (no `Task.cancel` — the enclosing task is
+    /// not ours). Guarded by `currentTaskID` so a LATE expiration from an
+    /// already-completed fire cannot poison a successor fire's sweep.
     private var expired = false
-    /// Idempotence guard for `setTaskCompleted` (iOS terminates on a 2nd call).
-    private var taskCompleted = false
+    /// Identity of the fire whose sweep is in flight, nil between fires.
+    /// Doubles as the reentry guard: an overlapping fire (double-fire, or a
+    /// sweep outliving its window into the next grant) completes immediately
+    /// instead of resetting the in-flight fire's state.
+    private var currentTaskID: ObjectIdentifier?
+    /// Tasks that already had `setTaskCompleted` called (iOS terminates on a
+    /// 2nd call). PER-TASK, not a shared bool, mirroring
+    /// `BackgroundProcessingService.completedTaskIDs`: with a shared bool an
+    /// overlapping handler's reset lets a stale completion path double-call
+    /// `setTaskCompleted` on one task while silently dropping the other's.
+    /// Grows one entry per fire for the process lifetime — same accepted
+    /// bound as the sibling service.
+    private var completedTaskIDs = Set<ObjectIdentifier>()
 
     // MARK: - Init
 
@@ -161,12 +181,28 @@ actor RediffRefetchService {
             task.setTaskCompleted(success: true)
             return
         }
+        // Reentry guard: if a fire's sweep is already in flight, complete the
+        // overlapping task immediately — do NOT reset the in-flight fire's
+        // state (that reset is how a shared-flag design double-completes the
+        // first task and orphans the second).
+        guard currentTaskID == nil else {
+            logger.warning("rediff re-fetch fired while a sweep is in flight — completing the overlapping task immediately")
+            completeTaskOnce(task, success: false)
+            return
+        }
+        currentTaskID = ObjectIdentifier(task as AnyObject)
+        defer { currentTaskID = nil }
         expired = false
-        taskCompleted = false
 
         // Reschedule first so iOS always has a pending request even if the
         // sweep crashes mid-fire.
         scheduleNextRefetch()
+
+        // playhead-xsdz.36 (R1 hygiene): clean up any B-copy a previous
+        // process abandoned between download and deletion (jetsam/expiration
+        // mid-consume). Runs before the sweep so the fire's own transient
+        // B-copy (always younger than the age floor) is never touched.
+        fileRemover.removeOrphanedBCopies(olderThan: Self.orphanedBCopyMinimumAge)
 
         task.expirationHandler = { [weak self] in
             let box = _UncheckedSendableBox(task)
@@ -406,16 +442,23 @@ actor RediffRefetchService {
     // MARK: - Completion
 
     /// Expiration hop: flip `expired` so the sweep bails, and complete once.
+    /// Only the CURRENT fire's expiration may abort the sweep — a late
+    /// expiration hop from an already-completed earlier fire must not poison
+    /// a successor fire's in-flight sweep.
     private func markExpiredAndComplete(_ task: any BackgroundProcessingTaskProtocol) {
-        expired = true
-        logger.info("rediff re-fetch task expired — bailing at next boundary")
+        if currentTaskID == ObjectIdentifier(task as AnyObject) {
+            expired = true
+            logger.info("rediff re-fetch task expired — bailing at next boundary")
+        }
         completeTaskOnce(task, success: false)
     }
 
-    /// Idempotent `setTaskCompleted` (first caller wins).
+    /// Idempotent `setTaskCompleted`, PER TASK (first caller for a given task
+    /// wins; other tasks' completions are unaffected).
     private func completeTaskOnce(_ task: any BackgroundProcessingTaskProtocol, success: Bool) {
-        guard !taskCompleted else { return }
-        taskCompleted = true
+        let id = ObjectIdentifier(task as AnyObject)
+        guard !completedTaskIDs.contains(id) else { return }
+        completedTaskIDs.insert(id)
         task.setTaskCompleted(success: success)
     }
 }
