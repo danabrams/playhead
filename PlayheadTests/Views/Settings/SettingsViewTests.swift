@@ -12,6 +12,7 @@
 // deliberately out of scope per the bead spec.
 
 import Foundation
+import Observation
 import SwiftData
 import Testing
 
@@ -757,7 +758,18 @@ struct SettingsICloudSyncReactivityTests {
     /// assert the view-model published value flips. Pinned by the bead
     /// spec — sign-out mid-session must update the footer without a
     /// view re-appear.
-    @Test func observeICloudSyncStatusFlipsOnSignOut() async throws {
+    ///
+    /// playhead-zqhz (review follow-up): this test kept the child-task +
+    /// 1 s deadline-poll pattern the rest of this file was cured of, and
+    /// it flaked the same way (the observation child task was still
+    /// waiting on MainActor scheduling when the deadline expired —
+    /// "Predicate never became true"). The waits are now event-driven:
+    /// the view-model is `@Observable`, so `awaitObserved` suspends on
+    /// observation-tracking change notifications for exactly the
+    /// property the predicate reads and re-checks on each mutation. No
+    /// polling deadline; the `.timeLimit` trait is the hang backstop.
+    @Test(.timeLimit(.minutes(1)))
+    func observeICloudSyncStatusFlipsOnSignOut() async throws {
         let provider = FakeCloudKitProvider(initialAccountStatus: .available)
         let coordinator = ICloudSyncCoordinator(provider: provider)
         await coordinator.handleAccountStatusChange()
@@ -765,39 +777,48 @@ struct SettingsICloudSyncReactivityTests {
         let viewModel = SettingsViewModel()
 
         // Run the observation in a child task so the suspending
-        // for-loop doesn't block the test. We then drive the
-        // status flip and poll the view-model for the new value.
+        // for-loop doesn't block the test. We then drive the status
+        // flip and await the view-model's observable mutation.
         let observationTask = Task { @MainActor in
             await viewModel.observeICloudSyncStatus(coordinator)
         }
         defer { observationTask.cancel() }
 
         // Wait for the seed value (`true`) to land on the view-model.
-        try await waitFor { viewModel.iCloudSyncEnabled == true }
+        await awaitObserved { viewModel.iCloudSyncEnabled == true }
 
         // Sign out mid-session.
         await provider.setAccountStatus(.noAccount)
         await coordinator.handleAccountStatusChange()
 
         // Footer must flip to `false` without a view re-appear.
-        try await waitFor { viewModel.iCloudSyncEnabled == false }
+        await awaitObserved { viewModel.iCloudSyncEnabled == false }
         #expect(viewModel.iCloudSyncEnabled == false)
     }
 
-    /// Polls a predicate on the main actor with a 1s ceiling. Sweeter
-    /// than scattering `try await Task.sleep` across each test.
+    /// Suspend until `predicate` is true, waking on `@Observable`
+    /// mutations of the properties the predicate reads (via
+    /// `withObservationTracking`). Event-driven — no deadline, no poll
+    /// interval; use a `.timeLimit` trait on the test as the backstop.
+    ///
+    /// Race-free on the MainActor: the predicate re-check and the
+    /// tracking registration run with no suspension between them, and
+    /// the mutation itself is MainActor-isolated, so a change cannot
+    /// slip between "predicate false" and "tracking armed". `onChange`
+    /// fires at willSet; the re-check runs after the setter's
+    /// synchronous completion because the MainActor is serial.
     @MainActor
-    private func waitFor(
-        _ predicate: @MainActor () -> Bool,
-        timeout: Duration = .seconds(1)
-    ) async throws {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while ContinuousClock.now < deadline {
-            if predicate() { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        if !predicate() {
-            Issue.record("Predicate never became true within \(timeout)")
+    private func awaitObserved(
+        _ predicate: @escaping @MainActor () -> Bool
+    ) async {
+        while !predicate() {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                withObservationTracking {
+                    _ = predicate()
+                } onChange: {
+                    continuation.resume()
+                }
+            }
         }
     }
 }
