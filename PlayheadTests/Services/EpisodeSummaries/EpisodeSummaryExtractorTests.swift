@@ -16,6 +16,10 @@ import Testing
 
 @testable import Playhead
 
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
+
 @Suite("EpisodeSummaryExtractor (playhead-jzik)")
 struct EpisodeSummaryExtractorTests {
 
@@ -369,6 +373,159 @@ struct EpisodeSummaryExtractorTests {
             #expect(error == .unparseableResponse)
         }
     }
+
+    // MARK: - iOS-27 error-taxonomy fallback (playhead-l3v0)
+
+    #if canImport(FoundationModels)
+    /// playhead-l3v0: iOS/macOS 27 replaced `LanguageModelSession.GenerationError`
+    /// with the top-level `LanguageModelError`. The permissive-fallback predicate
+    /// (`shouldFallBackToPermissive`) only recognised the LEGACY type, so an
+    /// iOS-27 `.refusal` fell through to `false` and the schema-bound error
+    /// propagated instead of triggering the permissive path — the whole reason
+    /// this extractor exists. Here the schema path throws `LanguageModelError.refusal`
+    /// and the permissive path is armed to succeed; a fixed extractor returns the
+    /// PERMISSIVE summary (permissive called once). Pre-fix, `extract` re-throws
+    /// the `LanguageModelError` and never calls permissive.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    @Test("iOS-27 LanguageModelError.refusal on the schema path triggers the permissive fallback")
+    func iOS27RefusalTriggersPermissiveFallback() async throws {
+        let transport = MockTransport()
+        await transport.setSchemaResult(
+            .failure(LanguageModelError.refusal(.init(explanation: "test", debugDescription: "test")))
+        )
+        await transport.setPermissiveResult(
+            .success("""
+            SUMMARY: Permissive recovered after the iOS-27 refusal.
+            TOPICS:
+            - alpha
+            GUESTS:
+            - Guest A
+            """)
+        )
+        let extractor = EpisodeSummaryExtractor(
+            transport: transport,
+            capability: MockCapabilityProvider(allowed: true)
+        )
+        let result = try await extractor.extract(
+            analysisAssetId: "asset-1",
+            episodeTitle: nil,
+            showTitle: nil,
+            transcriptVersion: "v1",
+            chunks: [makeChunk(id: "c-0", index: 0, start: 0, end: 60)]
+        )
+        #expect(result.summary.contains("Permissive recovered"))
+        #expect(await transport.schemaCallCount == 1)
+        #expect(await transport.permissiveCallCount == 1)
+    }
+
+    /// playhead-l3v0: on iOS 27 the legacy `GenerationError.decodingFailure`
+    /// analog — a model output that could not be parsed into the @Generable
+    /// schema — surfaces as the SEPARATE `GeneratedContent.ParsingError` type.
+    /// The legacy predicate mapped `.decodingFailure → true`; the iOS-27 parse
+    /// failure must keep triggering the permissive fallback. Pre-fix, the
+    /// `ParsingError` matched no cast and `extract` re-threw it.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    @Test("iOS-27 GeneratedContent.ParsingError on the schema path triggers the permissive fallback")
+    func iOS27ParsingErrorTriggersPermissiveFallback() async throws {
+        let transport = MockTransport()
+        await transport.setSchemaResult(
+            .failure(GeneratedContent.ParsingError(rawContent: "not-schema-shaped", debugDescription: "test"))
+        )
+        await transport.setPermissiveResult(
+            .success("SUMMARY: Permissive recovered after the parse failure.")
+        )
+        let extractor = EpisodeSummaryExtractor(
+            transport: transport,
+            capability: MockCapabilityProvider(allowed: true)
+        )
+        let result = try await extractor.extract(
+            analysisAssetId: "asset-1",
+            episodeTitle: nil,
+            showTitle: nil,
+            transcriptVersion: "v1",
+            chunks: [makeChunk(id: "c-0", index: 0, start: 0, end: 60)]
+        )
+        #expect(result.summary.contains("Permissive recovered"))
+        #expect(await transport.schemaCallCount == 1)
+        #expect(await transport.permissiveCallCount == 1)
+    }
+
+    /// playhead-l3v0: context-overflow must NOT fall back to permissive — the
+    /// permissive path uses the same (over-budget) prompt body, so retrying it
+    /// is pointless. Legacy `.exceededContextWindowSize → false`; the iOS-27
+    /// analog `LanguageModelError.contextSizeExceeded` must behave the same.
+    /// The error propagates and permissive is never called. Guards against a
+    /// regression that over-eagerly routes every `LanguageModelError` to the
+    /// fallback.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    @Test("iOS-27 LanguageModelError.contextSizeExceeded does NOT trigger the permissive fallback")
+    func iOS27ContextOverflowDoesNotTriggerFallback() async throws {
+        let transport = MockTransport()
+        let overflow = LanguageModelError.contextSizeExceeded(
+            .init(contextSize: 4096, tokenCount: 8192, debugDescription: "test")
+        )
+        await transport.setSchemaResult(.failure(overflow))
+        // Arm permissive to succeed so a WRONG fallback would be observable.
+        await transport.setPermissiveResult(.success("SUMMARY: should not be reached"))
+        let extractor = EpisodeSummaryExtractor(
+            transport: transport,
+            capability: MockCapabilityProvider(allowed: true)
+        )
+        var thrown: Error?
+        do {
+            _ = try await extractor.extract(
+                analysisAssetId: "asset-1",
+                episodeTitle: nil,
+                showTitle: nil,
+                transcriptVersion: "v1",
+                chunks: [makeChunk(id: "c-0", index: 0, start: 0, end: 60)]
+            )
+            Issue.record("expected the context-overflow error to propagate")
+        } catch {
+            thrown = error
+        }
+        // The ORIGINAL LanguageModelError propagates (not remapped to
+        // bothPathsRefused), and permissive was never attempted.
+        if case LanguageModelError.contextSizeExceeded = (thrown as? LanguageModelError) ?? overflow {
+            // ok
+        } else {
+            Issue.record("expected LanguageModelError.contextSizeExceeded, got \(String(describing: thrown))")
+        }
+        #expect(await transport.schemaCallCount == 1)
+        #expect(await transport.permissiveCallCount == 0)
+    }
+
+    /// playhead-l3v0 regression guard: the legacy iOS-26 `GenerationError.refusal`
+    /// path must keep triggering the permissive fallback after the new
+    /// `LanguageModelError` / `ParsingError` casts are added ahead of it.
+    @available(iOS 26.0, *)
+    @Test("legacy GenerationError.refusal still triggers the permissive fallback after the iOS-27 fix")
+    func legacyRefusalStillTriggersPermissiveFallback() async throws {
+        let transport = MockTransport()
+        let context = LanguageModelSession.GenerationError.Context(debugDescription: "test")
+        let refusal = LanguageModelSession.GenerationError.Refusal(transcriptEntries: [])
+        await transport.setSchemaResult(
+            .failure(LanguageModelSession.GenerationError.refusal(refusal, context))
+        )
+        await transport.setPermissiveResult(
+            .success("SUMMARY: Legacy refusal still recovered via permissive.")
+        )
+        let extractor = EpisodeSummaryExtractor(
+            transport: transport,
+            capability: MockCapabilityProvider(allowed: true)
+        )
+        let result = try await extractor.extract(
+            analysisAssetId: "asset-1",
+            episodeTitle: nil,
+            showTitle: nil,
+            transcriptVersion: "v1",
+            chunks: [makeChunk(id: "c-0", index: 0, start: 0, end: 60)]
+        )
+        #expect(result.summary.contains("Legacy refusal still recovered"))
+        #expect(await transport.schemaCallCount == 1)
+        #expect(await transport.permissiveCallCount == 1)
+    }
+    #endif
 
     // MARK: - Fixtures
 
