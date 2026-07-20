@@ -75,6 +75,16 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
         }
 
         #if canImport(FoundationModels)
+        // playhead-l3r2: iOS/macOS 27 throws the NEW `LanguageModelError`
+        // type; iOS/macOS 26 threw `LanguageModelSession.GenerationError`.
+        // Attempt the new cast first, then fall back to the legacy cast, so
+        // refusal (permissive-fallback) and context-overflow (smart-shrink)
+        // routing stays armed on BOTH OS generations. The two casts are for
+        // disjoint types, so ordering only reflects the common runtime case.
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *),
+           let languageModelError = error as? LanguageModelError {
+            return from(languageModelError: languageModelError)
+        }
         if #available(iOS 26.0, *),
            let generationError = error as? LanguageModelSession.GenerationError {
             return from(generationError: generationError)
@@ -118,6 +128,53 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
             .rateLimited
         case .refusal:
             .refusal
+        @unknown default:
+            .failedTransient
+        }
+    }
+
+    /// iOS/macOS 27 renamed and restructured the thrown generation-failure
+    /// type from `LanguageModelSession.GenerationError` to the top-level
+    /// `LanguageModelError`. This mirrors `from(generationError:)` case-for-
+    /// case so the same `SemanticScanStatus` (and therefore the same
+    /// `retryPolicy`) is produced on iOS 27 as on iOS 26. playhead-l3r2.
+    ///
+    /// Cases with no legacy `GenerationError` analog are documented inline.
+    /// Legacy cases with no `LanguageModelError` analog:
+    ///   - `assetsUnavailable`: on iOS 27 asset readiness is surfaced through
+    ///     `SystemLanguageModel.Availability.unavailable(.modelNotReady)`
+    ///     (see `from(availability:)`), not through a thrown error.
+    ///   - `concurrentRequests`: folded into `.rateLimited` in the new enum.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    static func from(languageModelError: LanguageModelError) -> SemanticScanStatus {
+        switch languageModelError {
+        case .contextSizeExceeded:
+            .exceededContextWindow
+        case .rateLimited:
+            .rateLimited
+        case .guardrailViolation:
+            .guardrailViolation
+        case .refusal:
+            .refusal
+        case .unsupportedGenerationGuide:
+            .decodingFailure
+        case .unsupportedLanguageOrLocale:
+            .unsupportedLocale
+        case .unsupportedTranscriptContent:
+            // No legacy analog. The transcript/prompt carried content the
+            // model can't process; nearest existing status is the decoding /
+            // unsupported-guide family (simplify-schema-and-retry-once).
+            .decodingFailure
+        case .unsupportedCapability:
+            // No legacy analog. The requested model capability (e.g.
+            // reasoning / tool-calling) isn't serviceable in this config;
+            // retrying the same request won't help, so map to the no-retry
+            // `.unavailable` status.
+            .unavailable
+        case .timeout:
+            // No legacy analog. Transient by nature — allow the standard
+            // transient retry.
+            .failedTransient
         @unknown default:
             .failedTransient
         }
