@@ -75,7 +75,9 @@ struct EpisodeFingerprintsV27MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        #expect(AnalysisStore.currentSchemaVersion == 27)
+        // Head moved 27 → 28 when playhead-xsdz.36 added rediff_refetch_state;
+        // the V27 table pins below are unchanged.
+        #expect(AnalysisStore.currentSchemaVersion == 28)
         #expect(try probeTableExists(in: dir, table: "episode_fingerprints"))
     }
 

@@ -61,4 +61,19 @@ struct AppConfigurationTests {
         #expect(ids.contains("com.playhead.app.analysis.backfill"),
                 "BGTaskSchedulerPermittedIdentifiers must include the analysis backfill identifier")
     }
+
+    @Test("BGTaskSchedulerPermittedIdentifiers includes the rediff re-fetch identifier (launch-critical since xsdz.36 activation)")
+    func rediffRefetchIdentifierPermitted() throws {
+        let bundle = Self.playheadBundle()
+        let info = bundle.infoDictionary ?? [:]
+        let ids = info["BGTaskSchedulerPermittedIdentifiers"] as? [String] ?? []
+        // playhead-xsdz.36 (R4): activation registers this identifier during
+        // launch, and `BGTaskScheduler.register` TRAPS on an identifier
+        // missing from the permitted list — a project.yml edit that drops
+        // the entry would crash every real-device launch while remaining
+        // invisible on the simulator (BGTaskScheduler never fires there).
+        // Pin via the code constant so the two can never drift apart.
+        #expect(ids.contains(RediffRefetchService.taskIdentifier),
+                "BGTaskSchedulerPermittedIdentifiers must include \(RediffRefetchService.taskIdentifier) — registration of an unpermitted id traps at launch")
+    }
 }

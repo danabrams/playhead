@@ -68,6 +68,17 @@ final class PlayheadRuntime {
     /// mistakenly reaped — the handler's row will have
     /// `startedAt > processLaunchTimestamp` by construction.
     let processLaunchTimestamp: Double
+    /// playhead-xsdz.36: the rediff B-side re-fetch BGTask service. Non-nil
+    /// ONLY when `RediffActivation.isEnabledByDefault` is true and this is
+    /// not a preview runtime — nil means nothing is registered, scheduled,
+    /// or fetched (the OFF byte-identity contract).
+    let rediffRefetchService: RediffRefetchService?
+    /// playhead-xsdz.36: late-binding episodeId → CURRENT enclosure-URL
+    /// resolver for the re-fetch enumerator. Installed by
+    /// `attachRediffEnclosureResolver(modelContainer:)` from
+    /// `PlayheadApp.task` once SwiftData is available; nil resolver ⇒ the
+    /// sweep sees zero candidates (benign no-op).
+    let rediffEnclosureResolverBox = RediffEnclosureResolverBox()
     let downloadManager: DownloadManager
     let analysisJobRunner: AnalysisJobRunner
     let analysisWorkScheduler: AnalysisWorkScheduler
@@ -1057,6 +1068,20 @@ final class PlayheadRuntime {
                 runtime: FoundationModelClassifier.makeLiveRuntimeForShadow()
             )
 
+        // playhead-xsdz.36 ACTIVATION: the production B-side staging
+        // provider. Injecting it arms the (already default-ON, Gate 1 #241)
+        // rediff slot pass — the pass still no-ops per-asset until the
+        // re-fetch consumer stages a rotated B-copy moments before
+        // `revalidateFromFeatures` runs. `nil` when the single activation
+        // switch is off (or in previews) keeps `computeRediffSlotPass` on its
+        // provider-nil guard — byte-identical to pre-activation.
+        let rediffActivationOn = RediffActivation.isEnabledByDefault && !isPreviewRuntime
+        let rediffBSideStagingProvider: RediffBSideStagingProvider? = rediffActivationOn
+            ? RediffBSideStagingProvider(
+                decoder: AnalysisAudioBSideDecoder(audioService: audioService)
+            )
+            : nil
+
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
             metadataExtractor: FallbackExtractor(),
@@ -1085,6 +1110,10 @@ final class PlayheadRuntime {
             // observer to the service. In release builds this is `nil`,
             // which makes the Phase 5 atom evidence projector a no-op.
             phase5ProjectorObserver: phase5ProjectorObserver,
+            // playhead-xsdz.36: production rediff B-side provider (staging
+            // actor fed by the re-fetch consumer). `nil` when the activation
+            // switch is off — the rediff pass no-ops on its provider guard.
+            rediffBSideProvider: rediffBSideStagingProvider,
             // Phase 6.5 (playhead-4my.16): forward eligible fusion decisions
             // to the orchestrator after each backfill run (step 17).
             skipOrchestrator: skipOrchestrator,
@@ -1249,6 +1278,44 @@ final class PlayheadRuntime {
             runLedger: runLedger
         )
 
+        // playhead-xsdz.36 ACTIVATION: the xsdz.28 re-fetch service, wired
+        // with its production conformers — store-backed enumerator + recorder
+        // (durable AttemptState incl. the R2 failure policy), the WiFi-only
+        // URLSession sampler/fetcher pair the xsdz.28 bead shipped for
+        // exactly this download (BGTask supplies charging+network; the
+        // session pins WiFi/non-constrained/non-expensive), and the consumer
+        // that hands a rotated B-copy to the rediff slot pass via
+        // `revalidateFromFeatures` before the copy is deleted. `nil` (switch
+        // off / preview) ⇒ nothing constructed, registered, or scheduled.
+        if rediffActivationOn, let rediffBSideStagingProvider {
+            self.rediffRefetchService = RediffRefetchService(
+                enabled: true,
+                config: .production,  // ~3d first-attempt delay (xsdz.30)
+                enumerator: AnalysisStoreRediffRefetchEnumerator(
+                    store: analysisStore,
+                    enclosureResolver: rediffEnclosureResolverBox
+                ),
+                rangedSampler: URLSessionRangedAudioSampler(),
+                localSampler: FileHandleLocalAudioSampler(),
+                fullFetcher: URLSessionFullEpisodeFetcher(),
+                bsideFingerprinter: EpisodeCaptureBSideFingerprinter(
+                    decoder: AnalysisAudioBSideDecoder(audioService: audioService)
+                ),
+                recorder: AnalysisStoreRediffRefetchRecorder(
+                    store: analysisStore,
+                    config: .production
+                ),
+                bsideConsumer: RevalidatingRediffBSideConsumer(
+                    staging: rediffBSideStagingProvider,
+                    store: analysisStore,
+                    adDetection: adDetectionService
+                ),
+                runLedger: runLedger
+            )
+        } else {
+            self.rediffRefetchService = nil
+        }
+
         let lanePreemptionCoordinator = LanePreemptionCoordinator()
         self.lanePreemptionCoordinator = lanePreemptionCoordinator
         self.analysisJobRunner = AnalysisJobRunner(
@@ -1258,7 +1325,10 @@ final class PlayheadRuntime {
             transcriptEngine: transcriptEngine,
             adDetection: adDetectionService,
             preemptionCoordinator: lanePreemptionCoordinator,
-            transcriptShadowGateLogger: preBuiltShadowGateLogger ?? NoOpTranscriptShadowGateLogger()
+            transcriptShadowGateLogger: preBuiltShadowGateLogger ?? NoOpTranscriptShadowGateLogger(),
+            // playhead-xsdz.36: A-side (played-copy) fingerprint capture —
+            // the rediff chroma A-side. Rides the single activation switch.
+            rediffASideCaptureEnabled: rediffActivationOn
         )
         // playhead-xiz6: wire a real `CandidateWindowCascade` into the
         // scheduler so the c3pi entry points (`seedCandidateWindows`,
@@ -2302,6 +2372,18 @@ final class PlayheadRuntime {
         // is available; see `BackgroundFeedRefreshService.attachSharedService`.
         BackgroundFeedRefreshService.registerTaskHandler()
 
+        // playhead-xsdz.36: register + prime the rediff re-fetch
+        // BGProcessingTask. Registration must land before launch ends
+        // (BGTaskScheduler requirement); the identifier has been in the
+        // Info.plist permitted list since xsdz.28. A fire before
+        // `attachRediffEnclosureResolver` installs the SwiftData resolver is
+        // a benign no-op sweep (zero candidates). Nil service (activation
+        // switch off) ⇒ nothing registered or scheduled — byte-identical.
+        if let rediffRefetchService {
+            rediffRefetchService.registerBackgroundTaskHandler()
+            Task { await rediffRefetchService.scheduleNextRefetch() }
+        }
+
         Task { [downloadManager, speechService, backgroundProcessingService, entitlementManager, iCloudSyncCoordinator, capabilitiesService] in
             do {
                 try await downloadManager.bootstrap()
@@ -3205,6 +3287,28 @@ final class PlayheadRuntime {
         )
         return { episodeKeys in
             await builder.summaries(for: episodeKeys)
+        }
+    }
+
+    /// playhead-xsdz.36: install the episodeId → CURRENT enclosure-URL
+    /// resolver for the rediff re-fetch enumerator (spike §7: never a stale
+    /// enclosure). Called from `PlayheadApp.task` once the SwiftData
+    /// `ModelContainer` exists — the same late-attach pattern as
+    /// `attachLearnedDeviceProfileStore`. A no-op when the activation switch
+    /// is off (no service to feed).
+    func attachRediffEnclosureResolver(modelContainer: ModelContainer) {
+        guard rediffRefetchService != nil else { return }
+        rediffEnclosureResolverBox.resolver = { @Sendable episodeId in
+            await MainActor.run {
+                let context = modelContainer.mainContext
+                let descriptor = FetchDescriptor<Episode>(
+                    predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
+                )
+                guard let episode = try? context.fetch(descriptor).first else {
+                    return nil
+                }
+                return episode.audioURL
+            }
         }
     }
 

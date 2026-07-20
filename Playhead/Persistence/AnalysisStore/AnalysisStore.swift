@@ -887,7 +887,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 27
+    nonisolated static let currentSchemaVersion = 28
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1554,6 +1554,10 @@ actor AnalysisStore {
             // playhead-xsdz.27: per-episode played-copy fingerprint store.
             // Creates `episode_fingerprints`. Bumps schema_version to 27.
             try migrateEpisodeFingerprintsV27IfNeeded()
+            // playhead-xsdz.36: rediff re-fetch activation state — durable
+            // per-episode AttemptState (the R2 failure-policy persistence)
+            // plus the bandwidth ledger. Bumps schema_version to 28.
+            try migrateRediffRefetchStateV28IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1824,6 +1828,9 @@ actor AnalysisStore {
         // into the ladder seam. Helper is fully idempotent (CREATE TABLE IF
         // NOT EXISTS + setSchemaVersion), so schema-version tests lock at v27.
         try migrateEpisodeFingerprintsV27IfNeeded()
+        // playhead-xsdz.36 (v28): mirror the rediff re-fetch state migration
+        // into the ladder seam. Helper is fully idempotent.
+        try migrateRediffRefetchStateV28IfNeeded()
     }
     #endif
 
@@ -4335,6 +4342,234 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    // MARK: - V28: Rediff re-fetch activation state (playhead-xsdz.36)
+    //
+    // Two tables:
+    //
+    //   `rediff_refetch_state` — durable per-episode
+    //   `RediffRefetchPolicy.AttemptState` (unchanged-attempt backoff AND the
+    //   xsdz.28 R2 failure-policy fields). FK ON DELETE CASCADE ties retention
+    //   to the asset, same as `episode_fingerprints`.
+    //
+    //   `rediff_bandwidth_ledger` — a single accumulator row (id = 1) with
+    //   cumulative pre-check / full-fetch byte totals and outcome counters:
+    //   the persisted counter surface for the xsdz.36 bandwidth-accounting
+    //   gate item (os_log breadcrumbs carry the per-event view).
+
+    /// V28 migration — create the rediff re-fetch state + bandwidth tables.
+    /// Idempotent (`CREATE TABLE IF NOT EXISTS`).
+    private func migrateRediffRefetchStateV28IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 28 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS rediff_refetch_state (
+                analysisAssetId        TEXT PRIMARY KEY REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                unchangedAttempts      INTEGER NOT NULL,
+                lastAttemptAt          REAL,
+                resolved               INTEGER NOT NULL,
+                lastFailureClass       TEXT,
+                sameClassFailureStreak INTEGER NOT NULL DEFAULT 0,
+                updatedAt              REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS rediff_bandwidth_ledger (
+                id                  INTEGER PRIMARY KEY CHECK (id = 1),
+                precheckBytesTotal  INTEGER NOT NULL DEFAULT 0,
+                fullFetchBytesTotal INTEGER NOT NULL DEFAULT 0,
+                unchangedCount      INTEGER NOT NULL DEFAULT 0,
+                rotatedCount        INTEGER NOT NULL DEFAULT 0,
+                failedCount         INTEGER NOT NULL DEFAULT 0,
+                parkedCount         INTEGER NOT NULL DEFAULT 0,
+                lastUpdatedAt       REAL
+            );
+        """)
+        try setSchemaVersion(28)
+    }
+
+    /// Upsert the durable re-fetch attempt state for one asset.
+    func upsertRediffRefetchState(_ row: RediffRefetchStateRow) throws {
+        let sql = """
+            INSERT INTO rediff_refetch_state
+            (analysisAssetId, unchangedAttempts, lastAttemptAt, resolved,
+             lastFailureClass, sameClassFailureStreak, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(analysisAssetId) DO UPDATE SET
+                unchangedAttempts = excluded.unchangedAttempts,
+                lastAttemptAt = excluded.lastAttemptAt,
+                resolved = excluded.resolved,
+                lastFailureClass = excluded.lastFailureClass,
+                sameClassFailureStreak = excluded.sameClassFailureStreak,
+                updatedAt = excluded.updatedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, row.analysisAssetId)
+        bind(stmt, 2, row.attemptState.unchangedAttempts)
+        if let lastAttemptAt = row.attemptState.lastAttemptAt {
+            bind(stmt, 3, lastAttemptAt)
+        } else {
+            sqlite3_bind_null(stmt, 3)
+        }
+        bind(stmt, 4, row.attemptState.resolved ? 1 : 0)
+        if let failureClass = row.attemptState.lastFailureClass {
+            bind(stmt, 5, failureClass.rawValue)
+        } else {
+            sqlite3_bind_null(stmt, 5)
+        }
+        bind(stmt, 6, row.attemptState.sameClassFailureStreak)
+        bind(stmt, 7, row.updatedAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// All persisted re-fetch attempt states. An unknown persisted
+    /// `lastFailureClass` string (a future class read by an older build)
+    /// decodes as `nil` class with its streak preserved — conservative:
+    /// the episode retries rather than staying parked under a class this
+    /// build cannot reason about.
+    func fetchRediffRefetchStates() throws -> [RediffRefetchStateRow] {
+        let sql = """
+            SELECT analysisAssetId, unchangedAttempts, lastAttemptAt, resolved,
+                   lastFailureClass, sameClassFailureStreak, updatedAt
+            FROM rediff_refetch_state
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var rows: [RediffRefetchStateRow] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append(readRediffRefetchStateRow(stmt))
+        }
+        return rows
+    }
+
+    /// The persisted attempt state for one asset, or `nil`.
+    func fetchRediffRefetchState(assetId: String) throws -> RediffRefetchStateRow? {
+        let sql = """
+            SELECT analysisAssetId, unchangedAttempts, lastAttemptAt, resolved,
+                   lastFailureClass, sameClassFailureStreak, updatedAt
+            FROM rediff_refetch_state
+            WHERE analysisAssetId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readRediffRefetchStateRow(stmt)
+    }
+
+    private func readRediffRefetchStateRow(_ stmt: OpaquePointer?) -> RediffRefetchStateRow {
+        let lastAttemptAt: Double? = sqlite3_column_type(stmt, 2) == SQLITE_NULL
+            ? nil
+            : sqlite3_column_double(stmt, 2)
+        var failureClass: RediffRefetchPolicy.FailureClass?
+        if sqlite3_column_type(stmt, 4) != SQLITE_NULL {
+            failureClass = RediffRefetchPolicy.FailureClass(rawValue: text(stmt, 4))
+        }
+        return RediffRefetchStateRow(
+            analysisAssetId: text(stmt, 0),
+            attemptState: RediffRefetchPolicy.AttemptState(
+                unchangedAttempts: Int(sqlite3_column_int64(stmt, 1)),
+                lastAttemptAt: lastAttemptAt,
+                resolved: sqlite3_column_int64(stmt, 3) != 0,
+                lastFailureClass: failureClass,
+                sameClassFailureStreak: Int(sqlite3_column_int64(stmt, 5))
+            ),
+            updatedAt: sqlite3_column_double(stmt, 6)
+        )
+    }
+
+    /// Candidate seeds for the re-fetch sweep: every asset with a
+    /// CURRENT-version A-side fingerprint stream whose re-fetch is not
+    /// already resolved. `capturedAt` doubles as the (conservative)
+    /// downloaded-at baseline for the first-attempt age gate.
+    func fetchRediffCandidateSeeds() throws -> [RediffCandidateSeed] {
+        let sql = """
+            SELECT f.analysisAssetId, a.episodeId, a.sourceURL, f.capturedAt
+            FROM episode_fingerprints f
+            JOIN analysis_assets a ON a.id = f.analysisAssetId
+            WHERE f.algorithmVersion = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM rediff_refetch_state s
+                WHERE s.analysisAssetId = f.analysisAssetId AND s.resolved = 1
+              )
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(ChromaFingerprinter.algorithmVersion))
+        var seeds: [RediffCandidateSeed] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            seeds.append(RediffCandidateSeed(
+                analysisAssetId: text(stmt, 0),
+                episodeId: text(stmt, 1),
+                sourceURL: text(stmt, 2),
+                capturedAt: sqlite3_column_double(stmt, 3)
+            ))
+        }
+        return seeds
+    }
+
+    /// Accumulate re-fetch bandwidth + outcome counters into the single
+    /// ledger row (created on first write).
+    func accumulateRediffBandwidth(
+        precheckBytes: Int,
+        fullFetchBytes: Int,
+        unchangedCount: Int,
+        rotatedCount: Int,
+        failedCount: Int,
+        parkedCount: Int,
+        at now: Double
+    ) throws {
+        let sql = """
+            INSERT INTO rediff_bandwidth_ledger
+            (id, precheckBytesTotal, fullFetchBytesTotal, unchangedCount,
+             rotatedCount, failedCount, parkedCount, lastUpdatedAt)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                precheckBytesTotal = precheckBytesTotal + excluded.precheckBytesTotal,
+                fullFetchBytesTotal = fullFetchBytesTotal + excluded.fullFetchBytesTotal,
+                unchangedCount = unchangedCount + excluded.unchangedCount,
+                rotatedCount = rotatedCount + excluded.rotatedCount,
+                failedCount = failedCount + excluded.failedCount,
+                parkedCount = parkedCount + excluded.parkedCount,
+                lastUpdatedAt = excluded.lastUpdatedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        // Byte counts bind as INT64 explicitly: the `bind(_:_:Int)` helper
+        // routes through `sqlite3_bind_int` with a TRAPPING `Int32(value)`
+        // conversion, and a single full fetch's byte count is CDN-controlled
+        // (no size cap upstream) — a >2 GiB enclosure must not crash the
+        // recorder. The outcome counters are per-sweep-bounded and stay on
+        // the Int helper.
+        sqlite3_bind_int64(stmt, 1, Int64(precheckBytes))
+        sqlite3_bind_int64(stmt, 2, Int64(fullFetchBytes))
+        bind(stmt, 3, unchangedCount)
+        bind(stmt, 4, rotatedCount)
+        bind(stmt, 5, failedCount)
+        bind(stmt, 6, parkedCount)
+        bind(stmt, 7, now)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// The cumulative bandwidth/outcome totals (zeros when never written) —
+    /// the diagnostics query surface for the xsdz.36 accounting item.
+    func fetchRediffBandwidthTotals() throws -> RediffBandwidthTotals {
+        let sql = """
+            SELECT precheckBytesTotal, fullFetchBytesTotal, unchangedCount,
+                   rotatedCount, failedCount, parkedCount, lastUpdatedAt
+            FROM rediff_bandwidth_ledger WHERE id = 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return RediffBandwidthTotals() }
+        return RediffBandwidthTotals(
+            precheckBytesTotal: sqlite3_column_int64(stmt, 0),
+            fullFetchBytesTotal: sqlite3_column_int64(stmt, 1),
+            unchangedCount: Int(sqlite3_column_int64(stmt, 2)),
+            rotatedCount: Int(sqlite3_column_int64(stmt, 3)),
+            failedCount: Int(sqlite3_column_int64(stmt, 4)),
+            parkedCount: Int(sqlite3_column_int64(stmt, 5)),
+            lastUpdatedAt: sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 6)
+        )
     }
 
     // MARK: - Transcript chunk ASR confidence (playhead-snat)
@@ -13128,4 +13363,37 @@ actor AnalysisStore {
         }
         return results
     }
+}
+
+// MARK: - Rediff re-fetch activation rows (playhead-xsdz.36, V28)
+
+/// One `rediff_refetch_state` row: the durable
+/// `RediffRefetchPolicy.AttemptState` for an asset plus its write stamp.
+struct RediffRefetchStateRow: Sendable, Equatable {
+    let analysisAssetId: String
+    let attemptState: RediffRefetchPolicy.AttemptState
+    let updatedAt: Double
+}
+
+/// One candidate seed for the re-fetch sweep (see
+/// `AnalysisStore.fetchRediffCandidateSeeds`).
+struct RediffCandidateSeed: Sendable, Equatable {
+    let analysisAssetId: String
+    let episodeId: String
+    let sourceURL: String
+    /// A-side capture time — the conservative downloaded-at baseline.
+    let capturedAt: Double
+}
+
+/// Cumulative `rediff_bandwidth_ledger` totals — the persisted counter
+/// query surface for the xsdz.36 bandwidth-accounting item.
+struct RediffBandwidthTotals: Sendable, Equatable {
+    var precheckBytesTotal: Int64 = 0
+    var fullFetchBytesTotal: Int64 = 0
+    var unchangedCount: Int = 0
+    var rotatedCount: Int = 0
+    var failedCount: Int = 0
+    var parkedCount: Int = 0
+    var lastUpdatedAt: Double?
+    var totalBytes: Int64 { precheckBytesTotal + fullFetchBytesTotal }
 }

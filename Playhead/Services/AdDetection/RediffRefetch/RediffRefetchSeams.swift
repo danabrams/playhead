@@ -101,11 +101,56 @@ protocol RediffRefetchRecording: Sendable {
     func recordOutcome(_ outcome: RediffRefetchPolicy.Outcome) async
 }
 
+/// playhead-xsdz.36 ACTIVATION seam: consumes a freshly fetched, ROTATED
+/// B-copy while it still exists on disk — the production conformer stages the
+/// file into the `RediffBSideStagingProvider`, drives
+/// `AdDetectionService.revalidateFromFeatures` (which runs the rediff slot
+/// pass against the staged B-side), and unstages. The CALLER
+/// (`RediffRefetchService.processCandidate`) still owns deletion of the file
+/// via its `defer` — the never-persist-B contract is unchanged.
+///
+/// A throw means the B-side was NOT consumed: the candidate records `.failed`
+/// (not resolved) so a later sweep re-fetches and retries under the R2
+/// failure policy.
+protocol RediffBSideConsuming: Sendable {
+    func consumeRotatedBSide(assetId: String, fileURL: URL) async throws
+}
+
+/// The B-side decoded to an EMPTY fingerprint stream — nothing to diff, and
+/// deterministic for the same copy (fingerprint-mismatch class).
+struct RediffBSideEmptyStreamError: RediffFailureClassifiable, Equatable {
+    var rediffFailureClass: RediffRefetchPolicy.FailureClass { .fingerprintMismatch }
+}
+
 /// Removes the transient B-copy temp file. A seam (not a bare `FileManager`
 /// call) so a test can assert removal WITHOUT a filesystem AND so the real
 /// FileManager remover can be exercised against a real temp file.
 protocol RediffTempFileRemoving: Sendable {
     func remove(_ fileURL: URL)
+
+    /// playhead-xsdz.36 (R1 hygiene, extended in R2): remove ORPHANED rediff
+    /// B-side artifacts abandoned by a process that died mid-consume (jetsam
+    /// is a routine BGProcessingTask fate). Two artifact classes, both
+    /// prefix-scoped and age-floored:
+    ///
+    ///   * tmp/ B-copies — files the full fetcher staged under its
+    ///     `rediff-bcopy-` prefix (~54 MB each; iOS purges tmp/ only
+    ///     opportunistically);
+    ///   * shard-cache directories — the chroma fallback's transient
+    ///     `rediff-bside-<uuid>` decode entries in NON-purgeable Application
+    ///     Support (~230 MB per decoded hour; every retry mints a new uuid,
+    ///     so these accumulate with no other cleaner).
+    ///
+    /// Called once per BG fire, BEFORE the sweep. `age` guards the
+    /// (test-only multi-instance) window where another service instance is
+    /// mid-candidate: a live B-copy/decode is consumed within one fire, so
+    /// anything older than `age` is unambiguously an orphan. Default no-op
+    /// so spy conformers and the flag-OFF world are untouched.
+    func removeOrphanedBCopies(olderThan age: TimeInterval)
+}
+
+extension RediffTempFileRemoving {
+    func removeOrphanedBCopies(olderThan age: TimeInterval) {}
 }
 
 // MARK: - Production conformers
@@ -228,6 +273,11 @@ struct URLSessionFullEpisodeFetcher: FullEpisodeFetching {
         case notOK(status: Int)
     }
 
+    /// Filename prefix for the caller-owned B-copy temp file. Shared with
+    /// `FileManagerTempFileRemover.removeOrphanedBCopies` so the orphan sweep
+    /// can never drift from what `download` actually names its files.
+    static let bcopyFilenamePrefix = "rediff-bcopy-"
+
     func download(url: URL) async throws -> (fileURL: URL, byteCount: Int) {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -242,7 +292,7 @@ struct URLSessionFullEpisodeFetcher: FullEpisodeFetching {
         // Move OUT of the URLSession-owned temp (which the system reclaims) into
         // a location WE control and delete after fingerprinting.
         let destination = fileManager.temporaryDirectory
-            .appendingPathComponent("rediff-bcopy-\(UUID().uuidString)")
+            .appendingPathComponent(Self.bcopyFilenamePrefix + UUID().uuidString)
         try? fileManager.removeItem(at: destination)
         try fileManager.moveItem(at: tempURL, to: destination)
         return (destination, Self.fileByteCount(at: destination))
@@ -308,6 +358,46 @@ struct FileManagerTempFileRemover: RediffTempFileRemoving {
             logger.error("Failed to delete B-copy \(fileURL.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
+
+    /// Sweep tmp/ for `rediff-bcopy-*` files older than `age`, then the
+    /// shard cache for orphaned `rediff-bside-*` decode directories (see the
+    /// protocol doc). Only rediff-owned prefixes are touched — nothing else
+    /// in either location is ours to delete.
+    func removeOrphanedBCopies(olderThan age: TimeInterval) {
+        let fileManager = FileManager.default
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: fileManager.temporaryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsSubdirectoryDescendants]
+        ) else { return }
+        let cutoff = Date(timeIntervalSinceNow: -age)
+        for url in entries
+        where url.lastPathComponent.hasPrefix(URLSessionFullEpisodeFetcher.bcopyFilenamePrefix) {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            guard modified < cutoff else { continue }
+            do {
+                try fileManager.removeItem(at: url)
+                logger.info("Removed orphaned B-copy \(url.lastPathComponent, privacy: .public)")
+            } catch {
+                logger.error("Failed to remove orphaned B-copy \(url.lastPathComponent, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+        }
+
+        // playhead-xsdz.36 (R2): the chroma fallback decodes the B-side
+        // through the analysis shard cache under a synthetic
+        // `rediff-bside-<uuid>` id, evicted inline on both exits — but a
+        // process death in between strands the directory (~230 MB per
+        // decoded hour, non-purgeable Application Support, new uuid per
+        // retry). Same age floor, same per-fire cadence as the tmp sweep.
+        let removedDirs = AnalysisAudioService.removeOrphanedShardCacheDirectories(
+            prefix: AnalysisAudioBSideDecoder.syntheticEpisodeIDPrefix,
+            olderThan: age
+        )
+        for name in removedDirs {
+            logger.info("Removed orphaned B-side shard cache \(name, privacy: .public)")
+        }
+    }
 }
 
 /// Default recorder: logs each outcome (bandwidth included) at info. Production
@@ -324,8 +414,8 @@ struct LoggingRediffRefetchRecorder: RediffRefetchRecording {
             logger.info("rediff-refetch unchanged assetId=\(assetId, privacy: .public) precheckBytes=\(cost.precheckBytes, privacy: .public)")
         case let .rotated(assetId, cost, fingerprintCount, _):
             logger.info("rediff-refetch ROTATED assetId=\(assetId, privacy: .public) precheckBytes=\(cost.precheckBytes, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) fpCount=\(fingerprintCount, privacy: .public)")
-        case let .failed(assetId, cost, error):
-            logger.error("rediff-refetch FAILED assetId=\(assetId, privacy: .public) bytes=\(cost.totalBytes, privacy: .public) error=\(error, privacy: .public)")
+        case let .failed(assetId, cost, failureClass, newState, error):
+            logger.error("rediff-refetch FAILED assetId=\(assetId, privacy: .public) bytes=\(cost.totalBytes, privacy: .public) class=\(failureClass.rawValue, privacy: .public) streak=\(newState.sameClassFailureStreak, privacy: .public) error=\(error, privacy: .public)")
         }
     }
 }

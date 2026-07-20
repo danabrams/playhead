@@ -137,6 +137,64 @@ struct EpisodeFingerprintCaptureTests {
         }
     }
 
+    // MARK: - Chunk-aware resample (playhead-xsdz.36 activation memory bound)
+
+    @Test("chunked resample is BIT-IDENTICAL to concat-then-resample on a curved input, across chunkings")
+    func chunkedResampleMatchesConcatenated() {
+        // Curved input (quadratic + sines) so any interpolation or boundary
+        // drift shows up; assorted chunkings including 1-sample chunks, a
+        // chunk boundary right at an interpolation pair, and empty chunks.
+        let n = 40_000
+        let signal = (0..<n).map { k -> Float in
+            let t = Double(k) / 16_000.0
+            return Float(0.3 * sin(2 * .pi * 313.0 * t) + 0.0000004 * Double(k * k % 1_000_003))
+        }
+        let expected = EpisodeFingerprintCapture.resampleToFingerprintRate(mono16kHz: signal)
+
+        let chunkings: [[Int]] = [
+            [n],                                    // single chunk == mono path
+            [1, n - 1],                             // pathological head split
+            [n / 3, n / 3, n - 2 * (n / 3)],        // thirds
+            [16_000, 0, 8_000, 0, n - 24_000],      // interior EMPTY chunks
+            [0, n - 500, 500, 0, 0],                // leading + trailing EMPTY chunks
+            Array(repeating: 977, count: n / 977) + [n % 977],  // prime-size chunks
+        ]
+        for sizes in chunkings {
+            var chunks: [[Float]] = []
+            var cursor = 0
+            for size in sizes {
+                chunks.append(Array(signal[cursor..<(cursor + size)]))
+                cursor += size
+            }
+            #expect(cursor == n, "test bug: chunking must cover the signal")
+            let out = EpisodeFingerprintCapture.resampleToFingerprintRate(chunkedMono16kHz: chunks)
+            // BIT-identical, not approximately equal — the chunk walk must be
+            // the same float program as the mono path (extractor identity).
+            #expect(out == expected, "chunking \(sizes.prefix(4))… diverged from the mono path")
+        }
+    }
+
+    @Test("chunked resample edge cases mirror the mono path")
+    func chunkedResampleEdgeCases() {
+        #expect(EpisodeFingerprintCapture.resampleToFingerprintRate(chunkedMono16kHz: []).isEmpty)
+        #expect(EpisodeFingerprintCapture.resampleToFingerprintRate(chunkedMono16kHz: [[]]).isEmpty)
+        #expect(EpisodeFingerprintCapture.resampleToFingerprintRate(chunkedMono16kHz: [[0.42]]) == [0.42])
+        #expect(EpisodeFingerprintCapture.resampleToFingerprintRate(chunkedMono16kHz: [[], [0.42], []]) == [0.42])
+    }
+
+    @Test("chunked fingerprints equal mono fingerprints (whole-extractor equality)")
+    func chunkedFingerprintsMatchMono() {
+        let samples = syntheticMono16k()
+        let third = samples.count / 3
+        let chunks = [
+            Array(samples[0..<third]),
+            Array(samples[third..<(2 * third)]),
+            Array(samples[(2 * third)...]),
+        ]
+        #expect(EpisodeFingerprintCapture.fingerprints(chunkedMono16kHz: chunks)
+            == EpisodeFingerprintCapture.fingerprints(mono16kHz: samples))
+    }
+
     // MARK: - Capture core
 
     /// A 16 kHz multi-tone signal long enough to yield a handful of

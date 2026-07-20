@@ -240,11 +240,17 @@ struct RediffRefetchTests {
         await service.runRefetchSweep()
 
         #expect(!FileManager.default.fileExists(atPath: bcopy.path), "B-copy must be deleted even on fingerprint failure")
-        guard case let .failed(_, cost, _) = recorder.outcomes.first else {
+        guard case let .failed(_, cost, failureClass, newState, _) = recorder.outcomes.first else {
             Issue.record("expected .failed, got \(String(describing: recorder.outcomes.first))"); return
         }
         #expect(cost.precheckBytes == 131_072)            // pre-check bytes still accounted
         #expect(cost.fullFetchBytes == 1_000)             // full-fetch bytes still accounted
+        // playhead-xsdz.36 (R2): a post-download failure is decode-class and
+        // the outcome now carries the ADVANCED state (streak started).
+        #expect(failureClass == .decodeFailure)
+        #expect(newState.lastFailureClass == .decodeFailure)
+        #expect(newState.sameClassFailureStreak == 1)
+        #expect(newState.resolved == false)
     }
 
     // MARK: - Service: ≥24h gate enforced end-to-end (acceptance)
@@ -362,6 +368,344 @@ struct RediffRefetchTests {
         await Task.yield()                         // let the expiration hop run
         #expect(task.setTaskCompletedCallCount == 1, "setTaskCompleted must be called exactly once")
         #expect(task.completedSuccess == true)
+    }
+
+    @Test("An overlapping fire completes immediately and never poisons the in-flight sweep")
+    func overlappingFireCompletesImmediately() async {
+        let gated = GatedRefetchEnumerator()
+        let scheduler = StubTaskScheduler()
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: gated,
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: StubFullFetcher(),
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: SpyTempFileRemover(),
+            taskScheduler: scheduler,
+            now: { 100 * Self.day }
+        )
+
+        let taskA = StubBackgroundTask()
+        let fireA = Task { await service.handleRefetchTask(taskA) }
+        // A suspended on the gate ⇒ it claimed the fire and rescheduled.
+        while !(await gated.gate.hasWaiters) { await Task.yield() }
+
+        // B fires while A's sweep is in flight: completed immediately (once,
+        // unsuccessfully), no second reschedule, A untouched.
+        let taskB = StubBackgroundTask()
+        await service.handleRefetchTask(taskB)
+        #expect(taskB.setTaskCompletedCallCount == 1, "overlapping fire must still be completed")
+        #expect(taskB.completedSuccess == false)
+        #expect(scheduler.submittedRequests.count == 1, "the overlapping fire must not double-schedule")
+
+        await gated.gate.open()
+        await fireA.value
+        #expect(taskA.setTaskCompletedCallCount == 1, "the in-flight fire completes exactly once")
+        #expect(taskA.completedSuccess == true, "the overlapping fire must not expire/poison A's sweep")
+    }
+
+    @Test("A late expiration from a completed fire neither double-completes it nor expires the successor fire")
+    func lateExpirationDoesNotPoisonSuccessorFire() async {
+        let gated = GatedRefetchEnumerator()
+        let scheduler = StubTaskScheduler()
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: gated,
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: StubFullFetcher(),
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: SpyTempFileRemover(),
+            taskScheduler: scheduler,
+            now: { 100 * Self.day }
+        )
+
+        // Fire A runs to normal completion.
+        await gated.gate.open()
+        let taskA = StubBackgroundTask()
+        await service.handleRefetchTask(taskA)
+        #expect(taskA.setTaskCompletedCallCount == 1)
+
+        // Fire B is mid-sweep (suspended on the gate) when A's expiration
+        // handler fires LATE. With shared per-instance flags this would
+        // double-complete A and mark B's fire expired; per-task tracking must
+        // do neither.
+        await gated.gate.close()
+        let taskB = StubBackgroundTask()
+        let fireB = Task { await service.handleRefetchTask(taskB) }
+        while !(await gated.gate.hasWaiters) { await Task.yield() }
+
+        taskA.simulateExpiration()
+        // Let the expiration hop land on the actor (B's sweep is suspended on
+        // the gate actor, so the service actor is free to run it).
+        for _ in 0..<50 { await Task.yield() }
+
+        await gated.gate.open()
+        await fireB.value
+
+        #expect(taskA.setTaskCompletedCallCount == 1, "late expiration must not double-complete A")
+        #expect(taskB.setTaskCompletedCallCount == 1)
+        #expect(taskB.completedSuccess == true, "A's late expiration must not poison B's fire")
+    }
+
+    // MARK: - Service: orphaned B-copy hygiene (xsdz.36 R1)
+
+    @Test("Each enabled fire sweeps orphaned B-copies through the remover seam; disabled fires do not")
+    func handlerSweepsOrphanedBCopies() async {
+        let remover = SpyTempFileRemover()
+        let enumerator = StubRefetchEnumerator()
+        func fire(enabled: Bool) async {
+            let service = RediffRefetchService(
+                enabled: enabled,
+                enumerator: enumerator,
+                rangedSampler: StubRangedSampler(),
+                localSampler: StubLocalSampler(),
+                fullFetcher: StubFullFetcher(),
+                bsideFingerprinter: StubBSideFingerprinter(),
+                recorder: SpyRefetchRecorder(),
+                fileRemover: remover,
+                taskScheduler: StubTaskScheduler(),
+                now: { 100 * Self.day }
+            )
+            await service.handleRefetchTask(StubBackgroundTask())
+        }
+        await fire(enabled: false)
+        #expect(remover.orphanSweepAges.isEmpty, "disabled fire must not touch the filesystem seam")
+        await fire(enabled: true)
+        #expect(remover.orphanSweepAges == [RediffRefetchService.orphanedBCopyMinimumAge])
+    }
+
+    @Test("R3: the expiration handler is installed BEFORE the per-fire orphan sweep and reschedule")
+    func expirationHandlerInstalledBeforeOrphanSweep() async {
+        // The synchronous orphan sweep can spend real time deleting a
+        // stranded multi-hundred-MB shard directory; the OS reclaim window is
+        // already open by then. If the handler is not yet installed, an early
+        // expiration is unobservable and the fire can neither bail nor
+        // complete. The spy remover snapshots the install state at the exact
+        // moment the sweep runs.
+        let task = StubBackgroundTask()
+        let scheduler = StubTaskScheduler()
+        let remover = HandlerOrderSpyTempFileRemover(
+            probe: { [weak task] in task?.expirationHandler != nil }
+        )
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: StubRefetchEnumerator(),
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: StubFullFetcher(),
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: remover,
+            taskScheduler: scheduler,
+            now: { 100 * Self.day }
+        )
+        await service.handleRefetchTask(task)
+        #expect(remover.handlerInstalledAtSweepTime == true,
+                "expiration handler must be live before the orphan sweep runs")
+        #expect(scheduler.submittedRequests.count == 1)
+        #expect(task.setTaskCompletedCallCount == 1)
+    }
+
+    @Test("FileManagerTempFileRemover removes stale rediff-bcopy orphans and spares fresh + unrelated files")
+    func orphanSweepRemovesOnlyStaleBCopies() throws {
+        let fileManager = FileManager.default
+        let tmp = fileManager.temporaryDirectory
+        let prefix = URLSessionFullEpisodeFetcher.bcopyFilenamePrefix
+        let stale = tmp.appendingPathComponent(prefix + "test-stale-\(UUID().uuidString)")
+        let fresh = tmp.appendingPathComponent(prefix + "test-fresh-\(UUID().uuidString)")
+        let unrelated = tmp.appendingPathComponent("rediff-unrelated-\(UUID().uuidString)")
+        try Data(repeating: 1, count: 64).write(to: stale)
+        try Data(repeating: 2, count: 64).write(to: fresh)
+        try Data(repeating: 3, count: 64).write(to: unrelated)
+        defer {
+            try? fileManager.removeItem(at: stale)
+            try? fileManager.removeItem(at: fresh)
+            try? fileManager.removeItem(at: unrelated)
+        }
+        // Age the stale one past the floor.
+        try fileManager.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -2 * 60 * 60)],
+            ofItemAtPath: stale.path
+        )
+
+        FileManagerTempFileRemover().removeOrphanedBCopies(olderThan: 60 * 60)
+
+        #expect(!fileManager.fileExists(atPath: stale.path), "stale orphan must be removed")
+        #expect(fileManager.fileExists(atPath: fresh.path), "a fresh B-copy (possibly live) must be spared")
+        #expect(fileManager.fileExists(atPath: unrelated.path), "non-prefix files are not ours to delete")
+    }
+
+    @Test("orphan sweep also reclaims stale rediff-bside shard-cache directories, sparing fresh + real-episode entries (R2)")
+    func orphanSweepRemovesStaleBSideShardCacheDirectories() throws {
+        let fileManager = FileManager.default
+        let root = AnalysisAudioService.shardCacheRootDirectory
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let prefix = AnalysisAudioBSideDecoder.syntheticEpisodeIDPrefix
+        let stale = root.appendingPathComponent(prefix + "test-stale-\(UUID().uuidString)", isDirectory: true)
+        let fresh = root.appendingPathComponent(prefix + "test-fresh-\(UUID().uuidString)", isDirectory: true)
+        let episode = root.appendingPathComponent("real-episode-\(UUID().uuidString)", isDirectory: true)
+        for dir in [stale, fresh, episode] {
+            try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+            try Data(repeating: 7, count: 64).write(to: dir.appendingPathComponent("shard_0.pcm"))
+        }
+        defer {
+            try? fileManager.removeItem(at: stale)
+            try? fileManager.removeItem(at: fresh)
+            try? fileManager.removeItem(at: episode)
+        }
+        // Age the stale decode dir past the floor (a dead process's leftover).
+        try fileManager.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -2 * 60 * 60)],
+            ofItemAtPath: stale.path
+        )
+
+        FileManagerTempFileRemover().removeOrphanedBCopies(olderThan: 60 * 60)
+
+        #expect(!fileManager.fileExists(atPath: stale.path), "stale B-side decode dir must be removed")
+        #expect(fileManager.fileExists(atPath: fresh.path), "a fresh decode dir (possibly live) must be spared")
+        #expect(fileManager.fileExists(atPath: episode.path), "real-episode cache entries are not ours to delete")
+    }
+
+    // MARK: - Service: durable run ledger (xsdz.36, R5 coverage)
+
+    @Test("an enabled fire writes one ledger run (rediff_refetch entry point, outcome + counters + bandwidth annotation); a disabled fire writes none")
+    func handlerRecordsLedgerRun() async {
+        // Disabled fire: no ledger traffic at all (OFF byte-identity).
+        do {
+            let ledger = SpyRunLedger()
+            let service = RediffRefetchService(
+                enabled: false,
+                enumerator: StubRefetchEnumerator(),
+                rangedSampler: StubRangedSampler(),
+                localSampler: StubLocalSampler(),
+                fullFetcher: StubFullFetcher(),
+                bsideFingerprinter: StubBSideFingerprinter(),
+                recorder: SpyRefetchRecorder(),
+                fileRemover: SpyTempFileRemover(),
+                taskScheduler: StubTaskScheduler(),
+                runLedger: ledger,
+                now: { 100 * Self.day }
+            )
+            await service.handleRefetchTask(StubBackgroundTask())
+            #expect(ledger.startCalls.isEmpty, "disabled fire must not touch the ledger")
+            #expect(ledger.finishCalls.isEmpty)
+        }
+
+        // Enabled fire, zero candidates → one run, .noEligibleWork, zeroed
+        // counters, the bandwidth annotation in deferReason.
+        do {
+            let ledger = SpyRunLedger()
+            let service = RediffRefetchService(
+                enabled: true,
+                enumerator: StubRefetchEnumerator(),
+                rangedSampler: StubRangedSampler(),
+                localSampler: StubLocalSampler(),
+                fullFetcher: StubFullFetcher(),
+                bsideFingerprinter: StubBSideFingerprinter(),
+                recorder: SpyRefetchRecorder(),
+                fileRemover: SpyTempFileRemover(),
+                taskScheduler: StubTaskScheduler(),
+                runLedger: ledger,
+                now: { 100 * Self.day }
+            )
+            await service.handleRefetchTask(StubBackgroundTask())
+            #expect(ledger.startCalls.count == 1)
+            #expect(ledger.startCalls.first?.entryPoint == .rediffRefetch)
+            #expect(ledger.startCalls.first?.taskIdentifier == RediffRefetchService.taskIdentifier)
+            #expect(ledger.finishCalls.count == 1)
+            let finish = ledger.finishCalls.first
+            #expect(finish?.runId == ledger.startCalls.first?.runId, "finish must resolve the run startRun opened")
+            #expect(finish?.update.outcome == .noEligibleWork)
+            #expect(finish?.update.jobsSeen == 0)
+            #expect(finish?.update.jobsAdmitted == 0)
+            #expect(finish?.update.jobsCompleted == 0)
+            #expect(finish?.update.expiration == false)
+            #expect(finish?.update.deferReason == "precheckBytes=0 fullFetchBytes=0",
+                    "bandwidth accounting rides the deferReason annotation")
+        }
+
+        // Enabled fire, one eligible UNCHANGED candidate → .admittedWork with
+        // the pre-check bytes annotated (seen 1, admitted 1, completed 0 — no
+        // rotation).
+        do {
+            let ledger = SpyRunLedger()
+            let sampler = StubRangedSampler()
+            sampler.defaultSample = RemoteAudioSample(
+                fingerprint: RediffRefetchPolicy.sampleFingerprint(head: Data("s".utf8), tail: Data("s".utf8), totalLength: 1),
+                bytesTransferred: 131_072
+            )
+            let local = StubLocalSampler()
+            local.defaultFingerprint = RediffRefetchPolicy.sampleFingerprint(head: Data("s".utf8), tail: Data("s".utf8), totalLength: 1)
+            let enumerator = StubRefetchEnumerator()
+            enumerator.candidatesToReturn = [RediffRefetchCandidate(
+                assetId: "asset-ledger",
+                enclosureURL: URL(string: "https://cdn.example.com/ledger.mp3")!,
+                downloadedAt: 0,
+                localAudioURL: URL(fileURLWithPath: "/tmp/ledger.mp3"),
+                attemptState: .initial
+            )]
+            let service = RediffRefetchService(
+                enabled: true,
+                enumerator: enumerator,
+                rangedSampler: sampler,
+                localSampler: local,
+                fullFetcher: StubFullFetcher(),
+                bsideFingerprinter: StubBSideFingerprinter(),
+                recorder: SpyRefetchRecorder(),
+                fileRemover: SpyTempFileRemover(),
+                taskScheduler: StubTaskScheduler(),
+                runLedger: ledger,
+                now: { 100 * Self.day }
+            )
+            await service.handleRefetchTask(StubBackgroundTask())
+            let finish = ledger.finishCalls.first
+            #expect(finish?.update.outcome == .admittedWork)
+            #expect(finish?.update.jobsSeen == 1)
+            #expect(finish?.update.jobsAdmitted == 1)
+            #expect(finish?.update.jobsCompleted == 0, "unchanged pre-check is not a completed rotation")
+            #expect(finish?.update.deferReason == "precheckBytes=131072 fullFetchBytes=0")
+        }
+    }
+
+    @Test("an expired fire resolves its ledger run as .expired with the expiration flag set")
+    func handlerRecordsExpiredLedgerRun() async {
+        let ledger = SpyRunLedger()
+        let gated = GatedRefetchEnumerator()
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: gated,
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: StubFullFetcher(),
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: SpyTempFileRemover(),
+            taskScheduler: StubTaskScheduler(),
+            runLedger: ledger,
+            now: { 100 * Self.day }
+        )
+
+        let task = StubBackgroundTask()
+        let fire = Task { await service.handleRefetchTask(task) }
+        // The sweep is in flight (suspended on the gate) ⇒ the expiration
+        // handler is installed and the run row is already open.
+        while !(await gated.gate.hasWaiters) { await Task.yield() }
+
+        task.simulateExpiration()
+        // Let the expiration hop land on the actor before releasing the sweep.
+        for _ in 0..<50 { await Task.yield() }
+        await gated.gate.open()
+        await fire.value
+
+        #expect(task.setTaskCompletedCallCount == 1)
+        #expect(task.completedSuccess == false)
+        let finish = ledger.finishCalls.first
+        #expect(finish?.update.outcome == .expired)
+        #expect(finish?.update.expiration == true)
     }
 
     @Test("parseTotalLength reads the total after the slash and rejects an unknown total")
@@ -522,7 +866,102 @@ final class SpyRefetchRecorder: RediffRefetchRecording, @unchecked Sendable {
 
 final class SpyTempFileRemover: RediffTempFileRemoving, @unchecked Sendable {
     private(set) var removed: [URL] = []
+    private(set) var orphanSweepAges: [TimeInterval] = []
     func remove(_ fileURL: URL) { removed.append(fileURL) }
+    func removeOrphanedBCopies(olderThan age: TimeInterval) { orphanSweepAges.append(age) }
+}
+
+/// R5: records the `handleRefetchTask` ledger traffic (start/finish pairs)
+/// so the rediff run-row wiring — entry point, outcome mapping, counters,
+/// bandwidth annotation — is pinned by test, not just by dogfood forensics.
+final class SpyRunLedger: BackgroundTaskRunLedger, @unchecked Sendable {
+    struct StartCall {
+        let runId: String
+        let entryPoint: BackgroundTaskRunEntryPoint
+        let taskIdentifier: String
+    }
+    struct FinishCall {
+        let runId: String
+        let update: BackgroundTaskRunOutcomeUpdate
+    }
+    private(set) var startCalls: [StartCall] = []
+    private(set) var finishCalls: [FinishCall] = []
+
+    func startRun(
+        entryPoint: BackgroundTaskRunEntryPoint,
+        taskIdentifier: String,
+        taskInstanceID: String?,
+        scenePhase: String?
+    ) async -> String {
+        let runId = UUID().uuidString
+        startCalls.append(StartCall(runId: runId, entryPoint: entryPoint, taskIdentifier: taskIdentifier))
+        return runId
+    }
+
+    func recordRunStart(
+        runId: String,
+        entryPoint: BackgroundTaskRunEntryPoint,
+        taskIdentifier: String,
+        taskInstanceID: String?,
+        scenePhase: String?
+    ) async {
+        startCalls.append(StartCall(runId: runId, entryPoint: entryPoint, taskIdentifier: taskIdentifier))
+    }
+
+    @discardableResult
+    func finishRun(runId: String, update: BackgroundTaskRunOutcomeUpdate) async -> Bool {
+        finishCalls.append(FinishCall(runId: runId, update: update))
+        return true
+    }
+
+    func fetchLatestRun(for entryPoint: BackgroundTaskRunEntryPoint) async -> BackgroundTaskRunRecord? { nil }
+    func fetchRecentRuns(limit: Int) async -> [BackgroundTaskRunRecord] { [] }
+    func fetchLatestRun(forAssetId assetId: String) async -> BackgroundTaskRunRecord? { nil }
+    @discardableResult
+    func reapOrphansAtLaunch(startedBefore: Double) async -> Int { 0 }
+}
+
+/// R3: remover that snapshots an arbitrary probe (e.g. "is the task's
+/// expiration handler installed?") at the moment the orphan sweep runs, so
+/// ordering inside `handleRefetchTask` is directly assertable.
+final class HandlerOrderSpyTempFileRemover: RediffTempFileRemoving, @unchecked Sendable {
+    private let probe: @Sendable () -> Bool
+    private(set) var handlerInstalledAtSweepTime: Bool?
+    init(probe: @escaping @Sendable () -> Bool) { self.probe = probe }
+    func remove(_ fileURL: URL) {}
+    func removeOrphanedBCopies(olderThan age: TimeInterval) {
+        handlerInstalledAtSweepTime = probe()
+    }
+}
+
+/// Reusable open/close latch for suspending a stub mid-call.
+actor TestGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func open() {
+        opened = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+    func close() { opened = false }
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    /// True once a caller is suspended on the gate — the race-free "the sweep
+    /// is in flight" probe for tests.
+    var hasWaiters: Bool { !waiters.isEmpty }
+}
+
+/// Enumerator whose `candidates()` suspends on a gate — lets a test hold a
+/// sweep in flight while it drives overlapping fires / late expirations.
+final class GatedRefetchEnumerator: RediffRefetchEnumerating, @unchecked Sendable {
+    let gate = TestGate()
+    var candidatesToReturn: [RediffRefetchCandidate] = []
+    func candidates() async -> [RediffRefetchCandidate] {
+        await gate.wait()
+        return candidatesToReturn
+    }
 }
 
 final class StubAudioDecoder: AudioFileDecoding, @unchecked Sendable {

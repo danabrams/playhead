@@ -121,6 +121,16 @@ actor AnalysisJobRunner {
     /// behavior is unchanged unless explicit wiring installs a provider.
     private let analysisSharingProvider: CrossUserAnalysisSharingProviding
 
+    /// playhead-xsdz.36 ACTIVATION: instance-level enablement for the
+    /// xsdz.27 played-copy (rediff A-side) fingerprint capture branch.
+    /// Defaults `false` so every existing construction site (and test) is
+    /// byte-identical to the pre-activation runner; `PlayheadRuntime` passes
+    /// `RediffActivation.isEnabledByDefault`. The compile-time
+    /// `EpisodeFingerprintCapture.captureEnabledByDefault` remains a
+    /// separate, still-`false`, still-pinned escape hatch (OR-ed in at the
+    /// branch).
+    private let rediffASideCaptureEnabled: Bool
+
     // MARK: - Init
 
     init(
@@ -146,7 +156,8 @@ actor AnalysisJobRunner {
         completedPipelineVersionsLoader: @escaping @Sendable (_ assetId: String) -> PipelineVersions? = { assetId in
             RevalidationStateStore.loadCompletedVersions(forAsset: assetId)
         },
-        analysisSharingProvider: CrossUserAnalysisSharingProviding = NoOpCrossUserAnalysisSharingProvider()
+        analysisSharingProvider: CrossUserAnalysisSharingProviding = NoOpCrossUserAnalysisSharingProvider(),
+        rediffASideCaptureEnabled: Bool = false
     ) {
         self.store = store
         self.audioProvider = audioProvider
@@ -163,6 +174,7 @@ actor AnalysisJobRunner {
         self.currentPipelineVersionsProvider = currentPipelineVersionsProvider
         self.completedPipelineVersionsLoader = completedPipelineVersionsLoader
         self.analysisSharingProvider = analysisSharingProvider
+        self.rediffASideCaptureEnabled = rediffASideCaptureEnabled
     }
 
     // MARK: - Run
@@ -418,33 +430,68 @@ actor AnalysisJobRunner {
             }
         }
 
-        // playhead-xsdz.27: played-copy fingerprint capture (default-OFF).
-        // When `captureEnabledByDefault` is on, fingerprint the FULL decoded
-        // episode (`allShards`, not the coverage-bounded `shards`) as the
-        // rediff A-side and persist it in AnalysisStore. Default OFF: this
-        // whole branch is skipped, so the live pipeline is byte-for-byte
-        // unchanged (this bead ships storage + a tested capture core, not a
-        // behavioral change). Failures are non-fatal and never affect
-        // analysis. xsdz.29 flips the flag / swaps in the as-played tap once
-        // it consumes the stream — see EpisodeFingerprintCapture.
-        if EpisodeFingerprintCapture.captureEnabledByDefault {
-            do {
-                // Skip (rather than persist a misleading empty identity) when
-                // the asset can't be read — `sourceAudioIdentity` must be the
-                // real assetFingerprint for the "audio changed under a reused
-                // asset id" check to mean anything.
-                if let asset = try await store.fetchAsset(id: assetId) {
-                    try await EpisodeFingerprintCapture.captureAndPersist(
-                        shards: allShards,
-                        assetId: assetId,
-                        sourceAudioIdentity: asset.assetFingerprint,
-                        store: store
-                    )
-                } else {
-                    logger.warning("Episode fingerprint capture skipped — asset \(assetId) not found")
+        // playhead-xsdz.27 capture / playhead-xsdz.36 activation: fingerprint
+        // the FULL decoded episode (`allShards`, not the coverage-bounded
+        // `shards`) as the rediff A-side and persist it in AnalysisStore.
+        // Live in production when `PlayheadRuntime` passes
+        // `rediffASideCaptureEnabled: RediffActivation.isEnabledByDefault`;
+        // with both flags off this branch is skipped and the pipeline is
+        // byte-for-byte the pre-activation one. Failures are non-fatal and
+        // never affect analysis.
+        //
+        // COST BOUND (xsdz.36): capture is skipped beyond
+        // `RediffActivation.maxASideCaptureDurationSeconds` — the resample
+        // transient is ~159 MB per decoded hour (chunk-aware walk; see
+        // EpisodeFingerprintCapture). NOTE (R4): skipping capture removes the
+        // episode from rediff re-fetch candidacy ENTIRELY — candidacy is
+        // keyed on a current-version A-side stream row (see
+        // `RediffActivation.maxASideCaptureDurationSeconds` for the full
+        // consequence chain) — so over-cap episodes get no rediff marks at
+        // all. The log line below must stay truthful for dogfood coverage
+        // accounting.
+        if rediffASideCaptureEnabled || EpisodeFingerprintCapture.captureEnabledByDefault {
+            if totalAudio > RediffActivation.maxASideCaptureDurationSeconds {
+                logger.info("Episode fingerprint capture skipped for asset \(assetId): duration \(Int(totalAudio))s exceeds the \(Int(RediffActivation.maxASideCaptureDurationSeconds))s capture cap — episode forfeits rediff re-fetch candidacy")
+            } else {
+                do {
+                    // Skip (rather than persist a misleading empty identity) when
+                    // the asset can't be read — `sourceAudioIdentity` must be the
+                    // real assetFingerprint for the "audio changed under a reused
+                    // asset id" check to mean anything.
+                    if let asset = try await store.fetchAsset(id: assetId) {
+                        // R3 recapture guard: `run(_:)` executes REPEATEDLY per
+                        // episode (bounded coverage passes, interruption/resume
+                        // cycles, seek re-latch), and the extractor walk is a
+                        // full-episode fingerprint (~159 MB transient + real
+                        // CPU) every time. When a CURRENT-version stream for
+                        // THIS exact audio already exists, skip: the fetch
+                        // already gates `algorithmVersion` + blob integrity
+                        // (mismatch/corruption reads as nil → recapture), and
+                        // the identity compare catches a re-downloaded copy
+                        // under a reused asset id. Recapturing would produce
+                        // the identical record AND bump `capturedAt` — which
+                        // is the re-fetch enumerator's downloaded-at baseline,
+                        // so every extra pass would re-arm the ~3d
+                        // first-attempt gate and push the B-side re-fetch out
+                        // indefinitely for episodes still being analyzed.
+                        let alreadyCaptured = (try await store.fetchEpisodeFingerprints(assetId: assetId))
+                            .map { $0.sourceAudioIdentity == asset.assetFingerprint } ?? false
+                        if alreadyCaptured {
+                            logger.debug("Episode fingerprint capture skipped for asset \(assetId): current-version stream already captured for this audio identity")
+                        } else {
+                            try await EpisodeFingerprintCapture.captureAndPersist(
+                                shards: allShards,
+                                assetId: assetId,
+                                sourceAudioIdentity: asset.assetFingerprint,
+                                store: store
+                            )
+                        }
+                    } else {
+                        logger.warning("Episode fingerprint capture skipped — asset \(assetId) not found")
+                    }
+                } catch {
+                    logger.warning("Episode fingerprint capture failed for asset \(assetId): \(error)")
                 }
-            } catch {
-                logger.warning("Episode fingerprint capture failed for asset \(assetId): \(error)")
             }
         }
 
