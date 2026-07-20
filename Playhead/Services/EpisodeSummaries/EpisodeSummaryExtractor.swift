@@ -570,6 +570,20 @@ actor EpisodeSummaryExtractor {
     /// trigger a permissive fallback. Refusals get the fallback; other
     /// failure shapes (cancellation, capability vanishing mid-call,
     /// our own `unparseableResponse`) propagate untouched.
+    ///
+    /// playhead-l3v0: iOS/macOS 27 replaced `LanguageModelSession.GenerationError`
+    /// with the top-level `LanguageModelError` and split the legacy
+    /// `.decodingFailure` case out into the SEPARATE `GeneratedContent.ParsingError`
+    /// type. Both carry the refusal-shaped signals that warrant the permissive
+    /// fallback, so we bridge them FIRST (new-first / legacy-fallback, mirroring
+    /// l3r2/cle1). Without this, an iOS-27 `.refusal` or schema parse failure
+    /// falls through to `false` and the permissive path — the whole reason this
+    /// extractor exists — never fires on the shipping OS. Only these two iOS-27
+    /// types are bridged: the legacy analogs of every OTHER new error type
+    /// (`LanguageModelSession.Error.concurrentRequests`,
+    /// `SystemLanguageModel.Error.assetsUnavailable`, etc.) already returned
+    /// `false`, which is this predicate's default — bridging them would be dead
+    /// mappings.
     private func shouldFallBackToPermissive(after error: Error) -> Bool {
         if error is CancellationError { return false }
         if let typed = error as? EpisodeSummaryExtractionError {
@@ -581,6 +595,39 @@ actor EpisodeSummaryExtractor {
             return typed == .unparseableResponse
         }
         #if canImport(FoundationModels)
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *) {
+            if let languageModelError = error as? LanguageModelError {
+                switch languageModelError {
+                case .refusal:
+                    // Legacy `.refusal` → permissive fallback.
+                    return true
+                case .contextSizeExceeded:
+                    // Legacy `.exceededContextWindowSize` → false: prompt too
+                    // big; the permissive path uses the same body and won't help.
+                    return false
+                case .guardrailViolation,
+                     .rateLimited,
+                     .unsupportedCapability,
+                     .unsupportedTranscriptContent,
+                     .unsupportedGenerationGuide,
+                     .unsupportedLanguageOrLocale,
+                     .timeout:
+                    // No legacy analog returned true (each hit the legacy
+                    // `@unknown default` → false).
+                    return false
+                @unknown default:
+                    return false
+                }
+            }
+            // The iOS-27 analog of the legacy `.decodingFailure` case: the
+            // model's output could not be parsed into the @Generable schema.
+            // Legacy mapped `.decodingFailure → true` (the safety classifier
+            // frequently injects a refusal shape that doesn't match the schema;
+            // permissive is the right next step).
+            if error is GeneratedContent.ParsingError {
+                return true
+            }
+        }
         if #available(iOS 26.0, *) {
             if let generation = error as? LanguageModelSession.GenerationError {
                 switch generation {

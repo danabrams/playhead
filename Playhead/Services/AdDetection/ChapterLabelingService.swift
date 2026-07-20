@@ -122,9 +122,10 @@ enum ChapterLabelingError: Error, Sendable, Equatable {
     /// FM ran out of context window mid-call.
     case exceededContextWindow
     /// The model declined to classify the region via a safety guardrail
-    /// (`LanguageModelSession.GenerationError.refusal` /
-    /// `.guardrailViolation`). The FM call reached the model — this is
-    /// content the model won't label, NOT an infra failure — so it is
+    /// (`LanguageModelSession.GenerationError.refusal` / `.guardrailViolation`
+    /// on iOS 26, or the iOS-27 `LanguageModelError.refusal` /
+    /// `.guardrailViolation`; see `classify`). The FM call reached the model —
+    /// this is content the model won't label, NOT an infra failure — so it is
     /// NOT retried (re-calling trips the same guardrail) and maps to
     /// `LabelFailureMode.guardrail`, which the plan-level gate excludes
     /// from the operational-rate abort numerator (au2v.1.24).
@@ -401,12 +402,37 @@ struct ChapterLabelingService: Sendable {
     /// map to `.guardrail` (content the model declines — not retried);
     /// all other FoundationModels-framework errors and any unknown error
     /// type fold into the retryable operational buckets.
+    ///
+    /// playhead-l3v0: iOS/macOS 27 throws the NEW top-level `LanguageModelError`
+    /// type; iOS/macOS 26 threw `LanguageModelSession.GenerationError`. We try
+    /// the new cast FIRST, then fall back to the legacy cast, so the load-bearing
+    /// guardrail short-circuit (`.refusal` / `.guardrailViolation` → `.guardrail`:
+    /// content the model declines, NOT retried, EXCLUDED from the au2v.1.24
+    /// operational-rate abort numerator) stays armed on BOTH OS generations.
+    /// Without the iOS-27 cast an iOS-27 refusal falls through to `.operational`,
+    /// which WOULD be retried (re-tripping the same guardrail) AND counted toward
+    /// the plan-abort numerator — the same misrouting l3r2/cle1 fixed for
+    /// `SemanticScanStatus`. The two casts are for disjoint types, so ordering
+    /// only reflects the common runtime case.
+    ///
+    /// Only `LanguageModelError` is bridged. The other iOS-27 error types
+    /// (`GeneratedContent.ParsingError`, `LanguageModelSession.Error`,
+    /// `SystemLanguageModel.Error`) carry only non-guardrail signals, and every
+    /// non-guardrail bucket here (`.decodingFailure` / `.rateLimited` /
+    /// `.exceededContextWindow` / `.operational`) retries identically and
+    /// collapses to `.operational` at the plan level — so those types already
+    /// land in the retryable `.operational(localizedDescription)` fallback below
+    /// with no observable difference. Bridging them would be dead mappings.
     static func classify(_ error: Error) -> ChapterLabelingError {
         if let labelingError = error as? ChapterLabelingError {
             return labelingError
         }
 
         #if canImport(FoundationModels)
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *),
+           let languageModelError = error as? LanguageModelError {
+            return classify(languageModelError: languageModelError)
+        }
         if #available(iOS 26.0, *),
            let generationError = error as? LanguageModelSession.GenerationError {
             switch generationError {
@@ -432,6 +458,56 @@ struct ChapterLabelingService: Sendable {
 
         return .operational(error.localizedDescription)
     }
+
+    #if canImport(FoundationModels)
+    /// iOS/macOS 27 renamed and restructured the thrown generation-failure type
+    /// from `LanguageModelSession.GenerationError` to the top-level
+    /// `LanguageModelError`. This mirrors the legacy `GenerationError` switch in
+    /// `classify(_:)` so the SAME `ChapterLabelingError` — and therefore the same
+    /// retry / guardrail decision in `label(...)` — is produced on iOS 27 as on
+    /// iOS 26. playhead-l3v0.
+    ///
+    /// The load-bearing bridge is `.refusal` / `.guardrailViolation` →
+    /// `.guardrail`; without it an iOS-27 refusal would be retried and counted in
+    /// the au2v.1.24 operational-rate abort. Every other case routes to the same
+    /// retryable bucket its legacy analog used (cases with no legacy analog are
+    /// documented inline).
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    static func classify(languageModelError: LanguageModelError) -> ChapterLabelingError {
+        switch languageModelError {
+        case .refusal, .guardrailViolation:
+            // Content refusal — the model reached us and declined. NOT
+            // operational; NOT retried (see `label(...)`). Mirrors the legacy
+            // `.refusal` / `.guardrailViolation` → `.guardrail` mapping.
+            return .guardrail(String(describing: languageModelError))
+        case .contextSizeExceeded:
+            return .exceededContextWindow
+        case .rateLimited:
+            return .rateLimited
+        case .unsupportedGenerationGuide:
+            // Legacy `.unsupportedGuide` analog → decoding family.
+            return .decodingFailure
+        case .unsupportedTranscriptContent:
+            // No legacy analog. The transcript carried content the model can't
+            // process; nearest bucket is the decoding / unsupported-guide family.
+            return .decodingFailure
+        case .unsupportedLanguageOrLocale:
+            // Legacy `.unsupportedLanguageOrLocale` → operational.
+            return .operational(String(describing: languageModelError))
+        case .unsupportedCapability:
+            // No legacy analog. Requested capability not serviceable — retried
+            // like any operational error (this service has no non-retry infra
+            // bucket other than `.guardrail`).
+            return .operational(String(describing: languageModelError))
+        case .timeout:
+            // No legacy analog. Transient by nature — retried via the
+            // operational arm.
+            return .operational(String(describing: languageModelError))
+        @unknown default:
+            return .operational(String(describing: languageModelError))
+        }
+    }
+    #endif
 
     // MARK: - Backoff schedule
 
