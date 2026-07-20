@@ -454,12 +454,33 @@ actor AnalysisJobRunner {
                     // real assetFingerprint for the "audio changed under a reused
                     // asset id" check to mean anything.
                     if let asset = try await store.fetchAsset(id: assetId) {
-                        try await EpisodeFingerprintCapture.captureAndPersist(
-                            shards: allShards,
-                            assetId: assetId,
-                            sourceAudioIdentity: asset.assetFingerprint,
-                            store: store
-                        )
+                        // R3 recapture guard: `run(_:)` executes REPEATEDLY per
+                        // episode (bounded coverage passes, interruption/resume
+                        // cycles, seek re-latch), and the extractor walk is a
+                        // full-episode fingerprint (~159 MB transient + real
+                        // CPU) every time. When a CURRENT-version stream for
+                        // THIS exact audio already exists, skip: the fetch
+                        // already gates `algorithmVersion` + blob integrity
+                        // (mismatch/corruption reads as nil → recapture), and
+                        // the identity compare catches a re-downloaded copy
+                        // under a reused asset id. Recapturing would produce
+                        // the identical record AND bump `capturedAt` — which
+                        // is the re-fetch enumerator's downloaded-at baseline,
+                        // so every extra pass would re-arm the ~3d
+                        // first-attempt gate and push the B-side re-fetch out
+                        // indefinitely for episodes still being analyzed.
+                        let alreadyCaptured = (try await store.fetchEpisodeFingerprints(assetId: assetId))
+                            .map { $0.sourceAudioIdentity == asset.assetFingerprint } ?? false
+                        if alreadyCaptured {
+                            logger.debug("Episode fingerprint capture skipped for asset \(assetId): current-version stream already captured for this audio identity")
+                        } else {
+                            try await EpisodeFingerprintCapture.captureAndPersist(
+                                shards: allShards,
+                                assetId: assetId,
+                                sourceAudioIdentity: asset.assetFingerprint,
+                                store: store
+                            )
+                        }
                     } else {
                         logger.warning("Episode fingerprint capture skipped — asset \(assetId) not found")
                     }

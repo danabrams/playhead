@@ -186,9 +186,13 @@ private struct ShardCache: Sendable {
     /// routine BGProcessingTask fate) strands up to ~230 MB/decoded-hour of
     /// raw PCM in non-purgeable Application Support with nothing else to
     /// clean it — every retry mints a NEW uuid, so orphans accumulate. The
-    /// age floor spares any legitimately in-flight decode (a live decode
-    /// keeps touching its directory, so its mtime stays fresh). Returns the
-    /// removed directory names so the caller can log them.
+    /// age floor spares any legitimately in-flight consume: an episode's
+    /// cache directory is only created at decode COMPLETION
+    /// (`saveShards`, step 9), so any existing directory has a
+    /// creation-fresh mtime and a live one is evicted within the same
+    /// call — a directory older than the floor is unambiguously an
+    /// orphan. Returns the removed directory names so the caller can log
+    /// them.
     static func removeOrphanedDirectories(prefix: String, olderThan age: TimeInterval) -> [String] {
         let fileManager = FileManager.default
         guard let entries = try? fileManager.contentsOfDirectory(

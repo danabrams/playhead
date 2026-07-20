@@ -243,11 +243,13 @@ actor RediffBSideStagingProvider: RediffBSideProvider {
 /// synthetic episode id and evicts its shard-cache entry immediately, so the
 /// B-side never pollutes the pipeline's shard cache for real episodes.
 ///
-/// DISK NOTE (R2): `AnalysisAudioService.decode` persists shards to the
-/// Application Support cache DURING the decode, so B-side PCM does touch
-/// disk transiently under the synthetic id — the inline `evictCache` on
-/// both exits removes it within the same call. A process death in between
-/// (jetsam mid-consume) strands the directory; the per-fire orphan sweep
+/// DISK NOTE (R2, wording corrected R3): `AnalysisAudioService.decode`
+/// persists the decoded shards to the Application Support cache at decode
+/// COMPLETION (`ShardCache.saveShards`, step 9 — skipped for truncated
+/// files), so B-side PCM does touch disk transiently under the synthetic
+/// id — the inline `evictCache` on both exits removes it within the same
+/// call. A process death in the save→evict window (jetsam mid-consume)
+/// strands the directory; the per-fire orphan sweep
 /// (`FileManagerTempFileRemover.removeOrphanedBCopies`, prefix-scoped via
 /// `syntheticEpisodeIDPrefix`) reclaims it on the next fire.
 struct AnalysisAudioBSideDecoder: AudioFileDecoding {

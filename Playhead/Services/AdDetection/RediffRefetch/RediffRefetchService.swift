@@ -194,7 +194,22 @@ actor RediffRefetchService {
         defer { currentTaskID = nil }
         expired = false
 
-        // Reschedule first so iOS always has a pending request even if the
+        // Install the expiration handler FIRST — before the reschedule and
+        // especially before the synchronous per-fire orphan sweep below,
+        // which can spend real time deleting a stranded multi-hundred-MB
+        // shard-cache directory. The OS reclaim window opens as soon as the
+        // launch handler is invoked; an expiration that lands before the
+        // handler is installed cannot be observed, so the fire would neither
+        // bail nor complete cleanly (the same failure mode
+        // `BackgroundProcessingService.handleBackfillTask` documents and
+        // defends against). `currentTaskID` is already claimed above, so an
+        // early expiration correctly flips `expired` for THIS fire.
+        task.expirationHandler = { [weak self] in
+            let box = _UncheckedSendableBox(task)
+            Task { await self?.markExpiredAndComplete(box.value) }
+        }
+
+        // Reschedule next so iOS always has a pending request even if the
         // sweep crashes mid-fire.
         scheduleNextRefetch()
 
@@ -203,11 +218,6 @@ actor RediffRefetchService {
         // mid-consume). Runs before the sweep so the fire's own transient
         // B-copy (always younger than the age floor) is never touched.
         fileRemover.removeOrphanedBCopies(olderThan: Self.orphanedBCopyMinimumAge)
-
-        task.expirationHandler = { [weak self] in
-            let box = _UncheckedSendableBox(task)
-            Task { await self?.markExpiredAndComplete(box.value) }
-        }
 
         // playhead-xsdz.36: durable run row (same `background_task_runs`
         // surface the backfill/recovery BG tasks use) so overnight dogfood

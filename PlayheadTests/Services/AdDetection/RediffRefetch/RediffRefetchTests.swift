@@ -478,6 +478,38 @@ struct RediffRefetchTests {
         #expect(remover.orphanSweepAges == [RediffRefetchService.orphanedBCopyMinimumAge])
     }
 
+    @Test("R3: the expiration handler is installed BEFORE the per-fire orphan sweep and reschedule")
+    func expirationHandlerInstalledBeforeOrphanSweep() async {
+        // The synchronous orphan sweep can spend real time deleting a
+        // stranded multi-hundred-MB shard directory; the OS reclaim window is
+        // already open by then. If the handler is not yet installed, an early
+        // expiration is unobservable and the fire can neither bail nor
+        // complete. The spy remover snapshots the install state at the exact
+        // moment the sweep runs.
+        let task = StubBackgroundTask()
+        let scheduler = StubTaskScheduler()
+        let remover = HandlerOrderSpyTempFileRemover(
+            probe: { [weak task] in task?.expirationHandler != nil }
+        )
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: StubRefetchEnumerator(),
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: StubFullFetcher(),
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: remover,
+            taskScheduler: scheduler,
+            now: { 100 * Self.day }
+        )
+        await service.handleRefetchTask(task)
+        #expect(remover.handlerInstalledAtSweepTime == true,
+                "expiration handler must be live before the orphan sweep runs")
+        #expect(scheduler.submittedRequests.count == 1)
+        #expect(task.setTaskCompletedCallCount == 1)
+    }
+
     @Test("FileManagerTempFileRemover removes stale rediff-bcopy orphans and spares fresh + unrelated files")
     func orphanSweepRemovesOnlyStaleBCopies() throws {
         let fileManager = FileManager.default
@@ -699,6 +731,19 @@ final class SpyTempFileRemover: RediffTempFileRemoving, @unchecked Sendable {
     private(set) var orphanSweepAges: [TimeInterval] = []
     func remove(_ fileURL: URL) { removed.append(fileURL) }
     func removeOrphanedBCopies(olderThan age: TimeInterval) { orphanSweepAges.append(age) }
+}
+
+/// R3: remover that snapshots an arbitrary probe (e.g. "is the task's
+/// expiration handler installed?") at the moment the orphan sweep runs, so
+/// ordering inside `handleRefetchTask` is directly assertable.
+final class HandlerOrderSpyTempFileRemover: RediffTempFileRemoving, @unchecked Sendable {
+    private let probe: @Sendable () -> Bool
+    private(set) var handlerInstalledAtSweepTime: Bool?
+    init(probe: @escaping @Sendable () -> Bool) { self.probe = probe }
+    func remove(_ fileURL: URL) {}
+    func removeOrphanedBCopies(olderThan age: TimeInterval) {
+        handlerInstalledAtSweepTime = probe()
+    }
 }
 
 /// Reusable open/close latch for suspending a stub mid-call.

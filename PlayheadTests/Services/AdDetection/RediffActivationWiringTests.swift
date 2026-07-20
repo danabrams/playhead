@@ -411,4 +411,41 @@ struct RediffActivationWiringTests {
                     "over-cap episodes must skip the chroma A-side capture")
         }
     }
+
+    @Test("recapture guard (R3): a matching-identity stream is not recomputed on later passes (capturedAt stable); a stale identity IS recaptured")
+    func runnerSkipsRecaptureForMatchingIdentity() async throws {
+        let assetId = "asset-cap-guard"
+        let dir = try makeTempDir(prefix: "RediffActCap-guard")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try await makeTestStore()
+        try await insertActivationAsset(store: store, assetId: assetId, sourceURL: "")
+        let shards = toneShards(episodeID: "ep-\(assetId)")
+        let runner = try await makeRunner(store: store, shards: shards, rediffASideCaptureEnabled: true)
+        let request = makeRunnerRequest(dir: dir, assetId: assetId)
+
+        // A pre-existing CURRENT-version stream whose identity does NOT match
+        // the asset (a re-downloaded copy under a reused id) must be replaced.
+        try await store.upsertEpisodeFingerprints(EpisodeFingerprintRecord(
+            analysisAssetId: assetId,
+            algorithmVersion: ChromaFingerprinter.algorithmVersion,
+            secondsPerFingerprint: ChromaFingerprinter.secondsPerFingerprint,
+            fingerprints: [1, 2, 3],
+            sourceAudioIdentity: "stale-identity",
+            capturedAt: 123
+        ))
+        _ = await runner.run(request)
+        let first = try #require(try await store.fetchEpisodeFingerprints(assetId: assetId))
+        #expect(first.sourceAudioIdentity == "fp-\(assetId)", "stale identity must be recaptured")
+        #expect(first.capturedAt != 123)
+        #expect(first.fingerprints != [1, 2, 3])
+
+        // Second pass over the SAME audio identity: capture skipped — the
+        // record (including `capturedAt`, the re-fetch enumerator's
+        // downloaded-at baseline) is byte-identical, so repeat passes cannot
+        // re-arm the ~3d first-attempt gate or re-spend the extractor walk.
+        _ = await runner.run(request)
+        let second = try #require(try await store.fetchEpisodeFingerprints(assetId: assetId))
+        #expect(second.capturedAt == first.capturedAt, "a repeat pass must not bump capturedAt")
+        #expect(second.fingerprints == first.fingerprints)
+    }
 }
