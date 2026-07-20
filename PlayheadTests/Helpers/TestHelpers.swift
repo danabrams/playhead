@@ -388,7 +388,9 @@ func makeSkipTestAdWindow(
     startTime: Double = 60,
     endTime: Double = 120,
     confidence: Double = 0.75,
-    decisionState: String = "confirmed"
+    decisionState: String = "confirmed",
+    startEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
+    endEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue
 ) -> AdWindow {
     AdWindow(
         id: id,
@@ -408,7 +410,9 @@ func makeSkipTestAdWindow(
         metadataConfidence: nil,
         metadataPromptVersion: nil,
         wasSkipped: false,
-        userDismissedBanner: false
+        userDismissedBanner: false,
+        startEdgeAnchor: startEdgeAnchor,
+        endEdgeAnchor: endEdgeAnchor
     )
 }
 

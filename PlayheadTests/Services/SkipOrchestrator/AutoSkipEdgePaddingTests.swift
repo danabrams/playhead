@@ -171,6 +171,48 @@ struct AutoSkipEdgePaddingPolicyTests {
         ) == nil)
     }
 
+    // MARK: - Per-edge tier derivation (playhead-hdgk)
+
+    @Test("derive: rediff byte-exact outranks stinger outranks unanchored, per edge")
+    func derivePerEdgePrecedence() {
+        // rediff wins even if a stinger snap is also (defensively) present —
+        // the byte differ did not misfire.
+        #expect(AutoSkipEdgeAnchor.derive(rediffByteExact: true, stingerSnapped: true) == .rediffByteExact)
+        #expect(AutoSkipEdgeAnchor.derive(rediffByteExact: true, stingerSnapped: false) == .rediffByteExact)
+        // stinger snap with no rediff ownership.
+        #expect(AutoSkipEdgeAnchor.derive(rediffByteExact: false, stingerSnapped: true) == .stingerSnapped)
+        // neither → the conservative default.
+        #expect(AutoSkipEdgeAnchor.derive(rediffByteExact: false, stingerSnapped: false) == .unanchored)
+    }
+
+    @Test("derive: start and end resolve INDEPENDENTLY (mixed edges)")
+    func deriveEdgesIndependent() {
+        // stinger start / unanchored end — the two edges disagree, proving
+        // each edge is derived from its own signals.
+        let mixedStart = AutoSkipEdgeAnchor.derive(rediffByteExact: false, stingerSnapped: true)
+        let mixedEnd = AutoSkipEdgeAnchor.derive(rediffByteExact: false, stingerSnapped: false)
+        #expect(mixedStart == .stingerSnapped)
+        #expect(mixedEnd == .unanchored)
+    }
+
+    @Test("Persisted default raw value is exactly 'unanchored' (locks the SQL DEFAULT)")
+    func unanchoredRawValueLocked() {
+        // The `ad_windows` columns default to the SQL literal 'unanchored';
+        // this pins the enum raw value that the literal must equal, so a
+        // future rename of the case is caught here rather than silently
+        // desyncing the migration default from the decode.
+        #expect(AutoSkipEdgeAnchor.unanchored.rawValue == "unanchored")
+        #expect(AutoSkipEdgeAnchor.rediffByteExact.rawValue == "rediffByteExact")
+        #expect(AutoSkipEdgeAnchor.stingerSnapped.rawValue == "stingerSnapped")
+        // Round-trip every case through rawValue so decode-on-read is total.
+        for tier in AutoSkipEdgeAnchor.allCases {
+            #expect(AutoSkipEdgeAnchor(rawValue: tier.rawValue) == tier)
+        }
+        // An unknown persisted string decodes to nil (callers map nil →
+        // `.unanchored`).
+        #expect(AutoSkipEdgeAnchor(rawValue: "someFutureTier") == nil)
+    }
+
     @Test("Invalid spans: zero, negative, and non-finite widths are suppressed")
     func invalidSpans() {
         #expect(AutoSkipEdgePadding.skipWindow(
@@ -235,6 +277,85 @@ struct AutoSkipEdgePaddingWiringTests {
         if let cue = pushedCues.first {
             #expect(Self.cueStart(cue) == 60)
             #expect(Self.cueEnd(cue) == 119) // 120 - 1.0 trailing cushion only
+        }
+    }
+
+    // MARK: - playhead-hdgk: anchors sourced from the PERSISTED row (no manual setEdgeAnchors)
+
+    @Test("hdgk OFF: persisted anchors on the row are inert — cue is byte-identical to pre-hdgk")
+    func offPersistedAnchorsAreInert() async throws {
+        let orchestrator = try await Self.makeAutoOrchestrator()
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { ranges in pushedCues = ranges }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1"
+        )
+        // Flag stays OFF (default). The row carries real anchors; stamping
+        // them must change nothing observable.
+        let ad = makeSkipTestAdWindow(
+            id: "ad-persisted-off", startTime: 60, endTime: 120,
+            confidence: 0.9, decisionState: "confirmed",
+            startEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue
+        )
+        await orchestrator.receiveAdWindows([ad])
+
+        #expect(pushedCues.count == 1)
+        if let cue = pushedCues.first {
+            #expect(Self.cueStart(cue) == 60)      // snapped bounds, no padding
+            #expect(Self.cueEnd(cue) == 119)       // 120 - 1.0 trailing cushion only
+        }
+    }
+
+    @Test("hdgk ON: persisted stinger anchors classify to the stinger tier — cue shrinks, NO manual setEdgeAnchors")
+    func onPersistedStingerAnchorsShrinkCue() async throws {
+        let orchestrator = try await Self.makeAutoOrchestrator()
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { ranges in pushedCues = ranges }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1"
+        )
+        await orchestrator.setEdgePaddingEnabled(true)
+        // Anchors flow from the persisted row through receiveAdWindows — the
+        // orchestrator is NOT told via setEdgeAnchors.
+        let ad = makeSkipTestAdWindow(
+            id: "ad-persisted-stinger", startTime: 60, endTime: 120,
+            confidence: 0.9, decisionState: "confirmed",
+            startEdgeAnchor: AutoSkipEdgeAnchor.stingerSnapped.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.stingerSnapped.rawValue
+        )
+        await orchestrator.receiveAdWindows([ad])
+
+        #expect(pushedCues.count == 1)
+        if let cue = pushedCues.first {
+            #expect(Self.cueStart(cue) == 60.75) // 60 + 0.75 stinger start margin
+            #expect(Self.cueEnd(cue) == 118.25)  // 120 - 0.75 margin - 1.0 cushion
+        }
+    }
+
+    @Test("hdgk ON: persisted rediff anchors classify to the rediff tier — a DIFFERENT margin than stinger")
+    func onPersistedRediffAnchorsUseRediffMargin() async throws {
+        let orchestrator = try await Self.makeAutoOrchestrator()
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { ranges in pushedCues = ranges }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1"
+        )
+        await orchestrator.setEdgePaddingEnabled(true)
+        let ad = makeSkipTestAdWindow(
+            id: "ad-persisted-rediff", startTime: 60, endTime: 120,
+            confidence: 0.9, decisionState: "confirmed",
+            startEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue
+        )
+        await orchestrator.receiveAdWindows([ad])
+
+        #expect(pushedCues.count == 1)
+        if let cue = pushedCues.first {
+            // 60 + 0.50 rediff start margin (NOT 60.75, the stinger margin) —
+            // proves the real persisted tier drives the classification.
+            #expect(Self.cueStart(cue) == 60.50)
+            #expect(Self.cueEnd(cue) == 118.25) // 120 - 0.75 rediff end margin - 1.0 cushion
         }
     }
 

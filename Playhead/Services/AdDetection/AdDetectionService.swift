@@ -5061,12 +5061,25 @@ actor AdDetectionService {
             let catalogStoreMatchSimilarity: Double? = (adCatalogStore == nil)
                 ? nil
                 : Double(spanTopCatalogSimilarity)
+            // playhead-hdgk: derive the per-edge anchor tier from the two
+            // authoritative sources in scope here — the refined span's width
+            // provenance (`.rediffSlot`) and the stinger snap trace keyed by
+            // the SAME `refinedSpan.id` the trace-re-key block below reads.
+            // Flag-OFF: `lastStingerRefinementTraceBySpanId` is empty (top-of-
+            // run reset) and no span carries `.rediffSlot`, so both edges
+            // resolve `.unanchored` — byte-identical to pre-hdgk.
+            let edgeAnchors = Self.deriveFusionEdgeAnchors(
+                anchorProvenance: refinedSpan.anchorProvenance,
+                stingerTrace: lastStingerRefinementTraceBySpanId[refinedSpan.id]
+            )
             let window = buildFusionAdWindow(
                 span: refinedSpan,
                 decision: decision,
                 policyAction: policyAction,
                 analysisAssetId: analysisAssetId,
-                catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
+                catalogStoreMatchSimilarity: catalogStoreMatchSimilarity,
+                startEdgeAnchor: edgeAnchors.start,
+                endEdgeAnchor: edgeAnchors.end
             )
             fusionWindows.append(window)
 
@@ -7133,12 +7146,47 @@ actor AdDetectionService {
     /// "wired and queried but no match cleared the floor"; positive
     /// values surface in the corpus export so NARL can measure the
     /// fingerprint-store firing rate.
+    /// playhead-hdgk: derive the per-edge auto-skip anchor tiers for a fusion
+    /// span from the two authoritative decision-build sources, start and end
+    /// resolved INDEPENDENTLY:
+    ///   • `.rediffByteExact` — the span carries `.rediffSlot` width ownership
+    ///     (the byte-exact rediff differ set BOTH edges; the refiners are
+    ///     bypassed for width-owned spans, so this is whole-span by
+    ///     construction — see the `isWidthOwnership` guards in `runBackfill`).
+    ///   • `.stingerSnapped` — the `StingerRefiner` snapped this specific edge
+    ///     (`trace.startSnapped` / `trace.endSnapped`).
+    ///   • `.unanchored` — neither. The conservative default.
+    ///
+    /// A `nil` trace (stinger flag OFF, or the span bypassed the refiner)
+    /// contributes no snap, so both edges fall through to `.unanchored` unless
+    /// rediff owns the width. Deliberately splice-agnostic: `.spliceSlot` is
+    /// acoustic width, NOT byte-exact, so a splice-owned edge stays
+    /// `.unanchored` (it does not qualify for the tight rediff margin).
+    static func deriveFusionEdgeAnchors(
+        anchorProvenance: [AnchorRef],
+        stingerTrace: StingerRefinementTrace?
+    ) -> (start: AutoSkipEdgeAnchor, end: AutoSkipEdgeAnchor) {
+        let rediffOwnsWidth = anchorProvenance.contains(.rediffSlot)
+        return (
+            start: AutoSkipEdgeAnchor.derive(
+                rediffByteExact: rediffOwnsWidth,
+                stingerSnapped: stingerTrace?.startSnapped ?? false
+            ),
+            end: AutoSkipEdgeAnchor.derive(
+                rediffByteExact: rediffOwnsWidth,
+                stingerSnapped: stingerTrace?.endSnapped ?? false
+            )
+        )
+    }
+
     private func buildFusionAdWindow(
         span: DecodedSpan,
         decision: DecisionResult,
         policyAction: SkipPolicyAction,
         analysisAssetId: String,
-        catalogStoreMatchSimilarity: Double? = nil
+        catalogStoreMatchSimilarity: Double? = nil,
+        startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
+        endEdgeAnchor: AutoSkipEdgeAnchor = .unanchored
     ) -> AdWindow {
         // Map fusion policy action + gate to AdDecisionState for persistence.
         // autoSkipEligible: confirmed when gate passes, candidate otherwise.
@@ -7183,7 +7231,15 @@ actor AdDetectionService {
             // decision_events records for the same window, keeping the
             // ad_windows row and decision_events row consistent.
             eligibilityGate: decision.eligibilityGate.rawValue,
-            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
+            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity,
+            // playhead-hdgk: persist the per-edge anchor tier derived at
+            // fusion time so the (dormant) auto-skip edge-padding policy can
+            // classify this span by its real provenance on ingest, instead of
+            // defaulting every edge to `.unanchored`. Default `.unanchored`
+            // here means "no derived anchor" — flag-ON auto-skips nothing for
+            // such a span, the conservative posture.
+            startEdgeAnchor: startEdgeAnchor.rawValue,
+            endEdgeAnchor: endEdgeAnchor.rawValue
         )
     }
 
@@ -8113,7 +8169,18 @@ actor AdDetectionService {
                 // existing row's catalog-store match similarity. Hot-path
                 // candidates are not re-fingerprinted; the value lives or
                 // dies with the originating backfill row.
-                catalogStoreMatchSimilarity: existing.catalogStoreMatchSimilarity
+                catalogStoreMatchSimilarity: existing.catalogStoreMatchSimilarity,
+                // playhead-hdgk: likewise preserve the existing row's per-edge
+                // anchor tiers. The hot path derives no rediff/stinger
+                // provenance of its own, so a fresh reconciled window would
+                // default them to `.unanchored` and lose the fusion-derived
+                // tiers of the matched backfill row. (Today `upsertHotPath…`
+                // routes matched IDs through a targeted UPDATE that never
+                // rewrites these columns, so the persisted values already
+                // survive; carrying them here keeps the in-memory row honest
+                // and hardens against a future switch to full-row REPLACE.)
+                startEdgeAnchor: existing.startEdgeAnchor,
+                endEdgeAnchor: existing.endEdgeAnchor
             )
             reconciled.append(
                 ReconciledHotPathWindow(

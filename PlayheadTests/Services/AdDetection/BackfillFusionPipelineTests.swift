@@ -577,6 +577,18 @@ struct BackfillOrchestratorWiringTests {
         let fusionWindows = try await store.fetchAdWindows(assetId: assetId)
         #expect(!fusionWindows.isEmpty, "Ad-signal chunks must produce at least one fusion window — pipeline regression if zero")
 
+        // playhead-hdgk: the real fusion path (buildFusionAdWindow) must stamp
+        // the per-edge anchor columns and round-trip them through insert→fetch.
+        // This backfill has neither a rediff slot nor a stinger context, so
+        // both edges derive to the conservative default 'unanchored' — proving
+        // the field flows through the live pipeline and defaults correctly
+        // (the non-default derivation logic is pinned by
+        // FusionEdgeAnchorDerivationTests).
+        for window in fusionWindows {
+            #expect(window.startEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
+            #expect(window.endEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
+        }
+
         // With windows produced, step 17 must have forwarded them to the orchestrator.
         // Shadow mode (no TrustScoringService) means windows arrive as .confirmed and
         // are logged but not applied as skip cues — the decision log is the observable.

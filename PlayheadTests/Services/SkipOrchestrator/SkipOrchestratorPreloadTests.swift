@@ -60,7 +60,9 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         end: Double,
         confidence: Double,
         decisionState: String = "confirmed",
-        analysisAssetId: String = "asset-1"
+        analysisAssetId: String = "asset-1",
+        startEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
+        endEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue
     ) -> AdWindow {
         AdWindow(
             id: id,
@@ -75,7 +77,91 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
             evidenceText: nil, evidenceStartTime: nil,
             metadataSource: "none",
             metadataConfidence: nil, metadataPromptVersion: nil,
-            wasSkipped: false, userDismissedBanner: false
+            wasSkipped: false, userDismissedBanner: false,
+            startEdgeAnchor: startEdgeAnchor,
+            endEdgeAnchor: endEdgeAnchor
+        )
+    }
+
+    // MARK: - playhead-hdgk: cross-launch preload stamps anchors BEFORE promotion
+
+    /// The cross-launch (preload) path forwards persisted `ad_windows` rows
+    /// through `receiveAdWindows`. This test proves the per-edge anchors on
+    /// those rows reach `edgeAnchorsByWindowId` BEFORE the preload's promotion
+    /// to `.applied` — the "stamp before promotion" ordering caveat. If the
+    /// anchors arrived late (or not at all) the auto-mode edge-padding veto
+    /// would classify the span `.unanchored` and suppress the cue entirely, so
+    /// the mere presence of a stinger-margin-shrunk cue is the proof.
+    func testPreloadStampsEdgeAnchorsBeforePromotion() async throws {
+        // Seed a confirmed, high-confidence row carrying stinger anchors.
+        try await store.insertAdWindow(
+            makeAdWindow(
+                id: "win-stinger", start: 60, end: 120, confidence: 0.9,
+                startEdgeAnchor: AutoSkipEdgeAnchor.stingerSnapped.rawValue,
+                endEdgeAnchor: AutoSkipEdgeAnchor.stingerSnapped.rawValue
+            )
+        )
+
+        // Auto-mode orchestrator (promotion is possible) with padding ON.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let autoOrchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let pushedCues = OSAllocatedUnfairLock<[CMTimeRange]>(initialState: [])
+        await autoOrchestrator.setSkipCueHandler { ranges in
+            pushedCues.withLock { $0 = ranges }
+        }
+        await autoOrchestrator.setEdgePaddingEnabled(true)
+
+        // beginEpisode runs the preload → receiveAdWindows → evaluateAndPush
+        // synchronously; a promotion here would already be committed.
+        await autoOrchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1"
+        )
+
+        let cues = pushedCues.withLock { $0 }
+        XCTAssertEqual(cues.count, 1, "The preloaded stinger-anchored span must auto-skip")
+        if let cue = cues.first {
+            XCTAssertEqual(CMTimeGetSeconds(cue.start), 60.75, accuracy: 0.0001,
+                           "start = 60 + 0.75 stinger margin (anchors reached the map before promotion)")
+            XCTAssertEqual(CMTimeGetSeconds(cue.start + cue.duration), 118.25, accuracy: 0.0001,
+                           "end = 120 - 0.75 stinger margin - 1.0 trailing cushion")
+        }
+
+        // The window did promote to .applied (not vetoed to markOnly).
+        let log = await autoOrchestrator.getDecisionLog()
+        XCTAssertTrue(
+            log.contains { $0.adWindowId == "win-stinger" && $0.decision == .applied },
+            "The stinger-anchored span must promote to .applied"
+        )
+    }
+
+    /// Companion to the above: a preloaded row with NO derived anchors
+    /// (`.unanchored`, the default) is vetoed under auto-mode padding ON — no
+    /// cue — confirming the ordering veto also holds on the cross-launch path.
+    func testPreloadUnanchoredRowIsVetoedUnderPaddingOn() async throws {
+        try await store.insertAdWindow(
+            makeAdWindow(id: "win-unanchored", start: 60, end: 120, confidence: 0.9)
+        )
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let autoOrchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let pushedCues = OSAllocatedUnfairLock<[CMTimeRange]>(initialState: [])
+        await autoOrchestrator.setSkipCueHandler { ranges in
+            pushedCues.withLock { $0 = ranges }
+        }
+        await autoOrchestrator.setEdgePaddingEnabled(true)
+        await autoOrchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1"
+        )
+
+        XCTAssertTrue(pushedCues.withLock { $0 }.isEmpty,
+                      "An unanchored preloaded span must be vetoed under padding ON")
+        let log = await autoOrchestrator.getDecisionLog()
+        XCTAssertFalse(
+            log.contains { $0.adWindowId == "win-unanchored" && $0.decision == .applied },
+            "An unanchored span must never promote under padding ON"
         )
     }
 

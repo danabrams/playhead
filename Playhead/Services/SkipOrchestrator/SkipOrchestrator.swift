@@ -1221,6 +1221,35 @@ actor SkipOrchestrator {
                 cueActive: false
             )
             windows[adWindow.id] = managed
+
+            // playhead-hdgk: stamp the per-edge anchor tier persisted on the
+            // row into `edgeAnchorsByWindowId` at the SAME moment the window
+            // is registered — BEFORE the single `evaluateAndPush()` below can
+            // promote it to `.applied`. This honors the `setEdgeAnchors`
+            // ordering caveat for all three `receiveAdWindows` callers (preload
+            // / live backfill push / cross-launch): anchors are present before
+            // the first promotion-capable evaluation. We populate the map
+            // directly rather than via `setEdgeAnchors(...)` to avoid a second
+            // `evaluateAndPush()` per window. An unknown persisted raw value
+            // (older enum, corrupt row) decodes to `.unanchored` — the
+            // conservative default under which flag-ON auto-skips nothing.
+            // Flag-OFF: `paddedCueSpan` never reads this map, so the stamp is
+            // inert and behavior stays byte-identical.
+            //
+            // Precedence: only stamp when NO entry exists yet, so that (a) an
+            // explicit `setEdgeAnchors(...)` override made before ingest is
+            // never clobbered by a persisted default, and (b) the FIRST (best-
+            // provenance) stamp survives a later re-arrival of the same id
+            // carrying weaker anchors (e.g. a hot-path reconcile that copies a
+            // preloaded row's id but not its fusion-derived anchors). In
+            // production there is no `setEdgeAnchors` caller, so the persisted
+            // anchors win on first arrival — the common path.
+            if edgeAnchorsByWindowId[adWindow.id] == nil {
+                edgeAnchorsByWindowId[adWindow.id] = (
+                    start: AutoSkipEdgeAnchor(rawValue: adWindow.startEdgeAnchor) ?? .unanchored,
+                    end: AutoSkipEdgeAnchor(rawValue: adWindow.endEdgeAnchor) ?? .unanchored
+                )
+            }
         }
 
         // Re-evaluate all windows and push updated cues.
@@ -1317,6 +1346,25 @@ actor SkipOrchestrator {
 
             // Build a synthetic AdWindow from the fusion decision so the existing
             // ManagedWindow + evaluateWindow machinery can handle it unchanged.
+            //
+            // playhead-hdgk: this path deliberately does NOT stamp
+            // `edgeAnchorsByWindowId`. `AdDecisionResult` carries no anchor
+            // fields, so a stamp here could only write the synthetic default
+            // `.unanchored` — and under the absent-only precedence in
+            // `receiveAdWindows` that FIRST write would then block the real
+            // fusion-derived anchors from the paired `receiveAdWindows` push
+            // (the persisted rows re-fetched by `AnalysisCoordinator` after
+            // `runBackfill`), which shares this window id. Leaving the map
+            // absent here lets the real anchors win. This is inert today
+            // (edge padding is default-OFF, so `paddedCueSpan` never reads the
+            // map). GATE-2 NOTE: when auto-skip is enabled, an auto-mode
+            // `.confirmed` window promoted off THIS push (before the paired
+            // `receiveAdWindows` arrives) would evaluate as `.unanchored` —
+            // conservatively vetoed to markOnly, self-correcting on the next
+            // push once real anchors land. To make the live path airtight
+            // rather than eventually-consistent, thread the derived anchors
+            // through `AdDecisionResult` and stamp them here too — a scoped
+            // follow-up for the enablement bead, not this plumbing one.
             let syntheticWindow = AdWindow(
                 id: result.id,
                 analysisAssetId: assetId,
@@ -2075,12 +2123,13 @@ actor SkipOrchestrator {
         guard edgePaddingEnabled, !isUserInitiatedSkip(managed) else {
             return (start: managed.snappedStart, end: managed.snappedEnd)
         }
-        // Per-edge anchor provenance is not yet persisted on AdWindow rows
-        // (stinger snap traces and rediff slot provenance live inside
-        // AdDetectionService). Until the Gate-2 stamping bead lands and
-        // populates `setEdgeAnchors`, every pipeline edge classifies
-        // `.unanchored` — under the derived policy that means flag-ON
-        // auto-skips nothing, the intended conservative posture.
+        // playhead-hdgk: per-edge anchor provenance is derived at fusion time
+        // (rediff `.rediffSlot` width ownership + `StingerRefiner` snap trace),
+        // persisted on the `AdWindow` row, and stamped into
+        // `edgeAnchorsByWindowId` at `receiveAdWindows` ingest — before any
+        // promotion. An absent entry (a span that never flowed through ingest,
+        // or a non-fusion producer) defaults both edges to `.unanchored`, under
+        // which flag-ON auto-skips nothing — the intended conservative posture.
         let anchors = edgeAnchorsByWindowId[managed.adWindow.id]
             ?? (start: .unanchored, end: .unanchored)
         return AutoSkipEdgePadding.skipWindow(

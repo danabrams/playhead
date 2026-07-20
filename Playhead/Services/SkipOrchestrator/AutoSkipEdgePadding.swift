@@ -48,11 +48,14 @@
 //     See derivation doc §7.
 //
 // The policy is pure and stateless: anchors are INPUTS. Per-edge anchor
-// provenance is not yet persisted on AdWindow rows (the stinger snap trace
-// and rediff slot provenance live inside AdDetectionService today), so the
-// orchestrator currently classifies every pipeline edge `.unanchored` —
-// flag-ON therefore auto-skips nothing until the Gate-2 provenance-stamping
-// bead lands. That is the intended conservative posture, not a shortcut.
+// provenance is derived at fusion/decision-build time (rediff `.rediffSlot`
+// width ownership and the `StingerRefiner` snap trace both live in
+// AdDetectionService), persisted on the `AdWindow` row, and stamped into
+// `SkipOrchestrator.edgeAnchorsByWindowId` at ingest (playhead-hdgk). A row
+// with no derived anchor still classifies `.unanchored` on both edges — so a
+// pipeline span with neither a rediff-slot nor a stinger snap remains
+// unskippable under flag-ON. That default is the intended conservative
+// posture, not a shortcut; enabling auto-skip is a separate Gate-2 decision.
 
 import Foundation
 
@@ -71,6 +74,33 @@ enum AutoSkipEdgeAnchor: String, Sendable, Equatable, CaseIterable {
     /// No hard anchor: FM/lexical/aggregator boundary, unsnapped stinger
     /// consult, or unknown provenance. The conservative default.
     case unanchored
+}
+
+extension AutoSkipEdgeAnchor {
+    /// Derive one edge's anchor tier from its authoritative decision-build
+    /// signals (playhead-hdgk). Start and end are derived by calling this
+    /// once per edge, INDEPENDENTLY — nothing here couples the two.
+    ///
+    /// Precedence, highest first:
+    ///   1. `.rediffByteExact` — this edge was set by the byte-exact rediff
+    ///      differ (the span carries `.rediffSlot` width ownership). The byte
+    ///      differ outranks a stinger snap even in the (production-impossible,
+    ///      since rediff-owned spans bypass the refiner) case where both fire:
+    ///      the differ "did not misfire" — same rationale as the
+    ///      `stingerStartDemotedShowKeys` scoping.
+    ///   2. `.stingerSnapped` — the `StingerRefiner` snapped this edge (its
+    ///      trace `startSnapped` / `endSnapped` is true for this edge).
+    ///   3. `.unanchored` — neither fired. The conservative default.
+    ///
+    /// Pure and total; no actor state, no side effects.
+    static func derive(
+        rediffByteExact: Bool,
+        stingerSnapped: Bool
+    ) -> AutoSkipEdgeAnchor {
+        if rediffByteExact { return .rediffByteExact }
+        if stingerSnapped { return .stingerSnapped }
+        return .unanchored
+    }
 }
 
 // MARK: - AutoSkipEdgePadding
