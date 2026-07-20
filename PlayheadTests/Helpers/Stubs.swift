@@ -137,25 +137,119 @@ final class StubAnalysisStore: @unchecked Sendable {
     }
 }
 
+// MARK: - TestEventCounter
+
+/// playhead-vsot: lock-protected counting event for event-driven test
+/// synchronization. Replaces the "poll a flag every 10 ms until a
+/// real-time deadline" pattern, which under full-suite contention turns
+/// behavior assertions into scheduler assertions (the awaited work IS
+/// still coming — the deadline just expires first).
+///
+/// `increment()` is called by the code path under observation;
+/// `wait(for:)` suspends the test until the count reaches the
+/// threshold and returns IMMEDIATELY if it already has. There is
+/// deliberately no timeout parameter: the awaited signal is the actual
+/// completion event, and the test's `.timeLimit` trait is the backstop
+/// for genuine regressions (a hang becomes a deterministic time-limit
+/// failure instead of a load-dependent flake).
+final class TestEventCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private var waiters: [(threshold: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    /// Current count. For post-wait assertions only — never poll this.
+    var current: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        let reached = count
+        let ready = waiters.filter { $0.threshold <= reached }
+        waiters.removeAll { $0.threshold <= reached }
+        lock.unlock()
+        for waiter in ready { waiter.continuation.resume() }
+    }
+
+    func wait(for threshold: Int = 1) async {
+        if hasReached(threshold) { return }
+        await withCheckedContinuation { continuation in
+            register(threshold: threshold, continuation: continuation)
+        }
+    }
+
+    // NSLock's lock()/unlock() are unavailable directly inside async
+    // functions, so the locking work lives in these synchronous helpers
+    // (the withCheckedContinuation body is synchronous).
+
+    private func hasReached(_ threshold: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return count >= threshold
+    }
+
+    private func register(
+        threshold: Int,
+        continuation: CheckedContinuation<Void, Never>
+    ) {
+        lock.lock()
+        if count >= threshold {
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        waiters.append((threshold, continuation))
+        lock.unlock()
+    }
+}
+
 // MARK: - StubBackgroundTask
 
 final class StubBackgroundTask: BackgroundProcessingTaskProtocol, @unchecked Sendable {
     var completedSuccess: Bool?
-    var expirationHandler: (() -> Void)?
+    var expirationHandler: (() -> Void)? {
+        didSet {
+            // playhead-vsot: signal installation so tests can await the
+            // handler being armed instead of polling under a deadline.
+            if expirationHandler != nil {
+                expirationHandlerInstalls.increment()
+            }
+        }
+    }
     /// Total count of `setTaskCompleted(success:)` calls. iOS terminates
     /// on a second call, so the idempotence guard in
     /// `BackgroundFeedRefreshService.completeTaskOnce` asserts this
     /// stays at exactly 1 across an expired-then-finished handler fire.
     private(set) var setTaskCompletedCallCount: Int = 0
 
+    /// playhead-vsot: event-driven completion/installation signals.
+    let completions = TestEventCounter()
+    let expirationHandlerInstalls = TestEventCounter()
+
     func setTaskCompleted(success: Bool) {
         completedSuccess = success
         setTaskCompletedCallCount += 1
+        completions.increment()
     }
 
     /// Simulate iOS firing the expiration handler.
     func simulateExpiration() {
         expirationHandler?()
+    }
+
+    /// Suspend until `setTaskCompleted` has been called at least once.
+    /// Returns immediately if it already was.
+    func awaitCompletion() async {
+        await completions.wait(for: 1)
+    }
+
+    /// Suspend until the handler under test has installed its
+    /// `expirationHandler`. Returns immediately if already installed.
+    func awaitExpirationHandlerInstalled() async {
+        await expirationHandlerInstalls.wait(for: 1)
     }
 }
 
@@ -165,7 +259,17 @@ final class StubBackgroundTask: BackgroundProcessingTaskProtocol, @unchecked Sen
 final class StubContinuedProcessingTask: ContinuedProcessingTaskProtocol, @unchecked Sendable {
     let identifier: String
     var completedSuccess: Bool?
-    var expirationHandler: (() -> Void)?
+    var expirationHandler: (() -> Void)? {
+        didSet {
+            if expirationHandler != nil {
+                expirationHandlerInstalls.increment()
+            }
+        }
+    }
+
+    /// playhead-vsot: event-driven completion/installation signals.
+    let completions = TestEventCounter()
+    let expirationHandlerInstalls = TestEventCounter()
 
     init(identifier: String) {
         self.identifier = identifier
@@ -173,11 +277,23 @@ final class StubContinuedProcessingTask: ContinuedProcessingTaskProtocol, @unche
 
     func setTaskCompleted(success: Bool) {
         completedSuccess = success
+        completions.increment()
     }
 
     /// Simulate iOS firing the expiration handler.
     func simulateExpiration() {
         expirationHandler?()
+    }
+
+    /// Suspend until `setTaskCompleted` has been called at least once.
+    func awaitCompletion() async {
+        await completions.wait(for: 1)
+    }
+
+    /// Suspend until the handler under test has installed its
+    /// `expirationHandler`.
+    func awaitExpirationHandlerInstalled() async {
+        await expirationHandlerInstalls.wait(for: 1)
     }
 }
 
@@ -206,8 +322,27 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
     var startCapabilityObserverDuration: Duration?
     /// If set, `runPendingBackfill()` will sleep this long to simulate work.
     /// Used by background-task expiration tests to keep the BG task open
-    /// long enough for the expiration handler to fire.
+    /// long enough for the expiration handler to fire. The sleep is
+    /// cancellation-responsive (`Task.sleep` throws on cancel), so
+    /// expiration-driven cancellation cuts it short deterministically.
     var runPendingBackfillDuration: Duration?
+
+    /// playhead-vsot: event-driven signals.
+    /// `stopCalls` increments on every `stop()` — the observable tail of
+    /// the backfill expiration-handler chain (… → finishRun →
+    /// handleExpiredProcessingTask → stop() → markComplete), so tests
+    /// await it instead of polling `stopCallCount` under a deadline.
+    let stopCalls = TestEventCounter()
+    /// Increments when `runPendingBackfill()` is ENTERED, so tests can
+    /// deterministically establish "backfill work is in flight".
+    let runPendingBackfillEntries = TestEventCounter()
+    /// When true, `runPendingBackfill()` suspends until
+    /// `runPendingBackfillReleases.increment()` is called. Gives tests a
+    /// guaranteed overlap window with no wall-clock stall duration.
+    /// NOT cancellation-responsive — use `runPendingBackfillDuration`
+    /// for expiration/cancellation tests instead.
+    var runPendingBackfillHoldsUntilReleased = false
+    let runPendingBackfillReleases = TestEventCounter()
 
     // MARK: playhead-44h1 hooks
     /// Captures every `continueForegroundAssist(episodeId:deadline:)` call
@@ -237,6 +372,12 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
         eventType: WorkJournalEntry.EventType,
         cause: InternalMissCause?
     )] = []
+    /// playhead-vsot: event signal for the journal append above. In the
+    /// NON-expiration continued-processing paths, production intentionally
+    /// calls `markComplete` BEFORE `appendTerminal` (race-gating against
+    /// the expiration path), so task completion is NOT the journal-row
+    /// signal — tests asserting journal rows must await THIS event.
+    let recordedOutcomes = TestEventCounter()
 
     func startCapabilityObserver() async {
         startCapabilityObserverCallCount += 1
@@ -247,12 +388,17 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
 
     func stop() async {
         stopCallCount += 1
+        stopCalls.increment()
     }
 
     func runPendingBackfill() async {
         runPendingBackfillCallCount += 1
+        runPendingBackfillEntries.increment()
         if let duration = runPendingBackfillDuration {
             try? await Task.sleep(for: duration)
+        }
+        if runPendingBackfillHoldsUntilReleased {
+            await runPendingBackfillReleases.wait(for: 1)
         }
     }
 
@@ -288,6 +434,7 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
         recordForegroundAssistOutcomeCalls.append(
             (episodeId: episodeId, eventType: eventType, cause: cause)
         )
+        recordedOutcomes.increment()
     }
 }
 

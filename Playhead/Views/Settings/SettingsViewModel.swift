@@ -134,28 +134,52 @@ final class SettingsViewModel {
     /// call returns. (Either path eventually clears the flag.)
     ///
     /// The loop suspends until the consuming task is cancelled —
-    /// SwiftUI tears `.task` down when the view leaves the hierarchy.
+    /// SwiftUI tears `.task` down when the view leaves the hierarchy —
+    /// or until the provider finishes its stream (test providers use a
+    /// finite scripted stream; the production service's stream never
+    /// finishes).
+    ///
+    /// playhead-zqhz: accepts `any CapabilitiesProviding` (the existing
+    /// protocol `CapabilitiesService` already conforms to) instead of
+    /// the concrete actor, and routes each emission through
+    /// `handleCapabilitySnapshot(_:evaluator:)`. Production wiring is
+    /// unchanged — `SettingsView` passes the same concrete
+    /// `runtime.capabilitiesService` — but tests can now drive a finite,
+    /// controllable snapshot stream deterministically instead of racing
+    /// a MainActor child task against a wall-clock deadline.
     /// Call once per view lifecycle.
     func observeCapabilitySnapshots(
-        _ capabilities: CapabilitiesService,
+        _ capabilities: any CapabilitiesProviding,
         evaluator: AnalysisEligibilityEvaluating
     ) async {
         let stream = await capabilities.capabilityUpdates()
         for await snapshot in stream {
-            // R2 audit: invalidate first so `evaluate()` re-reads the
-            // providers against THIS snapshot — see the doc comment for
-            // the race rationale.
-            evaluator.invalidate()
-            eligibility = evaluator.evaluate()
-            // If a recheck was in flight and the FM probe has now
-            // landed a usable verdict, clear the pending flag so the
-            // "Checking…" indicator releases without waiting for the
-            // user to tap Recheck a second time. A non-usable verdict
-            // leaves the flag alone — `recheckModels` clears it when
-            // it returns.
-            if isRecheckingModels, snapshot.foundationModelsUsable {
-                isRecheckingModels = false
-            }
+            handleCapabilitySnapshot(snapshot, evaluator: evaluator)
+        }
+    }
+
+    /// Handle a single capability snapshot emission. Extracted from the
+    /// `observeCapabilitySnapshots` loop (playhead-zqhz) so the
+    /// per-emission contract — invalidate-then-evaluate, and releasing
+    /// `isRecheckingModels` on a usable snapshot — is directly testable
+    /// without standing up a live stream.
+    func handleCapabilitySnapshot(
+        _ snapshot: CapabilitySnapshot,
+        evaluator: AnalysisEligibilityEvaluating
+    ) {
+        // R2 audit: invalidate first so `evaluate()` re-reads the
+        // providers against THIS snapshot — see the doc comment for
+        // the race rationale.
+        evaluator.invalidate()
+        eligibility = evaluator.evaluate()
+        // If a recheck was in flight and the FM probe has now
+        // landed a usable verdict, clear the pending flag so the
+        // "Checking…" indicator releases without waiting for the
+        // user to tap Recheck a second time. A non-usable verdict
+        // leaves the flag alone — `recheckModels` clears it when
+        // it returns.
+        if isRecheckingModels, snapshot.foundationModelsUsable {
+            isRecheckingModels = false
         }
     }
 

@@ -21,37 +21,36 @@ import Testing
 
 // MARK: - Helpers
 
-/// Drain a state stream to a list of statuses up to a wall-clock
-/// deadline. Returns the observed status sequence so the test body
-/// can assert ordering when needed (e.g. playing → paused → playing).
+/// Drain the state stream ON THE TEST'S OWN TASK until `predicate` is
+/// satisfied by the accumulated status sequence, then return everything
+/// observed (so the test body can assert ordering, e.g. playing →
+/// paused → playing).
+///
+/// playhead-vsot round 3: the previous version drained in a child task
+/// while the test polled a shared box under a 2 s wall-clock deadline —
+/// under the full parallel plan the actor's notification handler (or
+/// the drain task itself) was not scheduled inside 2 s and the tests
+/// failed with `observed=[]` at ~119 s wall (2026-07-20 double-parallel
+/// gate: "Siri activation interruption pauses playback" / "Phone call
+/// interruption pauses playback"). This is the SAME shape already fixed
+/// in InterruptionHandlingTests + RouteChangeTests (round 2). The stream
+/// IS the actor-handled signal — the handler's `pause()`/`play()` runs
+/// on PlaybackServiceActor and yields the new state to every observer,
+/// and `observeStates()` yields the current snapshot immediately on
+/// subscribe, so subscribing before the notification post cannot miss a
+/// transition. No deadline: if production stops pausing/resuming the
+/// drain parks forever and the test's `.timeLimit` trait fails
+/// deterministically instead of load-dependently.
 private func collectStatuses(
     from stream: AsyncStream<PlaybackState>,
-    until predicate: @Sendable @escaping ([PlaybackState.Status]) -> Bool,
-    deadline: Duration = .seconds(2)
+    until predicate: @Sendable @escaping ([PlaybackState.Status]) -> Bool
 ) async -> [PlaybackState.Status] {
-    let box = StatusBox()
-    let drain = Task {
-        for await state in stream {
-            await box.append(state.status)
-            if await box.matches(predicate) { return }
-        }
+    var observed: [PlaybackState.Status] = []
+    for await state in stream {
+        observed.append(state.status)
+        if predicate(observed) { break }
     }
-    let clock = ContinuousClock()
-    let end = clock.now.advanced(by: deadline)
-    while clock.now < end {
-        if await box.matches(predicate) { break }
-        try? await Task.sleep(for: .milliseconds(5))
-    }
-    drain.cancel()
-    return await box.statuses
-}
-
-private actor StatusBox {
-    var statuses: [PlaybackState.Status] = []
-    func append(_ s: PlaybackState.Status) { statuses.append(s) }
-    func matches(_ predicate: ([PlaybackState.Status]) -> Bool) -> Bool {
-        predicate(statuses)
-    }
+    return observed
 }
 
 @Suite("playhead-456 — Interruption handling")
@@ -59,7 +58,7 @@ struct PlaybackReliabilityInterruptionTests {
 
     // MARK: - Phone call interruption
 
-    @Test("Phone call interruption pauses playback")
+    @Test("Phone call interruption pauses playback", .timeLimit(.minutes(1)))
     func phoneCallInterruptionPauses() async throws {
         let center = NotificationCenter()
         let service = await PlaybackService(
@@ -96,7 +95,7 @@ struct PlaybackReliabilityInterruptionTests {
                 "Phone call interruption must pause playback; observed: \(observed)")
     }
 
-    @Test("Phone call ends with shouldResume → playback resumes")
+    @Test("Phone call ends with shouldResume → playback resumes", .timeLimit(.minutes(1)))
     func phoneCallEndsResumes() async throws {
         let center = NotificationCenter()
         let service = await PlaybackService(
@@ -176,7 +175,7 @@ struct PlaybackReliabilityInterruptionTests {
 
     // MARK: - Siri activation
 
-    @Test("Siri activation interruption pauses playback")
+    @Test("Siri activation interruption pauses playback", .timeLimit(.minutes(1)))
     func siriActivationPauses() async throws {
         // iOS posts the same `.interruptionNotification` for Siri as for
         // a phone call, distinguished only by the .began type. The bead
@@ -217,7 +216,7 @@ struct PlaybackReliabilityInterruptionTests {
                 "Siri activation must duck/pause; observed: \(observed)")
     }
 
-    @Test("Siri dismissal with shouldResume restores playback")
+    @Test("Siri dismissal with shouldResume restores playback", .timeLimit(.minutes(1)))
     func siriDismissResumes() async throws {
         let center = NotificationCenter()
         let service = await PlaybackService(
@@ -259,7 +258,7 @@ struct PlaybackReliabilityInterruptionTests {
 
     // MARK: - Full pause→resume cycle
 
-    @Test("Full interruption cycle: playing → paused → playing")
+    @Test("Full interruption cycle: playing → paused → playing", .timeLimit(.minutes(1)))
     func fullInterruptionCycle() async throws {
         let center = NotificationCenter()
         let service = await PlaybackService(

@@ -16,33 +16,30 @@ import Testing
 
 // MARK: - Helpers
 
-private actor StatusBox {
-    var statuses: [PlaybackState.Status] = []
-    func append(_ s: PlaybackState.Status) { statuses.append(s) }
-    func contains(_ s: PlaybackState.Status) -> Bool { statuses.contains(s) }
-    var snapshot: [PlaybackState.Status] { statuses }
-}
-
+/// Drain the state stream ON THE TEST'S OWN TASK until `expected`
+/// arrives, then return everything observed.
+///
+/// playhead-vsot round 2: the previous version drained in a child task
+/// while the test polled a shared box under a 2 s wall-clock deadline —
+/// under the full parallel plan the actor's notification handler (or
+/// the drain task itself) was not scheduled inside 2 s and both
+/// disconnect tests failed with `observed=[]` at ~95 s wall
+/// (2026-07-20 gate run 2). The stream IS the actor-handled signal
+/// (`pause()` yields `.paused` to every observer; `observeStates()`
+/// yields the current snapshot immediately on subscribe, so a
+/// pre-post subscription cannot miss the transition). No deadline —
+/// a production regression parks the drain and fails the test's
+/// `.timeLimit` deterministically instead of load-dependently.
 private func awaitStatus(
     in stream: AsyncStream<PlaybackState>,
-    matching expected: PlaybackState.Status,
-    deadline: Duration = .seconds(2)
+    matching expected: PlaybackState.Status
 ) async -> [PlaybackState.Status] {
-    let box = StatusBox()
-    let drain = Task {
-        for await state in stream {
-            await box.append(state.status)
-            if await box.contains(expected) { return }
-        }
+    var observed: [PlaybackState.Status] = []
+    for await state in stream {
+        observed.append(state.status)
+        if state.status == expected { break }
     }
-    let clock = ContinuousClock()
-    let end = clock.now.advanced(by: deadline)
-    while clock.now < end {
-        if await box.contains(expected) { break }
-        try? await Task.sleep(for: .milliseconds(5))
-    }
-    drain.cancel()
-    return await box.snapshot
+    return observed
 }
 
 @Suite("playhead-456 — Route changes")
@@ -50,7 +47,8 @@ struct RouteChangeTests {
 
     // MARK: - Disconnect
 
-    @Test("Headphone disconnect (oldDeviceUnavailable) pauses immediately")
+    @Test("Headphone disconnect (oldDeviceUnavailable) pauses immediately",
+          .timeLimit(.minutes(1)))
     func headphoneDisconnectPauses() async throws {
         // Apple App Store policy: when the user yanks headphones, audio
         // must pause. Production handles this via the
@@ -88,7 +86,8 @@ struct RouteChangeTests {
                 "Headphone unplug must pause playback (Apple policy); observed: \(observed)")
     }
 
-    @Test("Headphone disconnect preserves currentTime")
+    @Test("Headphone disconnect preserves currentTime",
+          .timeLimit(.minutes(1)))
     func headphoneDisconnectPreservesPosition() async throws {
         let center = NotificationCenter()
         let service = await PlaybackService(
@@ -204,7 +203,8 @@ struct RouteChangeTests {
 
     // MARK: - Reconnect + tap-to-play
 
-    @Test("Reconnect headphones + user tap play resumes from same position")
+    @Test("Reconnect headphones + user tap play resumes from same position",
+          .timeLimit(.minutes(1)))
     func reconnectAndTapPlayResumes() async throws {
         let center = NotificationCenter()
         let service = await PlaybackService(

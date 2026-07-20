@@ -489,15 +489,16 @@ struct MinimalContiguousSpanDecoderTests {
 
     // MARK: - Performance
 
-    @Test("Performance: decode 15,000 atoms with ~50 anchors + ~100 acoustic hints in < 200ms")
-    func performanceDecodeAtScale() async {
+    /// Shared fixture for the at-scale tests: 15,000 atoms with ~50
+    /// anchors and ~100 acoustic break hints.
+    private func makeScaleAtoms() -> [AtomEvidence] {
         let count = 15_000
         // ~50 anchored atoms spread across the sequence
         let anchoredOrdinals = Set(stride(from: 0, to: count, by: 300).prefix(50))
         // ~100 acoustic break atoms
         let breakOrdinals = Set(stride(from: 50, to: count, by: 150).prefix(100))
 
-        let atoms: [AtomEvidence] = (0 ..< count).map { i in
+        return (0 ..< count).map { i in
             makeEvidence(
                 ordinal: i,
                 startTime: Double(i) * 0.5,
@@ -506,16 +507,43 @@ struct MinimalContiguousSpanDecoderTests {
                 hasAcousticBreakHint: breakOrdinals.contains(i)
             )
         }
+    }
+
+    /// Fast-suite functional pin: decoding at full scale COMPLETES.
+    /// No clock — the wall-clock budget lives in the PerfGate test
+    /// below. playhead-vsot round 2: the previous combined test failed
+    /// a full-plan run at 0.91 s against its 500 ms simulator
+    /// allowance while a second xcodebuild lane shared the machine —
+    /// load, not a decoder regression (it passes in ~tens of ms
+    /// quiescent). Wall-clock budgets only hold on a quiescent CPU
+    /// (m9xk pattern / playhead-zx0l).
+    @Test("Decode at scale (15,000 atoms) completes", .timeLimit(.minutes(1)))
+    func decodeAtScaleCompletes() async {
+        let atoms = makeScaleAtoms()
+        let spans = decoder.decode(atoms: atoms, assetId: "perf-test")
+        // Basic sanity: some spans should be produced from 50 anchors
+        _ = spans // silence unused warning
+    }
+
+    /// Wall-clock budget: spec says 200 ms on device; < 500 ms is the
+    /// simulator allowance. PerfGate-gated — runs only in the serial
+    /// perf pass (scripts/perf-tests.sh MEASUREMENT_TESTS), skipped in
+    /// the parallel fast/integration suites.
+    @Test("Performance: decode 15,000 atoms with ~50 anchors + ~100 acoustic hints in < 200ms",
+          .enabled(if: PerfGate.runsMeasurementTests, "perf pass only — see playhead-zx0l"),
+          .timeLimit(.minutes(1)))
+    func performanceDecodeAtScale() async {
+        let atoms = makeScaleAtoms()
 
         let start = ContinuousClock.now
         let spans = decoder.decode(atoms: atoms, assetId: "perf-test")
         let elapsed = ContinuousClock.now - start
 
-        // Should complete in < 500ms on simulator (spec says 200ms on device;
-        // simulator is typically 2-3x slower under parallel test execution)
-        #expect(elapsed < .milliseconds(500))
+        // Should complete in < 500ms on a quiescent simulator (spec
+        // says 200ms on device).
+        #expect(elapsed < .milliseconds(500),
+                "At-scale decode must stay under the 500 ms simulator allowance; was \(elapsed)")
 
-        // Basic sanity: some spans should be produced from 50 anchors
         _ = spans // silence unused warning
     }
 

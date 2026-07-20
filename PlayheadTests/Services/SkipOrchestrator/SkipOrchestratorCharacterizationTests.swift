@@ -462,12 +462,20 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
 @Suite("SkipOrchestrator - recordListenRevert writes CorrectionEvent")
 struct SkipOrchestratorCorrectionStoreTests {
 
-    @Test("recordListenRevert persists a listenRevert CorrectionEvent")
+    @Test("recordListenRevert persists a listenRevert CorrectionEvent",
+          .timeLimit(.minutes(1)))
     func recordListenRevertWritesCorrectionEvent() async throws {
         let analysisStore = try await makeTestStore()
         try await analysisStore.insertAsset(makeSkipTestAnalysisAsset())
 
+        // playhead-vsot round 3: event-driven veto-write signal replaces
+        // the 5 s pollUntil deadline (same fire-and-forget-write class as
+        // the download harvest; see SignalingCorrectionStore).
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        let vetoRecorded = TestEventCounter()
+        let signalingStore = SignalingCorrectionStore(
+            wrapping: correctionStore, vetoRecorded: vetoRecorded
+        )
         let trustService = try await makeSkipTestTrustService(
             mode: "auto",
             trustScore: 0.9,
@@ -476,7 +484,7 @@ struct SkipOrchestratorCorrectionStoreTests {
         let orchestrator = SkipOrchestrator(
             store: analysisStore,
             trustService: trustService,
-            correctionStore: correctionStore
+            correctionStore: signalingStore
         )
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -501,15 +509,11 @@ struct SkipOrchestratorCorrectionStoreTests {
             podcastId: "podcast-1"
         )
 
-        // The correction store write happens in a fire-and-forget Task.
-        // Poll briefly to let it complete.
-        let found = try await pollUntil(timeout: .seconds(5)) {
-            let events = try await correctionStore.activeCorrections(for: "asset-1")
-            return !events.isEmpty
-        }
-        #expect(found, "Expected a CorrectionEvent to be written after recordListenRevert")
+        // Event-driven: resumes when the veto write lands. No deadline.
+        await vetoRecorded.wait(for: 1)
 
         let events = try await correctionStore.activeCorrections(for: "asset-1")
+        #expect(!events.isEmpty, "Expected a CorrectionEvent to be written after recordListenRevert")
         #expect(events.count == 1)
         let event = events[0]
         #expect(event.source == .listenRevert)

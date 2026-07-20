@@ -41,6 +41,26 @@ MEASUREMENT_TESTS=(
   # xsdz.26: 60-minute-episode fingerprinting wall-clock budget (needs the
   # staged corpus audio in the main checkout; skips cleanly without it).
   "PlayheadTests/ChromaFingerprinterPerfTests/sixtyMinuteEpisodeUnderBudget()"
+  # playhead-m9xk: skip-transition <500ms latency (real 150ms duck-settle
+  # sleep + ContinuousClock measurement). Ordering/reentrancy coverage for
+  # the same path runs deterministically in the fast suite via the injected
+  # transitionSleeper seam; only this latency measurement is gated here.
+  "PlayheadTests/SkipCueSmoothingTests/skipTransitionLatencyWithinProductionBudget()"
+  # playhead-vsot round 2: force-quit resume-data scan 2 s cold-launch SLA
+  # (median-of-3 wall-clock). Functional completion coverage stays in the
+  # fast suite (scanCompletesOverTenBlobCache); only the latency SLA is
+  # measured here.
+  "PlayheadTests/ScanForSuspendedTransfersTests/scanCompletesWithinSLA()"
+  # playhead-vsot round 2: at-scale span-decoder wall-clock budget (spec
+  # 200 ms device / 500 ms quiescent simulator). Functional completion
+  # stays in the fast suite (decodeAtScaleCompletes).
+  "PlayheadTests/MinimalContiguousSpanDecoderTests/performanceDecodeAtScale()"
+  # playhead-vsot round 3: SpanMetrics anti-quadratic wall-clock guards
+  # (5 s ceiling on 10k-pair summary / 1k+1k pairing). Correctness
+  # (metric counts) stays unconditional in the fast suite; only the
+  # timing guard is measured here.
+  "PlayheadTests/PerformanceSmokeTests/tenKPairs()"
+  "PlayheadTests/PerformanceSmokeTests/pairingScale()"
   # Note: AnalysisWorkSchedulerOutcomeBookkeepingTests is intentionally NOT
   # here — its cancel-mid-decode tests were rewritten to be deterministic
   # (via processNextDispatchableJobForTesting) and un-gated, so they run in

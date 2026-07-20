@@ -44,6 +44,13 @@ import Testing
 private actor StallingRecognizerCore {
     private var stallContinuations: [CheckedContinuation<Void, Never>] = []
     private(set) var transcribeStartedShardIds: [Int] = []
+    /// playhead-vsot: tests waiting for the engine's loop to reach the
+    /// recognizer. Resumed from `enterTranscribe` the moment the
+    /// threshold is met — event-driven, replacing the 15 s deadline
+    /// poll that reported "parked" failures under full-suite load
+    /// (the engine's Task simply hadn't been scheduled through
+    /// SpeechService yet when the deadline expired).
+    private var entryWaiters: [(threshold: Int, continuation: CheckedContinuation<Void, Never>)] = []
     /// When true, `transcribe` returns immediately without parking the
     /// caller. Used to verify post-stop appends never reach the
     /// recognizer at all.
@@ -51,9 +58,24 @@ private actor StallingRecognizerCore {
 
     func enterTranscribe(shardId: Int) async {
         transcribeStartedShardIds.append(shardId)
+        let reached = transcribeStartedShardIds.count
+        let ready = entryWaiters.filter { $0.threshold <= reached }
+        entryWaiters.removeAll { $0.threshold <= reached }
+        for waiter in ready { waiter.continuation.resume() }
         if bypass { return }
         await withCheckedContinuation { continuation in
             stallContinuations.append(continuation)
+        }
+    }
+
+    /// Suspend until at least `count` transcribe calls have been
+    /// entered. Returns immediately if they already have. No deadline —
+    /// the test `.timeLimit` is the backstop; a genuine "engine never
+    /// reaches the recognizer" regression fails deterministically there.
+    func awaitTranscribeEntered(count: Int = 1) async {
+        if transcribeStartedShardIds.count >= count { return }
+        await withCheckedContinuation { continuation in
+            entryWaiters.append((threshold: count, continuation: continuation))
         }
     }
 
@@ -146,25 +168,31 @@ private func makeStopTestAsset(id: String) -> AnalysisAsset {
     )
 }
 
-/// Spin briefly until `condition` returns true or the deadline elapses.
-/// Used to wait for the engine's transcription Task to make a
-/// recognizer call without sleeping a fixed wall-clock interval.
-private func waitUntil(
-    _ condition: () async -> Bool,
-    timeout: Duration = .seconds(15),
-    pollInterval: Duration = .milliseconds(10)
-) async -> Bool {
-    let deadline = ContinuousClock.now.advanced(by: timeout)
-    while ContinuousClock.now < deadline {
-        if await condition() { return true }
-        try? await Task.sleep(for: pollInterval)
+// playhead-vsot: the former `waitUntil` deadline-poll helper is gone —
+// readiness waits go through `StallingRecognizerCore.awaitTranscribeEntered`
+// (event-driven) and POSITIVE completion waits use
+// `awaitCompletionEvent(on:)` below (unbounded; the `.timeLimit` trait
+// is the backstop). Only NEGATIVE checks — "nothing must arrive" — keep
+// bounded observation windows, because a too-short window can only
+// produce a false PASS there, never a flaky failure.
+
+/// Await the first `.completed` event on the stream, with no timeout.
+/// Use for POSITIVE expectations only.
+private func awaitCompletionEvent(
+    on events: AsyncStream<TranscriptEngineEvent>
+) async -> String? {
+    for await event in events {
+        if case .completed(let assetId) = event {
+            return assetId
+        }
     }
-    return false
+    return nil
 }
 
 /// Gather events from the stream until either `.completed` fires or
 /// `duration` elapses. Returns the asset id of the completion event,
-/// or nil on timeout.
+/// or nil on timeout. Use for NEGATIVE expectations (asserting no
+/// completion arrives) only.
 private func awaitCompletion(
     on events: AsyncStream<TranscriptEngineEvent>,
     within duration: Duration
@@ -266,9 +294,10 @@ struct TranscriptEngineStopTranscriptionTests {
         // Wait for the engine to actually park inside `transcribe`.
         // Without this guard the test could race the engine's Task
         // scheduling and call stopTranscription before the loop has
-        // even reached its first await.
-        let parked = await waitUntil { await recognizer.core.startedCount >= 1 }
-        #expect(parked, "Recognizer should have entered transcribe before stop")
+        // even reached its first await. Event-driven (playhead-vsot):
+        // resumes exactly when the engine's loop enters the recognizer,
+        // however long scheduling takes under load.
+        await recognizer.core.awaitTranscribeEntered()
 
         // Mimic the AnalysisJobRunner timeout-branch behavior.
         await engine.stopTranscription(analysisAssetId: "asset-stalled")
@@ -324,7 +353,7 @@ struct TranscriptEngineStopTranscriptionTests {
         )
         await engine.finishAppending(analysisAssetId: "asset-evgated")
 
-        _ = await waitUntil { await recognizer.core.startedCount >= 1 }
+        await recognizer.core.awaitTranscribeEntered()
         await engine.stopTranscription(analysisAssetId: "asset-evgated")
         await recognizer.core.disableStall()
 
@@ -358,7 +387,7 @@ struct TranscriptEngineStopTranscriptionTests {
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
         await engine.finishAppending(analysisAssetId: "asset-late-append")
-        _ = await waitUntil { await recognizer.core.startedCount >= 1 }
+        await recognizer.core.awaitTranscribeEntered()
 
         // Snapshot the recognizer call count before the stop + append.
         let beforeAppend = await recognizer.core.startedCount
@@ -412,7 +441,7 @@ struct TranscriptEngineStopTranscriptionTests {
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
         await engine.finishAppending(analysisAssetId: "asset-rerun")
-        _ = await waitUntil { await recognizer.core.startedCount >= 1 }
+        await recognizer.core.awaitTranscribeEntered()
         await engine.stopTranscription(analysisAssetId: "asset-rerun")
         await recognizer.core.disableStall()
 
@@ -426,7 +455,7 @@ struct TranscriptEngineStopTranscriptionTests {
         )
         await engine.finishAppending(analysisAssetId: "asset-rerun")
 
-        let completedId = await awaitCompletion(on: secondEvents, within: .seconds(5))
+        let completedId = await awaitCompletionEvent(on: secondEvents)
         #expect(completedId == "asset-rerun",
                 "Re-run must emit .completed after the gate is cleared")
 
@@ -464,7 +493,7 @@ struct TranscriptEngineStopTranscriptionTests {
             snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
         )
         await engine.finishAppending(analysisAssetId: "asset-stopped")
-        _ = await waitUntil { await recognizer.core.startedCount >= 1 }
+        await recognizer.core.awaitTranscribeEntered()
         await engine.stopTranscription(analysisAssetId: "asset-stopped")
         await recognizer.core.disableStall()
 
@@ -477,7 +506,7 @@ struct TranscriptEngineStopTranscriptionTests {
         )
         await engine.finishAppending(analysisAssetId: "asset-fresh")
 
-        let completedId = await awaitCompletion(on: freshEvents, within: .seconds(5))
+        let completedId = await awaitCompletionEvent(on: freshEvents)
         #expect(completedId == "asset-fresh",
                 "Fresh asset must complete despite a prior stopTranscription on a different asset")
 
@@ -528,7 +557,7 @@ struct TranscriptEngineStopTranscriptionTests {
         await recognizer.core.disableStall()
 
         let events = await engine.events()
-        let completedId = await awaitCompletion(on: events, within: .seconds(5))
+        let completedId = await awaitCompletionEvent(on: events)
         #expect(completedId == "asset-active",
                 "Active session must complete despite a stale stop on a different asset")
 

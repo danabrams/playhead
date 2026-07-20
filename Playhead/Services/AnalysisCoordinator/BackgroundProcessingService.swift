@@ -300,6 +300,44 @@ actor BackgroundProcessingService {
         pendingInjectionWaiters.count
     }
 
+    /// playhead-vsot test seam: parked observers waiting for the
+    /// injection-waiter count to reach a threshold. Only tests append
+    /// here (via `waitForPendingInjectionWaitersForTesting`); the list
+    /// is empty in production, so the notify hook below is a no-op
+    /// filter over an empty array on the production path.
+    private var injectionWaiterObservers:
+        [(threshold: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    /// playhead-vsot test seam: suspend until at least `count` handlers
+    /// are parked in `awaitPreAnalysisServicesInjected`. Event-driven
+    /// replacement for polling `pendingInjectionWaiterCountForTesting()`
+    /// against a real-time deadline — under full-suite load the poll's
+    /// deadline could expire before the handler was ever scheduled,
+    /// after which `triggerInjectionWaitTimeoutForTesting()` resumed
+    /// nothing and the test fell through to the production 15 s timer.
+    /// Returns immediately when the threshold is already met.
+    /// Production code never calls this.
+    func waitForPendingInjectionWaitersForTesting(atLeast count: Int = 1) async {
+        if pendingInjectionWaiters.count >= count { return }
+        await withCheckedContinuation { continuation in
+            injectionWaiterObservers.append((threshold: count, continuation: continuation))
+        }
+    }
+
+    /// Resume any test observers whose threshold the parked-waiter
+    /// count has reached. Called after each append to
+    /// `pendingInjectionWaiters`. No-op (empty list) in production.
+    private func notifyInjectionWaiterObserversForTesting() {
+        guard !injectionWaiterObservers.isEmpty else { return }
+        let reached = pendingInjectionWaiters.count
+        let ready = injectionWaiterObservers.filter { $0.threshold <= reached }
+        guard !ready.isEmpty else { return }
+        injectionWaiterObservers.removeAll { $0.threshold <= reached }
+        for observer in ready {
+            observer.continuation.resume()
+        }
+    }
+
     /// Test seam for the continued-processing expiration path.
     ///
     /// `BGContinuedProcessingTask.expirationHandler` is synchronous, so
@@ -488,6 +526,9 @@ actor BackgroundProcessingService {
             }
             slot.continuation = continuation
             self.pendingInjectionWaiters.append(WaiterEntry(slot: slot))
+            // playhead-vsot: wake any test observer awaiting this park.
+            // Empty-list no-op in production.
+            self.notifyInjectionWaiterObserversForTesting()
         }
 
         timedOutTask.cancel()

@@ -705,9 +705,18 @@ struct PerformanceSmokeTests {
         let t0 = Date()
         let summary = MetricsSummary(batch: batch)
         let elapsed = Date().timeIntervalSince(t0)
-        #expect(elapsed < 5.0, "MetricsSummary on 10k pairs took \(elapsed)s — possible quadratic regression")
+        // playhead-vsot round 3: the wall-clock anti-quadratic guard is a
+        // LATENCY assertion — valid only on a quiescent CPU (m9xk class /
+        // playhead-zx0l). It runs only in the serial perf pass
+        // (scripts/perf-tests.sh MEASUREMENT_TESTS). The fast suite still
+        // runs the full 10k computation and checks correctness below, so
+        // a quadratic regression is caught precisely on the perf lane and
+        // would still visibly slow the fast suite.
+        if PerfGate.runsMeasurementTests {
+            #expect(elapsed < 5.0, "MetricsSummary on 10k pairs took \(elapsed)s — possible quadratic regression")
+        }
 
-        // Spot-check the summary is non-trivial.
+        // Spot-check the summary is non-trivial (unconditional correctness).
         #expect(summary.spanIoU.count == 10_000)
         #expect(summary.medianStartError != nil)
         #expect(summary.coverageRecall != nil)
@@ -743,7 +752,12 @@ struct PerformanceSmokeTests {
         let t0 = Date()
         let batch = MetricsBatch.pair(groundTruth: gts, detections: dets)
         let elapsed = Date().timeIntervalSince(t0)
-        #expect(elapsed < 5.0, "MetricsBatch.pair(...) took \(elapsed)s — possible quadratic regression")
+        // playhead-vsot round 3: wall-clock anti-quadratic guard gated to
+        // the serial perf pass (see tenKPairs above). Correctness stays
+        // unconditional in the fast suite.
+        if PerfGate.runsMeasurementTests {
+            #expect(elapsed < 5.0, "MetricsBatch.pair(...) took \(elapsed)s — possible quadratic regression")
+        }
         #expect(batch.pairs.count == 1000)
     }
 }

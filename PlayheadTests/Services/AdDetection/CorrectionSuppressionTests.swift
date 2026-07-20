@@ -437,12 +437,23 @@ struct CorrectionSuppressionTests {
 @Suite("SkipOrchestrator — Correction Scope Inference from AdWindow")
 struct SkipOrchestratorCorrectionScopeTests {
 
-    @Test("recordListenRevert writes exactTimeSpan scope with window's snapped start/end (playhead-zskc)")
+    @Test("recordListenRevert writes exactTimeSpan scope with window's snapped start/end (playhead-zskc)",
+          .timeLimit(.minutes(1)))
     func listenRevertScopeContent() async throws {
         let analysisStore = try await makeTestStore()
         try await analysisStore.insertAsset(makeSkipTestAnalysisAsset())
 
+        // playhead-vsot round 3: wrap the store so the fire-and-forget
+        // veto write (SkipOrchestrator.recordListenRevert spawns
+        // `Task { await store.recordVeto(...) }`) signals its completion
+        // — event-driven, replacing the 5 s `pollUntil` deadline (same
+        // fire-and-forget-write-then-short-poll class that flaked the
+        // download harvest under the parallel gate).
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        let vetoRecorded = TestEventCounter()
+        let signalingStore = SignalingCorrectionStore(
+            wrapping: correctionStore, vetoRecorded: vetoRecorded
+        )
         let trustService = try await makeSkipTestTrustService(
             mode: "auto",
             trustScore: 0.9,
@@ -451,7 +462,7 @@ struct SkipOrchestratorCorrectionScopeTests {
         let orchestrator = SkipOrchestrator(
             store: analysisStore,
             trustService: trustService,
-            correctionStore: correctionStore
+            correctionStore: signalingStore
         )
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -474,14 +485,12 @@ struct SkipOrchestratorCorrectionScopeTests {
             podcastId: "podcast-1"
         )
 
-        // Poll for the fire-and-forget Task to complete.
-        let found = try await pollUntil(timeout: .seconds(5)) {
-            let events = try await correctionStore.activeCorrections(for: "asset-1")
-            return !events.isEmpty
-        }
-        #expect(found, "CorrectionEvent should be written after recordListenRevert")
+        // Event-driven: resumes when the veto write actually lands. No
+        // deadline; the `.timeLimit` trait is the hang backstop.
+        await vetoRecorded.wait(for: 1)
 
         let events = try await correctionStore.activeCorrections(for: "asset-1")
+        #expect(!events.isEmpty, "CorrectionEvent should be written after recordListenRevert")
         let event = try #require(events.first)
 
         // Verify the scope is an exactTimeSpan with the window's actual time range.
@@ -530,12 +539,19 @@ struct ListenRevertSponsorScopeTests {
     // enrich AdWindow with evidence catalog entries to enable sponsor scope
     // inference on the revert path.
 
-    @Test("recordListenRevert writes only exactTimeSpan — no sponsorOnShow (by design)")
+    @Test("recordListenRevert writes only exactTimeSpan — no sponsorOnShow (by design)",
+          .timeLimit(.minutes(1)))
     func listenRevertWritesOnlyExactTimeSpan() async throws {
         let analysisStore = try await makeTestStore()
         try await analysisStore.insertAsset(makeSkipTestAnalysisAsset())
 
+        // playhead-vsot round 3: event-driven veto-write signal (see
+        // listenRevertScopeContent) replaces the 5 s pollUntil deadline.
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+        let vetoRecorded = TestEventCounter()
+        let signalingStore = SignalingCorrectionStore(
+            wrapping: correctionStore, vetoRecorded: vetoRecorded
+        )
         let trustService = try await makeSkipTestTrustService(
             mode: "auto",
             trustScore: 0.9,
@@ -544,7 +560,7 @@ struct ListenRevertSponsorScopeTests {
         let orchestrator = SkipOrchestrator(
             store: analysisStore,
             trustService: trustService,
-            correctionStore: correctionStore
+            correctionStore: signalingStore
         )
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -568,14 +584,11 @@ struct ListenRevertSponsorScopeTests {
             podcastId: "podcast-1"
         )
 
-        // Poll for the fire-and-forget Task to complete.
-        let found = try await pollUntil(timeout: .seconds(5)) {
-            let events = try await correctionStore.activeCorrections(for: "asset-1")
-            return !events.isEmpty
-        }
-        #expect(found, "CorrectionEvent should be written after recordListenRevert")
+        // Event-driven: resumes when the veto write lands.
+        await vetoRecorded.wait(for: 1)
 
         let events = try await correctionStore.activeCorrections(for: "asset-1")
+        #expect(!events.isEmpty, "CorrectionEvent should be written after recordListenRevert")
         // KEY ASSERTION: only one event (exactTimeSpan), NOT two (no sponsorOnShow).
         // playhead-zskc: changed from `exactSpan:` prefix to `exactTimeSpan:` now
         // that listenRevert persists window-precise time boundaries rather than
