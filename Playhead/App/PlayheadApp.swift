@@ -163,6 +163,14 @@ struct PlayheadApp: App {
                         modelContainer: modelContainer
                     )
 
+                    // playhead-xsdz.36: install the CURRENT-enclosure-URL
+                    // resolver for the rediff re-fetch enumerator now that
+                    // SwiftData is available. Until this runs, a rediff
+                    // BGTask fire is a benign zero-candidate sweep.
+                    runtime.attachRediffEnclosureResolver(
+                        modelContainer: modelContainer
+                    )
+
                     runtime.setPlaybackPositionPersistenceHandler { trigger in
                         await Self.persistPlaybackPosition(
                             runtime: runtime,

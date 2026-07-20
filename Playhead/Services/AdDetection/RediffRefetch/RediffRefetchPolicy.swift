@@ -60,6 +60,23 @@ enum RediffRefetchPolicy {
         var headSampleBytes: Int
         /// Tail sample size for the Strategy-C pre-check. Spike §5: 64 KB.
         var tailSampleBytes: Int
+        /// playhead-xsdz.36 (R2 failure-state policy): backoff applied AFTER a
+        /// failure has been confirmed deterministic (see
+        /// `deterministicConfirmationCount`), indexed by the number of
+        /// deterministic retries already made and clamped to the last entry.
+        /// Defaults 1d → 3d → 7d.
+        var deterministicFailureBackoffSchedule: [TimeInterval]
+        /// A failure becomes DETERMINISTIC when the SAME terminal
+        /// `FailureClass` occurs this many times consecutively (default 2 —
+        /// "same terminal error class twice consecutively"). Transient
+        /// failures and successful pre-checks reset the streak.
+        var deterministicConfirmationCount: Int
+        /// After a failure is confirmed deterministic, at most this many
+        /// backoff-gated retries are made (default 3 — one per entry of the
+        /// default deterministic backoff schedule). If all of them fail with
+        /// the same class, the episode is PARKED (terminal until the state
+        /// row is cleared).
+        var maxDeterministicAttempts: Int
 
         static let secondsPerDay: TimeInterval = 24 * 60 * 60
 
@@ -71,21 +88,107 @@ enum RediffRefetchPolicy {
             tailSampleBytes: 64 * 1024
         )
 
+        /// playhead-xsdz.36 ACTIVATION preset: identical to `.default` except
+        /// the first-attempt delay is ~3 DAYS, per the xsdz.30 days-gap
+        /// measurement — rotation coverage saturates by ~3d (87% at BOTH ~3d
+        /// and ~8d), so waiting 3d costs no coverage and skips the 1d/2d
+        /// re-check waste the 24h default would spend on slow rotators.
+        static let production = Configuration(
+            minimumAgeBeforeFirstAttempt: 3 * secondsPerDay
+        )
+
         init(
             minimumAgeBeforeFirstAttempt: TimeInterval = secondsPerDay,
             backoffSchedule: [TimeInterval] = [secondsPerDay, 2 * secondsPerDay, 4 * secondsPerDay],
             maxUnchangedAttempts: Int = 3,
             headSampleBytes: Int = 64 * 1024,
-            tailSampleBytes: Int = 64 * 1024
+            tailSampleBytes: Int = 64 * 1024,
+            deterministicFailureBackoffSchedule: [TimeInterval] = [secondsPerDay, 3 * secondsPerDay, 7 * secondsPerDay],
+            deterministicConfirmationCount: Int = 2,
+            maxDeterministicAttempts: Int = 3
         ) {
             precondition(!backoffSchedule.isEmpty, "backoffSchedule must be non-empty")
             precondition(maxUnchangedAttempts >= 1, "maxUnchangedAttempts must be ≥ 1")
             precondition(headSampleBytes > 0 && tailSampleBytes > 0, "sample sizes must be > 0")
+            precondition(!deterministicFailureBackoffSchedule.isEmpty, "deterministicFailureBackoffSchedule must be non-empty")
+            precondition(deterministicConfirmationCount >= 1, "deterministicConfirmationCount must be ≥ 1")
+            precondition(maxDeterministicAttempts >= 1, "maxDeterministicAttempts must be ≥ 1")
             self.minimumAgeBeforeFirstAttempt = minimumAgeBeforeFirstAttempt
             self.backoffSchedule = backoffSchedule
             self.maxUnchangedAttempts = maxUnchangedAttempts
             self.headSampleBytes = headSampleBytes
             self.tailSampleBytes = tailSampleBytes
+            self.deterministicFailureBackoffSchedule = deterministicFailureBackoffSchedule
+            self.deterministicConfirmationCount = deterministicConfirmationCount
+            self.maxDeterministicAttempts = maxDeterministicAttempts
+        }
+    }
+
+    // MARK: - Failure classification (playhead-xsdz.36, the xsdz.28 R2 decision)
+
+    /// Terminal-vs-transient classification of a per-candidate failure.
+    ///
+    /// TRANSIENT (network drop, cancellation, non-410/404 HTTP, unknown
+    /// pre-fetch errors) → retry at the next eligible sweep, unlimited — the
+    /// common case; the sweep itself is already WiFi+charging gated.
+    ///
+    /// TERMINAL classes are the ones that, when they repeat, indicate the
+    /// SAME failure will recur on every attempt (re-spending ~54 MB each
+    /// time — the xsdz.28 R2 loop): decode failure, HTTP 404/410, a
+    /// fingerprint-mismatch-class result, or invalid local state (asset row
+    /// gone / unusable). Two consecutive same-class terminal failures confirm
+    /// the failure as DETERMINISTIC → exponential backoff (1d → 3d → 7d),
+    /// capped at `maxDeterministicAttempts` retries, then PARK.
+    enum FailureClass: String, Sendable, Equatable, CaseIterable {
+        /// Network error / cancellation / any unclassified pre-download error.
+        case transient
+        /// The enclosure is gone: HTTP 404 or 410 (on the pre-check OR fetch).
+        case resourceGone = "resource_gone"
+        /// The fetched B-copy could not be decoded/fingerprinted.
+        case decodeFailure = "decode_failure"
+        /// The B-side produced an empty/unusable fingerprint stream.
+        case fingerprintMismatch = "fingerprint_mismatch"
+        /// Local state required to consume the B-side is missing or invalid
+        /// (e.g. the analysis-asset row disappeared under the candidate).
+        case staleAsset = "stale_asset"
+
+        var isTerminal: Bool { self != .transient }
+    }
+
+    /// Which stage of `processCandidate` the failure escaped from — the
+    /// fallback discriminator when the error TYPE alone is ambiguous: an
+    /// unknown error before the full fetch is cheap to retry (transient); an
+    /// unknown error after the ~54 MB download is treated as a decode-class
+    /// failure so a deterministic decoder loop cannot re-spend the fetch
+    /// forever.
+    enum FailureStage: Sendable, Equatable {
+        /// Ranged pre-check / local sample.
+        case precheck
+        /// The full ~54 MB re-fetch.
+        case fetch
+        /// B-side fingerprint / rediff-pass consumption (download succeeded).
+        case postDownload
+    }
+
+    /// Classify a thrown error into a `FailureClass`. Pure given
+    /// (error, stage); precedence: explicit conformance
+    /// (`RediffFailureClassifiable`) → cancellation → known network shapes →
+    /// stage fallback.
+    static func classifyFailure(_ error: any Error, stage: FailureStage) -> FailureClass {
+        if let classified = error as? any RediffFailureClassifiable {
+            return classified.rediffFailureClass
+        }
+        if error is CancellationError { return .transient }
+        if error is URLError { return .transient }
+        if case URLSessionFullEpisodeFetcher.FetchError.notOK(let status) = error {
+            return (status == 404 || status == 410) ? .resourceGone : .transient
+        }
+        if case URLSessionRangedAudioSampler.SampleError.notPartialContent(let status) = error {
+            return (status == 404 || status == 410) ? .resourceGone : .transient
+        }
+        switch stage {
+        case .precheck, .fetch: return .transient
+        case .postDownload: return .decodeFailure
         }
     }
 
@@ -102,14 +205,45 @@ enum RediffRefetchPolicy {
         /// `true` once a rotation was detected AND the B-side fingerprinted —
         /// TERMINAL: no further re-fetch is scheduled for this episode.
         var resolved: Bool
+        /// playhead-xsdz.36 (R2): class of the most recent FAILED attempt, or
+        /// `nil` when the last attempt did not fail (never attempted /
+        /// unchanged / rotated). `.transient` is stored too so eligibility can
+        /// distinguish "last attempt failed transiently → retry next sweep"
+        /// from "last attempt was an unchanged pre-check → unchanged backoff".
+        var lastFailureClass: FailureClass?
+        /// playhead-xsdz.36 (R2): count of CONSECUTIVE failures with the same
+        /// terminal `lastFailureClass`. 0 for transient failures and after any
+        /// non-failure attempt. Drives deterministic confirmation
+        /// (`>= deterministicConfirmationCount`), the deterministic backoff
+        /// index, and parking.
+        var sameClassFailureStreak: Int
 
         static let initial = AttemptState(unchangedAttempts: 0, lastAttemptAt: nil, resolved: false)
 
-        init(unchangedAttempts: Int = 0, lastAttemptAt: Double? = nil, resolved: Bool = false) {
+        init(
+            unchangedAttempts: Int = 0,
+            lastAttemptAt: Double? = nil,
+            resolved: Bool = false,
+            lastFailureClass: FailureClass? = nil,
+            sameClassFailureStreak: Int = 0
+        ) {
             self.unchangedAttempts = unchangedAttempts
             self.lastAttemptAt = lastAttemptAt
             self.resolved = resolved
+            self.lastFailureClass = lastFailureClass
+            self.sameClassFailureStreak = sameClassFailureStreak
         }
+    }
+
+    /// PARKED: a deterministic failure exhausted its retry budget — the
+    /// confirmation failures (`deterministicConfirmationCount`) plus all
+    /// `maxDeterministicAttempts` backoff-gated retries failed with the SAME
+    /// terminal class. Terminal for the sweep (surfaced as
+    /// `.parkedDeterministicFailure`); clearing the persisted state row is the
+    /// only un-park path.
+    static func isParked(_ state: AttemptState, config: Configuration = .default) -> Bool {
+        guard let cls = state.lastFailureClass, cls.isTerminal else { return false }
+        return state.sameClassFailureStreak >= config.deterministicConfirmationCount + config.maxDeterministicAttempts
     }
 
     /// Why an episode is or is not due for a re-fetch attempt right now. Each
@@ -126,6 +260,12 @@ enum RediffRefetchPolicy {
         case retryBudgetExhausted
         /// A rotation was already found + fingerprinted — terminal.
         case alreadyResolved
+        /// playhead-xsdz.36 (R2): a CONFIRMED deterministic failure's
+        /// exponential backoff (1d → 3d → 7d) has not elapsed yet.
+        case deterministicBackoffNotElapsed(nextEligibleAt: Double)
+        /// playhead-xsdz.36 (R2): deterministic-failure retry budget exhausted
+        /// — the episode is parked (terminal; surfaced in diagnostics).
+        case parkedDeterministicFailure
     }
 
     /// Decide whether `downloadedAt`'s episode is due for a re-fetch at `now`.
@@ -136,7 +276,23 @@ enum RediffRefetchPolicy {
         config: Configuration = .default
     ) -> Eligibility {
         if state.resolved { return .alreadyResolved }
+        if isParked(state, config: config) { return .parkedDeterministicFailure }
         if state.unchangedAttempts >= config.maxUnchangedAttempts { return .retryBudgetExhausted }
+
+        // CONFIRMED deterministic failure → exponential backoff, indexed by
+        // the number of post-confirmation retries already made.
+        if let cls = state.lastFailureClass, cls.isTerminal,
+           state.sameClassFailureStreak >= config.deterministicConfirmationCount,
+           let lastAttemptAt = state.lastAttemptAt {
+            let index = min(
+                state.sameClassFailureStreak - config.deterministicConfirmationCount,
+                config.deterministicFailureBackoffSchedule.count - 1
+            )
+            let nextEligibleAt = lastAttemptAt + config.deterministicFailureBackoffSchedule[max(0, index)]
+            return now >= nextEligibleAt
+                ? .eligible
+                : .deterministicBackoffNotElapsed(nextEligibleAt: nextEligibleAt)
+        }
 
         guard let lastAttemptAt = state.lastAttemptAt else {
             // First-ever attempt: the ≥24h download-age gate.
@@ -146,7 +302,14 @@ enum RediffRefetchPolicy {
                 : .tooSoonSinceDownload(ageSeconds: age)
         }
 
-        // Subsequent attempt: honor the backoff since the last attempt.
+        // Last attempt FAILED but is not (yet) a confirmed deterministic
+        // failure: transient failures and a first terminal-class failure both
+        // retry at the very next eligible sweep — no backoff (the R2 policy's
+        // "retry next eligible sweep, unlimited" arm).
+        if state.lastFailureClass != nil { return .eligible }
+
+        // Subsequent attempt after an UNCHANGED pre-check: honor the backoff
+        // since the last attempt.
         let index = min(state.unchangedAttempts - 1, config.backoffSchedule.count - 1)
         let backoff = config.backoffSchedule[max(0, index)]
         let nextEligibleAt = lastAttemptAt + backoff
@@ -155,7 +318,8 @@ enum RediffRefetchPolicy {
 
     /// Advance the state after an UNCHANGED pre-check (no rotation): bump the
     /// attempt count and stamp the attempt time so the next backoff is measured
-    /// from here.
+    /// from here. A successful attempt also RESETS the failure streak — the
+    /// R2 policy's "twice consecutively" requirement.
     static func advanceUnchanged(_ state: AttemptState, at now: Double) -> AttemptState {
         AttemptState(
             unchangedAttempts: state.unchangedAttempts + 1,
@@ -165,12 +329,45 @@ enum RediffRefetchPolicy {
     }
 
     /// Advance the state after a DETECTED rotation (B-side fingerprinted):
-    /// terminal — no further re-fetch for this episode.
+    /// terminal — no further re-fetch for this episode. Failure fields reset.
     static func markResolved(_ state: AttemptState, at now: Double) -> AttemptState {
         AttemptState(
             unchangedAttempts: state.unchangedAttempts,
             lastAttemptAt: now,
             resolved: true
+        )
+    }
+
+    /// playhead-xsdz.36 (R2): advance the state after a FAILED attempt.
+    ///
+    ///   * `.transient` → streak resets to 0 (also breaking any in-progress
+    ///     terminal chain: "same class twice CONSECUTIVELY"), retried at the
+    ///     next eligible sweep, unlimited.
+    ///   * terminal class equal to the previous failure's class → streak + 1.
+    ///   * terminal class different from the previous → streak restarts at 1.
+    ///
+    /// The streak drives everything downstream: `>= confirmationCount` puts
+    /// the episode into the deterministic backoff regime;
+    /// `>= confirmationCount + maxDeterministicAttempts` parks it.
+    static func advanceFailed(
+        _ state: AttemptState,
+        failureClass: FailureClass,
+        at now: Double
+    ) -> AttemptState {
+        let streak: Int
+        if !failureClass.isTerminal {
+            streak = 0
+        } else if state.lastFailureClass == failureClass {
+            streak = state.sameClassFailureStreak + 1
+        } else {
+            streak = 1
+        }
+        return AttemptState(
+            unchangedAttempts: state.unchangedAttempts,
+            lastAttemptAt: now,
+            resolved: false,
+            lastFailureClass: failureClass,
+            sameClassFailureStreak: streak
         )
     }
 
@@ -239,10 +436,25 @@ enum RediffRefetchPolicy {
         /// Pre-check ran; sample identical → full fetch SKIPPED (non-rotator).
         case unchanged(assetId: String, cost: BandwidthCost, newState: AttemptState)
         /// Pre-check differed → full re-fetch + B-side fingerprint + B-copy
-        /// DELETED. `fingerprintCount` is the B-side subfingerprint count.
+        /// DELETED. `fingerprintCount` is the B-side subfingerprint count
+        /// (0 when a `RediffBSideConsuming` handoff ran instead of the
+        /// standalone fingerprint — the rediff pass consumed the bytes).
         case rotated(assetId: String, cost: BandwidthCost, fingerprintCount: Int, newState: AttemptState)
-        /// A network/decode error aborted this candidate. Bytes already spent
-        /// are still accounted; the B-copy (if any) was still deleted.
-        case failed(assetId: String, cost: BandwidthCost, error: String)
+        /// A network/decode/consume error aborted this candidate. Bytes
+        /// already spent are still accounted; the B-copy (if any) was still
+        /// deleted. Carries the R2 `failureClass` and the ADVANCED state so
+        /// the recorder persists the failure streak (previously `.failed`
+        /// carried no state — the xsdz.28 R2 no-backoff loop).
+        case failed(assetId: String, cost: BandwidthCost, failureClass: FailureClass, newState: AttemptState, error: String)
     }
+}
+
+// MARK: - Failure-class conformance seam
+
+/// Errors that know their own rediff failure class (e.g. B-side consume
+/// errors thrown by the production `RediffBSideConsuming` conformer) declare
+/// it via this protocol; `RediffRefetchPolicy.classifyFailure` honors it
+/// before any type/stage-based fallback.
+protocol RediffFailureClassifiable: Error {
+    var rediffFailureClass: RediffRefetchPolicy.FailureClass { get }
 }

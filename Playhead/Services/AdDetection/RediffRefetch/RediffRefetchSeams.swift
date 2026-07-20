@@ -101,6 +101,27 @@ protocol RediffRefetchRecording: Sendable {
     func recordOutcome(_ outcome: RediffRefetchPolicy.Outcome) async
 }
 
+/// playhead-xsdz.36 ACTIVATION seam: consumes a freshly fetched, ROTATED
+/// B-copy while it still exists on disk — the production conformer stages the
+/// file into the `RediffBSideStagingProvider`, drives
+/// `AdDetectionService.revalidateFromFeatures` (which runs the rediff slot
+/// pass against the staged B-side), and unstages. The CALLER
+/// (`RediffRefetchService.processCandidate`) still owns deletion of the file
+/// via its `defer` — the never-persist-B contract is unchanged.
+///
+/// A throw means the B-side was NOT consumed: the candidate records `.failed`
+/// (not resolved) so a later sweep re-fetches and retries under the R2
+/// failure policy.
+protocol RediffBSideConsuming: Sendable {
+    func consumeRotatedBSide(assetId: String, fileURL: URL) async throws
+}
+
+/// The B-side decoded to an EMPTY fingerprint stream — nothing to diff, and
+/// deterministic for the same copy (fingerprint-mismatch class).
+struct RediffBSideEmptyStreamError: RediffFailureClassifiable, Equatable {
+    var rediffFailureClass: RediffRefetchPolicy.FailureClass { .fingerprintMismatch }
+}
+
 /// Removes the transient B-copy temp file. A seam (not a bare `FileManager`
 /// call) so a test can assert removal WITHOUT a filesystem AND so the real
 /// FileManager remover can be exercised against a real temp file.
@@ -324,8 +345,8 @@ struct LoggingRediffRefetchRecorder: RediffRefetchRecording {
             logger.info("rediff-refetch unchanged assetId=\(assetId, privacy: .public) precheckBytes=\(cost.precheckBytes, privacy: .public)")
         case let .rotated(assetId, cost, fingerprintCount, _):
             logger.info("rediff-refetch ROTATED assetId=\(assetId, privacy: .public) precheckBytes=\(cost.precheckBytes, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) fpCount=\(fingerprintCount, privacy: .public)")
-        case let .failed(assetId, cost, error):
-            logger.error("rediff-refetch FAILED assetId=\(assetId, privacy: .public) bytes=\(cost.totalBytes, privacy: .public) error=\(error, privacy: .public)")
+        case let .failed(assetId, cost, failureClass, newState, error):
+            logger.error("rediff-refetch FAILED assetId=\(assetId, privacy: .public) bytes=\(cost.totalBytes, privacy: .public) class=\(failureClass.rawValue, privacy: .public) streak=\(newState.sameClassFailureStreak, privacy: .public) error=\(error, privacy: .public)")
         }
     }
 }

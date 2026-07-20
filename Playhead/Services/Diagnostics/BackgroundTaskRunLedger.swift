@@ -124,6 +124,11 @@ enum BackgroundTaskRunEntryPoint: String, Codable, Sendable, Equatable, CaseIter
     case backfill = "backfill"
     case preAnalysisRecovery = "preanalysis_recovery"
     case continuedProcessing = "continued_processing"
+    /// playhead-xsdz.36: the rediff B-side re-fetch BGProcessingTask
+    /// (`RediffRefetchService`). Bandwidth totals ride `deferReason`
+    /// (`precheckBytes=… fullFetchBytes=…`); the durable byte counters live
+    /// in `rediff_bandwidth_ledger`.
+    case rediffRefetch = "rediff_refetch"
 }
 
 // MARK: - BackgroundTaskRunRecord

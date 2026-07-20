@@ -240,11 +240,17 @@ struct RediffRefetchTests {
         await service.runRefetchSweep()
 
         #expect(!FileManager.default.fileExists(atPath: bcopy.path), "B-copy must be deleted even on fingerprint failure")
-        guard case let .failed(_, cost, _) = recorder.outcomes.first else {
+        guard case let .failed(_, cost, failureClass, newState, _) = recorder.outcomes.first else {
             Issue.record("expected .failed, got \(String(describing: recorder.outcomes.first))"); return
         }
         #expect(cost.precheckBytes == 131_072)            // pre-check bytes still accounted
         #expect(cost.fullFetchBytes == 1_000)             // full-fetch bytes still accounted
+        // playhead-xsdz.36 (R2): a post-download failure is decode-class and
+        // the outcome now carries the ADVANCED state (streak started).
+        #expect(failureClass == .decodeFailure)
+        #expect(newState.lastFailureClass == .decodeFailure)
+        #expect(newState.sameClassFailureStreak == 1)
+        #expect(newState.resolved == false)
     }
 
     // MARK: - Service: ≥24h gate enforced end-to-end (acceptance)
