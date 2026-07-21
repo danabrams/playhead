@@ -277,27 +277,15 @@ struct AnalysisWorkSchedulerThreeLaneTests {
     // MARK: - Preemption hook call site (playhead-r835 FIX 1)
 
     /// Spy that records every lane handed to `preemptLowerLanes(for:)`.
-    /// Used to verify the scheduler loop invokes the hook iff it admits a
+    /// Used to verify the scheduler invokes the hook iff it admits a
     /// Now-lane job. Backed by an actor so writes from the scheduler
     /// (inside its own actor) and reads from the test (on the test task)
     /// are properly serialized under Swift 6 concurrency.
     private actor CallLog {
         private(set) var calls: [AnalysisWorkScheduler.SchedulerLane] = []
-        private var waiters: [(lane: AnalysisWorkScheduler.SchedulerLane, continuation: CheckedContinuation<Void, Never>)] = []
 
         func append(_ lane: AnalysisWorkScheduler.SchedulerLane) {
             calls.append(lane)
-            let ready = waiters.filter { $0.lane == lane }
-            waiters.removeAll { $0.lane == lane }
-            for waiter in ready { waiter.continuation.resume() }
-        }
-
-        /// playhead-vsot round 3: suspend until the preemption hook has
-        /// been invoked with `lane` — event-driven, replacing the 30 s
-        /// pollUntil on `calls.contains(lane)`.
-        func awaitCall(_ lane: AnalysisWorkScheduler.SchedulerLane) async {
-            if calls.contains(lane) { return }
-            await withCheckedContinuation { waiters.append((lane, $0)) }
         }
     }
 
@@ -321,15 +309,15 @@ struct AnalysisWorkSchedulerThreeLaneTests {
         #expect(calls.isEmpty)
     }
 
-    @Test("Preemption hook is invoked with .now when a priority>=20 job is admitted",
-          .timeLimit(.minutes(1)))
+    @Test("Preemption hook is invoked with .now when a priority>=20 job is admitted")
     func testPreemptionHookCalledForNowLaneJob() async throws {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         // Give the job a cached file so it proceeds past processJob's missing-
-        // file guard; otherwise the loop would still call the hook (preemption
-        // runs BEFORE processJob) but the job would flip to blocked:missingFile
-        // which also works. Explicit URL makes the intent obvious.
+        // file guard; otherwise the dispatch would still call the hook
+        // (preemption runs BEFORE processJob) but the job would flip to
+        // blocked:missingFile which also works. Explicit URL makes the
+        // intent obvious.
         downloads.cachedURLs["ep-now"] = URL(fileURLWithPath: "/tmp/ep-now.mp3")
 
         let job = makeAnalysisJob(
@@ -347,13 +335,19 @@ struct AnalysisWorkSchedulerThreeLaneTests {
         let scheduler = makeScheduler(store: store, downloads: downloads)
         let handler = SpyHandler()
         await scheduler.setLanePreemptionHandler(handler)
-        await scheduler.startSchedulerLoop()
-        defer { Task { await scheduler.stop() } }
 
-        // playhead-vsot round 3: event-driven on the hook invocation
-        // itself, replacing the 30 s pollUntil.
-        await handler.log.awaitCall(.now)
-        await scheduler.stop()
+        // playhead deflake2: run exactly one dispatch pass synchronously
+        // instead of spinning `startSchedulerLoop()` and waiting for the
+        // background loop's unstructured Task to reach the hook. The prior
+        // version awaited the hook off the live run loop, whose start-up
+        // and per-pass progress are starved under full-suite
+        // cooperative-pool load — the 1-minute time-limit backstop could
+        // trip before the loop ever dispatched. `processNextDispatchableJobForTesting`
+        // executes the identical admission → preemption-hook → processJob
+        // path in-line, so when it returns the hook has already fired.
+        let dispatched = await scheduler.processNextDispatchableJobForTesting()
+        #expect(dispatched, "Scheduler should have dispatched the queued Now-lane job")
+
         let finalCalls = await handler.log.calls
         #expect(finalCalls.contains(.now), "Preemption hook should be invoked with .now for a priority>=20 job")
         #expect(!finalCalls.contains(.soon),
@@ -383,22 +377,17 @@ struct AnalysisWorkSchedulerThreeLaneTests {
         let scheduler = makeScheduler(store: store, downloads: downloads)
         let handler = SpyHandler()
         await scheduler.setLanePreemptionHandler(handler)
-        await scheduler.startSchedulerLoop()
-        defer { Task { await scheduler.stop() } }
 
-        // Wait until we can confirm the scheduler has picked up the job —
-        // its state must transition out of "queued" (to a terminal or blocked
-        // state). Only then can we assert the hook was not called.
-        let processed = await pollUntil {
-            let j = try? await store.fetchJob(byId: "soon-admit-job")
-            switch j?.state {
-            case "queued", "paused": return false
-            default: return true
-            }
-        }
-        await scheduler.stop()
+        // playhead deflake2: run one dispatch pass synchronously rather
+        // than spinning the background loop and polling the job's state
+        // out of "queued" under a 30 s deadline (load-flaky). When
+        // `processNextDispatchableJobForTesting` returns, the Soon-lane job
+        // has been dispatched through the identical admission → processJob
+        // path — so the hook has definitively had its chance to fire (and,
+        // being Soon-lane, must not have).
+        let processed = await scheduler.processNextDispatchableJobForTesting()
         let calls = await handler.log.calls
-        #expect(processed, "Scheduler did not process soon-admit-job within deadline")
+        #expect(processed, "Scheduler did not dispatch soon-admit-job")
         #expect(calls.isEmpty,
                 "Preemption hook must not be invoked for Soon-lane admissions")
     }
@@ -424,19 +413,13 @@ struct AnalysisWorkSchedulerThreeLaneTests {
         let scheduler = makeScheduler(store: store, downloads: downloads)
         let handler = SpyHandler()
         await scheduler.setLanePreemptionHandler(handler)
-        await scheduler.startSchedulerLoop()
-        defer { Task { await scheduler.stop() } }
 
-        let processed = await pollUntil {
-            let j = try? await store.fetchJob(byId: "bg-admit-job")
-            switch j?.state {
-            case "queued", "paused": return false
-            default: return true
-            }
-        }
-        await scheduler.stop()
+        // playhead deflake2: deterministic single dispatch pass (see the
+        // Soon-lane sibling above) — replaces the load-flaky
+        // startSchedulerLoop + 30 s pollUntil on the job's state.
+        let processed = await scheduler.processNextDispatchableJobForTesting()
         let calls = await handler.log.calls
-        #expect(processed, "Scheduler did not process bg-admit-job within deadline")
+        #expect(processed, "Scheduler did not dispatch bg-admit-job")
         #expect(calls.isEmpty,
                 "Preemption hook must not be invoked for Background-lane admissions")
     }
