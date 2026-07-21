@@ -7398,8 +7398,20 @@ actor AnalysisStore {
     /// regardless of what the outer snapshot saw. It composes with (does not
     /// replace) the detection-level guard — belt and suspenders. Non-existing id
     /// or non-terminal existing → write as before (idempotency preserved).
-    /// `retiredIDs` is unchanged: terminal rows are never in it by construction
-    /// upstream (the reconcilable predicate excludes terminal states).
+    ///
+    /// The DELETE path carries the SAME guard, symmetrically. `retiredIDs` is
+    /// computed from that OUT-OF-TRANSACTION snapshot too, so an id that was
+    /// reconcilable at snapshot time can flip to terminal (`.applied` /
+    /// `.reverted`) in the race window and land in it — and an unconditional
+    /// DELETE would drop the just-applied terminal row's user-facing history
+    /// (`decisionState` + `wasSkipped`), from which a relaunch preload could
+    /// re-surface the span, even though the in-memory
+    /// `SkipOrchestrator.retireAdWindows` (SkipOrchestrator ~1259) ALREADY
+    /// refuses to retire terminal rows. So before deleting, each retired id's
+    /// LIVE in-transaction decisionState is read via the same helper and terminal
+    /// ids are filtered OUT of the delete (non-terminal / non-existing ids delete
+    /// as before). This keeps the store's DELETE path matching the in-memory
+    /// retire guard, atomically on the same connection.
     func reconcileBackfillAdWindows(
         _ windows: [AdWindow],
         retiredIDs: Set<String>
@@ -7417,7 +7429,21 @@ actor AnalysisStore {
                 try insertOrReplaceAdWindow(ad)
             }
             if !retiredIDs.isEmpty {
-                try deleteAdWindows(ids: retiredIDs)
+                // Atomic terminal guard on the DELETE path, symmetric to the
+                // INSERT-OR-REPLACE guard above: filter out any retired id whose
+                // live (in-transaction) decisionState is terminal, then delete
+                // the rest. Non-terminal / non-existing ids delete as before.
+                var deletableIDs = Set<String>()
+                for id in retiredIDs {
+                    if let existing = try adWindowDecisionState(id: id),
+                       Self.terminalAdDecisionStates.contains(existing) {
+                        continue
+                    }
+                    deletableIDs.insert(id)
+                }
+                if !deletableIDs.isEmpty {
+                    try deleteAdWindows(ids: deletableIDs)
+                }
             }
             try exec("COMMIT")
         } catch {

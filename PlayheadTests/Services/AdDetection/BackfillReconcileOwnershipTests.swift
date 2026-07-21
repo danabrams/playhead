@@ -583,7 +583,7 @@ struct BackfillReconcileOrchestratorTests {
     }
 }
 
-// MARK: - W1–W4: store-level atomic terminal guard (playhead-w17m)
+// MARK: - W1–W7: store-level atomic terminal guard (playhead-w17m)
 
 // The ud4n detection-level guard (`reconcileBackfillWindows`) computes its
 // `protectedIDs` from a snapshot READ taken OUTSIDE the write transaction. A
@@ -602,6 +602,10 @@ struct BackfillReconcileOrchestratorTests {
 // regardless of what the outer snapshot saw. It composes with (does not replace)
 // the detection-level guard — belt (drop protected from persist set) and
 // suspenders (atomic store backstop).
+//
+// W1–W4 cover the INSERT-OR-REPLACE path; W5–W7 cover the SYMMETRIC guard on the
+// DELETE (retire) path — `retiredIDs` is derived from the same stale snapshot, so
+// a raced terminal id can land in it and must not be hard-deleted either.
 @Suite("playhead-w17m — reconcile store-level atomic terminal guard")
 struct BackfillReconcileTerminalGuardTests {
 
@@ -795,5 +799,91 @@ struct BackfillReconcileTerminalGuardTests {
         // Retired window deleted.
         #expect(!after.contains { $0.id == retireId },
                 "the retiredID must still be deleted — the guard does not abort the transaction")
+    }
+
+    // MARK: W5–W7: symmetric guard on the DELETE (retire) path (playhead-w17m)
+
+    // `reconcileBackfillAdWindows` also hard-DELETEs `retiredIDs`. That set is
+    // computed from the SAME out-of-transaction snapshot the REPLACE guard
+    // distrusts (`AdDetectionService.reconcileBackfillWindows`): an id that was
+    // reconcilable at snapshot time can flip to terminal (`.applied` /
+    // `.reverted`) in the race window and land in `retiredIDs`. An unconditional
+    // DELETE would then drop the just-applied terminal row (losing decisionState
+    // + `wasSkipped`), diverging the DB from the in-memory
+    // `SkipOrchestrator.retireAdWindows` (SkipOrchestrator ~1259), which ALREADY
+    // refuses to retire terminal rows — and a relaunch preload could re-surface
+    // the skipped span. These pin the symmetric store-level DELETE guard: before
+    // deleting, each retired id's live in-transaction decisionState is read and
+    // terminal ids are filtered OUT of the delete.
+
+    // W5: a terminal `.applied` id present in `retiredIDs` is NOT deleted — the
+    // terminal row survives with decisionState + `wasSkipped` intact.
+    @Test("W5: .applied terminal id in retiredIDs is not deleted")
+    func w5AppliedRetireGuarded() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-w17m-w5"
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId))
+
+        let terminalId = "fusion-deadbeefw17m0005"
+        try await store.insertAdWindow(makeTerminalSeed(id: terminalId, assetId: assetId, decisionState: "applied"))
+
+        // Race: the retiredIDs snapshot was taken before the `.applied`
+        // transition, so the now-terminal id is (wrongly) in the retire set.
+        try await store.reconcileBackfillAdWindows([], retiredIDs: [terminalId])
+
+        let row = try await store.fetchAdWindow(id: terminalId)
+        let unwrapped = try #require(row, "the terminal .applied row must survive the retire")
+        #expect(unwrapped.decisionState == "applied",
+                "the DELETE-path guard must leave the terminal .applied row in place")
+        #expect(unwrapped.wasSkipped == true,
+                "wasSkipped history must survive — a relaunch preload must not re-surface a skipped span")
+        #expect(unwrapped.advertiser == "TerminalAdvertiser")
+    }
+
+    // W6: same protection for the other terminal state, `.reverted` (user
+    // listened through the ad — a rerun's retire must never resurface it).
+    @Test("W6: .reverted terminal id in retiredIDs is not deleted")
+    func w6RevertedRetireGuarded() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-w17m-w6"
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId))
+
+        let terminalId = "fusion-deadbeefw17m0006"
+        try await store.insertAdWindow(makeTerminalSeed(id: terminalId, assetId: assetId, decisionState: "reverted"))
+
+        try await store.reconcileBackfillAdWindows([], retiredIDs: [terminalId])
+
+        let row = try await store.fetchAdWindow(id: terminalId)
+        let unwrapped = try #require(row, "the terminal .reverted row must survive the retire")
+        #expect(unwrapped.decisionState == "reverted",
+                "the DELETE-path guard must leave the terminal .reverted row in place")
+        #expect(unwrapped.wasSkipped == true)
+    }
+
+    // W7: the DELETE guard is surgical, not blanket. In one call a terminal
+    // retiredID is preserved while a NON-terminal retiredID is still deleted —
+    // proving the guard is per-row and does not over-guard the retire path
+    // (matches in-memory `retireAdWindows`: terminal skipped, the rest removed).
+    @Test("W7: DELETE guard is per-row — non-terminal retiredID still deleted beside a preserved terminal one")
+    func w7RetireGuardIsPerRow() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-w17m-w7"
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId))
+
+        let terminalId = "fusion-w17m-w7-applied"
+        try await store.insertAdWindow(makeTerminalSeed(id: terminalId, assetId: assetId, decisionState: "applied"))
+
+        let nonTerminalId = "fusion-w17m-w7-candidate"
+        try await store.insertAdWindow(
+            makeReconcileWindow(id: nonTerminalId, assetId: assetId, decisionState: "candidate")
+        )
+
+        try await store.reconcileBackfillAdWindows([], retiredIDs: [terminalId, nonTerminalId])
+
+        let after = try await store.fetchAdWindows(assetId: assetId)
+        #expect(after.contains { $0.id == terminalId && $0.decisionState == "applied" && $0.wasSkipped },
+                "the terminal retiredID must be preserved")
+        #expect(!after.contains { $0.id == nonTerminalId },
+                "a non-terminal retiredID must still be deleted — the guard must not over-guard the retire path")
     }
 }
