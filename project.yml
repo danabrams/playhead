@@ -5,6 +5,13 @@ options:
     iOS: "27.0"
   xcodeVersion: "27.0"
   generateEmptyDirectories: true
+packages:
+  # playhead-b6jq PR 1: vendored trimmed fork of apple/coreai-models
+  # (BSD-3-Clause, LICENSE kept in the vendor dir). Provides the
+  # CoreAILM specialist-runtime product with the FoundationModels-bridge
+  # files excluded — see Vendor/coreai-models/Package.swift header.
+  coreaiModels:
+    path: Vendor/coreai-models
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -24,6 +31,13 @@ targets:
           - "playhead-dogfood-diagnostics-*.json"
     resources:
       - path: Playhead/Resources
+    dependencies:
+      # playhead-b6jq PR 1: first SPM dependency in the app. Pure
+      # plumbing — the only importer is the availability probe
+      # (Services/AdDetection/SpecialistRuntimeAvailability.swift),
+      # which compiles the module out on simulator.
+      - package: coreaiModels
+        product: CoreAILM
     settings:
       base:
         DEVELOPMENT_TEAM: 36Z6VYTT9X
