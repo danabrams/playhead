@@ -2203,6 +2203,30 @@ actor BackfillJobRunner {
         return "\(prefix)-\(hex.prefix(16))"
     }
 
+    /// playhead-ud4n: content-addressed id for a backfill fusion `AdWindow`
+    /// (Design B). Reuses the R7-Fix11 canonical-hash helper so an identical
+    /// rerun — same asset, detector version, and span ordinals — yields an
+    /// identical id. That makes `AnalysisStore.reconcileBackfillAdWindows`'s
+    /// INSERT-OR-REPLACE a true no-op and the reconcile set-difference retire
+    /// nothing: idempotency by construction, no UUID churn, and
+    /// `decision_events.windowId` stays stable across reruns. `analysisAssetId`
+    /// participates in the canonical string so the id is globally unique across
+    /// assets (the same ordinals in two episodes never collide); the `fusion-`
+    /// prefix keeps provenance legible beside the hot path's `UUID` ids and the
+    /// imported `shared-` ids, and lets the reconcilable predicate reason about
+    /// origin.
+    nonisolated static func makeFusionWindowId(
+        analysisAssetId: String,
+        detectorVersion: String,
+        spanStartOrdinal: Int,
+        spanEndOrdinal: Int
+    ) -> String {
+        let canonical =
+            "asset=\(analysisAssetId)|version=\(detectorVersion)|" +
+            "start=\(spanStartOrdinal)|end=\(spanEndOrdinal)"
+        return hashedId(prefix: "fusion", canonical: canonical)
+    }
+
     /// R7-Fix11: stable id for pass-A / pass-B scan rows. Exposed as
     /// `internal static` so tests can assert determinism and
     /// collision-immunity without reaching into the private helpers.

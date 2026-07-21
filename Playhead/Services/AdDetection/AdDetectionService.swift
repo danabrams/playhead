@@ -3850,6 +3850,11 @@ actor AdDetectionService {
         var decisionEvents: [DecisionEvent] = []
         // Phase 6.5 (playhead-4my.16): accumulate AdDecisionResult for step 17 forwarding.
         var fusionDecisionResults: [AdDecisionResult] = []
+        // playhead-ud4n: nonterminal hot-path rows this backfill retired
+        // (superseded and absent from the authoritative fusion output). Set by
+        // the reconcile+persist block below and delivered to the orchestrator in
+        // Step 17 BEFORE the replacement decisions (retire-before-replace).
+        var retiredHotPathWindowIDs: Set<String> = []
         // playhead-xsdz.10: collect each span's scored decision (post fragility /
         // negative-bank, pre hard-gate) so the temporal-regularization pass can
         // see the whole episode's candidate detections together before the
@@ -5291,10 +5296,30 @@ actor AdDetectionService {
             await decisionLogger.record(logEntry)
         }
 
-        // Persist fusion windows.
-        if !fusionWindows.isEmpty {
-            try await store.insertAdWindows(fusionWindows)
-            logger.info("Backfill: persisted \(fusionWindows.count) fusion windows")
+        // Persist fusion windows and retire the nonterminal hot-path rows this
+        // backfill supersedes. playhead-ud4n: backfill is authoritative over the
+        // current detector version's reconcilable rows. `reconcileBackfillWindows`
+        // computes the set-difference (existing reconcilable ids − new fusion
+        // ids); `reconcileBackfillAdWindows` then applies INSERT-OR-REPLACE(new)
+        // + DELETE(retired) in ONE transaction, so a superseded hot false-
+        // positive can no longer survive beside the fusion result and later
+        // auto-skip via the `beginEpisode` preload. Runs even when
+        // `fusionWindows` is empty (backfill found no ads) so a rejected hot
+        // candidate is still retired. `retiredHotPathWindowIDs` is delivered to
+        // the orchestrator in Step 17 (retire-before-replace).
+        let reconciled = try await reconcileBackfillWindows(
+            fusionWindows,
+            analysisAssetId: analysisAssetId
+        )
+        retiredHotPathWindowIDs = reconciled.retiredIDs
+        if !reconciled.windows.isEmpty || !reconciled.retiredIDs.isEmpty {
+            try await store.reconcileBackfillAdWindows(
+                reconciled.windows,
+                retiredIDs: reconciled.retiredIDs
+            )
+            logger.info(
+                "Backfill: persisted \(reconciled.windows.count) fusion windows, retired \(reconciled.retiredIDs.count) superseded hot-path rows"
+            )
         }
 
         // ── Step 15: MetadataExtractor ────────────────────────────────────────
@@ -5390,6 +5415,24 @@ actor AdDetectionService {
                 episodeDuration,
                 analysisAssetId: analysisAssetId
             )
+
+            // playhead-ud4n: retire-before-replace. Deliver the ids this
+            // backfill retired to the orchestrator BEFORE forwarding the
+            // replacement fusion decisions, mirroring the hot path's
+            // retire→receive ordering. The DB rows were already hard-deleted in
+            // the reconcile transaction above, so `AnalysisCoordinator.
+            // finalizeBackfill`'s re-fetch and a future `beginEpisode` preload
+            // can't resurrect them; this call also drops them from the live
+            // in-memory window set so a superseded hot false-positive stops
+            // auto-skipping in-session. Safe to deliver the full set:
+            // `retireAdWindows` no-ops unknown ids and refuses to drop
+            // `.applied` / `.reverted` rows. Unconditional on
+            // `fusionDecisionResults` — a clean backfill (no ads) still retires
+            // a rejected hot candidate.
+            if !retiredHotPathWindowIDs.isEmpty {
+                await orchestrator.retireAdWindows(ids: retiredHotPathWindowIDs)
+                logger.info("Backfill: retired \(retiredHotPathWindowIDs.count) superseded hot-path windows from orchestrator")
+            }
 
             if !fusionDecisionResults.isEmpty {
                 await orchestrator.receiveAdDecisionResults(fusionDecisionResults)
@@ -7218,7 +7261,19 @@ actor AdDetectionService {
         }
 
         return AdWindow(
-            id: UUID().uuidString,
+            // playhead-ud4n: content-addressed id (Design B) instead of a fresh
+            // UUID. Keyed on (assetId, detectorVersion, span ordinals) so an
+            // identical rerun mints an identical id — the reconcile is a no-op
+            // and `AdDetectionService.reconcileBackfillWindows` retires nothing.
+            // Each distinct span still yields a distinct id (ordinals differ),
+            // so the per-window trace/metadata maps keyed on this id stay
+            // collision-free.
+            id: BackfillJobRunner.makeFusionWindowId(
+                analysisAssetId: analysisAssetId,
+                detectorVersion: config.detectorVersion,
+                spanStartOrdinal: span.firstAtomOrdinal,
+                spanEndOrdinal: span.lastAtomOrdinal
+            ),
             analysisAssetId: analysisAssetId,
             startTime: span.startTime,
             endTime: span.endTime,
@@ -7255,6 +7310,98 @@ actor AdDetectionService {
             startEdgeAnchor: startEdgeAnchor.rawValue,
             endEdgeAnchor: endEdgeAnchor.rawValue
         )
+    }
+
+    // MARK: - Backfill ↔ hot-path reconciliation (playhead-ud4n)
+
+    /// playhead-ud4n: nonterminal decision states backfill is authoritative
+    /// over. `.applied` / `.reverted` are terminal user-facing history and are
+    /// deliberately absent. `.suppressed` IS included so a rerun can flip a
+    /// previously-suppressed span and so backfill's own prior output is
+    /// reconciled against the new run (no accumulation).
+    static let reconcilableBackfillDecisionStates: Set<String> = [
+        AdDecisionState.candidate.rawValue,
+        AdDecisionState.confirmed.rawValue,
+        AdDecisionState.suppressed.rawValue
+    ]
+
+    /// playhead-ud4n: boundary states that mark a row as user-owned or
+    /// correction-replay — never reconciled away by backfill. Mirrors the
+    /// local-only boundary states the cross-user-sharing export protects.
+    // Literals (not `Self.correctionReplayBoundaryState`) because a static
+    // stored-property initializer may not reference the covariant `Self` of a
+    // non-final class. "correctionReplay" mirrors `correctionReplayBoundaryState`;
+    // the pair is pinned by the predicate axis test.
+    static let reconcileProtectedBoundaryStates: Set<String> = [
+        "correctionReplay",
+        "userMarked",
+        "userConfirmedSuggested"
+    ]
+
+    /// playhead-ud4n: the *reconcilable invariant* (correctness backbone). A
+    /// persisted `AdWindow` row is reconcilable — backfill is authoritative and
+    /// may retire or replace it — iff ALL hold:
+    ///   • `detectorVersion == detectorVersion` (scope: current detector only;
+    ///     a stale other-version row is left untouched),
+    ///   • `decisionState ∈ {candidate, confirmed, suppressed}` (nonterminal),
+    ///   • `!id.hasPrefix("shared-")` (imported cross-user shares aren't ours),
+    ///   • `boundaryState ∉ {correctionReplay, userMarked,
+    ///     userConfirmedSuggested}` (user-owned / correction-replay preserved).
+    /// Every reconcilable row absent from the authoritative backfill output is
+    /// retired. Factored `static` over its inputs so it is directly
+    /// unit-testable without an actor hop or a live pipeline.
+    static func isReconcilableBackfillWindow(
+        _ window: AdWindow,
+        detectorVersion: String
+    ) -> Bool {
+        window.detectorVersion == detectorVersion
+            && reconcilableBackfillDecisionStates.contains(window.decisionState)
+            && !window.id.hasPrefix("shared-")
+            && !reconcileProtectedBoundaryStates.contains(window.boundaryState)
+    }
+
+    /// playhead-ud4n: reconcile the authoritative backfill fusion output
+    /// against the persisted `ad_windows` rows for this asset (Design B — pure
+    /// set-difference over content-addressed ids, no IoU matcher). Every
+    /// reconcilable existing row (see ``isReconcilableBackfillWindow``) whose id
+    /// is NOT in the new fusion set is retired; the fusion windows are returned
+    /// unchanged for INSERT-OR-REPLACE. Because fusion ids are content-
+    /// addressed, an identical rerun produces identical ids ⇒ an empty retire
+    /// set and a no-op replace (idempotency by construction). A superseded hot
+    /// candidate (its own `UUID` id) is never in the new fusion set, so it is
+    /// always retired — satisfying the FP-retirement AC independent of any
+    /// geometric match quality.
+    func reconcileBackfillWindows(
+        _ fusionWindows: [AdWindow],
+        analysisAssetId: String
+    ) async throws -> (windows: [AdWindow], retiredIDs: Set<String>) {
+        let existing = try await store.fetchAdWindows(assetId: analysisAssetId)
+        var reconcilableIDs = Set<String>()
+        var protectedIDs = Set<String>()
+        for row in existing {
+            if Self.isReconcilableBackfillWindow(row, detectorVersion: config.detectorVersion) {
+                reconcilableIDs.insert(row.id)
+            } else {
+                protectedIDs.insert(row.id)
+            }
+        }
+        // Terminal-collision guard: content-addressed ids are keyed on span
+        // ordinals only (not decisionState), so re-detecting a span the user
+        // already auto-skipped (`.applied`) or listened-through (`.reverted`)
+        // mints the SAME fusion id as the persisted terminal row. A blind
+        // INSERT-OR-REPLACE would clobber that terminal/user-owned/imported/
+        // other-version history. Drop any new window whose id collides with a
+        // protected (non-reconcilable) existing row so the protected row wins —
+        // the same precedence the orchestrator applies (it refuses to reprocess
+        // `.applied` / `.reverted`). Preserves the "terminal history preserved"
+        // AC even on an ad-signal rerun, not just a clean one.
+        let windowsToPersist = fusionWindows.filter { !protectedIDs.contains($0.id) }
+        let newIDs = Set(fusionWindows.map(\.id))
+        // Pure set-difference: every reconcilable existing row NOT re-produced by
+        // this backfill is retired. A reconcilable row re-produced under the same
+        // id is replaced in-place (idempotent), so it is excluded from retire.
+        let retiredIDs = reconcilableIDs.subtracting(newIDs)
+        return (windowsToPersist, retiredIDs)
     }
 
     // MARK: - Read-side correction mask selection (playhead-xsdz.34)
