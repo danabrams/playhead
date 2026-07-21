@@ -93,9 +93,9 @@ struct RediffRefetchStateV28MigrationTests {
         let (store, _) = try await makeTestStoreWithDirectory()
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // Drift guard: head moved 28 → 29 (playhead-hdgk ad_windows edge-anchor
-        // columns); the V28 rediff_refetch_state tables probed below are
-        // unchanged.
-        #expect(AnalysisStore.currentSchemaVersion == 29)
+        // columns) → 30 (playhead-gy2s analysis_jobs reject-advisory columns);
+        // the V28 rediff_refetch_state tables probed below are unchanged.
+        #expect(AnalysisStore.currentSchemaVersion == 30)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())

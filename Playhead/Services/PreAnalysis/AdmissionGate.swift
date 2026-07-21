@@ -196,13 +196,21 @@ enum AdmissionGate {
     ///   - deviceProfile: the per-device-class row (playhead-dh9b).
     ///   - storage: per-class storage admission snapshot (playhead-h7r).
     ///   - transport: network reachability + session + user preference.
+    ///   - transportExempt: playhead-gy2s (RC-2). When `true`, the transport
+    ///     gate (Gate 2) and the cellular slice clamp are skipped entirely.
+    ///     Set by the scheduler for compute-only pre-analysis — on-device
+    ///     transcription of an already-cached file, which performs ZERO
+    ///     network transfer and so must never be blocked (or slice-capped) by
+    ///     Wi-Fi/cellular/unreachable state. Every OTHER gate
+    ///     (thermal/storage/CPU) is evaluated unchanged.
     static func admit(
         job: AdmissionJob,
         profile: QualityProfile,
         deviceClass: DeviceClass,
         deviceProfile: DeviceClassProfile,
         storage: StorageSnapshot,
-        transport: TransportSnapshot
+        transport: TransportSnapshot,
+        transportExempt: Bool = false
     ) -> GateAdmissionDecision {
         // Collect every cause that applies simultaneously so
         // CauseAttributionPolicy can resolve precedence. The algorithm is
@@ -217,8 +225,10 @@ enum AdmissionGate {
             causes.append(.thermal)
         }
 
-        // Gate 2: transport.
-        if let transportCause = transportRejection(transport) {
+        // Gate 2: transport. playhead-gy2s (RC-2): compute-only pre-analysis
+        // performs no network transfer, so `transportExempt` skips this gate
+        // for it. Every other job class is gated exactly as before.
+        if !transportExempt, let transportCause = transportRejection(transport) {
             causes.append(transportCause)
         }
 
@@ -262,7 +272,8 @@ enum AdmissionGate {
             deviceProfile: deviceProfile,
             storage: storage,
             transport: transport,
-            job: job
+            job: job,
+            transportExempt: transportExempt
         )
         return .admit(sliceBytes: slice)
     }
@@ -349,7 +360,8 @@ enum AdmissionGate {
         deviceProfile: DeviceClassProfile,
         storage: StorageSnapshot,
         transport: TransportSnapshot,
-        job: AdmissionJob
+        job: AdmissionJob,
+        transportExempt: Bool = false
     ) -> Int64 {
         let nominal = Int64(deviceProfile.nominalSliceSizeBytes)
 
@@ -373,8 +385,11 @@ enum AdmissionGate {
             storageCeiling = min(storageCeiling, half)
         }
 
-        // Transport ceiling: cellular cap or unlimited.
-        let transportCeiling: Int64 = transport.isCellular ? cellularSliceCapBytes : .max
+        // Transport ceiling: cellular cap or unlimited. playhead-gy2s (RC-2):
+        // a transport-exempt job (compute-only pre-analysis) performs no
+        // transfer, so the cellular byte cap must not shrink its local write
+        // slice — treat transport as unlimited for it.
+        let transportCeiling: Int64 = (transport.isCellular && !transportExempt) ? cellularSliceCapBytes : .max
 
         return min(nominal, cpuCeiling, thermalCeiling, storageCeiling, transportCeiling)
     }
