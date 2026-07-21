@@ -7121,6 +7121,20 @@ actor AnalysisStore {
     // MARK: - CRUD: ad_windows
 
     func insertAdWindow(_ ad: AdWindow) throws {
+        try writeAdWindow(ad, orReplace: false)
+    }
+
+    /// playhead-ud4n: INSERT-OR-REPLACE variant used by the backfill reconcile
+    /// transaction. All 23 columns are authoritative on replace, so a re-run of
+    /// the same content-addressed id overwrites the row wholesale (a true no-op
+    /// when the inputs are unchanged). `ad_windows.id` is a TEXT PK with no
+    /// child FK referencing it, so the REPLACE's implicit delete has no cascade
+    /// side effects.
+    func insertOrReplaceAdWindow(_ ad: AdWindow) throws {
+        try writeAdWindow(ad, orReplace: true)
+    }
+
+    private func writeAdWindow(_ ad: AdWindow, orReplace: Bool) throws {
         // Column positions (1-indexed): id=1 analysisAssetId=2 startTime=3 endTime=4
         // confidence=5 boundaryState=6 decisionState=7 detectorVersion=8 advertiser=9
         // product=10 adDescription=11 evidenceText=12 evidenceStartTime=13
@@ -7129,8 +7143,9 @@ actor AnalysisStore {
         // catalogStoreMatchSimilarity=21 (playhead-epfk)
         // startEdgeAnchor=22 endEdgeAnchor=23 (playhead-hdgk)
         // Keep bind() call indices and this comment in sync when adding columns.
+        let conflictClause = orReplace ? "OR REPLACE " : ""
         let sql = """
-            INSERT INTO ad_windows
+            INSERT \(conflictClause)INTO ad_windows
             (id, analysisAssetId, startTime, endTime, confidence, boundaryState,
              decisionState, detectorVersion, advertiser, product, adDescription,
              evidenceText, evidenceStartTime, metadataSource, metadataConfidence,
@@ -7321,6 +7336,35 @@ actor AnalysisStore {
                 } else {
                     try insertAdWindow(ad)
                 }
+            }
+            if !retiredIDs.isEmpty {
+                try deleteAdWindows(ids: retiredIDs)
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// playhead-ud4n: atomic backfill reconciliation. Sibling of
+    /// `upsertHotPathAdWindows`. In ONE BEGIN…COMMIT/ROLLBACK transaction:
+    /// INSERT-OR-REPLACE each authoritative fusion window (content-addressed ids
+    /// make an unchanged rerun a no-op) then hard-DELETE the retired ids. Either
+    /// both land or neither does, so an interrupted backfill never leaves the
+    /// row set half-reconciled (a superseded hot row deleted while its fusion
+    /// replacement failed to insert, or vice versa). No schema change:
+    /// `ad_windows.id` is a TEXT PK with no child FK, so REPLACE and DELETE are
+    /// free of cascade side effects.
+    func reconcileBackfillAdWindows(
+        _ windows: [AdWindow],
+        retiredIDs: Set<String>
+    ) throws {
+        guard !windows.isEmpty || !retiredIDs.isEmpty else { return }
+        try exec("BEGIN TRANSACTION")
+        do {
+            for ad in windows {
+                try insertOrReplaceAdWindow(ad)
             }
             if !retiredIDs.isEmpty {
                 try deleteAdWindows(ids: retiredIDs)
