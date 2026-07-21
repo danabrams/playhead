@@ -641,6 +641,106 @@ struct ChapterLabelingServiceOperationalFailureTests {
         }
     }
     #endif
+
+    // MARK: - iOS-27 LanguageModelError (playhead-l3v0)
+
+    #if canImport(FoundationModels)
+    /// playhead-l3v0: iOS/macOS 27 throws the NEW top-level `LanguageModelError`
+    /// type, not the legacy `LanguageModelSession.GenerationError`. Before the
+    /// fix, `classify` only cast to `GenerationError`, so an iOS-27 refusal /
+    /// guardrail-violation fell through to `.operational(localizedDescription)`
+    /// — which WOULD be retried (re-tripping the same guardrail) AND counted in
+    /// the au2v.1.24 plan-level operational-rate abort numerator. This drives
+    /// the production `label(...)` seam with the iOS-27 error and asserts BOTH
+    /// route to `.guardrail` and are NOT retried, exactly like the legacy path.
+    /// It compiles against the pre-fix code (`LanguageModelError` is passed as
+    /// an `Error` through the injected closure) and fails at runtime there.
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    @Test("LanguageModelError.refusal / .guardrailViolation (iOS 27) classify to guardrail and are not retried")
+    func languageModelErrorRefusalClassifiesAsGuardrail() async {
+        let cases: [LanguageModelError] = [
+            .refusal(.init(explanation: "test", debugDescription: "test")),
+            .guardrailViolation(.init(debugDescription: "test"))
+        ]
+        for languageModelError in cases {
+            let counter = CallCounter()
+            // Scripted twice; a correct impl stops after the first (no retry).
+            let script = OutcomeScript([
+                .error(languageModelError),
+                .error(languageModelError)
+            ])
+            let service = makeService(counter: counter, script: script)
+            let result = await service.label(makeCandidate())
+
+            #expect(counter.value == 1, "iOS-27 refusal must not be retried")
+            #expect(result.attempts == 1)
+            #expect(result.failureMode == .guardrail)
+            #expect(result.failureMode != .operational)
+            #expect(result.chapter.disposition == .ambiguous)
+            #expect(result.chapter.qualityScore == 0.0)
+        }
+    }
+
+    /// playhead-l3v0: pin the full `LanguageModelError` → `ChapterLabelingError`
+    /// mapping through the production `classify(_:)` seam (the entry point
+    /// `label(...)` uses). Guardrail cases short-circuit; every other case must
+    /// land in a RETRYABLE bucket (matching where the legacy analog routed) so a
+    /// regression that (e.g.) mislabels context-overflow as guardrail — which
+    /// would wrongly skip the retry — is caught. Calls the existing
+    /// `classify(_ error: Error)` (passing `LanguageModelError` as `Error`), so
+    /// it compiles against the pre-fix code and fails there (everything mapped
+    /// to `.operational(localizedDescription)`).
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    @Test("LanguageModelError (iOS 27) classify maps every case to its ChapterLabelingError analog")
+    func languageModelErrorClassifyMapping() {
+        // Buckets with no associated value compare by ==.
+        #expect(
+            ChapterLabelingService.classify(
+                LanguageModelError.contextSizeExceeded(.init(contextSize: 4096, tokenCount: 8192, debugDescription: "t"))
+            ) == .exceededContextWindow
+        )
+        #expect(
+            ChapterLabelingService.classify(
+                LanguageModelError.rateLimited(.init(resetDate: nil, debugDescription: "t"))
+            ) == .rateLimited
+        )
+        #expect(
+            ChapterLabelingService.classify(
+                LanguageModelError.unsupportedGenerationGuide(.init(schemaName: "ChapterLabel", debugDescription: "t"))
+            ) == .decodingFailure
+        )
+        #expect(
+            ChapterLabelingService.classify(
+                LanguageModelError.unsupportedTranscriptContent(.init(unsupportedContent: [], debugDescription: "t"))
+            ) == .decodingFailure
+        )
+
+        // Guardrail bucket carries an associated String — match the case shape.
+        let guardrailCases: [LanguageModelError] = [
+            .refusal(.init(explanation: "t", debugDescription: "t")),
+            .guardrailViolation(.init(debugDescription: "t"))
+        ]
+        for guardrailCase in guardrailCases {
+            guard case .guardrail = ChapterLabelingService.classify(guardrailCase) else {
+                Issue.record("\(guardrailCase) must classify to .guardrail")
+                continue
+            }
+        }
+
+        // Operational bucket also carries an associated String — match the case.
+        let operationalCases: [LanguageModelError] = [
+            .unsupportedLanguageOrLocale(.init(languageCode: Locale.LanguageCode("fr"), debugDescription: "t")),
+            .unsupportedCapability(.init(capability: .reasoning, debugDescription: "t")),
+            .timeout(.init(debugDescription: "t"))
+        ]
+        for operationalCase in operationalCases {
+            guard case .operational = ChapterLabelingService.classify(operationalCase) else {
+                Issue.record("\(operationalCase) must classify to .operational")
+                continue
+            }
+        }
+    }
+    #endif
 }
 
 // MARK: - label() — cancellation
