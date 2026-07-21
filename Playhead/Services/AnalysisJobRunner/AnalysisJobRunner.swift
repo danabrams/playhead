@@ -592,6 +592,23 @@ actor AnalysisJobRunner {
         // without `.completed` returns much earlier).
         let transcriptStageStart = clock()
 
+        // playhead-ajr subscribe-before-start (RC-4): subscribe to the
+        // engine's event stream BEFORE kicking off transcription. `events()`
+        // hands back a fresh, NON-replaying `AsyncStream` continuation
+        // (`TranscriptEngineService.events()`); any `.completed` emitted before
+        // that continuation is registered is silently lost. On the previous
+        // ordering (startTranscription + finishAppending, THEN events()), a
+        // fast engine task could emit `.completed` in the gap — the runner
+        // would miss it, fall through to the sibling 300 s timeout arm below,
+        // and return a spurious `.failed("transcription:zeroCoverage")` after a
+        // multi-minute hang (the flightcast "Operation Interrupted"/hang class
+        // seen under full-suite / device load). Subscribing first closes that
+        // window: the continuation is registered on the engine actor before
+        // `startTranscription` spawns the transcription task, so no completion
+        // can slip past. `events()` reads no post-start state (it only mints a
+        // UUID + continuation), so establishing it early is safe.
+        let transcriptStream = await transcriptEngine.events()
+
         // Fire-and-forget: startTranscription kicks off work internally.
         // `gatedShards` equals `shards` unless `skipEnabled` is also
         // active in `acousticGateConfig`; see the gate evaluator above.
@@ -610,8 +627,6 @@ actor AnalysisJobRunner {
 
         // Observe the event stream for completion, with a 5-minute timeout
         // to avoid hanging indefinitely if the stream never emits .completed.
-        let transcriptStream = await transcriptEngine.events()
-
         let transcriptCoverage: Double = await withTaskGroup(of: Double.self) { [weak self] group in
             // Timeout task
             group.addTask {
