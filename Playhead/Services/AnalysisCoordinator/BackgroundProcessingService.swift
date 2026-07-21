@@ -1058,6 +1058,15 @@ actor BackgroundProcessingService {
             // setup that returned in microseconds and let iOS reclaim the
             // granted background time without any analysis happening.
             // See git blame for context.
+            // playhead-gy2s (RC-1): a bare `wake()` is a no-op if the loop was
+            // never started (sceneless background launch) or is wedged. Ensure
+            // the loop exists, then ACTIVELY drain the eligible queue rather
+            // than only nudging a poll. `runPendingBackfill` below still runs
+            // to keep the BG task alive and confirm the queue drained.
+            await self.analysisWorkScheduler?.ensureSchedulerLoopStarted()
+            if let scheduler = self.analysisWorkScheduler {
+                await scheduler.drainEligible(deadline: ContinuousClock.now + .seconds(25 * 60))
+            }
             await self.analysisWorkScheduler?.wake()
             await self.coordinator.runPendingBackfill()
 
@@ -1567,6 +1576,26 @@ actor BackgroundProcessingService {
                     self.logger.info("Pre-analysis recovery work task cancelled before completion")
                     return
                 }
+                // playhead-gy2s (RC-1 + invariant 6): recovery must DISPATCH,
+                // not just reconcile. `reconcile()` only repairs stale rows —
+                // for a queue of queued-but-unleased jobs every reconcile step
+                // is a no-op, so the pre-fix handler wrote jobsCompleted=0 /
+                // jobsSeen=NULL and the stall stayed invisible. Capture the
+                // eligible baseline for the ledger's `jobsSeen` (BEFORE the
+                // drain mutates state), ensure the scheduler loop is running,
+                // then actively drain the queue within the remaining budget.
+                let jobsSeen = await self.analysisWorkScheduler?.pendingJobCountForLedger() ?? 0
+                await self.analysisWorkScheduler?.ensureSchedulerLoopStarted()
+                if let scheduler = self.analysisWorkScheduler {
+                    await scheduler.drainEligible(deadline: ContinuousClock.now + .seconds(5 * 60))
+                }
+                // Re-check cancellation after the drain: a mid-drain
+                // expiration defers the terminal outcome to the expiration
+                // handler (matches the post-reconcile guard above).
+                guard !Task.isCancelled else {
+                    self.logger.info("Pre-analysis recovery work task cancelled during drain")
+                    return
+                }
                 let recovered = report.expiredLeasesRecovered
                     + report.recoveredStrandedSessionJobs
                     + report.missingFilesUnblocked
@@ -1576,13 +1605,14 @@ actor BackgroundProcessingService {
                     + report.strandedBackfillJobsReset
                     + report.strandedFinalPassJobsReset
                 let outcome: BackgroundTaskRunOutcome =
-                    recovered > 0 ? .recoveredWork : .noOp
+                    (recovered > 0 || jobsSeen > 0) ? .recoveredWork : .noOp
                 // Wait for the row insert to land before the UPDATE.
                 await startRunTask.value
                 await runLedger.finishRun(
                     runId: runId,
                     update: BackgroundTaskRunOutcomeUpdate(
                         outcome: outcome,
+                        jobsSeen: jobsSeen,
                         jobsCompleted: recovered
                     )
                 )

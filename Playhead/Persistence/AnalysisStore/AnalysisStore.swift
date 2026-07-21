@@ -903,7 +903,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 29
+    nonisolated static let currentSchemaVersion = 30
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1578,6 +1578,10 @@ actor AnalysisStore {
             // ad_windows. Additive-only ADD COLUMN with a safe 'unanchored'
             // default. Bumps schema_version to 29.
             try migrateAdWindowEdgeAnchorsV29IfNeeded()
+            // playhead-gy2s (RC-2): admission-reject advisory columns on
+            // analysis_jobs so silent scheduler rejections leave a durable,
+            // queryable trace. Additive-only, nullable. Bumps schema_version to 30.
+            try migrateAdmissionRejectReasonV30IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1856,6 +1860,11 @@ actor AnalysisStore {
         // gated on `tableExists("ad_windows")` so seeded fixtures without the
         // table still reach v29.
         try migrateAdWindowEdgeAnchorsV29IfNeeded()
+        // playhead-gy2s (v30): mirror the admission-reject advisory column
+        // migration into the ladder seam. Helper is fully idempotent and
+        // gated on `tableExists("analysis_jobs")` so seeded fixtures without
+        // the table still reach v30.
+        try migrateAdmissionRejectReasonV30IfNeeded()
     }
     #endif
 
@@ -4439,6 +4448,41 @@ actor AnalysisStore {
             )
         }
         try setSchemaVersion(29)
+    }
+
+    /// playhead-gy2s (V30, RC-2): add the admission-reject advisory columns
+    /// to `analysis_jobs`. When the admission gate hard-rejects a pass, the
+    /// scheduler writes the surfaced cause + wall-clock time here (UPDATE in
+    /// place — never appended, so a job stuck rejecting every 30 s does not
+    /// spam rows), making a perpetual rejection diagnosable and letting the
+    /// Activity surface show "waiting for storage / Wi-Fi" instead of a
+    /// silent "Nothing running." Both columns are nullable with no default
+    /// (NULL = "no reject recorded"), so pre-V30 rows backfill to NULL and no
+    /// data is lost.
+    ///
+    /// Appended at the END of the table (SQLite's only supported ADD COLUMN
+    /// position) at trailing indices 23 / 24 — AFTER the uzdq lease columns
+    /// (21 / 22). `readJob` reads positional indices 0..22 only, so the new
+    /// trailing columns leave every existing `SELECT *` reader correct.
+    /// `addColumnIfNeeded` makes each ALTER idempotent; `tableExists` guards
+    /// the ladder-only seam where a seeded fixture may omit `analysis_jobs`.
+    /// `setSchemaVersion(30)` runs unconditionally so the version bumps even
+    /// for such fixtures.
+    private func migrateAdmissionRejectReasonV30IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 30 else { return }
+        if try tableExists("analysis_jobs") {
+            try addColumnIfNeeded(
+                table: "analysis_jobs",
+                column: "lastRejectReason",
+                definition: "TEXT"
+            )
+            try addColumnIfNeeded(
+                table: "analysis_jobs",
+                column: "lastRejectAt",
+                definition: "REAL"
+            )
+        }
+        try setSchemaVersion(30)
     }
 
     /// Upsert the durable re-fetch attempt state for one asset.
@@ -8261,6 +8305,66 @@ actor AnalysisStore {
         bind(stmt, 4, Date().timeIntervalSince1970)
         bind(stmt, 5, jobId)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-gy2s (RC-2): record why the admission gate hard-rejected a
+    /// pre-analysis pass, as a durable advisory on the job row. UPDATED in
+    /// place (never appended) so a job rejecting on every 30 s poll refreshes
+    /// only `lastRejectAt` rather than spamming rows. Deliberately does NOT
+    /// bump `updatedAt`: the advisory is orthogonal to the lease/lifecycle
+    /// clock that `fetchLatestJobForEpisode` and the stranded reaper key on,
+    /// and a reject is not a state transition. A 0-row UPDATE (row already
+    /// gone / dispatched) is a benign no-op.
+    func recordJobAdmissionReject(jobId: String, reason: String, at: Double) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET lastRejectReason = ?, lastRejectAt = ?
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, reason)
+        bind(stmt, 2, at)
+        bind(stmt, 3, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-gy2s (RC-2): read the admission-reject advisory for a job, or
+    /// `nil` when none has been recorded (fresh row, or the job dispatched
+    /// before ever being rejected). Consumed by diagnostics + the Activity
+    /// surface so "Nothing running" can become "waiting for storage / Wi-Fi".
+    func fetchJobAdmissionReject(jobId: String) throws -> (reason: String, at: Double)? {
+        let sql = "SELECT lastRejectReason, lastRejectAt FROM analysis_jobs WHERE jobId = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        guard let reason = optionalText(stmt, 0) else { return nil }
+        let at = optionalDouble(stmt, 1) ?? 0
+        return (reason, at)
+    }
+
+    /// playhead-gy2s (RC-3): re-stamp queued rows that were enqueued under an
+    /// older scheduler epoch to the current epoch so orphan-recovery routing
+    /// keys on a consistent `{generationID, schedulerEpoch}` for the current
+    /// session. Queued rows hold no lease (guarded by `leaseOwner IS NULL`),
+    /// so this only advances routing metadata — it never disturbs a live
+    /// worker's bookkeeping. Returns the number of rows re-stamped. This is a
+    /// correctness bundle for RC-3, NOT the dispatch fix: dispatch eligibility
+    /// (`fetchNextEligibleJob`) never consulted `schedulerEpoch`.
+    func restampQueuedJobEpochs(to currentEpoch: Int, now: Double) throws -> Int {
+        let sql = """
+            UPDATE analysis_jobs
+            SET schedulerEpoch = ?, updatedAt = ?
+            WHERE state = 'queued' AND leaseOwner IS NULL AND schedulerEpoch < ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, currentEpoch)
+        bind(stmt, 2, now)
+        bind(stmt, 3, currentEpoch)
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
     }
 
     func updateJobAnalysisAssetId(jobId: String, analysisAssetId: String) throws {
