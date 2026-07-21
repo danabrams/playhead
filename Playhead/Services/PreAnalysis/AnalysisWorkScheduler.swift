@@ -714,6 +714,17 @@ actor AnalysisWorkScheduler {
             jobType: "preAnalysis"
         )
         let now = clock().timeIntervalSince1970
+        // playhead-gy2s (RC-3, orphan-recovery-routing correctness — NOT the
+        // dispatch fix): stamp the row with the current scheduler epoch and a
+        // fresh generation ID at enqueue so a later orphan sweep routes the
+        // row under the session it was minted in, rather than the epoch-0 /
+        // blank sentinel a bare enqueue used to leave. Dispatch eligibility
+        // (`fetchNextEligibleJob`) never consulted `schedulerEpoch`, so this
+        // changes no dispatch behavior. Safe because the lease acquisition
+        // overwrites `generationID` with its own UUID, and nothing branches on
+        // the empty-string sentinel (the live-lease check is
+        // `leaseOwner IS NOT NULL`).
+        let currentEpoch = (try? await store.fetchSchedulerEpoch()) ?? 0
         let job = AnalysisJob(
             jobId: UUID().uuidString,
             jobType: "preAnalysis",
@@ -735,7 +746,9 @@ actor AnalysisWorkScheduler {
             leaseExpiresAt: nil,
             lastErrorCode: nil,
             createdAt: now,
-            updatedAt: now
+            updatedAt: now,
+            generationID: UUID().uuidString,
+            schedulerEpoch: currentEpoch
         )
         do {
             try await store.insertJob(job)
@@ -1557,54 +1570,7 @@ actor AnalysisWorkScheduler {
     func processNextDispatchableJobForTesting(
         cancelAfterRunnerStart cause: InternalMissCause? = nil
     ) async -> Bool {
-        guard config.isEnabled else { return false }
-
-        let admission = await currentLaneAdmission()
-        guard !admission.pauseAllWork else { return false }
-        guard !admissionBlocksDeferred() else { return false }
-
-        let deferredWorkAllowed = admission.policy.allowSoonLane
-            || admission.policy.allowBackgroundLane
-        let now = clock().timeIntervalSince1970
-
-        guard let selected = await selectNextDispatchableJob(
-            deferredWorkAllowed: deferredWorkAllowed,
-            now: now
-        ) else {
-            return false
-        }
-
-        let job = selected.job
-        if job.jobType != "playback",
-           !admission.allowsDeferredJob(
-                desiredCoverageSec: job.desiredCoverageSec,
-                t2Threshold: config.t2DepthSeconds
-           ) {
-            return false
-        }
-
-        guard canAdmit(job: job) else { return false }
-
-        let gateDecision = await evaluateAdmissionGate(for: job)
-        switch gateDecision {
-        case .reject:
-            return false
-        case .admit:
-            break
-        }
-
-        if job.schedulerLane == .now, let preempt = preemptionHandler {
-            await preempt.preemptLowerLanes(for: job.schedulerLane)
-        }
-
-        didStart(job: job)
-        defer { didFinish(job: job) }
-        await processJob(
-            job,
-            cascadeWindow: selected.cascadeWindow,
-            testCancelAfterRunnerStart: cause
-        )
-        return true
+        await runSingleDispatchPass(cancelAfterRunnerStart: cause)
     }
 
     /// Test-only accessor for the live playhead position field.
@@ -2009,6 +1975,105 @@ actor AnalysisWorkScheduler {
             guard let self else { return }
             await self.runLoop()
         }
+    }
+
+    /// playhead-gy2s (RC-1): start the scheduler loop only if it is not
+    /// already running. Production normally boots the loop from
+    /// `PlayheadRuntime`'s SwiftUI `.task`, but a background launch with no
+    /// scene may never fire that view modifier — leaving `wake()` a no-op
+    /// against a loop that was never started, so eligible work sits forever.
+    /// The BG-task handlers call this before draining so the loop exists.
+    /// Idempotent: a live (non-cancelled) loop task is left untouched;
+    /// `startSchedulerLoop()` would otherwise cancel-and-restart it.
+    func ensureSchedulerLoopStarted() {
+        if let task = schedulerTask, !task.isCancelled { return }
+        startSchedulerLoop()
+    }
+
+    /// playhead-gy2s (RC-1): actively drain the eligible queue during a
+    /// background wake. The BG-task handlers used to only `wake()` the loop
+    /// and poll `fetchPendingJobCount` — but if the loop had never started (a
+    /// sceneless background launch), or was silently rejecting compute-only
+    /// pre-analysis (RC-2), pending never dropped and the whole OS budget
+    /// burned with 0 jobs done (`task_expired`, jobsCompleted=0). This method
+    /// repeatedly runs one standard dispatch pass until the queue has nothing
+    /// dispatchable OR the OS deadline / cancellation stops it. Each pass
+    /// awaits its job to completion, so draining is serial and the per-lane
+    /// cap never blocks the next pass. Budget-aware: honors `Task.isCancelled`
+    /// (BG expiration) and the caller-supplied `deadline`. Safe to run
+    /// alongside the long-lived `runLoop()` — dispatch is lease-guarded, so a
+    /// racing pass on the same job cleanly loses the CAS and skips.
+    func drainEligible(deadline: ContinuousClock.Instant) async {
+        guard config.isEnabled else { return }
+        while !Task.isCancelled, ContinuousClock.now < deadline {
+            let dispatched = await runSingleDispatchPass()
+            if !dispatched { break }
+        }
+    }
+
+    /// playhead-gy2s (RC-1): run exactly one standard dispatch pass and return
+    /// whether it dispatched a job. Extracted from the former
+    /// `processNextDispatchableJobForTesting` body so the production
+    /// background drain (`drainEligible`) and the DEBUG single-pass test seam
+    /// share one code path. Mirrors the runLoop's per-iteration standard
+    /// dispatch (admission → selection → lane/gate checks → lease + run),
+    /// minus the loop's foreground-catchup / acoustic-promotion / shadow-lane
+    /// side channels. Returns `false` (dispatched nothing) when work is paused,
+    /// deferred-blocked, the queue has no eligible job, the lane is at
+    /// capacity, or the admission gate rejects — the same conditions under
+    /// which the loop would sleep and re-poll.
+    @discardableResult
+    private func runSingleDispatchPass(
+        cancelAfterRunnerStart cause: InternalMissCause? = nil
+    ) async -> Bool {
+        guard config.isEnabled else { return false }
+
+        let admission = await currentLaneAdmission()
+        guard !admission.pauseAllWork else { return false }
+        guard !admissionBlocksDeferred() else { return false }
+
+        let deferredWorkAllowed = admission.policy.allowSoonLane
+            || admission.policy.allowBackgroundLane
+        let now = clock().timeIntervalSince1970
+
+        guard let selected = await selectNextDispatchableJob(
+            deferredWorkAllowed: deferredWorkAllowed,
+            now: now
+        ) else {
+            return false
+        }
+
+        let job = selected.job
+        if job.jobType != "playback",
+           !admission.allowsDeferredJob(
+                desiredCoverageSec: job.desiredCoverageSec,
+                t2Threshold: config.t2DepthSeconds
+           ) {
+            return false
+        }
+
+        guard canAdmit(job: job) else { return false }
+
+        let gateDecision = await evaluateAdmissionGate(for: job)
+        switch gateDecision {
+        case .reject:
+            return false
+        case .admit:
+            break
+        }
+
+        if job.schedulerLane == .now, let preempt = preemptionHandler {
+            await preempt.preemptLowerLanes(for: job.schedulerLane)
+        }
+
+        didStart(job: job)
+        defer { didFinish(job: job) }
+        await processJob(
+            job,
+            cascadeWindow: selected.cascadeWindow,
+            testCancelAfterRunnerStart: cause
+        )
+        return true
     }
 
     /// Stop the scheduler loop and any running job.
@@ -2626,14 +2691,53 @@ actor AnalysisWorkScheduler {
             estimatedWriteBytes: estimatedBytes
         )
 
-        return AdmissionGate.admit(
+        // playhead-gy2s (RC-2): a pre-analysis job whose input file is already
+        // on disk performs on-device transcription with ZERO network transfer.
+        // Because a background-lane job maps to a `.maintenance` transport
+        // session, such work was being mis-gated as a Wi-Fi-only transfer and
+        // silently rejected on cellular / unreachable — wedging the whole
+        // queue with eligible work and nothing running. Detect that class here
+        // and exempt ONLY the transport gate; storage / thermal / battery are
+        // unchanged.
+        // (Split rather than folded into `&&` because the RHS is an
+        // autoclosure that cannot host an `await`.)
+        let isComputeOnlyPreAnalysis: Bool
+        if job.jobType == "preAnalysis" {
+            isComputeOnlyPreAnalysis = (await downloadManager.cachedFileURL(for: job.episodeId)) != nil
+        } else {
+            isComputeOnlyPreAnalysis = false
+        }
+
+        let decision = AdmissionGate.admit(
             job: admissionJob,
             profile: profile,
             deviceClass: deviceClass,
             deviceProfile: deviceProfile,
             storage: storage,
-            transport: transport
+            transport: transport,
+            transportExempt: isComputeOnlyPreAnalysis
         )
+
+        // playhead-gy2s (RC-2): make the reject OBSERVABLE. On a hard reject we
+        // write a durable advisory reason to the job row (UPDATE in place, not
+        // an append — so a job that keeps rejecting every 30 s refreshes one
+        // row instead of spamming). This turns a silent "Nothing running" into
+        // a diagnosable "waiting for storage / Wi-Fi". Best-effort: a store
+        // hiccup must not change the admission verdict.
+        if case .reject(let cause) = decision {
+            let rejectedAt = clock().timeIntervalSince1970
+            do {
+                try await store.recordJobAdmissionReject(
+                    jobId: job.jobId,
+                    reason: cause.rawValue,
+                    at: rejectedAt
+                )
+            } catch {
+                logger.warning("Failed to record admission-reject advisory for job \(job.jobId): \(error)")
+            }
+        }
+
+        return decision
     }
 
     /// playhead-1iq1: build a per-admission `StorageSnapshot` from the

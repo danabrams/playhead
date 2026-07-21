@@ -55,8 +55,10 @@ struct AdWindowEdgeAnchorsV29MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        // Drift guard: head is exactly 29 for this bead.
-        #expect(AnalysisStore.currentSchemaVersion == 29)
+        // Drift guard: head moved 29 → 30 (playhead-gy2s analysis_jobs
+        // reject-advisory columns); the edge-anchor columns probed below are
+        // unchanged.
+        #expect(AnalysisStore.currentSchemaVersion == 30)
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "startEdgeAnchor"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "endEdgeAnchor"))
     }
