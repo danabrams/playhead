@@ -7391,6 +7391,32 @@ actor AnalysisStore {
         }
     }
 
+    /// playhead-w17m: decision states that are terminal user-facing history — a
+    /// skip that was applied to the listener (`.applied`) or an ad the user
+    /// listened through (`.reverted`). Held as raw string literals (not
+    /// `AdDecisionState`) because the persistence layer is deliberately decoupled
+    /// from the orchestrator's decision enum for I/O (see `AdWindow.decisionState`
+    /// / `startEdgeAnchor`). Pinned to `AdDecisionState.applied.rawValue` /
+    /// `.reverted.rawValue`; the SAME terminal set `SkipOrchestrator.retireAdWindows`
+    /// guards on (SkipOrchestrator ~1264) and that
+    /// `AdDetectionService.reconcilableBackfillDecisionStates` excludes.
+    static let terminalAdDecisionStates: Set<String> = ["applied", "reverted"]
+
+    /// playhead-w17m: read a single ad_window's current `decisionState` by id.
+    /// Deliberately a lightweight `SELECT decisionState` (not `fetchAdWindow`'s
+    /// `SELECT *`) so the reconcile terminal-guard read is cheap. Returns nil when
+    /// no such row exists. Runs on the store's single connection, so when called
+    /// inside a `BEGIN…COMMIT` it observes that transaction's live (uncommitted)
+    /// state — which is exactly why it closes the ud4n snapshot race.
+    private func adWindowDecisionState(id: String) throws -> String? {
+        let sql = "SELECT decisionState FROM ad_windows WHERE id = ? LIMIT 1"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return text(stmt, 0)
+    }
+
     /// playhead-ud4n: atomic backfill reconciliation. Sibling of
     /// `upsertHotPathAdWindows`. In ONE BEGIN…COMMIT/ROLLBACK transaction:
     /// INSERT-OR-REPLACE each authoritative fusion window (content-addressed ids
@@ -7400,6 +7426,36 @@ actor AnalysisStore {
     /// replacement failed to insert, or vice versa). No schema change:
     /// `ad_windows.id` is a TEXT PK with no child FK, so REPLACE and DELETE are
     /// free of cascade side effects.
+    ///
+    /// playhead-w17m — store-level atomic terminal guard. Before each
+    /// INSERT-OR-REPLACE, read the target id's LIVE (in-transaction) decisionState
+    /// and SKIP the write when it is terminal (`.applied` / `.reverted`), leaving
+    /// the terminal row untouched. `AdDetectionService.reconcileBackfillWindows`
+    /// already drops protected ids from the persist set, but it computes that
+    /// protected set from a snapshot read taken OUTSIDE this transaction: a
+    /// `candidate → .applied` transition landing between that snapshot and this
+    /// write is invisible to it, and because fusion ids are content-addressed
+    /// (ordinal-keyed, not decisionState-keyed) the rerun mints the SAME id, so a
+    /// blind REPLACE would clobber the just-applied terminal row back to
+    /// `.confirmed` (losing `wasSkipped`) — corrupting DB history. This guard runs
+    /// against live DB state INSIDE the transaction, so it closes that race
+    /// regardless of what the outer snapshot saw. It composes with (does not
+    /// replace) the detection-level guard — belt and suspenders. Non-existing id
+    /// or non-terminal existing → write as before (idempotency preserved).
+    ///
+    /// The DELETE path carries the SAME guard, symmetrically. `retiredIDs` is
+    /// computed from that OUT-OF-TRANSACTION snapshot too, so an id that was
+    /// reconcilable at snapshot time can flip to terminal (`.applied` /
+    /// `.reverted`) in the race window and land in it — and an unconditional
+    /// DELETE would drop the just-applied terminal row's user-facing history
+    /// (`decisionState` + `wasSkipped`), from which a relaunch preload could
+    /// re-surface the span, even though the in-memory
+    /// `SkipOrchestrator.retireAdWindows` (SkipOrchestrator ~1259) ALREADY
+    /// refuses to retire terminal rows. So before deleting, each retired id's
+    /// LIVE in-transaction decisionState is read via the same helper and terminal
+    /// ids are filtered OUT of the delete (non-terminal / non-existing ids delete
+    /// as before). This keeps the store's DELETE path matching the in-memory
+    /// retire guard, atomically on the same connection.
     func reconcileBackfillAdWindows(
         _ windows: [AdWindow],
         retiredIDs: Set<String>
@@ -7408,10 +7464,30 @@ actor AnalysisStore {
         try exec("BEGIN TRANSACTION")
         do {
             for ad in windows {
+                // Atomic terminal guard: never overwrite an existing row whose
+                // live decisionState is terminal.
+                if let existing = try adWindowDecisionState(id: ad.id),
+                   Self.terminalAdDecisionStates.contains(existing) {
+                    continue
+                }
                 try insertOrReplaceAdWindow(ad)
             }
             if !retiredIDs.isEmpty {
-                try deleteAdWindows(ids: retiredIDs)
+                // Atomic terminal guard on the DELETE path, symmetric to the
+                // INSERT-OR-REPLACE guard above: filter out any retired id whose
+                // live (in-transaction) decisionState is terminal, then delete
+                // the rest. Non-terminal / non-existing ids delete as before.
+                var deletableIDs = Set<String>()
+                for id in retiredIDs {
+                    if let existing = try adWindowDecisionState(id: id),
+                       Self.terminalAdDecisionStates.contains(existing) {
+                        continue
+                    }
+                    deletableIDs.insert(id)
+                }
+                if !deletableIDs.isEmpty {
+                    try deleteAdWindows(ids: deletableIDs)
+                }
             }
             try exec("COMMIT")
         } catch {
