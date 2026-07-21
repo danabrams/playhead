@@ -112,7 +112,10 @@ struct SearchRateLimitTests {
         #expect(secondHits == 1, "second same-query call should hit the cache; saw \(secondHits) total search requests")
     }
 
-    @Test("30 rapid-fire searches across distinct terms do not crash or hang and complete within a bounded deadline")
+    @Test(
+        "30 rapid-fire searches across distinct terms do not crash or hang and all complete",
+        .timeLimit(.minutes(1))
+    )
     func rapidFireDistinctTermsDoNotCrashOrHang() async throws {
         let (session, stub) = makeStubbedSession()
         defer { stub.release() }
@@ -140,15 +143,26 @@ struct SearchRateLimitTests {
         let queries = (0 ..< 30).map { "Query-\($0)" }
 
         // Production rate limiter is 3 s/request — a fully serialized
-        // burst of 30 distinct queries would take ~90 s. We bound this
-        // test's wall-clock budget at 8 s and dispatch each search
-        // inside a child Task. Each gets a 200ms slice; if the actor
-        // has not produced a result we cancel that task and move on.
+        // burst of 30 distinct queries would take ~90 s. Each search is
+        // dispatched inside a child Task with a 200 ms cancellation slice
+        // so a rate-limited caller unblocks promptly instead of sitting
+        // out the full interval; the slice is a latency bound, NOT an
+        // assertion.
+        //
+        // playhead deflake2: the previous version asserted a fixed
+        // `elapsed < 8.0` wall-clock budget. That deadline only trips
+        // under full-suite cooperative-pool saturation (the burst is
+        // ~0.03 s in isolation, ~0.5 s under local CPU load) — a
+        // load-dependent flake, not a real regression. The deterministic
+        // no-hang signal is that the structured `withTaskGroup` returns
+        // only after ALL 30 child tasks have completed; if the actor
+        // deadlocked, the group would never drain and the
+        // `.timeLimit(.minutes(1))` trait fails the test instead. So we
+        // key off the real completion signal (`outcomes.count == 30`) and
+        // let the time-limit trait be the hang backstop.
         // The test asserts:
         //   * No crash (the process is still alive at test end)
-        //   * Every caller's task either returned or was cancelled
-        //   * The whole burst returned within the budget (no hang)
-        let start = Date.now
+        //   * Every caller's task completed (the group drained all 30)
         let outcomes = await withTaskGroup(of: Bool.self) { group -> [Bool] in
             for q in queries {
                 group.addTask {
@@ -170,8 +184,12 @@ struct SearchRateLimitTests {
             }
             return collected
         }
-        let elapsed = Date.now.timeIntervalSince(start)
+        // The group draining all 30 children is the deterministic no-hang
+        // proof — no wall-clock deadline to race under load. Each child
+        // returns unconditionally after its search task resolves or is
+        // cancelled, so `count == 30` (every child ran to completion) is
+        // the only load-independent signal; the `.timeLimit` trait is the
+        // hang backstop.
         #expect(outcomes.count == 30)
-        #expect(elapsed < 8.0, "burst took \(elapsed)s; expected to be bounded")
     }
 }
