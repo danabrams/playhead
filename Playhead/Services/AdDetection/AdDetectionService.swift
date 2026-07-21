@@ -497,6 +497,21 @@ struct AdDetectionConfig: Sendable {
     /// enqueue guard is the sole reader.
     let specialistScanEnabled: Bool
 
+    /// playhead-b6jq PR 5 (Phase B2): master flag for the specialist MARK
+    /// COMPOSE step — turning PR4's persisted raw `specialist_scan_results` into
+    /// user-visible MARK-ONLY banner marks (`SpecialistMarkComposer`: τ=0.7
+    /// filter → merge → 70%-overlap dedupe → emit `AdWindow`s stamped
+    /// `detectorVersion="specialist-ft-v2"`, `eligibilityGate=markOnly`). When
+    /// `false` (the shipped default) BOTH compose sites — `runBackfill`'s Step 18
+    /// and `BackfillJobRunner.runSpecialistHostReadScan`'s tail — short-circuit
+    /// before any fetch/compose/write, so zero `ad_windows` rows are written, no
+    /// banner surfaces, and every FM path is byte-identical. Composed marks are
+    /// ALWAYS mark-only and can NEVER reach auto-skip; auto-skip stays
+    /// deterministic-only. Independent of `specialistScanEnabled`: compose reads
+    /// only persisted rows + existing windows (no model re-run), so a build can
+    /// scan without composing, or (once rows exist) compose without re-scanning.
+    let specialistMarkComposeEnabled: Bool
+
     /// playhead-xsdz.34: master flag for the user-correction READ side (the
     /// per-atom/per-span `.userVetoed` mask). When `false` (the production
     /// default), both `AtomEvidenceProjector` call sites inject
@@ -763,6 +778,7 @@ struct AdDetectionConfig: Sendable {
         rediffSlotShadowEnabled: Bool = false,
         specialistShadowEnabled: Bool = false,
         specialistScanEnabled: Bool = false,
+        specialistMarkComposeEnabled: Bool = false,
         userCorrectionReadSideEnabled: Bool = false,
         stingerRefinementEnabled: Bool = true,
         lexicalAnchorRefinementEnabled: Bool = false,
@@ -834,6 +850,7 @@ struct AdDetectionConfig: Sendable {
         self.rediffSlotShadowEnabled = rediffSlotShadowEnabled
         self.specialistShadowEnabled = specialistShadowEnabled
         self.specialistScanEnabled = specialistScanEnabled
+        self.specialistMarkComposeEnabled = specialistMarkComposeEnabled
         self.userCorrectionReadSideEnabled = userCorrectionReadSideEnabled
         self.stingerRefinementEnabled = stingerRefinementEnabled
         self.lexicalAnchorRefinementEnabled = lexicalAnchorRefinementEnabled
@@ -893,6 +910,7 @@ struct AdDetectionConfig: Sendable {
         rediffSlotShadowEnabled: false,
         specialistShadowEnabled: false,  // playhead-dsbc (Phase B1): specialist-shadow plumbing ships OFF and fully inert; live runtime is phone-gated Phase B2
         specialistScanEnabled: false,  // playhead-b6jq (PR 4): host-read scan phase ships OFF and fully inert (persist-only, acts on nothing); PR 5 consumes the rows
+        specialistMarkComposeEnabled: false,  // playhead-b6jq (PR 5): mark-compose ships OFF and fully inert (zero ad_windows writes, byte-identical); flip after corpus A/B
         userCorrectionReadSideEnabled: false,  // playhead-xsdz.34: read side ships OFF; xsdz.36 flips it after the corpus A/B
         stingerRefinementEnabled: true,
         lexicalAnchorRefinementEnabled: false,
@@ -5458,6 +5476,50 @@ actor AdDetectionService {
             }
         }
 
+        // ── Step 18: Specialist mark composition (playhead-b6jq PR5) ──────────
+        // Turn PR4's persisted raw `specialist_scan_results` into user-visible
+        // MARK-ONLY banner marks. Hard-gated on `specialistMarkComposeEnabled`
+        // (default OFF): flag-off short-circuits BEFORE any fetch/compose/write,
+        // so the compose path is fully skipped and this backfill is byte-identical
+        // to pre-PR5 (zero `ad_windows` writes, no banner). Runs BEFORE
+        // `AnalysisCoordinator.finalizeBackfill`'s re-fetch so composed marks reach
+        // the orchestrator in-session; a fresh `beginEpisode` preload picks them up
+        // on cross-launch (confidence ≥ 0.70 auto-clears the preload floor).
+        //
+        // Compose reads only persisted rows + existing windows — no model re-run,
+        // no FM coupling — so the composer is a standalone pure type. The version-
+        // scoped `reconcileSpecialistMarks` (pinned to "specialist-ft-v2") cannot
+        // clobber FM / user / shared marks, and content-addressed ids make a
+        // recompose idempotent. Timing note (blueprint §9): on the FIRST analysis
+        // the async scan job may not have drained yet, so this composes nothing and
+        // marks appear on the next `beginEpisode`/re-analysis — acceptable for a
+        // background-scan feature; the runner-tail compose site mitigates by
+        // persisting marks the moment scan rows land.
+        if config.specialistMarkComposeEnabled {
+            let scanRows = try await store.fetchSpecialistScanResults(analysisAssetId: analysisAssetId)
+            if !scanRows.isEmpty {
+                let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+                let specialistMarks = SpecialistMarkComposer.compose(
+                    scanRows: scanRows,
+                    existingWindows: existingWindows,
+                    analysisAssetId: analysisAssetId
+                )
+                let reconciledSpecialist = try await reconcileSpecialistMarks(
+                    specialistMarks,
+                    analysisAssetId: analysisAssetId
+                )
+                if !reconciledSpecialist.windows.isEmpty || !reconciledSpecialist.retiredIDs.isEmpty {
+                    try await store.reconcileBackfillAdWindows(
+                        reconciledSpecialist.windows,
+                        retiredIDs: reconciledSpecialist.retiredIDs
+                    )
+                    logger.info(
+                        "Backfill Step 18: composed \(reconciledSpecialist.windows.count) specialist mark-only windows, retired \(reconciledSpecialist.retiredIDs.count) stale specialist rows"
+                    )
+                }
+            }
+        }
+
         // ── Post-pipeline: priors + coverage watermark ────────────────────────
 
         if podcastId.isEmpty {
@@ -7419,6 +7481,67 @@ actor AdDetectionService {
         // id is replaced in-place (idempotent), so it is excluded from retire.
         let retiredIDs = reconcilableIDs.subtracting(newIDs)
         return (windowsToPersist, retiredIDs)
+    }
+
+    // MARK: - Specialist mark reconciliation (playhead-b6jq PR5)
+
+    /// playhead-b6jq PR 5: detector version stamped on every specialist mark.
+    /// Re-exported from `SpecialistMarkComposer.detectorVersion` (single source of
+    /// truth) so the version-scoped reconcile below and the composer agree by
+    /// construction. Because `isReconcilableBackfillWindow` scopes to an exact
+    /// `detectorVersion`, specialist marks (`"specialist-ft-v2"`) are INVISIBLE to
+    /// the FM reconcile (`"detection-v1"`) and vice versa — neither can clobber
+    /// the other.
+    static let specialistDetectorVersion = SpecialistMarkComposer.detectorVersion
+
+    /// playhead-b6jq PR 5: pure set-difference reconcile for specialist marks,
+    /// scoped to `detectorVersion == "specialist-ft-v2"`. The exact mirror of
+    /// `reconcileBackfillWindows`' body — same content-addressed set-difference,
+    /// same terminal-collision guard — but pinned to the specialist version via
+    /// `isReconcilableBackfillWindow(_,detectorVersion:)`. Factored `static` over
+    /// its inputs so BOTH compose sites (the service's Step 18 and
+    /// `BackfillJobRunner.runSpecialistHostReadScan`'s tail, which has no service
+    /// instance) share ONE reconcile invariant, and so it is directly unit-testable
+    /// without an actor hop.
+    ///
+    /// Cannot clobber FM / `shared-` / user-owned rows: those are never
+    /// reconcilable under the specialist version, so they land in `protectedIDs`
+    /// and never in the retire set. Idempotent: content-addressed ids mean an
+    /// identical recompose retires nothing and replaces in place.
+    static func reconcileSpecialistMarkSets(
+        newMarks: [AdWindow],
+        existingWindows: [AdWindow]
+    ) -> (windows: [AdWindow], retiredIDs: Set<String>) {
+        var reconcilableIDs = Set<String>()
+        var protectedIDs = Set<String>()
+        for row in existingWindows {
+            if isReconcilableBackfillWindow(row, detectorVersion: specialistDetectorVersion) {
+                reconcilableIDs.insert(row.id)
+            } else {
+                protectedIDs.insert(row.id)
+            }
+        }
+        // Terminal-collision guard (mirrors reconcileBackfillWindows): drop any new
+        // mark whose content-addressed id collides with a protected (non-
+        // reconcilable) existing row so the protected row wins.
+        let windowsToPersist = newMarks.filter { !protectedIDs.contains($0.id) }
+        let newIDs = Set(newMarks.map(\.id))
+        let retiredIDs = reconcilableIDs.subtracting(newIDs)
+        return (windowsToPersist, retiredIDs)
+    }
+
+    /// playhead-b6jq PR 5: store-backed wrapper mirroring `reconcileBackfillWindows`
+    /// — fetch the asset's persisted `ad_windows` fresh (so the reconcile sees the
+    /// live snapshot right before persist, closing the same race the store-level
+    /// terminal guard also covers) and delegate the set-difference to
+    /// `reconcileSpecialistMarkSets`. Returns `(windows, retiredIDs)` for the
+    /// reused `store.reconcileBackfillAdWindows` INSERT-OR-REPLACE + DELETE txn.
+    func reconcileSpecialistMarks(
+        _ marks: [AdWindow],
+        analysisAssetId: String
+    ) async throws -> (windows: [AdWindow], retiredIDs: Set<String>) {
+        let existing = try await store.fetchAdWindows(assetId: analysisAssetId)
+        return Self.reconcileSpecialistMarkSets(newMarks: marks, existingWindows: existing)
     }
 
     // MARK: - Read-side correction mask selection (playhead-xsdz.34)

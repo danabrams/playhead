@@ -55,6 +55,16 @@ enum CausalSource: String, Sendable, Codable, CaseIterable, Equatable {
     case positionPrior
     /// Acoustic break detection.
     case acoustic
+    /// playhead-b6jq PR 5: distilled on-device specialist host-read classifier.
+    /// Present for forward-compat provenance + demotion-exemption: specialist
+    /// marks are ALWAYS mark-only (never auto-skip), so — like `.foundationModel`
+    /// and `.acoustic` — `.specialist` is deliberately ABSENT from the demotion
+    /// rules (multiplier stays 1.0; nothing to demote for a signal that never
+    /// auto-skips). The metadataSource→CausalSource attribution mapping in
+    /// `UserCorrectionStore.recordVeto` is deferred (blueprint §9): a veto over a
+    /// specialist AdWindow does not yet attribute to `.specialist` because it
+    /// carries no `AnchorRef` provenance.
+    case specialist
 }
 
 // MARK: - CorrectionTargetRefs

@@ -93,6 +93,7 @@ struct SpecialistHostReadScanRunnerTests {
         fmRuntime: FoundationModelClassifier.Runtime,
         specialistRuntime: SpecialistAdClassifier.Runtime?,
         specialistScanEnabled: Bool,
+        specialistMarkComposeEnabled: Bool = false,
         snapshot: @escaping @Sendable () -> CapabilitySnapshot = { makePermissiveCapabilitySnapshot() }
     ) -> BackfillJobRunner {
         BackfillJobRunner(
@@ -105,7 +106,37 @@ struct SpecialistHostReadScanRunnerTests {
             batteryLevelProvider: { 1.0 },
             scanCohortJSON: makeTestScanCohortJSON(),
             specialistRuntime: specialistRuntime,
-            specialistScanEnabled: specialistScanEnabled
+            specialistScanEnabled: specialistScanEnabled,
+            specialistMarkComposeEnabled: specialistMarkComposeEnabled
+        )
+    }
+
+    /// Seed a synthetic high-confidence specialist scan row directly (P=0.95),
+    /// as if a prior scan had persisted it.
+    private func seedScanRow(
+        store: AnalysisStore,
+        assetId: String,
+        start: Double,
+        end: Double,
+        p: Double = 0.95
+    ) async throws {
+        try await store.insertSpecialistScanResult(
+            SpecialistScanResult(
+                id: "seed-\(assetId)-\(start)-\(end)",
+                analysisAssetId: assetId,
+                windowStartTime: start,
+                windowEndTime: end,
+                probabilityOfAd: p,
+                isAd: p >= 0.5,
+                adClass: "hostRead",
+                modelVersion: SpecialistModelResources.modelFolderName,
+                detectorVersion: AdDetectionConfig.default.detectorVersion,
+                transcriptVersion: "tx-seed",
+                scanCohortJSON: "{}",
+                reuseKeyHash: "seed-hash-\(start)-\(end)",
+                jobPhase: BackfillJobPhase.specialistHostReadScan.rawValue,
+                createdAt: 1000
+            )
         )
     }
 
@@ -297,6 +328,99 @@ struct SpecialistHostReadScanRunnerTests {
         )
         #expect(try await store.fetchBackfillJob(byId: specialistJobId) == nil)
         #expect(!result.admittedJobIds.contains(specialistJobId))
+    }
+
+    // MARK: - Mark compose (PR5)
+
+    /// playhead-b6jq PR5 default-OFF byte-identity: even with a hot P=0.95 scan
+    /// row seeded AND the scan phase running, `specialistMarkComposeEnabled=false`
+    /// (the shipped default) writes ZERO `ad_windows`. The compose tail is fully
+    /// skipped — byte-identical to PR4.
+    @Test("compose flag OFF (default): hot seeded rows + scan run write NO ad_windows")
+    func composeOffWritesNoAdWindows() async throws {
+        let assetId = "asset-spec-compose-off"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await seedScanRow(store: store, assetId: assetId, start: 30, end: 55, p: 0.95)
+        let inputs = makeInputs(assetId: assetId)
+
+        let runner = makeRunner(
+            store: store,
+            fmRuntime: TestFMRuntime().runtime,
+            specialistRuntime: makeStubRuntime(confidence: 0.9),
+            specialistScanEnabled: true,
+            specialistMarkComposeEnabled: false  // shipped default
+        )
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        // Scan rows exist (the seed + any scanned), but compose was skipped.
+        #expect(!(try await store.fetchSpecialistScanResults(analysisAssetId: assetId).isEmpty))
+        let adWindows = try await store.fetchAdWindows(assetId: assetId)
+        #expect(adWindows.isEmpty, "compose flag OFF must write zero ad_windows (byte-identity)")
+    }
+
+    /// playhead-b6jq PR5: with BOTH keys on, the runner-tail composes the persisted
+    /// scan verdicts into mark-only `AdWindow`s stamped specialist-ft-v2.
+    @Test("compose flag ON: writes specialist-ft-v2 mark-only candidate windows")
+    func composeOnWritesSpecialistMarkOnlyWindows() async throws {
+        let assetId = "asset-spec-compose-on"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let inputs = makeInputs(assetId: assetId)
+
+        let runner = makeRunner(
+            store: store,
+            fmRuntime: TestFMRuntime().runtime,
+            specialistRuntime: makeStubRuntime(confidence: 0.9),  // >= τ
+            specialistScanEnabled: true,
+            specialistMarkComposeEnabled: true
+        )
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        let adWindows = try await store.fetchAdWindows(assetId: assetId)
+        #expect(!adWindows.isEmpty, "compose ON must write specialist marks")
+        for w in adWindows {
+            #expect(w.detectorVersion == "specialist-ft-v2")
+            #expect(w.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+            #expect(w.decisionState == AdDecisionState.candidate.rawValue)
+            #expect(w.metadataSource == "specialist-v1")
+            #expect(w.id.hasPrefix("specialist-"))
+            #expect(w.confidence >= SpecialistMarkComposer.tau)
+        }
+    }
+
+    /// Idempotency at the runner site: a second identical run re-composes onto the
+    /// same content-addressed ids — no duplicate ad_windows.
+    @Test("compose ON: re-running does not duplicate specialist marks")
+    func composeOnRerunIsIdempotent() async throws {
+        let assetId = "asset-spec-compose-idem"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let inputs = makeInputs(assetId: assetId)
+
+        let runner = makeRunner(
+            store: store,
+            fmRuntime: TestFMRuntime().runtime,
+            specialistRuntime: makeStubRuntime(confidence: 0.9),
+            specialistScanEnabled: true,
+            specialistMarkComposeEnabled: true
+        )
+        _ = try await runner.runPendingBackfill(for: inputs)
+        let firstIds = Set(try await store.fetchAdWindows(assetId: assetId).map(\.id))
+        #expect(!firstIds.isEmpty)
+
+        // Second run: re-compose over the same persisted rows (the scan job itself
+        // is idempotency-skipped, but compose the persisted rows again directly).
+        let runner2 = makeRunner(
+            store: store,
+            fmRuntime: TestFMRuntime().runtime,
+            specialistRuntime: makeStubRuntime(confidence: 0.9),
+            specialistScanEnabled: true,
+            specialistMarkComposeEnabled: true
+        )
+        _ = try await runner2.runPendingBackfill(for: inputs)
+        let secondIds = Set(try await store.fetchAdWindows(assetId: assetId).map(\.id))
+        #expect(secondIds == firstIds, "content-addressed ids → no duplicate marks on re-run")
     }
 
     // MARK: - Thermal deferral

@@ -425,4 +425,43 @@ final class AdBannerCopyTests: XCTestCase {
         XCTAssertEqual(AdBannerQueue.dwellSeconds(for: .suggest), 12.0,
             "Suggest dwell must remain 12 s")
     }
+
+    // MARK: - Specialist provenance glyph (playhead-b6jq PR5)
+
+    func testSpecialistGlyphShownOnlyForSuggestSpecialistBanner() {
+        // TRUE: suggest tier + specialist provenance.
+        let specialistSuggest = makeBannerItem(
+            metadataConfidence: nil,
+            metadataSource: SpecialistMarkComposer.metadataSource,  // "specialist-v1"
+            tier: .suggest
+        )
+        XCTAssertTrue(AdBannerView.showsSpecialistGlyph(for: specialistSuggest))
+
+        // FALSE: specialist provenance but auto-skipped tier (specialist marks
+        // are always mark-only, but the predicate must still gate on tier).
+        let specialistAutoSkip = makeBannerItem(
+            metadataSource: SpecialistMarkComposer.metadataSource,
+            tier: .autoSkipped
+        )
+        XCTAssertFalse(AdBannerView.showsSpecialistGlyph(for: specialistAutoSkip))
+
+        // FALSE: suggest tier but a non-specialist source.
+        let fmSuggest = makeBannerItem(metadataSource: "fusion-v1", tier: .suggest)
+        XCTAssertFalse(AdBannerView.showsSpecialistGlyph(for: fmSuggest))
+    }
+
+    func testSpecialistSuggestBannerUsesGenericNoHallucinationCopy() {
+        // Specialist marks carry metadataConfidence == nil, so bannerCopy must
+        // fall back to the calm generic prompt with no advertiser.
+        let item = makeBannerItem(
+            advertiser: nil,
+            metadataConfidence: nil,
+            metadataSource: SpecialistMarkComposer.metadataSource,
+            tier: .suggest
+        )
+        let copy = AdBannerView.bannerCopy(for: item)
+        XCTAssertEqual(copy.prefix, "Sounds like a sponsor break")
+        XCTAssertNil(copy.advertiser, "specialist marks must never surface an advertiser name")
+        XCTAssertNil(copy.detail)
+    }
 }

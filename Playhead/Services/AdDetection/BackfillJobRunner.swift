@@ -129,6 +129,17 @@ actor BackfillJobRunner {
     /// `specialist_scan_results` rows are written, and the FM path is untouched.
     private let specialistScanEnabled: Bool
 
+    /// playhead-b6jq PR 5: master flag for the specialist MARK COMPOSE step at the
+    /// tail of `runSpecialistHostReadScan` (mirrors
+    /// `AdDetectionConfig.specialistMarkComposeEnabled`). Default `false`: with the
+    /// shipped default the compose tail short-circuits before any read/compose/
+    /// write, so scanning persists raw rows only and writes ZERO `ad_windows` —
+    /// byte-identical to PR4. When `true`, the runner composes the just-persisted
+    /// scan rows into mark-only `AdWindow`s the moment they land (the freshest-rows
+    /// site); it cannot push live (no orchestrator ref), so delivery rides the next
+    /// `beginEpisode` preload.
+    private let specialistMarkComposeEnabled: Bool
+
     /// Cycle 2 C2: per-reason telemetry counters for permissive
     /// failures. Incremented inside the runner whenever the persisted
     /// failed-window status came from a permissive bypass call. Logged
@@ -298,7 +309,8 @@ actor BackfillJobRunner {
         permissiveClassifier: PermissiveClassifierBox? = nil,
         narrowingConfig: NarrowingConfig = .default,
         specialistRuntime: SpecialistAdClassifier.Runtime? = nil,
-        specialistScanEnabled: Bool = false
+        specialistScanEnabled: Bool = false,
+        specialistMarkComposeEnabled: Bool = false
     ) {
         self.store = store
         self.admissionController = admissionController
@@ -314,6 +326,7 @@ actor BackfillJobRunner {
         self.narrowingConfig = narrowingConfig
         self.specialistRuntime = specialistRuntime
         self.specialistScanEnabled = specialistScanEnabled
+        self.specialistMarkComposeEnabled = specialistMarkComposeEnabled
     }
 
     // MARK: - Entry Point
@@ -2523,7 +2536,48 @@ actor BackfillJobRunner {
             try await store.insertSpecialistScanResult(row)
             persistedIds.append(row.id)
         }
+
+        // playhead-b6jq PR 5: mark-compose tail. Turn the just-persisted raw
+        // verdicts into user-visible MARK-ONLY `AdWindow`s the moment they are
+        // freshest. Hard-gated on `specialistMarkComposeEnabled` (default OFF):
+        // flag-off short-circuits before any read/compose/write, so the scan
+        // persists rows only and writes ZERO `ad_windows` — byte-identical to PR4.
+        // The runner has no orchestrator ref, so it cannot push live; delivery
+        // rides the next `beginEpisode` preload (composed marks are confidence ≥
+        // 0.70 candidates that auto-clear the preload floor). Idempotent with the
+        // service's Step 18 via content-addressed ids + the version-scoped
+        // reconcile (`AdDetectionService.reconcileSpecialistMarkSets`, pinned to
+        // "specialist-ft-v2" so FM / user / shared marks are never clobbered).
+        if specialistMarkComposeEnabled {
+            try await composeSpecialistMarks(analysisAssetId: inputs.analysisAssetId)
+        }
+
         return persistedIds
+    }
+
+    /// playhead-b6jq PR 5: compose + reconcile + persist the specialist mark-only
+    /// windows for one asset from its persisted `specialist_scan_results`. Reads
+    /// only persisted rows + existing windows (no model, no FM) and delegates the
+    /// version-scoped set-difference to the shared reconcile invariant so the
+    /// runner-tail site and the service's Step 18 stay in lockstep.
+    private func composeSpecialistMarks(analysisAssetId: String) async throws {
+        let scanRows = try await store.fetchSpecialistScanResults(analysisAssetId: analysisAssetId)
+        guard !scanRows.isEmpty else { return }
+        let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+        let marks = SpecialistMarkComposer.compose(
+            scanRows: scanRows,
+            existingWindows: existingWindows,
+            analysisAssetId: analysisAssetId
+        )
+        let reconciled = AdDetectionService.reconcileSpecialistMarkSets(
+            newMarks: marks,
+            existingWindows: existingWindows
+        )
+        guard !reconciled.windows.isEmpty || !reconciled.retiredIDs.isEmpty else { return }
+        try await store.reconcileBackfillAdWindows(
+            reconciled.windows,
+            retiredIDs: reconciled.retiredIDs
+        )
     }
 
     /// playhead-b6jq PR 4: assemble the classifier prompt for one window from

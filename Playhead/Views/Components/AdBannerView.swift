@@ -372,6 +372,16 @@ struct AdBannerView: View {
     /// Below this, the banner falls back to generic "Skipped sponsor segment".
     static let metadataConfidenceThreshold: Double = 0.60
 
+    /// playhead-b6jq PR 5: whether to render the subtle specialist-provenance
+    /// glyph on this banner. TRUE only for a suggest-tier banner whose window was
+    /// composed by the on-device specialist (`metadataSource == "specialist-v1"`,
+    /// stamped by `SpecialistMarkComposer`). Auto-skipped banners and non-specialist
+    /// suggest banners never show it. Factored out as a pure static so the predicate
+    /// is unit-testable without rendering SwiftUI.
+    static func showsSpecialistGlyph(for item: AdSkipBannerItem) -> Bool {
+        item.tier == .suggest && item.metadataSource == SpecialistMarkComposer.metadataSource
+    }
+
     /// Resolve the banner copy line from metadata, applying strict
     /// evidence-bound rules. Never surfaces a brand solely from a model guess.
     ///
@@ -552,6 +562,20 @@ struct AdBannerView: View {
                         .font(AppTypography.mono(size: 12, weight: .regular))
                         .foregroundStyle(boneText.opacity(0.7))
                         .lineLimit(1)
+                }
+
+                // playhead-b6jq PR 5: subtle specialist-provenance glyph. Shown
+                // only for suggest-tier banners whose window was composed by the
+                // on-device specialist. Accent tint at low opacity — a quiet source
+                // badge, never a metric. The copy stays the generic "Sounds like a
+                // sponsor break." (no advertiser hallucination); this only marks
+                // WHERE the suggestion came from.
+                if Self.showsSpecialistGlyph(for: item) {
+                    Image(systemName: "waveform.badge.magnifyingglass")
+                        .font(AppTypography.sans(size: 11, weight: .regular))
+                        .foregroundStyle(AppColors.accent.opacity(0.55))
+                        .padding(.leading, Spacing.xxs)
+                        .accessibilityLabel("Detected by on-device sponsor scan")
                 }
 
                 Spacer(minLength: Spacing.xs)

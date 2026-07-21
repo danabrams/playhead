@@ -18,9 +18,18 @@ struct CausalSourceEnumTests {
         }
     }
 
-    @Test("Expected case count is 7")
+    @Test("Expected case count is 8")
     func caseCount() {
-        #expect(CausalSource.allCases.count == 7)
+        // playhead-b6jq PR 5: `.specialist` added (7 → 8). If this fails after a
+        // future enum addition, verify the new case's demotion policy is
+        // deliberate (see the exempt/rules split in CausalSourceDemotionStore).
+        #expect(CausalSource.allCases.count == 8)
+    }
+
+    @Test("specialist case round-trips through rawValue")
+    func specialistRoundTrips() {
+        #expect(CausalSource(rawValue: CausalSource.specialist.rawValue) == .specialist)
+        #expect(CausalSource.specialist.rawValue == "specialist")
     }
 }
 
@@ -82,6 +91,21 @@ struct DemotionStoreTests {
 
         let acousticFactor = await demotionStore.demotionFactor(source: .acoustic, showId: "show-1")
         #expect(acousticFactor == 1.0)
+
+        // playhead-b6jq PR 5: `.specialist` is demotion-exempt — specialist marks
+        // are ALWAYS mark-only and never auto-skip, so there is nothing to demote.
+        let specialistFactor = await demotionStore.demotionFactor(source: .specialist, showId: "show-1")
+        #expect(specialistFactor == 1.0)
+    }
+
+    @Test("specialist source is a no-op on applyDemotion (demotion-exempt)")
+    func specialistExemptFromDemotion() async throws {
+        let store = try await makeTestStore()
+        let demotionStore = CausalSourceDemotionStore(store: store)
+
+        await demotionStore.applyDemotion(source: .specialist, showId: "show-1", correctionId: "c1")
+        let factor = await demotionStore.demotionFactor(source: .specialist, showId: "show-1")
+        #expect(factor == 1.0, "specialist is exempt — applyDemotion must not lower its multiplier")
     }
 
     @Test("Exempt sources are no-op on applyDemotion")

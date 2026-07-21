@@ -788,7 +788,11 @@ final class PlayheadRuntime {
                 // read from the SAME hoisted `adDetectionConfig` the service
                 // uses (config-source consistency).
                 specialistRuntime: specialistScanRuntime,
-                specialistScanEnabled: adDetectionConfig.specialistScanEnabled
+                specialistScanEnabled: adDetectionConfig.specialistScanEnabled,
+                // playhead-b6jq PR 5: the mark-compose flag rides the SAME hoisted
+                // `adDetectionConfig` (PR4 config-source discipline) so the runner-
+                // tail compose site and the service's Step 18 read one value.
+                specialistMarkComposeEnabled: adDetectionConfig.specialistMarkComposeEnabled
             )
         }
         // bd-3bz (Phase 4) / H7 (cycle 2): when the shadow phase bails on
