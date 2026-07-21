@@ -697,7 +697,8 @@ struct ShadowRetryTests {
 
     // MARK: - Test F — observer debounce
 
-    @Test("Test F: observer waits 60s of stable FM=true before draining; cancels on flip")
+    @Test("Test F: observer waits 60s of stable FM=true before draining; cancels on flip",
+          .timeLimit(.minutes(1)))
     func testF_observerDebounce() async throws {
         // Synchronously-driven fake clock. Each `sleep(seconds:)` call parks
         // a continuation that the test resumes by calling `release()`. The
@@ -729,7 +730,7 @@ struct ShadowRetryTests {
 
         // Step 1: false → true at "t=0". Observer should park a 60s sleep.
         await capabilities.send(canUseFoundationModels: true)
-        try await clock.waitForPendingSleep()
+        await clock.waitForPendingSleep()
         #expect(clock.pendingCount() == 1, "observer should have scheduled a debounce sleep")
         #expect(drainer.callCount() == 0, "drain should not fire before debounce elapses")
 
@@ -742,7 +743,7 @@ struct ShadowRetryTests {
         // Step 3: at virtual t=60s, complete the parked sleep. The drain
         // task awakes and calls the drainer.
         clock.releaseOldest()
-        try await drainer.waitForCall()
+        await drainer.waitForCall()
         #expect(drainer.callCount() == 1, "drain should fire exactly once at t=60s")
         #expect(drainer.lastSessionId() == "sess-D")
 
@@ -866,7 +867,8 @@ struct ShadowRetryTests {
 
     // MARK: - H2 — wake-on-mark drain bypasses the false→true transition rail
 
-    @Test("H2: wake() drains immediately when capability is already stable-true")
+    @Test("H2: wake() drains immediately when capability is already stable-true",
+          .timeLimit(.minutes(1)))
     func testH2_wakeDrainsImmediatelyWhenStableTrue() async throws {
         let clock = ManualShadowRetryClock()
         let capabilities = ManualCapabilities(initial: true)
@@ -893,14 +895,14 @@ struct ShadowRetryTests {
         await observer.start()
         // Let the initial-snapshot capability event flow through and
         // schedule its (60s) debounce.
-        try await clock.waitForPendingSleep()
+        await clock.waitForPendingSleep()
 
         // Now mark a session: production wires this through
         // `markSessionNeedsShadowRetry` + `observer.wake()`. The wake
         // bypasses the debounce because capability is already true.
         await observer.wake()
 
-        try await drainer.waitForCall()
+        await drainer.waitForCall()
         #expect(drainer.callCount() == 1)
         #expect(drainer.lastSessionId() == "sess-stable")
 
@@ -1362,43 +1364,35 @@ final class ManualShadowRetryClock: ShadowRetryClock, Sendable {
         cont?.resume()
     }
 
-    /// Waits until at least one sleep has been parked. Times out after
-    /// `timeoutSeconds` to keep tests from hanging on a missing schedule.
+    /// Waits until at least one sleep has been parked.
     ///
-    /// playhead-flake: this wait is purely event-driven (a `CheckedContinuation`
-    /// is parked under the lock and resumed by the producer side of
-    /// `sleep(seconds:)`). The timeout is a safety net to avoid a hung test;
-    /// it does NOT affect the happy-path latency. Under heavy parallel-suite
-    /// load the multi-hop pump-task pipeline that drives the observer's
-    /// `scheduleDrain()` (capability AsyncStream → pump task → merged stream
-    /// → consumer task → actor hop → `clock.sleep`) can starve for several
-    /// seconds before the parked sleep arrives, so we use a generous 30s
-    /// budget to swallow scheduler jitter without slowing fast runs.
-    func waitForPendingSleep(timeoutSeconds: Double = 30.0) async throws {
+    /// playhead-dd7d: this wait suspends on the ACTUAL schedule signal — a
+    /// `CheckedContinuation` parked under the lock and resumed by the
+    /// producer side of `sleep(seconds:)` — with NO wall-clock deadline.
+    /// The previous version raced this continuation against a 30s
+    /// `Task.sleep` timeout, but the multi-hop pump-task pipeline that
+    /// drives the observer's `scheduleDrain()` (capability AsyncStream →
+    /// pump task → merged stream → consumer task → actor hop →
+    /// `clock.sleep`) can be STARVED (not deadlocked) well past any fixed
+    /// budget under the saturated parallel plan, so the timeout won the
+    /// race and threw a spurious `ShadowRetryTestTimeout`. The pipeline
+    /// always makes progress once scheduled, so awaiting the bare signal is
+    /// deterministic; the test's `.timeLimit` trait is the hang backstop
+    /// for a genuine regression (matches `AsyncTestSignals` /
+    /// `TestEventCounter` convention).
+    func waitForPendingSleep() async {
         // Fast path.
         if state.withLock({ !$0.pending.isEmpty }) { return }
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    let alreadyHere: Bool = self.state.withLock { s in
-                        if !s.pending.isEmpty { return true }
-                        s.sleepArrived = cont
-                        return false
-                    }
-                    if alreadyHere { cont.resume() }
-                }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let alreadyHere: Bool = self.state.withLock { s in
+                if !s.pending.isEmpty { return true }
+                s.sleepArrived = cont
+                return false
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-                throw ShadowRetryTestTimeout()
-            }
-            try await group.next()
-            group.cancelAll()
+            if alreadyHere { cont.resume() }
         }
     }
 }
-
-struct ShadowRetryTestTimeout: Error {}
 
 /// Capability publisher that pushes snapshots into a single AsyncStream.
 /// Tracks the latest `canUseFoundationModels` value so `currentSnapshot`
@@ -1475,32 +1469,24 @@ final class RecordingDrainer: ShadowRetryDraining, Sendable {
         state.withLock { $0.calls.last }
     }
 
-    /// playhead-flake: like `ManualShadowRetryClock.waitForPendingSleep`, this
-    /// is an event-driven wait (a `CheckedContinuation` parked under the lock
-    /// and resumed by `retryShadowFMPhaseForSession`). The timeout is a safety
-    /// net only; the wake-to-drain path goes through the observer's pump tasks,
-    /// merged stream, and actor hop, all of which can be starved by parallel
-    /// suite execution. 30s gives the scheduler room without slowing happy
-    /// paths.
-    func waitForCall(timeoutSeconds: Double = 30.0) async throws {
+    /// playhead-dd7d: like `ManualShadowRetryClock.waitForPendingSleep`, this
+    /// suspends on the ACTUAL drain signal (a `CheckedContinuation` parked
+    /// under the lock and resumed by `retryShadowFMPhaseForSession`) with NO
+    /// wall-clock deadline. The wake-to-drain path traverses the observer's
+    /// pump tasks, merged stream, and an actor hop, all of which can be
+    /// starved — but never deadlocked — by the saturated parallel plan; the
+    /// old 30s timeout race therefore threw spurious `ShadowRetryTestTimeout`
+    /// failures under load. The test's `.timeLimit` trait is the hang
+    /// backstop for a genuine regression.
+    func waitForCall() async {
         if state.withLock({ !$0.calls.isEmpty }) { return }
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    let alreadyHere: Bool = self.state.withLock { s in
-                        if !s.calls.isEmpty { return true }
-                        s.arrived = cont
-                        return false
-                    }
-                    if alreadyHere { cont.resume() }
-                }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let alreadyHere: Bool = self.state.withLock { s in
+                if !s.calls.isEmpty { return true }
+                s.arrived = cont
+                return false
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-                throw ShadowRetryTestTimeout()
-            }
-            try await group.next()
-            group.cancelAll()
+            if alreadyHere { cont.resume() }
         }
     }
 }

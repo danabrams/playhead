@@ -89,6 +89,16 @@ final class AdBannerQueue {
     /// Auto-dismiss timer handle.
     private var dismissTask: Task<Void, Never>?
 
+    /// playhead-dd7d: Deferred queue-advance handle. `dismiss()` /
+    /// `dismissAfterAccept()` clear `currentBanner` immediately, then spawn
+    /// this task to slide the next banner in after a brief pause. Held (not
+    /// fire-and-forget) so tests can await the advance deterministically via
+    /// `advanceTaskForTesting()` instead of racing the 350 ms slide-in delay
+    /// against a fixed wall-clock sleep. No behavioral change to the app: the
+    /// task runs identically; it is merely retained by this property until it
+    /// completes or is superseded by the next advance.
+    private var advanceTask: Task<Void, Never>?
+
     /// Duration before auto-dismiss for an auto-skipped (high-tier) banner.
     /// 8 s is a calm dwell that leaves time to read but never lingers.
     private static let defaultAutoDismissSeconds: TimeInterval = 8.0
@@ -173,7 +183,7 @@ final class AdBannerQueue {
         // Show next queued banner after a brief pause so the exit animation
         // finishes before the next slide-in.
         if !queue.isEmpty {
-            Task {
+            advanceTask = Task {
                 try? await Task.sleep(for: .milliseconds(350))
                 showNext()
             }
@@ -194,7 +204,7 @@ final class AdBannerQueue {
         dismissTask?.cancel()
         dismissTask = nil
         if !queue.isEmpty {
-            Task {
+            advanceTask = Task {
                 try? await Task.sleep(for: .milliseconds(350))
                 showNext()
             }
@@ -239,6 +249,17 @@ final class AdBannerQueue {
     /// sleep.
     func autoDismissTaskForTesting() -> Task<Void, Never>? {
         dismissTask
+    }
+
+    /// playhead-dd7d: Test seam for awaiting the deferred queue-advance
+    /// spawned by `dismiss()` / `dismissAfterAccept()`. Awaiting the
+    /// returned task's `.value` blocks until the 350 ms slide-in delay has
+    /// elapsed AND `showNext()` has advanced `currentBanner` — a
+    /// deterministic completion signal that replaces racing a fixed
+    /// wall-clock sleep against the internal delay in tests. Returns nil if
+    /// no advance was scheduled (the queue was empty at dismiss time).
+    func advanceTaskForTesting() -> Task<Void, Never>? {
+        advanceTask
     }
 
     /// Two banners coalesce if they are close in time (adjacent/near-adjacent skips).
