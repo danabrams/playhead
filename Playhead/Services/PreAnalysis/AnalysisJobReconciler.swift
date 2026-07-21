@@ -42,6 +42,15 @@ struct ReconciliationReport: Sendable {
     /// helper but did not wire it; this counter records its yield so a
     /// stranded-final-pass-fleet event leaves a structured trail.
     let strandedFinalPassJobsReset: Int
+    /// playhead-gy2s (RC-3): queued `analysis_jobs` rows that were enqueued
+    /// under an older scheduler epoch and have been re-stamped to the current
+    /// epoch so orphan-recovery routing keys on a consistent
+    /// `{generationID, schedulerEpoch}`. Distinct from
+    /// `recoveredStrandedSessionJobs` (which flips running/paused/backfill
+    /// rows back to queued): these rows are ALREADY queued and dispatchable —
+    /// only their routing metadata was stale. Purely a correctness bundle;
+    /// dispatch eligibility never consulted `schedulerEpoch`.
+    let queuedJobEpochsRestamped: Int
 }
 
 // MARK: - AnalysisJobReconciler
@@ -84,7 +93,8 @@ actor AnalysisJobReconciler {
                 completedJobsGarbageCollected: 0,
                 failedJobsBackedOff: 0, unEnqueuedDownloadsCreated: 0,
                 strandedBackfillJobsReset: 0,
-                strandedFinalPassJobsReset: 0
+                strandedFinalPassJobsReset: 0,
+                queuedJobEpochsRestamped: 0
             )
         }
         isReconciling = true
@@ -99,6 +109,14 @@ actor AnalysisJobReconciler {
         // disjoint state values (`running`/`paused`/`backfill`), so it
         // cannot accidentally collide with either neighbor.
         let stepStranded = try await recoverStrandedSessionJobs()
+        // playhead-gy2s (RC-3): re-stamp queued rows minted under an older
+        // epoch to the current one. Runs AFTER `recoverStrandedSessionJobs`
+        // (which flips stranded running/paused/backfill rows back to queued
+        // under the current epoch) so any row it just re-queued is already
+        // current and this step is a no-op for it — this step only catches
+        // rows that were queued-and-stale all along (the dogfood shape:
+        // `_meta.scheduler_epoch=1`, queued jobs at epoch 0).
+        let stepRestamped = try await restampQueuedJobEpochs()
         let step2 = try await unblockMissingFiles()
         let step3 = try await unblockModelUnavailable()
         let step4 = try await supersedeStaleVersions()
@@ -120,7 +138,8 @@ actor AnalysisJobReconciler {
             failedJobsBackedOff: step6,
             unEnqueuedDownloadsCreated: step7,
             strandedBackfillJobsReset: stepBackfillReaper,
-            strandedFinalPassJobsReset: stepFinalPassReaper
+            strandedFinalPassJobsReset: stepFinalPassReaper,
+            queuedJobEpochsRestamped: stepRestamped
         )
 
         logger.info("""
@@ -136,10 +155,30 @@ actor AnalysisJobReconciler {
         backoff=\(report.failedJobsBackedOff), \
         newJobs=\(report.unEnqueuedDownloadsCreated), \
         strandedBackfillJobs=\(report.strandedBackfillJobsReset), \
-        strandedFinalPassJobs=\(report.strandedFinalPassJobsReset)
+        strandedFinalPassJobs=\(report.strandedFinalPassJobsReset), \
+        queuedEpochsRestamped=\(report.queuedJobEpochsRestamped)
         """)
 
         return report
+    }
+
+    // MARK: - Step: Re-stamp stale queued-row epochs (playhead-gy2s RC-3)
+
+    /// Re-stamp queued `analysis_jobs` rows whose `schedulerEpoch` predates
+    /// the current session so orphan-recovery routing keys on a consistent
+    /// `{generationID, schedulerEpoch}`. These rows are already queued and
+    /// dispatchable — only their routing metadata was stale (e.g. rows minted
+    /// before an epoch bump, or legacy rows enqueued at the epoch-0 sentinel).
+    /// Reads `_meta.scheduler_epoch` once at entry, matching the sequencing
+    /// contract documented on `recoverStrandedSessionJobs`.
+    private func restampQueuedJobEpochs() async throws -> Int {
+        let now = Date().timeIntervalSince1970
+        let currentEpoch = (try await store.fetchSchedulerEpoch()) ?? 0
+        let count = try await store.restampQueuedJobEpochs(to: currentEpoch, now: now)
+        if count > 0 {
+            logger.info("queued_epoch_restamped count=\(count) currentEpoch=\(currentEpoch)")
+        }
+        return count
     }
 
     // MARK: - Step 1: Recover expired leases

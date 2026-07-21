@@ -76,9 +76,10 @@ struct EpisodeFingerprintsV27MigrationTests {
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // Head moved 27 → 28 (playhead-xsdz.36 rediff_refetch_state) → 29
-        // (playhead-hdgk ad_windows edge-anchor columns); the V27 table pins
-        // below are unchanged.
-        #expect(AnalysisStore.currentSchemaVersion == 29)
+        // (playhead-hdgk ad_windows edge-anchor columns) → 30 (playhead-gy2s
+        // analysis_jobs reject-advisory columns); the V27 table pins below are
+        // unchanged.
+        #expect(AnalysisStore.currentSchemaVersion == 30)
         #expect(try probeTableExists(in: dir, table: "episode_fingerprints"))
     }
 
