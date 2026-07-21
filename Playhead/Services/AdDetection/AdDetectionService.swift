@@ -483,6 +483,20 @@ struct AdDetectionConfig: Sendable {
     /// output is byte-identical. Default OFF; this is pure inert plumbing.
     let specialistShadowEnabled: Bool
 
+    /// playhead-b6jq PR 4 (Phase B2): master flag for the specialist HOST-READ
+    /// SCAN phase — a background backfill pass that runs the on-device
+    /// specialist over candidate windows and PERSISTS raw verdicts to
+    /// `specialist_scan_results`. It ACTS ON NOTHING in PR 4: no tau=0.7
+    /// threshold, no mark/banner composition, and NOTHING touches auto-skip
+    /// eligibility (auto-skip stays deterministic-only; `adClass` stays
+    /// `"hostRead"`) — PR 5 consumes the rows. Two-key gated in
+    /// `BackfillJobRunner`: the phase is enqueued ONLY when this is `true` AND a
+    /// non-nil, phone-gated `SpecialistAdClassifier.Runtime` is injected.
+    /// Default OFF; with the shipped default no scan job is enqueued, no rows
+    /// are written, and every FM path is byte-identical. The runner's two-key
+    /// enqueue guard is the sole reader.
+    let specialistScanEnabled: Bool
+
     /// playhead-xsdz.34: master flag for the user-correction READ side (the
     /// per-atom/per-span `.userVetoed` mask). When `false` (the production
     /// default), both `AtomEvidenceProjector` call sites inject
@@ -748,6 +762,7 @@ struct AdDetectionConfig: Sendable {
         rediffSlotOwnershipEnabled: Bool = true,
         rediffSlotShadowEnabled: Bool = false,
         specialistShadowEnabled: Bool = false,
+        specialistScanEnabled: Bool = false,
         userCorrectionReadSideEnabled: Bool = false,
         stingerRefinementEnabled: Bool = true,
         lexicalAnchorRefinementEnabled: Bool = false,
@@ -818,6 +833,7 @@ struct AdDetectionConfig: Sendable {
         self.rediffSlotOwnershipEnabled = rediffSlotOwnershipEnabled
         self.rediffSlotShadowEnabled = rediffSlotShadowEnabled
         self.specialistShadowEnabled = specialistShadowEnabled
+        self.specialistScanEnabled = specialistScanEnabled
         self.userCorrectionReadSideEnabled = userCorrectionReadSideEnabled
         self.stingerRefinementEnabled = stingerRefinementEnabled
         self.lexicalAnchorRefinementEnabled = lexicalAnchorRefinementEnabled
@@ -876,6 +892,7 @@ struct AdDetectionConfig: Sendable {
         rediffSlotOwnershipEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1) — rediff width marks, presence 97.8% gold-audited; the mark-only rung of the xsdz.36 ladder
         rediffSlotShadowEnabled: false,
         specialistShadowEnabled: false,  // playhead-dsbc (Phase B1): specialist-shadow plumbing ships OFF and fully inert; live runtime is phone-gated Phase B2
+        specialistScanEnabled: false,  // playhead-b6jq (PR 4): host-read scan phase ships OFF and fully inert (persist-only, acts on nothing); PR 5 consumes the rows
         userCorrectionReadSideEnabled: false,  // playhead-xsdz.34: read side ships OFF; xsdz.36 flips it after the corpus A/B
         stingerRefinementEnabled: true,
         lexicalAnchorRefinementEnabled: false,

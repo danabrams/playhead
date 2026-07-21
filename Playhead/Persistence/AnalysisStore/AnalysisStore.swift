@@ -903,7 +903,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 30
+    nonisolated static let currentSchemaVersion = 31
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1582,6 +1582,11 @@ actor AnalysisStore {
             // analysis_jobs so silent scheduler rejections leave a durable,
             // queryable trace. Additive-only, nullable. Bumps schema_version to 30.
             try migrateAdmissionRejectReasonV30IfNeeded()
+            // playhead-b6jq PR 4: new `specialist_scan_results` table for the
+            // on-device host-read specialist's raw verdicts. Additive/forward-
+            // only, idempotent (CREATE TABLE IF NOT EXISTS). Bumps schema_version
+            // to 31.
+            try migrateSpecialistScanResultsV31IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1865,6 +1870,11 @@ actor AnalysisStore {
         // gated on `tableExists("analysis_jobs")` so seeded fixtures without
         // the table still reach v30.
         try migrateAdmissionRejectReasonV30IfNeeded()
+        // playhead-b6jq (v31): mirror the specialist_scan_results table
+        // migration into the ladder seam. Helper is fully idempotent
+        // (CREATE TABLE IF NOT EXISTS + setSchemaVersion), so schema-version
+        // tests lock at v31.
+        try migrateSpecialistScanResultsV31IfNeeded()
     }
     #endif
 
@@ -4483,6 +4493,153 @@ actor AnalysisStore {
             )
         }
         try setSchemaVersion(30)
+    }
+
+    /// playhead-b6jq PR 4 (Phase B2): create `specialist_scan_results`, the
+    /// raw-verdict store for the on-device host-read specialist's scan phase.
+    ///
+    /// Additive / forward-only / idempotent — the table lives ONLY in this
+    /// versioned migration fn (mirrors `migrateEpisodeFingerprintsV27IfNeeded`),
+    /// NOT in `createTables()`. `UNIQUE(reuseKeyHash)` + `INSERT OR REPLACE`
+    /// bounds row growth and makes a re-scan idempotent: a transcript regen or
+    /// model bump changes the reuse hash → a fresh row; an identical re-scan
+    /// collapses onto the same row. FK `ON DELETE CASCADE` to
+    /// `analysis_assets(id)` matches `semantic_scan_results`.
+    private func migrateSpecialistScanResultsV31IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 31 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS specialist_scan_results (
+                id                TEXT PRIMARY KEY,
+                analysisAssetId   TEXT NOT NULL REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                windowStartTime   REAL NOT NULL,
+                windowEndTime     REAL NOT NULL,
+                probabilityOfAd   REAL NOT NULL,
+                isAd              INTEGER NOT NULL DEFAULT 0,
+                adClass           TEXT,
+                modelVersion      TEXT NOT NULL,
+                detectorVersion   TEXT NOT NULL,
+                transcriptVersion TEXT NOT NULL,
+                scanCohortJSON    TEXT NOT NULL,
+                reuseKeyHash      TEXT NOT NULL,
+                jobPhase          TEXT NOT NULL DEFAULT 'specialistHostReadScan',
+                createdAt         REAL NOT NULL,
+                UNIQUE(reuseKeyHash)
+            )
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_specialist_scan_results_asset_created ON specialist_scan_results(analysisAssetId, createdAt ASC)")
+        try setSchemaVersion(31)
+    }
+
+    /// playhead-b6jq PR 4: canonical column list for `specialist_scan_results`.
+    /// Positional index mapping (see `readSpecialistScanResult`):
+    ///   0  id                    7  modelVersion
+    ///   1  analysisAssetId       8  detectorVersion
+    ///   2  windowStartTime       9  transcriptVersion
+    ///   3  windowEndTime        10  scanCohortJSON
+    ///   4  probabilityOfAd      11  reuseKeyHash
+    ///   5  isAd                 12  jobPhase
+    ///   6  adClass              13  createdAt
+    private static let specialistScanResultColumns = """
+        id, analysisAssetId, windowStartTime, windowEndTime, probabilityOfAd,
+        isAd, adClass, modelVersion, detectorVersion, transcriptVersion,
+        scanCohortJSON, reuseKeyHash, jobPhase, createdAt
+        """
+
+    /// playhead-b6jq PR 4: canonical reuse-key SHA-256 over the fields that
+    /// govern a specialist scan window's reusability. Mirrors
+    /// `semanticScanReuseKeyHash`: `scanCohortJSON` is canonicalized (sorted
+    /// keys) before hashing so cohort-equivalent inputs collapse regardless of
+    /// upstream JSON formatting. A transcript regen or model bump changes the
+    /// hash → a fresh row; an identical re-scan collapses onto the same row.
+    /// Layout:
+    ///   "<assetId>|<startSec>|<endSec>|<modelVersion>|<detectorVersion>|<transcriptVersion>|<canonicalCohort>"
+    static func specialistScanReuseKeyHash(
+        analysisAssetId: String,
+        windowStartTime: Double,
+        windowEndTime: Double,
+        modelVersion: String,
+        detectorVersion: String,
+        transcriptVersion: String,
+        scanCohortJSON: String
+    ) -> String {
+        let canonicalCohort = canonicalizeCohortJSON(scanCohortJSON)
+        let canonical =
+            "\(analysisAssetId)|\(windowStartTime)|\(windowEndTime)|" +
+            "\(modelVersion)|\(detectorVersion)|\(transcriptVersion)|\(canonicalCohort)"
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// playhead-b6jq PR 4: persist one raw specialist verdict.
+    /// `INSERT OR REPLACE` on the `UNIQUE(reuseKeyHash)` index makes a re-scan
+    /// idempotent (bounded row growth). RAW verdict only — no τ threshold, no
+    /// mark composition (PR 5 consumes these rows). Writes nothing to
+    /// `ad_windows` and never touches auto-skip eligibility.
+    func insertSpecialistScanResult(_ result: SpecialistScanResult) throws {
+        let sql = """
+            INSERT OR REPLACE INTO specialist_scan_results
+            (id, analysisAssetId, windowStartTime, windowEndTime, probabilityOfAd,
+             isAd, adClass, modelVersion, detectorVersion, transcriptVersion,
+             scanCohortJSON, reuseKeyHash, jobPhase, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, result.id)
+        bind(stmt, 2, result.analysisAssetId)
+        bind(stmt, 3, result.windowStartTime)
+        bind(stmt, 4, result.windowEndTime)
+        bind(stmt, 5, result.probabilityOfAd)
+        bind(stmt, 6, result.isAd ? 1 : 0)
+        bind(stmt, 7, result.adClass)
+        bind(stmt, 8, result.modelVersion)
+        bind(stmt, 9, result.detectorVersion)
+        bind(stmt, 10, result.transcriptVersion)
+        bind(stmt, 11, result.scanCohortJSON)
+        bind(stmt, 12, result.reuseKeyHash)
+        bind(stmt, 13, result.jobPhase)
+        bind(stmt, 14, result.createdAt)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-b6jq PR 4: all specialist scan rows for an asset, oldest first.
+    func fetchSpecialistScanResults(
+        analysisAssetId: String
+    ) throws -> [SpecialistScanResult] {
+        let sql = """
+            SELECT \(Self.specialistScanResultColumns) FROM specialist_scan_results
+            WHERE analysisAssetId = ?
+            ORDER BY createdAt ASC, rowid ASC
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        var results: [SpecialistScanResult] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(try readSpecialistScanResult(stmt))
+        }
+        return results
+    }
+
+    private func readSpecialistScanResult(_ stmt: OpaquePointer?) throws -> SpecialistScanResult {
+        SpecialistScanResult(
+            id: try requireText(stmt, 0),
+            analysisAssetId: try requireText(stmt, 1),
+            windowStartTime: sqlite3_column_double(stmt, 2),
+            windowEndTime: sqlite3_column_double(stmt, 3),
+            probabilityOfAd: sqlite3_column_double(stmt, 4),
+            isAd: sqlite3_column_int(stmt, 5) != 0,
+            adClass: optionalText(stmt, 6),
+            modelVersion: try requireText(stmt, 7),
+            detectorVersion: try requireText(stmt, 8),
+            transcriptVersion: try requireText(stmt, 9),
+            scanCohortJSON: try requireText(stmt, 10),
+            reuseKeyHash: try requireText(stmt, 11),
+            // NOT NULL DEFAULT 'specialistHostReadScan'; default defensively for
+            // any legacy row that escaped the migration default.
+            jobPhase: optionalText(stmt, 12) ?? "specialistHostReadScan",
+            createdAt: sqlite3_column_double(stmt, 13)
+        )
     }
 
     /// Upsert the durable re-fetch attempt state for one asset.

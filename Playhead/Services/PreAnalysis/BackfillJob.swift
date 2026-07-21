@@ -11,6 +11,16 @@ enum BackfillJobPhase: String, Codable, Sendable, Hashable, CaseIterable {
     /// ef2.4.7: FM scheduling phase for regions where metadata suggests ad
     /// presence but no strong anchor exists yet. Gated by MetadataActivationConfig.
     case metadataSeededRegion
+    /// playhead-b6jq PR 4 (Phase B2): background phase that runs the on-device
+    /// distilled specialist over candidate windows and PERSISTS raw verdicts to
+    /// `specialist_scan_results`. Acts on nothing (PR 5 consumes the rows).
+    /// Two-key gated in `BackfillJobRunner` (`specialistScanEnabled` AND a
+    /// non-nil `SpecialistAdClassifier.Runtime`), so with the shipped defaults
+    /// this case is never enqueued and every FM path stays byte-identical. It is
+    /// deliberately INERT in the FM recall union: `TargetedWindowNarrower.narrow`
+    /// returns `.empty` for it so it contributes nothing to
+    /// `predictedTargetedLineRefs`.
+    case specialistHostReadScan
 }
 
 enum BackfillJobStatus: String, Codable, Sendable, Hashable, CaseIterable {

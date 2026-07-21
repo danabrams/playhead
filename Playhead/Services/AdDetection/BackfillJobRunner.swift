@@ -116,6 +116,19 @@ actor BackfillJobRunner {
     /// `PermissiveAdClassifier` is itself an actor.
     private let permissiveClassifierBox: PermissiveClassifierBox?
 
+    /// playhead-b6jq PR 4: the on-device specialist runtime seam. `nil` on
+    /// simulator / any build without the bundled engine (the phone gate) and in
+    /// SwiftUI previews. Together with `specialistScanEnabled` this forms the
+    /// two-key gate: the specialist scan job is enqueued ONLY when this is
+    /// non-nil AND the flag is on. Defaulting to `nil` keeps every existing
+    /// caller/test byte-for-byte.
+    private let specialistRuntime: SpecialistAdClassifier.Runtime?
+    /// playhead-b6jq PR 4: master flag for the specialist host-read scan phase
+    /// (mirrors `AdDetectionConfig.specialistScanEnabled`, the sole reader).
+    /// Default `false`: with the shipped default the phase is never enqueued, no
+    /// `specialist_scan_results` rows are written, and the FM path is untouched.
+    private let specialistScanEnabled: Bool
+
     /// Cycle 2 C2: per-reason telemetry counters for permissive
     /// failures. Incremented inside the runner whenever the persisted
     /// failed-window status came from a permissive bypass call. Logged
@@ -283,7 +296,9 @@ actor BackfillJobRunner {
         clock: @escaping @Sendable () -> Date = { Date() },
         sensitiveRouter: SensitiveWindowRouter? = nil,
         permissiveClassifier: PermissiveClassifierBox? = nil,
-        narrowingConfig: NarrowingConfig = .default
+        narrowingConfig: NarrowingConfig = .default,
+        specialistRuntime: SpecialistAdClassifier.Runtime? = nil,
+        specialistScanEnabled: Bool = false
     ) {
         self.store = store
         self.admissionController = admissionController
@@ -297,6 +312,8 @@ actor BackfillJobRunner {
         self.sensitiveRouter = sensitiveRouter
         self.permissiveClassifierBox = permissiveClassifier
         self.narrowingConfig = narrowingConfig
+        self.specialistRuntime = specialistRuntime
+        self.specialistScanEnabled = specialistScanEnabled
     }
 
     // MARK: - Entry Point
@@ -438,6 +455,52 @@ actor BackfillJobRunner {
             enqueuedJobs.append(job)
         }
 
+        // playhead-b6jq PR 4: append ONE specialist host-read scan job when the
+        // two-key gate is satisfied — the flag is on AND a live runtime is
+        // present. Flag OFF (the shipped default) or a nil runtime (simulator /
+        // unstaged model / preview) means the block is skipped entirely: no new
+        // job, no rows, byte-identical to today. The FM `runJob` path is
+        // untouched — this phase drains through its own routing branch below.
+        // The insert / M-5 idempotency / enqueue idioms mirror the FM loop
+        // above exactly; the offset continues past the last plan phase so the
+        // deterministic jobId never collides with an FM phase's.
+        if specialistScanEnabled, specialistRuntime != nil {
+            let specialistJobId = Self.makeJobIdForTesting(
+                analysisAssetId: inputs.analysisAssetId,
+                transcriptVersion: inputs.transcriptVersion,
+                phase: .specialistHostReadScan,
+                offset: plan.phases.count
+            )
+            if let existing = try await store.fetchBackfillJob(byId: specialistJobId) {
+                // Idempotent re-invocation: complete → skip; retry-exhausted →
+                // skip; otherwise re-drive the existing row (no duplicate insert).
+                if existing.status != .complete,
+                   existing.retryCount < AdmissionController.maxRetries {
+                    await admissionController.enqueue(existing)
+                    enqueuedJobs.append(existing)
+                    resumedJobIds.insert(existing.jobId)
+                }
+            } else {
+                let specialistJob = BackfillJob(
+                    jobId: specialistJobId,
+                    analysisAssetId: inputs.analysisAssetId,
+                    podcastId: inputs.podcastId,
+                    phase: .specialistHostReadScan,
+                    coveragePolicy: plan.policy,
+                    priority: phasePriority(.specialistHostReadScan),
+                    progressCursor: nil,
+                    retryCount: 0,
+                    deferReason: nil,
+                    status: .queued,
+                    scanCohortJSON: scanCohortJSON,
+                    createdAt: now + Double(plan.phases.count) * 0.0001
+                )
+                try await store.insertBackfillJob(specialistJob)
+                await admissionController.enqueue(specialistJob)
+                enqueuedJobs.append(specialistJob)
+            }
+        }
+
         var admitted: [String] = []
         var deferred: [String] = []
         var scanResultIds: [String] = []
@@ -555,6 +618,27 @@ actor BackfillJobRunner {
                 // progressCursor/retryCount/deferReason so an earlier-deferred
                 // row's audit trail is not lost when it resumes.
                 try await store.markBackfillJobRunning(jobId: job.jobId)
+
+                // playhead-b6jq PR 4: the specialist host-read scan phase owns
+                // its own candidate selection and persistence — it bypasses the
+                // FM `narrowedInputs`/`runJob` path entirely. It is only ever
+                // reached under the two-key enqueue gate above, so nothing here
+                // runs with the shipped default flag. On the success path we
+                // must call `admissionController.finish` + `continue` ourselves
+                // (the shared finish at the bottom of the loop is skipped by the
+                // `continue`), mirroring the H13 short-circuit below.
+                if job.phase == .specialistHostReadScan {
+                    _ = try await runSpecialistHostReadScan(job: job, inputs: inputs)
+                    try await store.markBackfillJobComplete(
+                        jobId: job.jobId,
+                        progressCursor: BackfillProgressCursor(
+                            processedPhaseCount: 1,
+                            lastProcessedUpperBoundSec: inputs.segments.last?.endTime
+                        )
+                    )
+                    await admissionController.finish(jobId: job.jobId)
+                    continue
+                }
 
                 // Cycle 2 H13: `narrowedInputs` returns nil when the
                 // phase produced no anchors and we should skip dispatching
@@ -2344,9 +2428,131 @@ actor BackfillJobRunner {
     var classifierForTesting: FoundationModelClassifier { classifier }
     #endif
 
+    /// playhead-b6jq PR 4: run the on-device host-read specialist over the
+    /// planner's candidate windows and PERSIST raw verdicts to
+    /// `specialist_scan_results`. Acts on nothing — no `ad_windows`, no
+    /// auto-skip, no mark composition (PR 5 consumes the rows). `adClass` stays
+    /// whatever the verdict emits (`"hostRead"` for the live runtime).
+    ///
+    /// Resilience contract (§8): each window's classify is wrapped so a single
+    /// throw records nothing and the batch continues — one bad window must not
+    /// abort the scan. A `CancellationError` propagates (cooperative
+    /// cancellation is honored per window). Returns the persisted row ids.
+    ///
+    /// Transport note: the scan is fully on-device (no network), so the
+    /// network-gated BGProcessingTask that hosts the backfill adds no
+    /// constraint; admission gating (thermal / battery / low-power) is inherited
+    /// for free because the job drains through the same `AdmissionController`.
+    private func runSpecialistHostReadScan(
+        job: BackfillJob,
+        inputs: AssetInputs
+    ) async throws -> [String] {
+        // Only ever reached under the two-key gate, but keep the nil guard so a
+        // future caller cannot run this with no runtime.
+        guard let runtime = specialistRuntime else { return [] }
+
+        let windows = SpecialistScanPlanner().selectWindows(
+            segments: inputs.segments,
+            evidenceCatalog: inputs.evidenceCatalog,
+            // PR 4 MVP: the music-bed recall lever ships wired to `[]`; PR 5
+            // evaluates enabling it where τ=0.7 makes precision/recall
+            // measurable.
+            featureWindows: [],
+            budget: SpecialistScanPlanner.defaultBudget
+        )
+        guard !windows.isEmpty else { return [] }
+
+        let modelVersion = SpecialistModelResources.modelFolderName
+        // Reuse-key dimension only. The runner is FM-agnostic and does not hold
+        // an `AdDetectionConfig`; the detector-version tag just needs to be
+        // stable so a detector bump invalidates cached rows. `.default` is the
+        // shipped value and matches the production service's config.
+        let detectorVersion = AdDetectionConfig.default.detectorVersion
+        let createdAt = clock().timeIntervalSince1970
+
+        var persistedIds: [String] = []
+        for window in windows {
+            try Task.checkCancellation()
+
+            // Assemble the prompt from the segment text already in hand (no
+            // store read), mirroring `LiveSpecialistShadowDispatcher.buildPrompt`.
+            let prompt = Self.specialistPrompt(segments: inputs.segments, window: window)
+            guard !prompt.isEmpty else { continue }
+
+            let verdict: SpecialistVerdict
+            do {
+                let session = await runtime.makeSession()
+                verdict = try await session.classify(prompt)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Record nothing on a per-window throw; log and continue so one
+                // bad window cannot abort the whole batch.
+                logger.warning(
+                    "specialist scan classify failed: asset=\(inputs.analysisAssetId, privacy: .public) window=\(window.startTime, privacy: .public)..\(window.endTime, privacy: .public) error=\(String(describing: error), privacy: .public)"
+                )
+                continue
+            }
+
+            let reuseKeyHash = AnalysisStore.specialistScanReuseKeyHash(
+                analysisAssetId: inputs.analysisAssetId,
+                windowStartTime: window.startTime,
+                windowEndTime: window.endTime,
+                modelVersion: modelVersion,
+                detectorVersion: detectorVersion,
+                transcriptVersion: inputs.transcriptVersion,
+                scanCohortJSON: scanCohortJSON
+            )
+            let row = SpecialistScanResult(
+                id: Self.hashedId(prefix: "spec", canonical: reuseKeyHash),
+                analysisAssetId: inputs.analysisAssetId,
+                windowStartTime: window.startTime,
+                windowEndTime: window.endTime,
+                // RAW verdict only — no τ threshold, no mark composition (PR 5).
+                probabilityOfAd: verdict.confidence,
+                isAd: verdict.isAd,
+                adClass: verdict.adClass,
+                modelVersion: modelVersion,
+                detectorVersion: detectorVersion,
+                transcriptVersion: inputs.transcriptVersion,
+                scanCohortJSON: scanCohortJSON,
+                reuseKeyHash: reuseKeyHash,
+                jobPhase: job.phase.rawValue,
+                createdAt: createdAt
+            )
+            try await store.insertSpecialistScanResult(row)
+            persistedIds.append(row.id)
+        }
+        return persistedIds
+    }
+
+    /// playhead-b6jq PR 4: assemble the classifier prompt for one window from
+    /// the segments the planner selected — no store read. The window's
+    /// `lineRefs` are the segment indices overlapping the window; join their
+    /// trimmed, non-blank text with newlines (mirrors the shadow dispatcher).
+    nonisolated private static func specialistPrompt(
+        segments: [AdTranscriptSegment],
+        window: SpecialistScanWindow
+    ) -> String {
+        let refs = Set(window.lineRefs)
+        return segments
+            .filter { refs.contains($0.segmentIndex) }
+            .sorted { $0.segmentIndex < $1.segmentIndex }
+            .map(\.text)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
     private func phasePriority(_ phase: BackfillJobPhase) -> Int {
         switch phase {
         case .scanLikelyAdSlots: 30
+        // playhead-b6jq PR 4: below the lexical-slot phase, above harvester —
+        // the specialist scan is a candidate-gated pass, not the widest FM
+        // sweep. Priority only orders the single admission queue; it does not
+        // affect gating or byte-identity (the job is only ever enqueued under
+        // the two-key gate).
+        case .specialistHostReadScan: 25
         case .scanHarvesterProposals: 20
         case .metadataSeededRegion: 15
         case .scanRandomAuditWindows: 10

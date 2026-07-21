@@ -285,6 +285,15 @@ enum TargetedWindowNarrower {
                 config: config,
                 phaseLabel: "metadataSeededRegion"
             )
+        case .specialistHostReadScan:
+            // playhead-b6jq PR 4: the specialist scan phase is NOT an FM
+            // narrowing phase — it owns its own candidate selection
+            // (`SpecialistScanPlanner`) inside `BackfillJobRunner` and never
+            // routes through this narrower. Returning `.empty` keeps it inert in
+            // the FM recall union (`predictedTargetedLineRefs`) so it contributes
+            // nothing to the recall numerator and every FM path stays
+            // byte-identical.
+            return .empty
         }
     }
 

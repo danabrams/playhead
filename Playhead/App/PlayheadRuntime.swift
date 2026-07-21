@@ -725,8 +725,33 @@ final class PlayheadRuntime {
             return nil
         }()
 
+        // playhead-b6jq PR 4: config-source consistency (blueprint §8, highest
+        // risk). The `backfillJobRunnerFactory` is built BEFORE
+        // `AdDetectionService`, and both must read the SAME `AdDetectionConfig`
+        // so the runner's specialist-scan enqueue gate can never disagree with
+        // the service's view of the flag. Hoist ONE binding here, capture it in
+        // the factory below, and pass the SAME value as `config:` to the service
+        // init (which otherwise defaults to `.default`). `.default` is
+        // byte-identical to the previous implicit default, so passing it
+        // explicitly changes nothing except pinning the shared source.
+        let adDetectionConfig = AdDetectionConfig.default
+
+        // playhead-b6jq PR 4: resolve the on-device specialist runtime ONCE,
+        // device-only. `makeLiveRuntime` returns nil on simulator / any build
+        // without CoreAI (the phone gate), and `bundledModelURL()` returns nil
+        // when the model is not staged; either nil means the runner's two-key
+        // gate is never satisfied and the specialist scan never runs. Preview
+        // runtimes skip it entirely. Constructing is cheap (the engine loads
+        // lazily on the first classify), so building unconditionally on device
+        // is correct even when the flag is off — the flag, not this binding,
+        // decides whether the scan enqueues.
+        let specialistScanRuntime: SpecialistAdClassifier.Runtime? = isPreviewRuntime
+            ? nil
+            : SpecialistModelResources.bundledModelURL()
+                .flatMap { SpecialistAdClassifier.makeLiveRuntime(modelURL: $0) }
+
         let backfillJobRunnerFactory: @Sendable (AnalysisStore, FMBackfillMode) -> BackfillJobRunner = {
-            [capabilitiesServiceForFactory, batteryProvider, feedbackStore, bd1enRouter, bd1enPermissiveBox, bd1enRedactor] store, mode in
+            [capabilitiesServiceForFactory, batteryProvider, feedbackStore, bd1enRouter, bd1enPermissiveBox, bd1enRedactor, specialistScanRuntime, adDetectionConfig] store, mode in
             BackfillJobRunner(
                 store: store,
                 admissionController: AdmissionController(),
@@ -755,7 +780,15 @@ final class PlayheadRuntime {
                 // JSON-encoded with sorted keys) and buys cohort freshness.
                 scanCohortJSON: ScanCohort.productionJSON(),
                 sensitiveRouter: bd1enRouter,
-                permissiveClassifier: bd1enPermissiveBox
+                permissiveClassifier: bd1enPermissiveBox,
+                // playhead-b6jq PR 4: two-key specialist-scan gate. The runtime
+                // is nil on sim / unstaged model / preview, and the flag is off
+                // by default — so with the shipped config the runner never
+                // enqueues the scan and behavior is byte-identical. Both keys
+                // read from the SAME hoisted `adDetectionConfig` the service
+                // uses (config-source consistency).
+                specialistRuntime: specialistScanRuntime,
+                specialistScanEnabled: adDetectionConfig.specialistScanEnabled
             )
         }
         // bd-3bz (Phase 4) / H7 (cycle 2): when the shadow phase bails on
@@ -1095,6 +1128,11 @@ final class PlayheadRuntime {
         self.adDetectionService = AdDetectionService(
             store: analysisStore,
             metadataExtractor: FallbackExtractor(),
+            // playhead-b6jq PR 4: pass the SAME hoisted config the runner factory
+            // reads for the specialist-scan gate. `.default` is byte-identical to
+            // the previous implicit default; passing it explicitly pins the
+            // single config source so runner and service cannot drift.
+            config: adDetectionConfig,
             backfillJobRunnerFactory: backfillJobRunnerFactory,
             // M-D: capabilities provider lets the shadow phase short-circuit
             // before building atom/segment/catalog inputs on devices that

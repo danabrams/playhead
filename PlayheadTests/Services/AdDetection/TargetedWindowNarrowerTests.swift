@@ -1073,7 +1073,7 @@ struct TargetedWindowNarrowerTests {
 
     // MARK: - Cycle 2 Rev3-M2: BackfillJobPhase enumeration is pinned
 
-    @Test("Cycle 2 Rev3-M2: BackfillJobPhase.allCases set is exactly the five known cases")
+    @Test("Cycle 2 Rev3-M2: BackfillJobPhase.allCases set is exactly the six known cases")
     func backfillJobPhaseAllCasesPinned() {
         let observed = Set(BackfillJobPhase.allCases)
         let expected: Set<BackfillJobPhase> = [
@@ -1081,9 +1081,37 @@ struct TargetedWindowNarrowerTests {
             .scanHarvesterProposals,
             .scanLikelyAdSlots,
             .scanRandomAuditWindows,
-            .metadataSeededRegion
+            .metadataSeededRegion,
+            // playhead-b6jq PR 4: the specialist host-read scan phase. It is
+            // INERT in the FM narrowing/recall union (`narrow` returns `.empty`),
+            // so `predictedTargetedLineRefs` still excludes it — but it IS a real
+            // `BackfillJobPhase`, so it belongs in this pin.
+            .specialistHostReadScan
         ]
         #expect(observed == expected, "Adding a new BackfillJobPhase requires updating predictedTargetedLineRefs and the narrowing exclusion set")
+    }
+
+    @Test("playhead-b6jq PR 4: narrow(.specialistHostReadScan) is inert (returns .empty, no FM recall contribution)")
+    func specialistScanPhaseIsInertInNarrowing() {
+        let inputs = makeInputs()
+        let result = TargetedWindowNarrower.narrow(phase: .specialistHostReadScan, inputs: inputs)
+        #expect(result.wasEmpty)
+        #expect(result.narrowedSegments == nil)
+        #expect(!result.aborted)
+
+        // And it contributes nothing to the recall union: the predicted set with
+        // the specialist phase present equals the union built from only the
+        // non-fullEpisode phases (the specialist phase is already excluded there
+        // because `wasEmpty` phases add nothing).
+        var union = Set<Int>()
+        for phase in BackfillJobPhase.allCases
+        where phase != .fullEpisodeScan && phase != .specialistHostReadScan {
+            let r = TargetedWindowNarrower.narrow(phase: phase, inputs: inputs)
+            if let segments = r.narrowedSegments {
+                union.formUnion(segments.map(\.segmentIndex))
+            }
+        }
+        #expect(TargetedWindowNarrower.predictedTargetedLineRefs(inputs: inputs) == union)
     }
 
     // MARK: - Helpers

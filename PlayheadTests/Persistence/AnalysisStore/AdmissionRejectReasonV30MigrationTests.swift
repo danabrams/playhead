@@ -50,8 +50,9 @@ struct AdmissionRejectReasonV30MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        // Drift guard: head is exactly 30 for this bead.
-        #expect(AnalysisStore.currentSchemaVersion == 30)
+        // Drift guard: head moved 30 → 31 (playhead-b6jq specialist_scan_results);
+        // the V30 reject-advisory columns probed below are unchanged.
+        #expect(AnalysisStore.currentSchemaVersion == 31)
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectReason"))
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectAt"))
     }
