@@ -1001,6 +1001,7 @@
 		E4EE644F8F5FD09C4E08A37E /* SettingsL274.swift in Sources */ = {isa = PBXBuildFile; fileRef = 067980E620E74ED2B11C85C5 /* SettingsL274.swift */; };
 		E517D642282F2FF5DD23A010 /* WorkJournalReadCorruptionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A99B4D42141385767AE54B1 /* WorkJournalReadCorruptionTests.swift */; };
 		E54E2596ED3A2AEE73800093 /* SurfaceStatusInvariantLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0893B1796AB14ACE6C3D955B /* SurfaceStatusInvariantLogger.swift */; };
+		E57504689391B942473176E5 /* qwen3_0_6b_4bit_dynamic_ft_v2 in Resources */ = {isa = PBXBuildFile; fileRef = FFD3C5FB461332A137CE3DC5 /* qwen3_0_6b_4bit_dynamic_ft_v2 */; };
 		E57BB1DDC764D39DD20B2548 /* LiveEnvironmentSignalProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7990AC6D22FB3B0156DDF0FB /* LiveEnvironmentSignalProvider.swift */; };
 		E5EDF12755023034232EC3BB /* SLICohortMeaningfulnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 260D6F028C47AC6C2C8A73C6 /* SLICohortMeaningfulnessTests.swift */; };
 		E654599CAFB2FF0B4E11B0B8 /* SelfPromoBank.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F718920D30F80E7A9324813 /* SelfPromoBank.swift */; };
@@ -1112,6 +1113,7 @@
 		FE20F50A0907C05EEBB88314 /* EpisodeDurationBucketClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEF208412B71E825AD8E430F /* EpisodeDurationBucketClassifierTests.swift */; };
 		FE6E6BED9C5BF1683388A5D3 /* ChapterLabelingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D113DEAAC7D56CBB52E51E9 /* ChapterLabelingService.swift */; };
 		FE78A100F52792784CE35E26 /* AudioForensicsBoundaryDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC41A7231A013ECDB6BE5393 /* AudioForensicsBoundaryDetector.swift */; };
+		FEA4616CF252B8C04647D112 /* NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 8B895F9820E0CB1B66BDE3CA /* NOTICE.txt */; };
 		FEBE54A9366229133C9AEF3E /* FrozenTrace-AA8DCCA6-1927-4AA5-9062-D09EDBA11615.json in Resources */ = {isa = PBXBuildFile; fileRef = 1D2A618C1B0F29505669E26A /* FrozenTrace-AA8DCCA6-1927-4AA5-9062-D09EDBA11615.json */; };
 		FEE7000B43588E663B5FDAD3 /* QueueFinishObserverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55741E9D3F264B1ACA739E7F /* QueueFinishObserverTests.swift */; };
 		FEFCC10CFF7EF39FD043123F /* SensitiveWindowRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 117F1E41DE084B613166D952 /* SensitiveWindowRouter.swift */; };
@@ -1761,6 +1763,7 @@
 		89F391BB391AD909A18A6D8E /* AnalysisWorkSchedulerCandidateWindowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisWorkSchedulerCandidateWindowTests.swift; sourceTree = "<group>"; };
 		8A0B5BD4874AC60914F0E602 /* SegmentAggregator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SegmentAggregator.swift; sourceTree = "<group>"; };
 		8A59BB174DB2FBA01FE87751 /* DurationPrior.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DurationPrior.swift; sourceTree = "<group>"; };
+		8B895F9820E0CB1B66BDE3CA /* NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = NOTICE.txt; sourceTree = "<group>"; };
 		8BCE678E596FFBFE53CD62FE /* AnalysisAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisAudio.swift; sourceTree = "<group>"; };
 		8C8C2092BFFB988226C0C150 /* EpisodeLeaseAndWorkJournalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EpisodeLeaseAndWorkJournalTests.swift; sourceTree = "<group>"; };
 		8C8EF742FFE6F6BB80D6777C /* AdmissionControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdmissionControllerTests.swift; sourceTree = "<group>"; };
@@ -2254,6 +2257,7 @@
 		FF87059092BDF6E5FF9B1DB4 /* DecisionLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionLogger.swift; sourceTree = "<group>"; };
 		FFAC0AF611301A8AF53A5A5F /* MetadataEvidenceFusionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataEvidenceFusionTests.swift; sourceTree = "<group>"; };
 		FFCBD9A239AF9AFF6B5BAA97 /* AnalysisWorkSchedulerBackfillRearmTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisWorkSchedulerBackfillRearmTests.swift; sourceTree = "<group>"; };
+		FFD3C5FB461332A137CE3DC5 /* qwen3_0_6b_4bit_dynamic_ft_v2 */ = {isa = PBXFileReference; lastKnownFileType = folder; name = qwen3_0_6b_4bit_dynamic_ft_v2; path = Playhead/Resources/Models/qwen3_0_6b_4bit_dynamic_ft_v2; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -3270,6 +3274,7 @@
 				13239A6F6E1EC44E0BF7A83E /* Assets.xcassets */,
 				58E5A011BC4C448AF43A05CD /* LaunchScreen.storyboard */,
 				DF3C5579B9EB3AD2D6B64BB9 /* LexicalAnchorBank.json */,
+				8B895F9820E0CB1B66BDE3CA /* NOTICE.txt */,
 				A66DEB1918E282616C9D45FF /* Playhead.storekit */,
 				A6B7567749791518FBB4062F /* PreAnalysisConfig.json */,
 				967495DB14708D3F220F6FDB /* RedactionRules.json */,
@@ -4340,6 +4345,7 @@
 		F73584BA6173A6C9AE660DDD = {
 			isa = PBXGroup;
 			children = (
+				FFD3C5FB461332A137CE3DC5 /* qwen3_0_6b_4bit_dynamic_ft_v2 */,
 				799DAA47CF8EE7D35434258E /* Packages */,
 				C57371462F8A69506D585CCF /* Playhead */,
 				06AF8978062742FAAC79CD9B /* PlayheadTests */,
@@ -4384,6 +4390,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 8BB22A8715BEABBE134E3F9F /* Build configuration list for PBXNativeTarget "Playhead" */;
 			buildPhases = (
+				4A042A8AF14BFE7308031A36 /* Verify specialist model staged */,
 				4290CE74F64894A65828968C /* Sources */,
 				49BF0465877766451E375F07 /* Resources */,
 				74A5C90A05B0ACDBC44F5715 /* Frameworks */,
@@ -4515,17 +4522,38 @@
 				32D65ABF1F2B2CCA3F206D08 /* Assets.xcassets in Resources */,
 				74FC2078C7A375B26EBC92FB /* LaunchScreen.storyboard in Resources */,
 				B362385290171588E8153098 /* LexicalAnchorBank.json in Resources */,
+				FEA4616CF252B8C04647D112 /* NOTICE.txt in Resources */,
 				082AA741CCF2F7C35D663A0B /* Playhead.storekit in Resources */,
 				0714E7A46E1056F1B248CA18 /* PreAnalysisConfig.json in Resources */,
 				693780641DCC4FF280B23A4F /* RedactionRules.json in Resources */,
 				0D8BBCC084DACCC1EEA41D23 /* SelfPromoBank.json in Resources */,
 				646BB47B6070D34303AFDCDC /* StingerBank.json in Resources */,
+				E57504689391B942473176E5 /* qwen3_0_6b_4bit_dynamic_ft_v2 in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		4A042A8AF14BFE7308031A36 /* Verify specialist model staged */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Verify specialist model staged";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -euo pipefail\nMLIRB=\"${SRCROOT}/Playhead/Resources/Models/qwen3_0_6b_4bit_dynamic_ft_v2/qwen3_0_6b_4bit_dynamic_ft_v2.aimodel/main.mlirb\"\nif [ ! -f \"$MLIRB\" ]; then\n  echo \"error: specialist model weights are not staged.\" >&2\n  echo \"error: missing $MLIRB\" >&2\n  echo \"error: run  scripts/fetch-specialist-model.sh  to stage the ~321 MB model, then rebuild.\" >&2\n  echo \"error: see Playhead/Resources/Models/README.md\" >&2\n  exit 1\nfi\necho \"specialist model present: $MLIRB\"\n";
+		};
 		69E832A17746D20516B73647 /* Stamp build commit SHA */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;

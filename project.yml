@@ -29,8 +29,33 @@ targets:
           # swept into the Xcode project by regeneration.
           - "playhead-diagnostics-*.json"
           - "playhead-dogfood-diagnostics-*.json"
+          # playhead-b6jq PR2: the specialist model is added below as a
+          # dedicated *folder reference* (type: folder) so its nested
+          # `.aimodel/` + `tokenizer/` tree is bundled verbatim and is
+          # loadable at Bundle.main.resourceURL/qwen3_0_6b_4bit_dynamic_ft_v2/.
+          # This recursive walk (and the resources walk below) must NOT
+          # descend into it, or xcodegen flattens the tree into loose
+          # resource files and the folder reference degrades to a plain
+          # PBXGroup. Weights are gitignored (~321 MB); the README under
+          # Models/ is a dev doc and intentionally not bundled.
+          - "Resources/Models"
+      # playhead-b6jq PR2: bundle the on-device ad-detection specialist model
+      # as a folder reference (blue folder) so the `.aimodel/` + `tokenizer/`
+      # tree is preserved exactly — matching the phaseB spike loader
+      # (Bundle.main.resourceURL.appending(path: "qwen3_0_6b_4bit_dynamic_ft_v2")).
+      # It is the SOLE entry that references this path (both broad walks
+      # above/below exclude Models) so xcodegen emits a true folder reference.
+      # Weights (~321 MB) are gitignored; stage them first with
+      # scripts/fetch-specialist-model.sh. NO code loads this yet (that's PR3).
+      - path: Playhead/Resources/Models/qwen3_0_6b_4bit_dynamic_ft_v2
+        type: folder
+        buildPhase: resources
     resources:
       - path: Playhead/Resources
+        excludes:
+          # See the Resources/Models note in `sources` above — the model is
+          # a dedicated folder reference; keep this recursive walk out of it.
+          - "Models"
     dependencies:
       # playhead-b6jq PR 1: first SPM dependency in the app. Pure
       # plumbing — the only importer is the availability probe
@@ -84,6 +109,25 @@ targets:
     # BEFORE CodeSign (so the bundle's signature seals our plist
     # too). xcodegen's `postBuildScripts` lands in exactly that
     # window for an app target.
+    preBuildScripts:
+      # playhead-b6jq PR2: fail the build LOUD and early when the bundled
+      # specialist model weights are absent. They are gitignored (~321 MB),
+      # so a fresh checkout won't have them until scripts/fetch-specialist-model.sh
+      # runs. Without this guard, the missing folder reference surfaces as a
+      # cryptic "Build input file cannot be found" deep in the resources phase.
+      - name: Verify specialist model staged
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          MLIRB="${SRCROOT}/Playhead/Resources/Models/qwen3_0_6b_4bit_dynamic_ft_v2/qwen3_0_6b_4bit_dynamic_ft_v2.aimodel/main.mlirb"
+          if [ ! -f "$MLIRB" ]; then
+            echo "error: specialist model weights are not staged." >&2
+            echo "error: missing $MLIRB" >&2
+            echo "error: run  scripts/fetch-specialist-model.sh  to stage the ~321 MB model, then rebuild." >&2
+            echo "error: see Playhead/Resources/Models/README.md" >&2
+            exit 1
+          fi
+          echo "specialist model present: $MLIRB"
     postBuildScripts:
       - name: Stamp build commit SHA
         # Write a small `BuildProvenance.plist` into the built .app.

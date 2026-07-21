@@ -1,0 +1,94 @@
+Playhead — Third-Party Notices
+==============================================================================
+
+Playhead bundles and links third-party software and a bundled machine-learning
+model. The required attributions and license notices are reproduced below.
+The corresponding full license texts live in the repository (see references)
+and are redistributed with the source.
+
+
+------------------------------------------------------------------------------
+1. Qwen3-0.6B (bundled specialist model, fine-tuned + 4-bit quantized)
+------------------------------------------------------------------------------
+Playhead bundles an on-device ad-detection model that is a DERIVATIVE of
+Qwen3-0.6B: fine-tuned on Playhead's own data and 4-bit dynamically quantized,
+then compiled to Apple's Core AI (.aimodel) format.
+
+  Built with Qwen.
+  Qwen3 is developed by Alibaba Cloud / the Qwen team.
+  Licensed under the Apache License, Version 2.0.
+
+  This product includes a modified version of Qwen3-0.6B. Modifications:
+  supervised fine-tuning on Playhead ad-detection data and 4-bit dynamic
+  weight quantization. The bundled weights are a derivative work.
+
+  Upstream: https://huggingface.co/Qwen/Qwen3-0.6B
+  License:  Apache-2.0 (see https://www.apache.org/licenses/LICENSE-2.0)
+
+
+------------------------------------------------------------------------------
+2. coreai-models (Apple) — CoreAILM specialist runtime
+------------------------------------------------------------------------------
+Playhead vendors a trimmed fork of Apple's coreai-models (the CoreAILM
+product) to load and run the bundled model on device. Full license text:
+Vendor/coreai-models/LICENSE.
+
+  Copyright 2026 Apple Inc.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+  2. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+
+  3. Neither the name of the copyright holder nor the names of its
+     contributors may be used to endorse or promote products derived from
+     this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+  License:  BSD-3-Clause
+
+
+------------------------------------------------------------------------------
+3. swift-transformers (Hugging Face) — tokenizer / model support
+------------------------------------------------------------------------------
+Linked transitively via coreai-models (Transformers product) for tokenizer
+loading and text generation support.
+
+  Copyright the swift-transformers authors (Hugging Face, Inc.).
+  Licensed under the Apache License, Version 2.0.
+
+  Upstream: https://github.com/huggingface/swift-transformers (v1.2.0)
+  License:  Apache-2.0 (see https://www.apache.org/licenses/LICENSE-2.0)
+
+
+------------------------------------------------------------------------------
+4. xgrammar (MLC AI) — grammar-constrained decoding
+------------------------------------------------------------------------------
+Linked transitively via coreai-models (XGrammar product) for structured /
+JSON-schema-constrained generation.
+
+  Copyright the XGrammar authors (MLC AI).
+  Licensed under the Apache License, Version 2.0.
+
+  Upstream: https://github.com/mlc-ai/xgrammar
+            (rev 4d145cc13d878c751ebeed36af1c013074be76bc)
+  License:  Apache-2.0 (see https://www.apache.org/licenses/LICENSE-2.0)
+
+==============================================================================
+End of third-party notices.

@@ -44,6 +44,13 @@ Package.resolved
 # Local ASR models for playhead-l2f bootstrap. Large, regenerated/downloaded.
 models/ggml-*.bin
 
+# playhead-b6jq PR2: bundled ad-detection specialist model weights (~321 MB).
+# Staged out-of-git by scripts/fetch-specialist-model.sh — never committed,
+# because plain git-history bloat compounds across retrains. Only the
+# explanatory README under this dir is tracked.
+Playhead/Resources/Models/**
+!Playhead/Resources/Models/README.md
+
 # macOS
 .DS_Store
 
