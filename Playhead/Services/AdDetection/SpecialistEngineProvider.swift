@@ -87,6 +87,12 @@ actor SpecialistEngineProvider {
     /// In-flight single-flight load. Concurrent first-`classify` callers await
     /// this same `Task` rather than each starting a second ~202MB load.
     private var loadTask: Task<Loaded, Error>?
+    /// Monotonic load epoch. Bumped when a new load starts AND by `release()`,
+    /// so an in-flight load can tell whether it was superseded (released, or a
+    /// newer load began) before it commits its engine into `loaded`. `Task` is a
+    /// value type, so this epoch — not task identity (`===` doesn't compile on a
+    /// struct `Task`) — is how we detect supersession across the load `await`.
+    private var loadGeneration = 0
     #endif
 
     init(
@@ -156,6 +162,12 @@ actor SpecialistEngineProvider {
         #if canImport(CoreAILanguageModels) && !targetEnvironment(simulator)
         loadTask?.cancel()
         loadTask = nil
+        // Invalidate any in-flight load so that, when it completes, it DROPS its
+        // freshly built engine instead of repopulating `loaded` after us.
+        // `loadEngine` doesn't poll cancellation, so `cancel()` alone can't stop
+        // a load already past its first hop — without this epoch bump the load
+        // would resurrect the ~202MB engine and defeat this release entirely.
+        loadGeneration &+= 1
         // Dropping the last strong reference deinits the engine and frees its
         // GPU/ANE buffers (~202MB in the phaseB probe).
         loaded = nil
@@ -175,17 +187,30 @@ actor SpecialistEngineProvider {
 
         let url = modelURL
         let log = logger
+        loadGeneration &+= 1
+        let generation = loadGeneration
         let task = Task<Loaded, Error> {
             try await Self.loadEngine(modelURL: url, logger: log)
         }
         loadTask = task
         do {
             let result = try await task.value
+            // If `release()` (or a superseding load) ran while this ~5.6s load
+            // was in flight, `loadGeneration` moved on. Honor that: DROP the
+            // freshly built engine — ARC frees its ~202MB as `result` unwinds —
+            // rather than resurrecting it into `loaded` after a release. Without
+            // this the completed load would repopulate `loaded` post-`release`,
+            // since `loadEngine` never polls cancellation.
+            guard generation == loadGeneration else {
+                throw CancellationError()
+            }
             loaded = result
             loadTask = nil
             return result
         } catch {
-            loadTask = nil
+            // Only clear `loadTask` if we're still the current in-flight load;
+            // a supersession already replaced/cleared it and must not be clobbered.
+            if generation == loadGeneration { loadTask = nil }
             throw error
         }
     }
