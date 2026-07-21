@@ -582,3 +582,218 @@ struct BackfillReconcileOrchestratorTests {
                 "the retired hot window must not have fired an auto-skip")
     }
 }
+
+// MARK: - W1–W4: store-level atomic terminal guard (playhead-w17m)
+
+// The ud4n detection-level guard (`reconcileBackfillWindows`) computes its
+// `protectedIDs` from a snapshot READ taken OUTSIDE the write transaction. A
+// `candidate → .applied` transition that lands BETWEEN that snapshot read and
+// the write is invisible to `protectedIDs`; because fusion ids are content-
+// addressed (ordinal-keyed, not decisionState-keyed), a rerun of the now-applied
+// span mints the SAME `fusion-` id, and the blind INSERT-OR-REPLACE inside
+// `reconcileBackfillAdWindows` would clobber the just-applied terminal row back
+// to `.confirmed` (losing `wasSkipped`) — corrupting DB history even though the
+// in-memory orchestrator `.applied` still holds.
+//
+// This suite pins the SECOND, atomic backstop: `reconcileBackfillAdWindows`
+// itself refuses to overwrite an existing row whose live (in-transaction)
+// decisionState is terminal (`.applied` / `.reverted`). Because the guard reads
+// live DB state INSIDE the same transaction as the write, it closes the race
+// regardless of what the outer snapshot saw. It composes with (does not replace)
+// the detection-level guard — belt (drop protected from persist set) and
+// suspenders (atomic store backstop).
+@Suite("playhead-w17m — reconcile store-level atomic terminal guard")
+struct BackfillReconcileTerminalGuardTests {
+
+    /// A terminal row carrying user-facing history: `wasSkipped == true` and a
+    /// distinctive advertiser/confidence so a clobber is observable. Built
+    /// directly (not via `makeReconcileWindow`, which hardcodes
+    /// `wasSkipped: false`).
+    private func makeTerminalSeed(
+        id: String,
+        assetId: String,
+        decisionState: String
+    ) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: assetId,
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.85,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: decisionState,
+            detectorVersion: kReconcileDetectorVersion,
+            advertiser: "TerminalAdvertiser",
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: 60,
+            metadataSource: "fusion-v1",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: true,
+            userDismissedBanner: false
+        )
+    }
+
+    /// A same-id "re-detection" whose fields differ from the terminal seed so a
+    /// clobber (or absence of one) is unambiguous: `.confirmed`,
+    /// `wasSkipped` false, different advertiser + confidence.
+    private func makeCollidingRedetection(id: String, assetId: String) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: assetId,
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.55,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: "confirmed",
+            detectorVersion: kReconcileDetectorVersion,
+            advertiser: "ClobberAdvertiser",
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: 60,
+            metadataSource: "fusion-v1",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+    }
+
+    // W1: a persisted `.applied` terminal row is NEVER overwritten by a same-id
+    // window in the reconcile write set — the race the outer snapshot missed is
+    // closed atomically at the store. decisionState stays `.applied`, wasSkipped
+    // stays true, and the colliding window's data does not land.
+    @Test("W1: .applied terminal row is not overwritten by a same-id reconcile window")
+    func w1AppliedNotOverwritten() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-w17m-w1"
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId))
+
+        let collidingId = "fusion-deadbeefw17m0001"
+        try await store.insertAdWindow(makeTerminalSeed(id: collidingId, assetId: assetId, decisionState: "applied"))
+
+        // Simulate the raced state: the detection-level snapshot never saw the
+        // `.applied` transition, so the colliding window is (wrongly) in the
+        // persist set handed to the store.
+        try await store.reconcileBackfillAdWindows(
+            [makeCollidingRedetection(id: collidingId, assetId: assetId)],
+            retiredIDs: []
+        )
+
+        let row = try await store.fetchAdWindow(id: collidingId)
+        let unwrapped = try #require(row, "the terminal row must still exist")
+        #expect(unwrapped.decisionState == "applied",
+                "the store-level guard must leave the terminal .applied decisionState intact")
+        #expect(unwrapped.wasSkipped == true,
+                "wasSkipped history must be preserved (not clobbered to the colliding window's false)")
+        #expect(unwrapped.advertiser == "TerminalAdvertiser",
+                "no field of the colliding window may overwrite the terminal row")
+        #expect(unwrapped.confidence == 0.85)
+    }
+
+    // W2: same protection for the other terminal state, `.reverted` (user
+    // listened through the ad — history that a rerun must never resurface).
+    @Test("W2: .reverted terminal row is not overwritten by a same-id reconcile window")
+    func w2RevertedNotOverwritten() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-w17m-w2"
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId))
+
+        let collidingId = "fusion-deadbeefw17m0002"
+        try await store.insertAdWindow(makeTerminalSeed(id: collidingId, assetId: assetId, decisionState: "reverted"))
+
+        try await store.reconcileBackfillAdWindows(
+            [makeCollidingRedetection(id: collidingId, assetId: assetId)],
+            retiredIDs: []
+        )
+
+        let row = try await store.fetchAdWindow(id: collidingId)
+        let unwrapped = try #require(row, "the terminal row must still exist")
+        #expect(unwrapped.decisionState == "reverted",
+                "the store-level guard must leave the terminal .reverted decisionState intact")
+        #expect(unwrapped.wasSkipped == true)
+        #expect(unwrapped.advertiser == "TerminalAdvertiser")
+    }
+
+    // W3: the guard is surgical, not blanket. A NON-terminal existing row
+    // (candidate / confirmed / suppressed) with a colliding id is still
+    // INSERT-OR-REPLACE'd — the normal idempotent reconcile path is preserved.
+    @Test("W3: non-terminal rows (candidate/confirmed/suppressed) are still replaced on collision")
+    func w3NonTerminalStillReplaced() async throws {
+        for nonTerminal in ["candidate", "confirmed", "suppressed"] {
+            let store = try await makeTestStore()
+            let assetId = "asset-w17m-w3-\(nonTerminal)"
+            try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId))
+
+            let collidingId = "fusion-w17m-w3-\(nonTerminal)"
+            // Seed carries wasSkipped=true + a distinctive advertiser so the
+            // replace is observable. (makeTerminalSeed sets decisionState via the
+            // param, so this is a non-terminal row here despite the helper name.)
+            let seed = makeTerminalSeed(id: collidingId, assetId: assetId, decisionState: nonTerminal)
+            try await store.insertAdWindow(seed)
+
+            try await store.reconcileBackfillAdWindows(
+                [makeCollidingRedetection(id: collidingId, assetId: assetId)],
+                retiredIDs: []
+            )
+
+            let row = try await store.fetchAdWindow(id: collidingId)
+            let unwrapped = try #require(row, "the non-terminal row must still exist (replaced, not deleted)")
+            #expect(unwrapped.decisionState == "confirmed",
+                    "a non-terminal \(nonTerminal) row must be replaced by the colliding window")
+            #expect(unwrapped.wasSkipped == false,
+                    "the replace must overwrite wasSkipped to the colliding window's value")
+            #expect(unwrapped.advertiser == "ClobberAdvertiser",
+                    "the colliding window's fields must land on a non-terminal replace")
+            #expect(unwrapped.confidence == 0.55)
+        }
+    }
+
+    // W4: the guard is per-row and does not abort the rest of the reconcile. In
+    // one call: a colliding terminal row is preserved, a fresh new window is
+    // inserted, and a retiredID is still deleted — the transaction otherwise
+    // succeeds normally.
+    @Test("W4: terminal guard is per-row — new inserts and retires in the same batch still land")
+    func w4GuardIsPerRowNonBlocking() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-w17m-w4"
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId))
+
+        let terminalId = "fusion-w17m-w4-applied"
+        try await store.insertAdWindow(makeTerminalSeed(id: terminalId, assetId: assetId, decisionState: "applied"))
+
+        // A reconcilable row that this reconcile retires.
+        let retireId = "fusion-w17m-w4-retire"
+        try await store.insertAdWindow(
+            makeReconcileWindow(id: retireId, assetId: assetId, decisionState: "candidate")
+        )
+
+        let freshId = "fusion-w17m-w4-fresh"
+        let fresh = makeReconcileWindow(
+            id: freshId, assetId: assetId,
+            startTime: 200, endTime: 230,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: "confirmed", metadataSource: "fusion-v1"
+        )
+
+        try await store.reconcileBackfillAdWindows(
+            [makeCollidingRedetection(id: terminalId, assetId: assetId), fresh],
+            retiredIDs: [retireId]
+        )
+
+        let after = try await store.fetchAdWindows(assetId: assetId)
+        // Terminal row preserved.
+        let terminal = try #require(after.first { $0.id == terminalId })
+        #expect(terminal.decisionState == "applied")
+        #expect(terminal.wasSkipped == true)
+        // Fresh window inserted.
+        #expect(after.contains { $0.id == freshId && $0.decisionState == "confirmed" },
+                "a fresh (non-colliding) window in the same batch must still be inserted")
+        // Retired window deleted.
+        #expect(!after.contains { $0.id == retireId },
+                "the retiredID must still be deleted — the guard does not abort the transaction")
+    }
+}
