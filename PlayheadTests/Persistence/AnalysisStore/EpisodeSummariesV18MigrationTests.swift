@@ -215,7 +215,7 @@ struct EpisodeSummariesV18MigrationTests {
     func backfillCandidatesMissingSummary() async throws {
         let store = try await makeTestStore()
 
-        // Eligible: 90% coverage, no summary.
+        // Eligible: 90% real union coverage, ad detection complete, no summary.
         try await store.insertAsset(
             makeAsset(
                 id: "asset-jzik-eligible",
@@ -223,7 +223,9 @@ struct EpisodeSummariesV18MigrationTests {
                 episodeDurationSec: 100.0
             )
         )
-        // Ineligible: 50% coverage.
+        try await insertFastChunk(store, assetId: "asset-jzik-eligible", start: 0, end: 90)
+
+        // Ineligible: 50% union coverage.
         try await store.insertAsset(
             makeAsset(
                 id: "asset-jzik-low-coverage",
@@ -231,6 +233,8 @@ struct EpisodeSummariesV18MigrationTests {
                 episodeDurationSec: 100.0
             )
         )
+        try await insertFastChunk(store, assetId: "asset-jzik-low-coverage", start: 0, end: 50)
+
         // Eligible coverage but already has current-schema summary.
         try await store.insertAsset(
             makeAsset(
@@ -239,6 +243,7 @@ struct EpisodeSummariesV18MigrationTests {
                 episodeDurationSec: 100.0
             )
         )
+        try await insertFastChunk(store, assetId: "asset-jzik-already-summarized", start: 0, end: 95)
         try await store.upsertEpisodeSummary(
             EpisodeSummary(
                 analysisAssetId: "asset-jzik-already-summarized",
@@ -270,6 +275,7 @@ struct EpisodeSummariesV18MigrationTests {
                 episodeDurationSec: 100.0
             )
         )
+        try await insertFastChunk(store, assetId: "asset-jzik-stale", start: 0, end: 90)
         try await store.upsertEpisodeSummary(
             EpisodeSummary(
                 analysisAssetId: "asset-jzik-stale",
@@ -284,7 +290,7 @@ struct EpisodeSummariesV18MigrationTests {
 
         let candidates = try await store.fetchEpisodeSummaryBackfillCandidates(
             coverageFraction: 0.8,
-            currentSchemaVersion: 1,
+            currentSchemaVersion: EpisodeSummary.currentSchemaVersion,
             limit: 10
         )
         #expect(candidates.contains("asset-jzik-stale"))
@@ -300,6 +306,7 @@ struct EpisodeSummariesV18MigrationTests {
                 episodeDurationSec: nil
             )
         )
+        try await insertFastChunk(store, assetId: "asset-jzik-no-duration", start: 0, end: 60)
 
         let candidates = try await store.fetchEpisodeSummaryBackfillCandidates(
             coverageFraction: 0.8,
@@ -309,12 +316,155 @@ struct EpisodeSummariesV18MigrationTests {
         #expect(!candidates.contains("asset-jzik-no-duration"))
     }
 
+    // MARK: - 7. Real-coverage gate (playhead-g4dk)
+
+    @Test("backfill candidates: high watermark but low real (union) coverage is rejected")
+    func backfillCandidatesHighWatermarkLowUnionRejected() async throws {
+        let store = try await makeTestStore()
+
+        // The g4dk bug shape: the watermark REACHES 90/100 (90%) so the old
+        // `fastTranscriptCoverageEndTime / duration` gate admitted it, but
+        // the transcript is gappy — only ~39s of fast text is actually
+        // present. The union gate must reject it.
+        try await store.insertAsset(
+            makeAsset(
+                id: "asset-g4dk-gappy",
+                fastTranscriptCoverageEndTime: 90.0,
+                episodeDurationSec: 100.0
+            )
+        )
+        // Two short fast chunks near the start and end, unioning to 39s of
+        // real coverage even though the reach (max endTime) is 90s.
+        try await insertFastChunk(store, assetId: "asset-g4dk-gappy", start: 0, end: 20, index: 0)
+        try await insertFastChunk(store, assetId: "asset-g4dk-gappy", start: 71, end: 90, index: 1)
+
+        // Control: a genuinely 90%-covered sibling that MUST still pass, so
+        // the rejection above is attributable to real coverage, not the gate
+        // rejecting everything.
+        try await store.insertAsset(
+            makeAsset(
+                id: "asset-g4dk-dense",
+                fastTranscriptCoverageEndTime: 90.0,
+                episodeDurationSec: 100.0
+            )
+        )
+        try await insertFastChunk(store, assetId: "asset-g4dk-dense", start: 0, end: 90)
+
+        let candidates = try await store.fetchEpisodeSummaryBackfillCandidates(
+            coverageFraction: 0.8,
+            currentSchemaVersion: EpisodeSummary.currentSchemaVersion,
+            limit: 10
+        )
+        #expect(!candidates.contains("asset-g4dk-gappy"))
+        #expect(candidates.contains("asset-g4dk-dense"))
+    }
+
+    @Test("backfill candidates: episode where ad detection has not completed is rejected")
+    func backfillCandidatesAdDetectionIncompleteRejected() async throws {
+        let store = try await makeTestStore()
+
+        // Fully covered transcript (90/100) but analysis is still in
+        // progress and no confirmed-ad coverage exists yet — summarizing now
+        // would run on a pre-ad-detection transcript and leak a sponsor read.
+        try await store.insertAsset(
+            makeAsset(
+                id: "asset-g4dk-pre-addetect",
+                fastTranscriptCoverageEndTime: 90.0,
+                episodeDurationSec: 100.0,
+                analysisState: "backfill",
+                confirmedAdCoverageEndTime: nil
+            )
+        )
+        try await insertFastChunk(store, assetId: "asset-g4dk-pre-addetect", start: 0, end: 90)
+
+        let rejected = try await store.fetchEpisodeSummaryBackfillCandidates(
+            coverageFraction: 0.8,
+            currentSchemaVersion: EpisodeSummary.currentSchemaVersion,
+            limit: 10
+        )
+        #expect(!rejected.contains("asset-g4dk-pre-addetect"))
+
+        // Once ad detection confirms coverage (confirmedAdCoverageEndTime set)
+        // the SAME still-in-progress row becomes eligible — proving the
+        // rejection above was the completion gate, not the coverage gate.
+        try await store.updateConfirmedAdCoverage(id: "asset-g4dk-pre-addetect", endTime: 88.0)
+        let admitted = try await store.fetchEpisodeSummaryBackfillCandidates(
+            coverageFraction: 0.8,
+            currentSchemaVersion: EpisodeSummary.currentSchemaVersion,
+            limit: 10
+        )
+        #expect(admitted.contains("asset-g4dk-pre-addetect"))
+    }
+
+    @Test("backfill candidates: no-ad episode is eligible once full analysis completes")
+    func backfillCandidatesNoAdEpisodeEligibleWhenComplete() async throws {
+        let store = try await makeTestStore()
+
+        // An episode with NO detected ads never gets confirmedAdCoverageEndTime
+        // (it only advances to max(nonSuppressedWindows.endTime)). It must
+        // still be summary-eligible once full analysis completes, otherwise
+        // ad-free episodes would never get a summary.
+        try await store.insertAsset(
+            makeAsset(
+                id: "asset-g4dk-no-ads",
+                fastTranscriptCoverageEndTime: 95.0,
+                episodeDurationSec: 100.0,
+                analysisState: "completeFull",
+                confirmedAdCoverageEndTime: nil
+            )
+        )
+        try await insertFastChunk(store, assetId: "asset-g4dk-no-ads", start: 0, end: 95)
+
+        let candidates = try await store.fetchEpisodeSummaryBackfillCandidates(
+            coverageFraction: 0.8,
+            currentSchemaVersion: EpisodeSummary.currentSchemaVersion,
+            limit: 10
+        )
+        #expect(candidates.contains("asset-g4dk-no-ads"))
+    }
+
+    @Test("backfill candidates: no-ad completeTranscriptPartial episode is still eligible")
+    func backfillCandidatesNoAdPartialTranscriptEligible() async throws {
+        let store = try await makeTestStore()
+
+        // completeTranscriptPartial is a terminal-completion state (ad
+        // detection ran when the session left `.backfill`) whose transcript
+        // reach fell short of the 0.95 finalize ratio — a COMMON band for
+        // shows with music/applause/outro tails. A no-ad episode there never
+        // gets confirmedAdCoverageEndTime, so gating on the confirmed-ad
+        // watermark alone would deny it a summary forever. Its 90% union
+        // coverage clears the coverage gate, so it must be eligible.
+        try await store.insertAsset(
+            makeAsset(
+                id: "asset-g4dk-partial-noads",
+                fastTranscriptCoverageEndTime: 90.0,
+                episodeDurationSec: 100.0,
+                analysisState: "completeTranscriptPartial",
+                confirmedAdCoverageEndTime: nil
+            )
+        )
+        try await insertFastChunk(store, assetId: "asset-g4dk-partial-noads", start: 0, end: 90)
+
+        let candidates = try await store.fetchEpisodeSummaryBackfillCandidates(
+            coverageFraction: 0.8,
+            currentSchemaVersion: EpisodeSummary.currentSchemaVersion,
+            limit: 10
+        )
+        #expect(candidates.contains("asset-g4dk-partial-noads"))
+    }
+
     // MARK: - Fixtures
 
+    /// playhead-g4dk: eligibility now gates on ad-detection completion, so
+    /// tests default the asset to a full-analysis terminal. Individual
+    /// tests override `analysisState` / `confirmedAdCoverageEndTime` to
+    /// exercise the completion gate.
     private func makeAsset(
         id: String,
         fastTranscriptCoverageEndTime: Double? = nil,
-        episodeDurationSec: Double? = nil
+        episodeDurationSec: Double? = nil,
+        analysisState: String = "completeFull",
+        confirmedAdCoverageEndTime: Double? = nil
     ) -> AnalysisAsset {
         AnalysisAsset(
             id: id,
@@ -324,11 +474,41 @@ struct EpisodeSummariesV18MigrationTests {
             sourceURL: "file:///tmp/\(id).m4a",
             featureCoverageEndTime: nil,
             fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime,
-            confirmedAdCoverageEndTime: nil,
-            analysisState: "queued",
+            confirmedAdCoverageEndTime: confirmedAdCoverageEndTime,
+            analysisState: analysisState,
             analysisVersion: 1,
             capabilitySnapshot: nil,
             episodeDurationSec: episodeDurationSec
+        )
+    }
+
+    /// playhead-g4dk: the candidate gate now decides on interval-unioned
+    /// `pass='fast'` coverage, so tests must land real transcript chunks
+    /// (the watermark alone no longer qualifies an asset). Inserts one
+    /// fast chunk spanning `[start, end)` — union coverage == `end - start`.
+    private func insertFastChunk(
+        _ store: AnalysisStore,
+        assetId: String,
+        start: Double,
+        end: Double,
+        index: Int = 0,
+        text: String = "editorial content"
+    ) async throws {
+        try await store.insertTranscriptChunk(
+            TranscriptChunk(
+                id: "\(assetId)-chunk-\(index)",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-\(assetId)-\(index)",
+                chunkIndex: index,
+                startTime: start,
+                endTime: end,
+                text: text,
+                normalizedText: text,
+                pass: "fast",
+                modelVersion: "test",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
         )
     }
 }

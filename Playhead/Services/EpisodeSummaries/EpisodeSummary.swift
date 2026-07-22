@@ -38,7 +38,13 @@ import Foundation
 struct EpisodeSummary: Sendable, Equatable, Hashable, Codable {
     /// Bumps when the persisted shape OR the upstream prompt grammar
     /// changes in a way that should invalidate prior rows.
-    static let currentSchemaVersion: Int = 1
+    ///
+    /// v2 (playhead-g4dk): the summarizer now excludes confirmed-ad
+    /// transcript spans from its input and the prompt explicitly instructs
+    /// the model to ignore advertisements. Rows written at v1 were built
+    /// from raw ad-contaminated transcripts (a car-sponsor read once
+    /// crowded out a Tour de France episode), so they must regenerate.
+    static let currentSchemaVersion: Int = 2
 
     let analysisAssetId: String
     let summary: String

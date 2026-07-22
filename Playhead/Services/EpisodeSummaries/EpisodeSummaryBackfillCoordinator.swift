@@ -125,10 +125,31 @@ struct AnalysisStoreEpisodeSummaryBackfillCandidateProvider: EpisodeSummaryBackf
         }
         let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
         guard !chunks.isEmpty else { return nil }
+
+        // playhead-g4dk: drop transcript chunks that overlap a confirmed-ad
+        // span before the extractor ever sees them. Ads are detected and
+        // stored but the summary pipeline used to feed the model the raw
+        // transcript, so a pre-roll sponsor read in the opening sample
+        // window crowded out the episode's actual content. Removing whole
+        // overlapping chunks here guarantees the summarizer transport never
+        // receives confirmed-ad text.
+        let adRanges = try await confirmedAdRanges(assetId: assetId)
+        let adFreeChunks = EpisodeSummaryAdExclusion.excludingAds(
+            chunks: chunks,
+            adRanges: adRanges
+        )
+        // Defensive fallback: if exclusion removed EVERY chunk (a detector
+        // pathology that flags the whole episode as ad, not a real
+        // episode), summarize the raw transcript rather than produce
+        // nothing. A degenerate all-ad episode is preferable to a silently
+        // missing summary, and such rows are vanishingly rare.
+        let summarizerChunks = adFreeChunks.isEmpty ? chunks : adFreeChunks
+
         // Pick the most recent transcriptVersion observed across the
-        // chunks. Fast-pass chunks carry `nil`, so we fall back to the
-        // first non-nil if any. The coordinator stores this on the
-        // summary row as the invalidation key.
+        // transcript. Fast-pass chunks carry `nil`, so we fall back to the
+        // last non-nil if any. Derived from the FULL chunk set (not the
+        // ad-filtered one) so the invalidation key tracks the transcript
+        // pass independently of which spans were dropped as ads.
         let transcriptVersion = chunks
             .compactMap(\.transcriptVersion)
             .last
@@ -137,8 +158,28 @@ struct AnalysisStoreEpisodeSummaryBackfillCandidateProvider: EpisodeSummaryBackf
             episodeTitle: asset.episodeTitle,
             showTitle: nil,
             transcriptVersion: transcriptVersion,
-            chunks: chunks
+            chunks: summarizerChunks
         )
+    }
+
+    /// Confirmed-ad time ranges to exclude from the summarizer input.
+    /// Combines confirmed/applied `ad_windows` (an ad the pipeline is
+    /// confident about, or one already skipped for the listener) with the
+    /// decoder's contiguous ad spans (which are ad spans by construction).
+    /// `candidate` (unconfirmed hot-path), `suppressed` (below threshold),
+    /// and `reverted` (user chose to listen) windows are intentionally NOT
+    /// excluded — only confirmed ads should shrink the editorial text.
+    private func confirmedAdRanges(assetId: String) async throws -> [EpisodeSummaryAdRange] {
+        let confirmedStates: Set<String> = [
+            AdDecisionState.confirmed.rawValue,
+            AdDecisionState.applied.rawValue
+        ]
+        let windowRanges = try await store.fetchAdWindows(assetId: assetId)
+            .filter { confirmedStates.contains($0.decisionState) }
+            .map { EpisodeSummaryAdRange(start: $0.startTime, end: $0.endTime) }
+        let spanRanges = try await store.fetchDecodedSpans(assetId: assetId)
+            .map { EpisodeSummaryAdRange(start: $0.startTime, end: $0.endTime) }
+        return windowRanges + spanRanges
     }
 }
 
