@@ -875,6 +875,43 @@ struct RediffFetchPersonaTests {
         #expect(a != c)
     }
 
+    @Test("cacheBustedURL preserves pre-existing percent-encoding BYTE-FOR-BYTE (no queryItems round-trip mangling) and keeps the fragment")
+    func cacheBustedURLPreservesEncodingByteForByte() {
+        // A `queryItems` round-trip decodes `%2F`→`/`, `%2B`→`+`, `%3A`→`:`,
+        // silently changing WHICH object a redirect/tracking/signed param
+        // resolves to. The cache-buster must leave the existing query verbatim.
+        let signed = URL(string: "https://cdn.example.com/ep.mp3?sig=aB%2FcD%3D%3D&exp=123")!
+        let out = RediffFetchRequest.cacheBustedURL(signed, token: "TOK")
+        #expect(
+            out.absoluteString == "https://cdn.example.com/ep.mp3?sig=aB%2FcD%3D%3D&exp=123&_cb=TOK",
+            "existing %2F/%3D are preserved byte-for-byte; only _cb is appended"
+        )
+
+        // A nested percent-encoded URL param — the worst mangling case.
+        let redirect = URL(string: "https://cdn.example.com/ep.mp3?u=https%3A%2F%2Fx.com%2Fy")!
+        #expect(
+            RediffFetchRequest.cacheBustedURL(redirect, token: "T").absoluteString
+                == "https://cdn.example.com/ep.mp3?u=https%3A%2F%2Fx.com%2Fy&_cb=T",
+            "nested encoded URL param is not decoded"
+        )
+
+        // A `%2B` (encoded plus) must NOT collapse to a bare `+` (form-space).
+        let plus = URL(string: "https://cdn.example.com/ep.mp3?t=a%2Bb")!
+        #expect(RediffFetchRequest.cacheBustedURL(plus, token: "T").absoluteString
+            == "https://cdn.example.com/ep.mp3?t=a%2Bb&_cb=T")
+
+        // The URL fragment is preserved and _cb lands in the query, not the frag.
+        let frag = URL(string: "https://cdn.example.com/ep.mp3?a=b#chapter")!
+        #expect(RediffFetchRequest.cacheBustedURL(frag, token: "T").absoluteString
+            == "https://cdn.example.com/ep.mp3?a=b&_cb=T#chapter")
+
+        // A custom token carrying query-reserved chars is encoded, never
+        // corrupting the query with a stray `&`/`=`.
+        let messy = RediffFetchRequest.cacheBustedURL(URL(string: "https://cdn.example.com/ep.mp3")!, token: "a&b=c")
+        let items = URLComponents(url: messy, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(items == [URLQueryItem(name: "_cb", value: "a&b=c")], "the token round-trips as a single value")
+    }
+
     @Test("the curated bank is the divergence-reliable set, default = AppleCoreMedia-iPhone, and excludes curl/generic UAs")
     func curatedBankMembership() {
         #expect(Set(RediffFetchPersona.curatedBank.map(\.name))

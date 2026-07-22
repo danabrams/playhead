@@ -268,10 +268,23 @@ enum RediffFetchRequest {
     /// Unobtrusive cache-buster query-item name.
     static let cacheBusterQueryItem = "_cb"
 
-    /// Append a UNIQUE cache-buster query item to `url`, PRESERVING any
-    /// existing query string (URLComponents append — an existing `?a=b` is
-    /// kept, never clobbered). Falls back to the original URL if it cannot be
-    /// decomposed (never expected for an http(s) enclosure).
+    /// Token characters left un-encoded when the cache-buster value is stamped
+    /// into the query: the RFC 3986 "unreserved" set. The default UUID token is
+    /// already within it; a custom injected token is defensively encoded so it
+    /// can never introduce a stray `&`/`#`/`=` that corrupts the query.
+    private static let tokenAllowed = CharacterSet.alphanumerics
+        .union(CharacterSet(charactersIn: "-._~"))
+
+    /// Append a UNIQUE cache-buster query item to `url`, PRESERVING any existing
+    /// query string BYTE-FOR-BYTE. Uses `percentEncodedQueryItems` (NOT
+    /// `queryItems`): the latter decode/re-encode round-trip mangles pre-existing
+    /// percent-encoding in the enclosure's query — `%2F`→`/`, `%2B`→`+`,
+    /// `%3A`→`:` — which would silently change WHICH object a redirect/tracking
+    /// param resolves to. `percentEncodedQueryItems` keeps existing items
+    /// verbatim and appends `_cb` (its value pre-encoded via `tokenAllowed`).
+    /// An existing `?a=b` is kept, never clobbered; the fragment is preserved.
+    /// Falls back to the original URL if it cannot be decomposed (never expected
+    /// for an http(s) enclosure).
     ///
     /// RESIDUAL RISK — signed-URL 403 (xsdz.36.3 self-review "F2", DEFERRED):
     /// `_cb` is appended UNCONDITIONALLY, so an enclosure whose signature
@@ -290,9 +303,10 @@ enum RediffFetchRequest {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return url
         }
-        var items = components.queryItems ?? []
-        items.append(URLQueryItem(name: cacheBusterQueryItem, value: token))
-        components.queryItems = items
+        let encodedToken = token.addingPercentEncoding(withAllowedCharacters: tokenAllowed) ?? token
+        var items = components.percentEncodedQueryItems ?? []
+        items.append(URLQueryItem(name: cacheBusterQueryItem, value: encodedToken))
+        components.percentEncodedQueryItems = items
         return components.url ?? url
     }
 
