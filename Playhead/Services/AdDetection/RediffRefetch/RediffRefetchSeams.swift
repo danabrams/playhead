@@ -269,11 +269,18 @@ enum RediffFetchRequest {
     static let cacheBusterQueryItem = "_cb"
 
     /// Token characters left un-encoded when the cache-buster value is stamped
-    /// into the query: the RFC 3986 "unreserved" set. The default UUID token is
-    /// already within it; a custom injected token is defensively encoded so it
-    /// can never introduce a stray `&`/`#`/`=` that corrupts the query.
-    private static let tokenAllowed = CharacterSet.alphanumerics
-        .union(CharacterSet(charactersIn: "-._~"))
+    /// into the query: the RFC 3986 "unreserved" set, spelled out as ASCII
+    /// `A-Za-z0-9-._~` ONLY. Deliberately NOT `CharacterSet.alphanumerics` —
+    /// that set is the *Unicode* alphanumerics, so a non-ASCII injected token
+    /// (e.g. `"café"`) would be left as a RAW byte, which then either voids
+    /// `URLComponents.url` (silently dropping the whole `_cb` cache-buster) or
+    /// emits an invalid non-ASCII query. The default UUID token is already
+    /// within this ASCII set; any custom injected token — including a non-ASCII
+    /// one — is defensively percent-encoded so it can never introduce a stray
+    /// `&`/`#`/`=` or a raw non-ASCII byte that corrupts or voids the query.
+    private static let tokenAllowed = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
 
     /// Append a UNIQUE cache-buster query item to `url`, PRESERVING any existing
     /// query string BYTE-FOR-BYTE. Uses `percentEncodedQueryItems` (NOT

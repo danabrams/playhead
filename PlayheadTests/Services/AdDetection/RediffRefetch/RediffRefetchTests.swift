@@ -912,6 +912,30 @@ struct RediffFetchPersonaTests {
         #expect(items == [URLQueryItem(name: "_cb", value: "a&b=c")], "the token round-trips as a single value")
     }
 
+    @Test("cacheBustedURL percent-encodes a non-ASCII / reserved injected token to a valid all-ASCII query (never a raw byte, never a silently-dropped _cb)")
+    func cacheBustedURLEncodesNonASCIIToken() {
+        // RFC 3986 "unreserved" is ASCII-only. A token carrying a non-ASCII
+        // char (`é`) plus query-reserved chars (`#`, `/`, space) must be fully
+        // percent-encoded: leaving `é` RAW would either void `URLComponents.url`
+        // (dropping the whole cache-buster — a rediff served a stale cached
+        // stitch) or emit a non-ASCII query. `CharacterSet.alphanumerics` (the
+        // Unicode set) would leave `é` raw; the ASCII unreserved set encodes it.
+        let out = RediffFetchRequest.cacheBustedURL(
+            URL(string: "https://cdn.example.com/ep.mp3?a=b")!, token: "café#/ x"
+        )
+        // (1) the busted URL is emitted and is fully ASCII (percent-encoded) —
+        //     fails if `é` is left raw in the query.
+        #expect(out.absoluteString.canBeConverted(to: .ascii),
+                "a non-ASCII token must be percent-encoded, not left as a raw byte")
+        let items = URLComponents(url: out, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        // (2) the `_cb` item is PRESENT (never silently dropped by a nil-`url`
+        //     fallback) and round-trips back to exactly the injected token.
+        #expect(items.first(where: { $0.name == "_cb" })?.value == "café#/ x",
+                "the token decodes back to exactly what was injected")
+        // (3) the pre-existing query is untouched.
+        #expect(items.contains(URLQueryItem(name: "a", value: "b")))
+    }
+
     @Test("the curated bank is the divergence-reliable set, default = AppleCoreMedia-iPhone, and excludes curl/generic UAs")
     func curatedBankMembership() {
         #expect(Set(RediffFetchPersona.curatedBank.map(\.name))
