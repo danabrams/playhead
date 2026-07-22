@@ -266,16 +266,50 @@ private extension LibraryView {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        // Collect each feed's newly-discovered episodes as we refresh, then
+        // route them through the SAME gated selection + enqueue path the
+        // BGAppRefreshTask uses so a manual pull-to-refresh honors the
+        // `autoDownloadOnSubscribe` setting (playhead-y5mk). Pre-fix this
+        // discarded the refresh result, so the auto-download feature only
+        // ever fired from the (starved) background task.
         let service = discoveryService
+        var groups: [FeedRefreshDiscoveryGroup] = []
         for podcast in podcasts {
             do {
-                let _ = try await service.refreshEpisodes(
+                let newEpisodes = try await service.refreshEpisodes(
                     for: podcast, in: modelContext
+                )
+                guard !newEpisodes.isEmpty else { continue }
+                let records = newEpisodes.map { episode in
+                    FeedRefreshNewEpisode(
+                        canonicalEpisodeKey: episode.canonicalEpisodeKey,
+                        feedURL: podcast.feedURL,
+                        audioURL: episode.audioURL,
+                        publishedAt: episode.publishedAt
+                    )
+                }
+                groups.append(
+                    FeedRefreshDiscoveryGroup(
+                        feedURL: podcast.feedURL,
+                        autoDownloadOverride: podcast.autoDownloadOverride,
+                        newEpisodes: records
+                    )
                 )
             } catch {
                 // Silently continue — partial refresh is better than none.
             }
         }
+
+        // Delegate selection + enqueue to the shared service so the global
+        // setting, per-show override resolution, and cellular / already-
+        // cached dedup policy are applied exactly as in the background
+        // path. Skipped gracefully when no service is attached (previews)
+        // or nothing new was discovered; `.off` resolves to zero enqueues.
+        guard !groups.isEmpty,
+              let refreshService = BackgroundFeedRefreshService.shared else {
+            return
+        }
+        _ = await refreshService.enqueueAutoDownloads(for: groups)
     }
 }
 

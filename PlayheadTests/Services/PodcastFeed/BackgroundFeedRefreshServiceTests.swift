@@ -286,6 +286,237 @@ struct BackgroundFeedRefreshRescheduleTests {
     }
 }
 
+// MARK: - Idempotent reschedule (playhead-y5mk starvation fix)
+
+/// The bug: `scheduleNextRefresh()` unconditionally submitted a
+/// `BGAppRefreshTaskRequest`. Because `BGTaskScheduler.submit` dedupes by
+/// identifier, each resubmit REPLACED the pending request and pushed its
+/// earliest-begin-date another hour out. `start()` runs on every launch —
+/// including the frequent ~30-min background launches iOS grants for
+/// analysis — so the request never matured (observed: 131 submits, 0
+/// dispatches over 8 days). The fix skips the submit when a feed-refresh
+/// request is already pending; the post-dispatch reschedule bypasses the
+/// guard so a fired task still re-arms.
+@Suite("BackgroundFeedRefreshService — idempotent reschedule (playhead-y5mk)")
+struct BackgroundFeedRefreshIdempotentRescheduleTests {
+
+    @Test("scheduleNextRefresh submits when NO feed-refresh request is pending")
+    func submitsWhenNonePending() async {
+        let (service, _, _, _, scheduler) = makeService()
+
+        await service.scheduleNextRefresh()
+
+        let feedRefreshSubmits = scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundFeedRefreshService.taskIdentifier
+        }
+        #expect(feedRefreshSubmits.count == 1,
+                "Must submit exactly once when nothing is pending")
+    }
+
+    @Test("scheduleNextRefresh SKIPS the submit when a feed-refresh request is already pending")
+    func skipsWhenAlreadyPending() async {
+        let scheduler = StubTaskScheduler()
+        // Configurable pending set: a feed-refresh request is already there.
+        scheduler.seedPending(
+            BGAppRefreshTaskRequest(identifier: BackgroundFeedRefreshService.taskIdentifier)
+        )
+        let (service, _, _, _, _) = makeService(scheduler: scheduler)
+
+        await service.scheduleNextRefresh()
+
+        #expect(scheduler.submittedRequests.isEmpty,
+                "Must not submit when a feed-refresh request is already pending")
+    }
+
+    @Test("A pending request for a DIFFERENT identifier does not suppress the submit")
+    func differentIdentifierDoesNotSuppress() async {
+        let scheduler = StubTaskScheduler()
+        // Some unrelated task is pending — must NOT block feed-refresh.
+        scheduler.seedPending(
+            BGProcessingTaskRequest(identifier: BackgroundTaskID.backfillProcessing)
+        )
+        let (service, _, _, _, _) = makeService(scheduler: scheduler)
+
+        await service.scheduleNextRefresh()
+
+        let feedRefreshSubmits = scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundFeedRefreshService.taskIdentifier
+        }
+        #expect(feedRefreshSubmits.count == 1,
+                "Only a same-identifier pending request should suppress the submit")
+    }
+
+    /// Regression modeling the actual device failure: N background wakes,
+    /// each calling `scheduleNextRefresh()` (as `start()` does), must leave
+    /// EXACTLY ONE pending feed-refresh request — not N bulldozing
+    /// resubmits that keep pushing the begin-date out of reach.
+    @Test("N successive reschedules yield exactly one pending request, not N resubmits")
+    func repeatedReschedulesDoNotBulldozePending() async {
+        let (service, _, _, _, scheduler) = makeService()
+
+        // Simulate 8 background wakes (the observed window) re-arming.
+        for _ in 0..<8 {
+            await service.scheduleNextRefresh()
+        }
+
+        let pendingIdentifiers = await scheduler.pendingTaskRequestIdentifiers()
+        let feedRefreshPending = pendingIdentifiers.filter {
+            $0 == BackgroundFeedRefreshService.taskIdentifier
+        }
+        #expect(feedRefreshPending.count == 1,
+                "Exactly one feed-refresh request must be pending; got \(feedRefreshPending.count)")
+
+        let feedRefreshSubmits = scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundFeedRefreshService.taskIdentifier
+        }
+        #expect(feedRefreshSubmits.count == 1,
+                "Only the first wake should submit; the other 7 must be no-ops, got \(feedRefreshSubmits.count)")
+    }
+
+    /// The guard must NEVER block the post-dispatch reschedule. When a task
+    /// fires there is nothing pending, so re-arming (a fresh submit) is
+    /// correct and required. This pins that `handleFeedRefreshTask` still
+    /// submits even when — defensively — a request is already pending.
+    @Test("handleFeedRefreshTask re-arms unconditionally even when a request is already pending")
+    func handlerReschedulesEvenWhenPending() async {
+        let scheduler = StubTaskScheduler()
+        // Defensive: a feed-refresh request is already pending going in.
+        // A guarded submit would skip; the handler's forced path must not.
+        scheduler.seedPending(
+            BGAppRefreshTaskRequest(identifier: BackgroundFeedRefreshService.taskIdentifier)
+        )
+        let (service, _, _, _, _) = makeService(scheduler: scheduler)
+        let task = StubBackgroundTask()
+
+        await service.handleFeedRefreshTask(task)
+
+        let feedRefreshSubmits = scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundFeedRefreshService.taskIdentifier
+        }
+        #expect(feedRefreshSubmits.count >= 1,
+                "A fired task must re-arm the next fire even though a request was already pending")
+        #expect(task.completedSuccess == true)
+    }
+}
+
+// MARK: - Shared foreground/background enqueue path (playhead-y5mk)
+
+/// `enqueueAutoDownloads(for:)` is the single selection + enqueue entry
+/// point that BOTH the BGAppRefreshTask handler and `LibraryView`
+/// pull-to-refresh feed. These tests pin the gating that the foreground
+/// (manual) path now honors identically to the background path: `.off`
+/// enqueues nothing, `.last3` selects the newest three, already-known
+/// episodes (empty diff groups) are not re-enqueued, and per-show
+/// overrides resolve against the global.
+@Suite("BackgroundFeedRefreshService — shared enqueue path (playhead-y5mk)")
+struct BackgroundFeedRefreshSharedEnqueuePathTests {
+
+    @Test("Setting .off enqueues nothing even when new episodes were discovered")
+    func offEnqueuesNothing() async {
+        let feed = URL(string: "https://example.com/a.xml")!
+        let (service, _, _, downloader, _) = makeService(setting: .off)
+        let groups = [
+            FeedRefreshDiscoveryGroup(
+                feedURL: feed,
+                autoDownloadOverride: nil,
+                newEpisodes: [
+                    feedEpisode(key: "ep-1", feed: feed),
+                    feedEpisode(key: "ep-2", feed: feed),
+                ]
+            )
+        ]
+
+        let count = await service.enqueueAutoDownloads(for: groups)
+
+        #expect(count == 0)
+        #expect(await downloader.enqueuedEpisodeIds().isEmpty,
+                ".off must resolve to zero enqueues")
+    }
+
+    @Test("Setting .last3 selects the three newest undownloaded episodes")
+    func last3SelectsNewestThree() async {
+        let feed = URL(string: "https://example.com/a.xml")!
+        let (service, _, _, downloader, _) = makeService(setting: .last3)
+        let t0 = Date.now
+        let groups = [
+            FeedRefreshDiscoveryGroup(
+                feedURL: feed,
+                autoDownloadOverride: nil,
+                newEpisodes: [
+                    feedEpisode(key: "ep-5", feed: feed, published: t0.addingTimeInterval(-500)),
+                    feedEpisode(key: "ep-4", feed: feed, published: t0.addingTimeInterval(-400)),
+                    feedEpisode(key: "ep-3", feed: feed, published: t0.addingTimeInterval(-300)),
+                    feedEpisode(key: "ep-2", feed: feed, published: t0.addingTimeInterval(-200)),
+                    feedEpisode(key: "ep-1", feed: feed, published: t0.addingTimeInterval(-100)),
+                ]
+            )
+        ]
+
+        let count = await service.enqueueAutoDownloads(for: groups)
+
+        #expect(count == 3)
+        #expect(Set(await downloader.enqueuedEpisodeIds()) == Set(["ep-1", "ep-2", "ep-3"]),
+                ".last3 must enqueue only the three newest by publishedAt")
+    }
+
+    @Test("Groups whose diff is empty (already-known/downloaded episodes) enqueue nothing")
+    func emptyDiffGroupsAreNotEnqueued() async {
+        // Group A surfaced one genuinely-new episode; group B's discoveries
+        // were all already in the store, so its diff is empty. The already-
+        // known episodes must not be re-enqueued.
+        let feedA = URL(string: "https://example.com/a.xml")!
+        let feedB = URL(string: "https://example.com/b.xml")!
+        let (service, _, _, downloader, _) = makeService(setting: .all)
+        let groups = [
+            FeedRefreshDiscoveryGroup(
+                feedURL: feedA,
+                autoDownloadOverride: nil,
+                newEpisodes: [feedEpisode(key: "a-new", feed: feedA)]
+            ),
+            FeedRefreshDiscoveryGroup(
+                feedURL: feedB,
+                autoDownloadOverride: nil,
+                newEpisodes: []  // already-known → empty diff
+            ),
+        ]
+
+        let count = await service.enqueueAutoDownloads(for: groups)
+
+        #expect(count == 1)
+        #expect(await downloader.enqueuedEpisodeIds() == ["a-new"],
+                "Only genuinely-new episodes enqueue; empty-diff groups are skipped")
+    }
+
+    @Test("Per-show override resolves against the global in the shared path")
+    func perShowOverrideResolvesAgainstGlobal() async {
+        // Global .off; show A overrides to .all, show B inherits (nil).
+        let feedA = URL(string: "https://example.com/a.xml")!
+        let feedB = URL(string: "https://example.com/b.xml")!
+        let (service, _, _, downloader, _) = makeService(setting: .off)
+        let groups = [
+            FeedRefreshDiscoveryGroup(
+                feedURL: feedA,
+                autoDownloadOverride: .all,
+                newEpisodes: [
+                    feedEpisode(key: "a-1", feed: feedA),
+                    feedEpisode(key: "a-2", feed: feedA),
+                ]
+            ),
+            FeedRefreshDiscoveryGroup(
+                feedURL: feedB,
+                autoDownloadOverride: nil,  // inherits global .off
+                newEpisodes: [feedEpisode(key: "b-1", feed: feedB)]
+            ),
+        ]
+
+        let count = await service.enqueueAutoDownloads(for: groups)
+
+        #expect(count == 2)
+        #expect(Set(await downloader.enqueuedEpisodeIds()) == Set(["a-1", "a-2"]),
+                "Show A's .all override enqueues both; show B inherits .off and enqueues nothing")
+    }
+}
+
 // MARK: - Diff: only NEW episodes are downloaded
 
 @Suite("BackgroundFeedRefreshService — new-episode diff")
@@ -1011,6 +1242,22 @@ private func newRecord(
 ) -> NewEpisodeRecord {
     NewEpisodeRecord(
         canonicalEpisodeKey: key,
+        audioURL: URL(string: "https://example.com/\(key).mp3")!,
+        publishedAt: published
+    )
+}
+
+/// Builds a production `FeedRefreshNewEpisode` for the shared-enqueue-path
+/// tests, which drive `enqueueAutoDownloads(for:)` directly rather than
+/// through the refresher stub (playhead-y5mk).
+private func feedEpisode(
+    key: String,
+    feed: URL,
+    published: Date? = nil
+) -> FeedRefreshNewEpisode {
+    FeedRefreshNewEpisode(
+        canonicalEpisodeKey: key,
+        feedURL: feed,
         audioURL: URL(string: "https://example.com/\(key).mp3")!,
         publishedAt: published
     )
