@@ -156,6 +156,29 @@ struct PreRollStartClampTests {
         #expect(clamped[1].startTime == 0.0)    // earliest-start pre-roll widened
     }
 
+    /// TWO visible unanchored slots BOTH inside the pre-roll zone `(0, N]`: only
+    /// the EARLIEST-start slot is the pre-roll and is clamped to 0.0; the second
+    /// in-zone slot keeps its detected start — its start is NOT free at 0:00
+    /// (the first ad precedes it), and clamping it too would collide two windows
+    /// at 0. This is the discriminator the single-in-zone-window cases above lack:
+    /// a "clamp EVERY in-zone visible window" mutant passes all of them but fails
+    /// here, so it pins the first-slot-ONLY contract.
+    @Test("only the earliest of TWO in-zone visible slots is clamped")
+    func onlyEarliestOfTwoInZoneSlotsClamped() {
+        let n = AdDetectionConfig.default.preRollStartClampSeconds
+        let firstInZone = window(id: "a", start: 3.0, end: 10.0)
+        let secondInZone = window(id: "b", start: 12.0, end: 18.0)
+        #expect(firstInZone.startTime <= n && secondInZone.startTime <= n,
+                "both fixtures must sit in the pre-roll zone for this to discriminate")
+
+        let clamped = PreRollStartClamp.clamp(windows: [firstInZone, secondInZone])
+
+        #expect(clamped[0].id == "a")
+        #expect(clamped[0].startTime == 0.0)     // earliest-start pre-roll widened
+        #expect(clamped[1].id == "b")
+        #expect(clamped[1].startTime == 12.0)    // second in-zone slot untouched
+    }
+
     // MARK: - Trustworthy anchored edges are exempt (playhead-xsdz.66 M1)
 
     @Test("byte-exact rediff start edge is NOT clamped (precise boundary preserved)")

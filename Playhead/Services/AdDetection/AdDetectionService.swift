@@ -5380,9 +5380,22 @@ actor AdDetectionService {
         // WIDTH / MARK: applied HERE — after the per-span decision loop — so every
         // window already carries its final `eligibilityGate` / `decisionState` /
         // `confidence`; the clamp moves only the mark's start edge and can NEVER
-        // change a window's auto-skip eligibility. The live orchestrator /
-        // auto-skip path (`fusionDecisionResults`, forwarded in Step 17) is
-        // deliberately NOT clamped, so in-session skip behaviour is byte-identical.
+        // flip a window's auto-skip ELIGIBILITY (the gate field is copied verbatim).
+        // It can't change an auto-skip SPAN either — but NOT because the clamped
+        // rows stay out of the orchestrator: `AnalysisCoordinator.finalizeBackfill`
+        // re-fetches these persisted rows and re-pushes them via `receiveAdWindows`
+        // in-session (and the cross-launch `beginEpisode` preload reads them too),
+        // so the clamped start DOES reach the managed window and overwrites its
+        // `snappedStart`. What keeps that skip-safe is the `.unanchored` gate: the
+        // clamp fires ONLY on `.unanchored` starts, and `AutoSkipEdgePadding` (the
+        // Gate-2 auto-skip policy) refuses to auto-skip any `.unanchored` start —
+        // `skipWindow` returns nil and the span stays markOnly. So once auto-skip +
+        // edge padding are enabled the clamped span is never skipped, exactly as it
+        // wouldn't have been before the clamp; and auto-skip is OFF today
+        // (mark-only), so the clamp is currently a pure banner / overlay width win.
+        // (Residual: auto-skip enabled with edge padding OFF — not the intended
+        // Gate-2 config — would skip the raw clamped [0, end]; tracked for the
+        // enablement bead, same posture as the playhead-hdgk Gate-2 note.)
         // The window id is ordinal-addressed, so the clamp keeps it and the
         // content-addressed reconcile below stays in place — no reorder, no churn.
         // Idempotent + monotonic (start only moves leftward → coverage never
