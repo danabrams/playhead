@@ -102,6 +102,28 @@ struct FinalPassDeferredMidWindow: Error, Equatable {
     let reason: AdmissionDeferReason
 }
 
+// MARK: - FinalPassRevalidationRequest
+
+/// playhead-hc7e — payload handed to the post-final-pass revalidation hook
+/// once at least one AdWindow has been re-transcribed to `pass='final'`.
+///
+/// Closing the final-ASR loop: the runner APPENDS higher-quality final
+/// chunks but does not itself re-run detection. Without a trigger, the
+/// improved transcript sits unused until the next full analysis pass. The
+/// hook lets the composition root (`PlayheadRuntime`) invoke
+/// `AdDetectionService.revalidateFromFeatures` for the affected asset, which
+/// re-fetches the now-canonical fast+final chunk set and re-runs
+/// classifier + fusion + boundary over it.
+struct FinalPassRevalidationRequest: Sendable, Equatable {
+    let analysisAssetId: String
+    let podcastId: String?
+    /// Total episode duration (seconds) resolved from the persisted asset.
+    /// `0` when the asset row carries no durable duration.
+    let episodeDuration: Double
+    /// AdWindow ids whose audio was re-transcribed in the completed drain.
+    let reTranscribedWindowIds: [String]
+}
+
 // MARK: - FinalPassRetranscriptionRunner
 
 /// Runs the charge-gated final-pass re-transcription phase for one asset.
@@ -134,6 +156,12 @@ actor FinalPassRetranscriptionRunner {
     private let chargeStateProvider: @Sendable () async -> Bool
     private let confidenceFloor: Double
     private let modelVersion: String
+    /// playhead-hc7e — invoked once at the end of a drain that re-transcribed
+    /// at least one window, so the composition root can schedule a detector
+    /// re-run / revalidation over the newly-improved transcript. `nil` (the
+    /// default, and always in preview / most unit tests) makes the runner a
+    /// pure producer with no loop-close — byte-identical to pre-hc7e.
+    private let onFinalPassRetranscribed: (@Sendable (FinalPassRevalidationRequest) async -> Void)?
     private let logger = Logger(subsystem: "com.playhead", category: "FinalPassRetranscription")
 
     // MARK: - Inputs / Outputs
@@ -185,7 +213,8 @@ actor FinalPassRetranscriptionRunner {
         batteryLevelProvider: @escaping @Sendable () async -> Float,
         chargeStateProvider: @escaping @Sendable () async -> Bool,
         confidenceFloor: Double,
-        modelVersion: String
+        modelVersion: String,
+        onFinalPassRetranscribed: (@Sendable (FinalPassRevalidationRequest) async -> Void)? = nil
     ) {
         self.store = store
         self.speechService = speechService
@@ -195,6 +224,7 @@ actor FinalPassRetranscriptionRunner {
         self.chargeStateProvider = chargeStateProvider
         self.confidenceFloor = confidenceFloor
         self.modelVersion = modelVersion
+        self.onFinalPassRetranscribed = onFinalPassRetranscribed
     }
 
     // MARK: - Entry Point
@@ -605,6 +635,25 @@ actor FinalPassRetranscriptionRunner {
             } catch {
                 logger.warning("Final-pass: failed to advance watermark for \(input.analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
+        }
+
+        // playhead-hc7e — close the final-ASR loop. New `pass='final'` chunks
+        // were persisted for at least one window, so schedule a detector
+        // re-run / revalidation over the now-canonical transcript. Gated on
+        // `!reTranscribedWindowIds.isEmpty` so an idempotent no-op re-run (or a
+        // fully-deferred drain) does NOT re-trigger detection. Fires after the
+        // watermark advance so a revalidation that re-enters this runner sees a
+        // converged watermark. No-op when no hook was injected (preview / most
+        // unit tests) — the runner stays a pure producer.
+        if let onFinalPassRetranscribed, !reTranscribedWindowIds.isEmpty {
+            await onFinalPassRetranscribed(
+                FinalPassRevalidationRequest(
+                    analysisAssetId: input.analysisAssetId,
+                    podcastId: input.podcastId,
+                    episodeDuration: asset.episodeDurationSec ?? 0,
+                    reTranscribedWindowIds: reTranscribedWindowIds
+                )
+            )
         }
 
         return RunResult(

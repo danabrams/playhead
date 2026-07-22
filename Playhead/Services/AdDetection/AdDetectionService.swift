@@ -3544,13 +3544,28 @@ actor AdDetectionService {
 
         // ── Steps 1–3: Atomize, segment, build catalog ───────────────────────
 
-        let finalChunks: [TranscriptChunk] = {
-            let filtered = chunks.filter { $0.pass == "final" }
-            return filtered.isEmpty ? chunks : filtered
-        }()
+        // playhead-hc7e: collapse the mixed fast/final chunk array into ONE
+        // canonical transcript BEFORE any consumer reads it. Final-pass chunks
+        // REPLACE the fast coverage they overlap; fast chunks REMAIN everywhere
+        // the final pass never re-transcribed, so full-episode coverage is
+        // retained. The pre-hc7e `filter { pass == "final" }` collapsed the
+        // whole timeline to the candidate-local final chunks the moment a
+        // single final chunk existed (a candidate-local atom timeline instead
+        // of full-episode coverage), while the lexical/catalog/FM consumers
+        // below still saw the RAW mixed-pass array and double-counted the
+        // overlapping fast+final text. Every consumer now reads
+        // `canonicalChunks`. Single-pass transcripts (all-fast or all-final)
+        // pass through byte-identically, so this is a no-op for every asset
+        // that has never had a final-pass run.
+        let canonicalization = TranscriptChunkCanonicalizer.canonicalize(chunks)
+        let canonicalChunks = canonicalization.chunks
+        let canonicalDiagnostics = canonicalization.diagnostics
+        logger.info(
+            "Backfill canonical transcript: asset=\(analysisAssetId, privacy: .public) input=\(canonicalDiagnostics.inputCount, privacy: .public) final=\(canonicalDiagnostics.finalCount, privacy: .public) fast=\(canonicalDiagnostics.fastCount, privacy: .public) droppedFast=\(canonicalDiagnostics.droppedFastCount, privacy: .public) retainedFast=\(canonicalDiagnostics.retainedFastCount, privacy: .public) residualFastFinalOverlap=\(canonicalDiagnostics.residualFastFinalOverlapCount, privacy: .public) coverageRetained=\(canonicalDiagnostics.coverageRetained, privacy: .public) passthrough=\(canonicalDiagnostics.isPassthrough, privacy: .public)"
+        )
 
         let (atoms, transcriptVersion) = TranscriptAtomizer.atomize(
-            chunks: finalChunks,
+            chunks: canonicalChunks,
             analysisAssetId: analysisAssetId,
             normalizationHash: "norm-v1",
             sourceHash: "asr-v1"
@@ -3588,7 +3603,7 @@ actor AdDetectionService {
         // ── Step 4: Lexical scan + RuleBasedClassifier ───────────────────────
 
         let lexicalCandidates = scanner.scan(
-            chunks: chunks,
+            chunks: canonicalChunks,
             analysisAssetId: analysisAssetId,
             metadataEntries: metadataLexiconEntries
         )
@@ -3600,11 +3615,11 @@ actor AdDetectionService {
         // metadata-lexicon entries the candidate scan saw so the auto-ad
         // rule sees an identical hit population.
         let lexicalHits = scanner.collectHits(
-            chunks: chunks,
+            chunks: canonicalChunks,
             metadataEntries: metadataLexiconEntries
         )
 
-        logger.info("Backfill: \(lexicalCandidates.count) lexical candidates from \(chunks.count) final chunks")
+        logger.info("Backfill: \(lexicalCandidates.count) lexical candidates from \(canonicalChunks.count) canonical chunks")
 
         let classifierResults: [ClassifierResult]
         if !lexicalCandidates.isEmpty {
@@ -3629,7 +3644,7 @@ actor AdDetectionService {
                 logger.info("Backfill: skipping FM scan phase — missing podcastId for asset \(analysisAssetId)")
             } else {
                 let shadowResult = await runShadowFMPhase(
-                    chunks: chunks,
+                    chunks: canonicalChunks,
                     analysisAssetId: analysisAssetId,
                     podcastId: podcastId,
                     sessionIdOverride: sessionId
@@ -3704,7 +3719,7 @@ actor AdDetectionService {
 
         let regionInput = RegionShadowPhase.Input(
             analysisAssetId: analysisAssetId,
-            chunks: chunks,
+            chunks: canonicalChunks,
             lexicalCandidates: lexicalCandidates,
             featureWindows: featureWindows,
             episodeDuration: episodeDuration,
@@ -4047,27 +4062,27 @@ actor AdDetectionService {
         // nil without touching the bank — byte-identical to pre-xsdz.37. The
         // word stream is built lazily only when a context resolved, so the OFF
         // path never scans the transcript for anchors. It is built from
-        // `finalChunks` (the same final-pass stream the atomizer and the
-        // transcript boundary-cue builder consume) so a fast-pass duplicate of
-        // the same audio cannot double-count candidates or bind the snap to a
-        // fast-pass phrase interpolation.
+        // `canonicalChunks` (the same de-duplicated stream the atomizer and the
+        // transcript boundary-cue builder consume — playhead-hc7e) so a
+        // fast-pass duplicate of the same audio cannot double-count candidates
+        // or bind the snap to a fast-pass phrase interpolation.
         let lexicalContext = resolveLexicalRefinementContext(showKey: catalogShowId)
         let lexicalWords: [LexicalWord] = lexicalContext == nil
             ? []
-            : LexicalAnchorRefiner.buildWordStream(chunks: finalChunks)
+            : LexicalAnchorRefiner.buildWordStream(chunks: canonicalChunks)
         // playhead-fl4j: resolve the show-agnostic self-promo bank ONCE per run.
         // Flag OFF ⇒ nil without touching the bank (byte-identical to pre-fl4j).
         // The word stream is built lazily only when the bank resolved, so the
         // OFF path never scans the transcript for self-promo phrases. It is the
         // SAME `LexicalWord` stream the lexical refiner consumes (built from
-        // `finalChunks`); it lives on its own gate so self-promo suppression is
-        // independent of `lexicalAnchorRefinementEnabled` — the only cost of
+        // `canonicalChunks`); it lives on its own gate so self-promo suppression
+        // is independent of `lexicalAnchorRefinementEnabled` — the only cost of
         // both flags being ON at once is one extra pure word-stream build, never
         // in production (both default OFF).
         let selfPromoBank = selfPromoSuppressionBankIfEnabled()
         let selfPromoWords: [LexicalWord] = selfPromoBank == nil
             ? []
-            : LexicalAnchorRefiner.buildWordStream(chunks: finalChunks)
+            : LexicalAnchorRefiner.buildWordStream(chunks: canonicalChunks)
         // playhead-fl4j (attention→verification): resolve the show's OWN identity
         // tokens ONCE per run so an AMBIGUOUS self-promo phrase ("get tickets",
         // "on tour") can be corroborated by the show naming itself, not only by a
@@ -4103,13 +4118,13 @@ actor AdDetectionService {
         let transcriptBoundaryHits: [TranscriptBoundaryHit]
         if config.transcriptBoundaryCueEnabled {
             transcriptBoundaryHits = TranscriptBoundaryCueBuilder.buildHits(
-                from: finalChunks
+                from: canonicalChunks
             )
         } else {
             transcriptBoundaryHits = []
         }
         if !transcriptBoundaryHits.isEmpty {
-            logger.info("[kgby] backfill transcript boundary hits: \(transcriptBoundaryHits.count) (from \(finalChunks.count) final chunks)")
+            logger.info("[kgby] backfill transcript boundary hits: \(transcriptBoundaryHits.count) (from \(canonicalChunks.count) canonical chunks)")
         }
 
         // Bug 6 (decision-results wiring): hoist the per-asset DecisionCohort encoding
@@ -5530,7 +5545,7 @@ actor AdDetectionService {
                 nonSuppressedWindows: nonSuppressedWindows,
                 episodeDuration: episodeDuration,
                 featureWindows: featureWindows,
-                chunks: finalChunks
+                chunks: canonicalChunks
             )
         }
 

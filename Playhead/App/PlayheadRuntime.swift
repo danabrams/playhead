@@ -1460,6 +1460,16 @@ final class PlayheadRuntime {
         if !isPreviewRuntime {
             let capabilitiesForFinalPass = capabilitiesService
             let batteryForFinalPass = batteryProvider
+            // playhead-hc7e: close the final-ASR loop. When the charge-gated
+            // final-pass runner appends higher-quality `pass='final'` chunks,
+            // re-run detection over the now-canonical transcript so the
+            // improved text can move boundaries / flip decisions instead of
+            // waiting for the next full analysis pass. `revalidateFromFeatures`
+            // re-fetches the persisted fast+final chunk set (which
+            // `runBackfill` canonicalizes) and re-runs classifier + fusion +
+            // boundary. Best-effort: a failure here must not fail the
+            // final-pass drain.
+            let adDetectionForFinalPass = adDetectionService
             self.finalPassRetranscriptionRunner = FinalPassRetranscriptionRunner(
                 store: analysisStore,
                 speechService: speechService,
@@ -1468,7 +1478,20 @@ final class PlayheadRuntime {
                 batteryLevelProvider: { await batteryForFinalPass.currentBatteryState().level },
                 chargeStateProvider: { await batteryForFinalPass.currentBatteryState().isCharging },
                 confidenceFloor: FinalPassRetranscriptionRunner.defaultConfidenceFloor,
-                modelVersion: FinalPassRetranscriptionRunner.defaultModelVersion
+                modelVersion: FinalPassRetranscriptionRunner.defaultModelVersion,
+                onFinalPassRetranscribed: { [adDetectionForFinalPass] request in
+                    guard request.episodeDuration > 0 else { return }
+                    do {
+                        try await adDetectionForFinalPass.revalidateFromFeatures(
+                            analysisAssetId: request.analysisAssetId,
+                            podcastId: request.podcastId ?? "",
+                            episodeDuration: request.episodeDuration
+                        )
+                    } catch {
+                        // Loop-close is best-effort; the next full analysis
+                        // pass remains the backstop.
+                    }
+                }
             )
         } else {
             self.finalPassRetranscriptionRunner = nil
