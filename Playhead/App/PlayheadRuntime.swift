@@ -1352,9 +1352,16 @@ final class PlayheadRuntime {
                     store: analysisStore,
                     enclosureResolver: rediffEnclosureResolverBox
                 ),
-                rangedSampler: URLSessionRangedAudioSampler(),
+                // playhead-xsdz.45 (Unit 1): the production sweep fetches
+                // under the default (AppleCoreMedia-iPhone) persona so the
+                // pre-check + B-side full fetch present the same "streaming"
+                // request context iOS's own media stack sends. Each fetch also
+                // carries a unique `_cb` cache-buster (xsdz.36.3, default
+                // generator). k-way over the rest of the persona bank is
+                // Unit 2 — the sweep still fetches exactly one B-side here.
+                rangedSampler: URLSessionRangedAudioSampler(persona: .default),
                 localSampler: FileHandleLocalAudioSampler(),
-                fullFetcher: URLSessionFullEpisodeFetcher(),
+                fullFetcher: URLSessionFullEpisodeFetcher(persona: .default),
                 bsideFingerprinter: EpisodeCaptureBSideFingerprinter(
                     decoder: AnalysisAudioBSideDecoder(audioService: audioService)
                 ),

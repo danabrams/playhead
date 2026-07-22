@@ -800,4 +800,44 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
             """
         )
     }
+
+    /// playhead-xsdz.45 (Unit 1): the production rediff sweep must fetch under
+    /// the DEFAULT (AppleCoreMedia-iPhone) persona. The persona lives on the
+    /// two URLSession seam conformers (`URLSessionRangedAudioSampler` /
+    /// `URLSessionFullEpisodeFetcher`), which `RediffRefetchService` takes as
+    /// injected dependencies — the service has no persona of its own, so the
+    /// ONLY place production's persona choice is expressed is this construction
+    /// site in `PlayheadRuntime.swift`. The seam-level tests prove
+    /// "a seam built with `.default` stamps AppleCoreMedia-iPhone", but only
+    /// this canary pins that PRODUCTION actually passes `.default`.
+    ///
+    /// A regression that drops the argument (`URLSessionRangedAudioSampler()`)
+    /// or changes it to `nil`/another persona reverts the sweep to the
+    /// system-default UA — a same-context double-fetch AdsWizz/ART19 pin to a
+    /// byte-identical fill (nothing to diff) — and no seam-level test would
+    /// notice. Stripped of comments/strings so the canary anchors on real code,
+    /// not this doc comment.
+    func testRediffSweepFetchesUnderDefaultPersona() throws {
+        let source = SwiftSourceInspector.strippingCommentsAndStrings(
+            try SwiftSourceInspector.loadSource(
+                repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+            )
+        )
+
+        for seam in ["URLSessionRangedAudioSampler(persona: .default)",
+                     "URLSessionFullEpisodeFetcher(persona: .default)"] {
+            XCTAssertTrue(
+                source.contains(seam),
+                """
+                PlayheadRuntime.swift no longer constructs `\(seam)`. The production \
+                rediff sweep must fetch its pre-check + B-side under the default \
+                (AppleCoreMedia-iPhone) persona so per-client-pinning DAI stacks \
+                (AdsWizz/ART19) return a divergent fill to byte-align. A bare \
+                `()` or a nil/other persona reverts to the system-default UA and \
+                silently defeats rotation. Re-add `persona: .default` or update \
+                this canary if the seam was intentionally renamed.
+                """
+            )
+        }
+    }
 }
