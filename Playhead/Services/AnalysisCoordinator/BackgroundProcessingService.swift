@@ -89,9 +89,34 @@ extension BGContinuedProcessingTask: ContinuedProcessingTaskProtocol {}
 /// Abstracts BGTaskScheduler for testability.
 protocol BackgroundTaskScheduling: Sendable {
     func submit(_ taskRequest: BGTaskRequest) throws
+
+    /// Identifiers of the currently-pending (submitted-but-not-yet-
+    /// dispatched) task requests. Backed by
+    /// `BGTaskScheduler.getPendingTaskRequests`. Used to make the
+    /// feed-refresh reschedule idempotent (playhead-y5mk): a periodic
+    /// resubmit is skipped when a request with the same identifier is
+    /// already pending, so the ~30-min background launches iOS grants for
+    /// analysis can no longer bulldoze the feed-refresh earliest-begin-date
+    /// forward before its 60-min floor matures. Returns identifiers (not
+    /// the `BGTaskRequest` objects, which are not `Sendable`) — the guard
+    /// only needs to know whether an identifier is present.
+    func pendingTaskRequestIdentifiers() async -> [String]
 }
 
-extension BGTaskScheduler: BackgroundTaskScheduling {}
+extension BGTaskScheduler: BackgroundTaskScheduling {
+    func pendingTaskRequestIdentifiers() async -> [String] {
+        // Bridge the completion-handler API explicitly: within this
+        // extension the sync `getPendingTaskRequests(completionHandler:)`
+        // overload shadows the synthesized async form, so call it directly.
+        // Project to `[String]` INSIDE the completion so only a Sendable
+        // value crosses the continuation boundary (region isolation).
+        await withCheckedContinuation { continuation in
+            getPendingTaskRequests { requests in
+                continuation.resume(returning: requests.map(\.identifier))
+            }
+        }
+    }
+}
 
 /// Abstracts the analysis coordinator for testability.
 protocol AnalysisCoordinating: Sendable {

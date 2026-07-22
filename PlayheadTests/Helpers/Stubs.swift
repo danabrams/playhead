@@ -300,14 +300,36 @@ final class StubContinuedProcessingTask: ContinuedProcessingTaskProtocol, @unche
 // MARK: - StubTaskScheduler
 
 final class StubTaskScheduler: BackgroundTaskScheduling, @unchecked Sendable {
+    /// Append-only log of every `submit` call. Records submit calls even
+    /// when a same-identifier request was already pending (a submit always
+    /// gets logged here), so tests can assert exact submit counts.
     var submittedRequests: [BGTaskRequest] = []
     var shouldThrowOnSubmit = false
+
+    /// Identifiers of currently-pending requests — models
+    /// `BGTaskScheduler`'s dedupe-by-identifier: a `submit` marks that
+    /// identifier pending, and `pendingTaskRequestIdentifiers()` returns
+    /// the set. Tests may also pre-seed via `seedPending(_:)` to simulate a
+    /// request left pending by a prior launch (playhead-y5mk).
+    private var pendingIdentifiers: Set<String> = []
 
     func submit(_ taskRequest: BGTaskRequest) throws {
         if shouldThrowOnSubmit {
             throw NSError(domain: "StubTaskScheduler", code: 1)
         }
         submittedRequests.append(taskRequest)
+        pendingIdentifiers.insert(taskRequest.identifier)
+    }
+
+    func pendingTaskRequestIdentifiers() async -> [String] {
+        Array(pendingIdentifiers)
+    }
+
+    /// Pre-seed a pending request without a `submit` (models a request the
+    /// OS still holds pending from a prior launch). Used to prove
+    /// `scheduleNextRefresh` skips the submit when one is already pending.
+    func seedPending(_ request: BGTaskRequest) {
+        pendingIdentifiers.insert(request.identifier)
     }
 }
 

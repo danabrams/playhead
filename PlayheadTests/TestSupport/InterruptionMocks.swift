@@ -58,6 +58,13 @@ final class MockBackgroundTaskScheduler: BackgroundTaskScheduling, @unchecked Se
         _requests.append(taskRequest)
     }
 
+    func pendingTaskRequestIdentifiers() async -> [String] {
+        // Scoped `withLock` (not bare lock()/unlock(), which are
+        // unavailable in async contexts). The body is synchronous — no
+        // suspension is held across the lock.
+        lock.withLock { _requests.map(\.identifier) }
+    }
+
     func reset() {
         lock.lock()
         _requests.removeAll()

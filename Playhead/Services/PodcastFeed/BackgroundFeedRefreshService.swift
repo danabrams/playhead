@@ -90,6 +90,21 @@ struct FeedRefreshNewEpisode: Sendable, Equatable {
     let publishedAt: Date?
 }
 
+/// A per-podcast group of newly-discovered episodes plus that podcast's
+/// auto-download override. Shared input to
+/// `BackgroundFeedRefreshService.enqueueAutoDownloads(for:)`, which BOTH
+/// the BGAppRefreshTask handler and `LibraryView` pull-to-refresh feed so
+/// a manual refresh honors the same `autoDownloadOnSubscribe` gating as
+/// the background path (playhead-y5mk). `autoDownloadOverride` is the
+/// podcast's per-show override (`nil` = inherit global); the enqueue path
+/// resolves `override ?? global` per group so per-show choices never leak
+/// across podcasts in one refresh.
+struct FeedRefreshDiscoveryGroup: Sendable, Equatable {
+    let feedURL: URL
+    let autoDownloadOverride: AutoDownloadOnSubscribe?
+    let newEpisodes: [FeedRefreshNewEpisode]
+}
+
 // MARK: - Collaborator protocols
 
 /// Returns a pre-refresh snapshot of every subscribed podcast.
@@ -263,6 +278,17 @@ actor BackgroundFeedRefreshService {
         sharedService.withLock { $0 = service }
     }
 
+    /// The process-wide attached service, or `nil` before
+    /// `attachSharedService(_:)` runs (previews / unit tests that never
+    /// wire the App). `LibraryView.refreshAllFeeds` reads this to route a
+    /// manual pull-to-refresh's discoveries through the same gated
+    /// selection + enqueue path the BGAppRefreshTask uses (playhead-y5mk).
+    /// When `nil`, foreground auto-download is skipped gracefully and the
+    /// refresh itself still runs.
+    nonisolated static var shared: BackgroundFeedRefreshService? {
+        sharedService.withLock { $0 }
+    }
+
     /// Install a process-wide telemetry logger for the early-fire fallback
     /// to call before `attachSharedService(_:)` has run. Wire from
     /// `PlayheadRuntime` BEFORE `registerTaskHandler()` so the fallback
@@ -408,6 +434,16 @@ actor BackgroundFeedRefreshService {
     /// URLSession call and produce unrelated transient errors.
     private var expired = false
 
+    /// Reentrancy guard for the non-forced reschedule path (playhead-y5mk).
+    /// `scheduleNextRefresh(force:)` suspends on
+    /// `taskScheduler.pendingTaskRequestIdentifiers()`; without this flag a second
+    /// concurrent non-forced call could pass the "already pending?" check
+    /// before the first call's submit lands, defeating the idempotence
+    /// guard. The forced path (post-dispatch reschedule) never reads or
+    /// sets this — a fired task MUST re-arm the next fire regardless of
+    /// what is (or isn't) pending at that instant.
+    private var rescheduleInFlight = false
+
     /// Idempotence guard for `setTaskCompleted`. iOS rules:
     ///   1. The expiration handler MUST call `setTaskCompleted(success:)`
     ///      before it returns or the system terminates the app.
@@ -455,16 +491,56 @@ actor BackgroundFeedRefreshService {
 
     // MARK: - Scheduling
 
-    /// Submit a `BGAppRefreshTaskRequest` for the next fire. iOS enforces
-    /// the earliest-begin-date as a soft floor; actual dispatch still
-    /// depends on its own heuristics (battery, network, usage patterns).
+    /// Submit a `BGAppRefreshTaskRequest` for the next fire — but only if
+    /// one is not already pending (playhead-y5mk).
     ///
-    /// Failure is logged and swallowed: the user's worst case is missing
-    /// one refresh cycle, and Library pull-to-refresh remains as a
-    /// manual fallback. A thrown reschedule is NOT fatal to the current
-    /// handler fire — see `handleFeedRefreshTask` for why we always
-    /// reschedule first and still complete the task.
-    func scheduleNextRefresh() {
+    /// **Why the pending check exists:** `BGTaskScheduler.submit` dedupes
+    /// by identifier, so every unconditional resubmit REPLACES the pending
+    /// request and pushes its `earliestBeginDate` another
+    /// `minimumRefreshInterval` into the future. `start()` runs on EVERY
+    /// app launch — including the frequent ~30-min background launches iOS
+    /// grants to the analysis BGProcessingTasks — so the pre-fix
+    /// unconditional resubmit starved this task indefinitely (observed:
+    /// 131 submits, 0 dispatches over 8 days). Skipping the submit when a
+    /// request is already pending lets the earliest-begin-date mature.
+    ///
+    /// **`force`** bypasses the pending check. The post-dispatch reschedule
+    /// in `handleFeedRefreshTask` uses it: once a task actually dispatches
+    /// there is no pending request, so re-arming (a fresh submit) is both
+    /// correct and required — the guard must never block it.
+    ///
+    /// iOS enforces the earliest-begin-date as a soft floor; actual
+    /// dispatch still depends on its own heuristics (battery, network,
+    /// usage patterns). Failure is logged and swallowed: the user's worst
+    /// case is missing one refresh cycle, and Library pull-to-refresh
+    /// remains as a manual fallback. A thrown reschedule is NOT fatal to
+    /// the current handler fire — see `handleFeedRefreshTask` for why we
+    /// always reschedule first and still complete the task.
+    func scheduleNextRefresh(force: Bool = false) async {
+        if force {
+            submitFeedRefreshRequest()
+            return
+        }
+        // Reentrancy guard: `pendingTaskRequestIdentifiers()` is a suspension point,
+        // so serialize concurrent non-forced callers to keep the
+        // check-then-submit atomic on the actor.
+        guard !rescheduleInFlight else { return }
+        rescheduleInFlight = true
+        defer { rescheduleInFlight = false }
+
+        let pendingIdentifiers = await taskScheduler.pendingTaskRequestIdentifiers()
+        if pendingIdentifiers.contains(Self.taskIdentifier) {
+            logger.info("Feed refresh already pending — skipping duplicate submit (playhead-y5mk)")
+            return
+        }
+        submitFeedRefreshRequest()
+    }
+
+    /// Raw submit of the next feed-refresh request. Callers that must
+    /// always re-arm (`scheduleNextRefresh(force: true)`) reach it
+    /// directly; the periodic path goes through `scheduleNextRefresh()`
+    /// which first checks for an already-pending request.
+    private func submitFeedRefreshRequest() {
         let request = BGAppRefreshTaskRequest(identifier: Self.taskIdentifier)
         request.earliestBeginDate = Date(
             timeIntervalSinceNow: Self.minimumRefreshInterval
@@ -553,8 +629,10 @@ actor BackgroundFeedRefreshService {
         // Reschedule first — see spec: "Next refresh re-scheduled at
         // handler end (even on cancel)." Doing it up front makes that
         // contract unconditional even if the work path throws or is
-        // interrupted mid-fire.
-        scheduleNextRefresh()
+        // interrupted mid-fire. `force: true` bypasses the
+        // already-pending guard (playhead-y5mk): the task just dispatched,
+        // so nothing is pending and re-arming is the correct action here.
+        await scheduleNextRefresh(force: true)
 
         // The expiration callback fires on an arbitrary queue; bounce
         // through a Task so the flag mutation AND the `setTaskCompleted`
@@ -674,37 +752,36 @@ actor BackgroundFeedRefreshService {
             }
         }
 
-        let globalSetting = settingsProvider.currentAutoDownloadSetting()
-        // Resolve + select per feed so a per-show override never leaks
-        // into another podcast's selection. Iterate the feed list in
-        // enumeration order so the enqueue sequence stays stable for
-        // tests; the producer's order over a Dictionary is undefined.
-        var toDownload: [FeedRefreshNewEpisode] = []
+        // Build per-podcast groups in enumeration order so the enqueue
+        // sequence stays stable for tests; a Dictionary's iteration order
+        // is undefined. Route them through the shared selection + enqueue
+        // entry point that LibraryView pull-to-refresh also uses, so both
+        // paths apply identical per-show override resolution and gating
+        // (playhead-y5mk).
+        var groups: [FeedRefreshDiscoveryGroup] = []
         for snapshot in podcasts {
             guard let episodes = newEpisodesByFeed[snapshot.feedURL],
                   !episodes.isEmpty else { continue }
-            let effective = AutoDownloadOnSubscribe.effective(
-                override: snapshot.autoDownloadOverride,
-                global: globalSetting
+            groups.append(
+                FeedRefreshDiscoveryGroup(
+                    feedURL: snapshot.feedURL,
+                    autoDownloadOverride: snapshot.autoDownloadOverride,
+                    newEpisodes: episodes
+                )
             )
-            let picked = Self.pickEpisodesForDownload(
-                newEpisodes: episodes,
-                setting: effective
-            )
-            toDownload.append(contentsOf: picked)
         }
-
-        var enqueuedCount = 0
-        for episode in toDownload {
-            if expired { break }
-            await downloader.enqueueBackgroundDownload(
-                episodeId: episode.canonicalEpisodeKey,
-                from: episode.audioURL
-            )
-            enqueuedCount += 1
-        }
+        // Skip the enqueue batch once the task has expired. The pre-y5mk
+        // code checked `if expired { break }` per item; this is a single
+        // pre-batch check instead. Enqueue is a cheap local URLSession
+        // `resume()` and the expiration handler completes the task
+        // independently, so batching vs. per-item bail is immaterial. The
+        // shared `enqueueAutoDownloads` deliberately carries no expiration
+        // state so the foreground (LibraryView) caller — which never
+        // expires — reuses it unchanged.
+        let enqueuedCount = expired ? 0 : await enqueueAutoDownloads(for: groups)
+        let loggedGlobal = settingsProvider.currentAutoDownloadSetting().rawValue
         logger.info(
-            "Feed refresh: \(allNewEpisodesCount, privacy: .public) new episodes, \(toDownload.count, privacy: .public) enqueued (global=\(globalSetting.rawValue, privacy: .public))"
+            "Feed refresh: \(allNewEpisodesCount, privacy: .public) new episodes, \(enqueuedCount, privacy: .public) enqueued (global=\(loggedGlobal, privacy: .public))"
         )
 
         // playhead-5uvz.4 (Gap-5): if this fire enqueued any new
@@ -742,6 +819,48 @@ actor BackgroundFeedRefreshService {
             }
             await newEpisodeAnnouncer.announce(newEpisodes: flattened)
         }
+    }
+
+    /// Shared selection + enqueue entry point (playhead-y5mk).
+    ///
+    /// For each group resolves the effective policy (`override ?? global`,
+    /// reading the global once from `settingsProvider`), picks the
+    /// newest-first subset via `pickEpisodesForDownload`, and enqueues each
+    /// through the injected downloader — which is where the cellular /
+    /// already-cached-on-disk dedup policy is applied (see
+    /// `DownloadManager.backgroundDownload`). Returns the number enqueued.
+    ///
+    /// Both the BGAppRefreshTask handler (`runRefreshOnce`) and
+    /// `LibraryView.refreshAllFeeds` feed this method so background and
+    /// foreground refresh honor the same `autoDownloadOnSubscribe` gating:
+    /// when the resolved policy is `.off` nothing is enqueued. The input
+    /// `newEpisodes` are already the feed-diff result (new-to-store only),
+    /// so already-known episodes never reach here; groups with no new
+    /// episodes contribute nothing.
+    func enqueueAutoDownloads(for groups: [FeedRefreshDiscoveryGroup]) async -> Int {
+        let globalSetting = settingsProvider.currentAutoDownloadSetting()
+        var toDownload: [FeedRefreshNewEpisode] = []
+        for group in groups where !group.newEpisodes.isEmpty {
+            let effective = AutoDownloadOnSubscribe.effective(
+                override: group.autoDownloadOverride,
+                global: globalSetting
+            )
+            toDownload.append(
+                contentsOf: Self.pickEpisodesForDownload(
+                    newEpisodes: group.newEpisodes,
+                    setting: effective
+                )
+            )
+        }
+        var enqueuedCount = 0
+        for episode in toDownload {
+            await downloader.enqueueBackgroundDownload(
+                episodeId: episode.canonicalEpisodeKey,
+                from: episode.audioURL
+            )
+            enqueuedCount += 1
+        }
+        return enqueuedCount
     }
 
     /// Pure selection rule. Separated so tests can pin the ordering

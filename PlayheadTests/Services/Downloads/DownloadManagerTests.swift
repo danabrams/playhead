@@ -318,6 +318,10 @@ final class CapturingTaskScheduler: BackgroundTaskScheduling, @unchecked Sendabl
         submitted.append(taskRequest)
         submittedSignal.increment()
     }
+
+    func pendingTaskRequestIdentifiers() async -> [String] {
+        submitted.map(\.identifier)
+    }
 }
 
 @Suite("DownloadManager – Foreground-assist handoff (playhead-44h1)")
