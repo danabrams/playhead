@@ -311,17 +311,17 @@ struct AnalysisPipelineStallInvariantHarnessIntegrationTests {
     /// `expired`/`task_expired` with 0 completions. Asserted over BOTH entry
     /// points (backfill AND preanalysis_recovery — the RC-1 root cause was
     /// that neither dispatched) and across a range of queue depths. For each:
-    /// the queue fully drains — NOTHING is left `queued` (real dispatch
-    /// happened) AND the durable ledger records a PROGRESS outcome
-    /// (`admittedWork` / `recoveredWork`), never `.expired` and never a
-    /// stall-shaped no-progress terminal.
+    /// the queued set SHRINKS — at least one eligible job is dispatched out
+    /// of `queued` (real dispatch happened) AND the durable ledger records a
+    /// PROGRESS outcome (`admittedWork` / `recoveredWork`), never `.expired`
+    /// and never a stall-shaped no-progress terminal.
     ///
     /// Catches: any future regression where a background handler stops
     /// actively draining (reverts to bare `wake()` + poll, or a sceneless
-    /// launch leaves the loop unstarted) — jobs would stay pinned `queued`
-    /// and the ledger outcome would fall to `.noEligibleWork`/`.noOp`/
-    /// `.expired`, failing here for whichever entry point regressed.
-    @Test("Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queue fully drains + progress outcome, never expired/0-done",
+    /// launch leaves the loop unstarted) — every seeded job stays pinned
+    /// `queued` and the ledger outcome would fall to `.noEligibleWork`/
+    /// `.noOp`/`.expired`, failing here for whichever entry point regressed.
+    @Test("Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done",
           .timeLimit(.minutes(1)),
           arguments: [
             (BGEntry.backfill, 1), (BGEntry.backfill, 3), (BGEntry.backfill, 7),
@@ -366,35 +366,53 @@ struct AnalysisPipelineStallInvariantHarnessIntegrationTests {
         }
         await task.awaitCompletion()
         // Quiesce the loop the handler started so the queued-set read below
-        // is taken against a settled scheduler (the drain already ran to
-        // completion inside the handler).
+        // is taken against a settled scheduler (the awaited `drainEligible`
+        // has already returned; `stop()` halts the concurrently-started
+        // `runLoop` and any in-flight job — see the race note below).
         await scheduler.stop()
 
-        // Progress: every eligible job was DISPATCHED out of the `queued`
-        // state — the whole point of RC-1. The incident signature was
-        // "N queued / 0 running, pinned forever", so the faithful
-        // anti-stall assertion is that NOTHING remains queued.
+        // Progress: the background handler actively DISPATCHED eligible work
+        // OUT of the `queued` state — the whole point of RC-1. The incident
+        // signature was "N queued / 0 running, pinned forever", so the
+        // faithful anti-stall assertion is that the queued set SHRANK — at
+        // least one seeded job left `queued` under the handler's drive.
         //
-        // Asserting on the `queued` set (rather than a `pendingCount`
-        // snapshot of queued+running+paused) is also race-free against the
-        // `runLoop` that `ensureSchedulerLoopStarted()` spins up
-        // concurrently inside the handler. That loop can win the lease CAS
-        // on a seeded job; if it is still mid-run when the (non-awaited)
-        // `stop()` above cancels it, the job supersedes — the seed stamps
-        // `attemptCount` at `maxAttemptCount - 1`, so the cancel-mid-run arm
-        // takes the terminal `superseded` branch, never the requeue branch —
-        // so it can never reappear as `queued`. A `pendingCount` snapshot,
-        // by contrast, could transiently still count that stolen job as
-        // `running` if its terminal write lands just after the read, giving
-        // a false `after == before` at depth=1. `queued.isEmpty` avoids that
-        // flake while asserting something strictly STRONGER: EVERY job left
-        // the queue, not merely that pending decreased by one. `before`
-        // remains the seeded-count precondition. A regressed handler that
-        // fails to dispatch (RC-1: bare `wake()`+poll) leaves every seeded
-        // job pinned `queued` and fails here.
+        // We assert the deterministic floor (`< depth`), NOT a full drain
+        // (`isEmpty`), because two independent races make the exact residual
+        // count nondeterministic:
+        //
+        //  1. `ensureSchedulerLoopStarted()` spins up the `runLoop`
+        //     CONCURRENTLY with the awaited `drainEligible`. The seeded jobs
+        //     are priority-10 → `.soon` lane, whose cap is 1, so the loop and
+        //     the drain contend for a single in-flight slot. If the loop wins
+        //     it, `drainEligible`'s next pass sees the lane full, `canAdmit`
+        //     returns false, and it BREAKS EARLY — leaving jobs behind it
+        //     still `queued`. The (non-awaited) `stop()` above then cancels
+        //     the loop; any job it had not yet reached stays `queued`. A
+        //     full-drain (`isEmpty`) assertion would flake exactly here — the
+        //     gy2s pin uses the same tolerant pending-decrease form for this
+        //     reason.
+        //  2. A job the loop DID pick up may still be `running` (or its
+        //     cancel-driven terminal write not yet landed) at read time.
+        //     Because the seed stamps `attemptCount` at `maxAttemptCount - 1`,
+        //     every dispatched job terminates `superseded` in one pass — the
+        //     `.failed` and cancel-mid-run arms both take the terminal branch,
+        //     never a requeue — so a dispatched job can NEVER reappear as
+        //     `queued`. Asserting on the `queued` set (not a
+        //     queued+running+paused `pendingCount`) is therefore race-free
+        //     against this, and also fixes the depth=1 false `pending ==
+        //     before` the prior `after < before` form could hit when the loop
+        //     stole the only job and it was still `running` at the read.
+        //
+        // Net: whichever of {drain, loop} wins the slot dispatches at least
+        // one seeded job to a terminal `superseded`, so `queued.count` is
+        // strictly below the seeded `depth`. A regressed handler that fails
+        // to dispatch (RC-1: bare `wake()`+poll against a loop that was never
+        // started) leaves every seeded job pinned `queued` (`count == depth`)
+        // and fails here.
         let queuedAfter = try await store.fetchJobsByState("queued")
-        #expect(queuedAfter.isEmpty,
-                "\(entry) BGTask must actively DISPATCH every eligible queued job; still queued: \(queuedAfter.map(\.jobId)) (depth=\(depth))")
+        #expect(queuedAfter.count < depth,
+                "\(entry) BGTask must actively DISPATCH eligible queued work (queued must drop below the seeded \(depth)); still queued: \(queuedAfter.map(\.jobId))")
 
         // Durable classification: a progress outcome, never the stall's
         // silent `.expired`/no-progress terminal.
