@@ -9,6 +9,19 @@ import Foundation
 import os
 import OSLog
 
+/// playhead-t1kq: reference box that lets `runJob` hand its honest, PARTIAL
+/// coarse cursor back to the drain loop's `CancellationError` branch (which
+/// a BG-window expiry produces) so durable partial progress is checkpointed
+/// before the row flips to `.deferred` — mirroring the rate-limit defer
+/// branch. Only set when coarse coverage is incomplete: a fully-covered
+/// cursor would be episode-end, which `narrowedForResume` collapses to an
+/// empty resume that marks the job complete and strands pending refinement.
+/// Actor-internal; never escapes `BackfillJobRunner`'s isolation, so it does
+/// not need to be `Sendable`.
+private final class BackfillHonestCursorBox {
+    var lastCoveredUpperBoundSec: Double?
+}
+
 actor BackfillJobRunner {
 
     // MARK: - Inputs / Outputs
@@ -625,6 +638,10 @@ actor BackfillJobRunner {
             let jobWallStart = clock().timeIntervalSince1970
             var jobMetricsAudioSegments: [AdTranscriptSegment] = []
             var jobMetricsCounters = OperationalMetrics.Counters()
+            // playhead-t1kq: capture runJob's honest partial coarse cursor so
+            // the CancellationError branch below (BG-window expiry) can
+            // checkpoint durable progress before deferring. Fresh per job.
+            let honestCursorBox = BackfillHonestCursorBox()
 
             do {
                 // C-2: split lifecycle API. `markBackfillJobRunning` preserves
@@ -714,7 +731,7 @@ actor BackfillJobRunner {
                     continue
                 }
                 jobMetricsAudioSegments = jobInputs.segments
-                let (resultIds, eventIds, detectedAdLineRefs, jobWindows, jobCounters, coverage) = try await runJob(job, inputs: jobInputs)
+                let (resultIds, eventIds, detectedAdLineRefs, jobWindows, jobCounters, coverage) = try await runJob(job, inputs: jobInputs, honestCursorBox: honestCursorBox)
                 scanResultIds.append(contentsOf: resultIds)
                 evidenceEventIds.append(contentsOf: eventIds)
                 fmRefinementWindows.append(contentsOf: jobWindows)
@@ -812,6 +829,27 @@ actor BackfillJobRunner {
                 // rows.
                 await admissionController.finish(jobId: job.jobId)
                 do {
+                    // playhead-t1kq: a BG-window EXPIRY surfaces here as a
+                    // CancellationError. Checkpoint the honest partial coarse
+                    // cursor captured during the interrupted run BEFORE
+                    // flipping to `.deferred`, so every granted minute of a
+                    // scarce window becomes durable progress instead of being
+                    // re-scanned next time — mirroring the rate-limit defer
+                    // branch. Never regress below a prior deferred run's
+                    // cursor. Checkpoint-then-defer keeps the write ordering
+                    // identical to that branch (progressCursor written while
+                    // still `.running`, then status flips).
+                    if let honest = honestCursorBox.lastCoveredUpperBoundSec {
+                        let honestCursor = BackfillProgressCursor(
+                            processedPhaseCount: 0,
+                            lastProcessedUpperBoundSec: honest
+                        )
+                        let mergedCursor = job.progressCursor.map { honestCursor.monotonic(from: $0) } ?? honestCursor
+                        try await store.checkpointBackfillJobProgress(
+                            jobId: job.jobId,
+                            progressCursor: mergedCursor
+                        )
+                    }
                     // H-R3-1: include the phase so operators can tell which
                     // pass was interrupted without cross-referencing logs.
                     try await store.markBackfillJobDeferred(
@@ -1254,7 +1292,8 @@ actor BackfillJobRunner {
 
     private func runJob(
         _ job: BackfillJob,
-        inputs rootInputs: AssetInputs
+        inputs rootInputs: AssetInputs,
+        honestCursorBox: BackfillHonestCursorBox
     ) async throws -> (
         scanResultIds: [String],
         evidenceEventIds: [String],
@@ -1465,6 +1504,16 @@ actor BackfillJobRunner {
                 walkedUpperBound = plan.endTime
             }
             coverageContiguousUpperBound = walkedUpperBound
+            // playhead-t1kq: expose the honest PARTIAL coarse cursor so a
+            // CancellationError (BG-window expiry) during the remaining
+            // refinement/audit work can checkpoint durable progress. Only
+            // when coverage is incomplete — a fully-covered cursor is
+            // episode-end, which `narrowedForResume` collapses to an empty
+            // resume that would strand pending refinement (matches the
+            // rate-limit defer branch's `!coverageFullyCovered` guard).
+            if !coverageFullyCovered {
+                honestCursorBox.lastCoveredUpperBoundSec = walkedUpperBound
+            }
             let remainingPlans = coarsePlans.filter { !succeededPlanIndices.contains($0.windowIndex) }
             for (plan, status) in zip(remainingPlans, coarse.failedWindowStatuses) {
                         if let failureResult = makeCoarseFailureScanResult(
