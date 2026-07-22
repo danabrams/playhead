@@ -199,6 +199,15 @@ struct UIDeviceBatteryProvider: BatteryStateProviding {
 
 enum BackgroundTaskID {
     static let backfillProcessing = "com.playhead.app.analysis.backfill"
+    /// playhead-i6oi: charger-class sibling of `backfillProcessing`. Same
+    /// handler (`handleBackfillTask`), but submitted with
+    /// `requiresExternalPower = true` so it rides iOS's charger-maintenance
+    /// discretionary class (the one `preAnalysisRecovery` uses, which fires
+    /// overnight while charging) instead of the battery-budgeted class whose
+    /// device-activity / idle suppressors starved the plain identifier all
+    /// night. Submitted ALONGSIDE `backfillProcessing` so on-battery idle
+    /// windows still count.
+    static let backfillProcessingCharged = "com.playhead.app.analysis.backfill.charged"
     static let continuedProcessing = "com.playhead.app.analysis.continued"
     static let preAnalysisRecovery = "com.playhead.app.preanalysis.recovery"
 }
@@ -594,6 +603,15 @@ actor BackgroundProcessingService {
             task.setTaskCompleted(success: false)
         }
 
+        // playhead-i6oi: charger-class backfill sibling — same fallback.
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: BackgroundTaskID.backfillProcessingCharged,
+            using: nil
+        ) { task in
+            logger.warning("Charged backfill task fired before service initialized")
+            task.setTaskCompleted(success: false)
+        }
+
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTaskID.continuedProcessing,
             using: nil
@@ -630,6 +648,21 @@ actor BackgroundProcessingService {
         }
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTaskID.backfillProcessing,
+            using: nil
+        ) { [weak self] task in
+            guard let self, let processingTask = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            let sendableTask = UncheckedSendableBox(processingTask)
+            Task { await self.handleBackfillTask(sendableTask.value) }
+        }
+
+        // playhead-i6oi: charger-class backfill sibling routes to the SAME
+        // handler. Whichever class iOS grants a window to (battery-idle or
+        // charger-maintenance), the identical backfill drain runs.
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: BackgroundTaskID.backfillProcessingCharged,
             using: nil
         ) { [weak self] task in
             guard let self, let processingTask = task as? BGProcessingTask else {
@@ -837,17 +870,39 @@ actor BackgroundProcessingService {
         backfillRescheduleInFlight = true
         defer { backfillRescheduleInFlight = false }
 
-        let pendingIdentifiers = await taskScheduler.pendingTaskRequestIdentifiers()
+        let pendingIdentifiers = Set(await taskScheduler.pendingTaskRequestIdentifiers())
+
+        // Battery-eligible request — fires on on-battery idle windows.
         if pendingIdentifiers.contains(BackgroundTaskID.backfillProcessing) {
             logger.info("Backfill already pending — skipping duplicate submit (playhead-txq3)")
-            return
+        } else {
+            let request = BGProcessingTaskRequest(identifier: BackgroundTaskID.backfillProcessing)
+            request.requiresNetworkConnectivity = false
+            request.requiresExternalPower = false
+            submitWithTelemetry(request, reason: nil)
         }
 
-        let request = BGProcessingTaskRequest(identifier: BackgroundTaskID.backfillProcessing)
-        request.requiresNetworkConnectivity = false
-        request.requiresExternalPower = false
-
-        submitWithTelemetry(request, reason: nil)
+        // playhead-i6oi: ALSO submit the charger-class sibling
+        // (`requiresExternalPower = true`), which rides iOS's
+        // charger-maintenance discretionary class — the same class
+        // `preAnalysisRecovery` uses, which fires overnight while charging.
+        // The battery-budgeted class's device-activity / idle suppressors
+        // starved the plain identifier all night (the same-night A/B:
+        // recovery ran, backfill got zero). Submitting both means on-battery
+        // idle windows AND overnight-charging windows are reachable. Mirrors
+        // recovery's `earliestBeginDate` of 60s. The pending guard suppresses
+        // age-resetting re-submits (playhead-txq3), per identifier.
+        if pendingIdentifiers.contains(BackgroundTaskID.backfillProcessingCharged) {
+            logger.info("Charged backfill already pending — skipping duplicate submit (playhead-i6oi)")
+        } else {
+            let chargedRequest = BGProcessingTaskRequest(
+                identifier: BackgroundTaskID.backfillProcessingCharged
+            )
+            chargedRequest.requiresNetworkConnectivity = false
+            chargedRequest.requiresExternalPower = true
+            chargedRequest.earliestBeginDate = Date(timeIntervalSinceNow: 60)
+            submitWithTelemetry(chargedRequest, reason: "backfill-charged")
+        }
     }
 
     /// playhead-shpy: shared `BGTaskScheduler.submit` wrapper that emits
