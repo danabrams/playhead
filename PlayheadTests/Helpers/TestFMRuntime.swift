@@ -36,6 +36,13 @@ actor TestFMRuntime {
     /// a no-op so the capped-exponential rate-limit retry loop runs instantly;
     /// a test can pass a recording closure to assert pacing behavior.
     private let backoffSleepClosure: @Sendable (UInt64) async -> Void
+    /// playhead-t1kq: awaited at the START of each refinement respond,
+    /// before the response/failure is produced. Defaults to a no-op. A test
+    /// can gate on this to deterministically cancel the enclosing Task after
+    /// the coarse pass but during refinement — the scenario a BG-window
+    /// EXPIRY produces (so the post-refinement `Task.checkCancellation()`
+    /// throws, exercising the runner's cancellation-checkpoint branch).
+    private let onRefinementRespond: @Sendable () async -> Void
     private(set) var coarseCallCount = 0
     private(set) var refinementCallCount = 0
     private(set) var boundaryExtractionCallCount = 0
@@ -60,8 +67,10 @@ actor TestFMRuntime {
             support: nil
         ),
         defaultRefinement: RefinementWindowSchema = RefinementWindowSchema(spans: []),
-        defaultBoundaryExtraction: FMBoundarySchema = FMBoundarySchema(spans: [], abstain: false)
+        defaultBoundaryExtraction: FMBoundarySchema = FMBoundarySchema(spans: [], abstain: false),
+        onRefinementRespond: @escaping @Sendable () async -> Void = { }
     ) {
+        self.onRefinementRespond = onRefinementRespond
         self.coarseQueue = coarseResponses
         self.refinementQueue = refinementResponses
         self.boundaryExtractionQueue = boundaryExtractionResponses
@@ -123,7 +132,8 @@ actor TestFMRuntime {
         return coarseQueue.removeFirst()
     }
 
-    private func nextRefinement(prompt: String) throws -> RefinementWindowSchema {
+    private func nextRefinement(prompt: String) async throws -> RefinementWindowSchema {
+        await onRefinementRespond()
         refinementPrompts.append(prompt)
         refinementCallCount += 1
         if !refinementFailureQueue.isEmpty {

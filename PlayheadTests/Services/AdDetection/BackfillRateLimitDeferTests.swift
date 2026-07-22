@@ -297,6 +297,142 @@ struct BackfillRateLimitDeferTests {
         #expect(await fmRuntime.coarseCallCount == 1)
     }
 
+    // MARK: - playhead-t1kq: a BG-window EXPIRY (task cancellation) checkpoints the honest cursor
+
+    /// A minimal SUCCESSFUL refinement window (one paid third-party span) so
+    /// `refinement.windows` is non-empty and the runner reaches the
+    /// post-refinement `Task.checkCancellation()` (BackfillJobRunner.swift:1606
+    /// at time of writing) that surfaces the cancellation.
+    private static func oneSpanRefinement() -> RefinementWindowSchema {
+        RefinementWindowSchema(spans: [
+            SpanRefinementSchema(
+                commercialIntent: .paid,
+                ownership: .thirdParty,
+                firstLineRef: 0,
+                lastLineRef: 0,
+                certainty: .strong,
+                boundaryPrecision: .precise,
+                evidenceAnchors: [
+                    EvidenceAnchorSchema(
+                        evidenceRef: 0,
+                        lineRef: 0,
+                        kind: .url,
+                        certainty: .strong
+                    )
+                ],
+                alternativeExplanation: .none,
+                reasonTags: [.callToAction]
+            )
+        ])
+    }
+
+    @available(iOS 26.0, *)
+    @Test("a BG-window expiry (task cancellation) during refinement DEFERS with the honest PARTIAL coarse cursor checkpointed — not re-scanned")
+    func cancellationDuringRefinementCheckpointsHonestCursor() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeThreeWindowInputs()
+
+        // Coarse: window 0 (0..10) contains an ad (so refinement zooms it);
+        // window 1 (10..20) REFUSES — a tolerated hole that keeps the pass
+        // `.success` (so it does NOT take the rate-limit defer branch); window
+        // 2 (20..30) succeeds. The honest CONTIGUOUS coarse cursor is therefore
+        // window 0's end = 10 (the hole is window 1). The gate then lets us
+        // cancel the Task (a BG-window EXPIRY) once execution reaches the
+        // refinement respond — AFTER the honest cursor is captured — so the
+        // post-refinement `Task.checkCancellation()` throws. The runner must
+        // convert that into a DEFER with the honest cursor checkpointed.
+        let gate = RefinementGate()
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(supportLineRefs: [0], certainty: .strong)
+                )
+            ],
+            refinementResponses: [Self.oneSpanRefinement()],
+            coarseFailures: [nil, .refusal, nil],
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule(),
+            onRefinementRespond: { await gate.arriveAndWait() }
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let task = Task { try await runner.runPendingBackfill(for: inputs) }
+        await gate.awaitReached()   // coarse done + honest cursor (10) captured; blocked at refinement
+        task.cancel()               // BG window expires
+        await gate.release()        // refinement proceeds → post-refinement checkCancellation throws
+
+        // The runner re-throws CancellationError after deferring (H-2 contract).
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        #expect(await fmRuntime.refinementCallCount >= 1)
+
+        // The (deterministic-id) job is DEFERRED with the honest PARTIAL cursor
+        // (10) — NOT episode end (30), and NOT nil (which would re-scan the
+        // coarse prefix on the next BG window).
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: inputs.analysisAssetId,
+            transcriptVersion: inputs.transcriptVersion,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .deferred)
+        #expect(row.deferReason == "cancelled-during-fullEpisodeScan")
+        #expect(row.progressCursor?.lastProcessedUpperBoundSec == 10)
+    }
+
+    @available(iOS 26.0, *)
+    @Test("a task cancellation after FULL coarse coverage does NOT checkpoint an episode-end cursor (would strand refinement)")
+    func fullCoverageCancellationDoesNotCheckpoint() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeThreeWindowInputs()
+
+        // Every coarse window succeeds (fully covered); window 0 contains an ad
+        // so refinement runs; the Task is cancelled during refinement. Because
+        // coverage is COMPLETE, the honest cursor would be episode-end (30) —
+        // which `narrowedForResume` collapses to an empty resume that marks the
+        // job complete and STRANDS pending refinement. So the runner must NOT
+        // checkpoint: the deferred row keeps a nil cursor and the next BG
+        // window re-drives coarse + refinement cleanly.
+        let gate = RefinementGate()
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(supportLineRefs: [0], certainty: .strong)
+                )
+            ],
+            refinementResponses: [Self.oneSpanRefinement()],
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule(),
+            onRefinementRespond: { await gate.arriveAndWait() }
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let task = Task { try await runner.runPendingBackfill(for: inputs) }
+        await gate.awaitReached()
+        task.cancel()
+        await gate.release()
+
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        #expect(await fmRuntime.refinementCallCount >= 1)
+
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: inputs.analysisAssetId,
+            transcriptVersion: inputs.transcriptVersion,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .deferred)
+        #expect(row.progressCursor?.lastProcessedUpperBoundSec == nil,
+                "a full-coverage cancellation must not checkpoint an episode-end cursor")
+    }
+
     // MARK: - Item 4: inter-window pacing invokes the injected sleep
 
     @available(iOS 26.0, *)
@@ -337,4 +473,40 @@ struct BackfillRateLimitDeferTests {
 private actor SleepRecorder {
     private(set) var sleeps: [UInt64] = []
     func record(_ nanos: UInt64) { sleeps.append(nanos) }
+}
+
+/// playhead-t1kq: a deterministic (continuation-synchronized, NOT sleep-based)
+/// rendezvous so a test can cancel the runner's `Task` exactly when execution
+/// reaches the refinement respond — i.e. AFTER the coarse pass captured the
+/// honest cursor but BEFORE the post-refinement `Task.checkCancellation()`.
+/// `arriveAndWait()` is called from inside the runner (via
+/// `TestFMRuntime.onRefinementRespond`); the test drives `awaitReached()` then
+/// `release()`.
+private actor RefinementGate {
+    private var reached = false
+    private var released = false
+    private var reachedContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    /// Runner-side: signal arrival, then block until the test releases.
+    func arriveAndWait() async {
+        reached = true
+        reachedContinuation?.resume()
+        reachedContinuation = nil
+        if released { return }
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    /// Test-side: resume once the runner has reached the refinement respond.
+    func awaitReached() async {
+        if reached { return }
+        await withCheckedContinuation { reachedContinuation = $0 }
+    }
+
+    /// Test-side: let the gated refinement respond proceed.
+    func release() {
+        released = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
 }
