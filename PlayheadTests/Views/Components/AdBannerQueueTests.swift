@@ -286,4 +286,50 @@ final class AdBannerQueueTests: XCTestCase {
         XCTAssertEqual(queue.currentBanner?.id, "first",
             "First enqueued item should display first")
     }
+
+    // MARK: - Suggest exit reason threading (playhead-lc7z)
+
+    private func makeSuggestItem(id: String) -> AdSkipBannerItem {
+        var item = makeItem(id: id)
+        item.tier = .suggest
+        return item
+    }
+
+    func testSuggestDismissButtonReportsUserInitiated() {
+        let queue = AdBannerQueue()
+        var captured: (id: String, userInitiated: Bool)?
+        queue.onSuggestExitWithoutSkip = { item, userInitiated in
+            captured = (item.id, userInitiated)
+        }
+        queue.enqueue(makeSuggestItem(id: "s-dismiss"))
+
+        // An explicit "✕" tap forwards userInitiated: true.
+        queue.dismiss(userInitiated: true)
+
+        XCTAssertEqual(captured?.id, "s-dismiss")
+        XCTAssertEqual(captured?.userInitiated, true,
+            "An explicit dismiss tap on a suggest banner must report userInitiated=true")
+    }
+
+    func testSuggestAutoFadeReportsNotUserInitiated() async throws {
+        let sleep = ControlledAutoDismissSleep()
+        let queue = AdBannerQueue(
+            suggestAutoDismissSeconds: 0.01,
+            autoDismissSleep: { seconds in await sleep.sleep(seconds: seconds) }
+        )
+        var captured: (id: String, userInitiated: Bool)?
+        queue.onSuggestExitWithoutSkip = { item, userInitiated in
+            captured = (item.id, userInitiated)
+        }
+        queue.enqueue(makeSuggestItem(id: "s-fade"))
+
+        let dismissTask = try XCTUnwrap(queue.autoDismissTaskForTesting())
+        _ = await sleep.waitForObservedDwell()
+        await sleep.release()
+        await dismissTask.value
+
+        XCTAssertEqual(captured?.id, "s-fade")
+        XCTAssertEqual(captured?.userInitiated, false,
+            "A passive auto-fade of a suggest banner must report userInitiated=false")
+    }
 }

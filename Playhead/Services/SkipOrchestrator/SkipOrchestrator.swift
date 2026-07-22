@@ -1901,16 +1901,134 @@ actor SkipOrchestrator {
         evaluateAndPush()
     }
 
-    /// playhead-gtt9.23: User dismissed a suggest-tier banner without
-    /// skipping. We treat this as a soft "leave it alone" signal: the
-    /// suggest window is dropped from the in-memory suggest set so its
-    /// cue is gone from the UI, but no skip happens, no veto is recorded,
-    /// and no trust signal fires. Future calibration work (gtt9.3) may
-    /// promote this to an explicit decline signal; for now silence is
-    /// the conservative reading.
-    func declineSuggestedSkip(windowId: String) async {
-        guard suggestWindows.removeValue(forKey: windowId) != nil else { return }
-        logger.debug("User dismissed suggest banner for window \(windowId, privacy: .public)")
+    /// playhead-gtt9.23 / playhead-lc7z: User's suggest-tier banner exited
+    /// without a "Skip" tap. Two exit reasons, two behaviors:
+    ///
+    ///   • `userDismissed == false` (auto-fade timeout, the historical
+    ///     default): a soft "leave it alone" signal. The suggest window is
+    ///     dropped from the in-memory set so its cue is gone from the UI,
+    ///     but NO veto is recorded and NO trust signal fires. The user
+    ///     ignoring a banner for 12 s is too weak to mint a hard negative —
+    ///     they may simply not have looked. This preserves the pre-lc7z
+    ///     conservative reading.
+    ///
+    ///   • `userDismissed == true` (the user tapped the dismiss "✕"): an
+    ///     explicit "no, that isn't an ad." This is exactly the hard-negative
+    ///     the correction→retrain flywheel (xsdz.69 brand-as-editorial,
+    ///     xsdz.70 native ads) was being starved of. We persist a
+    ///     `.falsePositive` CorrectionEvent over the window's span, stamp
+    ///     `userDismissedBanner = 1` on the row, and flip its persisted
+    ///     `decisionState` to `.reverted` so a relaunch/replay never
+    ///     resurfaces the banner the user already waved off. No trust /
+    ///     threshold signal is fired here — this seam is capture-only; the
+    ///     runtime-calibration surfaces stay owned by the explicit
+    ///     revert paths (`revertByTimeRange` / `revertWindow`).
+    func declineSuggestedSkip(windowId: String, userDismissed: Bool = false) async {
+        guard let suggested = suggestWindows.removeValue(forKey: windowId) else { return }
+
+        guard userDismissed else {
+            // Auto-fade / silent decline — unchanged pre-lc7z behavior.
+            logger.debug("Suggest banner faded without action for window \(windowId, privacy: .public)")
+            return
+        }
+
+        // Explicit user dismissal. Deliberately KEEP the id in
+        // `suggestBanneredWindowIds`: presence there is what suppresses a
+        // re-emit if the same markOnly id is re-delivered in-session (e.g. a
+        // final-pass backfill push) — the `receiveAdWindows` guard treats a
+        // present id as "already shown, skip." Removing it would un-suppress
+        // the very banner the user just waved off. The window is already out
+        // of `suggestWindows` (removed above); the row is flipped to
+        // `.reverted` below to cover cross-launch replay.
+        logger.info("User dismissed suggest banner (false positive) for window \(windowId, privacy: .public)")
+
+        // Persist `userDismissedBanner = 1` and flip the row to `.reverted`
+        // so the vetoed suggestion does not resurface on the next launch.
+        do {
+            try await store.updateAdWindowUserDismissedBanner(id: windowId, userDismissedBanner: true)
+            try await store.updateAdWindowDecision(
+                id: windowId,
+                decisionState: SkipDecisionState.reverted.rawValue
+            )
+        } catch {
+            logger.warning("Failed to persist suggest dismissal for \(windowId): \(error.localizedDescription)")
+        }
+
+        // Persist the false-positive correction (with causal attribution and
+        // target refs) through the same store path false-negatives use.
+        persistSuggestDismissalCorrection(window: suggested)
+
+        evaluateAndPush()
+    }
+
+    /// playhead-lc7z: persist a `.falsePositive` CorrectionEvent for a
+    /// user-dismissed suggest banner. Unlike `persistManualCorrectionVeto`
+    /// (which routes through `recordVeto(startTime:…)` and cannot carry
+    /// attribution across the gesture boundary) this builds a fully-formed
+    /// event so `causalSource` and `targetRefs` land on the row — the
+    /// hard-negative miner needs both. Fire-and-forget; a lost write just
+    /// means one fewer hard negative, never a broken gesture. No-op when no
+    /// correction store is wired.
+    private func persistSuggestDismissalCorrection(window: AdWindow) {
+        guard let correctionStore else { return }
+        let assetId = window.analysisAssetId
+        let podcastId = activePodcastId
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: assetId,
+            startTime: window.startTime,
+            endTime: window.endTime
+        )
+        // Attribute the false positive to whatever composed the suggest
+        // mark. `metadataSource` is the single reliable producer tag on a
+        // mark-only window (the specialist stamps `specialist-v1`; FM-composed
+        // marks stamp `foundationModels`). Unknown/absent tags default to
+        // `.foundationModel`, matching `CausalInference.inferFromProvenance`.
+        let causalSource = Self.causalSource(forMetadataSource: window.metadataSource)
+        // Carry the brand (when present) so brand-as-editorial hard-negative
+        // mining can key on it, plus the show id for show-level attribution.
+        // The dismissed time span itself is carried by the scope above.
+        let normalizedSponsor: String? = window.advertiser
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        let targetRefs = CorrectionTargetRefs(
+            domain: podcastId,
+            sponsorEntity: normalizedSponsor
+        )
+        let event = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: scope.serialized,
+            source: .manualVeto,
+            podcastId: podcastId,
+            correctionType: .falsePositive,
+            causalSource: causalSource,
+            targetRefs: targetRefs
+        )
+        let store = correctionStore
+        Task {
+            do {
+                try await store.record(event)
+            } catch {
+                // Non-fatal: a lost correction just means one fewer hard
+                // negative for the retrain flywheel. Playback is unaffected.
+            }
+        }
+    }
+
+    /// playhead-lc7z: map an `AdWindow.metadataSource` producer tag to the
+    /// `CausalSource` most responsible for a suggest-tier mark. Kept static
+    /// and pure so it is unit-testable without an orchestrator instance.
+    static func causalSource(forMetadataSource metadataSource: String) -> CausalSource {
+        switch metadataSource {
+        case SpecialistMarkComposer.metadataSource:
+            return .specialist
+        case "foundationModels":
+            return .foundationModel
+        default:
+            // Absent / "none" / "fallback" tags carry no distinct producer
+            // signal; default to FM, the most common mark-only composer —
+            // the same fallback `CausalInference` uses when provenance is bare.
+            return .foundationModel
+        }
     }
 
     /// User tapped "Skip Ad" in manual mode. Promotes a confirmed window

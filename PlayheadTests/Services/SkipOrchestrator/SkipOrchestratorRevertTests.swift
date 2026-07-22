@@ -1172,4 +1172,186 @@ struct SkipOrchestratorRevertTests {
         #expect(suggestRow?.decisionState != AdDecisionState.reverted.rawValue,
                 "markOnly window outside the gesture must NOT be reverted; got \(suggestRow?.decisionState ?? "<missing>")")
     }
+
+    // MARK: - playhead-lc7z: suggest-banner dismissal persists a falsePositive correction
+
+    /// Build a markOnly suggest-tier AdWindow with a brand + producer tag so
+    /// the dismissal path has something to attribute (causalSource) and
+    /// something to key hard-negative mining on (sponsorEntity).
+    private func makeSuggestWindow(
+        id: String,
+        startTime: Double = 60,
+        endTime: Double = 120,
+        advertiser: String? = "Red Bull",
+        metadataSource: String = SpecialistMarkComposer.metadataSource
+    ) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: "asset-1",
+            startTime: startTime,
+            endTime: endTime,
+            confidence: 0.55,
+            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "test-1",
+            advertiser: advertiser, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: startTime,
+            metadataSource: metadataSource,
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+        )
+    }
+
+    private func pollForCorrections(
+        _ correctionStore: PersistentUserCorrectionStore,
+        assetId: String,
+        until predicate: @Sendable ([CorrectionEvent]) -> Bool = { !$0.isEmpty }
+    ) async throws -> [CorrectionEvent] {
+        var corrections: [CorrectionEvent] = []
+        for _ in 0..<40 {  // up to ~2s — the veto write is fire-and-forget
+            corrections = try await correctionStore.activeCorrections(for: assetId)
+            if predicate(corrections) { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return corrections
+    }
+
+    @Test("declineSuggestedSkip(userDismissed:true) persists a falsePositive correction and sets userDismissedBanner=1")
+    func suggestDismissPersistsFalsePositiveCorrection() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(store: store, correctionStore: correctionStore)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let suggest = makeSuggestWindow(id: "ad-suggest-fp")
+        try await store.insertAdWindow(suggest)
+        await orchestrator.receiveAdWindows([suggest])
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-fp"),
+                "markOnly window must enter the suggest tier")
+
+        // User taps the dismiss "✕" on the suggest banner.
+        await orchestrator.declineSuggestedSkip(windowId: "ad-suggest-fp", userDismissed: true)
+
+        // The suggest entry is cleared.
+        #expect(!(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-fp")),
+                "dismissed suggest window must be removed from the suggest set")
+
+        // Exactly one falsePositive correction is persisted, over the window's
+        // span, with causal attribution and target refs.
+        let corrections = try await pollForCorrections(correctionStore, assetId: "asset-1")
+        #expect(corrections.count == 1,
+                "one dismissal must persist exactly one correction; got \(corrections.count)")
+        let correction = try #require(corrections.first)
+        #expect(correction.correctionType == .falsePositive,
+                "dismissal must record a .falsePositive correction; got \(String(describing: correction.correctionType))")
+        #expect(correction.source?.kind == .falsePositive,
+                "source must map to the false-positive kind so the materializer counts it as a revert")
+        #expect(correction.causalSource == .specialist,
+                "specialist-composed mark must attribute to .specialist; got \(String(describing: correction.causalSource))")
+        #expect(correction.targetRefs?.sponsorEntity == "red bull",
+                "target refs must carry the normalized brand for hard-negative mining; got \(String(describing: correction.targetRefs?.sponsorEntity))")
+        if case .exactTimeSpan(_, let s, let e) = CorrectionScope.deserialize(correction.scope) {
+            #expect(s == 60.0, "persisted start must be the window's span start")
+            #expect(e == 120.0, "persisted end must be the window's span end")
+        } else {
+            Issue.record("Expected exactTimeSpan scope from the dismissal, got \(correction.scope)")
+        }
+
+        // userDismissedBanner=1 and decisionState=.reverted on the row.
+        let persisted = try await store.fetchAdWindows(assetId: "asset-1")
+        let row = persisted.first { $0.id == "ad-suggest-fp" }
+        #expect(row?.userDismissedBanner == true,
+                "dismissed window row must carry userDismissedBanner=1")
+        #expect(row?.decisionState == AdDecisionState.reverted.rawValue,
+                "dismissed window must persist as .reverted so it does not resurface; got \(row?.decisionState ?? "<missing>")")
+    }
+
+    @Test("declineSuggestedSkip auto-fade (userDismissed:false) records NO correction and leaves userDismissedBanner=0")
+    func suggestAutoFadeRecordsNothing() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(store: store, correctionStore: correctionStore)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let suggest = makeSuggestWindow(id: "ad-suggest-fade")
+        try await store.insertAdWindow(suggest)
+        await orchestrator.receiveAdWindows([suggest])
+
+        // Banner auto-fades (no user tap) — the default path.
+        await orchestrator.declineSuggestedSkip(windowId: "ad-suggest-fade")
+
+        #expect(!(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-fade")),
+                "faded suggest window must still be dropped from the suggest set")
+
+        // Give any (erroneous) fire-and-forget write a fair chance to land.
+        for _ in 0..<6 { try await Task.sleep(nanoseconds: 50_000_000) }
+
+        let corrections = try await correctionStore.activeCorrections(for: "asset-1")
+        #expect(corrections.isEmpty,
+                "a passive auto-fade must NOT mint a hard negative; got \(corrections.count) corrections")
+
+        let row = (try await store.fetchAdWindows(assetId: "asset-1")).first { $0.id == "ad-suggest-fade" }
+        #expect(row?.userDismissedBanner == false,
+                "auto-fade must not set userDismissedBanner")
+        #expect(row?.decisionState == AdDecisionState.candidate.rawValue,
+                "auto-fade must not flip the row to .reverted; got \(row?.decisionState ?? "<missing>")")
+    }
+
+    @Test("two suggest dismissals over the same span dedupe to a single falsePositive correction")
+    func suggestDismissDeduplicatesBySpan() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(store: store, correctionStore: correctionStore)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // Two distinct suggest windows over the SAME span — the realistic
+        // cross-session re-ingest case (new UUID, same ad). Both dismissed
+        // must collapse to one correction via the v23 identity index.
+        let w1 = makeSuggestWindow(id: "ad-suggest-dup-1")
+        let w2 = makeSuggestWindow(id: "ad-suggest-dup-2")
+        try await store.insertAdWindow(w1)
+        try await store.insertAdWindow(w2)
+        await orchestrator.receiveAdWindows([w1, w2])
+
+        await orchestrator.declineSuggestedSkip(windowId: "ad-suggest-dup-1", userDismissed: true)
+        await orchestrator.declineSuggestedSkip(windowId: "ad-suggest-dup-2", userDismissed: true)
+
+        // Wait until BOTH writes have landed (submissionCount == 2 proves the
+        // second dismissal reached the persistence layer and was deduped, not
+        // merely that only one ever ran).
+        let corrections = try await pollForCorrections(correctionStore, assetId: "asset-1") {
+            ($0.first?.submissionCount ?? 0) >= 2
+        }
+        #expect(corrections.count == 1,
+                "two dismissals of the same span must persist exactly one correction; got \(corrections.count)")
+        #expect(corrections.first?.submissionCount == 2,
+                "both dismissals must reach persistence and dedupe (submissionCount==2); got \(String(describing: corrections.first?.submissionCount))")
+    }
+
+    @Test("causalSource(forMetadataSource:) maps producer tags to the responsible source")
+    func causalSourceMappingIsFaithful() {
+        #expect(SkipOrchestrator.causalSource(forMetadataSource: SpecialistMarkComposer.metadataSource) == .specialist)
+        #expect(SkipOrchestrator.causalSource(forMetadataSource: "foundationModels") == .foundationModel)
+        #expect(SkipOrchestrator.causalSource(forMetadataSource: "none") == .foundationModel)
+        #expect(SkipOrchestrator.causalSource(forMetadataSource: "fallback") == .foundationModel)
+    }
 }

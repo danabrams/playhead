@@ -7702,6 +7702,21 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// playhead-lc7z: mark that the user explicitly dismissed the banner
+    /// surfaced for this window. Mirror of `updateAdWindowWasSkipped`.
+    /// The `userDismissedBanner` column previously had no writer — the
+    /// schema reserved it (v‑era migration) but nothing ever flipped it to
+    /// 1, so the correction→retrain flywheel could never see which windows
+    /// the user waved off. A no-op when `id` matches no row.
+    func updateAdWindowUserDismissedBanner(id: String, userDismissedBanner: Bool) throws {
+        let sql = "UPDATE ad_windows SET userDismissedBanner = ? WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, userDismissedBanner ? 1 : 0)
+        bind(stmt, 2, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     func updateConfirmedAdCoverage(id: String, endTime: Double) throws {
         let sql = "UPDATE analysis_assets SET confirmedAdCoverageEndTime = ? WHERE id = ?"
         let stmt = try prepare(sql)
