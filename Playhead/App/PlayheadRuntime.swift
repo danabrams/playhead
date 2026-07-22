@@ -82,6 +82,11 @@ final class PlayheadRuntime {
     let downloadManager: DownloadManager
     let analysisJobRunner: AnalysisJobRunner
     let analysisWorkScheduler: AnalysisWorkScheduler
+    /// playhead-3xtw: user-intent "Download & Analyze on demand" trigger.
+    /// Wires the download manager + analysis scheduler behind the narrow
+    /// prepare seams; reads `cellularPolicy` at call time. Playback-free
+    /// by construction (no playback dependency).
+    let episodePreparationCoordinator: EpisodePreparationCoordinator
     let analysisJobReconciler: AnalysisJobReconciler
     /// Bug 9: charge-gated final-pass re-transcription runner. Lives
     /// alongside `BackfillJobRunner` and runs an independent pipeline:
@@ -1444,6 +1449,17 @@ final class PlayheadRuntime {
             let coordinator = analysisCoordinator
             Task { await coordinator.setSchedulerStateSnapshotProvider(adapter) }
         }
+        // playhead-3xtw: construct the on-demand preparation coordinator
+        // now that the download manager + scheduler exist. Preview runtimes
+        // use the deterministic Wi‑Fi transport stub (no NWPathMonitor).
+        self.episodePreparationCoordinator = EpisodePreparationCoordinator(
+            downloads: DownloadManagerPreparationAdapter(manager: downloadManager),
+            analysis: SchedulerPreparationAdapter(scheduler: analysisWorkScheduler),
+            reachability: isPreviewRuntime
+                ? WifiTransportStatusProvider()
+                : LiveTransportStatusProvider()
+        )
+
         self.analysisJobReconciler = AnalysisJobReconciler(
             store: analysisStore,
             downloadManager: downloadManager,
@@ -2862,6 +2878,29 @@ final class PlayheadRuntime {
     ) async {
         guard let handler = playbackPositionPersistenceHandler else { return }
         await handler(trigger)
+    }
+
+    /// playhead-3xtw: user-intent "Download & Analyze on demand". Reads
+    /// the episode's fields on the main actor, then hands a plain
+    /// `Request` value to the playback-free preparation coordinator. This
+    /// enqueues the download (if needed, honoring `cellularPolicy`) and
+    /// the full analysis pipeline at the user-intent lane. It MUST NOT
+    /// start playback — it deliberately does not touch `playbackService`,
+    /// `analysisCoordinator.handlePlaybackEvent`, or
+    /// `analysisWorkScheduler.playbackStarted`.
+    @discardableResult
+    func prepareEpisodeForAnalysis(
+        _ episode: Episode
+    ) async -> EpisodePreparationCoordinator.Outcome {
+        let request = EpisodePreparationCoordinator.Request(
+            episodeId: episode.canonicalEpisodeKey,
+            podcastId: episode.podcast?.feedURL.absoluteString,
+            audioURL: episode.audioURL,
+            durationSec: episode.duration,
+            podcastTitle: episode.podcast?.title,
+            episodeTitle: episode.title
+        )
+        return await episodePreparationCoordinator.prepare(request)
     }
 
     func playEpisode(_ episode: Episode) async {
