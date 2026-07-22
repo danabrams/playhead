@@ -843,6 +843,19 @@ struct RediffFetchPersonaTests {
         #expect(request.value(forHTTPHeaderField: "User-Agent") == RediffFetchPersona.appleCoreMediaIPhone.userAgent)
     }
 
+    @Test("makeWiFiOnlySession disables the URL cache (xsdz.36.3) and stays WiFi-only (xsdz.28)")
+    func wifiOnlySessionDisablesCache() {
+        let config = URLSessionRangedAudioSampler.makeWiFiOnlySession().configuration
+        // playhead-xsdz.36.3: the third cache-defeating guard (with the `_cb`
+        // query item and the reload cache policy) — the session must hold NO
+        // URL cache so a rediff body can never be served from a stale entry.
+        #expect(config.urlCache == nil, "rediff session must disable the URL cache entirely")
+        // playhead-xsdz.28: cache-busting must NOT relax the WiFi-only pins.
+        #expect(config.allowsCellularAccess == false)
+        #expect(config.allowsConstrainedNetworkAccess == false)
+        #expect(config.allowsExpensiveNetworkAccess == false)
+    }
+
     @Test("cacheBustedURL appends a unique _cb, preserves an existing query string, and never clobbers")
     func cacheBustedURLAppends() {
         // No existing query → the sole query item is _cb.

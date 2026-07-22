@@ -272,6 +272,20 @@ enum RediffFetchRequest {
     /// existing query string (URLComponents append — an existing `?a=b` is
     /// kept, never clobbered). Falls back to the original URL if it cannot be
     /// decomposed (never expected for an http(s) enclosure).
+    ///
+    /// RESIDUAL RISK — signed-URL 403 (xsdz.36.3 self-review "F2", DEFERRED):
+    /// `_cb` is appended UNCONDITIONALLY, so an enclosure whose signature
+    /// covers the whole query string (e.g. an AWS SigV4 presigned URL) would
+    /// reject the extra param with a 403. This is CONTAINED, not silently
+    /// harmful: the 403 is a non-206 pre-check (`SampleError.notPartialContent`)
+    /// classified `.transient`, swallowed per-candidate, and it fails on the
+    /// ~128 KB ranged pre-check BEFORE the ~54 MB full fetch — no bandwidth
+    /// storm, no sweep abort. The DAI stacks the cache-buster targets
+    /// (AdsWizz/ART19/Megaphone) tolerate unknown extra params, and Playhead
+    /// resolves PLAIN public podcast enclosure URLs (there is no presign/token
+    /// logic anywhere in the feed/enclosure path), so no signed-URL feed is in
+    /// today's candidate set. A host-aware / retry-without-`_cb`-on-4xx
+    /// mitigation is deferred to a follow-up bead rather than gold-plated here.
     static func cacheBustedURL(_ url: URL, token: String) -> URL {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return url
