@@ -125,7 +125,13 @@ final class AdBannerQueue {
     /// `SkipOrchestrator.declineSuggestedSkip` so the orchestrator can
     /// drop the suggested window from its in-memory set. `nil` when the
     /// view does not need this signal (tests, previews).
-    var onSuggestExitWithoutSkip: ((AdSkipBannerItem) -> Void)?
+    ///
+    /// playhead-lc7z: the `Bool` distinguishes an explicit user dismissal
+    /// (the "✕" tap → `true`) from a passive auto-fade timeout (`false`).
+    /// Only the explicit dismissal is treated downstream as a
+    /// `.falsePositive` correction — a banner the user ignored for the full
+    /// dwell is too weak a signal to mint a hard negative.
+    var onSuggestExitWithoutSkip: ((AdSkipBannerItem, Bool) -> Void)?
 
     init(
         autoDismissSeconds: TimeInterval = AdBannerQueue.defaultAutoDismissSeconds,
@@ -166,7 +172,13 @@ final class AdBannerQueue {
     }
 
     /// Dismiss the current banner (user tapped dismiss or auto-dismiss fired).
-    func dismiss() {
+    ///
+    /// playhead-lc7z: `userInitiated` is `true` only when the user tapped the
+    /// dismiss "✕". The auto-fade timer and internal queue-advance calls use
+    /// the default `false`. The flag is forwarded to `onSuggestExitWithoutSkip`
+    /// so a suggest-tier dismissal is captured as a `.falsePositive`
+    /// correction while a passive auto-fade is not.
+    func dismiss(userInitiated: Bool = false) {
         dismissTask?.cancel()
         dismissTask = nil
         // playhead-gtt9.23: notify any suggest-tier exit handler so the
@@ -176,7 +188,7 @@ final class AdBannerQueue {
         // callback by setting `currentBanner` to nil before invoking
         // `dismiss()` — see `dismissAfterAccept(_:)`.
         if let banner = currentBanner, banner.tier == .suggest {
-            onSuggestExitWithoutSkip?(banner)
+            onSuggestExitWithoutSkip?(banner, userInitiated)
         }
         currentBanner = nil
 
@@ -850,13 +862,15 @@ struct AdBannerView: View {
             .accessibilityLabel("Skip this segment")
             .accessibilityHint("Skips the suggested sponsor break")
 
-            // Dismiss button — silent decline, no veto recorded. The
-            // queue's `dismiss()` invokes `onSuggestExitWithoutSkip`
-            // automatically, so the orchestrator cleanup happens once
-            // regardless of whether the user tapped the X or the
-            // banner auto-faded.
+            // Dismiss button. playhead-lc7z: an explicit "✕" tap on a
+            // suggest banner is the user saying "no, that isn't an ad" —
+            // pass `userInitiated: true` so the queue forwards it to
+            // `onSuggestExitWithoutSkip` as a dismissal, which the
+            // orchestrator captures as a `.falsePositive` correction. (A
+            // passive auto-fade of the same banner calls `dismiss()` with
+            // the default `false` and records nothing.)
             Button {
-                queue.dismiss()
+                queue.dismiss(userInitiated: true)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 12, weight: .semibold))

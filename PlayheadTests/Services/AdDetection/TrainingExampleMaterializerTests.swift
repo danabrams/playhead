@@ -870,6 +870,52 @@ struct TrainingExampleMaterializerTests {
         #expect(b.bucket != .disagreement)
     }
 
+    // MARK: - playhead-lc7z: dismissed false-positive → NEGATIVE training example
+
+    @Test("A .falsePositive correction over a region the model didn't flag yields a NEGATIVE training example")
+    func falsePositiveCorrectionYieldsNegativeExample() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // A region the model did NOT flag (no FM evidence, disposition .noAds)
+        // on a good transcript — the shape a dismissed false-positive suggest
+        // window takes when its mark came from a non-FM composer (specialist /
+        // lexical). The FP correction is the only user signal, so the example
+        // lands in .negative (this is NOT an ad). NOTE the companion case:
+        // when the model WAS FM-positive over the region, the same FP dismissal
+        // buckets .disagreement (model-vs-user) instead — that path is pinned
+        // by `exactTimeSpanCorrectionScopedToOverlap` above. Both are valid
+        // hard-negative / revert signals; only the bucket label differs.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-negative", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .noAds
+        ))
+
+        // .manualVeto is the source stamped by a suggest-banner dismissal;
+        // its kind is .falsePositive, so the materializer counts it as a
+        // revert. exactTimeSpan mirrors the scope the dismissal persists.
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: assetId, startTime: 0.0, endTime: 9.0
+        ).serialized
+        try await store.appendCorrectionEvent(correctionEvent(
+            id: "corr-fp", scope: scope, source: .manualVeto
+        ))
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId, store: store, now: 1_700_000_100
+        )
+
+        let row = try #require(
+            (try await store.loadTrainingExamples(forAsset: assetId))
+                .first { $0.id == "te-scan-negative" }
+        )
+        #expect(row.bucket == .negative,
+                "an FP correction over a region the model never flagged must bucket .negative; got \(row.bucket)")
+        #expect(row.userAction == "reverted",
+                "the FP correction must stamp userAction=reverted; got \(String(describing: row.userAction))")
+    }
+
     // MARK: - H1: parseCertainty maps CertaintyBand strings, not raw doubles
 
     @Test("H1: EvidencePayload certainty=\"strong\" produces a non-zero fmCertainty")

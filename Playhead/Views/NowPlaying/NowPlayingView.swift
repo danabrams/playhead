@@ -222,12 +222,20 @@ struct NowPlayingView: View {
             // closure cannot fire on a deallocated runtime if the
             // queue ever outlives this view.
             if bannerQueue.onSuggestExitWithoutSkip == nil {
-                bannerQueue.onSuggestExitWithoutSkip = { [weak runtime] item in
+                // playhead-lc7z: `userDismissed` is true only for an explicit
+                // "✕" tap; an auto-fade passes false. The orchestrator
+                // captures the explicit dismissal as a `.falsePositive`
+                // correction (and stamps `userDismissedBanner`), while a
+                // passive fade stays a silent decline.
+                bannerQueue.onSuggestExitWithoutSkip = { [weak runtime] item, userDismissed in
                     guard let runtime else { return }
                     let orchestrator = runtime.skipOrchestrator
                     let windowId = item.windowId
                     Task {
-                        await orchestrator.declineSuggestedSkip(windowId: windowId)
+                        await orchestrator.declineSuggestedSkip(
+                            windowId: windowId,
+                            userDismissed: userDismissed
+                        )
                     }
                 }
             }
