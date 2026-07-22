@@ -12536,56 +12536,128 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
-    /// Returns up to `limit` `analysisAssetId`s whose current asset row is
-    /// summary-eligible (transcript coverage ≥ `coverageFraction`) but for
-    /// which `episode_summaries` either has no row, has a stale
-    /// `schemaVersion`, or has a `transcriptVersion` that no longer matches
-    /// the live transcript fingerprint.
+    /// playhead-g4dk: interval-unioned seconds of `pass='fast'` transcript
+    /// actually present for `assetId`. Overlapping chunks count once, gaps
+    /// are excluded, and degenerate/inverted rows contribute nothing.
     ///
-    /// Coverage is computed as
-    ///     `fastTranscriptCoverageEndTime / episodeDurationSec`,
-    /// matching the runtime gate the coordinator uses.
+    /// Unlike the `fastTranscriptCoverageEndTime` watermark — a high-water
+    /// *reach* that overstates a gappy transcript — this is the "how much
+    /// fast text is real?" number the summary-eligibility gate compares
+    /// against. Returns 0 when no fast chunks exist: deliberately NO
+    /// watermark fallback, so a sparse-but-high-watermark asset (the g4dk
+    /// bug — a ~39%-real episode behind an 80% watermark) is gated out
+    /// rather than admitted on a stale reach.
+    private func fastTranscriptUnionSeconds(assetId: String) throws -> Double {
+        let sql = """
+            SELECT startTime, endTime
+            FROM transcript_chunks
+            WHERE pass = 'fast' AND analysisAssetId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        var intervals: [(start: Double, end: Double)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let start = sqlite3_column_double(stmt, 0)
+            let end = sqlite3_column_double(stmt, 1)
+            guard end > start else { continue }
+            intervals.append((start: start, end: end))
+        }
+        return AnalysisCoverageMath.unionedSeconds(intervals)
+    }
+
+    /// Returns up to `limit` `analysisAssetId`s whose current asset row is
+    /// summary-eligible but for which `episode_summaries` either has no row
+    /// or carries a stale `schemaVersion`.
+    ///
+    /// Summary-eligibility (playhead-g4dk) has two gates:
+    ///   - **Real transcript coverage.** The unioned seconds of fast
+    ///     transcript actually present (``fastTranscriptUnionSeconds``)
+    ///     divided by `episodeDurationSec` must be ≥ `coverageFraction`.
+    ///     This replaces the old `fastTranscriptCoverageEndTime /
+    ///     episodeDurationSec` watermark gate, which admitted sparse
+    ///     transcripts whose high-water reach masked large gaps and got
+    ///     them summarized on a gappy, ad-contaminated transcript.
+    ///   - **Ad-detection completion.** `confirmedAdCoverageEndTime` is
+    ///     set (ad detection confirmed at least one span) OR the asset has
+    ///     reached ANY terminal-completion state (`complete`,
+    ///     `completeFull`, `completeFeatureOnly`,
+    ///     `completeTranscriptPartial`). Every `complete*` terminal is
+    ///     reached only by transitioning OUT of `.backfill`, i.e. after the
+    ///     ad pipeline has run over the transcribed range — so confirmed
+    ///     ad spans (if any) exist to exclude by the time we summarize.
+    ///     Still-in-progress states (queued/spooling/…/backfill) and the
+    ///     `failed*` terminals do NOT qualify: summarizing then would run on
+    ///     a pre-ad-detection transcript and leak a sponsor read.
+    ///
+    ///     Crucially this must be a *disjunction* of the confirmed-ad
+    ///     watermark and the completion state, NOT confirmed-ad alone: a
+    ///     no-ad episode never advances `confirmedAdCoverageEndTime` (it
+    ///     only tracks `max(nonSuppressedWindows.endTime)`), so gating on
+    ///     the watermark alone would permanently deny summaries to every
+    ///     ad-free episode — including the common `completeTranscriptPartial`
+    ///     band whose transcript reach lands in [coverageFraction, 0.95).
+    ///     (`completeFeatureOnly` is admitted for symmetry but is filtered
+    ///     out by the coverage gate anyway: its transcript reach is ~0.)
     ///
     /// Notes:
     ///   - Assets with a missing or zero `episodeDurationSec` are excluded
     ///     (we cannot compute coverage), even if a transcript exists.
     ///   - Assets in `analysisState = 'failed'` are excluded — the
     ///     backfill coordinator should not poke at known-failed rows.
-    ///   - The coordinator does the per-asset transcript-version probe;
-    ///     this query only filters out rows whose summary is at the
-    ///     current `currentSchemaVersion` AND has a non-null
-    ///     `transcriptVersion` matching the asset's row. Anything
-    ///     ambiguous (NULL transcriptVersion on either side) returns so
-    ///     the coordinator can decide.
+    ///   - SQL pre-filters cheaply on the watermark presence, completion,
+    ///     failure, and summary staleness; the exact interval-union
+    ///     coverage decision is refined in Swift, since SQLite has no
+    ///     interval union without an extension (the same Swift-side union
+    ///     ``fetchCoverageSummariesByAssetIds`` computes). Candidates are
+    ///     visited in `createdAt DESC` order and the first `limit` that
+    ///     clear the real coverage threshold are returned; because the
+    ///     coverage cut happens in Swift, `limit` is enforced by the loop
+    ///     rather than a SQL `LIMIT`.
     func fetchEpisodeSummaryBackfillCandidates(
         coverageFraction: Double,
         currentSchemaVersion: Int,
         limit: Int
     ) throws -> [String] {
+        guard limit > 0 else { return [] }
         let sql = """
-            SELECT a.id
+            SELECT a.id, a.episodeDurationSec
             FROM analysis_assets a
             LEFT JOIN episode_summaries s ON s.analysisAssetId = a.id
             WHERE a.episodeDurationSec IS NOT NULL
               AND a.episodeDurationSec > 0
               AND a.fastTranscriptCoverageEndTime IS NOT NULL
-              AND (a.fastTranscriptCoverageEndTime / a.episodeDurationSec) >= ?
               AND a.analysisState != 'failed'
+              AND (
+                    a.confirmedAdCoverageEndTime IS NOT NULL
+                 OR a.analysisState IN (
+                        'complete', 'completeFull',
+                        'completeFeatureOnly', 'completeTranscriptPartial'
+                    )
+              )
               AND (
                     s.analysisAssetId IS NULL
                  OR s.schemaVersion < ?
               )
             ORDER BY a.createdAt DESC
-            LIMIT ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, coverageFraction)
-        bind(stmt, 2, currentSchemaVersion)
-        bind(stmt, 3, limit)
+        bind(stmt, 1, currentSchemaVersion)
+
         var ids: [String] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            ids.append(text(stmt, 0))
+            let id = text(stmt, 0)
+            guard let duration = optionalDouble(stmt, 1), duration > 0 else { continue }
+            // Refine the cheap SQL pre-filter with the real interval-union
+            // coverage — the deciding gate. Runs an independent prepared
+            // statement per candidate; the summary-staleness filter keeps
+            // the pre-filtered set small in steady state and the loop stops
+            // as soon as `limit` assets clear the threshold.
+            let coveredSec = try fastTranscriptUnionSeconds(assetId: id)
+            guard coveredSec / duration >= coverageFraction else { continue }
+            ids.append(id)
+            if ids.count >= limit { break }
         }
         return ids
     }

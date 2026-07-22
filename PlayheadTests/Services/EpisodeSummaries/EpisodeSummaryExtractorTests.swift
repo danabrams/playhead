@@ -192,6 +192,31 @@ struct EpisodeSummaryExtractorTests {
         #expect(!prompt.contains("From the show"))
     }
 
+    // playhead-g4dk: both prompt paths must instruct the model to ignore
+    // advertisements / sponsor reads so a sponsor read that survives the
+    // chunk-level exclusion still can't dominate the summary.
+    @Test("buildPrompt instructs the model to ignore advertisements")
+    func buildPromptExcludesAds() {
+        let prompt = EpisodeSummaryGrammar.buildPrompt(
+            episodeTitle: nil,
+            showTitle: nil,
+            chunks: [makeChunk(id: "c-0", index: 0, start: 0, end: 30)]
+        )
+        #expect(prompt.lowercased().contains("advertis"))
+        #expect(prompt.contains("Summarize only the editorial content"))
+    }
+
+    @Test("buildPermissivePrompt instructs the model to ignore advertisements")
+    func buildPermissivePromptExcludesAds() {
+        let prompt = EpisodeSummaryGrammar.buildPermissivePrompt(
+            episodeTitle: nil,
+            showTitle: nil,
+            chunks: [makeChunk(id: "c-0", index: 0, start: 0, end: 30)]
+        )
+        #expect(prompt.lowercased().contains("advertis"))
+        #expect(prompt.contains("Summarize only the editorial content"))
+    }
+
     // MARK: - Sanitize
 
     @Test("EpisodeSummary.sanitize trims whitespace and caps lists")
