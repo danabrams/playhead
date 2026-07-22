@@ -394,6 +394,11 @@ actor BackgroundProcessingService {
 
     /// Whether backfill is currently paused due to thermal/battery constraints.
     private var backfillPaused = false
+    /// playhead-txq3: reentrancy guard for `scheduleBackfillIfNeeded()`.
+    /// `pendingTaskRequestIdentifiers()` is a suspension point, so this
+    /// serializes concurrent callers to keep the check-then-submit atomic
+    /// on the actor (mirrors y5mk's `rescheduleInFlight` for feed refresh).
+    private var backfillRescheduleInFlight = false
 
     /// Whether all analysis is paused. Under C1, this gate is set only when
     /// `QualityProfile.schedulerPolicy.pauseAllWork` is true — today that is
@@ -713,6 +718,16 @@ actor BackgroundProcessingService {
         logger.info("BackgroundProcessingService started")
         // Kick off the initial pre-analysis recovery schedule.
         schedulePreAnalysisRecovery()
+        // playhead-txq3: arm backfill at LAUNCH too. Previously backfill was
+        // only submitted on a `.background`/`playbackDidStop`/self-rearm
+        // transition, so a user who queues episodes and never backgrounds
+        // or presses play left iOS with no submitted backfill BGProcessingTask
+        // to wake for — the in-memory `AnalysisWorkScheduler.runLoop` only
+        // gets CPU until the process is suspended (~30s). Recovery was already
+        // armed here; backfill now is too. The pending guard in
+        // `scheduleBackfillIfNeeded()` keeps this from bulldozing a request
+        // an earlier session already submitted.
+        await scheduleBackfillIfNeeded()
     }
 
     /// Stop all observation and cancel pending work.
@@ -742,11 +757,11 @@ actor BackgroundProcessingService {
 
     /// Signal that audio playback has stopped. Deactivates hot-path analysis,
     /// and schedules background backfill if appropriate.
-    func playbackDidStop() {
+    func playbackDidStop() async {
         hotPathActive = false
         logger.info("Hot-path inactive")
 
-        scheduleBackfillIfNeeded()
+        await scheduleBackfillIfNeeded()
     }
 
     /// playhead-fuo6: submit a backfill BGProcessingTask whenever the
@@ -763,8 +778,9 @@ actor BackgroundProcessingService {
     ///
     /// Wiring it on every `.background` scenePhase transition is safe
     /// because:
-    ///   * `BGTaskScheduler.submit(_:)` deduplicates identical
-    ///     identifiers; iOS coalesces duplicate submissions.
+    ///   * `scheduleBackfillIfNeeded()` no-ops when a backfill request is
+    ///     already pending (playhead-txq3), so repeated `.background`
+    ///     transitions cannot age-reset the pending request's timing.
     ///   * The submitted request is identical to the one already used
     ///     by `playbackDidStop()` and the self-rearm path
     ///     (`requiresExternalPower=false`, `requiresNetworkConnectivity
@@ -775,9 +791,9 @@ actor BackgroundProcessingService {
     ///
     /// Called from `PlayheadApp.onChange(of: scenePhase)` on the main
     /// actor when the new phase is `.background`.
-    func appDidEnterBackground() {
+    func appDidEnterBackground() async {
         logger.info("App entered background -- submitting backfill task")
-        scheduleBackfillIfNeeded()
+        await scheduleBackfillIfNeeded()
     }
 
     /// Returns the recommended hot-path lookahead multiplier based on
@@ -805,7 +821,28 @@ actor BackgroundProcessingService {
     // MARK: - Background Task Scheduling
 
     /// Schedule a BGProcessingTask for deferred backfill.
-    func scheduleBackfillIfNeeded() {
+    ///
+    /// playhead-txq3: skip the submit when a backfill request is ALREADY
+    /// pending. The prior code re-submitted on every `.background`
+    /// transition, `playbackDidStop`, and self-rearm — and while
+    /// `BGTaskScheduler.submit(_:)` de-dups on identifier, each submit
+    /// AGE-RESETS the pending request's scheduling, so an evening of
+    /// app-use kept pushing the wake further out. This is the exact
+    /// "bulldozing" pattern y5mk fixed for feed refresh; mirror the guard
+    /// (`pendingTaskRequestIdentifiers()` check + a reentrancy flag).
+    func scheduleBackfillIfNeeded() async {
+        // Reentrancy guard — serialize concurrent callers around the
+        // suspension point so the check-then-submit stays atomic.
+        guard !backfillRescheduleInFlight else { return }
+        backfillRescheduleInFlight = true
+        defer { backfillRescheduleInFlight = false }
+
+        let pendingIdentifiers = await taskScheduler.pendingTaskRequestIdentifiers()
+        if pendingIdentifiers.contains(BackgroundTaskID.backfillProcessing) {
+            logger.info("Backfill already pending — skipping duplicate submit (playhead-txq3)")
+            return
+        }
+
         let request = BGProcessingTaskRequest(identifier: BackgroundTaskID.backfillProcessing)
         request.requiresNetworkConnectivity = false
         request.requiresExternalPower = false
@@ -1006,7 +1043,7 @@ actor BackgroundProcessingService {
         }
 
         // Schedule the next occurrence.
-        scheduleBackfillIfNeeded()
+        await scheduleBackfillIfNeeded()
 
         let runLedger = self.runLedger
         let workTask = Task {
