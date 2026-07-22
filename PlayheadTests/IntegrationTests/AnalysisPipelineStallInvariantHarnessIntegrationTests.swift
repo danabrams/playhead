@@ -311,16 +311,17 @@ struct AnalysisPipelineStallInvariantHarnessIntegrationTests {
     /// `expired`/`task_expired` with 0 completions. Asserted over BOTH entry
     /// points (backfill AND preanalysis_recovery — the RC-1 root cause was
     /// that neither dispatched) and across a range of queue depths. For each:
-    /// pending strictly decreases (real dispatch happened) AND the durable
-    /// ledger records a PROGRESS outcome (`admittedWork` / `recoveredWork`),
-    /// never `.expired` and never a stall-shaped no-progress terminal.
+    /// the queue fully drains — NOTHING is left `queued` (real dispatch
+    /// happened) AND the durable ledger records a PROGRESS outcome
+    /// (`admittedWork` / `recoveredWork`), never `.expired` and never a
+    /// stall-shaped no-progress terminal.
     ///
     /// Catches: any future regression where a background handler stops
     /// actively draining (reverts to bare `wake()` + poll, or a sceneless
-    /// launch leaves the loop unstarted) — pending would stay pinned and the
-    /// ledger outcome would fall to `.noEligibleWork`/`.noOp`/`.expired`,
-    /// failing here for whichever entry point regressed.
-    @Test("Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — pending drains + progress outcome, never expired/0-done",
+    /// launch leaves the loop unstarted) — jobs would stay pinned `queued`
+    /// and the ledger outcome would fall to `.noEligibleWork`/`.noOp`/
+    /// `.expired`, failing here for whichever entry point regressed.
+    @Test("Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queue fully drains + progress outcome, never expired/0-done",
           .timeLimit(.minutes(1)),
           arguments: [
             (BGEntry.backfill, 1), (BGEntry.backfill, 3), (BGEntry.backfill, 7),
@@ -364,14 +365,36 @@ struct AnalysisPipelineStallInvariantHarnessIntegrationTests {
             ledgerEntryPoint = .preAnalysisRecovery
         }
         await task.awaitCompletion()
-        // Quiesce the loop the handler started so the pending read is stable
-        // (the drain already ran to completion inside the handler).
+        // Quiesce the loop the handler started so the queued-set read below
+        // is taken against a settled scheduler (the drain already ran to
+        // completion inside the handler).
         await scheduler.stop()
 
-        // Progress: the queue actively drained — the whole point of RC-1.
-        let after = try await pendingCount(store)
-        #expect(after < before,
-                "\(entry) BGTask must actively DISPATCH eligible work; pending \(before) -> \(after) (depth=\(depth))")
+        // Progress: every eligible job was DISPATCHED out of the `queued`
+        // state — the whole point of RC-1. The incident signature was
+        // "N queued / 0 running, pinned forever", so the faithful
+        // anti-stall assertion is that NOTHING remains queued.
+        //
+        // Asserting on the `queued` set (rather than a `pendingCount`
+        // snapshot of queued+running+paused) is also race-free against the
+        // `runLoop` that `ensureSchedulerLoopStarted()` spins up
+        // concurrently inside the handler. That loop can win the lease CAS
+        // on a seeded job; if it is still mid-run when the (non-awaited)
+        // `stop()` above cancels it, the job supersedes — the seed stamps
+        // `attemptCount` at `maxAttemptCount - 1`, so the cancel-mid-run arm
+        // takes the terminal `superseded` branch, never the requeue branch —
+        // so it can never reappear as `queued`. A `pendingCount` snapshot,
+        // by contrast, could transiently still count that stolen job as
+        // `running` if its terminal write lands just after the read, giving
+        // a false `after == before` at depth=1. `queued.isEmpty` avoids that
+        // flake while asserting something strictly STRONGER: EVERY job left
+        // the queue, not merely that pending decreased by one. `before`
+        // remains the seeded-count precondition. A regressed handler that
+        // fails to dispatch (RC-1: bare `wake()`+poll) leaves every seeded
+        // job pinned `queued` and fails here.
+        let queuedAfter = try await store.fetchJobsByState("queued")
+        #expect(queuedAfter.isEmpty,
+                "\(entry) BGTask must actively DISPATCH every eligible queued job; still queued: \(queuedAfter.map(\.jobId)) (depth=\(depth))")
 
         // Durable classification: a progress outcome, never the stall's
         // silent `.expired`/no-progress terminal.
