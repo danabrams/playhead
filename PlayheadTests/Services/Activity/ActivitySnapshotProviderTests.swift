@@ -349,11 +349,21 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(input.transcriptFraction == 250.0 / 300.0)
     }
 
-    /// Overflow watermark (e.g. confirmed-ad watermark briefly past the
-    /// asset's `episodeDurationSec` because of decoder/duration drift)
-    /// must clamp to `1.0` rather than leaking a >1 fraction into the
-    /// row's strip view.
-    @Test("confirmed-ad watermark > duration → analysisFraction clamps to 1.0")
+    /// Overflow (e.g. transcript + analysis coverage past the asset's
+    /// `episodeDurationSec` because of decoder/duration drift) must clamp to
+    /// `1.0` rather than leaking a >1 fraction into the row's strip view.
+    ///
+    /// playhead-sd71: AN is now the gap-aware analyzed-coverage AREA — a
+    /// subset of the transcript union clipped to the analysis frontier — so
+    /// the overshoot must be driven through a *transcribed* interval, not a
+    /// bare watermark. A single fast chunk [0, 600] gives 600s of transcript
+    /// covered against a 300s duration; the analysis frontier (confirmed-ad
+    /// = 600) is at or past that, so the clipped analyzed area is also 600s
+    /// and 600/300 = 2.0 clamps to 1.0. (Pre-sd71 this test passed a bare
+    /// confirmed-ad watermark with NO transcript, which under the corrected
+    /// semantics — you cannot analyze un-transcribed audio — would yield a
+    /// nil fraction, not 1.0.)
+    @Test("transcript + analysis coverage > duration → analysisFraction clamps to 1.0")
     func analysisFractionClampsOnOverflow() async throws {
         let fixture = try await makeFixture(assetSeeds: [
             AssetSeed(
@@ -361,6 +371,9 @@ struct LiveActivitySnapshotProviderFractionTests {
                 confirmedAdCoverageEndTime: 600,
                 episodeDurationSec: 300
             )
+        ])
+        try await fixture.store.insertTranscriptChunks([
+            transcriptChunk(assetId: fixture.assetIds[0], index: 0, start: 0, end: 600)
         ])
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
@@ -377,11 +390,17 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(input.analysisFraction == 1.0)
     }
 
-    /// Analysis progress should not render as unknown just because no
-    /// non-suppressed ad window was found. Feature coverage is the broad
-    /// analysis-progress watermark available for no-ad and feature-only
-    /// episodes.
-    @Test("feature coverage populates analysis fraction when confirmed-ad coverage is nil")
+    /// Analysis progress should be driven by the feature-coverage frontier
+    /// (not just confirmed-ad windows) for no-ad and feature-only episodes.
+    ///
+    /// playhead-sd71: AN is the analyzed-coverage AREA — transcript union
+    /// clipped to the analysis frontier. A fully-transcribed 300s episode
+    /// (one fast chunk [0, 300]) with feature coverage reaching 150s yields
+    /// clipped analyzed seconds of 150 → 150/300 = 0.5, and the frontier is
+    /// the FEATURE watermark (confirmed-ad is nil). This pins that feature
+    /// coverage — not confirmed-ad existence — selects the frontier, while
+    /// keeping AN a subset of TX (TX here is 300/300 = 1.0 >= AN 0.5).
+    @Test("feature coverage selects the analysis frontier when confirmed-ad coverage is nil")
     func analysisFractionUsesFeatureCoverageWithoutConfirmedAds() async throws {
         let fixture = try await makeFixture(assetSeeds: [
             AssetSeed(
@@ -390,6 +409,9 @@ struct LiveActivitySnapshotProviderFractionTests {
                 confirmedAdCoverageEndTime: nil,
                 episodeDurationSec: 300
             )
+        ])
+        try await fixture.store.insertTranscriptChunks([
+            transcriptChunk(assetId: fixture.assetIds[0], index: 0, start: 0, end: 300)
         ])
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
@@ -404,6 +426,10 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(inputs.count == 1)
         let input = try #require(inputs.first)
         #expect(input.analysisFraction == 0.5)
+        // AN (0.5) must not exceed TX (300/300 = 1.0).
+        let transcriptFraction = try #require(input.transcriptFraction)
+        let analysisFraction = try #require(input.analysisFraction)
+        #expect(analysisFraction <= transcriptFraction)
     }
 
     /// Missing or non-positive duration must produce `nil` for both
@@ -897,5 +923,87 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(snapshot.upNext.isEmpty)
         #expect(snapshot.recentlyFinished.count == 2)
         #expect(Set(snapshot.recentlyFinished.map(\.episodeId)) == Set(fixture.episodeIds))
+    }
+
+    // MARK: - playhead-sd71: AN <= TX invariant (live strip + dogfood)
+
+    /// Gappy fast transcript whose HIGH-WATER end reaches the very end of a
+    /// 1000s episode (union = 390s = 39%), with the analysis frontier
+    /// (confirmed-ad coverage) parked at 1000s (100%). Pre-sd71 the live
+    /// strip read AN off the frontier watermark → AN 100% while TX 39% (the
+    /// impossible "analyzed more than transcribed" state). Post-sd71 AN is
+    /// the gap-aware analyzed AREA: AN == TX == 0.39, and AN <= TX.
+    @Test("live strip: AN never exceeds TX — gappy transcript + frontier past holes → AN == TX == 0.39 (playhead-sd71)")
+    func liveStripAnalysisFractionNeverExceedsTranscriptFraction() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: 1000, // frontier at the end (100%)
+                episodeDurationSec: 1000
+            )
+        ])
+        try await fixture.store.insertTranscriptChunks([
+            transcriptChunk(assetId: fixture.assetIds[0], index: 0, start: 0, end: 140),
+            transcriptChunk(assetId: fixture.assetIds[0], index: 1, start: 300, end: 390),
+            transcriptChunk(assetId: fixture.assetIds[0], index: 2, start: 500, end: 560),
+            transcriptChunk(assetId: fixture.assetIds[0], index: 3, start: 900, end: 1000)
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+        let input = try #require(inputs.first)
+        let tx = try #require(input.transcriptFraction)
+        let an = try #require(input.analysisFraction)
+        #expect(tx == 390.0 / 1000.0)
+        #expect(an == 390.0 / 1000.0)
+        #expect(an <= tx)
+    }
+
+    /// Same scenario through the dogfood diagnostics block: the wire
+    /// `analysis_fraction` must be the corrected analyzed AREA (== TX ==
+    /// 0.39), never above TX. The raw `analysis_watermark_sec` stays exposed
+    /// for debugging even though the fraction no longer derives from it
+    /// ("only the FRACTION changes").
+    @Test("dogfood snapshot: analysis_fraction never exceeds transcript_fraction — AN == TX == 0.39 (playhead-sd71)")
+    func dogfoodSnapshotAnalysisFractionNeverExceedsTranscriptFraction() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: 1000,
+                episodeDurationSec: 1000
+            )
+        ])
+        try await fixture.store.insertTranscriptChunks([
+            transcriptChunk(assetId: fixture.assetIds[0], index: 0, start: 0, end: 140),
+            transcriptChunk(assetId: fixture.assetIds[0], index: 1, start: 300, end: 390),
+            transcriptChunk(assetId: fixture.assetIds[0], index: 2, start: 500, end: 560),
+            transcriptChunk(assetId: fixture.assetIds[0], index: 3, start: 900, end: 1000)
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdProvider: { nil },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let snapshot = await provider.loadDogfoodDiagnosticsSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            episodeHashProvider: { _ in "hashed-episode" }
+        )
+        let row = try #require(snapshot.rows.first)
+        let tx = try #require(row.pipeline.transcriptFraction)
+        let an = try #require(row.pipeline.analysisFraction)
+        #expect(tx == 390.0 / 1000.0)
+        #expect(an == 390.0 / 1000.0)
+        #expect(an <= tx)
+        // Raw watermark still exposed for debugging (only the FRACTION changed).
+        #expect(row.pipeline.analysisWatermarkSec == 1000)
     }
 }

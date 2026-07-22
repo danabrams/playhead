@@ -498,6 +498,19 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// watermark column when chunks are absent. `nil` when both are absent.
     let finalPassCoverageEndSec: Double?
     let finalPassCoverageEndSource: CoverageProvenance
+    /// playhead-sd71: gap-aware **analyzed-coverage AREA** — the
+    /// interval-unioned fast-transcript seconds that fall at or before the
+    /// analysis frontier (`max(featureCoverageEndSec, confirmedAdCoverageEndSec)`).
+    /// This is the honest "how much has actually been analyzed?" answer:
+    /// you cannot analyze audio you have not transcribed, so it is a subset
+    /// of ``fastTranscriptCoveredSec`` and is therefore mathematically
+    /// `<= fastTranscriptCoveredSec` by construction. Drives the AN pipeline
+    /// fraction, replacing the old high-water watermark that could overshoot
+    /// a gappy transcript (the "AN 100% / TX 39%" antipattern). `nil` when
+    /// the analysis frontier is unknown OR the transcript coverage is
+    /// unknown (mirrors ``fastTranscriptCoveredSec``'s nil semantics), so
+    /// AN renders as `--%` rather than a synthetic 0%.
+    let analysisCoveredSec: Double?
 }
 
 /// playhead-hygc.1.2: shared arithmetic for ``AnalysisCoverageSummary``.
@@ -544,6 +557,50 @@ enum AnalysisCoverageMath {
         }
         total += currentEnd - currentStart
         return total
+    }
+
+    /// playhead-sd71: gap-aware analyzed-coverage AREA. Clips each interval
+    /// to the closed window `[0, upperBound]` and returns the unioned
+    /// seconds of what remains — "of these intervals, how many de-overlapped
+    /// seconds fall at or before `upperBound` (and at or after zero)?".
+    ///
+    /// The load-bearing property: the result is always
+    /// `<= unionedSeconds(intervals)` for the same input, because every
+    /// clipped interval `[max(0, s), min(e, upperBound)]` is a subset of its
+    /// source `[s, e]`. Callers pass the transcript intervals and the
+    /// analysis frontier (watermark) so the AN pipeline metric measures the
+    /// analyzed AREA — a subset of the transcript union — and can never
+    /// exceed TX, unlike the raw frontier watermark which overshoots a
+    /// gappy transcript.
+    ///
+    /// Bounds handling mirrors ``unionedSeconds(_:)``'s finiteness contract:
+    /// non-finite interval endpoints are dropped. `upperBound <= 0` clips
+    /// everything away → `0`. A `+Infinity` `upperBound` means "no upper
+    /// clip" and returns the full ``unionedSeconds(_:)``; a `NaN` or
+    /// `-Infinity` `upperBound` is not a usable frontier → `0`.
+    static func unionedSecondsClipped(
+        _ intervals: [(start: Double, end: Double)],
+        upperBound: Double
+    ) -> Double {
+        guard upperBound.isFinite else {
+            return upperBound == .infinity ? unionedSeconds(intervals) : 0
+        }
+        guard upperBound > 0 else { return 0 }
+        let clipped = intervals.compactMap { interval -> (start: Double, end: Double)? in
+            // Drop non-finite / degenerate intervals before clipping so a
+            // poisoned endpoint cannot survive as a synthetic `[0, upperBound]`
+            // span after `max`/`min`.
+            guard interval.start.isFinite,
+                  interval.end.isFinite,
+                  interval.end > interval.start else {
+                return nil
+            }
+            let start = max(0, interval.start)
+            let end = min(interval.end, upperBound)
+            guard end > start else { return nil }
+            return (start: start, end: end)
+        }
+        return unionedSeconds(clipped)
     }
 }
 
@@ -7192,6 +7249,43 @@ actor AnalysisStore {
             let featureSec = assetRow?.featureCoverageEndTime
             let confirmedAdSec = assetRow?.confirmedAdCoverageEndTime
 
+            // playhead-sd71: gap-aware analyzed-coverage AREA. The analysis
+            // frontier is the broad feature/confirmed-ad watermark; the
+            // analyzed area is the transcribed content lying at or before
+            // that frontier. Because it is a subset of the transcript union
+            // it can never exceed `fastTranscriptCoveredSec`, so the AN
+            // pipeline fraction derived from it can never exceed TX (the
+            // watermark-vs-union antipattern this bead fixes). `nil` when the
+            // frontier is unknown OR transcript coverage is unknown, matching
+            // `fastTranscriptCoveredSec`'s nil semantics.
+            let analysisFrontierSec: Double?
+            switch (featureSec, confirmedAdSec) {
+            case let (feature?, confirmed?): analysisFrontierSec = max(feature, confirmed)
+            case let (feature?, nil): analysisFrontierSec = feature
+            case let (nil, confirmed?): analysisFrontierSec = confirmed
+            case (nil, nil): analysisFrontierSec = nil
+            }
+            let analysisCoveredSec: Double?
+            if let frontier = analysisFrontierSec, let transcriptCovered = fastCoveredSec {
+                let transcriptIntervals: [(start: Double, end: Double)]
+                if chunkMaxEnd != nil {
+                    // Real chunk intervals: gap-aware clip to the frontier.
+                    transcriptIntervals = fastIntervals[id] ?? []
+                } else {
+                    // Watermark-only transcript (no chunk intervals): model
+                    // the covered region as one contiguous [0, watermark] span
+                    // so the clip degrades to
+                    // min(transcriptWatermark, analysisFrontier).
+                    transcriptIntervals = [(start: 0, end: transcriptCovered)]
+                }
+                analysisCoveredSec = AnalysisCoverageMath.unionedSecondsClipped(
+                    transcriptIntervals,
+                    upperBound: frontier
+                )
+            } else {
+                analysisCoveredSec = nil
+            }
+
             summaries[id] = AnalysisCoverageSummary(
                 assetId: id,
                 episodeDurationSec: assetRow?.episodeDurationSec,
@@ -7204,7 +7298,8 @@ actor AnalysisStore {
                 confirmedAdCoverageEndSec: confirmedAdSec,
                 confirmedAdCoverageEndSource: confirmedAdSec == nil ? .unknown : .assetWatermark,
                 finalPassCoverageEndSec: finalEndSec,
-                finalPassCoverageEndSource: finalEndSource
+                finalPassCoverageEndSource: finalEndSource,
+                analysisCoveredSec: analysisCoveredSec
             )
         }
         return summaries

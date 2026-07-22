@@ -179,6 +179,164 @@ struct AnalysisCoverageMathTests {
     }
 }
 
+@Suite("AnalysisCoverageMath — clipped union / analyzed area (playhead-sd71)")
+struct AnalysisCoverageMathClippedTests {
+
+    /// Empty input is zero regardless of the frontier.
+    @Test("empty intervals produce zero for any upper bound")
+    func emptyIntervalsProduceZero() {
+        #expect(AnalysisCoverageMath.unionedSecondsClipped([], upperBound: 100) == 0)
+        #expect(AnalysisCoverageMath.unionedSecondsClipped([], upperBound: 0) == 0)
+        #expect(AnalysisCoverageMath.unionedSecondsClipped([], upperBound: .infinity) == 0)
+    }
+
+    /// Frontier past every interval end → no clipping → equals the full
+    /// unclipped union. This is the "analysis reached the end of a gappy
+    /// transcript" case: analyzed area == transcript union.
+    @Test("upper bound past all intervals → equals unclipped union")
+    func upperBoundPastAllEqualsUnclippedUnion() {
+        let intervals: [(start: Double, end: Double)] = [
+            (start: 0, end: 140),
+            (start: 300, end: 390),
+            (start: 500, end: 560),
+            (start: 900, end: 1000)
+        ]
+        let clipped = AnalysisCoverageMath.unionedSecondsClipped(intervals, upperBound: 5000)
+        let unclipped = AnalysisCoverageMath.unionedSeconds(intervals)
+        // 140 + 90 + 60 + 100 = 390 (gap-aware, NOT the 1000 extent).
+        #expect(unclipped == 390)
+        #expect(clipped == unclipped)
+    }
+
+    /// Frontier == 0 clips everything away → zero analyzed seconds.
+    @Test("upper bound 0 → full clip → zero")
+    func upperBoundZeroClipsEverything() {
+        let result = AnalysisCoverageMath.unionedSecondsClipped([
+            (start: 0, end: 100),
+            (start: 200, end: 300)
+        ], upperBound: 0)
+        #expect(result == 0)
+    }
+
+    /// Negative frontier is not a usable analysis position → zero.
+    @Test("negative upper bound → zero")
+    func negativeUpperBoundIsZero() {
+        let result = AnalysisCoverageMath.unionedSecondsClipped([
+            (start: 0, end: 100)
+        ], upperBound: -50)
+        #expect(result == 0)
+    }
+
+    /// Frontier lands mid-interval → that interval is truncated at the
+    /// frontier; earlier whole intervals count fully.
+    @Test("upper bound mid-interval truncates that interval")
+    func upperBoundMidIntervalTruncates() {
+        let result = AnalysisCoverageMath.unionedSecondsClipped([
+            (start: 0, end: 100),
+            (start: 200, end: 400)
+        ], upperBound: 300)
+        // [0,100] whole (100) + [200,300] truncated (100) = 200.
+        #expect(result == 200)
+    }
+
+    /// Frontier sits in the GAP between two intervals → only intervals at
+    /// or before the frontier count; the later one is excluded entirely.
+    @Test("upper bound between intervals excludes the later interval")
+    func upperBoundBetweenIntervalsExcludesLater() {
+        let result = AnalysisCoverageMath.unionedSecondsClipped([
+            (start: 0, end: 200),
+            (start: 500, end: 800)
+        ], upperBound: 350)
+        // [0,200] whole (200); [500,800] is entirely past 350 → excluded.
+        #expect(result == 200)
+    }
+
+    /// Degenerate / inverted intervals contribute zero even before clipping.
+    @Test("degenerate and inverted intervals contribute zero")
+    func degenerateIntervalsContributeZero() {
+        let result = AnalysisCoverageMath.unionedSecondsClipped([
+            (start: 5, end: 5),      // zero-width
+            (start: 100, end: 50),   // inverted
+            (start: 0, end: 40)      // valid
+        ], upperBound: 1000)
+        #expect(result == 40)
+    }
+
+    /// Non-finite endpoints are filtered even with a finite frontier, so a
+    /// poisoned interval cannot survive the max/min clip as a synthetic
+    /// [0, upperBound] span.
+    @Test("non-finite interval endpoints are filtered, total stays finite")
+    func nonFiniteIntervalsFiltered() {
+        let result = AnalysisCoverageMath.unionedSecondsClipped([
+            (start: 0, end: 100),
+            (start: .nan, end: 200),
+            (start: 0, end: .nan),
+            (start: -.infinity, end: 50),
+            (start: 0, end: .infinity)
+        ], upperBound: 500)
+        // Only [0, 100] survives.
+        #expect(result == 100)
+        #expect(result.isFinite)
+    }
+
+    /// Interval starting before zero is clipped to the [0, upperBound]
+    /// window's lower edge (defensive; production timestamps are >= 0).
+    @Test("interval starting before zero is clipped to zero")
+    func negativeStartClippedToZero() {
+        let result = AnalysisCoverageMath.unionedSecondsClipped([
+            (start: -30, end: 40)
+        ], upperBound: 1000)
+        // [-30,40] clipped to [0,40] → 40, not 70.
+        #expect(result == 40)
+    }
+
+    /// +Infinity frontier means "no upper clip" → the full unclipped union.
+    @Test("+Infinity upper bound equals the unclipped union")
+    func infiniteUpperBoundEqualsUnclipped() {
+        let intervals: [(start: Double, end: Double)] = [
+            (start: 0, end: 100),
+            (start: 300, end: 500)
+        ]
+        let clipped = AnalysisCoverageMath.unionedSecondsClipped(intervals, upperBound: .infinity)
+        #expect(clipped == AnalysisCoverageMath.unionedSeconds(intervals))
+        #expect(clipped == 300)
+    }
+
+    /// NaN frontier is not a usable analysis position → zero.
+    @Test("NaN upper bound → zero")
+    func nanUpperBoundIsZero() {
+        let result = AnalysisCoverageMath.unionedSecondsClipped([
+            (start: 0, end: 100)
+        ], upperBound: .nan)
+        #expect(result == 0)
+    }
+
+    /// Core invariant (AN <= TX at the math layer): for arbitrary gappy
+    /// intervals and ANY frontier, the clipped area never exceeds the
+    /// unclipped union, because each clipped interval is a subset of its
+    /// source. Swept across a range of frontiers including inside gaps,
+    /// mid-interval, and past the end.
+    @Test("clipped union never exceeds unclipped union across frontiers")
+    func clippedNeverExceedsUnclipped() {
+        let intervals: [(start: Double, end: Double)] = [
+            (start: 0, end: 140),
+            (start: 300, end: 390),
+            (start: 500, end: 560),
+            (start: 900, end: 1000)
+        ]
+        let unclipped = AnalysisCoverageMath.unionedSeconds(intervals)
+        for frontier in stride(from: -100.0, through: 1200.0, by: 37.0) {
+            let clipped = AnalysisCoverageMath.unionedSecondsClipped(
+                intervals,
+                upperBound: frontier
+            )
+            #expect(clipped <= unclipped,
+                    "clipped \(clipped) exceeded unclipped \(unclipped) at frontier \(frontier)")
+            #expect(clipped >= 0)
+        }
+    }
+}
+
 @Suite("AnalysisStore.fetchCoverageSummariesByAssetIds (playhead-hygc.1.2)")
 struct AnalysisStoreFetchCoverageSummariesTests {
 
@@ -466,6 +624,135 @@ struct AnalysisStoreFetchCoverageSummariesTests {
         }
         let result = try await store.fetchCoverageSummariesByAssetIds(ids)
         #expect(result.count == n)
+    }
+
+    // MARK: - playhead-sd71 analyzed-coverage AREA (AN <= TX)
+
+    /// The canonical "AN 100% / TX 39%" antipattern, reproduced at the read
+    /// model: a gappy fast transcript (union = 390s of a 1000s episode =
+    /// 39%) whose high-water end reaches 1000s, with the analysis frontier
+    /// (confirmed-ad coverage) parked at 1000s (100%). The OLD watermark AN
+    /// reported 1000/1000 = 100%. The corrected `analysisCoveredSec` is the
+    /// transcript union clipped to the frontier — and since the frontier is
+    /// past every hole, the clip is a no-op → analyzed area == transcript
+    /// union == 390s. AN == TX, never above.
+    @Test("(sd71) gappy transcript + frontier past holes → analyzed area == transcript union (AN == TX == 39%)")
+    func analyzedAreaEqualsTranscriptUnionWhenFrontierPastHoles() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-sd71-repro",
+            episodeDurationSec: 1000,
+            confirmedAdCoverageEndTime: 1000 // frontier at the very end
+        ))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "a-sd71-repro", index: 0, start: 0, end: 140),
+            makeChunk(assetId: "a-sd71-repro", index: 1, start: 300, end: 390),
+            makeChunk(assetId: "a-sd71-repro", index: 2, start: 500, end: 560),
+            makeChunk(assetId: "a-sd71-repro", index: 3, start: 900, end: 1000)
+        ])
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-sd71-repro"])
+        let summary = try #require(summaries["a-sd71-repro"])
+        // TX numerator: gap-aware union = 140 + 90 + 60 + 100 = 390.
+        #expect(summary.fastTranscriptCoveredSec == 390)
+        // High-water reaches the end — the value that fooled the old AN.
+        #expect(summary.fastTranscriptCoverageEndSec == 1000)
+        // AN numerator: analyzed AREA == transcript union (frontier past all
+        // holes), NOT the 1000s watermark.
+        #expect(summary.analysisCoveredSec == 390)
+        // Invariant: analyzed area is a subset of the transcript union.
+        let analyzed = try #require(summary.analysisCoveredSec)
+        let transcript = try #require(summary.fastTranscriptCoveredSec)
+        #expect(analyzed <= transcript)
+        // Both fractions land at 39% — NOT the old 100%.
+        let duration = try #require(summary.episodeDurationSec)
+        #expect(analyzed / duration == 390.0 / 1000.0)
+        #expect(transcript / duration == 390.0 / 1000.0)
+    }
+
+    /// Frontier landing mid-transcript clips the analyzed area strictly
+    /// below the transcript union.
+    @Test("(sd71) frontier mid-transcript clips analyzed area below the transcript union")
+    func analyzedAreaClippedWhenFrontierMidTranscript() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-sd71-partial",
+            episodeDurationSec: 600,
+            featureCoverageEndTime: 500 // frontier inside the second chunk
+        ))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "a-sd71-partial", index: 0, start: 0, end: 200),
+            makeChunk(assetId: "a-sd71-partial", index: 1, start: 400, end: 600)
+        ])
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-sd71-partial"])
+        let summary = try #require(summaries["a-sd71-partial"])
+        // Transcript union = 200 + 200 = 400.
+        #expect(summary.fastTranscriptCoveredSec == 400)
+        // Analyzed area: [0,200] whole (200) + [400,500] truncated (100) = 300.
+        #expect(summary.analysisCoveredSec == 300)
+        #expect((summary.analysisCoveredSec ?? 0) < (summary.fastTranscriptCoveredSec ?? 0))
+    }
+
+    /// No analysis frontier (no feature / confirmed-ad coverage) → analyzed
+    /// area is `nil` even when transcript is present, so AN renders `--%`
+    /// rather than a synthetic 0%.
+    @Test("(sd71) no analysis frontier → analyzed area nil even with transcript present")
+    func analyzedAreaNilWhenNoFrontier() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-sd71-nofrontier",
+            episodeDurationSec: 600
+        ))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "a-sd71-nofrontier", index: 0, start: 0, end: 300)
+        ])
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-sd71-nofrontier"])
+        let summary = try #require(summaries["a-sd71-nofrontier"])
+        #expect(summary.fastTranscriptCoveredSec == 300)
+        #expect(summary.analysisCoveredSec == nil)
+    }
+
+    /// Watermark-only transcript (no chunk intervals): the covered region is
+    /// modeled as one contiguous [0, transcriptWatermark] span, so the
+    /// analyzed area degrades to min(transcriptWatermark, frontier) — capped
+    /// at the transcript, so AN can never exceed TX even when the analysis
+    /// frontier runs ahead of the transcript watermark.
+    @Test("(sd71) watermark-only transcript → analyzed area = min(transcript watermark, frontier)")
+    func analyzedAreaWatermarkOnlyTranscript() async throws {
+        let store = try await makeTestStore()
+        // Frontier (500) AHEAD of the transcript watermark (200): analyzed
+        // area caps at the transcript (200).
+        try await store.insertAsset(makeAsset(
+            id: "a-sd71-wm-ahead",
+            episodeDurationSec: 600,
+            featureCoverageEndTime: 500,
+            fastTranscriptCoverageEndTime: 200
+        ))
+        // Frontier (120) BEHIND the transcript watermark (300): analyzed
+        // area truncates at the frontier (120).
+        try await store.insertAsset(makeAsset(
+            id: "a-sd71-wm-behind",
+            episodeDurationSec: 600,
+            featureCoverageEndTime: 120,
+            fastTranscriptCoverageEndTime: 300
+        ))
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds([
+            "a-sd71-wm-ahead", "a-sd71-wm-behind"
+        ])
+
+        let ahead = try #require(summaries["a-sd71-wm-ahead"])
+        #expect(ahead.fastTranscriptCoveredSec == 200)
+        #expect(ahead.fastTranscriptCoveredSource == .assetWatermark)
+        #expect(ahead.analysisCoveredSec == 200) // min(200, 500)
+        #expect((ahead.analysisCoveredSec ?? 0) <= (ahead.fastTranscriptCoveredSec ?? 0))
+
+        let behind = try #require(summaries["a-sd71-wm-behind"])
+        #expect(behind.fastTranscriptCoveredSec == 300)
+        #expect(behind.analysisCoveredSec == 120) // min(300, 120)
+        #expect((behind.analysisCoveredSec ?? 0) <= (behind.fastTranscriptCoveredSec ?? 0))
     }
 }
 
