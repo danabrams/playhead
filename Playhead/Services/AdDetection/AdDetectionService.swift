@@ -5378,7 +5378,17 @@ actor AdDetectionService {
         let nonSuppressedWindows = fusionWindows.filter { $0.decisionState != AdDecisionState.suppressed.rawValue }
         for window in nonSuppressedWindows {
             try Task.checkCancellation()
-            await extractAndPersistMetadata(window: window, chunks: chunks)
+            // playhead-hc7e: read the canonical transcript, not the raw mixed
+            // fast/final array. The window's overlapping evidence text is joined
+            // and handed to the metadata extractor; on a fully-covered ad window
+            // the raw array carried BOTH the fast chunk and the overlapping final
+            // chunk for the same audio, so the ad read was fed to the extractor
+            // twice (stale fast text interleaved with the higher-quality final
+            // text). `canonicalChunks` drops only fully-covered fast duplicates
+            // and retains partial-overlap fast chunks, so no unique evidence is
+            // lost — this keeps the "every consumer reads canonicalChunks"
+            // invariant true for the metadata path as well.
+            await extractAndPersistMetadata(window: window, chunks: canonicalChunks)
         }
 
         // ── Step 16: Event logging ────────────────────────────────────────────
