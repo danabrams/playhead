@@ -83,12 +83,232 @@ loading and text generation support.
 Linked transitively via coreai-models (XGrammar product) for structured /
 JSON-schema-constrained generation.
 
-  Copyright the XGrammar authors (MLC AI).
+  XGrammar
+  Copyright (c) 2024 by XGrammar Contributors
   Licensed under the Apache License, Version 2.0.
 
   Upstream: https://github.com/mlc-ai/xgrammar
             (rev 4d145cc13d878c751ebeed36af1c013074be76bc)
   License:  Apache-2.0 (see https://www.apache.org/licenses/LICENSE-2.0)
+
+
+------------------------------------------------------------------------------
+5. swift-jinja (Hugging Face) — prompt/template rendering
+------------------------------------------------------------------------------
+Linked transitively via swift-transformers (Tokenizers/Hub → Jinja) for
+chat-/prompt-template rendering.
+
+  Copyright the swift-jinja authors (Hugging Face, Inc.).
+  Licensed under the Apache License, Version 2.0.
+
+  Upstream: https://github.com/huggingface/swift-jinja (v2.4.2)
+  License:  Apache-2.0 (see https://www.apache.org/licenses/LICENSE-2.0)
+
+
+------------------------------------------------------------------------------
+6. swift-huggingface (Hugging Face) — hub/model-repo types
+------------------------------------------------------------------------------
+Linked transitively via swift-transformers (Hub → HuggingFace) for hub/model
+configuration types used by the on-device tokenizer stack. The Xet transport
+trait is disabled (swift-xet is not linked).
+
+  Copyright the swift-huggingface authors (Hugging Face, Inc.).
+  Licensed under the Apache License, Version 2.0.
+
+  Upstream: https://github.com/huggingface/swift-huggingface (v0.9.0)
+  License:  Apache-2.0 (see https://www.apache.org/licenses/LICENSE-2.0)
+
+
+------------------------------------------------------------------------------
+7. swift-nio (Apple) — async primitives (NIOCore)
+------------------------------------------------------------------------------
+Linked transitively via swift-huggingface → EventSource → NIOCore. The
+following NOTICE is reproduced as required by Apache-2.0 section 4(d):
+
+  The SwiftNIO Project
+  ====================
+
+  Please visit the SwiftNIO web site for more information:
+    * https://github.com/apple/swift-nio
+
+  Copyright 2017, 2018 The SwiftNIO Project
+
+  The SwiftNIO Project licenses this file to you under the Apache License,
+  version 2.0 (the "License"); you may not use this file except in compliance
+  with the License. You may obtain a copy of the License at:
+    https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+  License for the specific language governing permissions and limitations
+  under the License.
+
+  This product is heavily influenced by Netty.
+    * LICENSE (Apache License 2.0): https://github.com/netty/netty/blob/4.1/LICENSE.txt
+    * HOMEPAGE: https://netty.io
+
+  This product contains NodeJS's llhttp.
+    * LICENSE (MIT): https://github.com/nodejs/llhttp/blob/1e1c5b43326494e97cf8244ff57475eb72a1b62c/LICENSE-MIT
+    * HOMEPAGE: https://github.com/nodejs/llhttp
+
+  This product contains "cpp_magic.h" from Thomas Nixon & Jonathan Heathcote's uSHET
+    * LICENSE (MIT): https://github.com/18sg/uSHET/blob/c09e0acafd86720efe42dc15c63e0cc228244c32/lib/cpp_magic.h
+    * HOMEPAGE: https://github.com/18sg/uSHET
+
+  This product contains "sha1.c" and "sha1.h" from FreeBSD (Copyright (C) 1995,1996,1997,1998 WIDE Project)
+    * LICENSE (BSD-3): https://opensource.org/licenses/BSD-3-Clause
+    * HOMEPAGE: https://github.com/freebsd/freebsd-src
+
+  This product contains a derivation of Fabian Fett's 'Base64.swift'.
+    * LICENSE (Apache License 2.0): https://github.com/swift-extras/swift-extras-base64/blob/b8af49699d59ad065b801715a5009619100245ca/LICENSE
+    * HOMEPAGE: https://github.com/fabianfett/swift-base64-kit
+
+  This product contains a derivation of "XCTest+AsyncAwait.swift" & "StructuredConcurrencyHelpers" from AsyncHTTPClient.
+    * LICENSE (Apache License 2.0): https://www.apache.org/licenses/LICENSE-2.0
+    * HOMEPAGE: https://github.com/swift-server/async-http-client
+
+  This product contains a derivation of "_TinyArray.swift" from SwiftCertificates.
+    * LICENSE (Apache License 2.0): https://www.apache.org/licenses/LICENSE-2.0
+    * HOMEPAGE: https://github.com/apple/swift-certificates
+
+  This product contains a derivation of the mocking infrastructure from Swift System.
+    * LICENSE (Apache License 2.0): https://www.apache.org/licenses/LICENSE-2.0
+    * HOMEPAGE: https://github.com/apple/swift-system
+
+  This product contains a derivation of "TokenBucket.swift" from Swift Package Manager.
+    * LICENSE (Apache License 2.0): https://www.apache.org/licenses/LICENSE-2.0
+    * HOMEPAGE: https://github.com/swiftlang/swift-package-manager
+
+  Upstream: https://github.com/apple/swift-nio (v2.101.3)
+  License:  Apache-2.0 (see https://www.apache.org/licenses/LICENSE-2.0)
+
+
+------------------------------------------------------------------------------
+8. swift-crypto (Apple) — hashing (Crypto)
+------------------------------------------------------------------------------
+Linked transitively via swift-transformers/swift-huggingface (Hub/HuggingFace
+→ Crypto). On Apple platforms the Crypto module shims over system CryptoKit.
+The following NOTICE is reproduced as required by Apache-2.0 section 4(d):
+
+  The SwiftCrypto Project
+  =======================
+
+  Please visit the SwiftCrypto web site for more information:
+    * https://github.com/apple/swift-crypto
+
+  Copyright 2019 The SwiftCrypto Project
+
+  The SwiftCrypto Project licenses this file to you under the Apache License,
+  version 2.0 (the "License"); you may not use this file except in compliance
+  with the License. You may obtain a copy of the License at:
+    https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+  License for the specific language governing permissions and limitations
+  under the License.
+
+  This product contains test vectors from Google's wycheproof project.
+    * LICENSE (Apache License 2.0): https://github.com/C2SP/wycheproof/blob/31387e2cd596587c859c611027b6a44d2e2b65ff/LICENSE
+    * HOMEPAGE: https://github.com/google/wycheproof
+
+  This product contains a derivation of various files from SwiftNIO.
+    * LICENSE (Apache License 2.0): https://www.apache.org/licenses/LICENSE-2.0
+    * HOMEPAGE: https://github.com/apple/swift-nio
+
+  Upstream: https://github.com/apple/swift-crypto (v4.5.1)
+  License:  Apache-2.0 (see https://www.apache.org/licenses/LICENSE-2.0)
+
+
+------------------------------------------------------------------------------
+9. swift-collections (Apple) — ordered/deque containers
+------------------------------------------------------------------------------
+Linked transitively (OrderedCollections via swift-jinja/Hub; DequeModule via
+SwiftNIO).
+
+  Copyright (c) Apple Inc. and the Swift project authors.
+  Licensed under the Apache License, Version 2.0, with the Swift Runtime
+  Library Exception.
+
+  Upstream: https://github.com/apple/swift-collections (v1.6.0)
+  License:  Apache-2.0 with Runtime Library Exception
+            (see https://github.com/apple/swift-collections/blob/main/LICENSE.txt)
+
+
+------------------------------------------------------------------------------
+10. swift-atomics (Apple) — atomic primitives
+------------------------------------------------------------------------------
+Linked transitively via SwiftNIO (NIOConcurrencyHelpers → Atomics).
+
+  Copyright (c) Apple Inc. and the Swift project authors.
+  Licensed under the Apache License, Version 2.0, with the Swift Runtime
+  Library Exception.
+
+  Upstream: https://github.com/apple/swift-atomics (v1.3.1)
+  License:  Apache-2.0 with Runtime Library Exception
+            (see https://github.com/apple/swift-atomics/blob/main/LICENSE.txt)
+
+
+------------------------------------------------------------------------------
+11. EventSource (Mattt) — Server-Sent-Events client
+------------------------------------------------------------------------------
+Linked transitively via swift-huggingface (HuggingFace → EventSource).
+
+  Copyright 2025 Mattt (https://mat.tt)
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the "Software"),
+  to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+  and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  DEALINGS IN THE SOFTWARE.
+
+  Upstream: https://github.com/mattt/EventSource (v1.4.1)
+  License:  MIT
+
+
+------------------------------------------------------------------------------
+12. yyjson (YaoYuan) — JSON parsing
+------------------------------------------------------------------------------
+Linked transitively via swift-transformers (Hub → yyjson).
+
+  MIT License
+
+  Copyright (c) 2020 YaoYuan <ibireme@gmail.com>
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+  Upstream: https://github.com/ibireme/yyjson (v0.12.0)
+  License:  MIT
 
 ==============================================================================
 End of third-party notices.
