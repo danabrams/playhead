@@ -2651,68 +2651,109 @@ final class PlayheadRuntime {
         podcastIdBatchResolver: (@Sendable ([String]) async -> [String: String])? = nil
     ) async -> Int {
         let log = Logger(subsystem: "com.playhead", category: "FinalPassRetranscription")
-        let assets: [AnalysisAsset]
-        do {
-            assets = try await analysisStore.fetchAllAssets()
-        } catch {
-            log.warning("fetchAllAssets failed: \(error.localizedDescription, privacy: .public)")
-            return 0
-        }
 
-        // skeptical-review-cycle-3 M-B: prefer batch resolution. One
-        // MainActor hop returns the full episodeId → podcastFeedURL
-        // mapping; per-episode lookups during the loop hit the in-memory
-        // dict instead of bouncing back to MainActor for every asset.
-        let batchMap: [String: String]?
-        if let podcastIdBatchResolver {
-            let episodeIds = assets.map(\.episodeId)
-            batchMap = await podcastIdBatchResolver(episodeIds)
-        } else {
-            batchMap = nil
-        }
-
+        // playhead-b0uf: production-safe paginated sweep. `fetchAllAssets()`
+        // is `#if DEBUG`-gated because it materializes every `analysis_assets`
+        // row in one pass — on a real listener's library that can OOM or stall
+        // the actor. This launch feature ships in Release, so it must page
+        // through the table instead, holding at most one page (`pageSize` rows)
+        // in memory at a time. Every asset is still processed; only the fetch
+        // is chunked. Keyset (rowid) pagination is stable under concurrent
+        // INSERT/DELETE — see `AnalysisStore.fetchAssetsKeysetByRowId`.
+        let pageSize = 200
+        var afterRowId: Int64 = 0
         var driven = 0
-        for asset in assets {
-            // skeptical-review-cycle-6 H-Z1: shutdown() cancels this task
-            // mid-sweep; honor it between assets so we stop issuing FM/ASR
-            // work, and don't let the catch below swallow CancellationError.
-            if Task.isCancelled { break }
-            // Resolve audio URL via the download cache. If the file was
-            // evicted, no re-transcription can run anyway — skip silently.
-            guard let cachedURL = await downloadManager.cachedFileURL(for: asset.episodeId) else {
-                continue
-            }
-            guard let localURL = LocalAudioURL(cachedURL) else { continue }
 
-            let resolvedPodcastId: String?
-            if let batchMap {
-                resolvedPodcastId = batchMap[asset.episodeId]
-            } else {
-                resolvedPodcastId = await podcastIdResolver?(asset.episodeId)
-            }
-            let input = FinalPassRetranscriptionRunner.AssetInput(
-                analysisAssetId: asset.id,
-                podcastId: resolvedPodcastId,
-                audioURL: localURL,
-                episodeId: asset.episodeId
-            )
+        pageLoop: while true {
+            // Honor cancellation that lands between pages, before issuing the
+            // next DB fetch.
+            if Task.isCancelled { break }
+
+            let page: [(rowId: Int64, asset: AnalysisAsset)]
             do {
-                let result = try await runner.runFinalPassBackfill(for: input)
-                driven += result.reTranscribedWindowIds.count
-                // If the very first asset deferred at the top level (no
-                // charge / thermal / LPM), every subsequent asset would
-                // hit the same gate. Bail to avoid pointless DB reads.
-                if let reason = result.topLevelDeferReason {
-                    log.info("Top-level deferred (\(reason.rawValue, privacy: .public)) — abandoning sweep")
-                    break
-                }
-            } catch is CancellationError {
-                // Cancellation is the H-Z1 termination signal — not a
-                // per-asset failure. Stop the sweep cleanly.
-                break
+                page = try await analysisStore.fetchAssetsKeysetByRowId(
+                    afterRowId: afterRowId,
+                    limit: pageSize
+                )
             } catch {
-                log.warning("Run failed for \(asset.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                log.warning("fetchAssetsKeysetByRowId failed: \(error.localizedDescription, privacy: .public)")
+                break
             }
+            if page.isEmpty { break }
+            // Advance the keyset cursor to the largest rowid in this page. Rows
+            // come back `rowid ASC`, so the last tuple carries it; the next
+            // page starts strictly after it, guaranteeing forward progress
+            // (no repeat, no infinite loop).
+            afterRowId = page[page.count - 1].rowId
+            let assets = page.map(\.asset)
+
+            // skeptical-review-cycle-3 M-B: prefer batch resolution. One
+            // MainActor hop returns this page's episodeId → podcastFeedURL
+            // mapping; per-episode lookups during the loop hit the in-memory
+            // dict instead of bouncing back to MainActor for every asset.
+            // Resolved per page so we never materialize the whole library's
+            // episodeId list at once. The resolver returns each episodeId's
+            // mapping independently of the batch it arrives in, so per-page
+            // subsets union to the same result as one whole-library call.
+            let batchMap: [String: String]?
+            if let podcastIdBatchResolver {
+                let episodeIds = assets.map(\.episodeId)
+                batchMap = await podcastIdBatchResolver(episodeIds)
+            } else {
+                batchMap = nil
+            }
+
+            for asset in assets {
+                // skeptical-review-cycle-6 H-Z1: shutdown() cancels this task
+                // mid-sweep; honor it between assets so we stop issuing FM/ASR
+                // work, and don't let the catch below swallow CancellationError.
+                if Task.isCancelled { break pageLoop }
+                // Resolve audio URL via the download cache. If the file was
+                // evicted, no re-transcription can run anyway — skip silently.
+                guard let cachedURL = await downloadManager.cachedFileURL(for: asset.episodeId) else {
+                    continue
+                }
+                guard let localURL = LocalAudioURL(cachedURL) else { continue }
+
+                let resolvedPodcastId: String?
+                if let batchMap {
+                    resolvedPodcastId = batchMap[asset.episodeId]
+                } else {
+                    resolvedPodcastId = await podcastIdResolver?(asset.episodeId)
+                }
+                let input = FinalPassRetranscriptionRunner.AssetInput(
+                    analysisAssetId: asset.id,
+                    podcastId: resolvedPodcastId,
+                    audioURL: localURL,
+                    episodeId: asset.episodeId
+                )
+                do {
+                    let result = try await runner.runFinalPassBackfill(for: input)
+                    driven += result.reTranscribedWindowIds.count
+                    // If the very first asset deferred at the top level (no
+                    // charge / thermal / LPM), every subsequent asset — on
+                    // this page AND every later page — would hit the same
+                    // device-state gate. Bail the entire sweep to avoid
+                    // pointless DB reads.
+                    if let reason = result.topLevelDeferReason {
+                        log.info("Top-level deferred (\(reason.rawValue, privacy: .public)) — abandoning sweep")
+                        break pageLoop
+                    }
+                } catch is CancellationError {
+                    // Cancellation is the H-Z1 termination signal — not a
+                    // per-asset failure. Stop the sweep cleanly.
+                    break pageLoop
+                } catch {
+                    log.warning("Run failed for \(asset.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+
+            // A short page means the keyset cursor has drained the table:
+            // `fetchAssetsKeysetByRowId` fills up to `limit` greedily in rowid
+            // order, so fewer than `pageSize` rows implies no rows remain with
+            // `rowid > afterRowId`. (The `page.isEmpty` guard above also
+            // terminates the exact-multiple case on the following iteration.)
+            if page.count < pageSize { break }
         }
         return driven
     }

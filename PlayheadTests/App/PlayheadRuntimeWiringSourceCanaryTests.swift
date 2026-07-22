@@ -402,10 +402,10 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         // generic catch arm of the per-asset do/catch. We anchor on
         // the unique log line in the generic arm rather than the
         // bare `catch {` token, because the function body has an
-        // earlier do/catch around `analysisStore.fetchAllAssets()`
-        // whose `catch {` would otherwise be matched first and
-        // produce a false "typed catch comes after generic catch"
-        // failure.
+        // earlier do/catch around the paginated
+        // `analysisStore.fetchAssetsKeysetByRowId(...)` fetch whose
+        // `catch {` would otherwise be matched first and produce a
+        // false "typed catch comes after generic catch" failure.
         if let typedRange = body.range(of: "catch is CancellationError"),
            let genericRange = body.range(of: "log.warning(\"Run failed for") {
             XCTAssertLessThan(
