@@ -510,19 +510,27 @@ struct BackfillJobRunnerTests {
     }
 
     @available(iOS 26.0, *)
-    @Test("coarse rate limits degrade to passA failure rows without failing the FM job")
-    func coarseRateLimitsPersistFailureRowsWithoutFailingJob() async throws {
+    @Test("playhead-pmp9: an all-windows-rate-limited coarse pass DEFERS the job, not complete-with-holes")
+    func coarseRateLimitAllWindowsDefersJob() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
-        let fmRuntime = TestFMRuntime(coarseFailures: [.rateLimited, .rateLimited])
+        // The single coarse window rate-limits on the initial call AND every
+        // capped-exponential backoff retry (full budget) → it is abandoned, so
+        // the pass claims ZERO coverage. Before pmp9 the runner marked the job
+        // `complete` with the episode-end cursor and the M-5 idempotency gate
+        // then skipped it FOREVER, stranding the unscanned audio.
+        let budget = 1 + FoundationModelClassifier.rateLimitBackoffBaseNanos.count
+        let fmRuntime = TestFMRuntime(coarseFailures: Array(repeating: .rateLimited, count: budget))
         let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
 
         let result = try await runner.runPendingBackfill(for: makeInputs())
 
         #expect(!result.admittedJobIds.isEmpty)
-        #expect(result.deferredJobIds.isEmpty)
+        // NEW: the rate-limited job is DEFERRED (resumable), not silently completed.
+        #expect(!result.deferredJobIds.isEmpty)
         #expect(result.scanResultIds.count == 1)
-        #expect(await fmRuntime.coarseCallCount == 2, "runner should make the initial coarse request and one backoff retry")
+        #expect(await fmRuntime.coarseCallCount == budget,
+            "runner should exhaust the full capped-exponential backoff budget before abandoning the window")
 
         let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
         #expect(scans.count == 1)
@@ -533,7 +541,12 @@ struct BackfillJobRunnerTests {
 
         let jobId = try #require(result.admittedJobIds.first)
         let row = try #require(await store.fetchBackfillJob(byId: jobId))
-        #expect(row.status == .complete)
+        // Non-terminal DEFERRED so M-5 re-drives it; NOT `.complete`.
+        #expect(row.status == .deferred)
+        #expect(row.deferReason == "rateLimited-backoff")
+        // HONEST cursor: nothing was successfully scanned, so no coverage claimed.
+        #expect(row.progressCursor?.lastProcessedUpperBoundSec == nil)
+        // Deferral is not a retry-budget failure — retryCount stays 0.
         #expect(row.retryCount == 0)
     }
 
@@ -2714,7 +2727,9 @@ private actor WindowedTestFMRuntime {
                     respondCoarse: { _ in try await self.nextCoarse() },
                     respondRefinement: { _ in try await self.nextRefinement() }
                 )
-            }
+            },
+            // playhead-pmp9: no-op backoff sleep so rate-limit retries are instant.
+            backoffSleep: { _ in }
         )
     }
 

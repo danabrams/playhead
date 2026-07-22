@@ -714,13 +714,69 @@ actor BackfillJobRunner {
                     continue
                 }
                 jobMetricsAudioSegments = jobInputs.segments
-                let (resultIds, eventIds, detectedAdLineRefs, jobWindows, jobCounters) = try await runJob(job, inputs: jobInputs)
+                let (resultIds, eventIds, detectedAdLineRefs, jobWindows, jobCounters, coverage) = try await runJob(job, inputs: jobInputs)
                 scanResultIds.append(contentsOf: resultIds)
                 evidenceEventIds.append(contentsOf: eventIds)
                 fmRefinementWindows.append(contentsOf: jobWindows)
                 jobMetricsCounters = jobCounters
                 if job.phase == .fullEpisodeScan {
                     fullRescanDetectedAdLineRefs.formUnion(detectedAdLineRefs)
+                }
+
+                // playhead-pmp9: a coarse window hit FM rate-limiting and the
+                // episode is NOT fully covered. DEFER (non-terminal, resumable)
+                // with an HONEST cursor — do NOT mark complete. The previous
+                // behavior marked the job `complete` with the episode-end cursor
+                // even though whole windows never scanned, and the M-5
+                // idempotency gate then skipped the row FOREVER, permanently
+                // stranding the unscanned audio (dogfood: a 58-min episode only
+                // ad-scanned ~90s). Non-complete rows are re-driven by the
+                // existing M-5 path and resume from the cursor. The honest
+                // cursor is checkpointed while the row is still `.running`
+                // (`checkpointBackfillJobProgress` writes progressCursor without
+                // touching status), then the row flips to `.deferred` — mirroring
+                // the device-state defer branch above but for a rate-limit that
+                // survived the capped-exponential backoff.
+                if coverage.coarseRateLimitedIncomplete {
+                    let honest = BackfillProgressCursor(
+                        processedPhaseCount: 0,
+                        lastProcessedUpperBoundSec: coverage.lastCoveredUpperBoundSec
+                    )
+                    // Never regress below a cursor an earlier deferred run
+                    // already reached (a re-drive that rate-limits again before
+                    // making new progress must keep the prior checkpoint).
+                    let mergedCursor = job.progressCursor.map { honest.monotonic(from: $0) } ?? honest
+                    try await store.checkpointBackfillJobProgress(
+                        jobId: job.jobId,
+                        progressCursor: mergedCursor
+                    )
+                    try await store.markBackfillJobDeferred(
+                        jobId: job.jobId,
+                        reason: "rateLimited-backoff"
+                    )
+                    deferred.append(job.jobId)
+                    let deferCounters = operationalCounters(
+                        jobCounters: jobCounters,
+                        plannerContext: inputs.plannerContext,
+                        resumeAttempted: resumedJobIds.contains(job.jobId),
+                        resumeSucceeded: coverage.lastCoveredUpperBoundSec != nil,
+                        thermalDeferred: false
+                    )
+                    if let metricsEventId = await recordOperationalMetricsEvent(
+                        job: job,
+                        inputs: jobInputs,
+                        audioSegments: jobInputs.segments,
+                        wallStart: jobWallStart,
+                        wallEnd: clock().timeIntervalSince1970,
+                        counters: deferCounters
+                    ) {
+                        evidenceEventIds.append(metricsEventId)
+                    }
+                    logger.info(
+                        "FM backfill job \(job.jobId, privacy: .public) deferred: rate-limited coarse coverage hole, honest cursor=\(mergedCursor.lastProcessedUpperBoundSec ?? -1, privacy: .public)"
+                    )
+                    await admissionController.finish(jobId: job.jobId)
+                    continue
                 }
 
                 try await store.markBackfillJobComplete(
@@ -1160,16 +1216,57 @@ actor BackfillJobRunner {
     /// Runs the FM coarse pass and (when warranted) the refinement pass for a
     /// single backfill job, persisting results to `semantic_scan_results` and
     /// `evidence_events`. Returns the IDs that were written.
+    /// playhead-pmp9: coarse-pass coverage outcome surfaced to the drain loop.
+    /// When a coarse window hit FM rate-limiting and the episode is NOT fully
+    /// covered, the job DEFERS (non-terminal, resumable) with an honest cursor
+    /// instead of completing with permanent holes.
+    struct CoverageOutcome: Sendable, Equatable {
+        /// A coarse window hit FM rate-limiting AND the episode is not fully
+        /// covered — the job must defer (resumable), not complete-with-holes.
+        let coarseRateLimitedIncomplete: Bool
+        /// Honest upper bound (seconds, absolute timeline) of the CONTIGUOUS
+        /// successfully-scanned coarse prefix for this run. `nil` ⇒ nothing was
+        /// successfully scanned this run.
+        let lastCoveredUpperBoundSec: Double?
+    }
+
+    /// playhead-pmp9: narrow `inputs` to the un-scanned remainder for an
+    /// intra-episode RESUME. A job that previously deferred on a rate-limited
+    /// coarse window persisted an honest cursor (end of the contiguous scanned
+    /// prefix); segments at or below the cursor are already covered, so a
+    /// re-drive only needs to scan `segment.endTime > cursor`. With no cursor
+    /// (the first-run case) or when nothing is trimmed, returns `inputs`
+    /// unchanged — byte-identical to the pre-pmp9 path.
+    private static func narrowedForResume(_ inputs: AssetInputs, cursor: Double?) -> AssetInputs {
+        guard let cursor, cursor > 0 else { return inputs }
+        let remaining = inputs.segments.filter { $0.endTime > cursor }
+        guard remaining.count != inputs.segments.count else { return inputs }
+        return AssetInputs(
+            analysisAssetId: inputs.analysisAssetId,
+            podcastId: inputs.podcastId,
+            segments: remaining,
+            evidenceCatalog: inputs.evidenceCatalog,
+            transcriptVersion: inputs.transcriptVersion,
+            plannerContext: inputs.plannerContext,
+            acousticBreaks: inputs.acousticBreaks
+        )
+    }
+
     private func runJob(
         _ job: BackfillJob,
-        inputs: AssetInputs
+        inputs rootInputs: AssetInputs
     ) async throws -> (
         scanResultIds: [String],
         evidenceEventIds: [String],
         detectedAdLineRefs: Set<Int>,
         fmRefinementWindows: [FMRefinementWindowOutput],
-        counters: OperationalMetrics.Counters
+        counters: OperationalMetrics.Counters,
+        coverage: CoverageOutcome
     ) {
+        // playhead-pmp9: intra-episode RESUME — continue from the honest cursor
+        // a prior deferred run left, instead of re-windowing the whole episode.
+        // No-op (byte-identical) on a first run with no cursor.
+        let inputs = Self.narrowedForResume(rootInputs, cursor: job.progressCursor?.lastProcessedUpperBoundSec)
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
         var detectedAdLineRefs = Set<Int>()
@@ -1241,7 +1338,14 @@ actor BackfillJobRunner {
             try await store.insertSemanticScanResult(sentinel)
             scanResultIds.append(sentinel.id)
             counters.persistedScanResultCount += 1
-            return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows, counters)
+            return (
+                scanResultIds,
+                evidenceEventIds,
+                detectedAdLineRefs,
+                fmRefinementWindows,
+                counters,
+                CoverageOutcome(coarseRateLimitedIncomplete: false, lastCoveredUpperBoundSec: nil)
+            )
         }
 
         // bd-1en Phase 1: dispatch sensitive windows (pharma /
@@ -1285,6 +1389,19 @@ actor BackfillJobRunner {
             try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
             lastHeartbeatTick = ContinuousClock.now
         }
+
+        // playhead-pmp9: did the coarse pass hit FM rate-limiting, and (if so)
+        // how far did the CONTIGUOUS successfully-scanned prefix reach? The
+        // honest cursor + fully-covered flag are filled inside the coverage
+        // block below (which already reconstructs the succeeded-plan set), so
+        // the no-rate-limit path stays byte-identical — no extra planPassA, no
+        // extra FM work. Consumed by the drain loop to DEFER (resumable) a
+        // rate-limited-incomplete job with an honest resume cursor instead of
+        // marking it complete with permanent holes.
+        let coarseHitRateLimit = coarse.status == .rateLimited
+            || coarse.failedWindowStatuses.contains(.rateLimited)
+        var coverageContiguousUpperBound: Double? = nil
+        var coverageFullyCovered = true
 
         for window in coarse.windows {
             try Task.checkCancellation()
@@ -1334,6 +1451,20 @@ actor BackfillJobRunner {
                     })?.windowIndex
                 }
             )
+            // playhead-pmp9: honest coverage cursor. Walk plans in TIME order;
+            // advance the cursor across an unbroken run of successes from the
+            // start and STOP at the first window that was not successfully
+            // scanned (rate-limited / abandoned). This guarantees a resume never
+            // skips unscanned audio even if a later window succeeded past an
+            // earlier hole. (Pure arithmetic, no FM work, no persistence — the
+            // no-rate-limit path stays byte-identical.)
+            coverageFullyCovered = succeededPlanIndices.count == coarsePlans.count
+            var walkedUpperBound: Double? = nil
+            for plan in coarsePlans.sorted(by: { $0.startTime < $1.startTime }) {
+                guard succeededPlanIndices.contains(plan.windowIndex) else { break }
+                walkedUpperBound = plan.endTime
+            }
+            coverageContiguousUpperBound = walkedUpperBound
             let remainingPlans = coarsePlans.filter { !succeededPlanIndices.contains($0.windowIndex) }
             for (plan, status) in zip(remainingPlans, coarse.failedWindowStatuses) {
                         if let failureResult = makeCoarseFailureScanResult(
@@ -1585,7 +1716,11 @@ actor BackfillJobRunner {
             )
         }
 
-        return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows, counters)
+        let coverageOutcome = CoverageOutcome(
+            coarseRateLimitedIncomplete: coarseHitRateLimit && !coverageFullyCovered,
+            lastCoveredUpperBoundSec: coverageContiguousUpperBound
+        )
+        return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows, counters, coverageOutcome)
     }
 
     // MARK: - Bug 11 sentinel row builder

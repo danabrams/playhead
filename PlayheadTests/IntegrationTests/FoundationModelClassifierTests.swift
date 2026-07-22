@@ -3853,7 +3853,13 @@ struct FoundationModelClassifierTests {
                 CoarseScreeningSchema(disposition: .noAds, support: nil),
                 CoarseScreeningSchema(disposition: .noAds, support: nil)
             ],
+            // playhead-pmp9: the first window is abandoned only after the FULL
+            // capped-exponential backoff budget is exhausted — initial call + 4
+            // retries = 5 rate-limited failures — then windows 1 and 2 succeed.
             coarseFailures: [
+                .rateLimited,
+                .rateLimited,
+                .rateLimited,
                 .rateLimited,
                 .rateLimited,
                 nil,
@@ -3876,8 +3882,8 @@ struct FoundationModelClassifierTests {
         #expect(output.failedWindowStatuses == [.rateLimited])
 
         #expect(
-            snapshot.respondCalls.count == 4,
-            "expected 4 respond calls (initial + retry for the rate-limited window, then 2 successes), got \(snapshot.respondCalls.count)"
+            snapshot.respondCalls.count == 7,
+            "expected 7 respond calls (initial + 4 backoff retries for the rate-limited window, then 2 successes), got \(snapshot.respondCalls.count)"
         )
 
         let survivingLineRefs = output.windows.flatMap(\.lineRefs)
@@ -4185,7 +4191,13 @@ struct FoundationModelClassifierTests {
             refinementResponses: [
                 RefinementWindowSchema(spans: [])
             ],
+            // playhead-pmp9: the first zoom window is abandoned only after the
+            // full backoff budget (initial + 4 retries = 5 rate-limits); the
+            // second succeeds.
             refinementFailures: [
+                .rateLimited,
+                .rateLimited,
+                .rateLimited,
                 .rateLimited,
                 .rateLimited,
                 nil
@@ -4209,8 +4221,8 @@ struct FoundationModelClassifierTests {
         #expect(output.windows.count == 1)
         #expect(output.windows.map(\.windowIndex) == [1])
         #expect(
-            snapshot.respondRefinementCalls.count == 3,
-            "expected 3 refinement calls (initial + retry for the rate-limited window, then 1 success), got \(snapshot.respondRefinementCalls.count)"
+            snapshot.respondRefinementCalls.count == 6,
+            "expected 6 refinement calls (initial + 4 backoff retries for the rate-limited window, then 1 success), got \(snapshot.respondRefinementCalls.count)"
         )
     }
 
@@ -5447,7 +5459,9 @@ private func wrapRuntimeWithFeedback(
                     return blob
                 }
             )
-        }
+        },
+        // playhead-pmp9: preserve the wrapped runtime's backoff sleep seam.
+        backoffSleep: base.backoffSleep
     )
 }
 
@@ -5677,7 +5691,10 @@ private actor RuntimeRecorder {
                         try await self.recordRefinementResponse(sessionID: sessionID, prompt: prompt)
                     }
                 )
-            }
+            },
+            // playhead-pmp9: no-op backoff sleep so the capped-exponential
+            // rate-limit retry loop runs instantly under test.
+            backoffSleep: { _ in }
         )
     }
 

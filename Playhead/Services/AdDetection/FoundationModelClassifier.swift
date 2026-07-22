@@ -886,6 +886,17 @@ struct FoundationModelClassifier: Sendable {
         // consistently (over-anchoring is xsdz.63/xsdz.59, out of scope here).
         let fmGreedyDecoding: Bool
 
+        // playhead-pmp9: optional inter-window pacing (nanoseconds) applied
+        // between per-window coarse `respond` calls via `Runtime.backoffSleep`.
+        // Default `0` = NO delay = byte-identical to the pre-pmp9 coarse loop
+        // (no extra sleep, same FM calls, same outputs). A background
+        // BGProcessingTask driver can set this > 0 to spread per-window
+        // requests and avoid tripping the OS per-interval rate-limit throttle
+        // in the first place; the primary mitigation remains DEFERRING a
+        // rate-limited pass (see `BackfillJobRunner`), which this pacing only
+        // makes rarer. Dormant until a driver opts in.
+        let interWindowPacingNanos: UInt64
+
         // bd-3h2 (2026-04-06): On-device run on iOS 26.4 produced a
         // refinement decode failure with the FM emitting valid JSON
         // truncated mid-string (the second span's `"certainty"` field
@@ -917,7 +928,8 @@ struct FoundationModelClassifier: Sendable {
             zoomAmbiguityBudget: Int = 1,
             minimumZoomSpanLines: Int = 2,
             maximumRefinementSpansPerWindow: Int = 2,
-            fmGreedyDecoding: Bool = true
+            fmGreedyDecoding: Bool = true,
+            interWindowPacingNanos: UInt64 = 0
         ) {
             self.safetyMarginTokens = safetyMarginTokens
             self.coarseMaximumResponseTokens = coarseMaximumResponseTokens
@@ -926,6 +938,7 @@ struct FoundationModelClassifier: Sendable {
             self.minimumZoomSpanLines = max(1, minimumZoomSpanLines)
             self.maximumRefinementSpansPerWindow = max(1, maximumRefinementSpansPerWindow)
             self.fmGreedyDecoding = fmGreedyDecoding
+            self.interWindowPacingNanos = interWindowPacingNanos
         }
 
         /// playhead-xsdz.60: return a copy of `self` with `fmGreedyDecoding`
@@ -941,7 +954,8 @@ struct FoundationModelClassifier: Sendable {
                 zoomAmbiguityBudget: zoomAmbiguityBudget,
                 minimumZoomSpanLines: minimumZoomSpanLines,
                 maximumRefinementSpansPerWindow: maximumRefinementSpansPerWindow,
-                fmGreedyDecoding: value
+                fmGreedyDecoding: value,
+                interWindowPacingNanos: interWindowPacingNanos
             )
         }
 
@@ -998,11 +1012,49 @@ struct FoundationModelClassifier: Sendable {
         /// B9: token overhead for the FMBoundarySchema.
         let boundarySchemaTokenCount: @Sendable () async throws -> Int
         let makeSession: @Sendable () async -> Session
+        /// playhead-pmp9: injectable sleep between rate-limit backoff retries
+        /// (and, when `Config.interWindowPacingNanos > 0`, for inter-window
+        /// pacing). Production uses a real `Task.sleep`; test runtimes inject a
+        /// no-op so the capped-exponential backoff runs instantly. Keeping the
+        /// seam on `Runtime` means every builder that fakes FM sessions also
+        /// neutralizes the wall-clock waits without a separate injection path.
+        /// Declared `var` (not `let`) with a default so it appears in the
+        /// synthesized memberwise initializer as a defaulted parameter — a `let`
+        /// with a default value is excluded from the memberwise init.
+        var backoffSleep: @Sendable (_ nanoseconds: UInt64) async -> Void = { nanoseconds in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+        }
     }
 
     private static let promptPrefix = "Classify ad content."
     private static let refinementPromptPrefix = "Refine ad spans."
     private static let boundaryExtractionPromptPrefix = "Extract ad boundaries."
+
+    /// playhead-pmp9: capped-exponential backoff delays (nanoseconds) for a
+    /// rate-limited FM window: 0.5s → 1s → 2s → 4s, doubling and capped at 4s.
+    /// The count is the retry budget (4). This replaces the single fixed 50ms
+    /// retry, which was far too short for a background OS rate-limit throttle —
+    /// a throttled window would exhaust its one retry in 50ms, get abandoned as
+    /// `.rateLimited`, and (before this fix) leave a permanent coverage hole in
+    /// a `complete`-marked job. Kept as a plain array so the schedule is
+    /// directly assertable in a unit test without running FM or sleeping.
+    static let rateLimitBackoffBaseNanos: [UInt64] = [
+        500_000_000,
+        1_000_000_000,
+        2_000_000_000,
+        4_000_000_000,
+    ]
+
+    /// playhead-pmp9: apply ±20% jitter to a base backoff delay so a fleet of
+    /// devices throttled at the same instant don't retry in lockstep and
+    /// re-trip the throttle together. The deterministic base schedule stays
+    /// assertable via `rateLimitBackoffBaseNanos`; only the applied delay is
+    /// jittered.
+    static func jitteredBackoffNanos(_ base: UInt64) -> UInt64 {
+        let baseValue = Double(base)
+        let delta = baseValue * 0.2 * Double.random(in: -1...1)
+        return UInt64(max(0, baseValue + delta))
+    }
 
     // H10: The native `model.tokenCount(for:)` API isn't available on iOS
     // 26.0–26.3, so we estimate. The previous `wordCount * 1.35` factor
@@ -1416,6 +1468,15 @@ struct FoundationModelClassifier: Sendable {
 
         let totalWindows = plans.count
         for (planIndex, plan) in plans.enumerated() {
+            // playhead-pmp9: optional inter-window pacing. Default 0 = no delay
+            // = byte-identical to the pre-pmp9 loop. When a background driver
+            // sets `interWindowPacingNanos > 0`, wait between per-window
+            // `respond` calls (never before the first window) so requests don't
+            // burst and re-trip the OS per-interval rate-limit throttle. Uses
+            // the same injectable sleep as backoff so tests stay instant.
+            if config.interWindowPacingNanos > 0, planIndex > 0 {
+                await runtime.backoffSleep(config.interWindowPacingNanos)
+            }
             if plan.promptTokenCount > budget {
                 // Smart-shrink can't rescue a single-segment window — there
                 // is nothing below "one segment" to drop. But such segments
@@ -3696,51 +3757,64 @@ struct FoundationModelClassifier: Sendable {
                     totalWindows: totalWindows
                 )
             case .backoffAndRetry:
-                // Single backoff retry on a fresh session so the retry
-                // cannot inherit any conversation state from the failed
-                // attempt.
-                try? await Task.sleep(nanoseconds: 50_000_000)
-                let retrySessionBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
-                do {
-                    let response = try await retrySessionBox.respondCoarse(plan.prompt)
-                    let screening = sanitize(
-                        schema: response,
-                        validLineRefs: Set(plan.lineRefs)
-                    )
-                    return .success([
-                        FMCoarseWindowOutput(
-                            windowIndex: 0,
-                            lineRefs: plan.lineRefs,
-                            startTime: plan.startTime,
-                            endTime: plan.endTime,
-                            transcriptQuality: plan.transcriptQuality,
-                            screening: screening,
-                            latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
+                // playhead-pmp9: capped-exponential backoff (0.5s → 1s → 2s →
+                // 4s, jittered) on a FRESH session per attempt so no attempt
+                // inherits conversation state from a failed one. The prior
+                // single fixed 50ms retry was far too short for a background OS
+                // rate-limit throttle, so the window was abandoned as
+                // `.rateLimited` and (before pmp9) stranded as a permanent
+                // coverage hole in a `complete`-marked job. Only a persistent
+                // rate-limit keeps looping; any OTHER retry error is terminal
+                // for this window and returns immediately.
+                var backoffStatus = status
+                for baseNanos in Self.rateLimitBackoffBaseNanos {
+                    await runtime.backoffSleep(Self.jitteredBackoffNanos(baseNanos))
+                    let retrySessionBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
+                    do {
+                        let response = try await retrySessionBox.respondCoarse(plan.prompt)
+                        let screening = sanitize(
+                            schema: response,
+                            validLineRefs: Set(plan.lineRefs)
                         )
-                    ])
-                } catch {
-                    let retryStatus = SemanticScanStatus.from(error: error)
-                    reportCoarsePassErrorIfNeeded(
-                        plan: plan,
-                        error: error,
-                        status: retryStatus,
-                        windowIndex: windowIndex,
-                        totalWindows: totalWindows
-                    )
-                    reportCoarsePassRefusalDetailIfNeeded(
-                        plan: plan,
-                        error: error,
-                        windowIndex: windowIndex,
-                        totalWindows: totalWindows
-                    )
-                    await captureFeedbackForCoarseRefusalIfNeeded(
-                        error: error,
-                        sessionBox: retrySessionBox,
-                        windowIndex: windowIndex,
-                        totalWindows: totalWindows
-                    )
-                    return .failure(retryStatus)
+                        return .success([
+                            FMCoarseWindowOutput(
+                                windowIndex: 0,
+                                lineRefs: plan.lineRefs,
+                                startTime: plan.startTime,
+                                endTime: plan.endTime,
+                                transcriptQuality: plan.transcriptQuality,
+                                screening: screening,
+                                latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
+                            )
+                        ])
+                    } catch {
+                        let retryStatus = SemanticScanStatus.from(error: error)
+                        reportCoarsePassErrorIfNeeded(
+                            plan: plan,
+                            error: error,
+                            status: retryStatus,
+                            windowIndex: windowIndex,
+                            totalWindows: totalWindows
+                        )
+                        reportCoarsePassRefusalDetailIfNeeded(
+                            plan: plan,
+                            error: error,
+                            windowIndex: windowIndex,
+                            totalWindows: totalWindows
+                        )
+                        await captureFeedbackForCoarseRefusalIfNeeded(
+                            error: error,
+                            sessionBox: retrySessionBox,
+                            windowIndex: windowIndex,
+                            totalWindows: totalWindows
+                        )
+                        backoffStatus = retryStatus
+                        if retryStatus != .rateLimited {
+                            return .failure(retryStatus)
+                        }
+                    }
                 }
+                return .failure(backoffStatus)
             default:
                 return .failure(status)
             }
@@ -4171,29 +4245,42 @@ struct FoundationModelClassifier: Sendable {
                     return .failure(retryStatus, refusalExplanation: retryExplanation)
                 }
             case .backoffAndRetry:
-                try? await Task.sleep(nanoseconds: 50_000_000)
-                let retrySessionBox = await makePrewarmedSessionBox(promptPrefix: Self.refinementPromptPrefix)
-                do {
-                    let response = try await retrySessionBox.respondRefinement(plan.prompt)
-                    return .success(plan: plan, schema: response)
-                } catch {
-                    let retryStatus = SemanticScanStatus.from(error: error)
-                    reportRefinementDecodeFailureIfNeeded(
-                        plan: plan,
-                        error: error,
-                        status: retryStatus,
-                        retryStage: .backoffRetry
-                    )
-                    let retryExplanation = await reportRefinementPassRefusalDetailIfNeeded(plan: plan, error: error)
-                    await captureFeedbackForRefinementErrorIfNeeded(
-                        status: retryStatus,
-                        error: error,
-                        sessionBox: retrySessionBox,
-                        plan: plan,
-                        stage: .backoffRetry
-                    )
-                    return .failure(retryStatus, refusalExplanation: retryExplanation)
+                // playhead-pmp9: capped-exponential backoff on a fresh session
+                // per attempt (same schedule as the coarse path). Only a
+                // persistent rate-limit keeps looping; any other retry error is
+                // terminal for this window.
+                var backoffStatus = status
+                var backoffExplanation = explanation
+                for baseNanos in Self.rateLimitBackoffBaseNanos {
+                    await runtime.backoffSleep(Self.jitteredBackoffNanos(baseNanos))
+                    let retrySessionBox = await makePrewarmedSessionBox(promptPrefix: Self.refinementPromptPrefix)
+                    do {
+                        let response = try await retrySessionBox.respondRefinement(plan.prompt)
+                        return .success(plan: plan, schema: response)
+                    } catch {
+                        let retryStatus = SemanticScanStatus.from(error: error)
+                        reportRefinementDecodeFailureIfNeeded(
+                            plan: plan,
+                            error: error,
+                            status: retryStatus,
+                            retryStage: .backoffRetry
+                        )
+                        let retryExplanation = await reportRefinementPassRefusalDetailIfNeeded(plan: plan, error: error)
+                        await captureFeedbackForRefinementErrorIfNeeded(
+                            status: retryStatus,
+                            error: error,
+                            sessionBox: retrySessionBox,
+                            plan: plan,
+                            stage: .backoffRetry
+                        )
+                        backoffStatus = retryStatus
+                        backoffExplanation = retryExplanation
+                        if retryStatus != .rateLimited {
+                            return .failure(retryStatus, refusalExplanation: retryExplanation)
+                        }
+                    }
                 }
+                return .failure(backoffStatus, refusalExplanation: backoffExplanation)
             default:
                 return .failure(status, refusalExplanation: explanation)
             }
@@ -5164,6 +5251,15 @@ extension FoundationModelClassifier {
     }
 }
 
+/// playhead-pmp9 DOC-GUARD — DO NOT switch these respond paths to
+/// `session.streamResponse(...)`. The whole ad-detection backfill runs under a
+/// `BGProcessingTask` and MUST stay on the non-streaming
+/// `session.respond(to:generating:...)` API. Streaming a background scan buys
+/// nothing (no UI consumes partial tokens here) and holds the session open
+/// longer per window, which makes the OS per-interval FM rate-limit throttle
+/// MORE likely — the exact failure pmp9 hardens against (rate-limited windows
+/// were being stranded as permanent coverage holes). Rate-limit resilience
+/// lives in the capped-exponential backoff + resumable DEFER, not in streaming.
 @available(iOS 26.0, *)
 final actor LiveSessionActor {
     private let session: LanguageModelSession

@@ -110,7 +110,10 @@ private func makeTrackedRuntime(
                     try await tracker.respondRefinement(sessionID: id)
                 }
             )
-        }
+        },
+        // playhead-pmp9: no-op backoff sleep so the capped-exponential
+        // rate-limit retry loop runs instantly under test.
+        backoffSleep: { _ in }
     )
 }
 
@@ -224,16 +227,19 @@ struct SessionLifecycleRetryTests {
         #expect(sessionCount == 2)
     }
 
-    /// When both the initial attempt and the single backoff retry fail with
-    /// rate-limited, the window is abandoned — the retry count limit is exactly
-    /// one. The second retry call must still use a fresh session.
-    @Test("coarse backoff retry limit: two rate-limited failures abandon the window")
+    /// playhead-pmp9: when the initial attempt AND every capped-exponential
+    /// backoff retry (0.5s→1s→2s→4s = 4 retries) fail with rate-limited, the
+    /// window is abandoned — the retry budget is exactly the schedule length.
+    /// Every attempt must mint a fresh session.
+    @Test("coarse backoff retry budget: initial + 4 rate-limited retries abandon the window")
     func coarseBackoffRetryLimitAbandonedWindow() async throws {
         let tracker = SessionTracker()
 
-        // One window: initial fail + retry fail → window abandoned.
-        await tracker.enqueueCoarse(.failure(rateLimitedError()))
-        await tracker.enqueueCoarse(.failure(rateLimitedError()))
+        // One window: initial fail + 4 backoff retries all fail → abandoned.
+        // (Budget = FoundationModelClassifier.rateLimitBackoffBaseNanos.count.)
+        for _ in 0..<(1 + FoundationModelClassifier.rateLimitBackoffBaseNanos.count) {
+            await tracker.enqueueCoarse(.failure(rateLimitedError()))
+        }
 
         let runtime = makeTrackedRuntime(
             tracker: tracker,
@@ -250,20 +256,21 @@ struct SessionLifecycleRetryTests {
 
         let coarseRecords = await tracker.coarseRecords
         let sessionCount = await tracker.sessionCount
+        let expectedCalls = 1 + FoundationModelClassifier.rateLimitBackoffBaseNanos.count
 
         // Window is gracefully abandoned; pass still returns success with 0 windows.
         #expect(output.failedWindowStatuses == [.rateLimited])
 
-        // Exactly 2 calls: initial + one backoff retry. No further attempts.
-        #expect(coarseRecords.count == 2,
-            "expected exactly 2 respond calls (initial + 1 backoff retry), got \(coarseRecords.count)")
+        // Exactly initial + full backoff budget. No further attempts.
+        #expect(coarseRecords.count == expectedCalls,
+            "expected \(expectedCalls) respond calls (initial + full backoff budget), got \(coarseRecords.count)")
 
-        // The retry must use a distinct session from the initial.
-        #expect(coarseRecords[0].sessionID != coarseRecords[1].sessionID,
-            "failed backoff retry must use a fresh session, not reuse session \(coarseRecords[0].sessionID)")
+        // Every attempt must mint a fresh session — no session is reused.
+        #expect(Set(coarseRecords.map(\.sessionID)).count == expectedCalls,
+            "each backoff attempt must use a fresh session")
 
-        // Two sessions total.
-        #expect(sessionCount == 2)
+        // One session per attempt.
+        #expect(sessionCount == expectedCalls)
     }
 
     // MARK: - Coarse pass: shrinkWindowAndRetryOnce (context overflow)
@@ -403,16 +410,18 @@ struct SessionLifecycleRetryTests {
         #expect(sessionCount == 2)
     }
 
-    /// When both the initial refinement attempt and its single backoff retry
-    /// fail, the window is abandoned. The retry count limit is exactly one.
-    @Test("refinement backoff retry limit: two failures abandon the window, pass continues")
+    /// playhead-pmp9: when the initial refinement attempt AND every
+    /// capped-exponential backoff retry (4 retries) fail, the window is
+    /// abandoned. The retry budget is the schedule length.
+    @Test("refinement backoff retry budget: initial + 4 failures abandon the window, pass continues")
     func refinementBackoffRetryLimitAbandonedWindowPassContinues() async throws {
         let tracker = SessionTracker()
 
-        // Plan 0: initial fail + retry fail → abandoned.
+        // Plan 0: initial fail + 4 backoff retries all fail → abandoned.
         // Plan 1: succeed immediately.
-        await tracker.enqueueRefinement(.failure(rateLimitedError()))
-        await tracker.enqueueRefinement(.failure(rateLimitedError()))
+        for _ in 0..<(1 + FoundationModelClassifier.rateLimitBackoffBaseNanos.count) {
+            await tracker.enqueueRefinement(.failure(rateLimitedError()))
+        }
         await tracker.enqueueRefinement(.success(RefinementWindowSchema(spans: [])))
 
         let runtime = makeTrackedRuntime(
@@ -451,25 +460,23 @@ struct SessionLifecycleRetryTests {
         let refinementRecords = await tracker.refinementRecords
         let sessionCount = await tracker.sessionCount
 
+        let plan0Attempts = 1 + FoundationModelClassifier.rateLimitBackoffBaseNanos.count
+        let expectedCalls = plan0Attempts + 1 // plan 0 full budget + plan 1 success
+
         // Pass continues; plan 0 is gracefully dropped.
         #expect(output.status == .success)
         #expect(output.failedWindowStatuses == [.rateLimited])
 
-        // 3 calls: initial + retry (both fail) for plan 0, then plan 1 succeeds.
-        #expect(refinementRecords.count == 3,
-            "expected 3 refinement calls, got \(refinementRecords.count)")
+        // plan 0 full backoff budget (all fail), then plan 1 succeeds.
+        #expect(refinementRecords.count == expectedCalls,
+            "expected \(expectedCalls) refinement calls, got \(refinementRecords.count)")
 
-        // The retry must use a different session from the initial.
-        #expect(refinementRecords[0].sessionID != refinementRecords[1].sessionID,
-            "failed refinement retry must use a fresh session, not reuse session \(refinementRecords[0].sessionID)")
+        // Every attempt (all plan-0 retries + plan 1) mints a fresh session.
+        #expect(Set(refinementRecords.map(\.sessionID)).count == expectedCalls,
+            "each refinement attempt must use a fresh session")
 
-        // Plan 1's session must also be fresh (different from both plan 0 sessions).
-        let plan1ID = refinementRecords[2].sessionID
-        #expect(plan1ID != refinementRecords[0].sessionID)
-        #expect(plan1ID != refinementRecords[1].sessionID)
-
-        // 3 unique sessions total.
-        #expect(sessionCount == 3)
+        // One session per attempt total.
+        #expect(sessionCount == expectedCalls)
     }
 
     // MARK: - Refinement pass: shrinkWindowAndRetryOnce (context overflow)

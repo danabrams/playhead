@@ -32,6 +32,10 @@ actor TestFMRuntime {
     private let refinementSchemaTokenCountValue: Int
     private let boundarySchemaTokenCountValue: Int
     private let tokenCountRule: @Sendable (String) -> Int
+    /// playhead-pmp9: injected backoff / inter-window pacing sleep. Defaults to
+    /// a no-op so the capped-exponential rate-limit retry loop runs instantly;
+    /// a test can pass a recording closure to assert pacing behavior.
+    private let backoffSleepClosure: @Sendable (UInt64) async -> Void
     private(set) var coarseCallCount = 0
     private(set) var refinementCallCount = 0
     private(set) var boundaryExtractionCallCount = 0
@@ -47,6 +51,7 @@ actor TestFMRuntime {
         coarseSchemaTokenCount: Int = 16,
         refinementSchemaTokenCount: Int = 32,
         boundarySchemaTokenCount: Int = 32,
+        backoffSleep: @escaping @Sendable (UInt64) async -> Void = { _ in },
         tokenCountRule: @escaping @Sendable (String) -> Int = { prompt in
             max(1, prompt.split(whereSeparator: \.isWhitespace).count)
         },
@@ -68,6 +73,7 @@ actor TestFMRuntime {
         self.refinementSchemaTokenCountValue = refinementSchemaTokenCount
         self.boundarySchemaTokenCountValue = boundarySchemaTokenCount
         self.tokenCountRule = tokenCountRule
+        self.backoffSleepClosure = backoffSleep
         self.defaultCoarse = defaultCoarse
         self.defaultRefinement = defaultRefinement
         self.defaultBoundaryExtraction = defaultBoundaryExtraction
@@ -90,7 +96,11 @@ actor TestFMRuntime {
                     respondRefinement: { prompt in try await self.nextRefinement(prompt: prompt) },
                     respondBoundaryExtraction: { prompt in try await self.nextBoundaryExtraction(prompt: prompt) }
                 )
-            }
+            },
+            // playhead-pmp9: route through the injected sleep (default no-op) so
+            // the capped-exponential retry loop runs instantly under test unless
+            // a test opts into a recording closure.
+            backoffSleep: { nanos in await self.backoffSleepClosure(nanos) }
         )
     }
 
