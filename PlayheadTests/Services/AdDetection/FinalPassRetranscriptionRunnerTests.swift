@@ -163,6 +163,18 @@ private final class FlippingRecognizer: SpeechRecognizer, @unchecked Sendable {
     }
 }
 
+/// playhead-hc7e — records post-final-pass revalidation-hook invocations so
+/// a test can assert the final-ASR loop is closed (fired once when new final
+/// chunks land) and NOT re-fired on an idempotent no-op re-run.
+private final class RevalidationHookSpy: @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock(initialState: [FinalPassRevalidationRequest]())
+    var requests: [FinalPassRevalidationRequest] { lock.withLock { $0 } }
+    var callCount: Int { lock.withLock { $0.count } }
+    func record(_ request: FinalPassRevalidationRequest) {
+        lock.withLock { $0.append(request) }
+    }
+}
+
 @Suite("FinalPassRetranscriptionRunner")
 struct FinalPassRetranscriptionRunnerTests {
 
@@ -1098,5 +1110,91 @@ struct FinalPassRetranscriptionRunnerTests {
             #expect(interval >= lower)
             #expect(interval <= upper)
         }
+    }
+
+    // MARK: - playhead-hc7e: final-ASR loop close (revalidation trigger)
+
+    @Test("completing final-pass transcription schedules a revalidation")
+    func testFinalPassSchedulesRevalidation() async throws {
+        let store = try await makeTestStore()
+        // Asset carries a durable episode duration so the request payload can
+        // be asserted end-to-end.
+        try await store.insertAsset(AnalysisAsset(
+            id: "asset-fp",
+            episodeId: "ep-asset-fp",
+            assetFingerprint: "fp-asset-fp",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/asset-fp.m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "new",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 150
+        ))
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 30, samples: [])
+        ]
+        let spy = RevalidationHookSpy()
+        let snapshot = makeSnapshot()
+        let speechService = SpeechService(recognizer: CountingShardRecognizer())
+        let runner = FinalPassRetranscriptionRunner(
+            store: store,
+            speechService: speechService,
+            audioProvider: audio,
+            capabilitySnapshotProvider: { snapshot },
+            batteryLevelProvider: { 0.85 },
+            chargeStateProvider: { true },
+            confidenceFloor: 0.5,
+            modelVersion: "test-final-v1",
+            onFinalPassRetranscribed: { request in spy.record(request) }
+        )
+
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+        #expect(result.reTranscribedWindowIds == ["w1"])
+
+        // Loop closed exactly once, carrying the affected asset + duration.
+        #expect(spy.callCount == 1)
+        #expect(spy.requests.first?.analysisAssetId == "asset-fp")
+        #expect(spy.requests.first?.reTranscribedWindowIds == ["w1"])
+        #expect(spy.requests.first?.episodeDuration == 150)
+
+        // Idempotent re-run (watermark already covers the window, nothing new
+        // re-transcribed) must NOT re-schedule detection.
+        let second = try await runner.runFinalPassBackfill(for: makeInput())
+        #expect(second.reTranscribedWindowIds.isEmpty)
+        #expect(spy.callCount == 1)
+    }
+
+    @Test("a top-level-deferred final-pass run does not schedule revalidation")
+    func testDeferredRunDoesNotScheduleRevalidation() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        let spy = RevalidationHookSpy()
+        let snapshot = makeSnapshot()
+        let speechService = SpeechService(recognizer: CountingShardRecognizer())
+        let runner = FinalPassRetranscriptionRunner(
+            store: store,
+            speechService: speechService,
+            audioProvider: StubAnalysisAudioProvider(),
+            capabilitySnapshotProvider: { snapshot },
+            batteryLevelProvider: { 0.85 },
+            chargeStateProvider: { false },   // not on charge → top-level defer
+            confidenceFloor: 0.5,
+            modelVersion: "test-final-v1",
+            onFinalPassRetranscribed: { request in spy.record(request) }
+        )
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+        #expect(result.topLevelDeferReason == .batteryTooLow)
+        #expect(result.reTranscribedWindowIds.isEmpty)
+        #expect(spy.callCount == 0)
     }
 }
