@@ -277,6 +277,14 @@ actor DownloadManager {
     /// Multi-subscriber continuations for download progress.
     private var progressSubscribers: [UUID: AsyncStream<DownloadProgress>.Continuation] = [:]
 
+    /// playhead-3xtw (L2): highest `totalBytesWritten` broadcast for each
+    /// in-flight BACKGROUND transfer. The delegate spawns one actor-hop
+    /// `Task` per `didWriteData` callback, so a later Task can execute
+    /// before an earlier one; this monotonic high-water mark drops the
+    /// out-of-order stragglers so the delivered fraction never regresses.
+    /// Reset when a new download starts and cleared on completion.
+    private var lastBackgroundProgressBytes: [String: Int64] = [:]
+
     /// Multi-subscriber continuations for raw audio data chunks.
     private var audioDataSubscribers: [UUID: AsyncStream<AudioDataChunk>.Continuation] = [:]
 
@@ -381,6 +389,60 @@ actor DownloadManager {
                     metadata: metadata
                 )
             }
+        }
+        // playhead-3xtw: surface background-transfer byte progress through
+        // the same broadcast surface the foreground path uses, so the
+        // per-episode prepare control's download zone advances during a
+        // background (pre-cache / on-demand) download. Same init-once wiring
+        // + `[weak manager]` retain-cycle guard as the staged hook above.
+        self.sessionDelegate.onBackgroundDownloadProgress = {
+            [weak manager = self] episodeId, bytesWritten, totalBytes in
+            guard let manager else { return }
+            Task { [manager, episodeId, bytesWritten, totalBytes] in
+                await manager.broadcastBackgroundProgress(
+                    episodeId: episodeId,
+                    bytesWritten: bytesWritten,
+                    totalBytes: totalBytes
+                )
+            }
+        }
+    }
+
+    /// playhead-3xtw: actor-isolated receiver for background-transfer
+    /// progress harvested on the delegate queue. Yields to the live
+    /// progress streams (`progressStream` + `progressUpdates()`
+    /// subscribers) so the per-episode prepare control's download zone
+    /// advances during a background transfer, but deliberately does NOT
+    /// route through `noteTransferProgress`: background-session transfers
+    /// keep running while the app is suspended, so they must not enroll in
+    /// the foreground-assist `BGContinuedProcessingTaskRequest` keep-alive
+    /// (that budget is for foreground transfers only). `totalBytes <= 0`
+    /// (size unknown) is dropped rather than broadcast as a
+    /// divide-by-zero 0% event.
+    private func broadcastBackgroundProgress(
+        episodeId: String,
+        bytesWritten: Int64,
+        totalBytes: Int64
+    ) {
+        guard totalBytes > 0 else { return }
+        // playhead-3xtw (L2): drop stale, out-of-order ticks so the
+        // delivered fraction is monotonic within a transfer. Cleared on
+        // completion here and on a fresh `backgroundDownload` start.
+        let highWater = lastBackgroundProgressBytes[episodeId] ?? 0
+        guard bytesWritten >= highWater else { return }
+        if bytesWritten >= totalBytes {
+            lastBackgroundProgressBytes[episodeId] = nil
+        } else {
+            lastBackgroundProgressBytes[episodeId] = bytesWritten
+        }
+        let progress = DownloadProgress(
+            episodeId: episodeId,
+            bytesWritten: bytesWritten,
+            totalBytes: totalBytes
+        )
+        progressContinuation.yield(progress)
+        for (_, continuation) in progressSubscribers {
+            continuation.yield(progress)
         }
     }
 
@@ -1297,6 +1359,15 @@ actor DownloadManager {
             logger.debug("Skipping background download for \(episodeId): already cached")
             return
         }
+        // playhead-3xtw: idempotent — never start a second concurrent
+        // transfer for an episode already downloading (a rapid double-tap
+        // of the prepare control, or an auto + on-demand collision). The
+        // slot is cleared on completion/failure, so a genuine retry after a
+        // finished attempt still proceeds.
+        guard !bgInFlightEpisodes.contains(episodeId) else {
+            logger.debug("Skipping background download for \(episodeId): already in flight")
+            return
+        }
 
         // Pre-cache work: route through the maintenance lane when the
         // dual-session flag is on so it cannot starve user-initiated
@@ -1308,6 +1379,9 @@ actor DownloadManager {
         let task = session.downloadTask(with: url)
         task.taskDescription = episodeId
         bgInFlightEpisodes.insert(episodeId)
+        // playhead-3xtw (L2): reset the progress high-water mark for a fresh
+        // transfer so a retry's early ticks aren't dropped as "stale".
+        lastBackgroundProgressBytes[episodeId] = nil
         task.resume()
         logger.info("Queued background download for \(episodeId)")
     }
@@ -1873,6 +1947,19 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         (String, URL, URL?, HTTPAssetMetadata?) -> Void
     )?
 
+    /// playhead-3xtw: fired on the delegate queue for each byte-progress
+    /// callback of a background (pre-cache / on-demand) transfer, carrying
+    /// `(episodeId, totalBytesWritten, totalBytesExpectedToWrite)`. The
+    /// background session previously only LOGGED progress — so the
+    /// download zone of the per-episode prepare control (and the Activity
+    /// screen) could not observe an in-flight background transfer. Wiring
+    /// this hook into `DownloadManager.broadcastProgress` closes that gap
+    /// (the "44h1 will add" hook the didWriteData comment anticipated).
+    /// Same init-once / read-many invariant as `onBackgroundDownloadStaged`.
+    nonisolated(unsafe) var onBackgroundDownloadProgress: (
+        (String, Int64, Int64) -> Void
+    )?
+
     /// Invoked when the URLSession has drained all pending events after
     /// a background wake. Forwards the session's identifier so the app
     /// delegate can match it against its pending completion-handler map.
@@ -2015,10 +2102,14 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
             : 0
         let episodeId = downloadTask.taskDescription ?? "<missing-task-description>"
         logger.debug("Episode \(episodeId, privacy: .public) download: \(String(format: "%.1f", progress * 100))%")
-        // playhead-44h1 owns the Live Activity update. For 24cm we log
-        // progress and emit through the existing DownloadManager
-        // broadcast surface downstream via onDownloadProgress hooks that
-        // 44h1 will add.
+        // playhead-3xtw: emit through the DownloadManager broadcast
+        // surface so `progressUpdates()` / `progressSnapshot()` reflect
+        // in-flight BACKGROUND transfers (previously this callback only
+        // logged). Guard the missing-taskDescription sentinel so we never
+        // key progress under a bogus episode id.
+        if downloadTask.taskDescription != nil {
+            onBackgroundDownloadProgress?(episodeId, totalBytesWritten, totalBytesExpectedToWrite)
+        }
     }
 
     func urlSession(

@@ -644,6 +644,23 @@ actor AnalysisWorkScheduler {
     /// leaves the dictionary entry absent.
     private var pendingProbedEpisodeDurations: [DurationStashKey: Double] = [:]
 
+    /// playhead-3xtw: episodes the user explicitly asked to prepare via
+    /// the on-demand "Download & Analyze" control. The next `enqueue`
+    /// for an episode in this set is stamped at the user-intent (`.now`)
+    /// lane (priority 20) so it preempts starving background work — the
+    /// whole point of the foreground on-demand control. The entry is
+    /// consumed (removed) by that enqueue: it is a one-shot promotion of
+    /// the imminent analysis job, not a standing flag. Recording intent
+    /// for an episode that already has a queued job does NOT retroactively
+    /// promote it (the enqueue dedups by work key); the control still
+    /// reflects the in-progress analysis as its live status.
+    private var pendingUserIntentEpisodes: Set<String> = []
+    /// playhead-3xtw: requested analysis coverage (the episode duration)
+    /// for a user-intent episode, applied when the enqueue omits an
+    /// explicit `desiredCoverage`. Consumed alongside
+    /// `pendingUserIntentEpisodes`.
+    private var pendingUserIntentCoverage: [String: Double] = [:]
+
     init(
         store: AnalysisStore,
         jobRunner: AnalysisJobRunner,
@@ -706,8 +723,19 @@ actor AnalysisWorkScheduler {
         podcastTitle: String? = nil,
         episodeTitle: String? = nil
     ) async {
-        let priority = isExplicitDownload ? 10 : 0
-        let coverage = desiredCoverage ?? config.defaultT0DepthSeconds
+        // playhead-3xtw: a user tapped "Download & Analyze" for this
+        // episode (recorded via `markEpisodeUserIntent`). Route its
+        // analysis to the user-intent (`.now`) lane — priority >= 20 —
+        // so it preempts starving background work. The flag is one-shot:
+        // consumed and cleared just below, after the insert attempt, so
+        // it applies to exactly the imminent job. `isExplicitDownload`
+        // (priority 10, `.soon`) and auto (priority 0, `.background`)
+        // are unchanged when no user intent is pending.
+        let userInitiated = pendingUserIntentEpisodes.contains(episodeId)
+        let priority = userInitiated ? 20 : (isExplicitDownload ? 10 : 0)
+        let coverage = desiredCoverage
+            ?? pendingUserIntentCoverage[episodeId]
+            ?? config.defaultT0DepthSeconds
         let workKey = AnalysisJob.computeWorkKey(
             fingerprint: sourceFingerprint,
             analysisVersion: PreAnalysisConfig.analysisVersion,
@@ -757,6 +785,13 @@ actor AnalysisWorkScheduler {
         } catch {
             logger.error("Failed to enqueue job: \(error)")
         }
+
+        // playhead-3xtw: consume the one-shot user-intent flag now that
+        // the job (or its work-key-idempotent no-op) has been recorded, so
+        // a later auto enqueue for the same episode does not inherit the
+        // user-intent lane.
+        pendingUserIntentEpisodes.remove(episodeId)
+        pendingUserIntentCoverage[episodeId] = nil
 
         // playhead-i9dj: write self-describing titles to the
         // AnalysisStore as soon as the SwiftData side has them in scope.
@@ -923,6 +958,56 @@ actor AnalysisWorkScheduler {
         if schedulerScenePhase == .background {
             await backfillScheduler?.scheduleBackfillIfNeeded()
         }
+    }
+
+    // MARK: - User-intent preparation (playhead-3xtw)
+
+    /// Record that the user has explicitly asked to prepare `episodeId`
+    /// via the on-demand "Download & Analyze" control. The next
+    /// `enqueue(episodeId:)` — typically fired by the download completion
+    /// — lands at the user-intent (`.now`) lane with the requested
+    /// coverage.
+    ///
+    /// One-shot: the flag is consumed by that next `enqueue`. Idempotent —
+    /// re-marking is a plain set insert. Wakes the loop so an
+    /// already-enqueued-and-about-to-run pass re-evaluates promptly.
+    func markEpisodeUserIntent(episodeId: String, desiredCoverageSec: Double?) {
+        pendingUserIntentEpisodes.insert(episodeId)
+        if let desiredCoverageSec, desiredCoverageSec > 0 {
+            // Keep the deepest requested coverage if marked more than once.
+            let existing = pendingUserIntentCoverage[episodeId] ?? 0
+            pendingUserIntentCoverage[episodeId] = max(existing, desiredCoverageSec)
+        }
+        wakeSchedulerLoop()
+    }
+
+    /// Enqueue the full analysis pipeline for an ALREADY-downloaded
+    /// episode at the user-intent (`.now`) lane. Marks user intent (so the
+    /// enqueue is stamped priority 20) then enqueues through the shared
+    /// `enqueue(...)` path, inheriting its work-key dedup (idempotent —
+    /// re-tapping a preparing episode is a no-op), title/duration
+    /// bookkeeping, and background rearm. `desiredCoverageSec` (the
+    /// episode duration) requests full coverage; the backfill machinery
+    /// drives it to completion.
+    func enqueueUserIntentAnalysis(
+        episodeId: String,
+        podcastId: String?,
+        sourceFingerprint: String,
+        desiredCoverageSec: Double?,
+        podcastTitle: String?,
+        episodeTitle: String?
+    ) async {
+        markEpisodeUserIntent(episodeId: episodeId, desiredCoverageSec: desiredCoverageSec)
+        await enqueue(
+            episodeId: episodeId,
+            podcastId: podcastId,
+            downloadId: episodeId,
+            sourceFingerprint: sourceFingerprint,
+            isExplicitDownload: true,
+            desiredCoverage: desiredCoverageSec,
+            podcastTitle: podcastTitle,
+            episodeTitle: episodeTitle
+        )
     }
 
     /// playhead-c3pi: seed the candidate-window cascade for an episode.

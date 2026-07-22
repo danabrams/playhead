@@ -55,6 +55,12 @@ struct EpisodeListView: View {
     @State private var navigateToNowPlaying = false
     @State private var selectedEpisode: Episode?
 
+    /// playhead-3xtw: list-owned shared status model for the per-episode
+    /// "Download & Analyze on demand" controls. One batch of queries per
+    /// refresh feeds every row's control (vs. per-row queries). Created on
+    /// first appearance (needs the runtime from the environment).
+    @State private var preparationModel: EpisodePreparationStatusModel?
+
     /// playhead-jzik: per-row expansion state. The set holds the
     /// canonicalEpisodeKeys whose row is currently expanded — the row
     /// view consults this to render the optional summary block. Kept
@@ -260,6 +266,7 @@ private extension EpisodeListView {
                 EpisodeRow(
                     episode: episode,
                     isExpanded: expandedEpisodeKeys.contains(episode.canonicalEpisodeKey),
+                    preparationModel: preparationModel,
                     onPlay: { playEpisode(episode) }
                 )
                     .listRowBackground(AppColors.background)
@@ -326,6 +333,35 @@ private extension EpisodeListView {
                 modelContext: modelContext
             )
         }
+        // playhead-3xtw: seed + observe the shared preparation-status model.
+        // One batch refresh on appear, then a single download-progress
+        // subscription (blocks for the life of the .task).
+        .task {
+            let model = ensurePreparationModel()
+            await model.refresh(episodeIds: episodeKeys)
+            await model.observeDownloadProgress()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: ActivityRefreshNotification.name)
+        ) { _ in
+            let keys = episodeKeys
+            Task { await preparationModel?.refresh(episodeIds: keys) }
+        }
+    }
+
+    /// playhead-3xtw: episode keys currently in the list, for batch refresh.
+    private var episodeKeys: [String] {
+        episodes.map(\.canonicalEpisodeKey)
+    }
+
+    /// playhead-3xtw: lazily create (once) the list-owned status model. The
+    /// runtime is only available from the environment, so the model cannot
+    /// be built in `init`.
+    private func ensurePreparationModel() -> EpisodePreparationStatusModel {
+        if let preparationModel { return preparationModel }
+        let model = EpisodePreparationStatusModel(runtime: runtime)
+        preparationModel = model
+        return model
     }
 
     // MARK: - Actions
@@ -366,6 +402,11 @@ private struct EpisodeRow: View {
     /// `EpisodeListView` so the set survives @Query rebuilds; the row
     /// itself is purely a function of (episode, isExpanded).
     let isExpanded: Bool
+    /// playhead-3xtw: shared, list-owned preparation-status model. Optional
+    /// because it is created on the list's first appearance (it needs the
+    /// runtime); the on-demand control is simply omitted until it exists
+    /// (one frame later).
+    let preparationModel: EpisodePreparationStatusModel?
     /// playhead-jzik: invoked when the user taps the explicit "Play"
     /// affordance inside the expanded body. The row itself doesn't have
     /// the runtime (the list does), so we route the action up.
@@ -410,6 +451,18 @@ private struct EpisodeRow: View {
                 }
 
                 Spacer()
+
+                // playhead-3xtw: on-demand "Download & Analyze" control.
+                // A glyph next to the row's play affordances that also
+                // doubles as the live per-episode analysis-status
+                // indicator — it reflects the auto-pipeline's progress
+                // without a tap. All state is derived by the pure
+                // `deriveEpisodePreparationReadiness` (via the shared
+                // model); the tap routes through the playback-free
+                // preparation coordinator.
+                if let preparationModel {
+                    EpisodePreparationControl(episode: episode, model: preparationModel)
+                }
 
                 // Readiness status (playhead-cthe)
                 //
