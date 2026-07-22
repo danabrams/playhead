@@ -798,7 +798,179 @@ struct RediffRefetchTests {
     }
 }
 
+// MARK: - Persona + fetch-hygiene unit suite (playhead-xsdz.45 / xsdz.36.3)
+
+/// Pure, deterministic coverage of the request-context persona and the shared
+/// cache-buster/request builder — no network. The on-the-wire counterparts
+/// (persona headers + `_cb` actually sent) live in `RediffRefetchNetworkTests`.
+@Suite("RediffFetchPersona + fetch hygiene (playhead-xsdz.45 / xsdz.36.3)")
+struct RediffFetchPersonaTests {
+
+    @Test("apply stamps UA + Accept + Accept-Language when the persona supplies them")
+    func applyStampsHeaders() {
+        let persona = RediffFetchPersona(name: "p", userAgent: "UA/1", accept: "audio/*", acceptLanguage: "en-US")
+        var request = URLRequest(url: URL(string: "https://cdn.example.com/y.mp3")!)
+        persona.apply(to: &request)
+        #expect(request.value(forHTTPHeaderField: "User-Agent") == "UA/1")
+        #expect(request.value(forHTTPHeaderField: "Accept") == "audio/*")
+        #expect(request.value(forHTTPHeaderField: "Accept-Language") == "en-US")
+    }
+
+    @Test("a nil/absent persona AND the empty-UA persona both leave NO User-Agent header")
+    func nilAndEmptyLeaveNoUA() {
+        // Absent persona via the shared builder == today's exact request.
+        let base = RediffFetchRequest.makeBaseRequest(
+            cacheBustedURL: URL(string: "https://cdn.example.com/y.mp3?_cb=t")!, persona: nil
+        )
+        #expect(base.value(forHTTPHeaderField: "User-Agent") == nil, "absent persona ⇒ no UA header")
+
+        // The empty-UA persona is a NON-nil persona whose empty UA still sets
+        // no header (the non-empty guard) — the AdsWizz-safe "system default".
+        var request = URLRequest(url: URL(string: "https://cdn.example.com/y.mp3")!)
+        RediffFetchPersona.emptyUA.apply(to: &request)
+        #expect(request.value(forHTTPHeaderField: "User-Agent") == nil, "empty-UA persona ⇒ no UA header")
+        #expect(RediffFetchPersona.emptyUA.userAgent == "")
+    }
+
+    @Test("makeBaseRequest sets a cache-ignoring policy + GET + no-cellular, and applies the persona UA")
+    func baseRequestCachePolicy() {
+        let request = RediffFetchRequest.makeBaseRequest(
+            cacheBustedURL: URL(string: "https://cdn.example.com/y.mp3?_cb=t")!, persona: .default
+        )
+        #expect(request.cachePolicy == .reloadIgnoringLocalCacheData, "rediff fetches never read a stale local cache")
+        #expect(request.httpMethod == "GET")
+        #expect(request.allowsCellularAccess == false, "WiFi-only half of the policy is preserved")
+        #expect(request.value(forHTTPHeaderField: "User-Agent") == RediffFetchPersona.appleCoreMediaIPhone.userAgent)
+    }
+
+    @Test("makeWiFiOnlySession disables the URL cache (xsdz.36.3) and stays WiFi-only (xsdz.28)")
+    func wifiOnlySessionDisablesCache() {
+        let config = URLSessionRangedAudioSampler.makeWiFiOnlySession().configuration
+        // playhead-xsdz.36.3: the third cache-defeating guard (with the `_cb`
+        // query item and the reload cache policy) — the session must hold NO
+        // URL cache so a rediff body can never be served from a stale entry.
+        #expect(config.urlCache == nil, "rediff session must disable the URL cache entirely")
+        // playhead-xsdz.28: cache-busting must NOT relax the WiFi-only pins.
+        #expect(config.allowsCellularAccess == false)
+        #expect(config.allowsConstrainedNetworkAccess == false)
+        #expect(config.allowsExpensiveNetworkAccess == false)
+    }
+
+    @Test("cacheBustedURL appends a unique _cb, preserves an existing query string, and never clobbers")
+    func cacheBustedURLAppends() {
+        // No existing query → the sole query item is _cb.
+        let a = RediffFetchRequest.cacheBustedURL(URL(string: "https://cdn.example.com/ep.mp3")!, token: "t1")
+        #expect(URLComponents(url: a, resolvingAgainstBaseURL: false)?.queryItems == [URLQueryItem(name: "_cb", value: "t1")])
+
+        // An existing query is preserved; _cb is appended (foo/baz untouched).
+        let b = RediffFetchRequest.cacheBustedURL(URL(string: "https://cdn.example.com/ep.mp3?foo=bar&baz=1")!, token: "t2")
+        let bItems = URLComponents(url: b, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(bItems.contains(URLQueryItem(name: "foo", value: "bar")))
+        #expect(bItems.contains(URLQueryItem(name: "baz", value: "1")))
+        #expect(bItems.contains(URLQueryItem(name: "_cb", value: "t2")))
+        #expect(bItems.count == 3, "existing items are kept, not clobbered")
+
+        // Distinct tokens → distinct URLs (uniqueness at the URL level).
+        let c = RediffFetchRequest.cacheBustedURL(URL(string: "https://cdn.example.com/ep.mp3")!, token: "t3")
+        #expect(a != c)
+    }
+
+    @Test("cacheBustedURL preserves pre-existing percent-encoding BYTE-FOR-BYTE (no queryItems round-trip mangling) and keeps the fragment")
+    func cacheBustedURLPreservesEncodingByteForByte() {
+        // A `queryItems` round-trip decodes `%2F`→`/`, `%2B`→`+`, `%3A`→`:`,
+        // silently changing WHICH object a redirect/tracking/signed param
+        // resolves to. The cache-buster must leave the existing query verbatim.
+        let signed = URL(string: "https://cdn.example.com/ep.mp3?sig=aB%2FcD%3D%3D&exp=123")!
+        let out = RediffFetchRequest.cacheBustedURL(signed, token: "TOK")
+        #expect(
+            out.absoluteString == "https://cdn.example.com/ep.mp3?sig=aB%2FcD%3D%3D&exp=123&_cb=TOK",
+            "existing %2F/%3D are preserved byte-for-byte; only _cb is appended"
+        )
+
+        // A nested percent-encoded URL param — the worst mangling case.
+        let redirect = URL(string: "https://cdn.example.com/ep.mp3?u=https%3A%2F%2Fx.com%2Fy")!
+        #expect(
+            RediffFetchRequest.cacheBustedURL(redirect, token: "T").absoluteString
+                == "https://cdn.example.com/ep.mp3?u=https%3A%2F%2Fx.com%2Fy&_cb=T",
+            "nested encoded URL param is not decoded"
+        )
+
+        // A `%2B` (encoded plus) must NOT collapse to a bare `+` (form-space).
+        let plus = URL(string: "https://cdn.example.com/ep.mp3?t=a%2Bb")!
+        #expect(RediffFetchRequest.cacheBustedURL(plus, token: "T").absoluteString
+            == "https://cdn.example.com/ep.mp3?t=a%2Bb&_cb=T")
+
+        // The URL fragment is preserved and _cb lands in the query, not the frag.
+        let frag = URL(string: "https://cdn.example.com/ep.mp3?a=b#chapter")!
+        #expect(RediffFetchRequest.cacheBustedURL(frag, token: "T").absoluteString
+            == "https://cdn.example.com/ep.mp3?a=b&_cb=T#chapter")
+
+        // A custom token carrying query-reserved chars is encoded, never
+        // corrupting the query with a stray `&`/`=`.
+        let messy = RediffFetchRequest.cacheBustedURL(URL(string: "https://cdn.example.com/ep.mp3")!, token: "a&b=c")
+        let items = URLComponents(url: messy, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(items == [URLQueryItem(name: "_cb", value: "a&b=c")], "the token round-trips as a single value")
+    }
+
+    @Test("cacheBustedURL percent-encodes a non-ASCII / reserved injected token to a valid all-ASCII query (never a raw byte, never a silently-dropped _cb)")
+    func cacheBustedURLEncodesNonASCIIToken() {
+        // RFC 3986 "unreserved" is ASCII-only. A token carrying a non-ASCII
+        // char (`é`) plus query-reserved chars (`#`, `/`, space) must be fully
+        // percent-encoded: leaving `é` RAW would either void `URLComponents.url`
+        // (dropping the whole cache-buster — a rediff served a stale cached
+        // stitch) or emit a non-ASCII query. `CharacterSet.alphanumerics` (the
+        // Unicode set) would leave `é` raw; the ASCII unreserved set encodes it.
+        let out = RediffFetchRequest.cacheBustedURL(
+            URL(string: "https://cdn.example.com/ep.mp3?a=b")!, token: "café#/ x"
+        )
+        // (1) the busted URL is emitted and is fully ASCII (percent-encoded) —
+        //     fails if `é` is left raw in the query.
+        #expect(out.absoluteString.canBeConverted(to: .ascii),
+                "a non-ASCII token must be percent-encoded, not left as a raw byte")
+        let items = URLComponents(url: out, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        // (2) the `_cb` item is PRESENT (never silently dropped by a nil-`url`
+        //     fallback) and round-trips back to exactly the injected token.
+        #expect(items.first(where: { $0.name == "_cb" })?.value == "café#/ x",
+                "the token decodes back to exactly what was injected")
+        // (3) the pre-existing query is untouched.
+        #expect(items.contains(URLQueryItem(name: "a", value: "b")))
+    }
+
+    @Test("the curated bank is the divergence-reliable set, default = AppleCoreMedia-iPhone, and excludes curl/generic UAs")
+    func curatedBankMembership() {
+        #expect(Set(RediffFetchPersona.curatedBank.map(\.name))
+            == ["applecoremedia-iphone", "applecoremedia-macintosh", "overcast", "empty-ua"])
+        #expect(RediffFetchPersona.default == .appleCoreMediaIPhone, "the designated default persona")
+
+        // AppleCoreMedia UAs are the iOS media-stack form (the divergence core).
+        #expect(RediffFetchPersona.appleCoreMediaIPhone.userAgent?.contains("AppleCoreMedia") == true)
+        #expect(RediffFetchPersona.appleCoreMediaIPhone.userAgent?.contains("iPhone") == true)
+        #expect(RediffFetchPersona.appleCoreMediaMac.userAgent?.contains("AppleCoreMedia") == true)
+        #expect(RediffFetchPersona.appleCoreMediaMac.userAgent?.contains("Macintosh") == true)
+
+        // AdsWizz p_f_skip gotcha: curl/generic UAs are DELIBERATELY excluded
+        // (AdsWizz classifies them "unclassified" and serves no ad stitch).
+        for persona in RediffFetchPersona.curatedBank {
+            let ua = (persona.userAgent ?? "").lowercased()
+            #expect(!ua.contains("curl"), "curl/generic UAs must not be in the bank")
+            #expect(!ua.contains("wget"))
+        }
+    }
+}
+
 // MARK: - Seam stubs
+
+/// Deterministic, thread-safe cache-buster token source for the network tests:
+/// "cb-0", "cb-1", … so per-call uniqueness (and head/tail sharing) is exact.
+final class TokenCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func next() -> String {
+        lock.lock(); defer { lock.unlock() }
+        defer { n += 1 }
+        return "cb-\(n)"
+    }
+}
 
 final class StubRefetchEnumerator: RediffRefetchEnumerating, @unchecked Sendable {
     var candidatesToReturn: [RediffRefetchCandidate] = []
@@ -1007,6 +1179,14 @@ struct RediffRefetchNetworkTests {
         #expect(recorded.last?.range == "bytes=84431078-84496613", "tail range = last 64KB of the parsed total")
         #expect(sample.fingerprint.totalLength == 84_496_614, "total length parsed from Content-Range, not HEAD")
         #expect(sample.bytesTransferred == 131_072)
+
+        // playhead-xsdz.36.3: every rediff request is cache-busted; the head
+        // and tail of ONE sample share the per-sample token (coherent pair).
+        #expect(recorded.allSatisfy { $0.cacheBuster != nil }, "every ranged GET carries a _cb cache-buster")
+        #expect(recorded[0].cacheBuster == recorded[1].cacheBuster, "head + tail share one per-sample token")
+        // playhead-xsdz.45: a nil (absent) persona sets NO explicit UA header —
+        // byte-identical to the xsdz.28 request (system default UA).
+        #expect(recorded.allSatisfy { $0.userAgent == nil }, "absent persona ⇒ no explicit User-Agent header")
     }
 
     @Test("URLSessionFullEpisodeFetcher downloads to a temp file the caller can delete")
@@ -1027,6 +1207,106 @@ struct RediffRefetchNetworkTests {
         #expect(recorded.count == 1)
         #expect(recorded.first?.method == "GET")
         #expect(recorded.first?.range == nil, "a full fetch is a plain GET (no Range)")
+        // playhead-xsdz.36.3 / xsdz.45: the full B-side fetch is cache-busted,
+        // and an absent persona sets no explicit UA header.
+        #expect(recorded.first?.cacheBuster != nil, "full B-side fetch carries a _cb cache-buster")
+        #expect(recorded.first?.userAgent == nil, "absent persona ⇒ no explicit User-Agent header")
+    }
+
+    // MARK: - Persona + cache-buster on the wire (playhead-xsdz.45 / xsdz.36.3)
+
+    @Test("the default persona stamps the AppleCoreMedia-iPhone UA on both the ranged pre-check and the full fetch")
+    func defaultPersonaStampsAppleCoreMediaIPhone() async throws {
+        RediffMockURLProtocol.reset(total: 200_000)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RediffMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let ua = RediffFetchPersona.appleCoreMediaIPhone.userAgent
+
+        let sampler = URLSessionRangedAudioSampler(session: session, persona: .default)
+        _ = try await sampler.sample(
+            url: URL(string: "https://cdn.example.com/ep.mp3")!,
+            headBytes: 64 * 1024, tailBytes: 64 * 1024
+        )
+        let fetcher = URLSessionFullEpisodeFetcher(session: session, persona: .default)
+        let (fileURL, _) = try await fetcher.download(url: URL(string: "https://cdn.example.com/ep.mp3")!)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let recorded = RediffMockURLProtocol.snapshot()
+        #expect(recorded.count == 3, "head + tail + full")
+        #expect(recorded.allSatisfy { $0.userAgent == ua }, "every rediff request goes out under the default persona UA")
+        #expect(recorded.allSatisfy { $0.cacheBuster != nil }, "and every request is cache-busted")
+    }
+
+    @Test("the production sweep (service → seams) fetches every rediff request under the default persona")
+    func serviceSweepFetchesUnderDefaultPersona() async throws {
+        RediffMockURLProtocol.reset(total: 200_000)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RediffMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        // Rotating, eligible candidate: the local sample differs from the
+        // remote one so the sweep proceeds past the pre-check into the full
+        // B-side fetch — exercising BOTH seams via the service.
+        let local = StubLocalSampler()
+        local.defaultFingerprint = RediffRefetchPolicy.sampleFingerprint(
+            head: Data("played".utf8), tail: Data("played".utf8), totalLength: 1
+        )
+        let fingerprinter = StubBSideFingerprinter()
+        fingerprinter.fingerprintsToReturn = [1, 2, 3]
+        let enumerator = StubRefetchEnumerator()
+        enumerator.candidatesToReturn = [RediffRefetchCandidate(
+            assetId: "asset-persona",
+            enclosureURL: URL(string: "https://cdn.example.com/persona.mp3")!,
+            downloadedAt: 0,
+            localAudioURL: URL(fileURLWithPath: "/tmp/persona-played.mp3"),
+            attemptState: .initial
+        )]
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: enumerator,
+            rangedSampler: URLSessionRangedAudioSampler(session: session, persona: .default),
+            localSampler: local,
+            fullFetcher: URLSessionFullEpisodeFetcher(session: session, persona: .default),
+            bsideFingerprinter: fingerprinter,
+            recorder: SpyRefetchRecorder(),
+            fileRemover: FileManagerTempFileRemover(),  // deletes the real B-copy
+            taskScheduler: StubTaskScheduler(),
+            now: { 100 * RediffRefetchTests.day }
+        )
+        await service.runRefetchSweep()
+
+        let recorded = RediffMockURLProtocol.snapshot()
+        #expect(recorded.count == 3, "pre-check head + tail, then the full B-side fetch")
+        let ua = RediffFetchPersona.appleCoreMediaIPhone.userAgent
+        #expect(recorded.allSatisfy { $0.userAgent == ua }, "sweep → seams applies the default persona to every request")
+        #expect(recorded[0].cacheBuster == recorded[1].cacheBuster, "head + tail share one per-sample token")
+        #expect(recorded[2].cacheBuster != recorded[0].cacheBuster, "the full fetch is a fresh, distinct request")
+        #expect(recorded.allSatisfy { $0.cacheBuster != nil })
+    }
+
+    @Test("the cache-buster is unique per fetch call and shared within one sample's head+tail")
+    func cacheBusterUniquePerCall() async throws {
+        RediffMockURLProtocol.reset(total: 200_000)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RediffMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let counter = TokenCounter()
+        let sampler = URLSessionRangedAudioSampler(session: session, cacheBuster: { counter.next() })
+        for _ in 0..<2 {
+            _ = try await sampler.sample(
+                url: URL(string: "https://cdn.example.com/ep.mp3")!,
+                headBytes: 64 * 1024, tailBytes: 64 * 1024
+            )
+        }
+
+        let recorded = RediffMockURLProtocol.snapshot()
+        #expect(recorded.count == 4)
+        #expect(recorded[0].cacheBuster == "cb-0")
+        #expect(recorded[1].cacheBuster == "cb-0", "head + tail of sample #1 share one token")
+        #expect(recorded[2].cacheBuster == "cb-1", "sample #2 gets a fresh, distinct token")
+        #expect(recorded[3].cacheBuster == "cb-1")
     }
 }
 
@@ -1038,6 +1318,18 @@ final class RediffMockURLProtocol: URLProtocol, @unchecked Sendable {
         let range: String?
         let ifNoneMatch: String?
         let ifModifiedSince: String?
+        /// playhead-xsdz.45 / xsdz.36.3: the request context + cache-buster as
+        /// they actually went out on the wire, so persona-header application
+        /// and cache-busting are asserted end-to-end (not just at build time).
+        let userAgent: String?
+        let url: URL?
+        /// The `_cb` cache-buster query-item value on `url`, if present.
+        var cacheBuster: String? {
+            guard let url,
+                  let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+            else { return nil }
+            return items.first(where: { $0.name == "_cb" })?.value
+        }
     }
 
     nonisolated(unsafe) private static var recorded: [Recorded] = []
@@ -1066,7 +1358,9 @@ final class RediffMockURLProtocol: URLProtocol, @unchecked Sendable {
             method: request.httpMethod ?? "?",
             range: range,
             ifNoneMatch: request.value(forHTTPHeaderField: "If-None-Match"),
-            ifModifiedSince: request.value(forHTTPHeaderField: "If-Modified-Since")
+            ifModifiedSince: request.value(forHTTPHeaderField: "If-Modified-Since"),
+            userAgent: request.value(forHTTPHeaderField: "User-Agent"),
+            url: request.url
         ))
         total = Self.totalLength
         Self.lock.unlock()

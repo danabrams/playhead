@@ -153,6 +153,187 @@ extension RediffTempFileRemoving {
     func removeOrphanedBCopies(olderThan age: TimeInterval) {}
 }
 
+// MARK: - Request context (persona) + fetch hygiene
+
+/// playhead-xsdz.45 (+ xsdz.36.2 enabler): the HTTP request-context a rediff
+/// fetch presents to the DAI stack. Cross-network survey (2026-07-21): AdsWizz
+/// (Conan, Fresh Air) and Art19 (Business Wars) PIN the ad fill per client —
+/// a same-context double-fetch returns byte-identical bodies (nothing to
+/// byte-align), while varying ONLY the `User-Agent` header yields a divergent
+/// fill. This `Sendable` value type is the seam Unit 2 (k-way over multiple
+/// personas) and Unit 3 (day-0 play-time rediff) plumb through the fetch
+/// conformers; Unit 1 wires the production sweep under the single default
+/// (AppleCoreMedia-iPhone) persona.
+struct RediffFetchPersona: Sendable, Equatable {
+    /// Stable identifier for logging / test membership assertions. NEVER sent.
+    let name: String
+    /// The `User-Agent` header value. `nil` OR empty ⇒ NO `User-Agent` header
+    /// is set and the request goes out under the system default UA — this is
+    /// the "empty-UA" persona's contract, and it matches a nil/absent persona.
+    let userAgent: String?
+    /// Optional `Accept` override. `nil` ⇒ leave CFNetwork's default (`*/*`).
+    let accept: String?
+    /// Optional `Accept-Language` override. `nil` ⇒ system default.
+    let acceptLanguage: String?
+
+    init(name: String, userAgent: String?, accept: String? = nil, acceptLanguage: String? = nil) {
+        self.name = name
+        self.userAgent = userAgent
+        self.accept = accept
+        self.acceptLanguage = acceptLanguage
+    }
+
+    /// Stamp this persona's request context onto `request`. The UA is applied
+    /// ONLY when non-nil AND non-empty, so the empty-UA persona (and any nil
+    /// field) leaves the header untouched — byte-identical to today's no-UA
+    /// request. `Accept` / `Accept-Language` follow the same non-empty guard.
+    func apply(to request: inout URLRequest) {
+        if let userAgent, !userAgent.isEmpty {
+            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        }
+        if let accept, !accept.isEmpty {
+            request.setValue(accept, forHTTPHeaderField: "Accept")
+        }
+        if let acceptLanguage, !acceptLanguage.isEmpty {
+            request.setValue(acceptLanguage, forHTTPHeaderField: "Accept-Language")
+        }
+    }
+
+    // MARK: Curated bank
+
+    // The divergence-reliable set (cross-network survey + the AdsWizz de-risk
+    // probe). AppleCoreMedia-iPhone and AppleCoreMedia-Macintosh — the UAs
+    // iOS's own media stack sends — both classify as "streaming" and ALWAYS
+    // return distinct fills; Overcast and the empty-UA persona add extra
+    // distinct stitches.
+    //
+    // DELIBERATELY EXCLUDED — curl and other generic/unclassified UAs. The
+    // AdsWizz de-risk probe found AdsWizz classifies them "unclassified",
+    // emits a `p_f_skip` token, and serves NO ad stitch (minimal/empty body),
+    // which is useless for rediff (nothing to byte-align). Do NOT add a
+    // curl/generic persona to this bank.
+
+    /// iOS's own media-stack UA. The designated DEFAULT persona.
+    static let appleCoreMediaIPhone = RediffFetchPersona(
+        name: "applecoremedia-iphone",
+        userAgent: "AppleCoreMedia/1.0.0.21G93 (iPhone; U; CPU OS 17_6_1 like Mac OS X; en_us)"
+    )
+
+    /// The Macintosh media-stack analogue — a reliably DISTINCT "streaming"
+    /// fill vs the iPhone persona.
+    static let appleCoreMediaMac = RediffFetchPersona(
+        name: "applecoremedia-macintosh",
+        userAgent: "AppleCoreMedia/1.0.0.23G93 (Macintosh; U; Intel Mac OS X 10_15_7; en_us)"
+    )
+
+    /// A popular third-party podcast client — an extra distinct stitch.
+    static let overcast = RediffFetchPersona(
+        name: "overcast",
+        userAgent: "Overcast/3.0.0 (+http://overcast.fm/)"
+    )
+
+    /// Empty UA ⇒ NO explicit `User-Agent` header is set, so the request goes
+    /// out under CFNetwork's system default UA (not a literally-empty header —
+    /// the OS still fills one in). That system-default UA is itself distinct
+    /// from the AppleCoreMedia personas, so it contributes an extra distinct
+    /// fill in a k-way batch; it is also the safe stand-in for a nil/absent
+    /// persona. Kept explicit in the bank so Unit 2 can name it as a member.
+    static let emptyUA = RediffFetchPersona(name: "empty-ua", userAgent: "")
+
+    /// The divergence-reliable bank Unit 2 (k-way) fans out over, default
+    /// first. curl/generic UAs are excluded on purpose (see the note above).
+    static let curatedBank: [RediffFetchPersona] = [
+        .appleCoreMediaIPhone,
+        .appleCoreMediaMac,
+        .overcast,
+        .emptyUA,
+    ]
+
+    /// The single persona the production sweep (Unit 1) fetches under.
+    static let `default` = RediffFetchPersona.appleCoreMediaIPhone
+}
+
+/// playhead-xsdz.36.3: shared request hygiene for EVERY rediff enclosure fetch
+/// — cache-busting + optional persona stamping. Per-request-rotating shows
+/// (SYSK/Omny/Triton) returned byte-shrinking near-identical bodies until the
+/// request was made UNIQUE: an in-session URL cache / CDN edge cache was
+/// serving a stale copy and defeating rotation. Every rediff fetch therefore
+/// (a) appends a unique `_cb` query item, (b) ignores local caches via the
+/// request cache policy, and (c) runs on a `urlCache = nil` session — three
+/// independent guards so no rediff body is ever served from a stale cache.
+///
+/// A cache-buster query param and `URLRequest.cachePolicy` are NOT conditional
+/// requests, so the file's NO-HEAD / NO-ETag contract is preserved.
+enum RediffFetchRequest {
+    /// Unobtrusive cache-buster query-item name.
+    static let cacheBusterQueryItem = "_cb"
+
+    /// Token characters left un-encoded when the cache-buster value is stamped
+    /// into the query: the RFC 3986 "unreserved" set, spelled out as ASCII
+    /// `A-Za-z0-9-._~` ONLY. Deliberately NOT `CharacterSet.alphanumerics` —
+    /// that set is the *Unicode* alphanumerics, so a non-ASCII injected token
+    /// (e.g. `"café"`) would be left as a RAW byte, which then either voids
+    /// `URLComponents.url` (silently dropping the whole `_cb` cache-buster) or
+    /// emits an invalid non-ASCII query. The default UUID token is already
+    /// within this ASCII set; any custom injected token — including a non-ASCII
+    /// one — is defensively percent-encoded so it can never introduce a stray
+    /// `&`/`#`/`=` or a raw non-ASCII byte that corrupts or voids the query.
+    private static let tokenAllowed = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
+
+    /// Append a UNIQUE cache-buster query item to `url`, PRESERVING any existing
+    /// query string BYTE-FOR-BYTE. Uses `percentEncodedQueryItems` (NOT
+    /// `queryItems`): the latter decode/re-encode round-trip mangles pre-existing
+    /// percent-encoding in the enclosure's query — `%2F`→`/`, `%2B`→`+`,
+    /// `%3A`→`:` — which would silently change WHICH object a redirect/tracking
+    /// param resolves to. `percentEncodedQueryItems` keeps existing items
+    /// verbatim and appends `_cb` (its value pre-encoded via `tokenAllowed`).
+    /// An existing `?a=b` is kept, never clobbered; the fragment is preserved.
+    /// Falls back to the original URL if it cannot be decomposed (never expected
+    /// for an http(s) enclosure).
+    ///
+    /// RESIDUAL RISK — signed-URL 403 (xsdz.36.3 self-review "F2", DEFERRED):
+    /// `_cb` is appended UNCONDITIONALLY, so an enclosure whose signature
+    /// covers the whole query string (e.g. an AWS SigV4 presigned URL) would
+    /// reject the extra param with a 403. This is CONTAINED, not silently
+    /// harmful: the 403 is a non-206 pre-check (`SampleError.notPartialContent`)
+    /// classified `.transient`, swallowed per-candidate, and it fails on the
+    /// ~128 KB ranged pre-check BEFORE the ~54 MB full fetch — no bandwidth
+    /// storm, no sweep abort. The DAI stacks the cache-buster targets
+    /// (AdsWizz/ART19/Megaphone) tolerate unknown extra params, and Playhead
+    /// resolves PLAIN public podcast enclosure URLs (there is no presign/token
+    /// logic anywhere in the feed/enclosure path), so no signed-URL feed is in
+    /// today's candidate set. A host-aware / retry-without-`_cb`-on-4xx
+    /// mitigation is deferred to a follow-up bead rather than gold-plated here.
+    static func cacheBustedURL(_ url: URL, token: String) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        let encodedToken = token.addingPercentEncoding(withAllowedCharacters: tokenAllowed) ?? token
+        var items = components.percentEncodedQueryItems ?? []
+        items.append(URLQueryItem(name: cacheBusterQueryItem, value: encodedToken))
+        components.percentEncodedQueryItems = items
+        return components.url ?? url
+    }
+
+    /// Build the base GET request for a rediff fetch against an ALREADY
+    /// cache-busted URL: WiFi-only, cache-ignoring, persona-stamped. Callers
+    /// add the `Range` header (ranged pre-check) or nothing (full download).
+    static func makeBaseRequest(cacheBustedURL: URL, persona: RediffFetchPersona?) -> URLRequest {
+        var request = URLRequest(url: cacheBustedURL)
+        request.httpMethod = "GET"
+        request.allowsCellularAccess = false
+        // Ignore any local cache entry — belt-and-suspenders with the `_cb`
+        // query item and the `urlCache = nil` session so a per-request-rotating
+        // DAI edge/URL cache can never serve a stale, byte-identical stitch
+        // (playhead-xsdz.36.3).
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        persona?.apply(to: &request)
+        return request
+    }
+}
+
 // MARK: - Production conformers
 
 /// URLSession-backed ranged sampler. Issues exactly two GETs — `bytes=0-…` for
@@ -162,9 +343,28 @@ extension RediffTempFileRemoving {
 /// charging + network-present gate; this pins the WiFi half of the policy).
 struct URLSessionRangedAudioSampler: RangedAudioSampling {
     let session: URLSession
+    /// playhead-xsdz.45: the request-context this sampler fetches under. `nil`
+    /// (default, and every pre-activation caller/test) ⇒ NO persona headers;
+    /// the request matches the xsdz.28 one (system default UA) EXCEPT for the
+    /// xsdz.36.3 cache-buster, which every rediff fetch carries. The production
+    /// sweep is constructed with `.default` (AppleCoreMedia-iPhone).
+    let persona: RediffFetchPersona?
+    /// playhead-xsdz.36.3: per-sample cache-buster token generator. Called
+    /// EXACTLY ONCE per `sample()` — the head and tail sub-requests share the
+    /// token so they resolve to the same (busted) object and stay a coherent
+    /// pair — and must return a UNIQUE token each call so no rediff pre-check
+    /// is ever served a stale cached body. Injectable for deterministic tests;
+    /// defaults to a UUID (a distinct token per fetch, as a k-way batch needs).
+    let cacheBuster: @Sendable () -> String
 
-    init(session: URLSession = URLSessionRangedAudioSampler.makeWiFiOnlySession()) {
+    init(
+        session: URLSession = URLSessionRangedAudioSampler.makeWiFiOnlySession(),
+        persona: RediffFetchPersona? = nil,
+        cacheBuster: @escaping @Sendable () -> String = { UUID().uuidString }
+    ) {
         self.session = session
+        self.persona = persona
+        self.cacheBuster = cacheBuster
     }
 
     /// A WiFi-and-not-constrained URLSession for rediff traffic (spike §5:
@@ -174,6 +374,11 @@ struct URLSessionRangedAudioSampler: RangedAudioSampling {
         config.allowsCellularAccess = false
         config.allowsConstrainedNetworkAccess = false
         config.allowsExpensiveNetworkAccess = false
+        // playhead-xsdz.36.3: disable the in-memory URL cache entirely so a
+        // rediff pre-check / full fetch can never be satisfied from a stale
+        // cached body (belt-and-suspenders with the per-request `_cb`
+        // cache-buster and the reload cache policy).
+        config.urlCache = nil
         return URLSession(configuration: config)
     }
 
@@ -184,9 +389,14 @@ struct URLSessionRangedAudioSampler: RangedAudioSampling {
     }
 
     func sample(url: URL, headBytes: Int, tailBytes: Int) async throws -> RemoteAudioSample {
+        // playhead-xsdz.36.3: ONE cache-buster per sample — the head and tail
+        // sub-requests share it so they resolve to the same busted object; a
+        // fresh token each sample defeats any stale URL/edge cache.
+        let bustedURL = RediffFetchRequest.cacheBustedURL(url, token: cacheBuster())
+
         // Head-sample GET (Range bytes=0-(headBytes-1)) — a ranged GET, NOT an
         // HTTP HEAD — whose 206 `Content-Range` also yields the total length.
-        let (headData, total) = try await rangedGet(url: url, start: 0, length: headBytes, expectContentRange: true)
+        let (headData, total) = try await rangedGet(url: bustedURL, start: 0, length: headBytes, expectContentRange: true)
         let totalLength = try requireTotal(total)
 
         // TAIL request. Clamp the start for a file smaller than the tail window
@@ -195,7 +405,7 @@ struct URLSessionRangedAudioSampler: RangedAudioSampling {
         // this is theoretical.
         let tailStart = max(0, totalLength - Int64(tailBytes))
         let tailLength = Int(totalLength - tailStart)
-        let (tailData, _) = try await rangedGet(url: url, start: tailStart, length: tailLength, expectContentRange: false)
+        let (tailData, _) = try await rangedGet(url: bustedURL, start: tailStart, length: tailLength, expectContentRange: false)
 
         let fingerprint = RediffRefetchPolicy.sampleFingerprint(
             head: headData,
@@ -208,17 +418,16 @@ struct URLSessionRangedAudioSampler: RangedAudioSampling {
         )
     }
 
-    /// One range GET. Returns the body bytes and, when `expectContentRange`, the
-    /// parsed total length from `Content-Range: bytes A-B/TOTAL`.
+    /// One range GET. `url` is ALREADY cache-busted by `sample()`. Returns the
+    /// body bytes and, when `expectContentRange`, the parsed total length from
+    /// `Content-Range: bytes A-B/TOTAL`.
     private func rangedGet(
         url: URL,
         start: Int64,
         length: Int,
         expectContentRange: Bool
     ) async throws -> (Data, Int64?) {
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.allowsCellularAccess = false
+        var request = RediffFetchRequest.makeBaseRequest(cacheBustedURL: url, persona: persona)
         let end = start + Int64(max(0, length - 1))
         request.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
 
@@ -264,9 +473,24 @@ struct URLSessionRangedAudioSampler: RangedAudioSampling {
 /// file the caller owns and deletes; WiFi-only, matching the sampler.
 struct URLSessionFullEpisodeFetcher: FullEpisodeFetching {
     let session: URLSession
+    /// playhead-xsdz.45: request-context for the full B-side fetch. `nil`
+    /// (default, and every pre-activation caller/test) ⇒ NO persona headers;
+    /// the request matches the xsdz.28 one EXCEPT for the xsdz.36.3
+    /// cache-buster every rediff fetch carries. Production uses `.default`.
+    let persona: RediffFetchPersona?
+    /// playhead-xsdz.36.3: cache-buster token generator, called ONCE per
+    /// `download()` so the B-side full fetch is a UNIQUE request (never a
+    /// stale cached stitch). Injectable for tests; defaults to a UUID.
+    let cacheBuster: @Sendable () -> String
 
-    init(session: URLSession = URLSessionRangedAudioSampler.makeWiFiOnlySession()) {
+    init(
+        session: URLSession = URLSessionRangedAudioSampler.makeWiFiOnlySession(),
+        persona: RediffFetchPersona? = nil,
+        cacheBuster: @escaping @Sendable () -> String = { UUID().uuidString }
+    ) {
         self.session = session
+        self.persona = persona
+        self.cacheBuster = cacheBuster
     }
 
     enum FetchError: Error, Equatable {
@@ -279,9 +503,10 @@ struct URLSessionFullEpisodeFetcher: FullEpisodeFetching {
     static let bcopyFilenamePrefix = "rediff-bcopy-"
 
     func download(url: URL) async throws -> (fileURL: URL, byteCount: Int) {
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.allowsCellularAccess = false
+        // playhead-xsdz.36.3: fresh cache-buster per download so the B-side
+        // full fetch is a UNIQUE request (never a stale cached stitch).
+        let bustedURL = RediffFetchRequest.cacheBustedURL(url, token: cacheBuster())
+        let request = RediffFetchRequest.makeBaseRequest(cacheBustedURL: bustedURL, persona: persona)
 
         let fileManager = FileManager.default
         let (tempURL, response) = try await session.download(for: request)
