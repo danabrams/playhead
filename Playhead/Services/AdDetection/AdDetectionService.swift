@@ -690,6 +690,24 @@ struct AdDetectionConfig: Sendable {
     /// is off. DEFAULT `90.0`.
     let postRollGuardSeconds: Double
 
+    /// playhead-xsdz.66: pre-roll start-at-zero clamp threshold, in seconds. When
+    /// the episode's FIRST ad window starts within this many seconds of t=0 — the
+    /// pre-roll position — `runBackfill` extends its start edge to exactly 0.0
+    /// (via `PreRollStartClamp`, applied AFTER the per-span decision loop so it is
+    /// a WIDTH / MARK improvement only and can never change auto-skip
+    /// eligibility). A pre-roll begins at 0:00, but the ASR / transcript
+    /// cold-start ramp routinely makes the detected start a few seconds late, and
+    /// a pre-roll's start edge is "free" at 0:00 — so recovering it is a
+    /// deterministic-DAI width win (measured pre-roll width coverage ~57% → ~80%).
+    ///
+    /// Unlike the OFF-by-default channels above, this clamp ships ON: its DEFAULT
+    /// `20.0` is a live production knob, NOT a dormant flag. 20 s covers the
+    /// typical cold-start miss with margin while staying far below any plausible
+    /// mid-roll (the earliest mid-rolls land minutes in), so a "first" slot that
+    /// starts later than this is treated as a mid-roll and left untouched. Set to
+    /// `<= 0` to disable the clamp.
+    let preRollStartClampSeconds: Double
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -788,7 +806,8 @@ struct AdDetectionConfig: Sendable {
         musicOffsetFMRecoveryEnabled: Bool = true,
         certaintyTieredSkipEnabled: Bool = false,
         hostReadConfidenceFloor: Double = 0.9,
-        postRollGuardSeconds: Double = 90.0
+        postRollGuardSeconds: Double = 90.0,
+        preRollStartClampSeconds: Double = 20.0
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -861,6 +880,7 @@ struct AdDetectionConfig: Sendable {
         self.certaintyTieredSkipEnabled = certaintyTieredSkipEnabled
         self.hostReadConfidenceFloor = hostReadConfidenceFloor
         self.postRollGuardSeconds = postRollGuardSeconds
+        self.preRollStartClampSeconds = preRollStartClampSeconds
     }
 
     static let `default` = AdDetectionConfig(
@@ -920,7 +940,8 @@ struct AdDetectionConfig: Sendable {
         musicOffsetFMRecoveryEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1, same certified measurement as the proposer)
         certaintyTieredSkipEnabled: false,  // playhead-wraj: certainty-tiered auto-skip gate ships OFF; enablement is Dan's Gate-2 decision (2026-07-19 gate-delta measurement 32/32 at T=0.9 + 90s post-roll)
         hostReadConfidenceFloor: 0.9,  // playhead-wraj: T=0.9 themove host-read calibration (2026-07-17); inert while certaintyTieredSkipEnabled is false
-        postRollGuardSeconds: 90.0  // playhead-wraj: post-roll guard window (Dan 2026-07-19); inert while certaintyTieredSkipEnabled is false
+        postRollGuardSeconds: 90.0,  // playhead-wraj: post-roll guard window (Dan 2026-07-19); inert while certaintyTieredSkipEnabled is false
+        preRollStartClampSeconds: 20.0  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — width/mark only, applied post-decision so eligibility is untouched; 20s covers the cold-start miss, far below any mid-roll
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -5345,6 +5366,50 @@ actor AdDetectionService {
             )
             await decisionLogger.record(logEntry)
         }
+
+        // ── Pre-roll start-at-zero clamp (playhead-xsdz.66) ──────────────────
+        // A pre-roll ad begins at 0:00, but the ASR / transcript cold-start ramp
+        // routinely makes the detected start a few seconds late. When the
+        // episode's FIRST ad window sits in the pre-roll zone (an `.unanchored`
+        // start within `preRollStartClampSeconds` of 0), extend its start edge to
+        // exactly 0.0 — a pre-roll's start edge is "free" at 0:00. Trustworthy
+        // `.rediffByteExact` / `.stingerSnapped` edges are EXEMPT (the clamp never
+        // second-guesses a precise boundary), so this only reclaims the width the
+        // cold-start ramp lost on the guessed presence-core starts.
+        //
+        // WIDTH / MARK: applied HERE — after the per-span decision loop — so every
+        // window already carries its final `eligibilityGate` / `decisionState` /
+        // `confidence`; the clamp moves only the mark's start edge and can NEVER
+        // flip a window's auto-skip ELIGIBILITY (the gate field is copied verbatim).
+        // It can't change an auto-skip SPAN either — but NOT because the clamped
+        // rows stay out of the orchestrator: `AnalysisCoordinator.finalizeBackfill`
+        // re-fetches these persisted rows and re-pushes them via `receiveAdWindows`
+        // in-session (and the cross-launch `beginEpisode` preload reads them too),
+        // so the clamped start DOES reach the managed window and overwrites its
+        // `snappedStart`. What keeps that skip-safe is the `.unanchored` gate: the
+        // clamp fires ONLY on `.unanchored` starts, and `AutoSkipEdgePadding` (the
+        // Gate-2 auto-skip policy) refuses to auto-skip any `.unanchored` start —
+        // `skipWindow` returns nil and the span stays markOnly. So once auto-skip +
+        // edge padding are enabled the clamped span is never skipped, exactly as it
+        // wouldn't have been before the clamp; and auto-skip is OFF today
+        // (mark-only), so the clamp is currently a pure banner / overlay width win.
+        // (Residual: auto-skip enabled with edge padding OFF — not the intended
+        // Gate-2 config — would skip the raw clamped [0, end]; tracked for the
+        // enablement bead, same posture as the playhead-hdgk Gate-2 note.)
+        // The window id is ordinal-addressed, so the clamp keeps it and the
+        // content-addressed reconcile below stays in place — no reorder, no churn.
+        // Idempotent + monotonic (start only moves leftward → coverage never
+        // shrinks, start never exceeds end). Disabled when
+        // `preRollStartClampSeconds <= 0`.
+        //
+        // The widened start does also flow into the learned priors + metadata
+        // extraction below (both read `nonSuppressedWindows`); that is benign and
+        // arguably correct — a pre-roll genuinely starts at 0:00 — and touches no
+        // eligibility decision for this episode.
+        fusionWindows = PreRollStartClamp.clamp(
+            windows: fusionWindows,
+            config: .init(maxPreRollStartSeconds: config.preRollStartClampSeconds)
+        )
 
         // Persist fusion windows and retire the nonterminal hot-path rows this
         // backfill supersedes. playhead-ud4n: backfill is authoritative over the
