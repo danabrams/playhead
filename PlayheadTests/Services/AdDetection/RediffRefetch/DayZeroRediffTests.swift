@@ -374,10 +374,12 @@ struct DayZeroRediffTriggerTests {
                 "the day-0 B-copy must be deleted on exit")
     }
 
-    @Test("the day-0 k-way count is its own constant (2, playhead-9s6q FIX B), the flag defaults OFF, and neither touches the lagged single-fetch default")
+    @Test("the day-0 k-way count is its own constant (2, playhead-9s6q FIX B), the flag is ACTIVATED (xsdz.36), and neither touches the lagged single-fetch default")
     func dayZeroConstantsAreIndependent() {
-        #expect(RediffActivation.dayZeroEnabledByDefault == false,
-                "day-0 ships inert — flipping it on is the rollout go/no-go")
+        #expect(RediffActivation.dayZeroEnabledByDefault == true,
+                "day-0 ACTIVATED (playhead-xsdz.36): the minutes-apart corpus measurement cleared the rollout go/no-go (Conan 211s, Fresh Air 203s recovered); mark-only, WiFi+charging-gated")
+        #expect(RediffActivation.nonMonotonicSegmentRecoveryEnabled == true,
+                "playhead-9s6q FIX A ACTIVATED (xsdz.36): day-0 mint recovers non-monotonic Fresh Air-class chains; lagged path still passes false unconditionally")
         #expect(RediffActivation.dayZeroKWayFetchCount == 2,
                 "playhead-9s6q FIX B: day-0 draws 2 personas DISTINCT from the download UA (Mac+Overcast), no wasted collision fetch")
         #expect(RediffActivation.productionKWayFetchCount == 1,
