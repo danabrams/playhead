@@ -17,6 +17,12 @@ struct TranscriptPeekView: View {
     /// Current playback time, driven by the parent NowPlayingViewModel.
     let currentTime: TimeInterval
 
+    /// Episode duration, driven by the parent NowPlayingViewModel. Used to
+    /// seed a coverage-free "mark the untranscribed tail" span that runs to
+    /// the episode end (playhead-m1l9). Defaults to 0 (no tail affordance)
+    /// so previews/tests that don't supply it are unaffected.
+    var episodeDuration: TimeInterval = 0
+
     /// Phase 5 (u4d): User correction store for "This isn't an ad" gesture.
     /// Defaults to no-op; Phase 7 injects a real store via PlayheadRuntime.
     var correctionStore: any UserCorrectionStore = NoOpUserCorrectionStore()
@@ -46,6 +52,12 @@ struct TranscriptPeekView: View {
 
     /// Confirmation alert for submitting marked chunks as false negative.
     @State private var showMarkConfirmation = false
+
+    /// Confirmation alert for marking the untranscribed post-roll/tail as an ad.
+    @State private var showTailMarkConfirmation = false
+
+    /// Span captured when the tail affordance is tapped, submitted on confirm.
+    @State private var pendingTailSpan: (start: Double, end: Double)? = nil
 
     /// "Not an ad" marking mode: when true, tapping chunks selects/deselects them for veto.
     @State private var isNotAdMarkingMode = false
@@ -81,8 +93,35 @@ struct TranscriptPeekView: View {
             } else {
                 transcriptScroll
             }
+
+            // playhead-m1l9: coverage-free affordance for a post-roll / tail
+            // the fast transcript hasn't reached — the chunk-selection "Mark
+            // ad" flow can't reach it because there are no chunks to tap.
+            if !peekViewModel.isLoading,
+               let tailSpan = peekViewModel.untranscribedTailMarkSpan(
+                   currentTime: currentTime,
+                   episodeDuration: episodeDuration
+               ) {
+                untranscribedTailFooter(span: tailSpan)
+            }
         }
         .background(AppColors.surface)
+        // playhead-m1l9: the tail-mark confirmation lives on the always-present
+        // body (not the conditionally-rendered footer) so it survives the
+        // footer disappearing mid-interaction (e.g. playback reaching the end).
+        .alert("Mark ad to the end?", isPresented: $showTailMarkConfirmation) {
+            Button("Cancel", role: .cancel) {
+                pendingTailSpan = nil
+            }
+            Button("Report missed ad", role: .destructive) {
+                if let pending = pendingTailSpan {
+                    submitUntranscribedTailMark(span: pending)
+                }
+                pendingTailSpan = nil
+            }
+        } message: {
+            Text("The untranscribed section from here to the end of the episode will be reported as an ad.")
+        }
         .onChange(of: currentTime) { _, newTime in
             let second = Int(newTime)
             guard second != lastAppliedSecond else { return }
@@ -299,6 +338,59 @@ private extension TranscriptPeekView {
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, Spacing.lg)
+    }
+
+    // MARK: Untranscribed-tail mark footer (playhead-m1l9)
+
+    /// Pinned footer offering a coverage-free mark for a post-roll / tail the
+    /// fast transcript hasn't reached yet. Routes to the same
+    /// `injectUserMarkedAd` path the player "Hearing an ad" button uses,
+    /// seeding a span from the playhead to the episode end.
+    func untranscribedTailFooter(span: (start: Double, end: Double)) -> some View {
+        VStack(spacing: 0) {
+            Divider()
+                .foregroundStyle(AppColors.textSecondary.opacity(0.2))
+
+            Button {
+                pendingTailSpan = span
+                showTailMarkConfirmation = true
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Rectangle()
+                        .fill(AppColors.accent)
+                        .frame(width: 3)
+                        .frame(maxHeight: .infinity)
+
+                    Image(systemName: "ear.fill")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(AppColors.accent)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Hearing an ad past the transcript?")
+                            .font(AppTypography.sans(size: 13, weight: .semibold))
+                            .foregroundStyle(AppColors.textPrimary)
+                        Text("Mark from here to the end as an ad")
+                            .font(AppTypography.sans(size: 11, weight: .regular))
+                            .foregroundStyle(AppColors.textTertiary)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(AppColors.textTertiary.opacity(0.6))
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.sm)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(minHeight: 44)
+        }
+        .background(AppColors.surface)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Mark an ad in the untranscribed section")
+        .accessibilityHint("Reports the post-roll from the current position to the end of the episode as an ad")
     }
 
     // MARK: Transcript Scroll
@@ -575,6 +667,30 @@ private extension TranscriptPeekView {
             }
 
             // Feed false-negative signal to TrustService (mirrors reportHearingAd).
+            if let pid, let trustSvc {
+                await trustSvc.recordFalseNegativeSignal(podcastId: pid)
+            }
+        }
+    }
+
+    /// Submit a coverage-free mark for the untranscribed post-roll/tail
+    /// (playhead-m1l9). Mirrors `submitMarkedChunks`' downstream calls —
+    /// `injectUserMarkedAd` for immediate skip + AdWindow/CorrectionEvent
+    /// persistence, plus the false-negative trust signal — but sources the
+    /// span from the playhead-to-episode-end seed rather than existing chunks,
+    /// so a tail with NO transcript chunks can still be marked.
+    func submitUntranscribedTailMark(span: (start: Double, end: Double)) {
+        let startTime = span.start
+        let endTime = span.end
+        guard endTime > startTime else { return }
+
+        let trustSvc = trustService
+        let pid = podcastId
+        let runtimeRef = runtime
+        Task {
+            if let runtimeRef {
+                await runtimeRef.injectUserMarkedAd(start: startTime, end: endTime)
+            }
             if let pid, let trustSvc {
                 await trustSvc.recordFalseNegativeSignal(podcastId: pid)
             }

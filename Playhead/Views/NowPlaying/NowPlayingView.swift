@@ -308,6 +308,9 @@ struct NowPlayingView: View {
                         )
                     ),
                     currentTime: viewModel.currentTime,
+                    // playhead-m1l9: episode duration seeds the coverage-free
+                    // "mark the untranscribed post-roll/tail" affordance.
+                    episodeDuration: viewModel.duration,
                     // Phase 7.2: inject the persistent correction store so the
                     // "This isn't an ad" gesture writes through to SQLite.
                     correctionStore: runtime.correctionStore,
