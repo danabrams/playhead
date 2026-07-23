@@ -1345,20 +1345,29 @@ final class PlayheadRuntime {
         // `revalidateFromFeatures` before the copy is deleted. `nil` (switch
         // off / preview) ⇒ nothing constructed, registered, or scheduled.
         if rediffActivationOn, let rediffBSideStagingProvider {
+            // playhead-xsdz.36.2 (k-way): the production sweep's fetch count is
+            // the single flippable `RediffActivation.productionKWayFetchCount`
+            // (conservatively 1 — today's single-fetch bandwidth). The k-way
+            // MECHANISM is wired here but stays inert until that constant is
+            // deliberately raised (a bandwidth go/no-go for the xsdz.36 rollout).
+            var rediffConfig = RediffRefetchPolicy.Configuration.production  // ~3d first-attempt delay (xsdz.30)
+            rediffConfig.kWayFetchCount = RediffActivation.productionKWayFetchCount
             self.rediffRefetchService = RediffRefetchService(
                 enabled: true,
-                config: .production,  // ~3d first-attempt delay (xsdz.30)
+                config: rediffConfig,
                 enumerator: AnalysisStoreRediffRefetchEnumerator(
                     store: analysisStore,
                     enclosureResolver: rediffEnclosureResolverBox
                 ),
-                // playhead-xsdz.45 (Unit 1): the production sweep fetches
-                // under the default (AppleCoreMedia-iPhone) persona so the
-                // pre-check + B-side full fetch present the same "streaming"
-                // request context iOS's own media stack sends. Each fetch also
-                // carries a unique `_cb` cache-buster (xsdz.36.3, default
-                // generator). k-way over the rest of the persona bank is
-                // Unit 2 — the sweep still fetches exactly one B-side here.
+                // playhead-xsdz.45 (Unit 1): the ranged pre-check fetches under
+                // the default (AppleCoreMedia-iPhone) persona so it presents the
+                // same "streaming" request context iOS's own media stack sends,
+                // with a unique `_cb` cache-buster (xsdz.36.3, default generator).
+                // playhead-xsdz.36.2 (k-way): the B-side FULL fetcher draws its
+                // persona PER FETCH from the curated bank (iPhone → Mac →
+                // Overcast → empty) — `download(url:persona:)` overrides this
+                // stored default. At the conservative production K=1 that is the
+                // iPhone persona, byte-identical to Unit 1's single fetch.
                 rangedSampler: URLSessionRangedAudioSampler(persona: .default),
                 localSampler: FileHandleLocalAudioSampler(),
                 fullFetcher: URLSessionFullEpisodeFetcher(persona: .default),

@@ -428,6 +428,26 @@ struct RediffBSideStagingProviderTests {
         #expect(await provider.refetchedBSideMono16kHz(assetId: "a1") == nil, "decode failure degrades to nil (status quo)")
     }
 
+    @Test("k-way: stageAll exposes every URL via refetchedBSideFileURLs; single-URL accessors return the primary")
+    func kWayStageAllListSemantics() async {
+        let provider = RediffBSideStagingProvider(decoder: StubBSideDecoder(), durationProbe: { _ in nil })
+        let urls = [URL(fileURLWithPath: "/tmp/x0.mp3"), URL(fileURLWithPath: "/tmp/x1.mp3"), URL(fileURLWithPath: "/tmp/x2.mp3")]
+
+        await provider.stageAll(assetId: "a1", fileURLs: urls)
+        #expect(await provider.refetchedBSideFileURLs(assetId: "a1") == urls, "all K B-sides exposed")
+        #expect(await provider.refetchedBSideFileURL(assetId: "a1") == urls.first, "single-URL accessor returns the primary")
+        #expect(await provider.stagedCount == 1, "stagedCount is the asset count, not the file count")
+
+        await provider.unstage(assetId: "a1")
+        #expect(await provider.refetchedBSideFileURLs(assetId: "a1").isEmpty)
+        #expect(await provider.refetchedBSideFileURL(assetId: "a1") == nil)
+
+        // An empty stageAll unstages (defensive).
+        await provider.stageAll(assetId: "a1", fileURLs: urls)
+        await provider.stageAll(assetId: "a1", fileURLs: [])
+        #expect(await provider.stagedCount == 0)
+    }
+
     @Test("the duration cap gates the PCM decode (cost bound), not the byte-path URL")
     func durationCap() async throws {
         let decoder = StubBSideDecoder()
@@ -472,6 +492,33 @@ struct RevalidatingRediffBSideConsumerTests {
 
         #expect(spy.revalidateCalls == [SpyAdDetection.RevalidateCall(assetId: "a1", podcastId: "", episodeDuration: 280)])
         #expect(await staging.stagedCount == 0, "unstaged after consumption — no stale mapping")
+    }
+
+    @Test("k-way: stages ALL copies at once, revalidates ONCE, exposes every copy during the pass, unstages after")
+    func kWayStagesAllCopiesForOneRevalidation() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a1", episodeId: "ep-1", duration: 280))
+        let staging = makeStaging()
+        let spy = SpyAdDetection()
+        let urls = [
+            URL(fileURLWithPath: "/tmp/b0.mp3"),
+            URL(fileURLWithPath: "/tmp/b1.mp3"),
+            URL(fileURLWithPath: "/tmp/b2.mp3"),
+        ]
+        let stagingForClosure = staging
+        spy.onRevalidate = { @Sendable in
+            let all = await stagingForClosure.refetchedBSideFileURLs(assetId: "a1")
+            #expect(all == urls, "all K B-sides must be staged while the pass runs")
+            let primary = await stagingForClosure.refetchedBSideFileURL(assetId: "a1")
+            #expect(primary == urls.first, "the single-URL accessor serves the primary during the pass")
+        }
+        let consumer = RevalidatingRediffBSideConsumer(staging: staging, store: store, adDetection: spy)
+
+        try await consumer.consumeRotatedBSides(assetId: "a1", fileURLs: urls)
+
+        #expect(spy.revalidateCalls == [SpyAdDetection.RevalidateCall(assetId: "a1", podcastId: "", episodeDuration: 280)],
+                "one revalidation for the whole batch")
+        #expect(await staging.stagedCount == 0, "unstaged after the batch — no stale mapping")
     }
 
     @Test("episode duration falls back to the A-side stream extent when the column is NULL")

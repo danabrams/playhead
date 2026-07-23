@@ -252,6 +252,33 @@ enum RediffSlotOwnership {
         return merged.filter { $0.durationSeconds <= config.maxSlotSeconds }
     }
 
+    // MARK: - K-way union (playhead-xsdz.36.2)
+
+    /// UNION the played-slot lists from K pairwise byte diffs (A vs each of the
+    /// K distinct-persona B-sides) into ONE slot set. Because a single
+    /// fetch-PAIR can MISS an ad pod when both draws land the same fill on a
+    /// low-entropy slot, unioning the divergent regions across the fetch set
+    /// recovers pods any one pair misses (the "B vs C misses / B+C+D recovers"
+    /// case).
+    ///
+    /// BACKWARD-COMPAT: a single list (K=1) is returned UNCHANGED — byte-identical
+    /// to the pre-k-way single-fetch differ output, which is already cleaned by
+    /// `gateAndDiffBytes`. Multiple lists are concatenated and re-cleaned by the
+    /// SAME `mergedAndCapped` the 2-way path uses, so overlapping detections of
+    /// the same pod collapse to one slot and the union carries the identical slot
+    /// shape downstream (candidate → veto → disposition). Each input list is
+    /// assumed already `mergedAndCapped` (as `gateAndDiffBytes` returns them);
+    /// re-cleaning is idempotent for a single list and correct for the union.
+    static func unionedPlayedSlots(
+        _ perBSideSlots: [[PlayedSlot]],
+        config: Configuration = .default
+    ) -> [PlayedSlot] {
+        // K=1 (or a single accepted B) → verbatim, no re-clean: the crisp
+        // "reduces to today's EXACT single-fetch behavior" guarantee.
+        guard perBSideSlots.count > 1 else { return perBSideSlots.first ?? [] }
+        return mergedAndCapped(perBSideSlots.flatMap { $0 }, config: config)
+    }
+
     // MARK: - Byte-path gate (playhead-xsdz.57 — PRIMARY differ)
 
     /// Why a byte alignment did or did not yield trustworthy slots. EVERY
@@ -565,11 +592,29 @@ protocol RediffBSideProvider: Sendable {
     /// file — bf4a2383 precedent) before reading a byte, and the bytes NEVER
     /// outlive the diff (xsdz.28 never-persist-B).
     func refetchedBSideFileURL(assetId: String) async -> URL?
+
+    /// playhead-xsdz.36.2 (k-way): ALL staged B-side files for `assetId` — the K
+    /// distinct-persona re-fetches the byte differ aligns A against and unions.
+    ///
+    /// A PROTOCOL REQUIREMENT (not extension-only) so a concrete provider's
+    /// override is DYNAMICALLY dispatched through the `any RediffBSideProvider`
+    /// existential the service holds — an extension-only method would statically
+    /// bind to the default and silently drop every B-side but the first. The
+    /// default (see below) wraps the single `refetchedBSideFileURL` so pre-k-way
+    /// providers drive exactly today's one alignment.
+    func refetchedBSideFileURLs(assetId: String) async -> [URL]
 }
 
 extension RediffBSideProvider {
     /// Default: no byte-level B-side — the byte path falls back to chroma.
     func refetchedBSideFileURL(assetId: String) async -> URL? { nil }
+
+    /// Default: the single `refetchedBSideFileURL` as a one-element list (or
+    /// empty) — one alignment, exactly the pre-k-way behavior.
+    func refetchedBSideFileURLs(assetId: String) async -> [URL] {
+        if let url = await refetchedBSideFileURL(assetId: assetId) { return [url] }
+        return []
+    }
 }
 
 // MARK: - Rediff shadow breadcrumb (distinct tag; reuses the frozen row type)

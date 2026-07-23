@@ -186,7 +186,11 @@ struct AnalysisStoreRediffRefetchRecorder: RediffRefetchRecording {
 /// A-side used), duration-capped by
 /// `RediffActivation.maxBSideDecodeDurationSeconds`.
 actor RediffBSideStagingProvider: RediffBSideProvider {
-    private var staged: [String: URL] = [:]
+    /// playhead-xsdz.36.2 (k-way): assetId → the K staged B-side files (one per
+    /// distinct-persona re-fetch). A single-fetch (K=1) asset holds a one-element
+    /// list — `refetchedBSideFileURL` returns its first element, byte-identical
+    /// to the pre-k-way single-URL map.
+    private var staged: [String: [URL]] = [:]
     private let decoder: any AudioFileDecoding
     private let maxDecodeDurationSeconds: TimeInterval
     private let durationProbe: @Sendable (URL) async -> TimeInterval?
@@ -202,23 +206,41 @@ actor RediffBSideStagingProvider: RediffBSideProvider {
         self.durationProbe = durationProbe
     }
 
+    /// Single-B stage (the K=1 / pre-k-way path): replaces any prior mapping
+    /// with a one-element list.
     func stage(assetId: String, fileURL: URL) {
-        staged[assetId] = fileURL
+        staged[assetId] = [fileURL]
+    }
+
+    /// playhead-xsdz.36.2 (k-way): stage ALL K distinct-persona B-copies at once
+    /// so `computeByteAlignedPlayedSlots` can align A vs each and union. An empty
+    /// list unstages (defensive — the consumer always stages ≥1).
+    func stageAll(assetId: String, fileURLs: [URL]) {
+        staged[assetId] = fileURLs.isEmpty ? nil : fileURLs
     }
 
     func unstage(assetId: String) {
         staged[assetId] = nil
     }
 
-    /// Test/diagnostic surface: how many B-sides are currently staged.
+    /// Test/diagnostic surface: how many ASSETS currently have staged B-sides
+    /// (not the total file count).
     var stagedCount: Int { staged.count }
 
     func refetchedBSideFileURL(assetId: String) async -> URL? {
-        staged[assetId]
+        staged[assetId]?.first
+    }
+
+    func refetchedBSideFileURLs(assetId: String) async -> [URL] {
+        staged[assetId] ?? []
     }
 
     func refetchedBSideMono16kHz(assetId: String) async -> [Float]? {
-        guard let url = staged[assetId] else { return nil }
+        // The chroma FALLBACK stays single-B: decode the PRIMARY (first-persona)
+        // copy. k-way union is a byte-path concept (the byte differ aligns A vs
+        // each staged B); the chroma path is only reached when the byte path is
+        // unavailable/rejected for ALL of them.
+        guard let url = staged[assetId]?.first else { return nil }
         // Cost bound for the chroma fallback: a >cap episode returns nil →
         // the pass falls through to status quo (the byte path has already
         // been tried by this point).
@@ -318,7 +340,18 @@ struct RevalidatingRediffBSideConsumer: RediffBSideConsuming {
 
     private static let logger = Logger(subsystem: "com.playhead", category: "RediffRefetch")
 
+    /// Single-B consume (K=1 / pre-k-way): stage the one B-copy and revalidate.
+    /// Byte-identical to routing through `consumeRotatedBSides` with a
+    /// one-element list.
     func consumeRotatedBSide(assetId: String, fileURL: URL) async throws {
+        try await consumeRotatedBSides(assetId: assetId, fileURLs: [fileURL])
+    }
+
+    /// playhead-xsdz.36.2 (k-way): stage ALL K B-copies, run ONE revalidation
+    /// (so `computeByteAlignedPlayedSlots` aligns A vs each and unions the
+    /// divergent regions), then unstage on every exit.
+    func consumeRotatedBSides(assetId: String, fileURLs: [URL]) async throws {
+        guard !fileURLs.isEmpty else { return }
         let asset: AnalysisAsset
         do {
             guard let fetched = try await store.fetchAsset(id: assetId) else {
@@ -360,8 +393,8 @@ struct RevalidatingRediffBSideConsumer: RediffBSideConsuming {
         let latestJob = (try? await store.fetchLatestJobForEpisode(asset.episodeId)) ?? nil
         let podcastId = latestJob?.podcastId ?? ""
 
-        await staging.stage(assetId: assetId, fileURL: fileURL)
-        Self.logger.info("rediff B-side staged for revalidation asset=\(assetId, privacy: .public)")
+        await staging.stageAll(assetId: assetId, fileURLs: fileURLs)
+        Self.logger.info("rediff B-side staged for revalidation asset=\(assetId, privacy: .public) copies=\(fileURLs.count, privacy: .public)")
         do {
             try await adDetection.revalidateFromFeatures(
                 analysisAssetId: assetId,

@@ -228,6 +228,55 @@ struct RediffSlotOwnershipTests {
         #expect(RediffSlotOwnership.cleanedPlayedSlots(from: []).isEmpty)
     }
 
+    // MARK: - k-way union (playhead-xsdz.36.2)
+
+    @Test("unionedPlayedSlots: a single list (K=1) is returned UNCHANGED — the exact single-fetch behavior")
+    func unionSingleListUnchanged() {
+        let single = [Self.played(100, 160, left: 40, right: 50), Self.played(300, 340)]
+        #expect(RediffSlotOwnership.unionedPlayedSlots([single]) == single)
+        #expect(RediffSlotOwnership.unionedPlayedSlots([]).isEmpty)
+        #expect(RediffSlotOwnership.unionedPlayedSlots([[]]).isEmpty)
+    }
+
+    @Test("unionedPlayedSlots recovers a pod one fetch-pair misses (B vs C misses / B+C+D recovers)")
+    func unionRecoversCollisionMissedPod() {
+        // Three ad pods exist in the played copy. Fetch B reveals pods 1 & 3 but
+        // its stitch COLLIDED with A on pod 2 (identical fill → no byte
+        // divergence → pod 2 MISSED). Fetch C (a distinct persona) reveals pod 2;
+        // fetch D reveals pods 1 & 2. UNIONing the pairwise diffs recovers all
+        // three — the collision-missed pod 2 included.
+        let pod1 = Self.played(60, 90)
+        let pod2 = Self.played(600, 640)
+        let pod3 = Self.played(1800, 1830)
+        let bDiff = [pod1, pod3]   // A vs B: pod2 collided → MISSED
+        let cDiff = [pod2]         // A vs C: only pod2 diverged
+        let dDiff = [pod1, pod2]   // A vs D
+
+        // A single pair (B alone) MISSES pod 2.
+        #expect(!RediffSlotOwnership.unionedPlayedSlots([bDiff]).contains { $0.startSeconds == 600 },
+                "the single B-vs-A diff misses the low-entropy collision pod")
+
+        // The union across the fetch set RECOVERS it — 100% of the pods.
+        let union = RediffSlotOwnership.unionedPlayedSlots([bDiff, cDiff, dDiff])
+        let intervals = union.map { ($0.startSeconds, $0.endSeconds) }
+        #expect(union.count == 3, "all three pods recovered, got \(intervals)")
+        #expect(intervals.contains { $0 == (60, 90) })
+        #expect(intervals.contains { $0 == (600, 640) },
+                "the collision-missed pod is recovered from another persona's divergence")
+        #expect(intervals.contains { $0 == (1800, 1830) })
+    }
+
+    @Test("unionedPlayedSlots collapses overlapping detections of the SAME pod to one slot")
+    func unionCollapsesOverlappingSamePod() {
+        // Two personas detect the same pod at slightly different byte edges; the
+        // union must merge them (not duplicate), widening to the outer edges.
+        let b = [Self.played(100, 160, left: 200, right: 5)]
+        let c = [Self.played(99, 161, left: 5, right: 300)]
+        let union = RediffSlotOwnership.unionedPlayedSlots([b, c])
+        #expect(union.count == 1, "same-pod overlap merges, not duplicated")
+        #expect(union[0].startSeconds == 99 && union[0].endSeconds == 161)
+    }
+
     // MARK: - resolveSpan / synthesizeSlot + coreCoverage gate
 
     private static func played(_ start: Double, _ end: Double, left: Double = 120, right: Double = 120) -> RediffSlotOwnership.PlayedSlot {

@@ -6501,46 +6501,81 @@ actor AdDetectionService {
         asset: AnalysisAsset,
         analysisAssetId: String
     ) async -> [RediffSlotOwnership.PlayedSlot]? {
-        guard let bSideURL = await provider.refetchedBSideFileURL(assetId: analysisAssetId) else {
-            return nil
-        }
+        // playhead-xsdz.36.2 (k-way): ALL staged B-sides (the K distinct-persona
+        // re-fetches). A single-B provider yields one URL — exactly today's one
+        // alignment. Empty → no byte signal → chroma fallback.
+        let bSideURLs = await provider.refetchedBSideFileURLs(assetId: analysisAssetId)
+        guard !bSideURLs.isEmpty else { return nil }
         guard let aSideURL = Self.byteDifferASideURL(sourceURL: asset.sourceURL) else {
             logger.info(
                 "[xsdz.57] byte differ unavailable asset=\(analysisAssetId, privacy: .public): no anchored A-side file — falling back to chroma"
             )
             return nil
         }
-        guard Self.isAnchoredRegularFile(bSideURL) else {
-            logger.info(
-                "[xsdz.57] byte differ unavailable asset=\(analysisAssetId, privacy: .public): B-side URL is not an anchored regular file — falling back to chroma"
-            )
-            return nil
-        }
         let aData: Data
-        let bData: Data
         do {
             aData = try Data(contentsOf: aSideURL, options: .mappedIfSafe)
-            bData = try Data(contentsOf: bSideURL, options: .mappedIfSafe)
         } catch {
             logger.warning(
-                "[xsdz.57] byte differ read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription) — falling back to chroma"
+                "[xsdz.57] byte differ A-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription) — falling back to chroma"
             )
             return nil
         }
-        let alignment = RediffByteAligner.align(aData: aData, bData: bData)
-        let outcome = RediffSlotOwnership.gateAndDiffBytes(alignment: alignment)
-        switch outcome {
-        case .accepted(let acceptance):
+
+        // Align A vs EACH B-side; collect the accepted per-B played-slot lists.
+        // A per-B miss (unanchored file, unreadable bytes, or a byte-gate
+        // rejection — no runs / non-monotonic / re-encode CDN) is SKIPPED, not
+        // fatal: another persona's B may still diverge on the same pod
+        // (playhead-xsdz.36.2). If EVERY B misses, the whole byte path yields
+        // nothing → chroma fallback exactly as pre-xsdz.57.
+        var perBSideSlots: [[RediffSlotOwnership.PlayedSlot]] = []
+        for bSideURL in bSideURLs {
+            guard Self.isAnchoredRegularFile(bSideURL) else {
+                logger.info(
+                    "[xsdz.57] byte differ skip asset=\(analysisAssetId, privacy: .public): B-side URL is not an anchored regular file"
+                )
+                continue
+            }
+            let bData: Data
+            do {
+                bData = try Data(contentsOf: bSideURL, options: .mappedIfSafe)
+            } catch {
+                logger.warning(
+                    "[xsdz.57] byte differ B-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)"
+                )
+                continue
+            }
+            let alignment = RediffByteAligner.align(aData: aData, bData: bData)
+            let outcome = RediffSlotOwnership.gateAndDiffBytes(alignment: alignment)
+            switch outcome {
+            case .accepted(let acceptance):
+                logger.info(
+                    "[xsdz.57] byte differ accepted asset=\(analysisAssetId, privacy: .public) slots=\(acceptance.playedSlots.count) runsChained=\(acceptance.runsChained) chainedFractionB=\(String(format: "%.3f", acceptance.chainedFractionB), privacy: .public)"
+                )
+                perBSideSlots.append(acceptance.playedSlots)
+            case .rejectedNoChainedRuns, .rejectedNonMonotonic, .rejectedLowChainedFraction:
+                logger.info(
+                    "[xsdz.57] byte differ rejected asset=\(analysisAssetId, privacy: .public): \(String(describing: outcome), privacy: .public)"
+                )
+                continue
+            }
+        }
+        guard !perBSideSlots.isEmpty else {
             logger.info(
-                "[xsdz.57] byte differ accepted asset=\(analysisAssetId, privacy: .public) slots=\(acceptance.playedSlots.count) runsChained=\(acceptance.runsChained) chainedFractionB=\(String(format: "%.3f", acceptance.chainedFractionB), privacy: .public)"
-            )
-            return acceptance.playedSlots
-        case .rejectedNoChainedRuns, .rejectedNonMonotonic, .rejectedLowChainedFraction:
-            logger.info(
-                "[xsdz.57] byte differ rejected asset=\(analysisAssetId, privacy: .public): \(String(describing: outcome), privacy: .public) — falling back to chroma"
+                "[xsdz.36.2] byte differ: no B-side aligned (\(bSideURLs.count) tried) asset=\(analysisAssetId, privacy: .public) — falling back to chroma"
             )
             return nil
         }
+        // UNION the divergent regions across the K diffs. K=1 returns the single
+        // list unchanged (byte-identical to xsdz.57); K≥2 recovers pods a single
+        // pair misses.
+        let unioned = RediffSlotOwnership.unionedPlayedSlots(perBSideSlots)
+        if perBSideSlots.count > 1 {
+            logger.info(
+                "[xsdz.36.2] k-way union asset=\(analysisAssetId, privacy: .public) diffs=\(perBSideSlots.count) unionSlots=\(unioned.count)"
+            )
+        }
+        return unioned
     }
 
     /// The played-copy (A-side) file for the byte differ, derived from the
