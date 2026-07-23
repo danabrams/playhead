@@ -59,4 +59,20 @@ enum RediffActivation {
     /// chroma-fallback path (`refetchedBSideMono16kHz`); the byte-primary
     /// path is unaffected by this cap.
     static let maxBSideDecodeDurationSeconds: TimeInterval = maxASideCaptureDurationSeconds
+
+    /// playhead-xsdz.36.2 (k-way): the number of DISTINCT-persona B-side
+    /// re-fetches the PRODUCTION sweep performs per rotated candidate.
+    ///
+    /// **Deliberately 1 — the single-fetch status quo.** k-way (K≥3) drives
+    /// per-slot divergence up (a pod one fetch-pair misses is recovered from
+    /// another persona's distinct stitch) but MULTIPLIES the re-fetch bandwidth
+    /// on the WiFi+charging BGTask: ~54 MB × K per rotated episode
+    /// (~1.1 GB/library-week at K=1, so ~3.3 GB at K=3). Raising K is a data
+    /// go/no-go that belongs to the SEPARATE xsdz.36 rollout, NOT this bead — the
+    /// k-way MECHANISM ships here config-gated, defaulting to today's bandwidth.
+    ///
+    /// To activate k-way in production, flip THIS ONE constant (e.g. to `3` for
+    /// the iPhone+Mac core plus Overcast). K is capped at the curated persona
+    /// bank size (4); see `RediffFetchPersona.kWayPersonas`.
+    static let productionKWayFetchCount = 1
 }

@@ -73,6 +73,20 @@ protocol LocalAudioSampling: Sendable {
 /// persisted. Returns the temp file URL + its byte count.
 protocol FullEpisodeFetching: Sendable {
     func download(url: URL) async throws -> (fileURL: URL, byteCount: Int)
+
+    /// playhead-xsdz.36.2 (k-way): fetch under an EXPLICIT request-context
+    /// persona so one injected fetcher can present K DISTINCT contexts across a
+    /// k-way batch. The default IGNORES the persona (routes to `download(url:)`)
+    /// so pre-k-way conformers/test doubles compile and behave unchanged; the
+    /// production `URLSessionFullEpisodeFetcher` overrides it to stamp the
+    /// persona. A `nil` persona means the conformer's own default context.
+    func download(url: URL, persona: RediffFetchPersona?) async throws -> (fileURL: URL, byteCount: Int)
+}
+
+extension FullEpisodeFetching {
+    func download(url: URL, persona: RediffFetchPersona?) async throws -> (fileURL: URL, byteCount: Int) {
+        try await download(url: url)
+    }
 }
 
 /// Decodes + resamples + fingerprints the B-side copy OFF the hot actor and
@@ -114,6 +128,25 @@ protocol RediffRefetchRecording: Sendable {
 /// failure policy.
 protocol RediffBSideConsuming: Sendable {
     func consumeRotatedBSide(assetId: String, fileURL: URL) async throws
+
+    /// playhead-xsdz.36.2 (k-way): consume the K distinct-persona B-copies of a
+    /// rotated candidate at ONCE — the production conformer stages ALL of them,
+    /// drives ONE `revalidateFromFeatures` (so `computeByteAlignedPlayedSlots`
+    /// aligns A vs each Bi and UNIONS the divergent regions), then unstages. The
+    /// CALLER still owns deletion of every file via its `defer`. The default
+    /// routes to the single-file `consumeRotatedBSide` with the FIRST copy so
+    /// pre-k-way conformers/doubles are unchanged; an empty list is a no-op.
+    ///
+    /// A throw means NO B-side was consumed: the candidate records `.failed` so a
+    /// later sweep re-fetches and retries under the R2 failure policy.
+    func consumeRotatedBSides(assetId: String, fileURLs: [URL]) async throws
+}
+
+extension RediffBSideConsuming {
+    func consumeRotatedBSides(assetId: String, fileURLs: [URL]) async throws {
+        guard let first = fileURLs.first else { return }
+        try await consumeRotatedBSide(assetId: assetId, fileURL: first)
+    }
 }
 
 /// The B-side decoded to an EMPTY fingerprint stream — nothing to diff, and
@@ -251,6 +284,25 @@ struct RediffFetchPersona: Sendable, Equatable {
 
     /// The single persona the production sweep (Unit 1) fetches under.
     static let `default` = RediffFetchPersona.appleCoreMediaIPhone
+
+    /// playhead-xsdz.36.2 (k-way): the first `count` DISTINCT personas from the
+    /// curated bank in the divergence-reliable ORDER — iPhone → Mac → Overcast
+    /// → empty. The AppleCoreMedia iPhone+Mac pair is the reliable divergence
+    /// CORE (both classify "streaming", always distinct fills); Overcast and the
+    /// empty-UA persona add extra distinct stitches. A k-way batch draws these
+    /// K personas so every fetch presents a DISTINCT request context — never
+    /// reusing a persona within a batch, and never a curl/generic UA (the bank
+    /// excludes those; AdsWizz serves them ad-light).
+    ///
+    /// `count` is clamped to `[1, curatedBank.count]`: K=1 yields exactly
+    /// `[.appleCoreMediaIPhone]` (== `.default`), so a K=1 batch is
+    /// byte-identical on the wire to today's single default-persona fetch; a
+    /// `count` above the bank size is capped at `curatedBank.count` (there are
+    /// no further distinct personas to draw without reuse).
+    static func kWayPersonas(count: Int) -> [RediffFetchPersona] {
+        let k = max(1, min(count, curatedBank.count))
+        return Array(curatedBank.prefix(k))
+    }
 }
 
 /// playhead-xsdz.36.3: shared request hygiene for EVERY rediff enclosure fetch
@@ -502,7 +554,18 @@ struct URLSessionFullEpisodeFetcher: FullEpisodeFetching {
     /// can never drift from what `download` actually names its files.
     static let bcopyFilenamePrefix = "rediff-bcopy-"
 
+    /// Fetch under this fetcher's OWN persona (the pre-k-way call, byte-identical
+    /// to xsdz.45). k-way callers use `download(url:persona:)` to draw a distinct
+    /// persona per fetch instead.
     func download(url: URL) async throws -> (fileURL: URL, byteCount: Int) {
+        try await download(url: url, persona: persona)
+    }
+
+    /// playhead-xsdz.36.2 (k-way): fetch under an EXPLICIT persona (overriding
+    /// this fetcher's stored default), still with a fresh per-download
+    /// cache-buster. A k-way batch calls this K times with K distinct personas
+    /// through one injected fetcher.
+    func download(url: URL, persona: RediffFetchPersona?) async throws -> (fileURL: URL, byteCount: Int) {
         // playhead-xsdz.36.3: fresh cache-buster per download so the B-side
         // full fetch is a UNIQUE request (never a stale cached stitch).
         let bustedURL = RediffFetchRequest.cacheBustedURL(url, token: cacheBuster())

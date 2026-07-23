@@ -77,6 +77,17 @@ enum RediffRefetchPolicy {
         /// the same class, the episode is PARKED (terminal until the state
         /// row is cleared).
         var maxDeterministicAttempts: Int
+        /// playhead-xsdz.36.2 (k-way): how many DISTINCT-persona B-side re-fetches
+        /// the sweep performs per rotated candidate. `1` (the default) is the
+        /// single-fetch status quo — byte-identical to xsdz.36. K≥3 fans out over
+        /// the curated persona bank (iPhone → Mac → Overcast → empty) and UNIONS
+        /// the pairwise byte diffs so a pod one fetch-pair misses (both draws
+        /// landed the same low-entropy fill) is recovered from another persona's
+        /// distinct stitch — at K× the re-fetch bandwidth. The PRODUCTION value
+        /// is the single flippable `RediffActivation.productionKWayFetchCount`
+        /// (conservatively 1); this knob lets tests exercise K≥2. Effectively
+        /// capped at the curated bank size (see `RediffFetchPersona.kWayPersonas`).
+        var kWayFetchCount: Int
 
         static let secondsPerDay: TimeInterval = 24 * 60 * 60
 
@@ -105,7 +116,8 @@ enum RediffRefetchPolicy {
             tailSampleBytes: Int = 64 * 1024,
             deterministicFailureBackoffSchedule: [TimeInterval] = [secondsPerDay, 3 * secondsPerDay, 7 * secondsPerDay],
             deterministicConfirmationCount: Int = 2,
-            maxDeterministicAttempts: Int = 3
+            maxDeterministicAttempts: Int = 3,
+            kWayFetchCount: Int = 1
         ) {
             precondition(!backoffSchedule.isEmpty, "backoffSchedule must be non-empty")
             precondition(maxUnchangedAttempts >= 1, "maxUnchangedAttempts must be ≥ 1")
@@ -113,6 +125,7 @@ enum RediffRefetchPolicy {
             precondition(!deterministicFailureBackoffSchedule.isEmpty, "deterministicFailureBackoffSchedule must be non-empty")
             precondition(deterministicConfirmationCount >= 1, "deterministicConfirmationCount must be ≥ 1")
             precondition(maxDeterministicAttempts >= 1, "maxDeterministicAttempts must be ≥ 1")
+            precondition(kWayFetchCount >= 1, "kWayFetchCount must be ≥ 1")
             self.minimumAgeBeforeFirstAttempt = minimumAgeBeforeFirstAttempt
             self.backoffSchedule = backoffSchedule
             self.maxUnchangedAttempts = maxUnchangedAttempts
@@ -121,6 +134,7 @@ enum RediffRefetchPolicy {
             self.deterministicFailureBackoffSchedule = deterministicFailureBackoffSchedule
             self.deterministicConfirmationCount = deterministicConfirmationCount
             self.maxDeterministicAttempts = maxDeterministicAttempts
+            self.kWayFetchCount = kWayFetchCount
         }
     }
 

@@ -768,6 +768,142 @@ struct RediffRefetchTests {
         #expect(decoder.calls == [url])
     }
 
+    // MARK: - k-way fetch (playhead-xsdz.36.2)
+
+    @Test("k-way default is 1 (single-fetch bandwidth) in every config + the production activation constant")
+    func kWayDefaultsAreOne() {
+        #expect(RediffRefetchPolicy.Configuration.default.kWayFetchCount == 1)
+        #expect(RediffRefetchPolicy.Configuration.production.kWayFetchCount == 1)
+        #expect(RediffActivation.productionKWayFetchCount == 1,
+                "production stays single-fetch until a deliberate bandwidth go/no-go")
+    }
+
+    @Test("K=1 (default): a rotator triggers EXACTLY ONE fetch under the iPhone persona; the consumer gets one copy")
+    func kWayK1SingleFetchBackwardCompat() async {
+        let (fetcher, consumer, remover, recorder) = kWayDoubles()
+        await runKWaySweep(kWayFetchCount: 1, fetcher: fetcher, consumer: consumer,
+                           remover: remover, recorder: recorder)
+
+        #expect(fetcher.calls.count == 1, "K=1 → exactly today's single B-side fetch")
+        #expect(fetcher.calls.first?.persona?.name == "applecoremedia-iphone")
+        #expect(consumer.consumedFileURLs.count == 1)
+        #expect(consumer.consumedFileURLs.first == [URL(fileURLWithPath: "/tmp/kway-bcopy-0.mp3")])
+        #expect(remover.removed == [URL(fileURLWithPath: "/tmp/kway-bcopy-0.mp3")], "the one B-copy is deleted")
+        guard case let .rotated(_, cost, _, _) = recorder.outcomes.first else {
+            Issue.record("expected .rotated"); return
+        }
+        #expect(cost.fullFetchBytes == 54_000_000, "K=1 bandwidth = one full fetch")
+    }
+
+    @Test("K=3: three DISTINCT-persona fetches in iPhone→Mac→Overcast order; consumer gets all 3; all 3 deleted; bandwidth is 3×")
+    func kWayK3FetchesThreeDistinctPersonasAndDeletesAll() async {
+        let (fetcher, consumer, remover, recorder) = kWayDoubles()
+        await runKWaySweep(kWayFetchCount: 3, fetcher: fetcher, consumer: consumer,
+                           remover: remover, recorder: recorder)
+
+        // Three fetches, drawn in the divergence-reliable order, all distinct,
+        // none curl/generic.
+        #expect(fetcher.calls.count == 3, "K=3 → three B-side fetches")
+        #expect(fetcher.calls.map { $0.persona?.name }
+            == ["applecoremedia-iphone", "applecoremedia-macintosh", "overcast"])
+        #expect(Set(fetcher.calls.compactMap { $0.persona?.name }).count == 3, "no persona reused within a batch")
+        for call in fetcher.calls {
+            let ua = (call.persona?.userAgent ?? "").lowercased()
+            #expect(!ua.contains("curl") && !ua.contains("wget"))
+        }
+
+        // The consumer stages ALL three at once (one k-way handoff).
+        #expect(consumer.consumedFileURLs.count == 1)
+        #expect(consumer.consumedFileURLs.first?.count == 3)
+
+        // Never-persist-B: every fetched copy is deleted.
+        let expectedFiles = (0..<3).map { URL(fileURLWithPath: "/tmp/kway-bcopy-\($0).mp3") }
+        #expect(Set(remover.removed) == Set(expectedFiles), "all K B-copies deleted")
+
+        // Bandwidth accounts K× the full fetch.
+        guard case let .rotated(_, cost, _, _) = recorder.outcomes.first else {
+            Issue.record("expected .rotated"); return
+        }
+        #expect(cost.fullFetchBytes == 3 * 54_000_000)
+    }
+
+    @Test("k-way: a mid-batch fetch throw still DELETES the already-fetched copies and does NOT consume (never-persist-B)")
+    func kWayMidBatchFetchThrowDeletesFetchedCopies() async {
+        let sampler = StubRangedSampler()
+        sampler.defaultSample = RemoteAudioSample(
+            fingerprint: Self.fingerprint("fresh", total: 55_000_000), bytesTransferred: 131_072)
+        let local = StubLocalSampler()
+        local.defaultFingerprint = Self.fingerprint("played", total: 54_000_000)  // rotated
+        let fetcher = KWaySpyFullFetcher()
+        fetcher.throwOnCallIndex = 1  // first fetch succeeds, the SECOND throws mid-batch
+        let consumer = SpyKWayBSideConsumer()
+        let remover = SpyTempFileRemover()
+        let recorder = SpyRefetchRecorder()
+        let enumerator = StubRefetchEnumerator()
+        enumerator.candidatesToReturn = [Self.candidate(downloadedAt: 0)]
+        let service = RediffRefetchService(
+            enabled: true,
+            config: RediffRefetchPolicy.Configuration(kWayFetchCount: 3),
+            enumerator: enumerator,
+            rangedSampler: sampler,
+            localSampler: local,
+            fullFetcher: fetcher,
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: recorder,
+            fileRemover: remover,
+            taskScheduler: StubTaskScheduler(),
+            bsideConsumer: consumer,
+            now: { 100 * Self.day }
+        )
+        await service.runRefetchSweep()
+
+        // The first copy WAS fetched before the throw; it must be deleted.
+        #expect(remover.removed == [URL(fileURLWithPath: "/tmp/kway-bcopy-0.mp3")],
+                "the already-fetched B-copy is deleted even when a later fetch in the batch throws")
+        // A partial batch is never consumed → the candidate retries under the R2 policy.
+        #expect(consumer.consumedFileURLs.isEmpty, "a mid-batch fetch throw must not stage/consume a partial batch")
+        guard case .failed = recorder.outcomes.first else {
+            Issue.record("expected .failed, got \(String(describing: recorder.outcomes.first))"); return
+        }
+    }
+
+    /// Fresh k-way doubles for a rotator sweep.
+    private func kWayDoubles() -> (KWaySpyFullFetcher, SpyKWayBSideConsumer, SpyTempFileRemover, SpyRefetchRecorder) {
+        (KWaySpyFullFetcher(), SpyKWayBSideConsumer(), SpyTempFileRemover(), SpyRefetchRecorder())
+    }
+
+    /// Drive one sweep of a single ROTATED, eligible candidate at the given K.
+    private func runKWaySweep(
+        kWayFetchCount: Int,
+        fetcher: KWaySpyFullFetcher,
+        consumer: SpyKWayBSideConsumer,
+        remover: SpyTempFileRemover,
+        recorder: SpyRefetchRecorder
+    ) async {
+        let sampler = StubRangedSampler()
+        sampler.defaultSample = RemoteAudioSample(
+            fingerprint: Self.fingerprint("fresh", total: 55_000_000), bytesTransferred: 131_072)
+        let local = StubLocalSampler()
+        local.defaultFingerprint = Self.fingerprint("played", total: 54_000_000)  // differs → rotated
+        let enumerator = StubRefetchEnumerator()
+        enumerator.candidatesToReturn = [Self.candidate(downloadedAt: 0)]
+        let service = RediffRefetchService(
+            enabled: true,
+            config: RediffRefetchPolicy.Configuration(kWayFetchCount: kWayFetchCount),
+            enumerator: enumerator,
+            rangedSampler: sampler,
+            localSampler: local,
+            fullFetcher: fetcher,
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: recorder,
+            fileRemover: remover,
+            taskScheduler: StubTaskScheduler(),
+            bsideConsumer: consumer,
+            now: { 100 * Self.day }
+        )
+        await service.runRefetchSweep()
+    }
+
     // MARK: - Helpers
 
     private func makeService(
@@ -956,6 +1092,41 @@ struct RediffFetchPersonaTests {
             #expect(!ua.contains("wget"))
         }
     }
+
+    // MARK: - k-way persona selection (playhead-xsdz.36.2)
+
+    @Test("kWayPersonas draws K DISTINCT personas in iPhone→Mac→Overcast→empty order, K=1 == default, clamped, never curl")
+    func kWayPersonaSelection() {
+        #expect(RediffFetchPersona.kWayPersonas(count: 1).map(\.name) == ["applecoremedia-iphone"])
+        #expect(RediffFetchPersona.kWayPersonas(count: 2).map(\.name)
+            == ["applecoremedia-iphone", "applecoremedia-macintosh"])
+        #expect(RediffFetchPersona.kWayPersonas(count: 3).map(\.name)
+            == ["applecoremedia-iphone", "applecoremedia-macintosh", "overcast"])
+        #expect(RediffFetchPersona.kWayPersonas(count: 4).map(\.name)
+            == ["applecoremedia-iphone", "applecoremedia-macintosh", "overcast", "empty-ua"])
+
+        // K=1 is EXACTLY the default persona → a K=1 batch is byte-identical to
+        // today's single default-persona fetch.
+        #expect(RediffFetchPersona.kWayPersonas(count: 1) == [.default])
+
+        // The iPhone+Mac divergence CORE always leads.
+        let three = RediffFetchPersona.kWayPersonas(count: 3)
+        #expect(three.first == .appleCoreMediaIPhone)
+        #expect(three[1] == .appleCoreMediaMac)
+
+        // DISTINCT within a batch (never reused).
+        #expect(Set(three.map(\.name)).count == 3)
+
+        // Clamped to the bank size above it, and to ≥1 below it.
+        #expect(RediffFetchPersona.kWayPersonas(count: 9) == RediffFetchPersona.curatedBank)
+        #expect(RediffFetchPersona.kWayPersonas(count: 0) == [.appleCoreMediaIPhone], "clamped to ≥1")
+
+        // Never a curl/generic UA (the bank excludes them).
+        for persona in RediffFetchPersona.kWayPersonas(count: 4) {
+            let ua = (persona.userAgent ?? "").lowercased()
+            #expect(!ua.contains("curl") && !ua.contains("wget"))
+        }
+    }
 }
 
 // MARK: - Seam stubs
@@ -1015,6 +1186,47 @@ final class StubFullFetcher: FullEpisodeFetching, @unchecked Sendable {
         if let errorToThrow { throw errorToThrow }
         guard let fileToReturn else { throw NSError(domain: "StubFullFetcher", code: 1) }
         return (fileToReturn, byteCount)
+    }
+}
+
+/// playhead-xsdz.36.2 (k-way): records the (url, persona) of every fetch and
+/// returns a DISTINCT fake temp URL per call (`/tmp/kway-bcopy-<n>.mp3`), so a
+/// batch's persona ordering, distinctness, per-copy deletion, and bandwidth are
+/// directly assertable. Implements BOTH `download` overloads so the persona the
+/// service passes is captured (not swallowed by the default extension).
+final class KWaySpyFullFetcher: FullEpisodeFetching, @unchecked Sendable {
+    struct Call: Sendable { let url: URL; let persona: RediffFetchPersona? }
+    private(set) var calls: [Call] = []
+    var byteCountPerFetch = 54_000_000
+    /// If set, the fetch at this 0-based call index THROWS (models a mid-batch
+    /// network failure) — nothing is returned for that call, so the earlier
+    /// copies are the only ones the caller must delete.
+    var throwOnCallIndex: Int?
+    func download(url: URL) async throws -> (fileURL: URL, byteCount: Int) {
+        try await download(url: url, persona: nil)
+    }
+    func download(url: URL, persona: RediffFetchPersona?) async throws -> (fileURL: URL, byteCount: Int) {
+        let index = calls.count
+        if index == throwOnCallIndex {
+            throw NSError(domain: "KWaySpyFullFetcher", code: 1)
+        }
+        calls.append(Call(url: url, persona: persona))
+        return (URL(fileURLWithPath: "/tmp/kway-bcopy-\(index).mp3"), byteCountPerFetch)
+    }
+}
+
+/// playhead-xsdz.36.2 (k-way): records the file-URL LIST handed to each
+/// `consumeRotatedBSides` so the "stage ALL K copies at once" handoff is
+/// assertable. Implements the k-way method directly (not the single-file default).
+final class SpyKWayBSideConsumer: RediffBSideConsuming, @unchecked Sendable {
+    private(set) var consumedFileURLs: [[URL]] = []
+    var errorToThrow: Error?
+    func consumeRotatedBSide(assetId: String, fileURL: URL) async throws {
+        try await consumeRotatedBSides(assetId: assetId, fileURLs: [fileURL])
+    }
+    func consumeRotatedBSides(assetId: String, fileURLs: [URL]) async throws {
+        consumedFileURLs.append(fileURLs)
+        if let errorToThrow { throw errorToThrow }
     }
 }
 

@@ -346,33 +346,50 @@ actor RediffRefetchService {
 
             // (d) Rotator → full re-fetch → fingerprint/consume (off hot
             //     actor) → DELETE.
+            //
+            // playhead-xsdz.36.2 (k-way): fetch K B-copies, each under a
+            // DISTINCT persona drawn from the curated bank in the
+            // divergence-reliable order (iPhone → Mac → Overcast → empty), each
+            // with its own unique cache-buster. K=1 (the default and the
+            // conservative production value) fetches exactly ONE B-copy under
+            // the default persona — byte-identical to xsdz.36. The consumer
+            // stages ALL K so `computeByteAlignedPlayedSlots` unions the pairwise
+            // diffs; a pod one fetch-pair misses is recovered from another
+            // persona's stitch.
             stage = .fetch
-            let full = try await fullFetcher.download(url: candidate.enclosureURL)
-            fullFetchBytes = full.byteCount
-            // NEVER persist the B-copy: delete on EVERY exit from this scope,
-            // including a throw out of the fingerprint/consume step below.
-            defer { fileRemover.remove(full.fileURL) }
+            let personas = RediffFetchPersona.kWayPersonas(count: config.kWayFetchCount)
+            var fetchedFileURLs: [URL] = []
+            // NEVER persist the B-copies: delete EVERY fetched copy on EVERY exit
+            // from this scope — a mid-batch fetch throw, or a throw out of the
+            // fingerprint/consume step below. Captures the growing array by
+            // reference, so it deletes exactly what was fetched.
+            defer { for url in fetchedFileURLs { fileRemover.remove(url) } }
+            for persona in personas {
+                let full = try await fullFetcher.download(url: candidate.enclosureURL, persona: persona)
+                fetchedFileURLs.append(full.fileURL)
+                fullFetchBytes += full.byteCount
+            }
 
             stage = .postDownload
             let fingerprintCount: Int
             if let bsideConsumer {
-                // ACTIVATION path (xsdz.36): hand the B-copy to the rediff
-                // slot pass (stage → revalidate → unstage) while the file
-                // still exists. The pass fingerprints/aligns internally, so
+                // ACTIVATION path (xsdz.36): hand the K B-copies to the rediff
+                // slot pass (stage all → revalidate once → unstage) while the
+                // files still exist. The pass fingerprints/aligns internally, so
                 // the standalone fingerprint step would be a redundant
                 // full-episode decode — skipped. A consume throw is a FAILURE
                 // (no resolve) so a later sweep retries under the R2 policy.
-                try await bsideConsumer.consumeRotatedBSide(
+                try await bsideConsumer.consumeRotatedBSides(
                     assetId: candidate.assetId,
-                    fileURL: full.fileURL
+                    fileURLs: fetchedFileURLs
                 )
                 fingerprintCount = 0
             } else {
-                // Pre-activation xsdz.28 path, byte-identical: standalone
-                // B-side fingerprint validation. An EMPTY stream is now a
-                // fingerprint-mismatch-class failure rather than a silent
-                // "resolved with 0 fingerprints" terminal.
-                let fingerprints = try await bsideFingerprinter.fingerprint(fileURL: full.fileURL)
+                // Pre-activation xsdz.28 path, byte-identical at K=1: standalone
+                // B-side fingerprint validation of the primary (first-persona)
+                // copy. An EMPTY stream is a fingerprint-mismatch-class failure
+                // rather than a silent "resolved with 0 fingerprints" terminal.
+                let fingerprints = try await bsideFingerprinter.fingerprint(fileURL: fetchedFileURLs[0])
                 guard !fingerprints.isEmpty else { throw RediffBSideEmptyStreamError() }
                 fingerprintCount = fingerprints.count
             }
