@@ -1230,6 +1230,42 @@ final class SpyKWayBSideConsumer: RediffBSideConsuming, @unchecked Sendable {
     }
 }
 
+/// playhead-xsdz.36.4 (day-0 byte-exact mint): records the FLAT B-side URL list
+/// handed to each `mintByteExactDayZeroMarks` call and returns a configurable
+/// mark count, so the day-0 marked/unmarked outcome split (and the never-persist
+/// deletion + bandwidth accounting around it) is directly assertable without a
+/// real byte differ / store.
+final class SpyDayZeroMinter: RediffDayZeroMinting, @unchecked Sendable {
+    private(set) var calls: [(assetId: String, bSideURLs: [URL])] = []
+    /// Marks to report per call. Default `1` (a marked day-0 run); set `0` to
+    /// exercise the poisoning-safe unmarked path (no resolve, no state advance).
+    var markCountToReturn = 1
+    func mintByteExactDayZeroMarks(assetId: String, bSideURLs: [URL]) async -> Int {
+        calls.append((assetId, bSideURLs))
+        return markCountToReturn
+    }
+}
+
+/// playhead-xsdz.36.4: returns a provided list of REAL on-disk file URLs, one
+/// per fetch call (by index, cycling if fewer files than fetches), so the day-0
+/// byte-exact mint can read genuine A/B bytes off disk. Records the (url,
+/// persona) of every fetch like `KWaySpyFullFetcher`.
+final class RealFilesKWayFetcher: FullEpisodeFetching, @unchecked Sendable {
+    struct Call: Sendable { let url: URL; let persona: RediffFetchPersona? }
+    private(set) var calls: [Call] = []
+    let files: [URL]
+    var byteCountPerFetch = 54_000_000
+    init(files: [URL]) { self.files = files }
+    func download(url: URL) async throws -> (fileURL: URL, byteCount: Int) {
+        try await download(url: url, persona: nil)
+    }
+    func download(url: URL, persona: RediffFetchPersona?) async throws -> (fileURL: URL, byteCount: Int) {
+        let index = calls.count
+        calls.append(Call(url: url, persona: persona))
+        return (files[index % files.count], byteCountPerFetch)
+    }
+}
+
 final class StubBSideFingerprinter: RediffBSideFingerprinting, @unchecked Sendable {
     var fingerprintsToReturn: [UInt32] = [1, 2, 3]
     var errorToThrow: Error?

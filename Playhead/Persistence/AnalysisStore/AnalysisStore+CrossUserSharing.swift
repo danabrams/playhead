@@ -315,7 +315,15 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
             switch boundaryState {
             case "userMarked",
                  "userConfirmedSuggested",
-                 "correctionReplay":
+                 "correctionReplay",
+                 // playhead-xsdz.36.4: day-0 byte-exact rediff marks are LOCAL
+                 // ground truth for THIS user's DAI stitch (another user's stitch
+                 // has different byte boundaries), so they are never exported —
+                 // but they ARE a recognized disposition, so an asset carrying one
+                 // does not abort its cross-user snapshot via
+                 // `hasKnownExportDisposition`. Mirrors
+                 // `AdDetectionService.dayZeroRediffByteExactBoundaryState`.
+                 "dayZeroRediffByteExact":
                 return true
             default:
                 return false

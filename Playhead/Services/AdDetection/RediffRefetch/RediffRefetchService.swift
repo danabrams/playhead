@@ -87,6 +87,14 @@ actor RediffRefetchService {
     /// pre-activation caller) preserves the xsdz.28 behavior byte-for-byte:
     /// standalone B-side fingerprint, then delete.
     private let bsideConsumer: (any RediffBSideConsuming)?
+    /// playhead-xsdz.36.4 DAY-0: optional byte-exact mint path for the play-time
+    /// (day-0) trigger. `nil` (default, and every lagged-only caller) ⇒ the day-0
+    /// path is a no-op even when the trigger fires. When wired,
+    /// `runDayZeroRefetch` routes the k-way B-copies through it — byte-align vs
+    /// the pinned A-side → ≥2-persona-robust byte-EXACT slots → mark-only banners
+    /// — INSTEAD of the `bsideConsumer`/`revalidateFromFeatures` route (which
+    /// needs persisted analysis that a true first listen does not have).
+    private let dayZeroMinter: (any RediffDayZeroMinting)?
     /// playhead-xsdz.36: optional durable run ledger (same surface the other
     /// BG tasks use, `background_task_runs`). `nil` (default) records nothing.
     private let runLedger: (any BackgroundTaskRunLedger)?
@@ -129,6 +137,7 @@ actor RediffRefetchService {
         fileRemover: any RediffTempFileRemoving = FileManagerTempFileRemover(),
         taskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared,
         bsideConsumer: (any RediffBSideConsuming)? = nil,
+        dayZeroMinter: (any RediffDayZeroMinting)? = nil,
         runLedger: (any BackgroundTaskRunLedger)? = nil,
         now: @escaping @Sendable () -> Double = { Date().timeIntervalSince1970 }
     ) {
@@ -143,6 +152,7 @@ actor RediffRefetchService {
         self.fileRemover = fileRemover
         self.taskScheduler = taskScheduler
         self.bsideConsumer = bsideConsumer
+        self.dayZeroMinter = dayZeroMinter
         self.runLedger = runLedger
         self.now = now
     }
@@ -314,12 +324,9 @@ actor RediffRefetchService {
         at sweepNow: Double
     ) async -> CandidateResult {
         var precheckBytes = 0
-        var fullFetchBytes = 0
-        // Stage marker for failure classification: an unknown error BEFORE
-        // the ~54 MB fetch retries cheaply (transient); an unknown error
-        // AFTER it is decode-class so a deterministic loop cannot re-spend
-        // the fetch every sweep (xsdz.28 R2).
-        var stage = RediffRefetchPolicy.FailureStage.precheck
+        // Stage marker for a PRE-CHECK failure classification: an unknown error
+        // BEFORE the ~54 MB fetch retries cheaply (transient). The fetch/consume
+        // stages are classified inside `fetchConsumeAndRecord`.
         do {
             // (a) Ranged head/tail sample of the CURRENT enclosure (NO HEAD).
             let remote = try await rangedSampler.sample(
@@ -343,21 +350,69 @@ actor RediffRefetchService {
                 await recorder.recordOutcome(.unchanged(assetId: candidate.assetId, cost: cost, newState: newState))
                 return CandidateResult(cost: cost, rotated: false, failed: false)
             }
+        } catch {
+            // A pre-check-stage failure: no full fetch was spent, so the cost is
+            // whatever the ranged sample transferred (0 if it was the throw).
+            let failureClass = RediffRefetchPolicy.classifyFailure(error, stage: .precheck)
+            let newState = RediffRefetchPolicy.advanceFailed(
+                candidate.attemptState,
+                failureClass: failureClass,
+                at: sweepNow
+            )
+            if RediffRefetchPolicy.isParked(newState, config: config) {
+                logger.error(
+                    "rediff re-fetch PARKED assetId=\(candidate.assetId, privacy: .public) class=\(failureClass.rawValue, privacy: .public) streak=\(newState.sameClassFailureStreak, privacy: .public)"
+                )
+            }
+            let cost = RediffRefetchPolicy.BandwidthCost(precheckBytes: precheckBytes, fullFetchBytes: 0)
+            await recorder.recordOutcome(.failed(
+                assetId: candidate.assetId,
+                cost: cost,
+                failureClass: failureClass,
+                newState: newState,
+                error: String(describing: error)
+            ))
+            return CandidateResult(cost: cost, rotated: false, failed: true)
+        }
 
-            // (d) Rotator → full re-fetch → fingerprint/consume (off hot
-            //     actor) → DELETE.
-            //
-            // playhead-xsdz.36.2 (k-way): fetch K B-copies, each under a
-            // DISTINCT persona drawn from the curated bank in the
-            // divergence-reliable order (iPhone → Mac → Overcast → empty), each
-            // with its own unique cache-buster. K=1 (the default and the
-            // conservative production value) fetches exactly ONE B-copy under
-            // the default persona — byte-identical to xsdz.36. The consumer
-            // stages ALL K so `computeByteAlignedPlayedSlots` unions the pairwise
-            // diffs; a pod one fetch-pair misses is recovered from another
-            // persona's stitch.
-            stage = .fetch
-            let personas = RediffFetchPersona.kWayPersonas(count: config.kWayFetchCount)
+        // (d) Rotator → the shared full-fetch → consume → delete → record arm.
+        return await fetchConsumeAndRecord(
+            candidate,
+            at: sweepNow,
+            precheckBytes: precheckBytes,
+            kWayFetchCount: config.kWayFetchCount
+        )
+    }
+
+    /// The rotator arm, shared by the lagged sweep (after its rotation
+    /// pre-check) and the day-0 play-time trigger (which skips the pre-check):
+    /// full re-fetch K distinct-persona B-copies → fingerprint/consume off the
+    /// hot actor → DELETE every copy on every exit → record the terminal
+    /// outcome + bandwidth. `precheckBytes` is the bandwidth already spent
+    /// before this arm (the lagged pre-check's ~128 KB ranged sample; `0` for
+    /// day-0, which does no pre-check). `kWayFetchCount` is the config value for
+    /// the lagged sweep and the day-0 constant for the trigger.
+    ///
+    /// playhead-xsdz.36.2 (k-way): fetch K B-copies, each under a DISTINCT
+    /// persona drawn from the curated bank in the divergence-reliable order
+    /// (iPhone → Mac → Overcast → empty), each with its own unique cache-buster.
+    /// K=1 fetches exactly ONE B-copy under the default persona. The consumer
+    /// stages ALL K so `computeByteAlignedPlayedSlots` unions the pairwise
+    /// diffs; a pod one fetch-pair misses is recovered from another persona's
+    /// stitch.
+    private func fetchConsumeAndRecord(
+        _ candidate: RediffRefetchCandidate,
+        at sweepNow: Double,
+        precheckBytes: Int,
+        kWayFetchCount: Int
+    ) async -> CandidateResult {
+        var fullFetchBytes = 0
+        // Stage marker for failure classification: an unknown error AFTER the
+        // ~54 MB fetch is decode-class so a deterministic loop cannot re-spend
+        // the fetch every sweep (xsdz.28 R2).
+        var stage = RediffRefetchPolicy.FailureStage.fetch
+        do {
+            let personas = RediffFetchPersona.kWayPersonas(count: kWayFetchCount)
             var fetchedFileURLs: [URL] = []
             // NEVER persist the B-copies: delete EVERY fetched copy on EVERY exit
             // from this scope — a mid-batch fetch throw, or a throw out of the
@@ -423,6 +478,133 @@ actor RediffRefetchService {
                 newState: newState,
                 error: String(describing: error)
             ))
+            return CandidateResult(cost: cost, rotated: false, failed: true)
+        }
+    }
+
+    // MARK: - Day-0 (immediate, play-time) rediff (playhead-xsdz.36.4)
+
+    /// Run an IMMEDIATE (day-0) rediff for a SINGLE just-started episode — the
+    /// capstone of the rediff-activation series. Unlike the lagged sweep this
+    /// deliberately BYPASSES the ≥24h eligibility gate AND the rotation
+    /// PRE-CHECK: the pre-check is a single-persona head/tail probe that
+    /// false-negatives on client-PINNED DAI (a same-context re-fetch returns a
+    /// byte-identical body), the very category day-0's k-way probe targets.
+    ///
+    /// FIRST-LISTEN MARKING (playhead-xsdz.36.4 rework): day-0 does NOT route
+    /// through the lagged `bsideConsumer`/`revalidateFromFeatures` arm. That arm
+    /// re-runs the slot pass over PERSISTED transcript/analysis, which on a true
+    /// first listen does NOT yet exist (transcription takes minutes; the k-way
+    /// fetch finishes in seconds) — so it produced ZERO marks AND poisoned the
+    /// shared lagged state. Instead day-0 uses `fetchMintAndRecord`: k-way full
+    /// fetch → hand the B-copies to `dayZeroMinter`, which byte-aligns each
+    /// against the pinned A-side and MINTS mark-only banners for byte-EXACT,
+    /// ≥2-persona-robust divergent slots (a byte-exact divergent region is its
+    /// OWN deterministic ad-presence core — no persisted analysis required) →
+    /// DELETE every B-copy → account bandwidth. Marks flow to banners as the
+    /// SAME mark-only surface (auto-skip stays held).
+    ///
+    /// SAFETY (wrj8): the A-side of the byte diff is the pinned played file
+    /// (read-only, resolved from the asset row's `sourceURL` inside the
+    /// minter); the B-side(s) are separate never-played temp copies deleted on
+    /// every exit. Day-0 NEVER writes/rotates the pinned playback audio.
+    ///
+    /// POISONING FIX: day-0 is ADDITIVE toward `rediff_refetch_state`. It writes
+    /// `resolved` ONLY when it actually produced marks; an empty/failed run
+    /// accounts bandwidth but advances NO attempt state, so the lagged sweep
+    /// still recovers those ads later (see `Outcome.dayZeroUnmarked`).
+    ///
+    /// Enablement/power/network GATING is the CALLER's responsibility
+    /// (`DayZeroRediffTrigger`, gated on `RediffActivation.dayZeroEnabledByDefault`
+    /// + WiFi + charging/deep-scan). The service-level `enabled` flag still
+    /// governs whether ANY network/filesystem is touched — a disabled service is
+    /// a no-op even here (the OFF byte-identity contract). A `nil` `dayZeroMinter`
+    /// is likewise a no-op (no fetch, no marks): day-0 has no marking path.
+    @discardableResult
+    func runDayZeroRefetch(
+        for candidate: RediffRefetchCandidate,
+        kWayFetchCount: Int = RediffActivation.dayZeroKWayFetchCount
+    ) async -> SweepSummary {
+        var summary = SweepSummary()
+        guard enabled, dayZeroMinter != nil else { return summary }
+        summary.candidateCount = 1
+        summary.eligibleProcessed = 1
+        let result = await fetchMintAndRecord(
+            candidate,
+            at: now(),
+            kWayFetchCount: kWayFetchCount
+        )
+        summary.precheckBytes += result.cost.precheckBytes
+        summary.fullFetchBytes += result.cost.fullFetchBytes
+        if result.rotated { summary.rotatedCount += 1 }
+        if result.failed { summary.failedCount += 1 }
+        logger.info(
+            "rediff DAY-0 refetch asset=\(candidate.assetId, privacy: .public) marked=\(summary.rotatedCount, privacy: .public) failed=\(summary.failedCount, privacy: .public) bytes=\(summary.totalBytes, privacy: .public)"
+        )
+        return summary
+    }
+
+    /// The DAY-0 mint arm (playhead-xsdz.36.4): fetch K distinct-persona B-copies
+    /// → DELETE every copy on every exit → hand them to the `dayZeroMinter` for
+    /// the byte-EXACT ≥2-persona-robust mark mint → record the poisoning-safe
+    /// outcome + bandwidth. Mirrors `fetchConsumeAndRecord`'s fetch + never-
+    /// persist-B `defer`, but replaces the persisted-analysis consume with the
+    /// first-listen byte-exact mint and the always-resolve `.rotated` outcome
+    /// with the additive `.dayZeroMarked` / `.dayZeroUnmarked` split.
+    private func fetchMintAndRecord(
+        _ candidate: RediffRefetchCandidate,
+        at sweepNow: Double,
+        kWayFetchCount: Int
+    ) async -> CandidateResult {
+        // Guarded by `runDayZeroRefetch`; re-asserted so this arm is self-safe.
+        guard let dayZeroMinter else {
+            return CandidateResult(cost: .zero, rotated: false, failed: false)
+        }
+        var fullFetchBytes = 0
+        do {
+            let personas = RediffFetchPersona.kWayPersonas(count: kWayFetchCount)
+            var fetchedFileURLs: [URL] = []
+            // NEVER persist the B-copies: delete EVERY fetched copy on EVERY exit
+            // (a mid-batch fetch throw, or a throw/return out of the mint below).
+            defer { for url in fetchedFileURLs { fileRemover.remove(url) } }
+            for persona in personas {
+                let full = try await fullFetcher.download(url: candidate.enclosureURL, persona: persona)
+                fetchedFileURLs.append(full.fileURL)
+                fullFetchBytes += full.byteCount
+            }
+
+            let markCount = await dayZeroMinter.mintByteExactDayZeroMarks(
+                assetId: candidate.assetId,
+                bSideURLs: fetchedFileURLs
+            )
+            let cost = RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: fullFetchBytes)
+            if markCount > 0 {
+                // A day-0 MARK resolves the shared state (terminal, no lagged
+                // re-fetch) — a deliberate bandwidth tradeoff. Day-0's K=3 fetch
+                // breadth exceeds the lagged K=1 sweep, but day-0 also applies a
+                // STRICTER ≥2-persona quorum, so it is not a strict superset of
+                // lagged RESULTS: a pod that diverges on ONLY the lagged default
+                // persona would be dropped by day-0's quorum yet marked by the
+                // lagged K=1 sweep — resolving forecloses that (rare) recovery.
+                // Accepted because such marks are mark-only (a missed banner, never
+                // eaten content) and the saved re-fetch bandwidth is the priority.
+                let newState = RediffRefetchPolicy.markResolved(candidate.attemptState, at: sweepNow)
+                await recorder.recordOutcome(.dayZeroMarked(
+                    assetId: candidate.assetId, cost: cost, markCount: markCount, newState: newState))
+                return CandidateResult(cost: cost, rotated: true, failed: false)
+            } else {
+                // POISONING FIX: no marks ⇒ bandwidth accounted, NO state advance
+                // (the asset stays a lagged candidate — nothing resolved).
+                await recorder.recordOutcome(.dayZeroUnmarked(
+                    assetId: candidate.assetId, cost: cost, error: nil))
+                return CandidateResult(cost: cost, rotated: false, failed: false)
+            }
+        } catch {
+            // POISONING FIX: a day-0 fetch error also advances NO lagged state —
+            // bytes spent are accounted; the lagged sweep runs later unimpeded.
+            let cost = RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: fullFetchBytes)
+            await recorder.recordOutcome(.dayZeroUnmarked(
+                assetId: candidate.assetId, cost: cost, error: String(describing: error)))
             return CandidateResult(cost: cost, rotated: false, failed: true)
         }
     }

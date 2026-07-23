@@ -199,6 +199,324 @@ struct RediffActivationWiringTests {
         #expect(await staging.stagedCount == 0)
     }
 
+    /// Build the K day-0 B-copies (real files on disk) + the refetch service
+    /// wired for the byte-exact DAY-0 MINT path (`dayZeroMinter`), with pre-check
+    /// samplers rigged to THROW if ever consulted (day-0 bypasses the pre-check).
+    private func makeDayZeroMintService(
+        store: AnalysisStore,
+        bFiles: [URL],
+        recorder: SpyRefetchRecorder
+    ) -> RediffRefetchService {
+        let adService = makeService(
+            store: store,
+            provider: RediffBSideStagingProvider(decoder: StubDecoder(), durationProbe: { _ in nil })
+        )
+        let sampler = StubRangedSampler()
+        sampler.errorToThrow = NSError(domain: "precheck-must-not-run", code: 1)
+        let local = StubLocalSampler()
+        local.errorToThrow = NSError(domain: "precheck-must-not-run", code: 2)
+        return RediffRefetchService(
+            enabled: true,
+            config: .production,
+            enumerator: StubRefetchEnumerator(),
+            rangedSampler: sampler,
+            localSampler: local,
+            fullFetcher: RealFilesKWayFetcher(files: bFiles),
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: recorder,
+            fileRemover: FileManagerTempFileRemover(),
+            taskScheduler: StubTaskScheduler(),
+            dayZeroMinter: AdDetectionDayZeroByteExactMinter(adDetection: adService),
+            now: { 100 * Self.day }
+        )
+    }
+
+    private static let day0Enclosure = URL(string: "https://cdn.example.com/current.mp3")!
+
+    @Test("DAY-0 (xsdz.36.4): a TRUE first listen (NO persisted chunks/analysis) mints byte-exact MARK-ONLY AdWindow banners from ≥2-persona-robust divergence; .dayZeroMarked; B deleted")
+    func dayZeroFirstListenMintsByteExactMarks() async throws {
+        let assetId = "asset-day0-firstlisten"
+        let dir = try makeTempDir(prefix: "RediffDay0FL-\(assetId)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try BytePair.stage(in: dir)
+
+        // TWO real B copies (K=2, distinct personas) — both diverge from A
+        // identically → the region is ≥2-persona-robust (the mint quorum).
+        let b0 = dir.appendingPathComponent("dl-b0.mp3")
+        let b1 = dir.appendingPathComponent("dl-b1.mp3")
+        try FileManager.default.copyItem(at: pair.bURL, to: b0)
+        try FileManager.default.copyItem(at: pair.bURL, to: b1)
+
+        let store = try await makeTestStore()
+        try await insertActivationAsset(store: store, assetId: assetId, sourceURL: pair.aURL.absoluteString)
+        // NO transcript chunks — a TRUE first listen (the case the checkpoint
+        // failed: `revalidateFromFeatures` early-returns on empty chunks).
+
+        let recorder = SpyRefetchRecorder()
+        let refetch = makeDayZeroMintService(store: store, bFiles: [b0, b1], recorder: recorder)
+        let candidate = RediffRefetchCandidate(
+            assetId: assetId, enclosureURL: Self.day0Enclosure,
+            downloadedAt: 0, localAudioURL: pair.aURL, attemptState: .initial
+        )
+        let summary = await refetch.runDayZeroRefetch(for: candidate, kWayFetchCount: 2)
+
+        // A mark was produced → summary + poisoning-safe RESOLVED state.
+        #expect(summary.rotatedCount == 1)
+        #expect(summary.fullFetchBytes == 2 * 54_000_000)
+        guard case let .dayZeroMarked(_, cost, markCount, newState) = recorder.outcomes.first else {
+            Issue.record("expected .dayZeroMarked, got \(String(describing: recorder.outcomes.first))"); return
+        }
+        #expect(markCount == 1)
+        #expect(cost.precheckBytes == 0, "day-0 spends no pre-check bytes")
+        #expect(newState.resolved)
+
+        // The product outcome: a byte-exact MARK-ONLY AdWindow banner — WITHOUT
+        // any persisted transcript/analysis (the byte-exact slot is its OWN
+        // presence core). NOT a decoded span, NOT auto-skip.
+        let windows = try await store.fetchAdWindows(assetId: assetId)
+        #expect(windows.count == 1, "exactly the byte-exact ad slot is marked, got \(windows.map { ($0.startTime, $0.endTime) })")
+        if let w = windows.first {
+            #expect(w.eligibilityGate == SkipEligibilityGate.markOnly.rawValue, "mark-only banner, never auto-skip")
+            #expect(w.confidence == 1.0, "deterministic byte-exact certainty")
+            #expect(w.startTime >= 94.5 && w.startTime <= 95.5, "byte-exact start ≈ 95, got \(w.startTime)")
+            #expect(w.endTime >= 164.5 && w.endTime <= 165.5, "byte-exact end ≈ 165, got \(w.endTime)")
+        }
+        // No analysis ran → no decoded spans (the marks are AdWindows only).
+        #expect(try await store.fetchDecodedSpans(assetId: assetId).isEmpty,
+                "no transcript/analysis ran ⇒ no decoded spans")
+        // Never-persist-B: both copies deleted on exit.
+        #expect(!FileManager.default.fileExists(atPath: b0.path))
+        #expect(!FileManager.default.fileExists(atPath: b1.path))
+    }
+
+    @Test("DAY-0 narrowness: a SINGLE byte-exact divergent B (no ≥2-persona quorum) mints NOTHING → .dayZeroUnmarked (poisoning-safe: no resolve, asset stays a lagged candidate)")
+    func dayZeroSinglePersonaMintsNothing() async throws {
+        let assetId = "asset-day0-single"
+        let dir = try makeTempDir(prefix: "RediffDay0Single-\(assetId)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try BytePair.stage(in: dir)
+        let b0 = dir.appendingPathComponent("dl-b0.mp3")
+        try FileManager.default.copyItem(at: pair.bURL, to: b0)
+
+        let store = try await makeTestStore()
+        try await insertActivationAsset(store: store, assetId: assetId, sourceURL: pair.aURL.absoluteString)
+
+        let recorder = SpyRefetchRecorder()
+        let refetch = makeDayZeroMintService(store: store, bFiles: [b0], recorder: recorder)
+        let candidate = RediffRefetchCandidate(
+            assetId: assetId, enclosureURL: Self.day0Enclosure,
+            downloadedAt: 0, localAudioURL: pair.aURL, attemptState: .initial
+        )
+        // K=1 — a lone divergence cannot reach the ≥2-persona robustness quorum.
+        let summary = await refetch.runDayZeroRefetch(for: candidate, kWayFetchCount: 1)
+
+        #expect(summary.rotatedCount == 0, "a single-persona diff mints nothing")
+        guard case let .dayZeroUnmarked(_, cost, _) = recorder.outcomes.first else {
+            Issue.record("expected .dayZeroUnmarked, got \(String(describing: recorder.outcomes.first))"); return
+        }
+        #expect(cost.fullFetchBytes == 54_000_000, "bytes still accounted")
+        #expect(try await store.fetchAdWindows(assetId: assetId).isEmpty, "no marks minted")
+        // The MINT path itself never touches `rediff_refetch_state` (state is the
+        // recorder's job — the store-level poisoning contract is pinned by
+        // `RediffRefetchRecorderTests.dayZeroOutcomesPoisoningSafe`). Here the
+        // `.dayZeroUnmarked` outcome above is the poisoning-safe signal.
+        #expect(try await store.fetchRediffRefetchStates().isEmpty,
+                "the day-0 mint writes only AdWindows, never rediff_refetch_state")
+        #expect(!FileManager.default.fileExists(atPath: b0.path))
+    }
+
+    @Test("DAY-0 byte-EXACT only: ≥2 personas whose diffs FALL BACK to chroma (re-encode / no shared frames) mint NOTHING → .dayZeroUnmarked")
+    func dayZeroChromaFallbackMintsNothing() async throws {
+        let assetId = "asset-day0-chroma"
+        let dir = try makeTempDir(prefix: "RediffDay0Chroma-\(assetId)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try BytePair.stage(in: dir)
+
+        // Two B copies that share NO frames with A (a whole-file re-encode
+        // analogue) → the byte gate rejects each (`rejectedNoChainedRuns`), the
+        // very "fall back to chroma" trigger — from which day-0 mints NOTHING.
+        let reencoded = SyntheticMP3.file(SyntheticMP3.frames(count: 10_719, seed: 0x5EED_5EED))
+        let b0 = dir.appendingPathComponent("reenc-b0.mp3")
+        let b1 = dir.appendingPathComponent("reenc-b1.mp3")
+        try reencoded.write(to: b0)
+        try reencoded.write(to: b1)
+
+        let store = try await makeTestStore()
+        try await insertActivationAsset(store: store, assetId: assetId, sourceURL: pair.aURL.absoluteString)
+
+        let recorder = SpyRefetchRecorder()
+        let refetch = makeDayZeroMintService(store: store, bFiles: [b0, b1], recorder: recorder)
+        let candidate = RediffRefetchCandidate(
+            assetId: assetId, enclosureURL: Self.day0Enclosure,
+            downloadedAt: 0, localAudioURL: pair.aURL, attemptState: .initial
+        )
+        let summary = await refetch.runDayZeroRefetch(for: candidate, kWayFetchCount: 2)
+
+        #expect(summary.rotatedCount == 0, "chroma-fallback diffs mint nothing (byte-exact only)")
+        guard case .dayZeroUnmarked = recorder.outcomes.first else {
+            Issue.record("expected .dayZeroUnmarked, got \(String(describing: recorder.outcomes.first))"); return
+        }
+        #expect(try await store.fetchAdWindows(assetId: assetId).isEmpty, "no byte-exact slot ⇒ no marks")
+    }
+
+    @Test("DAY-0 idempotency: a robust byte-exact slot already covered by an existing AdWindow is NOT re-marked")
+    func dayZeroDoesNotDoubleMarkExistingWindow() async throws {
+        let assetId = "asset-day0-idem"
+        let dir = try makeTempDir(prefix: "RediffDay0Idem-\(assetId)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try BytePair.stage(in: dir)
+        let b0 = dir.appendingPathComponent("dl-b0.mp3")
+        let b1 = dir.appendingPathComponent("dl-b1.mp3")
+        try FileManager.default.copyItem(at: pair.bURL, to: b0)
+        try FileManager.default.copyItem(at: pair.bURL, to: b1)
+
+        let store = try await makeTestStore()
+        try await insertActivationAsset(store: store, assetId: assetId, sourceURL: pair.aURL.absoluteString)
+        // Pre-seed an AdWindow already covering the ~[95,165] byte slot.
+        try await store.upsertHotPathAdWindows([AdWindow(
+            id: "pre-existing", analysisAssetId: assetId, startTime: 90, endTime: 170,
+            confidence: 0.7, boundaryState: "userMarked",
+            decisionState: AdDecisionState.candidate.rawValue, detectorVersion: "test-detection-v1",
+            advertiser: nil, product: nil, adDescription: nil, evidenceText: nil, evidenceStartTime: 90,
+            metadataSource: "test", metadataConfidence: nil, metadataPromptVersion: nil,
+            wasSkipped: false, userDismissedBanner: false, evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue, catalogStoreMatchSimilarity: nil
+        )], existingIDs: [], retiredIDs: [])
+
+        let recorder = SpyRefetchRecorder()
+        let refetch = makeDayZeroMintService(store: store, bFiles: [b0, b1], recorder: recorder)
+        let candidate = RediffRefetchCandidate(
+            assetId: assetId, enclosureURL: Self.day0Enclosure,
+            downloadedAt: 0, localAudioURL: pair.aURL, attemptState: .initial
+        )
+        _ = await refetch.runDayZeroRefetch(for: candidate, kWayFetchCount: 2)
+
+        // No new window (the pre-existing one already covers the slot).
+        let windows = try await store.fetchAdWindows(assetId: assetId)
+        #expect(windows.count == 1, "the covered slot is not re-marked, got \(windows.count) windows")
+        #expect(windows.first?.id == "pre-existing")
+        guard case .dayZeroUnmarked = recorder.outcomes.first else {
+            Issue.record("expected .dayZeroUnmarked (all robust slots already covered), got \(String(describing: recorder.outcomes.first))"); return
+        }
+    }
+
+    @Test("DAY-0 marks are RECONCILE-PROTECTED: they survive a later analysis run (not a reconcilable backfill window) and are recognized (never abort a cross-user snapshot)")
+    func dayZeroMarksAreReconcileProtected() {
+        // The literal used at the protection sites must match the constant.
+        #expect(AdDetectionService.dayZeroRediffByteExactBoundaryState == "dayZeroRediffByteExact")
+        #expect(AdDetectionService.reconcileProtectedBoundaryStates
+            .contains(AdDetectionService.dayZeroRediffByteExactBoundaryState),
+            "a day-0 byte-exact mark must survive a later backfill's reconciliation")
+
+        // A day-0 window is NOT a reconcilable backfill window — the algorithmic
+        // detector's transcript/FM fusion would not re-emit this deterministic
+        // byte-exact mark, so retiring it would silently delete a correct mark.
+        let dayZeroWindow = AdWindow(
+            id: UUID().uuidString, analysisAssetId: "a", startTime: 95, endTime: 165,
+            confidence: 1.0, boundaryState: AdDetectionService.dayZeroRediffByteExactBoundaryState,
+            decisionState: AdDecisionState.candidate.rawValue, detectorVersion: "v1",
+            advertiser: nil, product: nil, adDescription: nil, evidenceText: nil, evidenceStartTime: 95,
+            metadataSource: AdDetectionService.dayZeroRediffByteExactMetadataSource,
+            metadataConfidence: nil, metadataPromptVersion: nil, wasSkipped: false, userDismissedBanner: false,
+            evidenceSources: nil, eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+            catalogStoreMatchSimilarity: nil
+        )
+        #expect(!AdDetectionService.isReconcilableBackfillWindow(dayZeroWindow, detectorVersion: "v1"),
+                "day-0 marks are protected from backfill retirement (retirable only by an explicit user veto)")
+    }
+
+    @Test("DAY-0 marks do NOT abort a cross-user snapshot: an asset carrying one still exports (the mark is a recognized local-only disposition, itself excluded)")
+    func dayZeroMarkDoesNotAbortCrossUserSnapshot() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-day0-share"
+        // A valid share fixture: 64-hex assetFingerprint + positive analysisVersion.
+        try await store.insertAsset(AnalysisAsset(
+            id: assetId, episodeId: "ep-\(assetId)",
+            assetFingerprint: String(repeating: "a", count: 64),
+            weakFingerprint: nil, sourceURL: "file:///tmp/x.mp3",
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil, episodeDurationSec: 280
+        ))
+        // One exportable window + one day-0 byte-exact mark on the same asset.
+        try await store.upsertHotPathAdWindows([
+            AdWindow(
+                id: "exportable", analysisAssetId: assetId, startTime: 10, endTime: 40,
+                confidence: 0.9, boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+                decisionState: AdDecisionState.confirmed.rawValue, detectorVersion: "test-detection-v1",
+                advertiser: nil, product: nil, adDescription: nil, evidenceText: nil, evidenceStartTime: 10,
+                metadataSource: "fusion", metadataConfidence: nil, metadataPromptVersion: nil,
+                wasSkipped: false, userDismissedBanner: false, evidenceSources: nil,
+                eligibilityGate: SkipEligibilityGate.eligible.rawValue, catalogStoreMatchSimilarity: nil
+            ),
+            AdWindow(
+                id: "day0", analysisAssetId: assetId, startTime: 95, endTime: 165,
+                confidence: 1.0, boundaryState: AdDetectionService.dayZeroRediffByteExactBoundaryState,
+                decisionState: AdDecisionState.candidate.rawValue, detectorVersion: "test-detection-v1",
+                advertiser: nil, product: nil, adDescription: nil, evidenceText: nil, evidenceStartTime: 95,
+                metadataSource: AdDetectionService.dayZeroRediffByteExactMetadataSource,
+                metadataConfidence: nil, metadataPromptVersion: nil, wasSkipped: false, userDismissedBanner: false,
+                evidenceSources: nil, eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+                catalogStoreMatchSimilarity: nil
+            )
+        ], existingIDs: [], retiredIDs: [])
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: assetId, podcastId: "podcast-share"
+        )
+        // The day-0 mark is a RECOGNIZED disposition (so the snapshot is NOT
+        // aborted by `hasKnownExportDisposition`), but it is local-only (so it is
+        // NOT in the exported windows — another user's DAI stitch differs).
+        let exported = try #require(snapshot, "an asset with a day-0 mark must still export a snapshot")
+        #expect(exported.windows.contains { $0.sourceWindowId == "exportable" })
+        #expect(!exported.windows.contains { $0.sourceWindowId == "day0" },
+                "the local-only day-0 mark is never exported to other users")
+    }
+
+    // Scope: this covers the Download & Analyze GATING (`forceDeepScanOptIn`
+    // permits an unplugged WiFi fetch) + the byte-exact MINT given a READY
+    // episode (asset + A-side present, no chunks). The runtime step that WAITS
+    // for the asset + file to materialize after `prepare()` is pinned separately
+    // by `DayZeroPreparationReadinessTests`.
+    @Test("DAY-0 Download & Analyze (playhead-3xtw): the tap grants the deep-scan opt-in, so an UNPLUGGED WiFi first-listen mints byte-exact marks with NO persisted analysis")
+    func dayZeroDownloadAndAnalyzeUnpluggedFirstListenMintsMarks() async throws {
+        let assetId = "asset-day0-dna"
+        let dir = try makeTempDir(prefix: "RediffDay0DNA-\(assetId)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try BytePair.stage(in: dir)
+        let b0 = dir.appendingPathComponent("dl-b0.mp3")
+        let b1 = dir.appendingPathComponent("dl-b1.mp3")
+        try FileManager.default.copyItem(at: pair.bURL, to: b0)
+        try FileManager.default.copyItem(at: pair.bURL, to: b1)
+
+        let store = try await makeTestStore()
+        try await insertActivationAsset(store: store, assetId: assetId, sourceURL: pair.aURL.absoluteString)
+        // NO transcript chunks — first-listen Download & Analyze.
+
+        let recorder = SpyRefetchRecorder()
+        let service = makeDayZeroMintService(store: store, bFiles: [b0, b1], recorder: recorder)
+        // The Download & Analyze trigger: UNPLUGGED, settings opt-in OFF — only
+        // the tap-as-opt-in (`forceDeepScanOptIn: true`) can permit this. K=2 so
+        // the divergence is ≥2-persona-robust.
+        let trigger = DayZeroRediffTrigger(
+            service: service, enabled: true, kWayFetchCount: 2,
+            reachabilityProvider: { .wifi },
+            chargeStateProvider: { false },          // unplugged
+            deepScanOptInProvider: { false }         // settings opt-in OFF
+        )
+        let summary = await trigger.triggerIfEligible(
+            analysisAssetId: assetId,
+            enclosureURL: Self.day0Enclosure,
+            playedFileURL: pair.aURL,
+            forceDeepScanOptIn: true                 // the explicit tap
+        )
+
+        #expect(summary.rotatedCount == 1, "the Download & Analyze tap fires day-0 unplugged on WiFi")
+        let windows = try await store.fetchAdWindows(assetId: assetId)
+        #expect(windows.count == 1, "byte-exact first-listen mark from the Download & Analyze trigger")
+        #expect(windows.first?.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+    }
+
     @Test("a consume failure records .failed (no resolve, R2 state advanced), deletes the B-copy, and leaves no marks")
     func consumeFailureIsRetriedNotResolved() async throws {
         let dir = try makeTempDir(prefix: "RediffActivation-fail")

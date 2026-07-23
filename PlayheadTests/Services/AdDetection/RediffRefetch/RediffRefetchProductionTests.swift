@@ -388,6 +388,43 @@ struct RediffRefetchRecorderTests {
         #expect(totals.failedCount == 1)
         #expect(totals.parkedCount == 1)
     }
+
+    @Test("DAY-0 poisoning fix (xsdz.36.4): .dayZeroUnmarked accounts bandwidth but writes NO state; .dayZeroMarked resolves + accounts")
+    func dayZeroOutcomesPoisoningSafe() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a1"))
+        try await store.insertAsset(makeAsset(id: "a2"))
+        let recorder = AnalysisStoreRediffRefetchRecorder(store: store, config: .production, now: { 999 })
+
+        // A no-mark day-0 run: bandwidth accounted, but NO rediff_refetch_state
+        // row — so `fetchRediffCandidateSeeds` (which excludes ONLY resolved
+        // assets) never permanently excludes it; the lagged sweep recovers it.
+        await recorder.recordOutcome(.dayZeroUnmarked(
+            assetId: "a1",
+            cost: RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: 108_000_000),
+            error: nil
+        ))
+        #expect(try await store.fetchRediffRefetchState(assetId: "a1") == nil,
+                "an unmarked day-0 run advances NO attempt state (poisoning-safe)")
+        var totals = try await store.fetchRediffBandwidthTotals()
+        #expect(totals.fullFetchBytesTotal == 108_000_000, "bytes are still accounted")
+        #expect(totals.rotatedCount == 0)
+
+        // A marked day-0 run: resolves the shared state (day-0 K≥3 supersets the
+        // lagged K=1 sweep) AND accounts bandwidth.
+        let resolvedState = RediffRefetchPolicy.markResolved(.initial, at: 200)
+        await recorder.recordOutcome(.dayZeroMarked(
+            assetId: "a2",
+            cost: RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: 162_000_000),
+            markCount: 2,
+            newState: resolvedState
+        ))
+        #expect(try await store.fetchRediffRefetchState(assetId: "a2")?.attemptState == resolvedState)
+        #expect(try await store.fetchRediffRefetchState(assetId: "a2")?.attemptState.resolved == true)
+        totals = try await store.fetchRediffBandwidthTotals()
+        #expect(totals.fullFetchBytesTotal == 108_000_000 + 162_000_000)
+        #expect(totals.rotatedCount == 1, "a marked day-0 counts as one rotation-equivalent")
+    }
 }
 
 // MARK: - Staging provider

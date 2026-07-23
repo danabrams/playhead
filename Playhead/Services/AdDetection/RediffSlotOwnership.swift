@@ -279,6 +279,70 @@ enum RediffSlotOwnership {
         return mergedAndCapped(perBSideSlots.flatMap { $0 }, config: config)
     }
 
+    // MARK: - k-way ROBUSTNESS quorum (playhead-xsdz.36.4 — day-0 byte-exact mint)
+
+    /// Minimum number of DISTINCT personas whose byte diffs must corroborate a
+    /// region before a day-0 slot may MINT its own ad-presence core. `2` — a
+    /// single low-entropy coincidence (one persona's stitch alone) is never
+    /// enough to mint a mark on a first listen.
+    static let dayZeroMinPersonaSupport = 2
+
+    /// The `≥minPersonaSupport`-persona ROBUSTNESS gate over the K pairwise byte
+    /// diffs (A vs each of the K distinct-persona B-sides). Unlike
+    /// `unionedPlayedSlots` — which unions ALL divergent regions with NO quorum,
+    /// to RECOVER a pod a single lagged fetch-pair missed — this keeps ONLY the
+    /// regions a `minPersonaSupport` quorum of personas independently diverged
+    /// on. It is the day-0 mint's safety valve: a byte-exact slot mints its own
+    /// presence core (no persisted transcript/analysis needed), so it must be
+    /// corroborated across personas, not a lone coincidence.
+    ///
+    /// For every accepted per-persona slot, count how many of the K lists carry
+    /// an OVERLAPPING slot (self counts once — a list contributes at most one to
+    /// the tally regardless of how many of its own slots overlap); keep the slot
+    /// when that count `≥ minPersonaSupport`. The kept slots (across all lists)
+    /// are then merged + duration-capped by the SAME `mergedAndCapped` the union
+    /// path uses, so corroborating detections of ONE pod collapse to a single
+    /// slot carrying the OUTER edges. Fragment-merge / duration-cap / min-width
+    /// (already applied by `gateAndDiffBytes` on each input list) all still hold.
+    ///
+    /// EDGE NOTE: a DAI pod's A-time extent is FIXED (only the B-side fill
+    /// differs), so every persona that detects a pod produces a near-IDENTICAL
+    /// A-time slot — the merge of corroborating slots is that same extent. The
+    /// merge takes the outer edges, so in the pathological case of two overlapping
+    /// slots of DIFFERENT extent the merged region's flanks could rest on
+    /// single-persona bytes; that cannot arise for real DAI (fixed A-extent), is
+    /// bounded by `maxSlotSeconds`, and — being mark-only — could only ever
+    /// mis-place a banner edge, never eat content.
+    ///
+    /// Returns EMPTY when fewer than `minPersonaSupport` diff lists are supplied
+    /// (the quorum is unreachable) — so a day-0 probe that produced only ONE
+    /// byte-exact diff mints NOTHING and leaves the ads for the lagged sweep.
+    /// This gate is byte-exact-day-0-only; it never touches the lagged
+    /// `unionedPlayedSlots` path.
+    static func kWayRobustPlayedSlots(
+        _ perBSideSlots: [[PlayedSlot]],
+        minPersonaSupport: Int = dayZeroMinPersonaSupport,
+        config: Configuration = .default
+    ) -> [PlayedSlot] {
+        let quorum = max(2, minPersonaSupport)
+        guard perBSideSlots.count >= quorum else { return [] }
+        var robust: [PlayedSlot] = []
+        for slots in perBSideSlots {
+            for slot in slots {
+                let range = TimeRange(start: slot.startSeconds, end: slot.endSeconds)
+                var support = 0
+                for other in perBSideSlots where other.contains(where: {
+                    TimeRange(start: $0.startSeconds, end: $0.endSeconds).intersects(range)
+                }) {
+                    support += 1
+                    if support >= quorum { break }
+                }
+                if support >= quorum { robust.append(slot) }
+            }
+        }
+        return mergedAndCapped(robust, config: config)
+    }
+
     // MARK: - Byte-path gate (playhead-xsdz.57 — PRIMARY differ)
 
     /// Why a byte alignment did or did not yield trustworthy slots. EVERY

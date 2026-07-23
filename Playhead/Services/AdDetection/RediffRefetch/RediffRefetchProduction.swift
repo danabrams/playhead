@@ -137,6 +137,20 @@ struct AnalysisStoreRediffRefetchRecorder: RediffRefetchRecording {
             Self.logger.error("rediff-refetch FAILED assetId=\(assetId, privacy: .public) bytes=\(cost.totalBytes, privacy: .public) class=\(failureClass.rawValue, privacy: .public) streak=\(newState.sameClassFailureStreak, privacy: .public) error=\(error, privacy: .public)")
             let parked = RediffRefetchPolicy.isParked(newState, config: config)
             await persist(assetId: assetId, state: newState, cost: cost, unchanged: 0, rotated: 0, failed: 1, parked: parked ? 1 : 0)
+
+        case let .dayZeroMarked(assetId, cost, markCount, newState):
+            // Day-0 byte-exact mint that PRODUCED marks → resolve the shared
+            // state (day-0 K≥3 supersets the lagged K=1 sweep) + account bytes.
+            Self.logger.info("rediff DAY-0 MARKED assetId=\(assetId, privacy: .public) marks=\(markCount, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public)")
+            await persist(assetId: assetId, state: newState, cost: cost, unchanged: 0, rotated: 1, failed: 0, parked: 0)
+
+        case let .dayZeroUnmarked(assetId, cost, error):
+            // POISONING FIX: bandwidth ONLY — NO `upsertRediffRefetchState`, so a
+            // no-mark/failed day-0 run never resolves or advances the lagged
+            // attempt-state (`fetchRediffCandidateSeeds` still enumerates the
+            // asset for a later lagged sweep).
+            Self.logger.info("rediff DAY-0 unmarked assetId=\(assetId, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) error=\(error ?? "none", privacy: .public)")
+            await accumulateBandwidthOnly(cost: cost)
         }
     }
 
@@ -168,6 +182,26 @@ struct AnalysisStoreRediffRefetchRecorder: RediffRefetchRecording {
             // Best-effort durability: a write failure costs one attempt's
             // bookkeeping (the episode retries next sweep), never the sweep.
             Self.logger.warning("rediff-refetch state persist failed assetId=\(assetId, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// playhead-xsdz.36.4 (poisoning fix): accumulate ONLY the bandwidth ledger,
+    /// never the per-asset attempt state. Used for a `.dayZeroUnmarked` outcome
+    /// so an empty/failed day-0 run is accounted for but leaves the shared
+    /// `rediff_refetch_state` untouched (the lagged sweep still enumerates it).
+    private func accumulateBandwidthOnly(cost: RediffRefetchPolicy.BandwidthCost) async {
+        do {
+            try await store.accumulateRediffBandwidth(
+                precheckBytes: cost.precheckBytes,
+                fullFetchBytes: cost.fullFetchBytes,
+                unchangedCount: 0,
+                rotatedCount: 0,
+                failedCount: 0,
+                parkedCount: 0,
+                at: now()
+            )
+        } catch {
+            Self.logger.warning("rediff DAY-0 bandwidth accounting failed: \(String(describing: error), privacy: .public)")
         }
     }
 }
@@ -409,5 +443,26 @@ struct RevalidatingRediffBSideConsumer: RediffBSideConsuming {
             await staging.unstage(assetId: assetId)
             throw error
         }
+    }
+}
+
+// MARK: - Day-0 byte-exact minter (playhead-xsdz.36.4)
+
+/// Production `RediffDayZeroMinting`: routes the k-way day-0 B-copies straight
+/// to `AdDetectionService.mintByteExactDayZeroMarks`, which resolves the PINNED
+/// A-side from the asset row (wrj8 read-only mmap), byte-aligns A vs each B,
+/// keeps only byte-EXACT ≥2-persona-robust divergent slots, and persists them
+/// as MARK-ONLY AdWindow banners — the FIRST-LISTEN marking path.
+///
+/// It deliberately does NOT stage into the `RediffBSideStagingProvider` or run
+/// `revalidateFromFeatures`: those re-run the slot pass over PERSISTED analysis
+/// that a true first listen does not yet have. The byte-exact divergent region
+/// is its OWN deterministic ad-presence core, so the mint needs no persisted
+/// transcript. The chroma differ is never consulted (byte-exact only).
+struct AdDetectionDayZeroByteExactMinter: RediffDayZeroMinting {
+    let adDetection: any AdDetectionProviding
+
+    func mintByteExactDayZeroMarks(assetId: String, bSideURLs: [URL]) async -> Int {
+        await adDetection.mintByteExactDayZeroMarks(analysisAssetId: assetId, bSideURLs: bSideURLs)
     }
 }

@@ -86,6 +86,62 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         )
     }
 
+    /// playhead-xsdz.36.4: the day-0 rediff kickoff must be FIRE-AND-FORGET so
+    /// starting playback is never blocked or delayed by the ~54 MB × K second
+    /// fetch. Two structural guarantees, neither reachable through a full
+    /// `PlayheadRuntime` init in a unit test:
+    ///   • `kickOffDayZeroRediff` is a SYNCHRONOUS helper (no `async`) that runs
+    ///     the trigger inside a `Task.detached` — off the MainActor hot path;
+    ///   • neither `playEpisode` call site awaits the kickoff.
+    /// A regression that makes the helper `async` (so `playEpisode` awaits it) or
+    /// drops the `Task.detached` would let a stalled fetch wedge playback start.
+    func testDayZeroRediffKickoffIsFireAndForget() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+
+        guard let defRange = source.range(of: "private func kickOffDayZeroRediff(") else {
+            XCTFail("`kickOffDayZeroRediff` not found in PlayheadRuntime.swift — the day-0 play-time trigger wiring is missing.")
+            return
+        }
+
+        // The signature (def → first `{`) must not be `async`: a synchronous
+        // kickoff returns immediately to `playEpisode`.
+        guard let bodyBrace = source.range(of: "{", range: defRange.upperBound..<source.endIndex) else {
+            XCTFail("Could not locate the `kickOffDayZeroRediff` body brace.")
+            return
+        }
+        let signature = source[defRange.upperBound..<bodyBrace.lowerBound]
+        XCTAssertFalse(
+            signature.contains("async"),
+            "kickOffDayZeroRediff must be a synchronous fire-and-forget kickoff (never `async`) so playEpisode is not blocked by the day-0 fetch."
+        )
+
+        // Its body must run the trigger on a DETACHED task, and await
+        // `triggerIfEligible` INSIDE that task (never in playEpisode).
+        guard let detachedRange = source.range(
+            of: "Task.detached",
+            range: defRange.upperBound..<source.endIndex
+        ) else {
+            XCTFail("kickOffDayZeroRediff must run the day-0 trigger in a `Task.detached` — off the playback hot path.")
+            return
+        }
+        XCTAssertNotNil(
+            source.range(of: "triggerIfEligible", range: detachedRange.upperBound..<source.endIndex),
+            "The detached day-0 task must await `triggerIfEligible`."
+        )
+
+        // Neither call site may await the kickoff.
+        XCTAssertNil(
+            source.range(of: "await kickOffDayZeroRediff"),
+            "The day-0 kickoff must be fire-and-forget — never awaited (found `await kickOffDayZeroRediff`)."
+        )
+        XCTAssertNil(
+            source.range(of: "await self.kickOffDayZeroRediff"),
+            "The day-0 kickoff must be fire-and-forget — never awaited (found `await self.kickOffDayZeroRediff`)."
+        )
+    }
+
     /// All six lazy-init loggers (FoundationModelsFeedbackStore,
     /// SurfaceStatusInvariantLogger, DecisionLogger, AssetLifecycleLogger,
     /// BGTaskTelemetryLogger — playhead-jncn audit items #4/#8/#10/#15/#17 —

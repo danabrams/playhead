@@ -149,6 +149,27 @@ extension RediffBSideConsuming {
     }
 }
 
+/// playhead-xsdz.36.4 DAY-0 seam: the FIRST-LISTEN marking path. Consumes the
+/// k-way day-0 B-copies by BYTE-aligning them against the PINNED played A-side
+/// (resolved read-only from the asset row inside the conformer — wrj8) and
+/// minting MARK-ONLY banners for byte-EXACT, ≥2-persona-robust divergent slots.
+///
+/// This is the deterministic-certainty exception to the presence-gated mandate:
+/// a byte-exact divergent region IS a dynamically-inserted ad segment,
+/// sample-accurately — so it mints its OWN ad-presence core and does NOT depend
+/// on any persisted transcript / analysis (which does not yet exist on a true
+/// first listen — the very failure the day-0 `RediffBSideConsuming`/revalidate
+/// route hit). The chroma differ is NEVER consulted here (byte-exact only).
+///
+/// Returns the number of marks minted. `0` ⇒ nothing byte-exact/robust was
+/// found (or a chroma-only fallback) ⇒ the day-0 run must NOT resolve the
+/// shared lagged state, so the lagged sweep still recovers the ads later. The
+/// CALLER (`RediffRefetchService`) still owns deletion of every B-copy via its
+/// `defer` — the never-persist-B contract is unchanged. Mark-only (no auto-skip).
+protocol RediffDayZeroMinting: Sendable {
+    func mintByteExactDayZeroMarks(assetId: String, bSideURLs: [URL]) async -> Int
+}
+
 /// The B-side decoded to an EMPTY fingerprint stream — nothing to diff, and
 /// deterministic for the same copy (fingerprint-mismatch class).
 struct RediffBSideEmptyStreamError: RediffFailureClassifiable, Equatable {
@@ -704,6 +725,10 @@ struct LoggingRediffRefetchRecorder: RediffRefetchRecording {
             logger.info("rediff-refetch ROTATED assetId=\(assetId, privacy: .public) precheckBytes=\(cost.precheckBytes, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) fpCount=\(fingerprintCount, privacy: .public)")
         case let .failed(assetId, cost, failureClass, newState, error):
             logger.error("rediff-refetch FAILED assetId=\(assetId, privacy: .public) bytes=\(cost.totalBytes, privacy: .public) class=\(failureClass.rawValue, privacy: .public) streak=\(newState.sameClassFailureStreak, privacy: .public) error=\(error, privacy: .public)")
+        case let .dayZeroMarked(assetId, cost, markCount, _):
+            logger.info("rediff DAY-0 MARKED assetId=\(assetId, privacy: .public) marks=\(markCount, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public)")
+        case let .dayZeroUnmarked(assetId, cost, error):
+            logger.info("rediff DAY-0 unmarked assetId=\(assetId, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) error=\(error ?? "none", privacy: .public)")
         }
     }
 }
