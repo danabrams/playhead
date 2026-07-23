@@ -139,7 +139,7 @@ struct DayZeroRediffTriggerTests {
         )
     }
 
-    @Test("fires when enabled + WiFi + charging: k-way (=3) distinct-persona fetch, all handed to the minter, all deleted, bandwidth accounted, .dayZeroMarked (resolved)")
+    @Test("fires when enabled + WiFi + charging: k-way (=2) DOWNLOAD-DISTINCT persona fetch, all handed to the minter, all deleted, bandwidth accounted, .dayZeroMarked (resolved)")
     func firesWhenEnabledAndGated() async {
         let fetcher = KWaySpyFullFetcher()
         let minter = SpyDayZeroMinter()   // returns 1 mark by default
@@ -151,30 +151,34 @@ struct DayZeroRediffTriggerTests {
         )
         let summary = await fire(trigger)
 
-        // K=3 distinct-persona fetch in the divergence-reliable order.
-        #expect(fetcher.calls.count == 3, "day-0 uses dayZeroKWayFetchCount = 3")
+        // playhead-9s6q FIX B: K=2 personas GUARANTEED distinct from the download
+        // UA (AppleCoreMedia-iPhone) → [Mac, Overcast]. The former K=3 wasted its
+        // first (iPhone) fetch colliding byte-identically on a client-pinned show.
+        #expect(fetcher.calls.count == 2, "day-0 uses dayZeroKWayFetchCount = 2")
         #expect(fetcher.calls.map { $0.persona?.name }
-            == ["applecoremedia-iphone", "applecoremedia-macintosh", "overcast"])
+            == ["applecoremedia-macintosh", "overcast"])
+        // NONE of the staged personas is the download persona.
+        #expect(fetcher.calls.allSatisfy { $0.persona?.name != RediffFetchPersona.download.name })
         // The enclosure URL is the one the trigger passed.
         #expect(fetcher.calls.allSatisfy { $0.url == Self.enclosure })
-        // The minter receives ALL 3 B-copies at once (one k-way byte-exact mint).
+        // The minter receives BOTH B-copies at once (one k-way byte-exact mint).
         #expect(minter.calls.count == 1)
-        #expect(minter.calls.first?.bSideURLs.count == 3)
+        #expect(minter.calls.first?.bSideURLs.count == 2)
         #expect(minter.calls.first?.assetId == "asset-day0")
         // Never-persist-B: every fetched copy is deleted.
-        let expected = (0..<3).map { URL(fileURLWithPath: "/tmp/kway-bcopy-\($0).mp3") }
+        let expected = (0..<2).map { URL(fileURLWithPath: "/tmp/kway-bcopy-\($0).mp3") }
         #expect(Set(remover.removed) == Set(expected))
-        // Bandwidth accounted; a MARK ⇒ .dayZeroMarked (resolved) — day-0 K≥3
-        // supersets the lagged K=1 sweep, so a mark may resolve the shared state.
+        // Bandwidth accounted; a MARK ⇒ .dayZeroMarked (resolved) — day-0 K≥2
+        // (distinct personas) still lets a mark resolve the shared state.
         guard case let .dayZeroMarked(_, cost, markCount, newState) = recorder.outcomes.first else {
             Issue.record("expected .dayZeroMarked, got \(String(describing: recorder.outcomes.first))"); return
         }
         #expect(markCount == 1)
-        #expect(cost.fullFetchBytes == 3 * 54_000_000)
+        #expect(cost.fullFetchBytes == 2 * 54_000_000)
         #expect(cost.precheckBytes == 0, "day-0 does no pre-check — zero pre-check bytes")
         #expect(newState.resolved)
         #expect(summary.rotatedCount == 1)
-        #expect(summary.fullFetchBytes == 3 * 54_000_000)
+        #expect(summary.fullFetchBytes == 2 * 54_000_000)
     }
 
     @Test("POISONING FIX: a day-0 run that mints NO marks records .dayZeroUnmarked — bytes accounted, but NO resolve / NO state advance")
@@ -192,15 +196,15 @@ struct DayZeroRediffTriggerTests {
 
         #expect(minter.calls.count == 1, "the minter still ran (byte-exact attempt)")
         // Still fetched + deleted (bandwidth is spent regardless of the verdict).
-        #expect(fetcher.calls.count == 3)
-        let expected = (0..<3).map { URL(fileURLWithPath: "/tmp/kway-bcopy-\($0).mp3") }
+        #expect(fetcher.calls.count == 2)
+        let expected = (0..<2).map { URL(fileURLWithPath: "/tmp/kway-bcopy-\($0).mp3") }
         #expect(Set(remover.removed) == Set(expected))
         // The outcome is .dayZeroUnmarked: bytes accounted, NO AttemptState — the
         // asset stays a lagged candidate (fetchRediffCandidateSeeds still sees it).
         guard case let .dayZeroUnmarked(_, cost, error) = recorder.outcomes.first else {
             Issue.record("expected .dayZeroUnmarked, got \(String(describing: recorder.outcomes.first))"); return
         }
-        #expect(cost.fullFetchBytes == 3 * 54_000_000, "bytes spent are still accounted")
+        #expect(cost.fullFetchBytes == 2 * 54_000_000, "bytes spent are still accounted")
         #expect(error == nil, "a clean no-mark run carries no error")
         #expect(summary.rotatedCount == 0, "no mark ⇒ nothing resolved")
         #expect(summary.failedCount == 0, "a clean no-mark run is not a failure")
@@ -215,7 +219,7 @@ struct DayZeroRediffTriggerTests {
             remover: SpyTempFileRemover(), recorder: SpyRefetchRecorder()
         )
         await fire(trigger)
-        #expect(fetcher.calls.count == 3, "opt-in permits an unplugged WiFi day-0 fetch")
+        #expect(fetcher.calls.count == 2, "opt-in permits an unplugged WiFi day-0 fetch")
     }
 
     @Test("Download & Analyze (playhead-3xtw): forceDeepScanOptIn fires unplugged on WiFi even with the settings opt-in OFF (the tap IS the opt-in)")
@@ -229,7 +233,7 @@ struct DayZeroRediffTriggerTests {
             remover: SpyTempFileRemover(), recorder: SpyRefetchRecorder()
         )
         await fire(trigger, forceDeepScanOptIn: true)
-        #expect(fetcher.calls.count == 3, "the explicit Download & Analyze tap grants the deep-scan opt-in on unplugged WiFi")
+        #expect(fetcher.calls.count == 2, "the explicit Download & Analyze tap grants the deep-scan opt-in on unplugged WiFi")
     }
 
     @Test("Download & Analyze: forceDeepScanOptIn NEVER overrides the WiFi requirement (cellular stays rejected)")
@@ -370,12 +374,12 @@ struct DayZeroRediffTriggerTests {
                 "the day-0 B-copy must be deleted on exit")
     }
 
-    @Test("the day-0 k-way count is its own constant (3), the flag defaults OFF, and neither touches the lagged single-fetch default")
+    @Test("the day-0 k-way count is its own constant (2, playhead-9s6q FIX B), the flag defaults OFF, and neither touches the lagged single-fetch default")
     func dayZeroConstantsAreIndependent() {
         #expect(RediffActivation.dayZeroEnabledByDefault == false,
                 "day-0 ships inert — flipping it on is the rollout go/no-go")
-        #expect(RediffActivation.dayZeroKWayFetchCount == 3,
-                "day-0 draws the iPhone+Mac+Overcast divergence core")
+        #expect(RediffActivation.dayZeroKWayFetchCount == 2,
+                "playhead-9s6q FIX B: day-0 draws 2 personas DISTINCT from the download UA (Mac+Overcast), no wasted collision fetch")
         #expect(RediffActivation.productionKWayFetchCount == 1,
                 "the lagged sweep's single-fetch default is untouched")
     }
