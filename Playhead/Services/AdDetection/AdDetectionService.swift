@@ -9973,8 +9973,8 @@ actor AdDetectionService {
 
     /// playhead-xsdz.36.4 — the DAY-0 byte-exact rediff mint: the FIRST-LISTEN
     /// marking path. Resolves the PINNED played A-side from the asset row (wrj8
-    /// read-only mmap), byte-aligns it against each k-way B-copy, keeps only
-    /// byte-EXACT ≥2-persona-robust divergent slots, and persists each as a
+    /// read-only mmap), byte-aligns it against each k-way B-copy, UNIONs the
+    /// byte-EXACT divergent slots across personas, and persists each as a
     /// MARK-ONLY AdWindow banner. Returns the number of marks minted.
     ///
     /// WHY THIS BYPASSES PRESENCE-GATING (the narrow, guarded exception): every
@@ -9982,16 +9982,20 @@ actor AdDetectionService {
     /// a decoded span whose PRESENCE a transcript/FM core already established
     /// (`computeRediffSlotPass` guards on `!decodedSpans.isEmpty`, and
     /// `RediffSlotOwnership.candidates` widens EXISTING spans). On a true first
-    /// listen no such core exists yet. But a byte-EXACT divergent region across a
-    /// ≥2-persona-robust k-way fetch IS a dynamically-inserted ad segment,
-    /// sample-accurately, with DETERMINISTIC certainty — a stronger signal than
-    /// the transcript/FM core it would otherwise wait on. So a byte-exact day-0
-    /// slot is its OWN presence core. This is deliberately NARROW:
+    /// listen no such core exists yet. But a byte-EXACT divergent region between
+    /// the played A-side and a re-fetched B-side IS a dynamically-inserted ad
+    /// segment, sample-accurately, with DETERMINISTIC certainty — a stronger
+    /// signal than the transcript/FM core it would otherwise wait on. So a
+    /// byte-exact day-0 slot is its OWN presence core. This is deliberately NARROW:
     ///   • BYTE-EXACT ONLY — the chroma differ / `refetchedBSideMono16kHz` is
     ///     never consulted here; a diff that falls back to chroma mints nothing.
-    ///   • ≥2-PERSONA-ROBUST — `RediffSlotOwnership.kWayRobustPlayedSlots`
-    ///     requires the region be corroborated across ≥2 personas, never a lone
-    ///     low-entropy coincidence.
+    ///   • UNION (quorum = 1) — `RediffSlotOwnership.unionedPlayedSlots` mints a
+    ///     slot ANY one persona's byte-exact diff reveals (the SAME lagged-path
+    ///     primitive). The per-persona byte gate is the precision guard; a ≥2
+    ///     AGREEMENT quorum was tried and REMOVED (playhead-wybg) — on client-
+    ///     PINNED shows only ONE persona diverges (the rest COLLIDE, byte-
+    ///     identical), so requiring agreement dropped real ads. Staging ≥2
+    ///     distinct-persona B-copies is the COLLISION-RECOVERY floor, not agreement.
     ///   • Every false-widening guard still applies (`gateAndDiffBytes`:
     ///     min-run-bytes, monotonic, re-encode/`chainedFraction` reject,
     ///     min-ad-width; then fragment-merge + duration-cap).
@@ -10004,9 +10008,12 @@ actor AdDetectionService {
     /// this call; the caller (`RediffRefetchService`) still deletes every B-copy.
     /// The persisted marks are A-time scalars only. The A-side file is READ-ONLY.
     func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int {
-        // A ≥2-persona quorum is impossible with fewer than 2 B-copies.
-        guard bSideURLs.count >= RediffSlotOwnership.dayZeroMinPersonaSupport else {
-            logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): \(bSideURLs.count) B-side(s) < \(RediffSlotOwnership.dayZeroMinPersonaSupport)-persona quorum")
+        // Day-0 requires ≥2 distinct-persona B-copies for COLLISION RECOVERY: on
+        // a client-pinned show a single re-fetch can collide (byte-identical → no
+        // divergence), so staging ≥2 gives a divergence a chance. NOT an agreement
+        // quorum — the mint UNIONs whatever diverges (playhead-wybg).
+        guard bSideURLs.count >= RediffSlotOwnership.dayZeroMinKWayBCopies else {
+            logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): \(bSideURLs.count) B-side(s) < \(RediffSlotOwnership.dayZeroMinKWayBCopies) distinct-persona B-copies for collision recovery")
             return 0
         }
         // The asset row supplies the PINNED A-side (wrj8: read-only played file).
@@ -10035,8 +10042,8 @@ actor AdDetectionService {
 
         // BYTE-EXACT per-persona diffs ONLY. A B whose byte gate rejects (no
         // chained runs / non-monotonic / re-encode CDN) is a chroma-fallback
-        // TRIGGER for the lagged pass — but day-0 mints NOTHING from it: it is
-        // simply not counted toward the ≥2-persona quorum.
+        // TRIGGER for the lagged pass — but day-0 mints NOTHING from it: it
+        // simply does not contribute a per-persona slot list to the union.
         var perBSideSlots: [[RediffSlotOwnership.PlayedSlot]] = []
         for bSideURL in bSideURLs {
             guard Self.isAnchoredRegularFile(bSideURL) else { continue }
@@ -10054,20 +10061,24 @@ actor AdDetectionService {
             perBSideSlots.append(acceptance.playedSlots)
         }
 
-        // ≥2-persona-robust byte-EXACT slots (false-widening guards inside).
-        let robust = RediffSlotOwnership.kWayRobustPlayedSlots(perBSideSlots)
-        guard !robust.isEmpty else {
-            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): \(perBSideSlots.count) byte-exact diff(s), no ≥2-persona-robust slot — nothing minted")
+        // UNION the byte-EXACT divergent slots across personas (false-widening
+        // guards already applied per-list by `gateAndDiffBytes`). Quorum = 1: a
+        // slot mints if ANY persona diverged on it — the SAME lagged-path union
+        // primitive, so a client-pinned show where only one persona diverges
+        // still mints (playhead-wybg). Overlapping same-slot detections collapse.
+        let unioned = RediffSlotOwnership.unionedPlayedSlots(perBSideSlots)
+        guard !unioned.isEmpty else {
+            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): \(perBSideSlots.count) byte-exact diff(s), no divergent slot — nothing minted")
             return 0
         }
 
-        // Idempotency: skip any robust slot overlapping an existing AdWindow
+        // Idempotency: skip any minted slot overlapping an existing AdWindow
         // (any decisionState, incl. a user-vetoed `.reverted` row) so a repeat
         // day-0 fire — or a day-0 run after some analysis already marked — never
         // double-banners or resurfaces a veto (mirrors correction-replay).
         let existing = (try? await store.fetchAdWindows(assetId: analysisAssetId)) ?? []
         var windows: [AdWindow] = []
-        for slot in robust {
+        for slot in unioned {
             let overlapsExisting = existing.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
             let overlapsEmitted = windows.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
             if overlapsExisting || overlapsEmitted { continue }
@@ -10098,7 +10109,7 @@ actor AdDetectionService {
             ))
         }
         guard !windows.isEmpty else {
-            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): all \(robust.count) robust slot(s) already covered by existing AdWindows — nothing minted")
+            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): all \(unioned.count) unioned slot(s) already covered by existing AdWindows — nothing minted")
             return 0
         }
         do {

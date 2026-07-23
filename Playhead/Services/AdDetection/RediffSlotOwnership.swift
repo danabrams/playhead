@@ -279,69 +279,28 @@ enum RediffSlotOwnership {
         return mergedAndCapped(perBSideSlots.flatMap { $0 }, config: config)
     }
 
-    // MARK: - k-way ROBUSTNESS quorum (playhead-xsdz.36.4 — day-0 byte-exact mint)
+    // MARK: - Day-0 k-way minimum (playhead-xsdz.36.4 / playhead-wybg)
 
-    /// Minimum number of DISTINCT personas whose byte diffs must corroborate a
-    /// region before a day-0 slot may MINT its own ad-presence core. `2` — a
-    /// single low-entropy coincidence (one persona's stitch alone) is never
-    /// enough to mint a mark on a first listen.
-    static let dayZeroMinPersonaSupport = 2
-
-    /// The `≥minPersonaSupport`-persona ROBUSTNESS gate over the K pairwise byte
-    /// diffs (A vs each of the K distinct-persona B-sides). Unlike
-    /// `unionedPlayedSlots` — which unions ALL divergent regions with NO quorum,
-    /// to RECOVER a pod a single lagged fetch-pair missed — this keeps ONLY the
-    /// regions a `minPersonaSupport` quorum of personas independently diverged
-    /// on. It is the day-0 mint's safety valve: a byte-exact slot mints its own
-    /// presence core (no persisted transcript/analysis needed), so it must be
-    /// corroborated across personas, not a lone coincidence.
+    /// Minimum number of DISTINCT-persona B-copies a day-0 byte-exact probe must
+    /// have staged before it attempts a mint. `2` — this is NOT a corroboration
+    /// quorum. The day-0 mint UNIONs the per-persona byte-exact slots via
+    /// `unionedPlayedSlots` (quorum = 1: a slot mints if ANY one persona's diff
+    /// reveals it), exactly like the lagged path. This constant is instead a
+    /// COLLISION-RECOVERY floor: on a client-PINNED show (Conan/AdsWizz) a single
+    /// re-fetch can land the SAME stitch as the played copy (byte-identical → 0
+    /// divergent slots → reveals nothing), so day-0 requires ≥2 distinct-persona
+    /// B-copies to give a divergence a chance. The per-persona byte gate
+    /// (`gateAndDiffBytes`: min-run-bytes, monotonic-clean, chainedFractionB ≥
+    /// floor) is the PRECISION guard; staging ≥2 personas is the RECALL guard.
     ///
-    /// For every accepted per-persona slot, count how many of the K lists carry
-    /// an OVERLAPPING slot (self counts once — a list contributes at most one to
-    /// the tally regardless of how many of its own slots overlap); keep the slot
-    /// when that count `≥ minPersonaSupport`. The kept slots (across all lists)
-    /// are then merged + duration-capped by the SAME `mergedAndCapped` the union
-    /// path uses, so corroborating detections of ONE pod collapse to a single
-    /// slot carrying the OUTER edges. Fragment-merge / duration-cap / min-width
-    /// (already applied by `gateAndDiffBytes` on each input list) all still hold.
-    ///
-    /// EDGE NOTE: a DAI pod's A-time extent is FIXED (only the B-side fill
-    /// differs), so every persona that detects a pod produces a near-IDENTICAL
-    /// A-time slot — the merge of corroborating slots is that same extent. The
-    /// merge takes the outer edges, so in the pathological case of two overlapping
-    /// slots of DIFFERENT extent the merged region's flanks could rest on
-    /// single-persona bytes; that cannot arise for real DAI (fixed A-extent), is
-    /// bounded by `maxSlotSeconds`, and — being mark-only — could only ever
-    /// mis-place a banner edge, never eat content.
-    ///
-    /// Returns EMPTY when fewer than `minPersonaSupport` diff lists are supplied
-    /// (the quorum is unreachable) — so a day-0 probe that produced only ONE
-    /// byte-exact diff mints NOTHING and leaves the ads for the lagged sweep.
-    /// This gate is byte-exact-day-0-only; it never touches the lagged
-    /// `unionedPlayedSlots` path.
-    static func kWayRobustPlayedSlots(
-        _ perBSideSlots: [[PlayedSlot]],
-        minPersonaSupport: Int = dayZeroMinPersonaSupport,
-        config: Configuration = .default
-    ) -> [PlayedSlot] {
-        let quorum = max(2, minPersonaSupport)
-        guard perBSideSlots.count >= quorum else { return [] }
-        var robust: [PlayedSlot] = []
-        for slots in perBSideSlots {
-            for slot in slots {
-                let range = TimeRange(start: slot.startSeconds, end: slot.endSeconds)
-                var support = 0
-                for other in perBSideSlots where other.contains(where: {
-                    TimeRange(start: $0.startSeconds, end: $0.endSeconds).intersects(range)
-                }) {
-                    support += 1
-                    if support >= quorum { break }
-                }
-                if support >= quorum { robust.append(slot) }
-            }
-        }
-        return mergedAndCapped(robust, config: config)
-    }
+    /// playhead-wybg: the former `kWayRobustPlayedSlots` ≥2-AGREEMENT quorum was
+    /// REMOVED. A minutes-apart (realistic day-0 timing) measurement showed that on
+    /// pinned shows only ONE persona (e.g. Overcast) diverges and reveals the real
+    /// ads (211 s), while the same-persona re-fetch collides (byte-identical); a
+    /// ≥2-agreement quorum dropped those ads, defeating the entire k-way
+    /// collision-recovery purpose. Union + the byte gate is precise single-fetch,
+    /// so day-0 unifies with the lagged union path.
+    static let dayZeroMinKWayBCopies = 2
 
     // MARK: - Byte-path gate (playhead-xsdz.57 — PRIMARY differ)
 

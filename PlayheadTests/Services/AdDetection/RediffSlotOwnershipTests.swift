@@ -277,62 +277,44 @@ struct RediffSlotOwnershipTests {
         #expect(union[0].startSeconds == 99 && union[0].endSeconds == 161)
     }
 
-    // MARK: - k-way ROBUSTNESS quorum (playhead-xsdz.36.4 — day-0 byte-exact mint)
+    // MARK: - day-0 mint UNION semantics (playhead-xsdz.36.4 / playhead-wybg)
+    //
+    // The day-0 byte-exact mint UNIONs the per-persona slot lists via
+    // `unionedPlayedSlots` — quorum = 1: a slot mints if ANY persona's byte-exact
+    // diff reveals it (the lagged-path primitive). A ≥2-AGREEMENT quorum
+    // (`kWayRobustPlayedSlots`) was tried and REMOVED (playhead-wybg): a minutes-
+    // apart measurement showed that on client-PINNED shows (Conan/AdsWizz) only
+    // ONE persona diverges while the same-persona re-fetch COLLIDES (byte-
+    // identical), so requiring cross-persona agreement dropped real ads and
+    // defeated k-way collision recovery. These tests pin the pinned-show recovery
+    // over the EXACT `perBSideSlots` shape `mintByteExactDayZeroMarks` builds (one
+    // list per persona whose B passed `gateAndDiffBytes`; a collision is an
+    // accepted-but-EMPTY list, a gate-reject contributes no list at all).
 
-    @Test("kWayRobustPlayedSlots: fewer than 2 diff lists can never reach the ≥2-persona quorum → empty")
-    func robustFewerThanTwoListsEmpty() {
-        #expect(RediffSlotOwnership.kWayRobustPlayedSlots([]).isEmpty)
-        #expect(RediffSlotOwnership.kWayRobustPlayedSlots([[Self.played(100, 160)]]).isEmpty,
-                "a single persona's divergence is NOT robust enough to mint")
+    @Test("day-0 union: a SINGLE diverging persona among collisions/gate-rejects still mints its slots (the Conan/AdsWizz pinned-show case)")
+    func dayZeroUnionSingleDivergingPersonaMints() {
+        // Client-pinned show: the same-persona re-fetch COLLIDES with A (byte-
+        // identical → gate-accepted with ZERO divergent slots → an EMPTY list); a
+        // gate-REJECTED persona (re-encode CDN) contributes NO list at all. Only
+        // ONE persona (Overcast) diverges and reveals the real pods. Union mints
+        // exactly those — NOT nothing. NON-tautological: the removed ≥2-agreement
+        // quorum returned EMPTY here (the diverging pods have single-persona support).
+        let collision: [RediffSlotOwnership.PlayedSlot] = []            // same-persona: byte-identical
+        let overcast = [Self.played(0, 31, left: 8, right: 400),       // dynamic pre-roll
+                        Self.played(1500, 1680, left: 400, right: 8)]  // mid-roll pod
+        // The gate-rejected persona simply isn't in the list.
+        let minted = RediffSlotOwnership.unionedPlayedSlots([collision, overcast])
+        let intervals = minted.map { ($0.startSeconds, $0.endSeconds) }
+        #expect(minted.count == 2, "the lone diverging persona's pods mint despite the collision, got \(intervals)")
+        #expect(intervals.contains { $0 == (0, 31) }, "dynamic pre-roll minted")
+        #expect(intervals.contains { $0 == (1500, 1680) }, "mid-roll pod minted")
     }
 
-    @Test("kWayRobustPlayedSlots keeps ONLY regions ≥2 personas independently diverged on")
-    func robustKeepsOnlyCorroboratedRegions() {
-        // Persona B: pods 1 & 2. Persona C: pods 2 & 3. Only pod 2 is corroborated
-        // by BOTH — pods 1 and 3 are lone (single-persona) coincidences and drop.
-        let b = [Self.played(60, 90), Self.played(600, 640)]
-        let c = [Self.played(600, 640), Self.played(1800, 1830)]
-        let robust = RediffSlotOwnership.kWayRobustPlayedSlots([b, c])
-        let intervals = robust.map { ($0.startSeconds, $0.endSeconds) }
-        #expect(robust.count == 1, "only the ≥2-persona pod survives, got \(intervals)")
-        #expect(intervals.first! == (600, 640))
-    }
-
-    @Test("kWayRobustPlayedSlots collapses corroborating detections of ONE pod to a single slot (outer edges)")
-    func robustCollapsesCorroboratingPod() {
-        // Two personas detect the same pod at slightly different edges → robust,
-        // merged to the outer edges (same `mergedAndCapped` the union uses).
-        let b = [Self.played(100, 160, left: 200, right: 5)]
-        let c = [Self.played(99, 161, left: 5, right: 300)]
-        let robust = RediffSlotOwnership.kWayRobustPlayedSlots([b, c])
-        #expect(robust.count == 1)
-        #expect(robust[0].startSeconds == 99 && robust[0].endSeconds == 161)
-    }
-
-    @Test("kWayRobustPlayedSlots: 3 personas where only 1 diverges on a pod → that pod is NOT robust (drops)")
-    func robustThreeListsLoneDiffDrops() {
-        // pod X corroborated by B & C (robust); pod Y seen ONLY by D (drops).
-        let b = [Self.played(100, 160)]
-        let c = [Self.played(101, 159)]
-        let d = [Self.played(500, 540)]
-        let robust = RediffSlotOwnership.kWayRobustPlayedSlots([b, c, d])
-        let intervals = robust.map { ($0.startSeconds, $0.endSeconds) }
-        #expect(robust.count == 1, "only the corroborated pod survives, got \(intervals)")
-        #expect(intervals.first!.0 == 100 && intervals.first!.1 == 160)
-    }
-
-    @Test("kWayRobustPlayedSlots: an empty list among K does not count toward a pod's quorum")
-    func robustEmptyListDoesNotCount() {
-        // B and C both have the pod (robust); the empty D contributes nothing but
-        // must not break the B+C quorum.
-        let b = [Self.played(100, 160)]
-        let c = [Self.played(100, 160)]
-        let d: [RediffSlotOwnership.PlayedSlot] = []
-        let robust = RediffSlotOwnership.kWayRobustPlayedSlots([b, c, d])
-        #expect(robust.count == 1)
-        // And a pod present in only ONE non-empty list among K stays non-robust.
-        let single = RediffSlotOwnership.kWayRobustPlayedSlots([[Self.played(100, 160)], d])
-        #expect(single.isEmpty, "one non-empty persona + one empty ⇒ no quorum")
+    @Test("day-0 union: ALL personas collide (every list empty) → nothing minted")
+    func dayZeroUnionAllCollideMintsNothing() {
+        // Every re-fetch landed the same stitch as A (byte-identical → empty
+        // lists). No divergence anywhere → the union is empty → the mint returns 0.
+        #expect(RediffSlotOwnership.unionedPlayedSlots([[], [], []]).isEmpty)
     }
 
     // MARK: - resolveSpan / synthesizeSlot + coreCoverage gate
