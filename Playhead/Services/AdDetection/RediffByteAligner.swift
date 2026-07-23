@@ -144,7 +144,62 @@ enum RediffByteAligner {
         let aDurationSeconds: Double
         let bDurationSeconds: Double
 
+        // playhead-9s6q FIX A — NON-MONOTONIC SEGMENT RECOVERY (ADDITIVE; every
+        // field ABOVE is byte-for-byte unchanged, so a consumer that ignores
+        // these — i.e. the strict/lagged gate path — is byte-identical to
+        // pre-9s6q). When an ad-LENGTH difference (or CBR header-bleed) makes a
+        // later break's run overlap an earlier one in B, the max-bytes `chain`
+        // DROPS runs and `monotonicClean` is false. Rather than discard a
+        // high-`chainedFractionB` fetch full of real divergent ads, `align` ALSO
+        // partitions the found runs into contiguous monotonic segments and
+        // re-derives the inter-run A-gap slots over the FULL segmented
+        // (A-ordered, A-non-overlapping) run set — the UNION of every segment's
+        // divergent regions. `RediffSlotOwnership.gateAndDiffBytes` consumes
+        // these ONLY behind its (default-OFF) non-monotonic-recovery flag; the
+        // strict `slots`/`chainedFractionB` path is otherwise untouched.
+        //
+        // For a monotonic-clean alignment these MIRROR the single-chain values
+        // (one segment == the chain), so recovery is a no-op there.
+
+        /// Divergent A-time slots over the FULL monotonic-segmented run set (the
+        /// union across segments). Equals `slots` when `monotonicClean`.
+        let segmentedSlots: [Slot]
+        /// Σ(segment run bytes) / B audio bytes — the re-encode floor computed
+        /// over the SEGMENTED aligned coverage (≥ `chainedFractionB`, since
+        /// segmenting keeps runs the single chain dropped). Equals
+        /// `chainedFractionB` when `monotonicClean`.
+        let segmentedChainedFractionB: Double
+        /// Count of runs across all monotonic segments. Equals `chain.count`
+        /// when `monotonicClean`.
+        let segmentedRunsChained: Int
+
         var monotonicClean: Bool { runsDroppedNonMonotonic == 0 }
+
+        init(
+            runsFound: Int,
+            chain: [Run],
+            runsDroppedNonMonotonic: Int,
+            chainedBytes: Int,
+            chainedFractionB: Double,
+            slots: [Slot],
+            aDurationSeconds: Double,
+            bDurationSeconds: Double,
+            segmentedSlots: [Slot] = [],
+            segmentedChainedFractionB: Double = 0,
+            segmentedRunsChained: Int = 0
+        ) {
+            self.runsFound = runsFound
+            self.chain = chain
+            self.runsDroppedNonMonotonic = runsDroppedNonMonotonic
+            self.chainedBytes = chainedBytes
+            self.chainedFractionB = chainedFractionB
+            self.slots = slots
+            self.aDurationSeconds = aDurationSeconds
+            self.bDurationSeconds = bDurationSeconds
+            self.segmentedSlots = segmentedSlots
+            self.segmentedChainedFractionB = segmentedChainedFractionB
+            self.segmentedRunsChained = segmentedRunsChained
+        }
     }
 
     // MARK: - MP3 frame header (exact port of python _parse_header)
@@ -561,15 +616,136 @@ enum RediffByteAligner {
             )
         }
         let bAudioBytes = max(1, pb.sizeBytes - pb.leadingID3Bytes)
+        let chainedFractionB = Double(chainedBytes) / Double(bAudioBytes)
+
+        // playhead-9s6q FIX A: when the chain had to DROP runs (non-monotonic),
+        // ALSO derive the divergent slots over the FULL monotonic-segmented run
+        // set so a high-coverage fetch's real ads are recoverable (behind the
+        // gate's opt-in flag) instead of discarded wholesale. For a
+        // monotonic-clean alignment the single chain IS the only segment, so
+        // mirror the chain values and do no extra work.
+        let segmentedSlots: [Slot]
+        let segmentedChainedFractionB: Double
+        let segmentedRunsChained: Int
+        if dropped == 0 {
+            segmentedSlots = slots
+            segmentedChainedFractionB = chainedFractionB
+            segmentedRunsChained = chain.count
+        } else {
+            let seg = segmentDivergentSlots(runs: runs, pa: pa, pb: pb, bAudioBytes: bAudioBytes)
+            segmentedSlots = seg.slots
+            segmentedChainedFractionB = seg.chainedFractionB
+            segmentedRunsChained = seg.runsChained
+        }
+
         return Alignment(
             runsFound: runs.count,
             chain: chain,
             runsDroppedNonMonotonic: dropped,
             chainedBytes: chainedBytes,
-            chainedFractionB: Double(chainedBytes) / Double(bAudioBytes),
+            chainedFractionB: chainedFractionB,
             slots: slots,
             aDurationSeconds: pa.durationSeconds,
-            bDurationSeconds: pb.durationSeconds
+            bDurationSeconds: pb.durationSeconds,
+            segmentedSlots: segmentedSlots,
+            segmentedChainedFractionB: segmentedChainedFractionB,
+            segmentedRunsChained: segmentedRunsChained
         )
+    }
+
+    // MARK: - Non-monotonic segment recovery (playhead-9s6q FIX A)
+
+    /// Re-derive divergent A-time slots when the max-bytes `chain` had to DROP
+    /// runs (non-monotonic). Partition the found runs into contiguous monotonic
+    /// segments and UNION their divergent regions: walk the runs in A-order,
+    /// keep an A-non-overlapping accepted set (a later run that A-overlaps an
+    /// already-kept run is dropped — the same conflict `chainRuns` resolves when
+    /// it drops a run), then emit the inter-run A-gaps (plus head/tail) as slots
+    /// EXACTLY as `align` does for a single chain. A segment BOUNDARY — where B
+    /// jumps backward because an ad's length differs between A and B — simply
+    /// appears as an inter-run gap whose B-width is ≤ 0 (a `removed_in_B` /
+    /// `replaced` divergence), which is precisely the rotated ad that made the
+    /// chain non-monotonic. The union of these gaps across segments is the
+    /// recovered ad set.
+    ///
+    /// PRECISION (why segmenting cannot manufacture a spurious slot): every run
+    /// is already ≥ `minRunBytes` (from `byteRuns`), so a segment cannot be
+    /// built from sub-min-run noise; the returned `chainedFractionB`
+    /// (Σ accepted run bytes / B audio bytes) lets the gate keep its re-encode
+    /// floor over the segmented coverage; and the gate's `minAdSeconds` filter
+    /// drops sub-ad gaps. B coordinates feed only the gap KIND and the flank
+    /// seconds — the A-timeline slot edges are byte-exact off the aligned runs.
+    static func segmentDivergentSlots(
+        runs: [Run], pa: ParsedMP3, pb: ParsedMP3, bAudioBytes: Int
+    ) -> (slots: [Slot], chainedFractionB: Double, runsChained: Int) {
+        guard !runs.isEmpty else { return ([], 0, 0) }
+        // The SAME stable order `chainRuns` uses.
+        let sorted = runs.enumerated()
+            .sorted { ($0.element.aStart, $0.element.bStart, $0.offset)
+                < ($1.element.aStart, $1.element.bStart, $1.offset) }
+            .map(\.element)
+        // A-ordered, A-non-overlapping accepted set. Dropping a later
+        // A-overlapper (the conflict `chainRuns` also resolves) keeps the gap
+        // arithmetic below well-formed (every A-gap ≥ 0).
+        var accepted: [Run] = []
+        var globalAEnd = -1
+        for run in sorted {
+            if run.aStart < globalAEnd { continue }
+            accepted.append(run)
+            globalAEnd = run.aStart + run.bytes
+        }
+        let chainedBytes = accepted.reduce(0) { $0 + $1.bytes }
+
+        var slots: [Slot] = []
+        func addGap(a0: Int, a1: Int, b0: Int, b1: Int, kindHint: SlotKind?, leftFlank: Double, rightFlank: Double) {
+            let ga = a1 - a0
+            let gb = b1 - b0
+            if ga <= 0 && gb <= 0 { return }
+            let kind: SlotKind
+            if let kindHint {
+                kind = kindHint
+            } else if ga > 0 && gb > 0 {
+                kind = .replaced
+            } else if ga > 0 {
+                kind = .removedInB
+            } else {
+                kind = .insertedInB
+            }
+            slots.append(Slot(
+                kind: kind,
+                aStartByte: a0,
+                aEndByte: a1,
+                aStartSeconds: timeAt(pa, byteOffset: a0),
+                aEndSeconds: timeAt(pa, byteOffset: a1),
+                aBytes: ga,
+                bBytes: gb,
+                leftFlankSeconds: leftFlank,
+                rightFlankSeconds: rightFlank
+            ))
+        }
+        func runASeconds(_ run: Run) -> Double {
+            timeAt(pa, byteOffset: run.aStart + run.bytes) - timeAt(pa, byteOffset: run.aStart)
+        }
+        if let first = accepted.first, let last = accepted.last {
+            addGap(
+                a0: pa.leadingID3Bytes, a1: first.aStart,
+                b0: pb.leadingID3Bytes, b1: first.bStart,
+                kindHint: .head, leftFlank: 0, rightFlank: runASeconds(first)
+            )
+            for (left, right) in zip(accepted, accepted.dropFirst()) {
+                addGap(
+                    a0: left.aStart + left.bytes, a1: right.aStart,
+                    b0: left.bStart + left.bytes, b1: right.bStart,
+                    kindHint: nil, leftFlank: runASeconds(left), rightFlank: runASeconds(right)
+                )
+            }
+            addGap(
+                a0: last.aStart + last.bytes, a1: pa.sizeBytes,
+                b0: last.bStart + last.bytes, b1: pb.sizeBytes,
+                kindHint: .tail, leftFlank: runASeconds(last), rightFlank: 0
+            )
+        }
+        let fraction = Double(chainedBytes) / Double(max(1, bAudioBytes))
+        return (slots, fraction, accepted.count)
     }
 }

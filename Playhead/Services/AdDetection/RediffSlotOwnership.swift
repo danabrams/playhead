@@ -321,7 +321,11 @@ enum RediffSlotOwnership {
         /// unique-frame anchor set toward 0) or nothing survived min-run.
         case rejectedNoChainedRuns
         /// The chain dropped runs (python `monotonic_clean == false`) — an
-        /// out-of-order byte structure the slot semantics cannot trust.
+        /// out-of-order byte structure the strict slot semantics cannot trust.
+        /// playhead-9s6q: with `recoverNonMonotonicSegments` set (day-0 opt-in),
+        /// a fetch that would land here is instead segment-recovered; it only
+        /// still reaches this case when the segmented recovery finds no
+        /// trustworthy slot (low coverage / all sub-ad-width).
         case rejectedNonMonotonic(dropped: Int)
         /// `chainedFractionB` below the re-encode floor (the byte analogue of
         /// the chroma `alignedFractionB` guard, SAME `minAlignedFractionB`).
@@ -356,15 +360,30 @@ enum RediffSlotOwnership {
     /// analogue of the chroma differ's `minGapFps` floor — pure-B insertions
     /// have zero A-width and drop out here), then fragment-merged and
     /// duration-capped by the SAME `mergedAndCapped` the chroma path uses.
+    ///
+    /// playhead-9s6q FIX A (`recoverNonMonotonicSegments`): DEFAULT `false` is
+    /// the historical WHOLESALE reject on a non-monotonic chain — byte-identical
+    /// to the pre-9s6q lagged/production path. When `true` (the day-0 opt-in),
+    /// a non-monotonic alignment is instead RECOVERED via the aligner's
+    /// monotonic-SEGMENT partition (`segmentRecoveredByteGate`), preserving every
+    /// precision guard. The lagged sweep passes `false`; nothing changes until a
+    /// separate corpus go/no-go flips the flag on.
     static func gateAndDiffBytes(
         alignment: RediffByteAligner.Alignment,
-        config: Configuration = .default
+        config: Configuration = .default,
+        recoverNonMonotonicSegments: Bool = false
     ) -> ByteGateOutcome {
         guard !alignment.chain.isEmpty else {
             return .rejectedNoChainedRuns
         }
         guard alignment.monotonicClean else {
-            return .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic)
+            // playhead-9s6q FIX A: the day-0 opt-in RECOVERS the divergent slots
+            // from the monotonic segments; the strict path (default) discards the
+            // whole fetch exactly as before.
+            guard recoverNonMonotonicSegments else {
+                return .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic)
+            }
+            return segmentRecoveredByteGate(alignment: alignment, config: config)
         }
         guard alignment.chainedFractionB >= config.minAlignedFractionB else {
             return .rejectedLowChainedFraction(alignment.chainedFractionB)
@@ -384,6 +403,47 @@ enum RediffSlotOwnership {
             chainedFractionB: alignment.chainedFractionB,
             runsFound: alignment.runsFound,
             runsChained: alignment.chain.count,
+            playedSlots: playedSlots
+        ))
+    }
+
+    /// playhead-9s6q FIX A: the non-monotonic RECOVERY arm. Preserves EVERY
+    /// precision guard of the strict path, applied to the SEGMENTED coverage:
+    ///   • re-encode floor — `segmentedChainedFractionB` (Σ segment run bytes /
+    ///     B audio bytes) must clear `minAlignedFractionB`, so a low-coverage
+    ///     island (a re-encode) is STILL rejected wholesale (not widened);
+    ///   • min-run-bytes — intrinsic (every segmented run is already ≥
+    ///     `minRunBytes` from `byteRuns`);
+    ///   • min-ad-width + fragment-merge + duration-cap — the SAME
+    ///     `mergedAndCapped` cleaning the strict path applies, so sub-ad and
+    ///     alignment-breakdown gaps are dropped.
+    /// If nothing survives the guards, this returns the SAME `.rejectedNonMonotonic`
+    /// the strict path would (no manufactured acceptance).
+    private static func segmentRecoveredByteGate(
+        alignment: RediffByteAligner.Alignment,
+        config: Configuration
+    ) -> ByteGateOutcome {
+        guard alignment.segmentedChainedFractionB >= config.minAlignedFractionB else {
+            return .rejectedLowChainedFraction(alignment.segmentedChainedFractionB)
+        }
+        let playedSlots = mergedAndCapped(
+            alignment.segmentedSlots
+                .filter { $0.aSeconds >= config.minAdSeconds }
+                .map { PlayedSlot(
+                    startSeconds: $0.aStartSeconds,
+                    endSeconds: $0.aEndSeconds,
+                    leftRunSeconds: $0.leftFlankSeconds,
+                    rightRunSeconds: $0.rightFlankSeconds
+                ) },
+            config: config
+        )
+        guard !playedSlots.isEmpty else {
+            return .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic)
+        }
+        return .accepted(ByteAcceptance(
+            chainedFractionB: alignment.segmentedChainedFractionB,
+            runsFound: alignment.runsFound,
+            runsChained: alignment.segmentedRunsChained,
             playedSlots: playedSlots
         ))
     }

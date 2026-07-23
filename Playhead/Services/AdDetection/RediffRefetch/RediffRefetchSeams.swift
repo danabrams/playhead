@@ -306,6 +306,27 @@ struct RediffFetchPersona: Sendable, Equatable {
     /// The single persona the production sweep (Unit 1) fetches under.
     static let `default` = RediffFetchPersona.appleCoreMediaIPhone
 
+    /// playhead-9s6q (FIX B): the request context the app's OWN episode download
+    /// (the played A-side copy the byte differ mmaps) presents to the CDN — the
+    /// baseline a day-0 B-fetch must DIFFER from to avoid a byte-identical
+    /// collision on a client-PINNED show. Modeled as the AppleCoreMedia-iPhone
+    /// "streaming" context (the iOS media-stack UA), matching the persona the
+    /// rediff system treats as `.default` everywhere. If the app's actual
+    /// download UA is ever retargeted, update THIS constant — the
+    /// distinct-from-download SELECTION logic (`kWayPersonasDistinct`) is
+    /// download-persona-agnostic and needs no change.
+    static let download = RediffFetchPersona.appleCoreMediaIPhone
+
+    /// The effective wire User-Agent KEY for collision comparison: a `nil` OR
+    /// empty `userAgent` both mean "no explicit header → CFNetwork's system
+    /// default", so they collapse to ONE sentinel. Two personas with the same
+    /// key present the SAME UA on the wire and (on a client-PINNED show) return
+    /// byte-identical bodies — a wasted collision fetch. This is the UA (the
+    /// pinning dimension); `accept`/`acceptLanguage` are uniform across the bank.
+    var effectiveUserAgentKey: String {
+        (userAgent?.isEmpty ?? true) ? "\u{0}system-default" : userAgent!
+    }
+
     /// playhead-xsdz.36.2 (k-way): the first `count` DISTINCT personas from the
     /// curated bank in the divergence-reliable ORDER — iPhone → Mac → Overcast
     /// → empty. The AppleCoreMedia iPhone+Mac pair is the reliable divergence
@@ -323,6 +344,27 @@ struct RediffFetchPersona: Sendable, Equatable {
     static func kWayPersonas(count: Int) -> [RediffFetchPersona] {
         let k = max(1, min(count, curatedBank.count))
         return Array(curatedBank.prefix(k))
+    }
+
+    /// playhead-9s6q (FIX B): the first `count` curated-bank personas whose
+    /// effective wire UA DIFFERS from `downloadPersona` — the divergence draws a
+    /// day-0 probe stages so NONE collides byte-identically with the played
+    /// A-side (which the app downloaded under `downloadPersona`). With the
+    /// AppleCoreMedia-iPhone download persona this yields `[Mac, Overcast,
+    /// empty]` before clamping — e.g. `count: 2` → `[Mac, Overcast]`, two real
+    /// divergence draws with no wasted collision fetch.
+    ///
+    /// `count` is clamped to `[1, <#distinct personas#>]`. The bank's
+    /// curl/generic-UA exclusion still holds (they were never bank members).
+    /// Unlike `kWayPersonas`, this NEVER returns the download persona, so a
+    /// same-context re-fetch (0 divergence on a pinned show) can't be staged.
+    static func kWayPersonasDistinct(from downloadPersona: RediffFetchPersona, count: Int) -> [RediffFetchPersona] {
+        let downloadKey = downloadPersona.effectiveUserAgentKey
+        let distinct = curatedBank.filter { $0.effectiveUserAgentKey != downloadKey }
+        // `curatedBank` holds 4 distinct-UA personas, so removing one download
+        // persona always leaves ≥1; the clamp is defensive.
+        let k = max(1, min(count, max(1, distinct.count)))
+        return Array(distinct.prefix(k))
     }
 }
 

@@ -1127,6 +1127,48 @@ struct RediffFetchPersonaTests {
             #expect(!ua.contains("curl") && !ua.contains("wget"))
         }
     }
+
+    // MARK: - playhead-9s6q FIX B: download-distinct day-0 persona selection
+
+    @Test("kWayPersonasDistinct draws K personas GUARANTEED distinct from the download UA — day-0's K=2 is [Mac, Overcast], never the iPhone download persona")
+    func kWayPersonasDistinctFromDownload() {
+        // The download persona is the AppleCoreMedia-iPhone streaming context.
+        #expect(RediffFetchPersona.download == .appleCoreMediaIPhone)
+
+        // Day-0's production K=2 → the two divergence draws that are NOT the
+        // download persona, in divergence-reliable order.
+        let k2 = RediffFetchPersona.kWayPersonasDistinct(from: .download, count: 2)
+        #expect(k2.map(\.name) == ["applecoremedia-macintosh", "overcast"])
+
+        // The distinctness INVARIANT: no staged persona shares the download's
+        // effective wire UA (the client-pinning collision dimension).
+        let downloadKey = RediffFetchPersona.download.effectiveUserAgentKey
+        for persona in k2 {
+            #expect(persona.effectiveUserAgentKey != downloadKey, "\(persona.name) collides with the download UA")
+        }
+        // And it satisfies the ≥2 collision-recovery floor day-0 requires.
+        #expect(k2.count >= RediffSlotOwnership.dayZeroMinKWayBCopies)
+
+        // K=1 still excludes the download persona (unlike `kWayPersonas`, whose
+        // K=1 IS the download/default persona).
+        #expect(RediffFetchPersona.kWayPersonasDistinct(from: .download, count: 1).map(\.name)
+            == ["applecoremedia-macintosh"])
+        #expect(RediffFetchPersona.kWayPersonas(count: 1) == [.download], "control: kWayPersonas K=1 IS the download persona")
+
+        // Excluding iPhone leaves 3 distinct personas; count clamps to that and to ≥1.
+        #expect(RediffFetchPersona.kWayPersonasDistinct(from: .download, count: 3).map(\.name)
+            == ["applecoremedia-macintosh", "overcast", "empty-ua"])
+        #expect(RediffFetchPersona.kWayPersonasDistinct(from: .download, count: 9).count == 3, "clamped to the distinct-persona count")
+        #expect(RediffFetchPersona.kWayPersonasDistinct(from: .download, count: 0).count == 1, "clamped to ≥1")
+
+        // Download-persona-AGNOSTIC: excluding the empty-UA persona instead
+        // (nil/empty both collapse to the system-default key) yields the
+        // AppleCoreMedia + Overcast set — the selection logic tracks whatever
+        // persona downloaded the A-side, not a hardcoded exclusion.
+        let distinctFromEmpty = RediffFetchPersona.kWayPersonasDistinct(from: .emptyUA, count: 4)
+        #expect(!distinctFromEmpty.contains { $0.effectiveUserAgentKey == RediffFetchPersona.emptyUA.effectiveUserAgentKey })
+        #expect(distinctFromEmpty.map(\.name) == ["applecoremedia-iphone", "applecoremedia-macintosh", "overcast"])
+    }
 }
 
 // MARK: - Seam stubs

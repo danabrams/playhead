@@ -10171,8 +10171,12 @@ actor AdDetectionService {
     ///     identical), so requiring agreement dropped real ads. Staging ≥2
     ///     distinct-persona B-copies is the COLLISION-RECOVERY floor, not agreement.
     ///   • Every false-widening guard still applies (`gateAndDiffBytes`:
-    ///     min-run-bytes, monotonic, re-encode/`chainedFraction` reject,
-    ///     min-ad-width; then fragment-merge + duration-cap).
+    ///     min-run-bytes, re-encode/`chainedFraction` reject, min-ad-width;
+    ///     then fragment-merge + duration-cap). playhead-9s6q FIX A: day-0 opts
+    ///     into non-monotonic SEGMENT recovery (flag `nonMonotonicSegmentRecovery
+    ///     Enabled`, default OFF) — a non-monotonic multi-break fetch is
+    ///     segment-recovered (each guard re-applied over the segmented coverage)
+    ///     rather than discarded; the lagged path keeps the strict reject.
     ///   • MARK-ONLY — `eligibilityGate = .markOnly`, edges left `.unanchored`;
     ///     a rare FP is only a wrong banner, never eaten content. Auto-skip held.
     /// It does NOT change presence-gating for the lagged path, the chroma differ,
@@ -10229,7 +10233,14 @@ actor AdDetectionService {
                 continue
             }
             let alignment = RediffByteAligner.align(aData: aData, bData: bData)
-            guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(alignment: alignment) else {
+            // playhead-9s6q FIX A: the day-0 mint OPTS IN to non-monotonic segment
+            // recovery (flag default OFF) so a Fresh Air-class multi-break fetch
+            // whose chain went non-monotonic yields its divergent ad slots instead
+            // of nothing. Every precision guard still applies per segment.
+            guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(
+                alignment: alignment,
+                recoverNonMonotonicSegments: RediffActivation.nonMonotonicSegmentRecoveryEnabled
+            ) else {
                 continue
             }
             perBSideSlots.append(acceptance.playedSlots)

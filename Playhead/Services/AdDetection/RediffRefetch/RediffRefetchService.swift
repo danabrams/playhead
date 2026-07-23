@@ -562,7 +562,13 @@ actor RediffRefetchService {
         }
         var fullFetchBytes = 0
         do {
-            let personas = RediffFetchPersona.kWayPersonas(count: kWayFetchCount)
+            // playhead-9s6q (FIX B): day-0 stages K VARIED personas GUARANTEED
+            // distinct from the download UA (`RediffFetchPersona.download`), so no
+            // B-copy collides byte-identically with the played A-side on a
+            // client-PINNED show — unlike the lagged sweep's `kWayPersonas`, whose
+            // first persona IS the download context. The lagged path is unchanged.
+            let personas = RediffFetchPersona.kWayPersonasDistinct(
+                from: .download, count: kWayFetchCount)
             var fetchedFileURLs: [URL] = []
             // NEVER persist the B-copies: delete EVERY fetched copy on EVERY exit
             // (a mid-batch fetch throw, or a throw/return out of the mint below).
