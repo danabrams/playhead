@@ -2971,6 +2971,21 @@ final class PlayheadRuntime {
         // by default.
         let keepFullMusic = episode.podcast?.keepFullMusic ?? false
 
+        // playhead-wrj8 (#4): protect the file backing THIS episode from
+        // LRU eviction while it is the in-use playback/marking target, so
+        // `evictIfNeeded` can never delete the bytes the user is playing and
+        // marking ads against. Refcounted, so we release the PREVIOUS
+        // episode's protection when switching (and stopPlayback releases the
+        // current one at a true terminal). Guarded on `previous != episodeId`
+        // so a re-play of the same episode does not double-protect.
+        let previousProtectedEpisodeId = currentEpisodeId
+        if previousProtectedEpisodeId != episodeId {
+            if let previousProtectedEpisodeId {
+                await downloadManager.unprotectFromAnalysis(episodeId: previousProtectedEpisodeId)
+            }
+            await downloadManager.protectForAnalysis(episodeId: episodeId)
+        }
+
         setCurrentEpisodeId(episodeId)
         currentPodcastId = podcastId
         currentEpisodeTitle = episode.title
@@ -3008,11 +3023,26 @@ final class PlayheadRuntime {
         // Resolve a local audio file. Both playback and analysis use the
         // same file to avoid dynamic ad insertion serving different ads
         // on separate HTTP requests.
+        //
+        // playhead-wrj8 (#1): resolve EXCLUSIVELY through the pinned
+        // complete artifact. The persisted `episode.cachedAudioURL` pin is
+        // trusted only when the download manager confirms the file is still
+        // present AND complete (`servingURLIfComplete`) — never blindly,
+        // so a stale pointer at an evicted/rotated/partial file can't be
+        // played. Once a complete artifact exists we never fall through to
+        // the streaming path (which re-derives from the mutable
+        // `episode.audioURL` and could land a different DAI stitch).
         let localURL: URL
-        if let cached = episode.cachedAudioURL {
-            localURL = cached
+        if let pinned = episode.cachedAudioURL,
+           FileManager.default.fileExists(atPath: pinned.path),
+           await downloadManager.servingURLIfComplete(for: episodeId) != nil {
+            localURL = pinned
         } else if let cached = await downloadManager.cachedFileURL(for: episodeId) {
             localURL = cached
+            // Persist the per-episode pin so subsequent plays resolve
+            // straight to the immutable artifact.
+            episode.cachedAudioURL = cached
+            episode.downloadState = .downloaded
         } else {
             // Not cached — stream-download and play once enough is buffered.
             logger.info("Episode not cached — streaming download: \(episodeId)")
@@ -3163,6 +3193,13 @@ final class PlayheadRuntime {
 
     func stopPlayback() async {
         await requestPlaybackPositionPersistence(.stopped)
+        // playhead-wrj8 (#4): release the in-use eviction protection taken
+        // in playEpisode. This is the true terminal for the current
+        // episode's playback/marking, so the file may now be evicted under
+        // LRU pressure when the cache is over budget.
+        if let protectedEpisodeId = currentEpisodeId {
+            await downloadManager.unprotectFromAnalysis(episodeId: protectedEpisodeId)
+        }
         audioCacheTask?.cancel()
         audioCacheTask = nil
         await analysisWorkScheduler.playbackStopped()

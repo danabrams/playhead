@@ -153,6 +153,137 @@ struct FeedRefreshTests {
         let episodes = try context.fetch(FetchDescriptor<Episode>())
         #expect(episodes.count == 1)
     }
+
+    // MARK: - playhead-wrj8: a downloaded episode's audio must not rotate
+
+    @Test("wrj8: a DOWNLOADED episode's duration is preserved across a feed refresh (audioURL still refreshes for eviction recovery)")
+    @MainActor
+    func downloadedEpisodeNotRotatedByRefresh() async throws {
+        let (session, stub) = makeStubbedSession()
+        defer { stub.release() }
+
+        let feedURL = URL(string: "https://example.com/dai-show/feed.xml")!
+        // First fetch: stitch A enclosure, 1541 s.
+        let firstFeed = RSSFeedStubFactory.feedXML(
+            title: "DAI Show", author: "A",
+            episodes: [
+                .init(
+                    title: "Ep", guid: "dai-1",
+                    enclosureURL: URL(string: "https://cdn.example.com/dai-show/stitchA.mp3"),
+                    durationSeconds: 1541
+                )
+            ]
+        )
+        // Refresh: SAME guid, but a rotated enclosure (fresh DAI stitch) +
+        // a shorter declared duration — exactly the incident's shape.
+        let secondFeed = RSSFeedStubFactory.feedXML(
+            title: "DAI Show", author: "A",
+            episodes: [
+                .init(
+                    title: "Ep", guid: "dai-1",
+                    enclosureURL: URL(string: "https://cdn.example.com/dai-show/stitchB.mp3"),
+                    durationSeconds: 528
+                )
+            ]
+        )
+        let counter = AtomicCounter()
+        stub.register(.init(
+            matches: { $0.url?.absoluteString.contains("dai-show/feed.xml") ?? false },
+            response: { _ in
+                let n = counter.incrementAndGet()
+                return .success(n == 1 ? firstFeed : secondFeed, statusCode: 200)
+            }
+        ))
+
+        let service = PodcastDiscoveryService(session: session)
+        let container = try makeFeedDiscoveryContainer()
+        let context = ModelContext(container)
+
+        let parsed = try await service.fetchFeed(url: feedURL)
+        let podcast = await service.persist(parsed, from: feedURL, in: context)
+        try context.save()
+
+        let ep = try #require(try context.fetch(FetchDescriptor<Episode>()).first)
+        let originalURL = ep.audioURL
+        let originalDuration = ep.duration
+        #expect(originalURL.absoluteString.contains("stitchA"))
+
+        // Simulate the episode being downloaded + pinned (as playEpisode does).
+        ep.downloadState = .downloaded
+        ep.cachedAudioURL = URL(fileURLWithPath: "/tmp/pinned-dai-1.mp3")
+        try context.save()
+
+        _ = try await service.refreshEpisodes(for: podcast, in: context)
+        try context.save()
+
+        let refreshed = try #require(try context.fetch(FetchDescriptor<Episode>()).first)
+        // The DURATION under a downloaded artifact must NOT rotate to the
+        // feed's shorter re-declared value.
+        #expect(refreshed.duration == originalDuration,
+                "downloaded episode duration must NOT rotate on refresh")
+        // The audioURL DOES refresh — it is only ever used on the streaming
+        // path (reached only when NO complete artifact exists, e.g. after
+        // eviction). The immutable played FILE is guaranteed by the
+        // completeness pin at the DownloadManager layer, never by this
+        // field, so refreshing it is safe and lets an evicted episode
+        // re-stream from a live enclosure instead of a frozen/expired one.
+        #expect(refreshed.audioURL.absoluteString.contains("stitchB"),
+                "audioURL should still track the feed so an evicted episode can re-stream")
+    }
+
+    @Test("wrj8: a NOT-downloaded episode still updates audioURL/duration on refresh (happy path)")
+    @MainActor
+    func notDownloadedEpisodeStillUpdatesOnRefresh() async throws {
+        let (session, stub) = makeStubbedSession()
+        defer { stub.release() }
+
+        let feedURL = URL(string: "https://example.com/open-show/feed.xml")!
+        let firstFeed = RSSFeedStubFactory.feedXML(
+            title: "Open Show", author: "A",
+            episodes: [
+                .init(
+                    title: "Ep", guid: "open-1",
+                    enclosureURL: URL(string: "https://cdn.example.com/open-show/v1.mp3"),
+                    durationSeconds: 1000
+                )
+            ]
+        )
+        let secondFeed = RSSFeedStubFactory.feedXML(
+            title: "Open Show", author: "A",
+            episodes: [
+                .init(
+                    title: "Ep", guid: "open-1",
+                    enclosureURL: URL(string: "https://cdn.example.com/open-show/v2.mp3"),
+                    durationSeconds: 1200
+                )
+            ]
+        )
+        let counter = AtomicCounter()
+        stub.register(.init(
+            matches: { $0.url?.absoluteString.contains("open-show/feed.xml") ?? false },
+            response: { _ in
+                let n = counter.incrementAndGet()
+                return .success(n == 1 ? firstFeed : secondFeed, statusCode: 200)
+            }
+        ))
+
+        let service = PodcastDiscoveryService(session: session)
+        let container = try makeFeedDiscoveryContainer()
+        let context = ModelContext(container)
+
+        let parsed = try await service.fetchFeed(url: feedURL)
+        let podcast = await service.persist(parsed, from: feedURL, in: context)
+        try context.save()
+
+        // NOT downloaded — the guard must not fire.
+        _ = try await service.refreshEpisodes(for: podcast, in: context)
+        try context.save()
+
+        let refreshed = try #require(try context.fetch(FetchDescriptor<Episode>()).first)
+        #expect(refreshed.audioURL.absoluteString.contains("v2"),
+                "a not-downloaded episode should still track the feed's current enclosure")
+        #expect(refreshed.duration == 1200)
+    }
 }
 
 // MARK: - Atomic counter for ordered stub responses

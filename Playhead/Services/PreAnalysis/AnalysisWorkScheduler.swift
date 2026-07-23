@@ -2973,6 +2973,24 @@ actor AnalysisWorkScheduler {
             return
         }
 
+        // playhead-wrj8 (#4): protect the cached audio file from LRU
+        // eviction for the duration of this analysis job, so a large cache
+        // over budget can't delete the file mid-analysis (which would strand
+        // the job or, worse, force a re-fetch of a different DAI stitch).
+        // Refcounted + released on every exit via `defer`, so it composes
+        // with the playback-side protection on the same episode. Reached
+        // via a concrete cast (the eviction refcount is DownloadManager
+        // state, deliberately NOT on the `DownloadProviding` query
+        // protocol) so lightweight test stubs are unaffected.
+        let protectedEpisodeId = job.episodeId
+        let evictionProtector = downloadManager as? DownloadManager
+        await evictionProtector?.protectForAnalysis(episodeId: protectedEpisodeId)
+        defer {
+            if let evictionProtector {
+                Task { await evictionProtector.unprotectFromAnalysis(episodeId: protectedEpisodeId) }
+            }
+        }
+
         // Acquire lease. playhead-5uvz.1 (Gap-1): use the journal-aware
         // variant so the lease UPDATE and the `acquired` work_journal
         // row land in the SAME SQL transaction. Without this the

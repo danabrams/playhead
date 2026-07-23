@@ -579,3 +579,137 @@ struct DownloadManagerProgressSnapshotTests {
         #expect(snapshot[secondId] == 0.75)
     }
 }
+
+// MARK: - Immutable-artifact invariant (playhead-wrj8)
+
+/// The bytes PLAYED == ANALYZED == MARKED-AGAINST must be one immutable
+/// artifact for the life of a downloaded episode. On a DAI show the
+/// enclosure re-cuts a different ad stitch per request, so any path that
+/// silently overwrites / serves-a-partial rotates the audio the user marked
+/// ads against. These tests lock the completeness pin + overwrite refusal.
+@Suite("DownloadManager – immutable artifact (playhead-wrj8)")
+struct DownloadManagerImmutableArtifactTests {
+
+    @Test("A truncated (under-length) pinned file is NOT served as cached")
+    func truncatedFileWithheld() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "ep-trunc"
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        // Only 1000 of an expected 5000 bytes are on disk.
+        try Data(repeating: 0xC3, count: 1000).write(to: completeURL)
+        await manager.writePin(
+            AudioAssetPin(expectedBytes: 5000, sha256: nil, sourceURL: nil, etag: nil),
+            for: episodeId
+        )
+
+        #expect(await manager.cachedFileURL(for: episodeId) == nil)
+        #expect(await manager.isCached(episodeId: episodeId) == false)
+
+        // Once the file reaches the pinned length it serves.
+        try Data(repeating: 0xC3, count: 5000).write(to: completeURL)
+        #expect(await manager.cachedFileURL(for: episodeId) == completeURL)
+        #expect(await manager.isCached(episodeId: episodeId))
+    }
+
+    @Test("A legacy bare file with no pin is served (non-destructive migration)")
+    func legacyBareFileServed() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let completeURL = await manager.completeFileURL(for: "ep-legacy")
+        try Data(repeating: 0xD4, count: 2048).write(to: completeURL)
+
+        #expect(await manager.cachedFileURL(for: "ep-legacy") == completeURL)
+        #expect(await manager.isCached(episodeId: "ep-legacy"))
+    }
+
+    @Test("A complete pinned artifact is NOT overwritten by a later background completion (different stitch)")
+    func pinnedArtifactSurvivesBackgroundCompletion() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "ep-pin-immutable"
+        let completeURL = await manager.completeFileURL(for: episodeId)
+
+        // Stitch A: the bytes the user played + marked ads against.
+        let stitchA = Data(repeating: 0xA1, count: 4096)
+        try stitchA.write(to: completeURL)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64(stitchA.count),
+                sha256: nil,
+                sourceURL: "https://dai.example.com/ep.mp3",
+                etag: "\"A\""
+            ),
+            for: episodeId
+        )
+
+        // A background transfer completes later with a DIFFERENT stitch
+        // (different length + content) — the DAI rotation vector.
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PlayheadBGStagingWrj8A", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+        let staged = stagingDir.appendingPathComponent(
+            "\(DownloadManager.safeFilename(for: episodeId)).mp3"
+        )
+        let stitchB = Data(repeating: 0xB2, count: 2048)
+        try stitchB.write(to: staged)
+
+        await manager.handleBackgroundDownloadComplete(
+            episodeId: episodeId,
+            stagedURL: staged,
+            originalURL: URL(string: "https://dai.example.com/ep.mp3"),
+            metadata: HTTPAssetMetadata(etag: "\"B\"", contentLength: 2048, lastModified: nil)
+        )
+
+        // The played bytes are untouched, and the rotated deposit was discarded.
+        let onDisk = try Data(contentsOf: completeURL)
+        #expect(onDisk == stitchA, "played artifact must not be overwritten by a rotated re-fetch")
+        #expect(!FileManager.default.fileExists(atPath: staged.path), "staged rotated copy must be discarded")
+        #expect(await manager.cachedFileURL(for: episodeId) == completeURL)
+    }
+
+    @Test("Eviction protection is refcounted — one release does not unprotect a doubly-held episode")
+    func protectionRefcounted() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // 100-byte budget with two 60-byte files (120 total) forces one eviction.
+        let manager = DownloadManager(cacheDirectory: dir, maxCacheBytes: 100)
+        try await manager.bootstrap()
+
+        let data = Data(repeating: 0x42, count: 60)
+        let heldURL = await manager.completeFileURL(for: "held")
+        let freeURL = await manager.completeFileURL(for: "free")
+        try data.write(to: heldURL)
+        try data.write(to: freeURL)
+
+        // Two overlapping owners (playback + analysis) protect "held".
+        await manager.protectForAnalysis(episodeId: "held")
+        await manager.protectForAnalysis(episodeId: "held")
+        // Analysis finishes and releases once — playback still holds it.
+        await manager.unprotectFromAnalysis(episodeId: "held")
+
+        try await manager.evictIfNeeded()
+
+        let fm = FileManager.default
+        #expect(fm.fileExists(atPath: heldURL.path), "still-held episode must survive eviction")
+        #expect(!fm.fileExists(atPath: freeURL.path), "unprotected episode is the eviction victim")
+
+        // Release the last holder → now unprotected.
+        await manager.unprotectFromAnalysis(episodeId: "held")
+        #expect(await manager.protectedEpisodeIdsForTesting().isEmpty)
+    }
+}
