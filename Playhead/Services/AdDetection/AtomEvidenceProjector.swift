@@ -295,7 +295,24 @@ actor AtomEvidenceProjector {
                 ))
             }
 
-            let isAnchored = !anchorProvenance.isEmpty && correctionMask != .userVetoed
+            // Correction masks override the anchor decision in BOTH directions
+            // (playhead-xsdz.34 veto + playhead-527u confirm):
+            //   • `.userVetoed`    → NEVER anchored (user removed this region).
+            //   • `.userConfirmed` → ALWAYS anchored (user ADDED this region as a
+            //     missed ad). Force-anchoring re-emits the region's decoded span
+            //     on every re-derivation (backfill/rediff) even when no automated
+            //     signal fires, so a user-added mark's ad-presence is SACRED and
+            //     survives re-analysis — the symmetric mirror of the veto path.
+            //   • `.none`          → anchored iff some trustworthy source fired.
+            let isAnchored: Bool
+            switch correctionMask {
+            case .userVetoed:
+                isAnchored = false
+            case .userConfirmed:
+                isAnchored = true
+            case .none:
+                isAnchored = !anchorProvenance.isEmpty
+            }
 
             results.append(AtomEvidence(
                 atomOrdinal: ordinal,

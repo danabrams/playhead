@@ -2749,7 +2749,37 @@ actor AdDetectionService {
             evidenceText: nil, evidenceStartTime: startTime,
             metadataSource: "userCorrection",
             metadataConfidence: nil, metadataPromptVersion: nil,
-            wasSkipped: false, userDismissedBanner: false
+            wasSkipped: false, userDismissedBanner: false,
+            // playhead-527u (product-owner AC): a user's manual ad mark is the
+            // highest-certainty "this IS an ad" signal we have, so the region is
+            // AUTO-SKIP-ELIGIBLE, not merely banner/markOnly. Stamp the gate
+            // `.eligible` at write time as the EXPLICIT, honest semantic.
+            //
+            // Reviewer-527u correction (MUST-RESOLVE #1): the reload path does
+            // NOT require this stamp to auto-skip. `beginEpisode` preloads
+            // `ad_windows` (confidence 1.0, `.confirmed` ⇒ preload-eligible) into
+            // `receiveAdWindows`, whose gate filter drops ONLY recognised
+            // NON-eligible cases (`.markOnly` → suggest tier; `.blocked*` /
+            // `.cappedByFMSuppression` → dropped). Both `nil` AND `.eligible`
+            // fall THROUGH to the managed path, and `evaluateWindow` never re-
+            // checks the gate — so in `.auto` mode a userMarked row auto-skips
+            // regardless of gate. userMarked rows never traverse the stricter
+            // `receiveAdDecisionResults` eligible-only filter (that path carries
+            // `AdDecisionResult`s, not persisted `AdWindow`s). Consequently a
+            // PRE-EXISTING dogfood mark persisted before 527u with `gate == nil`
+            // ALSO auto-skips on reload (proven by `UserAddedMarkSurvivesBackfill
+            // Tests` MR1) — no migration is needed. The explicit stamp is
+            // belt-and-suspenders: it is the correct value, is self-documenting,
+            // and is robust to any future tightening of the `receiveAdWindows`
+            // guard that would drop `nil`. It only auto-skips WHERE the mode
+            // already auto-skips (`.auto`); in `.manual`/`.shadow`,
+            // `evaluateWindow` returns `.confirmed` (banner, no skip) — identical
+            // to the `nil` behaviour. The re-derived fusion window over the same
+            // region is deduped away in `reconcileBackfillWindows`, so this row is
+            // the single surfaced window for the marked ad. Only THIS definitive
+            // user-marked region is promoted; ordinary re-derived / FM host-read
+            // windows keep the certainty-tiered gate they were minted with.
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
 
         do {
@@ -6455,6 +6485,21 @@ actor AdDetectionService {
             .filter { $0.correctionMask == .userVetoed }
             .map { TimeRange(start: $0.startTime, end: $0.endTime) }
 
+        // playhead-527u §confirmed gate: user-CONFIRMED (added) regions are SACRED
+        // WIDTH. The rediff oracle must neither RESHAPE a confirmed span nor NEWLY
+        // ENCLOSE (absorb) a confirmed region into another span's slot. Two mirrors
+        // of the veto path achieve this:
+        //   (a) fold the confirmed ranges into the newly-enclosed gate
+        //       (`protectedRanges`) so NO other span's slot can widen over a
+        //       confirmed region → `.vetoNewlyEnclosed` → status-quo (no absorb);
+        //   (b) strip the slot from a confirmed span's OWN candidate below so it
+        //       resolves to `.noSlot` → carried at minted width (no reshape) and
+        //       can never itself be an absorber.
+        let confirmedRanges: [TimeRange] = atomEvidence
+            .filter { $0.correctionMask == .userConfirmed }
+            .map { TimeRange(start: $0.startTime, end: $0.endTime) }
+        let protectedRanges = vetoedRanges + confirmedRanges
+
         // Phase 1: resolve per-span rediff slots (bank-agnostic — resolution does
         // not depend on the bank verdicts, only slot-token gathering does).
         let allFalse = [Bool](repeating: false, count: decodedSpans.count)
@@ -6462,7 +6507,7 @@ actor AdDetectionService {
             decodedSpans: decodedSpans,
             atomEvidence: atomEvidence,
             playedSlots: playedSlots,
-            vetoedRanges: vetoedRanges,
+            vetoedRanges: protectedRanges,
             coreBankMatch: allFalse,
             slotBankMatch: allFalse
         )
@@ -6479,10 +6524,18 @@ actor AdDetectionService {
 
         // Phase 3: candidates with the real verdicts → the shared disposition engine.
         let candidates: [SpliceSlotCandidate] = decodedSpans.indices.map { i in
-            SpliceSlotCandidate(
+            // playhead-527u (b): a confirmed span keeps status-quo width — strip
+            // its slot so it resolves to `.noSlot` (never reshaped, never an
+            // absorber). `.vetoNewlyEnclosed` on `protectedRanges` already blocks
+            // other slots from absorbing it.
+            let core = TimeRange(
+                start: decodedSpans[i].startTime, end: decodedSpans[i].endTime
+            )
+            let confirmedProtected = confirmedRanges.contains { $0.intersects(core) }
+            return SpliceSlotCandidate(
                 mintedInterval: bundle.candidates[i].mintedInterval,
-                slot: bundle.candidates[i].slot,
-                slotIntersectsAtoms: bundle.candidates[i].slotIntersectsAtoms,
+                slot: confirmedProtected ? nil : bundle.candidates[i].slot,
+                slotIntersectsAtoms: confirmedProtected ? true : bundle.candidates[i].slotIntersectsAtoms,
                 coreBankMatch: coreMatch[i],
                 slotBankMatch: slotMatch[i]
             )
@@ -6653,8 +6706,18 @@ actor AdDetectionService {
             )
         }
 
+        // playhead-527u: defense-in-depth — never DELETE a user-correction span's
+        // persisted row here, even if some future disposition path let its id
+        // reach `supersededIds`. `SpliceSlotRewriter` already excludes them, so
+        // this normally subtracts nothing.
+        let userCorrectionIds = Set(
+            decodedSpans
+                .filter { $0.anchorProvenance.contains(where: \.isUserCorrection) }
+                .map(\.id)
+        )
+        let idsToDelete = rewrite.supersededIds.filter { !userCorrectionIds.contains($0) }
         do {
-            try await store.deleteDecodedSpans(ids: rewrite.supersededIds)
+            try await store.deleteDecodedSpans(ids: idsToDelete)
             if !rewrite.finalSpans.isEmpty {
                 try await store.upsertDecodedSpans(rewrite.finalSpans)
             }
@@ -7575,6 +7638,26 @@ actor AdDetectionService {
     /// Every reconcilable row absent from the authoritative backfill output is
     /// retired. Factored `static` over its inputs so it is directly
     /// unit-testable without an actor hop or a live pipeline.
+    /// playhead-527u: merge possibly-overlapping `[start, end)` ranges into a
+    /// disjoint, sorted set. Used by `reconcileBackfillWindows`' dominance
+    /// dedupe so a covered-duration sum cannot double-count a span covered by
+    /// two overlapping user marks (which would inflate the dominance fraction
+    /// past 1.0 and over-drop). Degenerate/inverted ranges are dropped.
+    static func mergedTimeRanges(
+        _ ranges: [(start: Double, end: Double)]
+    ) -> [(start: Double, end: Double)] {
+        let sorted = ranges.filter { $0.end > $0.start }.sorted { $0.start < $1.start }
+        var merged: [(start: Double, end: Double)] = []
+        for r in sorted {
+            if let last = merged.last, r.start <= last.end {
+                merged[merged.count - 1].end = Swift.max(last.end, r.end)
+            } else {
+                merged.append(r)
+            }
+        }
+        return merged
+    }
+
     static func isReconcilableBackfillWindow(
         _ window: AdWindow,
         detectorVersion: String
@@ -7610,6 +7693,72 @@ actor AdDetectionService {
                 protectedIDs.insert(row.id)
             }
         }
+        // playhead-527u: user-mark DOMINANCE dedupe (prevents the force-anchor
+        // DOUBLE window WITHOUT retiring a genuinely-distinct overlapping ad).
+        // A user's EXPLICIT mark (`recordUserMarkedAd` → `boundaryState ==
+        // userMarked`) is the definitive, AUTO-SKIP-ELIGIBLE ground truth for
+        // its region (its row is stamped `eligibilityGate == .eligible`) and
+        // surfaces as its own window. The 527u confirm mask force-anchors that
+        // region, so backfill re-derives a decoded span over it that fuses into
+        // a NEW `acousticRefined` fusion window. Content-addressed on span
+        // ordinals, that window has a DIFFERENT id than the userMarked row's
+        // UUID, so the id-collision guard below does NOT catch it — left alone
+        // it co-exists with the userMarked row, producing a DOUBLE window over
+        // one ad. Drop ONLY the REDUNDANT re-derived window — the one the user
+        // mark reciprocally DOMINATES (`markDominates` below) — so the eligible
+        // userMarked row is the single surfaced window for that ad and the skip
+        // uses the USER'S boundaries. A distinct/wider ad that merely overlaps
+        // the marked span, OR a small distinct ad sitting mostly inside a larger
+        // mark, is NOT dominated and is KEPT: a blanket overlap-drop would
+        // silently retire a legitimate auto-skip-eligible detection (a
+        // precision/coverage LOSS).
+        // This is the backfill mirror of the hot-path `correctionReplayCandidates`
+        // overlap-skip; the re-emitted DECODED span (transcript-overlay /
+        // summarizer ad-presence) is untouched — only the redundant AdWindow is
+        // suppressed.
+        let userMarkedRanges = Self.mergedTimeRanges(
+            existing
+                .filter { $0.boundaryState == "userMarked" }
+                .map { (start: $0.startTime, end: $0.endTime) }
+        )
+        // playhead-527u (reviewer 527u): RECIPROCAL dominance — the window must be
+        // "this marked ad re-detected", which requires BOTH:
+        //   (a) the user-mark UNION covers ≥half the window — the window is mostly
+        //       marked ground, NOT a distinct WIDER ad that merely overlaps an
+        //       edge (guards the R3 wide-ad-survives case); AND
+        //   (b) the window covers ≥half of at least ONE single mark — it spans the
+        //       mark rather than sitting mostly-inside it. Without (b) a SMALL
+        //       DISTINCT ad lying mostly under a LARGE mark (e.g. mark [35,55],
+        //       ad [48,58] → 70% of the ad is inside the mark, so (a) alone drops
+        //       it and loses the skip of [55,58]) would be wrongly retired. The
+        //       force-anchored re-detection always covers the WHOLE mark (every
+        //       confirmed atom is anchored), so (b) holds for the true double;
+        //       a sliver-overlap distinct ad covers only a fraction of the mark,
+        //       so (b) fails and it is KEPT (precision/coverage preserved).
+        func markDominates(_ w: AdWindow) -> Bool {
+            let width = w.endTime - w.startTime
+            guard width > 0 else { return false }
+            let covered = userMarkedRanges.reduce(0.0) { acc, r in
+                acc + Swift.max(0, Swift.min(w.endTime, r.end) - Swift.max(w.startTime, r.start))
+            }
+            guard covered / width >= 0.5 else { return false }  // (a)
+            return userMarkedRanges.contains { r in            // (b)
+                let markWidth = r.end - r.start
+                guard markWidth > 0 else { return false }
+                let overlap = Swift.max(
+                    0, Swift.min(w.endTime, r.end) - Swift.max(w.startTime, r.start)
+                )
+                return overlap / markWidth >= 0.5
+            }
+        }
+        // Ids of the redundant re-derived windows the user mark dominates.
+        // Excluded from `newIDs` below so that a copy persisted by a PRE-fix run
+        // (same content-addressed id, now reconcilable) is RETIRED via the
+        // set-difference rather than silently protected from retirement by its
+        // own new-but-dropped id.
+        let userMarkOverlapDroppedIDs = Set(
+            fusionWindows.filter(markDominates).map(\.id)
+        )
         // Terminal-collision guard: content-addressed ids are keyed on span
         // ordinals only (not decisionState), so re-detecting a span the user
         // already auto-skipped (`.applied`) or listened-through (`.reverted`)
@@ -7620,11 +7769,15 @@ actor AdDetectionService {
         // the same precedence the orchestrator applies (it refuses to reprocess
         // `.applied` / `.reverted`). Preserves the "terminal history preserved"
         // AC even on an ad-signal rerun, not just a clean one.
-        let windowsToPersist = fusionWindows.filter { !protectedIDs.contains($0.id) }
-        let newIDs = Set(fusionWindows.map(\.id))
+        let windowsToPersist = fusionWindows.filter {
+            !protectedIDs.contains($0.id) && !userMarkOverlapDroppedIDs.contains($0.id)
+        }
         // Pure set-difference: every reconcilable existing row NOT re-produced by
         // this backfill is retired. A reconcilable row re-produced under the same
         // id is replaced in-place (idempotent), so it is excluded from retire.
+        // A user-mark-overlap-dropped id is treated as NOT re-produced (removed
+        // from `newIDs`) so any stale persisted copy of it is retired.
+        let newIDs = Set(fusionWindows.map(\.id)).subtracting(userMarkOverlapDroppedIDs)
         let retiredIDs = reconcilableIDs.subtracting(newIDs)
         return (windowsToPersist, retiredIDs)
     }
@@ -7697,22 +7850,43 @@ actor AdDetectionService {
     /// `runPhase5ProjectorPhase` — resolve the veto mask identically and the
     /// flag branch is directly unit-testable (T4).
     ///
-    /// Flag-off OR no store ⇒ `NoCorrectionMaskProvider()` ⇒ the pipeline output
-    /// is byte-identical to pre-xsdz.34 (preserves the async-install race window
-    /// note at the `correctionStore` wiring: until the store lands there are no
-    /// masks — the safe default). Flag-on WITH a store ⇒ a
-    /// `StoreBackedCorrectionMaskProvider` over the asset's active
-    /// `.falsePositive` scopes (boost/`.falseNegative` excluded by the store
-    /// query, guardrail 1).
+    /// No store ⇒ `NoCorrectionMaskProvider()` (preserves the async-install race
+    /// window note at the `correctionStore` wiring: until the store lands there
+    /// are no masks — the safe default).
+    ///
+    /// Direction split (playhead-527u):
+    ///   • `.falsePositive` VETO masks stay gated by `enabled`
+    ///     (`userCorrectionReadSideEnabled`) — the suppress-direction A/B
+    ///     (xsdz.36). Unchanged.
+    ///   • `.falseNegative` CONFIRM masks are ALWAYS applied when a store is
+    ///     present. Preserving a user's ADDED mark is trust-critical, has no
+    ///     recall/precision downside (it only re-anchors a region the user
+    ///     explicitly said IS an ad), and only touches assets the user actually
+    ///     corrected — so it must not ride the veto A/B flag.
+    ///
+    /// A non-corrected asset yields BOTH sets empty ⇒ `NoCorrectionMaskProvider`
+    /// ⇒ byte-identical to pre-527u (guardrail: no change to non-corrected
+    /// episodes' analysis). Flag-off + only a veto ⇒ veto excluded, confirm empty
+    /// ⇒ `NoCorrectionMaskProvider` (preserves the xsdz.34 flag-off identity).
     static func makeCorrectionMaskProvider(
         enabled: Bool,
         store: (any UserCorrectionStore)?,
         analysisAssetId: String,
         atoms: [TranscriptAtom]
     ) async -> any CorrectionMaskProvider {
-        guard enabled, let store else { return NoCorrectionMaskProvider() }
-        let scopes = await store.activeFalsePositiveScopes(for: analysisAssetId)
-        return StoreBackedCorrectionMaskProvider(fromScopes: scopes, atoms: atoms)
+        guard let store else { return NoCorrectionMaskProvider() }
+        let confirmedScopes = await store.activeFalseNegativeScopes(for: analysisAssetId)
+        let vetoScopes = enabled
+            ? await store.activeFalsePositiveScopes(for: analysisAssetId)
+            : []
+        guard !confirmedScopes.isEmpty || !vetoScopes.isEmpty else {
+            return NoCorrectionMaskProvider()
+        }
+        return StoreBackedCorrectionMaskProvider(
+            fromVetoScopes: vetoScopes,
+            confirmedScopes: confirmedScopes,
+            atoms: atoms
+        )
     }
 
     // MARK: - Phase 5 Projector Phase (playhead-4my.5)
