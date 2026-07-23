@@ -7559,7 +7559,7 @@ actor AdDetectionService {
         // ground truth for the user's own stitch — a later analysis run's
         // transcript/FM fusion would not re-emit them, so they must NOT be
         // reconciled away (literal mirrors `dayZeroRediffByteExactBoundaryState`;
-        // pinned by `dayZeroByteExactBoundaryStateIsReconcileProtected`).
+        // pinned by `RediffActivationWiringTests.dayZeroMarksAreReconcileProtected`).
         "dayZeroRediffByteExact"
     ]
 
