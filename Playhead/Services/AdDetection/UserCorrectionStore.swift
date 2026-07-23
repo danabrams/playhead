@@ -454,6 +454,19 @@ protocol UserCorrectionStore: Sendable {
     /// returns `[]` (no corrections), so stores that don't persist corrections
     /// (`NoOpUserCorrectionStore`, test doubles) are correct without change.
     func activeFalsePositiveScopes(for analysisAssetId: String) async -> [CorrectionScope]
+
+    /// playhead-527u (false-negative read-side): the active `.falseNegative`
+    /// (ADD-direction) correction scopes for the asset, deduped, decoded to
+    /// `CorrectionScope`. The symmetric counterpart of `activeFalsePositiveScopes`
+    /// — it feeds `StoreBackedCorrectionMaskProvider` so an explicit "this IS an
+    /// ad" mark becomes a `.userConfirmed` atom mask that FORCE-ANCHORS the
+    /// region, so re-analysis never undoes a user-added mark.
+    ///
+    /// MUST include ONLY `.falseNegative` corrections (guardrail 1, mirrored: the
+    /// confirm mask acts only in the ADD direction). Legacy nil-source rows are
+    /// false-positive vetoes by convention and are therefore excluded here. The
+    /// default implementation returns `[]`.
+    func activeFalseNegativeScopes(for analysisAssetId: String) async -> [CorrectionScope]
 }
 
 // MARK: - UserCorrectionStore default
@@ -461,6 +474,11 @@ protocol UserCorrectionStore: Sendable {
 extension UserCorrectionStore {
     /// Default: no corrections. Overridden by `PersistentUserCorrectionStore`.
     func activeFalsePositiveScopes(for analysisAssetId: String) async -> [CorrectionScope] {
+        []
+    }
+
+    /// Default: no corrections. Overridden by `PersistentUserCorrectionStore`.
+    func activeFalseNegativeScopes(for analysisAssetId: String) async -> [CorrectionScope] {
         []
     }
 }
@@ -1057,6 +1075,34 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         }
         return events.compactMap { event -> CorrectionScope? in
             guard event.source?.kind == .falsePositive || event.source == nil else { return nil }
+            return CorrectionScope.deserialize(event.scope)
+        }
+    }
+
+    /// playhead-527u (false-negative read-side): the deduped `.falseNegative`
+    /// correction scopes for the asset, backed by `activeCorrections(for:)`.
+    ///
+    /// Filtered to false negatives with the SAME predicate `correctionBoostFactor`
+    /// uses (`source?.kind == .falseNegative`), so the ADD-direction confirm mask
+    /// sees exactly the user's "missed ad here" reports. Legacy nil-source rows
+    /// are excluded (they are false-positive vetoes by convention). Corrupt scope
+    /// strings decode to `nil` and are dropped. The synthetic negative-ordinal
+    /// `.exactSpan` spans DO appear here (they are `.falseNegative`), but their
+    /// negative ordinals never intersect real transcript ordinals, so they mask
+    /// no real atom — the `.exactTimeSpan` marks from `recordUserMarkedAd` are
+    /// what force-anchor a re-derived region.
+    func activeFalseNegativeScopes(for analysisAssetId: String) async -> [CorrectionScope] {
+        let events: [CorrectionEvent]
+        do {
+            events = try await activeCorrections(for: analysisAssetId)
+        } catch {
+            logger.warning(
+                "activeFalseNegativeScopes: failed to load corrections for \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return []
+        }
+        return events.compactMap { event -> CorrectionScope? in
+            guard event.source?.kind == .falseNegative else { return nil }
             return CorrectionScope.deserialize(event.scope)
         }
     }

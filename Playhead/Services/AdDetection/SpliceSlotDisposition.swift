@@ -351,6 +351,24 @@ enum SpliceSlotRewriter {
         var absorbedIds: [String] = []
 
         for (i, span) in decodedSpans.enumerated() {
+            // playhead-527u: a SACRED user-added ad is carried through verbatim —
+            // no automated width disposition may drop or reshape it. TWO forms
+            // qualify, and guarding BOTH here — at the width-pass-agnostic
+            // rewriter — protects the user's mark for the rediff AND the (dormant,
+            // rediff-exclusive) acoustic splice ownership passes alike:
+            //   • a `.userCorrection`-provenance span (the synthetic
+            //     `recordFalseNegative` ±15s span), and
+            //   • a force-anchored span that COVERS a `.userConfirmed` atom (the
+            //     `recordUserMarkedAd` `.exactTimeSpan` path — its span carries NO
+            //     `.userCorrection` provenance, only the atom mask). The
+            //     `computeRediffSlotPass` §5 gate already strips such a span's slot
+            //     to `.noSlot`, so this is belt-and-suspenders on the rediff path
+            //     and the SOLE protection should the acoustic pass ever be enabled.
+            if span.anchorProvenance.contains(where: \.isUserCorrection)
+                || Self.coversUserConfirmedAtom(span, atomEvidence: atomEvidence) {
+                finalSpans.append(span)
+                continue
+            }
             switch dispositions[i] {
             case .noSlot, .demoted:
                 // Unchanged minted span — carried through verbatim.
@@ -400,6 +418,14 @@ enum SpliceSlotRewriter {
 
         let finalIds = Set(finalSpans.map(\.id))
         let supersededIds = decodedSpans
+            // playhead-527u: never mark a SACRED user-added span's row for
+            // deletion. Both forms are always carried verbatim above (same id in
+            // `finalIds`), so this filter is defensive against any future
+            // disposition path that would change/drop their id.
+            .filter {
+                !$0.anchorProvenance.contains(where: \.isUserCorrection)
+                    && !Self.coversUserConfirmedAtom($0, atomEvidence: atomEvidence)
+            }
             .map(\.id)
             .filter { !finalIds.contains($0) }
 
@@ -408,5 +434,22 @@ enum SpliceSlotRewriter {
             absorbedIds: absorbedIds,
             supersededIds: supersededIds
         )
+    }
+
+    /// playhead-527u: true when `span` overlaps ANY atom the user explicitly
+    /// CONFIRMED as an ad (`correctionMask == .userConfirmed`). Such a span is the
+    /// force-anchored re-emission of a user-added mark (`recordUserMarkedAd`) and
+    /// carries no `.userCorrection` provenance, so this atom-mask check is how the
+    /// rewriter recognizes and protects it. Positive-duration interval overlap
+    /// (touching endpoints do not count), consistent with the slot-intersect math.
+    private static func coversUserConfirmedAtom(
+        _ span: DecodedSpan,
+        atomEvidence: [AtomEvidence]
+    ) -> Bool {
+        let spanRange = TimeRange(start: span.startTime, end: span.endTime)
+        return atomEvidence.contains {
+            $0.correctionMask == .userConfirmed
+                && TimeRange(start: $0.startTime, end: $0.endTime).intersects(spanRange)
+        }
     }
 }
