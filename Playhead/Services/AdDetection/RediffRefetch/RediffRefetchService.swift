@@ -314,12 +314,9 @@ actor RediffRefetchService {
         at sweepNow: Double
     ) async -> CandidateResult {
         var precheckBytes = 0
-        var fullFetchBytes = 0
-        // Stage marker for failure classification: an unknown error BEFORE
-        // the ~54 MB fetch retries cheaply (transient); an unknown error
-        // AFTER it is decode-class so a deterministic loop cannot re-spend
-        // the fetch every sweep (xsdz.28 R2).
-        var stage = RediffRefetchPolicy.FailureStage.precheck
+        // Stage marker for a PRE-CHECK failure classification: an unknown error
+        // BEFORE the ~54 MB fetch retries cheaply (transient). The fetch/consume
+        // stages are classified inside `fetchConsumeAndRecord`.
         do {
             // (a) Ranged head/tail sample of the CURRENT enclosure (NO HEAD).
             let remote = try await rangedSampler.sample(
@@ -343,21 +340,69 @@ actor RediffRefetchService {
                 await recorder.recordOutcome(.unchanged(assetId: candidate.assetId, cost: cost, newState: newState))
                 return CandidateResult(cost: cost, rotated: false, failed: false)
             }
+        } catch {
+            // A pre-check-stage failure: no full fetch was spent, so the cost is
+            // whatever the ranged sample transferred (0 if it was the throw).
+            let failureClass = RediffRefetchPolicy.classifyFailure(error, stage: .precheck)
+            let newState = RediffRefetchPolicy.advanceFailed(
+                candidate.attemptState,
+                failureClass: failureClass,
+                at: sweepNow
+            )
+            if RediffRefetchPolicy.isParked(newState, config: config) {
+                logger.error(
+                    "rediff re-fetch PARKED assetId=\(candidate.assetId, privacy: .public) class=\(failureClass.rawValue, privacy: .public) streak=\(newState.sameClassFailureStreak, privacy: .public)"
+                )
+            }
+            let cost = RediffRefetchPolicy.BandwidthCost(precheckBytes: precheckBytes, fullFetchBytes: 0)
+            await recorder.recordOutcome(.failed(
+                assetId: candidate.assetId,
+                cost: cost,
+                failureClass: failureClass,
+                newState: newState,
+                error: String(describing: error)
+            ))
+            return CandidateResult(cost: cost, rotated: false, failed: true)
+        }
 
-            // (d) Rotator → full re-fetch → fingerprint/consume (off hot
-            //     actor) → DELETE.
-            //
-            // playhead-xsdz.36.2 (k-way): fetch K B-copies, each under a
-            // DISTINCT persona drawn from the curated bank in the
-            // divergence-reliable order (iPhone → Mac → Overcast → empty), each
-            // with its own unique cache-buster. K=1 (the default and the
-            // conservative production value) fetches exactly ONE B-copy under
-            // the default persona — byte-identical to xsdz.36. The consumer
-            // stages ALL K so `computeByteAlignedPlayedSlots` unions the pairwise
-            // diffs; a pod one fetch-pair misses is recovered from another
-            // persona's stitch.
-            stage = .fetch
-            let personas = RediffFetchPersona.kWayPersonas(count: config.kWayFetchCount)
+        // (d) Rotator → the shared full-fetch → consume → delete → record arm.
+        return await fetchConsumeAndRecord(
+            candidate,
+            at: sweepNow,
+            precheckBytes: precheckBytes,
+            kWayFetchCount: config.kWayFetchCount
+        )
+    }
+
+    /// The rotator arm, shared by the lagged sweep (after its rotation
+    /// pre-check) and the day-0 play-time trigger (which skips the pre-check):
+    /// full re-fetch K distinct-persona B-copies → fingerprint/consume off the
+    /// hot actor → DELETE every copy on every exit → record the terminal
+    /// outcome + bandwidth. `precheckBytes` is the bandwidth already spent
+    /// before this arm (the lagged pre-check's ~128 KB ranged sample; `0` for
+    /// day-0, which does no pre-check). `kWayFetchCount` is the config value for
+    /// the lagged sweep and the day-0 constant for the trigger.
+    ///
+    /// playhead-xsdz.36.2 (k-way): fetch K B-copies, each under a DISTINCT
+    /// persona drawn from the curated bank in the divergence-reliable order
+    /// (iPhone → Mac → Overcast → empty), each with its own unique cache-buster.
+    /// K=1 fetches exactly ONE B-copy under the default persona. The consumer
+    /// stages ALL K so `computeByteAlignedPlayedSlots` unions the pairwise
+    /// diffs; a pod one fetch-pair misses is recovered from another persona's
+    /// stitch.
+    private func fetchConsumeAndRecord(
+        _ candidate: RediffRefetchCandidate,
+        at sweepNow: Double,
+        precheckBytes: Int,
+        kWayFetchCount: Int
+    ) async -> CandidateResult {
+        var fullFetchBytes = 0
+        // Stage marker for failure classification: an unknown error AFTER the
+        // ~54 MB fetch is decode-class so a deterministic loop cannot re-spend
+        // the fetch every sweep (xsdz.28 R2).
+        var stage = RediffRefetchPolicy.FailureStage.fetch
+        do {
+            let personas = RediffFetchPersona.kWayPersonas(count: kWayFetchCount)
             var fetchedFileURLs: [URL] = []
             // NEVER persist the B-copies: delete EVERY fetched copy on EVERY exit
             // from this scope — a mid-batch fetch throw, or a throw out of the
@@ -425,6 +470,55 @@ actor RediffRefetchService {
             ))
             return CandidateResult(cost: cost, rotated: false, failed: true)
         }
+    }
+
+    // MARK: - Day-0 (immediate, play-time) rediff (playhead-xsdz.36.4)
+
+    /// Run an IMMEDIATE (day-0) rediff for a SINGLE just-started episode — the
+    /// capstone of the rediff-activation series. Unlike the lagged sweep this
+    /// deliberately BYPASSES the ≥24h eligibility gate AND the rotation
+    /// PRE-CHECK: the pre-check is a single-persona head/tail probe that
+    /// false-negatives on client-PINNED DAI (a same-context re-fetch returns a
+    /// byte-identical body), the very category day-0's k-way probe targets. It
+    /// goes straight to the shared `fetchConsumeAndRecord` arm — k-way full
+    /// fetch → consume (stage → `revalidateFromFeatures` runs the byte-align
+    /// slot pass against the pinned played A-side → mark) → DELETE every B-copy
+    /// → record bandwidth — so day-0 marks flow to banners through the EXACT
+    /// same `RediffSlotOwnership` path as the lagged sweep (mark-only).
+    ///
+    /// SAFETY (wrj8): the A-side of the byte diff is the pinned played file
+    /// (read-only, resolved from the asset row's `sourceURL` inside the
+    /// differ); the B-side(s) are separate never-played temp copies deleted on
+    /// every exit. Day-0 NEVER writes/rotates the pinned playback audio.
+    ///
+    /// Enablement/power/network GATING is the CALLER's responsibility
+    /// (`DayZeroRediffTrigger`, gated on `RediffActivation.dayZeroEnabledByDefault`
+    /// + WiFi + charging/deep-scan). The service-level `enabled` flag still
+    /// governs whether ANY network/filesystem is touched — a disabled service is
+    /// a no-op even here (the OFF byte-identity contract).
+    @discardableResult
+    func runDayZeroRefetch(
+        for candidate: RediffRefetchCandidate,
+        kWayFetchCount: Int = RediffActivation.dayZeroKWayFetchCount
+    ) async -> SweepSummary {
+        var summary = SweepSummary()
+        guard enabled else { return summary }
+        summary.candidateCount = 1
+        summary.eligibleProcessed = 1
+        let result = await fetchConsumeAndRecord(
+            candidate,
+            at: now(),
+            precheckBytes: 0,
+            kWayFetchCount: kWayFetchCount
+        )
+        summary.precheckBytes += result.cost.precheckBytes
+        summary.fullFetchBytes += result.cost.fullFetchBytes
+        if result.rotated { summary.rotatedCount += 1 }
+        if result.failed { summary.failedCount += 1 }
+        logger.info(
+            "rediff DAY-0 refetch asset=\(candidate.assetId, privacy: .public) rotated=\(summary.rotatedCount, privacy: .public) failed=\(summary.failedCount, privacy: .public) bytes=\(summary.totalBytes, privacy: .public)"
+        )
+        return summary
     }
 
     // MARK: - BGTask registration (playhead-xsdz.36 activation)

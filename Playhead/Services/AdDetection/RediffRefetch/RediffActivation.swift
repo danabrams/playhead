@@ -75,4 +75,34 @@ enum RediffActivation {
     /// the iPhone+Mac core plus Overcast). K is capped at the curated persona
     /// bank size (4); see `RediffFetchPersona.kWayPersonas`.
     static let productionKWayFetchCount = 1
+
+    // MARK: - playhead-xsdz.36.4 (day-0 / immediate play-time rediff)
+
+    /// THE day-0 switch (playhead-xsdz.36.4). `true` = the PLAY-TIME trigger
+    /// (`DayZeroRediffTrigger`) kicks off an IMMEDIATE k-way rediff for the
+    /// just-started episode, so a drop-day listener gets DAI width marks on
+    /// FIRST listen instead of waiting for the lagged ≥24h BGTask sweep.
+    /// `false` = the trigger site is INERT: no play-time re-fetch is ever
+    /// started and no power/network signal is even read — byte-identical to the
+    /// lagged-only app.
+    ///
+    /// DELIBERATELY `false`. A day-0 fetch is a full ~54 MB × K second download
+    /// AT PLAY TIME, so flipping it on is a bandwidth/battery go/no-go that
+    /// belongs to the SEPARATE xsdz.36 rollout, NOT this bead — the mechanism
+    /// ships here gated OFF. Even when on it only runs on WiFi + (charging OR a
+    /// user "deep-scan" opt-in), never on cellular or unplugged-without-opt-in;
+    /// see `DayZeroRediffGate`. Auto-skip stays held — day-0 is mark-only, on the
+    /// SAME `RediffSlotOwnership` marks path as the lagged sweep.
+    static let dayZeroEnabledByDefault = false
+
+    /// playhead-xsdz.36.4: the k-way fetch count the DAY-0 trigger uses,
+    /// INDEPENDENT of `productionKWayFetchCount` (which governs the lagged
+    /// BGTask sweep and stays 1). Day-0 is a single deliberate, gated, immediate
+    /// probe, so it draws the iPhone→Mac→Overcast divergence core (3) to reveal
+    /// client-PINNED DAI (AdsWizz/ART19) on first listen — the very category a
+    /// single-persona probe misses. This bandwidth lives ENTIRELY behind the OFF
+    /// `dayZeroEnabledByDefault` flag, so it never perturbs the lagged path's
+    /// single-fetch default. Capped at the curated persona bank size (4) by
+    /// `RediffFetchPersona.kWayPersonas`.
+    static let dayZeroKWayFetchCount = 3
 }

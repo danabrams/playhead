@@ -199,6 +199,85 @@ struct RediffActivationWiringTests {
         #expect(await staging.stagedCount == 0)
     }
 
+    @Test("DAY-0 (xsdz.36.4): runDayZeroRefetch bypasses the pre-check and produces byte-exact .rediffSlot marks via the SAME path; B deleted; staging empty")
+    func dayZeroProducesWidthMarksBypassingPrecheck() async throws {
+        let assetId = "asset-day0-activation"
+        let dir = try makeTempDir(prefix: "RediffDay0-\(assetId)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try BytePair.stage(in: dir)
+
+        let downloadedB = dir.appendingPathComponent("downloaded-b.mp3")
+        try FileManager.default.copyItem(at: pair.bURL, to: downloadedB)
+
+        let store = try await makeTestStore()
+        try await insertActivationAsset(store: store, assetId: assetId, sourceURL: pair.aURL.absoluteString)
+        try await store.insertTranscriptChunks(chunks(assetId: assetId))
+
+        let staging = RediffBSideStagingProvider(decoder: StubDecoder(), durationProbe: { _ in nil })
+        let adService = makeService(store: store, provider: staging)
+        let consumer = RevalidatingRediffBSideConsumer(staging: staging, store: store, adDetection: adService)
+
+        // Pre-check samplers rigged to THROW if ever consulted — the day-0 path
+        // must NEVER call them (it bypasses the single-persona pre-check that
+        // false-negatives on client-pinned DAI). If the extraction regressed and
+        // day-0 ran the pre-check, the throw would record `.failed` and leave no
+        // marks — so this doubles as the bypass guard.
+        let sampler = StubRangedSampler()
+        sampler.errorToThrow = NSError(domain: "precheck-must-not-run", code: 1)
+        let local = StubLocalSampler()
+        local.errorToThrow = NSError(domain: "precheck-must-not-run", code: 2)
+        let full = StubFullFetcher()
+        full.fileToReturn = downloadedB
+        full.byteCount = 54_000_000
+        let recorder = SpyRefetchRecorder()
+
+        let refetch = RediffRefetchService(
+            enabled: true,
+            config: .production,
+            enumerator: StubRefetchEnumerator(),
+            rangedSampler: sampler,
+            localSampler: local,
+            fullFetcher: full,
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: recorder,
+            fileRemover: FileManagerTempFileRemover(),
+            taskScheduler: StubTaskScheduler(),
+            bsideConsumer: consumer,
+            now: { 100 * Self.day }
+        )
+
+        let candidate = RediffRefetchCandidate(
+            assetId: assetId,
+            enclosureURL: URL(string: "https://cdn.example.com/current.mp3")!,
+            downloadedAt: 0,
+            localAudioURL: pair.aURL,
+            attemptState: .initial
+        )
+        // K=1 for a single-copy diff against the synthetic B (the union of one is
+        // that one). The pre-check samplers above must never be touched.
+        let summary = await refetch.runDayZeroRefetch(for: candidate, kWayFetchCount: 1)
+
+        #expect(summary.rotatedCount == 1)
+        #expect(summary.fullFetchBytes == 54_000_000)
+        guard case let .rotated(_, cost, _, newState) = recorder.outcomes.first else {
+            Issue.record("expected .rotated, got \(String(describing: recorder.outcomes.first))"); return
+        }
+        #expect(cost.precheckBytes == 0, "day-0 spends no pre-check bytes")
+        #expect(newState.resolved)
+
+        // The product outcome: byte-exact .rediffSlot width marks — the SAME
+        // RediffSlotOwnership marks path the lagged sweep uses (mark-only).
+        let spans = try await store.fetchDecodedSpans(assetId: assetId)
+        let rediffOwned = spans.filter { $0.anchorProvenance.contains(.rediffSlot) }
+        #expect(rediffOwned.count == 1, "exactly the ad span is rediff-width-owned, got \(spans.map(\.anchorProvenance))")
+        if let span = rediffOwned.first {
+            #expect(span.startTime >= 94.5 && span.startTime <= 95.5, "start ≈ 95, got \(span.startTime)")
+            #expect(span.endTime >= 164.5 && span.endTime <= 165.5, "end ≈ 165, got \(span.endTime)")
+        }
+        #expect(!FileManager.default.fileExists(atPath: downloadedB.path), "B-copy deleted after the day-0 consume")
+        #expect(await staging.stagedCount == 0)
+    }
+
     @Test("a consume failure records .failed (no resolve, R2 state advanced), deletes the B-copy, and leaves no marks")
     func consumeFailureIsRetriedNotResolved() async throws {
         let dir = try makeTempDir(prefix: "RediffActivation-fail")

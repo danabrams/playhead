@@ -73,6 +73,13 @@ final class PlayheadRuntime {
     /// not a preview runtime — nil means nothing is registered, scheduled,
     /// or fetched (the OFF byte-identity contract).
     let rediffRefetchService: RediffRefetchService?
+    /// playhead-xsdz.36.4: the play-time (day-0) rediff trigger. Non-nil ONLY
+    /// when `rediffRefetchService` is (activation on, not preview); `playEpisode`
+    /// fires it fire-and-forget after resolving the analysis asset id. Its own
+    /// `enabled` flag (`RediffActivation.dayZeroEnabledByDefault`, default false)
+    /// keeps it INERT until the day-0 rollout flips it on — nil/inert means no
+    /// play-time re-fetch is ever started.
+    let dayZeroRediffTrigger: DayZeroRediffTrigger?
     /// playhead-xsdz.36: late-binding episodeId → CURRENT enclosure-URL
     /// resolver for the re-fetch enumerator. Installed by
     /// `attachRediffEnclosureResolver(modelContainer:)` from
@@ -1335,6 +1342,15 @@ final class PlayheadRuntime {
             runLedger: runLedger
         )
 
+        // playhead-ml96 / xsdz.36.4: the shared transport-status provider
+        // (NWPathMonitor-backed in production, the deterministic Wi-Fi stub in
+        // previews). Hoisted so the day-0 rediff trigger's WiFi gate and the
+        // on-demand preparation coordinator share ONE monitor instead of each
+        // spinning up its own.
+        let transportStatusProvider: any TransportStatusProviding = isPreviewRuntime
+            ? WifiTransportStatusProvider()
+            : LiveTransportStatusProvider()
+
         // playhead-xsdz.36 ACTIVATION: the xsdz.28 re-fetch service, wired
         // with its production conformers — store-backed enumerator + recorder
         // (durable AttemptState incl. the R2 failure policy), the WiFi-only
@@ -1387,6 +1403,28 @@ final class PlayheadRuntime {
             )
         } else {
             self.rediffRefetchService = nil
+        }
+
+        // playhead-xsdz.36.4: the play-time DAY-0 rediff trigger, sharing the
+        // re-fetch service constructed above (same k-way fetcher, B-side staging
+        // consumer, temp-file remover, bandwidth recorder). Non-nil only when the
+        // service is; INERT until `RediffActivation.dayZeroEnabledByDefault` is
+        // flipped on, and even then only on WiFi + (charging OR deep-scan
+        // opt-in). The deep-scan opt-in provider is `{ false }` until a settings
+        // toggle is wired — the current opt-in wiring point.
+        if let rediffRefetchService {
+            self.dayZeroRediffTrigger = DayZeroRediffTrigger(
+                service: rediffRefetchService,
+                reachabilityProvider: { [transportStatusProvider] in
+                    await transportStatusProvider.currentReachability()
+                },
+                chargeStateProvider: { [batteryProvider] in
+                    await batteryProvider.currentBatteryState().isCharging
+                },
+                deepScanOptInProvider: { false }
+            )
+        } else {
+            self.dayZeroRediffTrigger = nil
         }
 
         let lanePreemptionCoordinator = LanePreemptionCoordinator()
@@ -1471,9 +1509,9 @@ final class PlayheadRuntime {
         self.episodePreparationCoordinator = EpisodePreparationCoordinator(
             downloads: DownloadManagerPreparationAdapter(manager: downloadManager),
             analysis: SchedulerPreparationAdapter(scheduler: analysisWorkScheduler),
-            reachability: isPreviewRuntime
-                ? WifiTransportStatusProvider()
-                : LiveTransportStatusProvider()
+            // Reuse the hoisted shared transport provider (see the day-0 wiring
+            // above) rather than constructing a second NWPathMonitor.
+            reachability: transportStatusProvider
         )
 
         self.analysisJobReconciler = AnalysisJobReconciler(
@@ -2964,6 +3002,11 @@ final class PlayheadRuntime {
         let episodeId = episode.canonicalEpisodeKey
         let podcastId = episode.podcast?.feedURL.absoluteString
         let position = episode.playbackPosition
+        // playhead-xsdz.36.4: the CURRENT episode enclosure URL — the source the
+        // day-0 rediff trigger re-fetches K ways (distinct personas) to reveal
+        // DAI. Read once on MainActor so the Sendable streaming Task closure and
+        // both play-resolution branches share the same value.
+        let enclosureURL = episode.audioURL
         // playhead-epii: read the per-show "Keep full music" override
         // synchronously on MainActor before any async hops, so the
         // value can be captured by Sendable closures that don't have
@@ -3062,14 +3105,13 @@ final class PlayheadRuntime {
                 podcastTitle: episode.podcast?.title,
                 episodeTitle: episode.title
             )
-            let audioURL = episode.audioURL
 
             audioCacheTask = Task { [weak self, downloadManager, analysisCoordinator] in
                 guard let self else { return }
                 do {
                     let result = try await downloadManager.streamingDownload(
                         episodeId: episodeId,
-                        from: audioURL,
+                        from: enclosureURL,
                         context: titleContext
                     )
                     guard !Task.isCancelled, self.currentEpisodeId == episodeId else { return }
@@ -3136,6 +3178,15 @@ final class PlayheadRuntime {
                             assetId: assetId,
                             keepFullMusic: keepFullMusic
                         )
+                        // playhead-xsdz.36.4: fire the immediate day-0 rediff
+                        // for THIS just-started episode (inert unless the day-0
+                        // flag + WiFi/charging gate pass). Fire-and-forget off
+                        // the playback hot path — never awaited.
+                        self.kickOffDayZeroRediff(
+                            analysisAssetId: assetId,
+                            enclosureURL: enclosureURL,
+                            playedFileURL: result.fileURL
+                        )
                     }
 
                     // Wait for the full download before starting analysis —
@@ -3187,6 +3238,47 @@ final class PlayheadRuntime {
             await silenceCompressionCoordinator.beginEpisode(
                 assetId: assetId,
                 keepFullMusic: keepFullMusic
+            )
+            // playhead-xsdz.36.4: fire the immediate day-0 rediff for THIS
+            // just-started episode (inert unless the day-0 flag + WiFi/charging
+            // gate pass). Fire-and-forget off the playback hot path.
+            kickOffDayZeroRediff(
+                analysisAssetId: assetId,
+                enclosureURL: enclosureURL,
+                playedFileURL: localURL
+            )
+        }
+    }
+
+    /// playhead-xsdz.36.4: kick off an IMMEDIATE (day-0) rediff for the
+    /// just-started episode, OFF the playback hot path. A no-op unless
+    /// `dayZeroRediffTrigger` is wired (activation on) AND
+    /// `RediffActivation.dayZeroEnabledByDefault` is flipped on AND the live
+    /// WiFi + (charging OR deep-scan) gate passes — all checked INSIDE the
+    /// detached task so this call returns immediately and never blocks or delays
+    /// playback start.
+    ///
+    /// SAFETY (wrj8): the byte diff's A-side is the pinned played file
+    /// (read-only, resolved from the asset row inside the differ); the day-0
+    /// B-side(s) are separate never-played temp copies the service deletes on
+    /// every exit. Day-0 never writes/rotates the pinned playback audio.
+    private func kickOffDayZeroRediff(
+        analysisAssetId: String,
+        enclosureURL: URL,
+        playedFileURL: URL
+    ) {
+        // Short-circuit on the INERT default (day-0 flag off) BEFORE spawning any
+        // task, so the flag-off play path is truly zero-cost (no task alloc) —
+        // byte-identical to the lagged-only app. The live WiFi/charging gate is
+        // still checked inside `triggerIfEligible` when the flag is on.
+        guard let trigger = dayZeroRediffTrigger, trigger.enabled else { return }
+        // Detached so the k-way fetch + byte-align + marks run entirely off the
+        // MainActor playback path — `playEpisode` does not await this.
+        Task.detached {
+            await trigger.triggerIfEligible(
+                analysisAssetId: analysisAssetId,
+                enclosureURL: enclosureURL,
+                playedFileURL: playedFileURL
             )
         }
     }
