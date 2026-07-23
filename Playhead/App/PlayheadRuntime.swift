@@ -1399,6 +1399,15 @@ final class PlayheadRuntime {
                     store: analysisStore,
                     adDetection: adDetectionService
                 ),
+                // playhead-xsdz.36.4: the DAY-0 byte-exact mint path (play-time +
+                // Download & Analyze). Byte-aligns the pinned A-side against the
+                // k-way B-copies and mints mark-only banners for byte-EXACT
+                // ≥2-persona-robust divergent slots WITHOUT persisted analysis —
+                // so a true first listen gets marks. Inert until
+                // `dayZeroEnabledByDefault` is flipped on (the trigger gates it).
+                dayZeroMinter: AdDetectionDayZeroByteExactMinter(
+                    adDetection: adDetectionService
+                ),
                 runLedger: runLedger
             )
         } else {
@@ -2987,15 +2996,108 @@ final class PlayheadRuntime {
     func prepareEpisodeForAnalysis(
         _ episode: Episode
     ) async -> EpisodePreparationCoordinator.Outcome {
+        let episodeId = episode.canonicalEpisodeKey
+        let enclosureURL = episode.audioURL
         let request = EpisodePreparationCoordinator.Request(
-            episodeId: episode.canonicalEpisodeKey,
+            episodeId: episodeId,
             podcastId: episode.podcast?.feedURL.absoluteString,
-            audioURL: episode.audioURL,
+            audioURL: enclosureURL,
             durationSec: episode.duration,
             podcastTitle: episode.podcast?.title,
             episodeTitle: episode.title
         )
-        return await episodePreparationCoordinator.prepare(request)
+        let outcome = await episodePreparationCoordinator.prepare(request)
+        // playhead-xsdz.36.4: the SECOND day-0 rediff trigger — the on-demand
+        // "Download & Analyze" tap (playhead-3xtw). Off the playback hot path (no
+        // timing race), so it is the cleaner trigger. The tap is itself the
+        // deep-scan opt-in, so this fires unplugged on WiFi (charging not
+        // required); WiFi + the default-OFF `dayZeroEnabledByDefault` flag still
+        // gate it. Inert unless the flag is flipped on.
+        kickOffDayZeroRediffForPreparation(episodeId: episodeId, enclosureURL: enclosureURL)
+        return outcome
+    }
+
+    /// playhead-xsdz.36.4: max poll attempts the Download & Analyze day-0 kickoff
+    /// makes while WAITING for the episode's pinned file + registered asset to
+    /// materialize. On a genuine first-listen "Download & Analyze" the download
+    /// and the asset registration are ASYNC — neither is ready when `prepare()`
+    /// returns — so firing synchronously would always miss. The kickoff instead
+    /// waits (bounded) for both. Bounded so a very slow / failed download
+    /// eventually gives up (the lagged ≥24h sweep is the backstop). Off the hot
+    /// path, so the wait blocks nothing.
+    nonisolated static let dayZeroPreparationReadinessMaxAttempts = 40
+    /// Delay between readiness polls (~10 s). `maxAttempts × this` bounds the wait
+    /// (~6.5 min) — comfortably covering a typical episode download + the asset
+    /// registration that follows it, which is all day-0 needs (it reads no
+    /// transcript, only the asset row's `sourceURL` + the file).
+    nonisolated static let dayZeroPreparationReadinessPollNanos: UInt64 = 10 * 1_000_000_000
+
+    /// Poll `resolveReady` up to `maxAttempts` times (sleeping `pollNanos` between
+    /// misses) and return its first non-nil value, or `nil` if the budget elapses
+    /// or the task is cancelled. Pure over its seams (the resolver + an injectable
+    /// sleep) so the WAIT-then-fire behavior is unit-testable without a live
+    /// DownloadManager / analysis pipeline.
+    nonisolated static func awaitDayZeroPreparationReadiness<T: Sendable>(
+        maxAttempts: Int,
+        pollNanos: UInt64,
+        sleep: @Sendable (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) },
+        resolveReady: @Sendable () async -> T?
+    ) async -> T? {
+        var attempt = 0
+        while attempt < maxAttempts {
+            if Task.isCancelled { return nil }
+            if let ready = await resolveReady() { return ready }
+            attempt += 1
+            if attempt < maxAttempts { await sleep(pollNanos) }
+        }
+        return nil
+    }
+
+    /// playhead-xsdz.36.4: kick off an immediate day-0 rediff for an episode the
+    /// user asked to "Download & Analyze" (playhead-3xtw), OFF the caller's path.
+    /// A no-op unless `dayZeroRediffTrigger` is wired (activation on) AND
+    /// `RediffActivation.dayZeroEnabledByDefault` is flipped on — checked before
+    /// spawning any task so the inert default costs nothing. The tap is the
+    /// deep-scan opt-in (`forceDeepScanOptIn: true`), so the live gate only needs
+    /// WiFi; charging is not required.
+    ///
+    /// The detached task WAITS (bounded) for the pinned downloaded file AND the
+    /// registered analysis asset before firing — on a genuine first-listen
+    /// Download & Analyze both materialize AFTER `prepare()` returns (the download
+    /// runs async and the asset is registered by the analysis pipeline). If
+    /// neither materializes within the budget it gives up (the lagged sweep is
+    /// the backstop). The day-0 mint itself needs no transcript/analysis.
+    ///
+    /// SAFETY (wrj8): identical to the play-time trigger — the A-side is the
+    /// pinned downloaded file (read-only, resolved from the asset row inside the
+    /// minter); the B-side(s) are separate temp copies deleted on every exit.
+    private func kickOffDayZeroRediffForPreparation(
+        episodeId: String,
+        enclosureURL: URL
+    ) {
+        guard let trigger = dayZeroRediffTrigger, trigger.enabled else { return }
+        let store = analysisStore
+        let downloads = downloadManager
+        Task.detached {
+            // Wait (bounded) for BOTH the pinned file (the byte differ's A-side)
+            // and the registered asset (the mint key + A-side `sourceURL` source)
+            // — neither is ready when `prepare()` returns on a first-listen tap.
+            let ready = await Self.awaitDayZeroPreparationReadiness(
+                maxAttempts: Self.dayZeroPreparationReadinessMaxAttempts,
+                pollNanos: Self.dayZeroPreparationReadinessPollNanos
+            ) { () -> (assetId: String, playedFileURL: URL)? in
+                guard let playedFileURL = await downloads.cachedFileURL(for: episodeId) else { return nil }
+                guard let asset = (try? await store.fetchAssetByEpisodeId(episodeId)) ?? nil else { return nil }
+                return (asset.id, playedFileURL)
+            }
+            guard let ready else { return }   // budget elapsed / cancelled → lagged sweep backstops
+            await trigger.triggerIfEligible(
+                analysisAssetId: ready.assetId,
+                enclosureURL: enclosureURL,
+                playedFileURL: ready.playedFileURL,
+                forceDeepScanOptIn: true
+            )
+        }
     }
 
     func playEpisode(_ episode: Episode) async {

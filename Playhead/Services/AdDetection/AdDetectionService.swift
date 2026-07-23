@@ -1218,6 +1218,21 @@ protocol AdDetectionProviding: Sendable {
         episodeDuration: Double,
         sessionId: String?
     ) async throws
+
+    /// playhead-xsdz.36.4 DAY-0 byte-exact mint: byte-align the PINNED played
+    /// A-side (resolved read-only from the asset row) against the k-way day-0
+    /// B-copies and persist a MARK-ONLY banner for every byte-EXACT,
+    /// ≥2-persona-robust divergent slot — the FIRST-LISTEN marking path that
+    /// needs NO persisted transcript/analysis. Returns the number of marks
+    /// minted. The default is a no-op (`0`) so test/stub conformers that never
+    /// run a day-0 mint compile unchanged; `AdDetectionService` overrides it.
+    func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int
+}
+
+extension AdDetectionProviding {
+    /// Default no-op: a conformer without a byte-exact day-0 mint path returns 0
+    /// (mints nothing). `AdDetectionService` provides the real implementation.
+    func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int { 0 }
 }
 
 extension AdDetectionProviding {
@@ -7539,7 +7554,13 @@ actor AdDetectionService {
     static let reconcileProtectedBoundaryStates: Set<String> = [
         "correctionReplay",
         "userMarked",
-        "userConfirmedSuggested"
+        "userConfirmedSuggested",
+        // playhead-xsdz.36.4: day-0 byte-exact rediff marks are DETERMINISTIC
+        // ground truth for the user's own stitch — a later analysis run's
+        // transcript/FM fusion would not re-emit them, so they must NOT be
+        // reconciled away (literal mirrors `dayZeroRediffByteExactBoundaryState`;
+        // pinned by `dayZeroByteExactBoundaryStateIsReconcileProtected`).
+        "dayZeroRediffByteExact"
     ]
 
     /// playhead-ud4n: the *reconcilable invariant* (correctness backbone). A
@@ -8657,6 +8678,12 @@ actor AdDetectionService {
                     // `decisionState` to `.reverted` (filtered out below
                     // by `currentHotPathCandidateWindows`).
                     window.boundaryState != Self.correctionReplayBoundaryState
+                        // playhead-xsdz.36.4: day-0 byte-exact marks are
+                        // deterministic ground truth the algorithmic detector
+                        // does NOT re-emit; like correction-replay rows they must
+                        // never be retired by the algorithmic-absence path (only
+                        // by an explicit user veto → `.reverted`, filtered above).
+                        && window.boundaryState != Self.dayZeroRediffByteExactBoundaryState
                         && window.endTime > replayEnvelope.lowerBound
                         && window.startTime < replayEnvelope.upperBound
                 }
@@ -9918,6 +9945,170 @@ actor AdDetectionService {
             emitted.append(row)
         }
         return emitted
+    }
+
+    // MARK: - Day-0 byte-exact rediff mint (playhead-xsdz.36.4)
+
+    /// `boundaryState` literal stamped on AdWindows minted by the DAY-0
+    /// byte-exact rediff path — clear provenance so dogfood/NARL telemetry can
+    /// attribute a first-listen mark to the deterministic day-0 byte differ
+    /// (distinct from the lagged `.rediffSlot` decoded-span width marks and from
+    /// `correctionReplay`). Internal (not private) so the reconcile/export
+    /// protection axis tests can pin it against the literals those sites use.
+    ///
+    /// PROTECTED like a user mark: day-0 byte-exact marks are DETERMINISTIC
+    /// ground truth for the user's OWN played stitch, so they must PERSIST across
+    /// a later analysis run whose transcript/FM fusion would not re-emit them.
+    /// The literal "dayZeroRediffByteExact" is therefore also listed in
+    /// `reconcileProtectedBoundaryStates` (backfill), excluded in
+    /// `hotPathCandidateIDs` (hot-path retirement), and recognized as
+    /// local-only in `CrossUserSharing.isLocalOnlyBoundaryState` (so it is never
+    /// exported and never aborts a cross-user snapshot). Retirable ONLY by an
+    /// explicit user veto (`decisionState = .reverted`).
+    static let dayZeroRediffByteExactBoundaryState: String = "dayZeroRediffByteExact"
+
+    /// `metadataSource` stamp mirroring `dayZeroRediffByteExactBoundaryState` so
+    /// the mark's source is recorded on the row.
+    static let dayZeroRediffByteExactMetadataSource: String = "rediffDayZeroByteExact"
+
+    /// playhead-xsdz.36.4 — the DAY-0 byte-exact rediff mint: the FIRST-LISTEN
+    /// marking path. Resolves the PINNED played A-side from the asset row (wrj8
+    /// read-only mmap), byte-aligns it against each k-way B-copy, keeps only
+    /// byte-EXACT ≥2-persona-robust divergent slots, and persists each as a
+    /// MARK-ONLY AdWindow banner. Returns the number of marks minted.
+    ///
+    /// WHY THIS BYPASSES PRESENCE-GATING (the narrow, guarded exception): every
+    /// other rediff mark is presence-gated — a rediff slot only sets the WIDTH of
+    /// a decoded span whose PRESENCE a transcript/FM core already established
+    /// (`computeRediffSlotPass` guards on `!decodedSpans.isEmpty`, and
+    /// `RediffSlotOwnership.candidates` widens EXISTING spans). On a true first
+    /// listen no such core exists yet. But a byte-EXACT divergent region across a
+    /// ≥2-persona-robust k-way fetch IS a dynamically-inserted ad segment,
+    /// sample-accurately, with DETERMINISTIC certainty — a stronger signal than
+    /// the transcript/FM core it would otherwise wait on. So a byte-exact day-0
+    /// slot is its OWN presence core. This is deliberately NARROW:
+    ///   • BYTE-EXACT ONLY — the chroma differ / `refetchedBSideMono16kHz` is
+    ///     never consulted here; a diff that falls back to chroma mints nothing.
+    ///   • ≥2-PERSONA-ROBUST — `RediffSlotOwnership.kWayRobustPlayedSlots`
+    ///     requires the region be corroborated across ≥2 personas, never a lone
+    ///     low-entropy coincidence.
+    ///   • Every false-widening guard still applies (`gateAndDiffBytes`:
+    ///     min-run-bytes, monotonic, re-encode/`chainedFraction` reject,
+    ///     min-ad-width; then fragment-merge + duration-cap).
+    ///   • MARK-ONLY — `eligibilityGate = .markOnly`, edges left `.unanchored`;
+    ///     a rare FP is only a wrong banner, never eaten content. Auto-skip held.
+    /// It does NOT change presence-gating for the lagged path, the chroma differ,
+    /// or any non-day-0 flow.
+    ///
+    /// NEVER-PERSIST-B (wrj8/xsdz.28): the B bytes are read (mmap) only inside
+    /// this call; the caller (`RediffRefetchService`) still deletes every B-copy.
+    /// The persisted marks are A-time scalars only. The A-side file is READ-ONLY.
+    func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int {
+        // A ≥2-persona quorum is impossible with fewer than 2 B-copies.
+        guard bSideURLs.count >= RediffSlotOwnership.dayZeroMinPersonaSupport else {
+            logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): \(bSideURLs.count) B-side(s) < \(RediffSlotOwnership.dayZeroMinPersonaSupport)-persona quorum")
+            return 0
+        }
+        // The asset row supplies the PINNED A-side (wrj8: read-only played file).
+        let asset: AnalysisAsset
+        do {
+            guard let fetched = try await store.fetchAsset(id: analysisAssetId) else {
+                logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): no asset row")
+                return 0
+            }
+            asset = fetched
+        } catch {
+            logger.warning("[xsdz.36.4] day-0 mint fetchAsset failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+            return 0
+        }
+        guard let aSideURL = Self.byteDifferASideURL(sourceURL: asset.sourceURL) else {
+            logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): no anchored A-side file")
+            return 0
+        }
+        let aData: Data
+        do {
+            aData = try Data(contentsOf: aSideURL, options: .mappedIfSafe)
+        } catch {
+            logger.warning("[xsdz.36.4] day-0 mint A-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+            return 0
+        }
+
+        // BYTE-EXACT per-persona diffs ONLY. A B whose byte gate rejects (no
+        // chained runs / non-monotonic / re-encode CDN) is a chroma-fallback
+        // TRIGGER for the lagged pass — but day-0 mints NOTHING from it: it is
+        // simply not counted toward the ≥2-persona quorum.
+        var perBSideSlots: [[RediffSlotOwnership.PlayedSlot]] = []
+        for bSideURL in bSideURLs {
+            guard Self.isAnchoredRegularFile(bSideURL) else { continue }
+            let bData: Data
+            do {
+                bData = try Data(contentsOf: bSideURL, options: .mappedIfSafe)
+            } catch {
+                logger.warning("[xsdz.36.4] day-0 mint B-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+                continue
+            }
+            let alignment = RediffByteAligner.align(aData: aData, bData: bData)
+            guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(alignment: alignment) else {
+                continue
+            }
+            perBSideSlots.append(acceptance.playedSlots)
+        }
+
+        // ≥2-persona-robust byte-EXACT slots (false-widening guards inside).
+        let robust = RediffSlotOwnership.kWayRobustPlayedSlots(perBSideSlots)
+        guard !robust.isEmpty else {
+            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): \(perBSideSlots.count) byte-exact diff(s), no ≥2-persona-robust slot — nothing minted")
+            return 0
+        }
+
+        // Idempotency: skip any robust slot overlapping an existing AdWindow
+        // (any decisionState, incl. a user-vetoed `.reverted` row) so a repeat
+        // day-0 fire — or a day-0 run after some analysis already marked — never
+        // double-banners or resurfaces a veto (mirrors correction-replay).
+        let existing = (try? await store.fetchAdWindows(assetId: analysisAssetId)) ?? []
+        var windows: [AdWindow] = []
+        for slot in robust {
+            let overlapsExisting = existing.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
+            let overlapsEmitted = windows.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
+            if overlapsExisting || overlapsEmitted { continue }
+            windows.append(AdWindow(
+                id: UUID().uuidString,
+                analysisAssetId: analysisAssetId,
+                startTime: slot.startSeconds,
+                endTime: slot.endSeconds,
+                confidence: 1.0,   // deterministic byte-exact certainty
+                boundaryState: Self.dayZeroRediffByteExactBoundaryState,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: config.detectorVersion,
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: slot.startSeconds,
+                metadataSource: Self.dayZeroRediffByteExactMetadataSource,
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: nil,
+                eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+                catalogStoreMatchSimilarity: nil
+                // startEdgeAnchor / endEdgeAnchor default to `.unanchored`:
+                // mark-only, NOT auto-skip-eligible (a separate gated step).
+            ))
+        }
+        guard !windows.isEmpty else {
+            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): all \(robust.count) robust slot(s) already covered by existing AdWindows — nothing minted")
+            return 0
+        }
+        do {
+            try await store.upsertHotPathAdWindows(windows, existingIDs: [], retiredIDs: [])
+        } catch {
+            logger.warning("[xsdz.36.4] day-0 mint persist failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+            return 0
+        }
+        logger.info("[xsdz.36.4] day-0 byte-exact minted \(windows.count) mark-only banner(s) asset=\(analysisAssetId, privacy: .public)")
+        return windows.count
     }
 
     private func boundarySingletonPromotedSegments(

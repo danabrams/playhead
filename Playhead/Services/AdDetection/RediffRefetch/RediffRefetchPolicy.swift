@@ -460,6 +460,22 @@ enum RediffRefetchPolicy {
         /// the recorder persists the failure streak (previously `.failed`
         /// carried no state — the xsdz.28 R2 no-backoff loop).
         case failed(assetId: String, cost: BandwidthCost, failureClass: FailureClass, newState: AttemptState, error: String)
+        /// playhead-xsdz.36.4 DAY-0: a play-time byte-exact rediff that PRODUCED
+        /// marks. `markCount` mark-only banners were persisted; the full-fetch
+        /// bytes are accounted, and `newState` is `.markResolved` (day-0 K≥3 is a
+        /// superset of the lagged K=1 sweep, so a day-0 MARK may resolve the
+        /// shared state). Distinct from `.rotated` so dogfood telemetry can
+        /// separate the day-0 mint from the lagged revalidate consume.
+        case dayZeroMarked(assetId: String, cost: BandwidthCost, markCount: Int, newState: AttemptState)
+        /// playhead-xsdz.36.4 DAY-0: a play-time rediff that produced NO marks
+        /// (nothing byte-exact/≥2-persona-robust — e.g. an incomplete A-side at
+        /// play time, a re-encoding CDN, or a chroma-only fallback) OR threw. The
+        /// bytes spent are STILL accounted, but — the POISONING FIX — NO attempt
+        /// state is written: an empty/failed day-0 run must NOT resolve or advance
+        /// the shared `rediff_refetch_state`, so the lagged sweep still recovers
+        /// those ads later. `error` is nil for a clean no-mark run, non-nil when a
+        /// fetch/read/persist threw.
+        case dayZeroUnmarked(assetId: String, cost: BandwidthCost, error: String?)
     }
 }
 

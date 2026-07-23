@@ -113,17 +113,28 @@ struct DayZeroRediffTrigger: Sendable {
     ///   - playedFileURL: the pinned played file (informational — the day-0 path
     ///     reads the A-side from the asset row, never this URL, and never writes
     ///     it).
+    ///   - forceDeepScanOptIn: when `true`, the deep-scan opt-in leg of the gate
+    ///     is treated as GRANTED without reading `deepScanOptInProvider` — the
+    ///     on-demand "Download & Analyze" trigger (playhead-3xtw) sets this
+    ///     because the user EXPLICITLY requested analysis by tapping the control,
+    ///     which satisfies "charging OR deep-scan opt-in" (so an unplugged WiFi
+    ///     device still runs). The WiFi requirement and the `enabled` flag are
+    ///     UNAFFECTED. The play-time trigger leaves it `false` (reads the
+    ///     provider), so its behavior is unchanged.
     @discardableResult
     func triggerIfEligible(
         analysisAssetId: String,
         enclosureURL: URL,
         playedFileURL: URL,
+        forceDeepScanOptIn: Bool = false,
         at now: Double = Date().timeIntervalSince1970
     ) async -> RediffRefetchService.SweepSummary {
         guard enabled else { return SweepSummary() }
         let reachability = await reachabilityProvider()
         let isCharging = await chargeStateProvider()
-        let deepScanOptIn = deepScanOptInProvider()
+        // The explicit "Download & Analyze" tap is itself the deep-scan opt-in —
+        // don't even read the (settings-backed) provider in that case.
+        let deepScanOptIn = forceDeepScanOptIn || deepScanOptInProvider()
         guard DayZeroRediffGate.allows(
             enabled: enabled,
             reachability: reachability,
