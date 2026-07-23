@@ -192,6 +192,25 @@ fi
 WORKTREE_DIR="$(mktemp -u "$WORKTREE_PARENT/testflight.$TIMESTAMP.XXXXXX")"
 git -C "$REPO_ROOT" worktree add --detach "$WORKTREE_DIR" "$REF" >/dev/null
 
+# A clean worktree lacks the gitignored FM model directories under
+# Playhead/Resources/Models (each is ~hundreds of MB and lives outside git).
+# xcodegen references them as source/resource folders, so `xcodegen generate`
+# aborts with "missing source directory …/Resources/Models/<model>" unless we
+# provide them. Symlink each model dir from the primary checkout so both the
+# spec validation and the Release resource-copy phase resolve real bytes.
+MODELS_SRC="$REPO_ROOT/Playhead/Resources/Models"
+MODELS_DST="$WORKTREE_DIR/Playhead/Resources/Models"
+if [[ -d "$MODELS_SRC" ]]; then
+  mkdir -p "$MODELS_DST"
+  for model_dir in "$MODELS_SRC"/*/; do
+    [[ -d "$model_dir" ]] || continue
+    model_name="$(basename "$model_dir")"
+    if [[ ! -e "$MODELS_DST/$model_name" ]]; then
+      ln -s "$model_dir" "$MODELS_DST/$model_name"
+    fi
+  done
+fi
+
 ARCHIVE_PATH="$ARTIFACTS_DIR/Playhead.xcarchive"
 UPLOAD_PATH="$ARTIFACTS_DIR/upload"
 UPLOAD_OPTIONS_PLIST="$ARTIFACTS_DIR/UploadOptions.plist"
@@ -209,10 +228,13 @@ plutil -create xml1 "$UPLOAD_OPTIONS_PLIST"
 /usr/libexec/PlistBuddy -c 'Add :destination string upload' "$UPLOAD_OPTIONS_PLIST"
 /usr/libexec/PlistBuddy -c 'Add :manageAppVersionAndBuildNumber bool true' "$UPLOAD_OPTIONS_PLIST"
 /usr/libexec/PlistBuddy -c 'Add :method string app-store-connect' "$UPLOAD_OPTIONS_PLIST"
-/usr/libexec/PlistBuddy -c 'Add :provisioningProfiles dict' "$UPLOAD_OPTIONS_PLIST"
-/usr/libexec/PlistBuddy -c "Add :provisioningProfiles:$BUNDLE_ID string $PROFILE_NAME" "$UPLOAD_OPTIONS_PLIST"
-/usr/libexec/PlistBuddy -c "Add :signingCertificate string $CODE_SIGN_IDENTITY" "$UPLOAD_OPTIONS_PLIST"
-/usr/libexec/PlistBuddy -c 'Add :signingStyle string manual' "$UPLOAD_OPTIONS_PLIST"
+# Automatic signing: let Xcode select/regenerate a distribution profile that
+# matches the app's CURRENT entitlements (a pinned manual profile goes stale
+# whenever a capability like iCloud is added — see playhead dogfood 2026-07-23,
+# where "Playhead App Store" lacked the iCloud entitlements). Automatic signing
+# also correctly scopes signing to the app target only, so SPM package targets
+# (swift-transformers, swift-crypto) that reject provisioning profiles build.
+/usr/libexec/PlistBuddy -c 'Add :signingStyle string automatic' "$UPLOAD_OPTIONS_PLIST"
 /usr/libexec/PlistBuddy -c 'Add :stripSwiftSymbols bool true' "$UPLOAD_OPTIONS_PLIST"
 /usr/libexec/PlistBuddy -c "Add :teamID string $TEAM_ID" "$UPLOAD_OPTIONS_PLIST"
 /usr/libexec/PlistBuddy -c 'Add :uploadSymbols bool true' "$UPLOAD_OPTIONS_PLIST"
@@ -224,15 +246,14 @@ xcodebuild archive \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$ARTIFACTS_DIR/DerivedData" \
   -archivePath "$ARCHIVE_PATH" \
-  CODE_SIGN_STYLE=Manual \
-  "CODE_SIGN_IDENTITY=$CODE_SIGN_IDENTITY" \
-  "DEVELOPMENT_TEAM=$TEAM_ID" \
-  "PROVISIONING_PROFILE_SPECIFIER=$PROFILE_NAME" \
-  "PROVISIONING_PROFILE=$PROFILE_UUID"
+  -allowProvisioningUpdates \
+  CODE_SIGN_STYLE=Automatic \
+  "DEVELOPMENT_TEAM=$TEAM_ID"
 
 xcodebuild -exportArchive \
   -archivePath "$ARCHIVE_PATH" \
   -exportPath "$UPLOAD_PATH" \
+  -allowProvisioningUpdates \
   -exportOptionsPlist "$UPLOAD_OPTIONS_PLIST"
 
 echo
