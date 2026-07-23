@@ -68,6 +68,39 @@ struct CacheEntry: Sendable {
     let hasActiveAnalysis: Bool
 }
 
+// MARK: - AudioAssetPin
+
+/// playhead-wrj8: the immutable-artifact "content pin" persisted next to a
+/// downloaded episode's audio file (`<hash>.pin`). Its presence + the
+/// `expectedBytes` field are what let the cache distinguish a COMPLETE,
+/// serveable artifact from a truncated / mid-stream / interrupted file — an
+/// existence-only check cannot.
+///
+/// Invariant: for the life of a downloaded episode the pinned artifact is
+/// immutable. Once a pin exists whose `expectedBytes` matches the on-disk
+/// length, no non-rediff path may overwrite that file in place — the bytes
+/// PLAYED == ANALYZED == MARKED-AGAINST never change (DAI shows re-cut a
+/// different ad stitch on every fetch, so silently re-fetching would rotate
+/// the audio the user marked ads against).
+///
+/// A `nil` pin (legacy files downloaded before wrj8) is treated as
+/// complete-by-existence so the change is non-destructive; freshly
+/// downloaded/streamed files always write a pin.
+struct AudioAssetPin: Codable, Sendable, Equatable {
+    /// Authoritative complete byte length. During a streaming download this
+    /// is seeded to the HTTP `Content-Length` (or `Int64.max` when unknown)
+    /// so the growing file reads as INCOMPLETE until finalized; on
+    /// completion it is rewritten to the actual on-disk size.
+    var expectedBytes: Int64
+    /// Full-file SHA-256, populated once the download completes. Optional
+    /// because it is not known until the bytes are all on disk.
+    var sha256: String?
+    /// Enclosure URL the bytes were fetched from (diagnostics only).
+    var sourceURL: String?
+    /// HTTP validator captured at download time (diagnostics only).
+    var etag: String?
+}
+
 // MARK: - DownloadManagerError
 
 enum DownloadManagerError: Error, CustomStringConvertible {
@@ -215,14 +248,29 @@ actor DownloadManager {
     /// testing surface stays consistent.
     private var backgroundTaskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared
 
+    /// playhead-wrj8: fetches the CURRENT server validator (ETag /
+    /// Content-Length) for a URL, used to decide whether a persisted
+    /// resume-data blob is still safe to splice. Defaults to a real HTTP
+    /// HEAD request; tests inject a deterministic stub via
+    /// ``setResumeValidatorProviderForTesting(_:)``. Returns `nil` when the
+    /// validator cannot be established (treated as "cannot prove freshness"
+    /// → re-download fresh rather than risk splicing a rotated stitch).
+    private var resumeValidatorProvider: (@Sendable (URL) async -> HTTPAssetMetadata?)?
+
     /// Metadata cache: episode ID -> HTTP metadata from last response.
     private var metadataCache: [String: HTTPAssetMetadata] = [:]
 
     /// LRU tracking: episode ID -> last access time.
     private var accessLog: [String: Date] = [:]
 
-    /// Episodes with active/incomplete analysis (protected from eviction).
-    private var analysisProtectedEpisodes: Set<String> = []
+    /// Episodes with active/incomplete analysis or in-flight playback
+    /// (protected from eviction). playhead-wrj8: refcounted (was a plain
+    /// `Set`) so overlapping owners — the playback lifecycle and one or
+    /// more analysis jobs on the SAME episode — compose correctly: the
+    /// file backing the current episode is only eligible for eviction once
+    /// EVERY protector has released. A bare `Set` let whichever owner
+    /// finished first drop protection out from under the others.
+    private var analysisProtectedEpisodes: [String: Int] = [:]
 
     /// Episode IDs whose background URLSession download is currently
     /// in flight. Background tasks aren't tracked in `activeDownloads`
@@ -342,11 +390,16 @@ actor DownloadManager {
         // alive long enough for the FileManager write inside
         // `persistResumeData` to complete, so the Task hop introduces
         // no loss-of-write risk.
-        self.sessionDelegate.onResumeDataHarvested = { [weak manager = self] episodeId, data in
+        self.sessionDelegate.onResumeDataHarvested = { [weak manager = self] episodeId, data, sourceURL, metadata in
             guard let manager else { return }
-            Task { [manager, episodeId, data] in
+            Task { [manager, episodeId, data, sourceURL, metadata] in
                 do {
-                    try await manager.persistResumeData(episodeId: episodeId, data: data)
+                    try await manager.persistResumeData(
+                        episodeId: episodeId,
+                        data: data,
+                        sourceURL: sourceURL,
+                        validator: metadata
+                    )
                 } catch {
                     // A write failure here is best-effort; the next
                     // cold-launch scan simply won't see this blob. Log
@@ -549,6 +602,36 @@ actor DownloadManager {
     /// Production leaves the default `.shared` scheduler in place.
     func setBackgroundTaskSchedulerForTesting(_ scheduler: any BackgroundTaskScheduling) {
         self.backgroundTaskScheduler = scheduler
+    }
+
+    /// playhead-wrj8: inject the resume-freshness validator provider so
+    /// tests can exercise the ETag/length-mismatch → re-download-fresh path
+    /// without real network. Production leaves this `nil` and the resume
+    /// path issues a real HTTP HEAD.
+    func setResumeValidatorProviderForTesting(
+        _ provider: @escaping @Sendable (URL) async -> HTTPAssetMetadata?
+    ) {
+        self.resumeValidatorProvider = provider
+    }
+
+    /// playhead-wrj8: resolves the current server validator for `url`,
+    /// using the injected provider when present, otherwise a real HTTP HEAD.
+    func currentServerValidator(for url: URL) async -> HTTPAssetMetadata? {
+        if let provider = resumeValidatorProvider {
+            return await provider(url)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else {
+            return nil
+        }
+        let len = http.expectedContentLength
+        return HTTPAssetMetadata(
+            etag: http.value(forHTTPHeaderField: "ETag"),
+            contentLength: len > 0 ? len : nil,
+            lastModified: http.value(forHTTPHeaderField: "Last-Modified")
+        )
     }
 
     // MARK: - playhead-44h1 (fix): Foreground-assist lifecycle
@@ -991,11 +1074,13 @@ actor DownloadManager {
         let sourceExt = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
         extensionCache[episodeId] = sourceExt
 
-        // Already fully cached?
-        let completeURL = completeFileURL(for: episodeId)
-        if FileManager.default.fileExists(atPath: completeURL.path) {
+        // Already fully cached? playhead-wrj8: completeness-gated so a
+        // truncated file is re-fetched rather than served, and a complete
+        // pinned artifact is returned as-is (never re-fetched → never
+        // rotated by a fresh DAI stitch).
+        if let complete = servingURLIfComplete(for: episodeId) {
             touchAccess(episodeId: episodeId)
-            return completeURL
+            return complete
         }
 
         // Already downloading?
@@ -1053,7 +1138,21 @@ actor DownloadManager {
         let weakFP = AudioFingerprint.makeWeak(url: url, metadata: metadata)
         fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: nil)
 
-        // Move temp -> complete first, then hash from final location.
+        // playhead-wrj8: refuse to overwrite an already-complete pinned
+        // artifact. If a complete file materialized between the
+        // early-return check and now (a concurrent writer, or a bg
+        // pre-cache that finished first), keep it — never replace the
+        // played/analyzed bytes with a freshly-cut DAI stitch. The temp
+        // file is cleaned up by the `defer` above.
+        if let existing = servingURLIfComplete(for: episodeId) {
+            touchAccess(episodeId: episodeId)
+            logger.info("Download for \(episodeId): complete pinned artifact already present — keeping it, discarding re-fetch")
+            return existing
+        }
+
+        // Move temp -> complete first, then hash from final location. An
+        // incomplete leftover (partial from a failed stream) is safe to
+        // replace — `servingURLIfComplete` returned nil for it above.
         if fm.fileExists(atPath: completeURL.path) {
             try fm.removeItem(at: completeURL)
         }
@@ -1066,6 +1165,19 @@ actor DownloadManager {
         // Compute strong fingerprint from the final file.
         let strongHash = try FileHasher.sha256(fileURL: completeURL)
         fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: strongHash)
+
+        // playhead-wrj8: pin the artifact as COMPLETE. From here the file
+        // is immutable — cachedFileURL/streaming cache-hit/overwrite guards
+        // all treat it as the single served copy.
+        writePin(
+            AudioAssetPin(
+                expectedBytes: downloaded,
+                sha256: strongHash,
+                sourceURL: url.absoluteString,
+                etag: metadata.etag
+            ),
+            for: episodeId
+        )
 
         // Enqueue pre-analysis if scheduler is wired up.
         if let scheduler = analysisWorkScheduler {
@@ -1134,20 +1246,29 @@ actor DownloadManager {
         extensionCache[episodeId] = sourceExt
 
         let completeURL = completeFileURL(for: episodeId)
-        if FileManager.default.fileExists(atPath: completeURL.path) {
+        // playhead-wrj8: completeness-gated cache-hit. A COMPLETE pinned
+        // artifact is served as-is (never re-streamed → the played bytes
+        // can't be swapped for a different DAI stitch). A mid-stream /
+        // truncated leftover (pin present but under-length) is NOT a
+        // cache-hit and falls through to a fresh stream below.
+        if let complete = servingURLIfComplete(for: episodeId) {
             touchAccess(episodeId: episodeId)
             let uti = Self.utiForExtension(sourceExt)
-            // File size is the total for a complete file.
-            let attrs = try? FileManager.default.attributesOfItem(atPath: completeURL.path)
+            let attrs = try? FileManager.default.attributesOfItem(atPath: complete.path)
             let size = (attrs?[.size] as? Int64)
-            return StreamingDownloadResult(fileURL: completeURL, totalBytes: size, contentType: uti, downloadComplete: {})
+            return StreamingDownloadResult(fileURL: complete, totalBytes: size, contentType: uti, downloadComplete: {})
         }
 
         // Write directly to the final location so AVPlayer can read it.
+        // Any leftover here is an incomplete partial (the complete case
+        // returned above); replacing it is safe.
         let fm = FileManager.default
         if fm.fileExists(atPath: completeURL.path) {
             try fm.removeItem(at: completeURL)
         }
+        // playhead-wrj8: drop any stale pin from a prior interrupted
+        // attempt so the fresh stream re-pins from scratch below.
+        deletePin(for: episodeId)
         // playhead-h3h: create with explicit
         // `.completeUntilFirstUserAuthentication` rather than letting the
         // file inherit the system default. Aligns with the AnalysisStore
@@ -1160,6 +1281,25 @@ actor DownloadManager {
         )
         let fileHandle = try FileHandle(forWritingTo: completeURL)
 
+        // playhead-wrj8 (R1): seed an always-incomplete pin (Int64.max) the
+        // instant the empty file exists, BEFORE the network await below.
+        // Without it, `servingURLIfComplete` treats the freshly-created
+        // 0-byte / mid-connection file as complete-by-existence (no pin yet)
+        // for the whole connection-setup window, so a concurrent cache-hit
+        // reader could be handed a truncated file — the exact "serve a
+        // partial" hole the invariant forbids. The real Content-Length
+        // rewrites this a few lines down; `finalizeStreamingPin` stamps the
+        // true length at completion.
+        writePin(
+            AudioAssetPin(
+                expectedBytes: Int64.max,
+                sha256: nil,
+                sourceURL: url.absoluteString,
+                etag: nil
+            ),
+            for: episodeId
+        )
+
         let request = URLRequest(url: url)
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
 
@@ -1168,6 +1308,8 @@ actor DownloadManager {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             try? fileHandle.close()
             try? fm.removeItem(at: completeURL)
+            // Drop the seed pin so a removed file leaves no orphan pin behind.
+            deletePin(for: episodeId)
             throw DownloadManagerError.downloadFailed(episodeId, "HTTP \(code)")
         }
 
@@ -1183,6 +1325,23 @@ actor DownloadManager {
         let weakFP = AudioFingerprint.makeWeak(url: url, metadata: metadata)
         fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: nil)
 
+        // playhead-wrj8: seed an INCOMPLETE pin — `expectedBytes` is the
+        // full Content-Length (or Int64.max when the server omits it).
+        // While the file grows below its size stays under `expectedBytes`,
+        // so `servingURLIfComplete` withholds it from every cache path
+        // (and a force-quit mid-stream leaves it withheld across relaunch,
+        // never serving a truncated file). `finalizeStreamingPin` rewrites
+        // it to the real length on completion.
+        writePin(
+            AudioAssetPin(
+                expectedBytes: totalContentLength ?? Int64.max,
+                sha256: nil,
+                sourceURL: url.absoluteString,
+                etag: metadata.etag
+            ),
+            for: episodeId
+        )
+
         let signalURL = completeURL
         let threshold = min(playableThreshold, totalContentLength ?? playableThreshold)
         let audioUTI = Self.utiForExtension(sourceExt)
@@ -1194,6 +1353,10 @@ actor DownloadManager {
         let result: StreamingDownloadResult = try await withCheckedThrowingContinuation { continuation in
             let capturedLogger = self.logger
             let capturedEpisodeId = episodeId
+            // playhead-wrj8: carry the source URL + validator into the
+            // detached completion so the finalized pin records them.
+            let capturedSourceURL = url.absoluteString
+            let capturedEtag = metadata.etag
             let completionContinuation = completionStream.1
             Task.detached { [weak self] in
                 var bytesWritten: Int64 = 0
@@ -1265,7 +1428,21 @@ actor DownloadManager {
                     }
 
                     // Compute strong fingerprint now that file is complete.
-                    if let strongHash = try? FileHasher.sha256(fileURL: signalURL) {
+                    let strongHash = try? FileHasher.sha256(fileURL: signalURL)
+                    // playhead-wrj8: finalize the completeness pin to the
+                    // real on-disk length BEFORE eviction/serving, so the
+                    // just-completed stream becomes the single immutable
+                    // artifact. Done unconditionally (even when hashing
+                    // fails) so the file can never remain wedged as
+                    // "incomplete" and force a re-stream that would land a
+                    // different DAI stitch.
+                    await self?.finalizeStreamingPin(
+                        episodeId: capturedEpisodeId,
+                        sourceURL: capturedSourceURL,
+                        etag: capturedEtag,
+                        sha256: strongHash
+                    )
+                    if let strongHash {
                         await self?.setFingerprint(
                             episodeId: capturedEpisodeId, weak: weakFP, strong: strongHash
                         )
@@ -1423,6 +1600,110 @@ actor DownloadManager {
         "mp3", "m4a", "aac", "wav", "caf", "aiff", "mp4", "ogg", "opus"
     ]
 
+    // MARK: - Completeness pin (playhead-wrj8)
+
+    /// File extension for the per-episode completeness pin sidecar.
+    static let pinExtension = "pin"
+
+    /// URL of the `<hash>.pin` completeness sidecar for an episode. Shares
+    /// the audio file's hashed basename but a distinct extension, so it is
+    /// never mistaken for the audio file by `resolveExtension`/eviction/etc.
+    func pinFileURL(for episodeId: String) -> URL {
+        completeDirectory
+            .appendingPathComponent("\(Self.safeFilename(for: episodeId)).\(Self.pinExtension)")
+    }
+
+    /// Loads the persisted completeness pin for an episode, or `nil` when
+    /// none is stored (legacy files, or a not-yet-downloaded episode).
+    func loadPin(for episodeId: String) -> AudioAssetPin? {
+        let url = pinFileURL(for: episodeId)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(AudioAssetPin.self, from: data)
+    }
+
+    /// Atomically writes/overwrites the completeness pin for an episode.
+    func writePin(_ pin: AudioAssetPin, for episodeId: String) {
+        let url = pinFileURL(for: episodeId)
+        guard let data = try? JSONEncoder().encode(pin) else { return }
+        do {
+            let dir = url.deletingLastPathComponent()
+            if !FileManager.default.fileExists(atPath: dir.path) {
+                try FileManager.default.createDirectory(
+                    at: dir, withIntermediateDirectories: true
+                )
+            }
+            try data.write(to: url, options: .atomic)
+        } catch {
+            logger.error(
+                "Failed to write completeness pin for \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+        }
+    }
+
+    /// Removes the completeness pin for an episode (no-op when absent).
+    func deletePin(for episodeId: String) {
+        try? FileManager.default.removeItem(at: pinFileURL(for: episodeId))
+    }
+
+    /// playhead-wrj8: finalize a streaming download's pin to the actual
+    /// on-disk length so `servingURLIfComplete` starts serving it. Reads the
+    /// true size from disk (authoritative — the streamed byte counter could
+    /// drift) and stamps the optional strong hash. Called from the detached
+    /// streaming-completion task.
+    fileprivate func finalizeStreamingPin(
+        episodeId: String,
+        sourceURL: String,
+        etag: String?,
+        sha256: String?
+    ) {
+        let size = completeFileSize(for: episodeId) ?? 0
+        guard size > 0 else {
+            // No bytes on disk — leave any incomplete pin in place so the
+            // file stays withheld rather than being marked complete-at-zero.
+            return
+        }
+        writePin(
+            AudioAssetPin(
+                expectedBytes: size,
+                sha256: sha256,
+                sourceURL: sourceURL,
+                etag: etag
+            ),
+            for: episodeId
+        )
+    }
+
+    /// On-disk byte length of the complete audio file, or `nil` if absent.
+    private func completeFileSize(for episodeId: String) -> Int64? {
+        let url = completeFileURL(for: episodeId)
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else {
+            return nil
+        }
+        return (attrs[.size] as? Int64)
+    }
+
+    /// playhead-wrj8: the single completeness gate. Returns the audio file
+    /// URL ONLY when the episode has a fully-downloaded, serveable artifact:
+    ///
+    ///   * file present AND a pin exists → serveable iff the on-disk length
+    ///     reached the pin's `expectedBytes` (a truncated / mid-stream /
+    ///     interrupted file has fewer bytes and is withheld);
+    ///   * file present AND no pin → treated as complete-by-existence
+    ///     (legacy files downloaded before wrj8), so the change is
+    ///     non-destructive;
+    ///   * file absent → `nil`.
+    ///
+    /// Every "is this cached?" and "may I overwrite this?" decision routes
+    /// through here so playback, analysis, and the download writers all
+    /// agree on exactly one immutable artifact per episode.
+    func servingURLIfComplete(for episodeId: String) -> URL? {
+        guard let size = completeFileSize(for: episodeId) else { return nil }
+        if let pin = loadPin(for: episodeId) {
+            guard pin.expectedBytes > 0, size >= pin.expectedBytes else { return nil }
+        }
+        return completeFileURL(for: episodeId)
+    }
+
     /// Resolve the file extension for an episode. Checks the in-memory cache
     /// first, then scans the complete directory for a matching file.
     private func resolveExtension(for episodeId: String) -> String {
@@ -1445,16 +1726,18 @@ actor DownloadManager {
     }
 
     /// Returns the cached file URL if the episode is fully downloaded.
+    /// playhead-wrj8: gated on completeness (a truncated / mid-stream file
+    /// no longer reads as "cached"), so playback + analysis never resolve a
+    /// partial artifact.
     func cachedFileURL(for episodeId: String) -> URL? {
-        let url = completeFileURL(for: episodeId)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard let url = servingURLIfComplete(for: episodeId) else { return nil }
         touchAccess(episodeId: episodeId)
         return url
     }
 
     /// Returns true if the episode audio is fully cached on disk.
     func isCached(episodeId: String) -> Bool {
-        FileManager.default.fileExists(atPath: completeFileURL(for: episodeId).path)
+        servingURLIfComplete(for: episodeId) != nil
     }
 
     /// Returns the set of episode IDs that have fully-downloaded cached audio.
@@ -1528,14 +1811,28 @@ actor DownloadManager {
 
     // MARK: - Analysis Protection
 
-    /// Marks an episode as having active analysis, protecting it from eviction.
+    /// Marks an episode as in-use (active analysis or in-flight playback),
+    /// protecting its cached audio file from LRU eviction. playhead-wrj8:
+    /// refcounted — balance every call with exactly one
+    /// ``unprotectFromAnalysis(episodeId:)``.
     func protectForAnalysis(episodeId: String) {
-        analysisProtectedEpisodes.insert(episodeId)
+        analysisProtectedEpisodes[episodeId, default: 0] += 1
     }
 
-    /// Removes analysis protection, allowing the episode to be evicted.
+    /// Releases one unit of eviction protection. The episode becomes
+    /// eviction-eligible only when the refcount returns to zero.
     func unprotectFromAnalysis(episodeId: String) {
-        analysisProtectedEpisodes.remove(episodeId)
+        guard let count = analysisProtectedEpisodes[episodeId] else { return }
+        if count <= 1 {
+            analysisProtectedEpisodes.removeValue(forKey: episodeId)
+        } else {
+            analysisProtectedEpisodes[episodeId] = count - 1
+        }
+    }
+
+    /// Test/diagnostic accessor: episodes currently protected from eviction.
+    func protectedEpisodeIdsForTesting() -> Set<String> {
+        Set(analysisProtectedEpisodes.keys)
     }
 
     // MARK: - Cache Size & Eviction
@@ -1582,16 +1879,21 @@ actor DownloadManager {
         // outside the manager (or before its accessLog entry was
         // written) can still be identified for protection checks.
         let knownEpisodeIds = Set(accessLog.keys)
-            .union(analysisProtectedEpisodes)
+            .union(analysisProtectedEpisodes.keys)
             .union(activeDownloads.keys)
             .union(bgInFlightEpisodes)
         let hashToEpisodeId: [String: String] = Dictionary(
             uniqueKeysWithValues: knownEpisodeIds.map { (Self.safeFilename(for: $0), $0) }
         )
         for fileURL in contents {
+            // playhead-wrj8: never evict a `.pin` sidecar directly — it is
+            // deleted alongside its audio file below. Treating it as a
+            // standalone eviction candidate would strip the completeness
+            // marker off a still-present audio file.
+            guard fileURL.pathExtension != Self.pinExtension else { continue }
             let name = fileURL.deletingPathExtension().lastPathComponent
             let episodeId = hashToEpisodeId[name]
-            guard !(episodeId.map { analysisProtectedEpisodes.contains($0) } ?? false) else { continue }
+            guard !(episodeId.map { analysisProtectedEpisodes[$0] != nil } ?? false) else { continue }
             guard !(episodeId.map { activeDownloads.keys.contains($0) } ?? false) else { continue }
             guard !(episodeId.map { bgInFlightEpisodes.contains($0) } ?? false) else { continue }
 
@@ -1615,6 +1917,13 @@ actor DownloadManager {
             guard currentSize > maxCacheBytes else { break }
 
             try fm.removeItem(at: candidate.url)
+            // playhead-wrj8: drop the completeness pin alongside the audio
+            // so a re-download starts from a clean slate (no stale pin
+            // claiming an evicted file is still complete).
+            let pinURL = candidate.url
+                .deletingPathExtension()
+                .appendingPathExtension(Self.pinExtension)
+            try? fm.removeItem(at: pinURL)
             currentSize -= candidate.size
             // Only scrub the per-episode caches when we resolved a real
             // episode id. Writing nil at the hashed-filename key would
@@ -1660,6 +1969,10 @@ actor DownloadManager {
         if fm.fileExists(atPath: partial.path) {
             try fm.removeItem(at: partial)
         }
+        // playhead-wrj8: drop the completeness pin too so a later
+        // re-download is treated as a fresh artifact rather than colliding
+        // with a stale "complete" claim.
+        deletePin(for: episodeId)
         // Symmetric blob cleanup so a future scan doesn't resurrect a
         // suspended-transfer event for an episode the user just deleted.
         try? deleteResumeData(episodeId: episodeId)
@@ -1713,6 +2026,34 @@ actor DownloadManager {
         let destURL = completeFileURL(for: episodeId)
         let destDir = destURL.deletingLastPathComponent()
 
+        // playhead-wrj8: REFUSE to overwrite an already-complete pinned
+        // artifact. This is the vector that best matches the incident: a
+        // background transfer (or a force-quit RESUME, which finalizes
+        // through this same path) completing with a DIFFERENT DAI ad
+        // stitch must NOT clobber the bytes the user already played and
+        // marked ads against. Discard the staged deposit, adopt a pin for
+        // the existing file if it has none, and keep the played copy.
+        if let existing = servingURLIfComplete(for: episodeId) {
+            try? fm.removeItem(at: stagedURL)
+            if loadPin(for: episodeId) == nil,
+               let size = completeFileSize(for: episodeId) {
+                writePin(
+                    AudioAssetPin(
+                        expectedBytes: size,
+                        sha256: fingerprintCache[episodeId]?.strong,
+                        sourceURL: originalURL?.absoluteString,
+                        etag: metadata?.etag
+                    ),
+                    for: episodeId
+                )
+            }
+            touchAccess(episodeId: episodeId)
+            bgInFlightEpisodes.remove(episodeId)
+            try? deleteResumeData(episodeId: episodeId)
+            logger.info("Background completion for \(episodeId, privacy: .public): complete pinned artifact already present — kept it, discarded re-fetch at \(existing.lastPathComponent, privacy: .public)")
+            return
+        }
+
         do {
             if !fm.fileExists(atPath: destDir.path) {
                 try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
@@ -1765,10 +2106,32 @@ actor DownloadManager {
         // triage can spot a corrupt deposit; the cache entry without
         // the strong field still carries the weak fingerprint and is
         // useful to dedup re-downloads (playhead-24cm.1 I4).
+        // playhead-wrj8: pin the freshly-deposited artifact as COMPLETE
+        // (actual on-disk length) so it becomes the single immutable served
+        // copy. Written regardless of whether the strong-hash step below
+        // succeeds, so the file can never remain "unpinned/incomplete" and
+        // get re-fetched into a different stitch.
+        if let size = completeFileSize(for: episodeId) {
+            writePin(
+                AudioAssetPin(
+                    expectedBytes: size,
+                    sha256: nil,
+                    sourceURL: originalURL?.absoluteString,
+                    etag: metadata?.etag
+                ),
+                for: episodeId
+            )
+        }
+
         do {
             let strongHash = try FileHasher.sha256(fileURL: destURL)
             let weakFP = fingerprintCache[episodeId]?.weak ?? ""
             fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: strongHash)
+            // Backfill the strong hash into the pin now that it's computed.
+            if var pin = loadPin(for: episodeId) {
+                pin.sha256 = strongHash
+                writePin(pin, for: episodeId)
+            }
             await enqueueAnalysisIfNeeded(
                 episodeId: episodeId,
                 sourceFingerprint: strongHash,
@@ -1982,7 +2345,14 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
     /// this invariant for safety. Same contract as
     /// `onBackgroundDownloadStaged` and `onUrlSessionDidFinishEvents`
     /// above.
-    nonisolated(unsafe) var onResumeDataHarvested: ((String, Data) -> Void)?
+    /// playhead-wrj8: widened to also carry the terminated transfer's
+    /// source URL and HTTP validator (ETag / Content-Length), harvested
+    /// from the task on the delegate queue. The resume path persists these
+    /// alongside the blob so a later `downloadTask(withResumeData:)` can be
+    /// validated against the live server — a rotated DAI enclosure whose
+    /// ETag/length no longer matches must NOT be spliced into the played
+    /// file (it would land a different ad stitch).
+    nonisolated(unsafe) var onResumeDataHarvested: ((String, Data, URL?, HTTPAssetMetadata?) -> Void)?
 
     /// WorkJournal recorder for finalized / failed events. Defaults to
     /// `NoopWorkJournalRecorder`; the real implementation is injected at
@@ -2155,7 +2525,20 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         if nsError.domain == NSURLErrorDomain,
            let resumeData = nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
            !resumeData.isEmpty {
-            onResumeDataHarvested?(episodeId, resumeData)
+            // playhead-wrj8: harvest the source URL + HTTP validator while
+            // the delegate-queue stack still has the task (it is
+            // non-Sendable and cannot cross the actor hop below).
+            let sourceURL = task.originalRequest?.url ?? task.currentRequest?.url
+            let harvestedMetadata: HTTPAssetMetadata? = {
+                guard let response = task.response as? HTTPURLResponse else { return nil }
+                let len = response.expectedContentLength
+                return HTTPAssetMetadata(
+                    etag: response.value(forHTTPHeaderField: "ETag"),
+                    contentLength: len > 0 ? len : nil,
+                    lastModified: response.value(forHTTPHeaderField: "Last-Modified")
+                )
+            }()
+            onResumeDataHarvested?(episodeId, resumeData, sourceURL, harvestedMetadata)
         }
 
         let recorder = workJournal

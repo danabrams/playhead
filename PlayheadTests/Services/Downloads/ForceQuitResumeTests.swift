@@ -433,6 +433,110 @@ struct ResumeSuspendedTransferTests {
         #expect(failures.first?.episodeId == "ep-corrupt2")
         #expect(failures.first?.cause == .pipelineError)
     }
+
+    // MARK: - playhead-wrj8: resume freshness gate
+
+    @Test("wrj8: a resume whose server ETag/length rotated re-downloads fresh instead of splicing")
+    func resumeRotatedValidatorRedownloadsFresh() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "ep-rotated"
+        let src = URL(string: "https://dai.example.com/ep.mp3")!
+        // Suspended transfer captured validator: ETag "A", length 100.
+        try await manager.persistResumeData(
+            episodeId: episodeId,
+            data: Data([0x01, 0x02, 0x03]),
+            sourceURL: src,
+            validator: HTTPAssetMetadata(etag: "\"A\"", contentLength: 100, lastModified: nil)
+        )
+        // An INCOMPLETE partial (withheld by an under-length pin) sits at
+        // the target path — the fresh re-download must clear it so it isn't
+        // skipped by the existence check.
+        let leftover = await manager.completeFileURL(for: episodeId)
+        try Data(repeating: 0x11, count: 40).write(to: leftover)
+        await manager.writePin(
+            AudioAssetPin(expectedBytes: 100, sha256: nil, sourceURL: nil, etag: nil),
+            for: episodeId
+        )
+        // Server now serves a DIFFERENT stitch: ETag "B", length 80.
+        await manager.setResumeValidatorProviderForTesting { _ in
+            HTTPAssetMetadata(etag: "\"B\"", contentLength: 80, lastModified: nil)
+        }
+
+        let outcome = try await manager.resumeSuspendedTransfer(episodeId: episodeId)
+        #expect(outcome == .redownloadedFresh)
+        // Blob discarded — the fresh full download owns continuation now.
+        #expect(try await manager.loadResumeData(episodeId: episodeId) == nil)
+        // The incomplete leftover + its stale pin were cleared so the fresh
+        // download is not skipped by the existence check.
+        #expect(!FileManager.default.fileExists(atPath: leftover.path))
+        #expect(await manager.loadPin(for: episodeId) == nil)
+
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    @Test("wrj8: a resume whose server validator still matches splices the blob")
+    func resumeFreshValidatorResumes() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "ep-fresh"
+        let src = URL(string: "https://cdn.example.com/ep.mp3")!
+        try await manager.persistResumeData(
+            episodeId: episodeId,
+            data: Data([0xAB, 0xCD]),
+            sourceURL: src,
+            validator: HTTPAssetMetadata(etag: "\"A\"", contentLength: 100, lastModified: nil)
+        )
+        // Server unchanged — same ETag + length.
+        await manager.setResumeValidatorProviderForTesting { _ in
+            HTTPAssetMetadata(etag: "\"A\"", contentLength: 100, lastModified: nil)
+        }
+
+        let outcome = try await manager.resumeSuspendedTransfer(episodeId: episodeId)
+        #expect(outcome == .resumed)
+        #expect(try await manager.loadResumeData(episodeId: episodeId) == nil)
+
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    @Test("wrj8: a resume is discarded when a complete pinned artifact already exists")
+    func resumeDiscardedWhenAlreadyComplete() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "ep-already-complete"
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        let played = Data(repeating: 0xEE, count: 1024)
+        try played.write(to: completeURL)
+        await manager.writePin(
+            AudioAssetPin(expectedBytes: 1024, sha256: nil, sourceURL: nil, etag: nil),
+            for: episodeId
+        )
+
+        try await manager.persistResumeData(
+            episodeId: episodeId,
+            data: Data([0x01]),
+            sourceURL: URL(string: "https://dai.example.com/ep.mp3")!,
+            validator: HTTPAssetMetadata(etag: "\"A\"", contentLength: 100, lastModified: nil)
+        )
+
+        let outcome = try await manager.resumeSuspendedTransfer(episodeId: episodeId)
+        #expect(outcome == .alreadyComplete)
+        #expect(try await manager.loadResumeData(episodeId: episodeId) == nil)
+        // The played artifact is untouched.
+        #expect(try Data(contentsOf: completeURL) == played)
+    }
 }
 
 // MARK: - WorkJournalRecording protocol — preempted default
@@ -511,10 +615,14 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         // No deadline; the `.timeLimit` trait is the hang backstop.
         let persisted = TestEventCounter()
         let productionHarvest = delegate.onResumeDataHarvested
-        delegate.onResumeDataHarvested = { episodeId, data in
-            productionHarvest?(episodeId, data)
+        // playhead-wrj8: closure widened to carry the source URL + HTTP
+        // validator harvested off the task; forward them through.
+        delegate.onResumeDataHarvested = { episodeId, data, sourceURL, metadata in
+            productionHarvest?(episodeId, data, sourceURL, metadata)
             Task {
-                try? await manager.persistResumeData(episodeId: episodeId, data: data)
+                try? await manager.persistResumeData(
+                    episodeId: episodeId, data: data, sourceURL: sourceURL, validator: metadata
+                )
                 persisted.increment()
             }
         }

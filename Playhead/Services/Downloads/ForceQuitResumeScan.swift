@@ -57,6 +57,17 @@ enum SuspendedTransferResumeOutcome: Sendable, Equatable {
     /// Blob present but unusable. Has been deleted; user must retry
     /// from scratch (clean-restart path).
     case corrupted
+    /// playhead-wrj8: a complete pinned artifact already exists for this
+    /// episode — resuming would splice a fresh DAI stitch into (or beside)
+    /// the played file, so the blob is discarded and nothing is fetched.
+    case alreadyComplete
+    /// playhead-wrj8: the persisted resume blob could NOT be proven fresh
+    /// against the live server (ETag / Content-Length changed, or the
+    /// validator could not be established). Rather than
+    /// `downloadTask(withResumeData:)` — whose Range/If-Range request would
+    /// splice a different-length stitch into the played file — the blob is
+    /// discarded and a FRESH full download is started to a new artifact.
+    case redownloadedFresh
 }
 
 // MARK: - Resume-data blob store
@@ -79,13 +90,37 @@ extension DownloadManager {
         resumeDataDirectory.appendingPathComponent("\(hash).episode")
     }
 
+    /// playhead-wrj8: sidecar recording the source URL + HTTP validator of
+    /// the suspended transfer, so `resumeSuspendedTransfer` can prove the
+    /// server bytes haven't rotated before splicing the blob.
+    private func resumeValidatorFileURL(forHash hash: String) -> URL {
+        resumeDataDirectory.appendingPathComponent("\(hash).validator")
+    }
+
+    /// playhead-wrj8: persisted resume-freshness validator.
+    struct ResumeValidatorRecord: Codable, Sendable, Equatable {
+        var url: String?
+        var etag: String?
+        var contentLength: Int64?
+    }
+
     /// Writes `data` as the resume-data blob for `episodeId`. Overwrites
     /// any prior blob for that episode.
     ///
     /// Internal so tests can reach it via `@testable import`. Production
-    /// writes happen inside `scanForSuspendedTransfers()` — callers do
+    /// writes happen via the delegate resume-data harvest — callers do
     /// NOT need to call this directly.
-    func persistResumeData(episodeId: String, data: Data) throws {
+    ///
+    /// playhead-wrj8: `sourceURL` + `validator` are persisted in a sidecar
+    /// so the resume path can validate freshness. Both default to `nil` for
+    /// backward compatibility (legacy 2-arg callers / blobs without a
+    /// harvested response resume as before).
+    func persistResumeData(
+        episodeId: String,
+        data: Data,
+        sourceURL: URL? = nil,
+        validator: HTTPAssetMetadata? = nil
+    ) throws {
         let fm = FileManager.default
         if !fm.fileExists(atPath: resumeDataDirectory.path) {
             try fm.createDirectory(
@@ -98,6 +133,31 @@ extension DownloadManager {
 
         try data.write(to: blobURL, options: .atomic)
         try Data(episodeId.utf8).write(to: indexURL, options: .atomic)
+
+        let validatorURL = resumeValidatorFileURL(forHash: hash)
+        if sourceURL != nil || validator != nil {
+            let record = ResumeValidatorRecord(
+                url: sourceURL?.absoluteString,
+                etag: validator?.etag,
+                contentLength: validator?.contentLength
+            )
+            if let encoded = try? JSONEncoder().encode(record) {
+                try encoded.write(to: validatorURL, options: .atomic)
+            }
+        } else {
+            // No validator harvested — drop any stale sidecar so the
+            // resume path takes the legacy (unvalidated) branch rather
+            // than comparing against outdated data.
+            try? fm.removeItem(at: validatorURL)
+        }
+    }
+
+    /// Loads the persisted resume-freshness validator for `episodeId`.
+    func loadResumeValidator(episodeId: String) -> ResumeValidatorRecord? {
+        let hash = Self.safeFilename(for: episodeId)
+        let url = resumeValidatorFileURL(forHash: hash)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(ResumeValidatorRecord.self, from: data)
     }
 
     /// Reads the persisted resume-data blob for `episodeId`, returning
@@ -117,6 +177,7 @@ extension DownloadManager {
         let hash = Self.safeFilename(for: episodeId)
         let blobURL = resumeDataFileURL(forHash: hash)
         let indexURL = resumeDataIndexFileURL(forHash: hash)
+        let validatorURL = resumeValidatorFileURL(forHash: hash)
         let fm = FileManager.default
         if fm.fileExists(atPath: blobURL.path) {
             try fm.removeItem(at: blobURL)
@@ -124,6 +185,8 @@ extension DownloadManager {
         if fm.fileExists(atPath: indexURL.path) {
             try fm.removeItem(at: indexURL)
         }
+        // playhead-wrj8: symmetric cleanup of the freshness sidecar.
+        try? fm.removeItem(at: validatorURL)
         reportedSuspendedTransfers.remove(episodeId)
     }
 
@@ -360,6 +423,16 @@ extension DownloadManager {
     ) async throws -> SuspendedTransferResumeOutcome {
         let logger = Self.resumeDataLogger
 
+        // playhead-wrj8: if a COMPLETE pinned artifact already exists,
+        // resuming would splice a fresh DAI stitch into / beside the bytes
+        // the user already played and marked. Discard the blob and keep the
+        // played copy untouched.
+        if servingURLIfComplete(for: episodeId) != nil {
+            logger.info("resumeSuspendedTransfer: \(episodeId, privacy: .public) already complete — discarding resume blob")
+            try? deleteResumeData(episodeId: episodeId)
+            return .alreadyComplete
+        }
+
         guard let blob = try loadResumeData(episodeId: episodeId) else {
             logger.info("resumeSuspendedTransfer: no blob for \(episodeId, privacy: .public)")
             return .missing
@@ -387,6 +460,44 @@ extension DownloadManager {
             return .corrupted
         }
 
+        // playhead-wrj8: FRESHNESS GATE. A `downloadTask(withResumeData:)`
+        // replays as a Range / If-Range request against the enclosure. On a
+        // DAI origin that re-cuts a different ad stitch per request, the
+        // resumed bytes are a DIFFERENT-length stitch than the partial we
+        // already have — splicing them corrupts the played file. So when we
+        // have a persisted validator + source URL, prove the server bytes
+        // are unchanged (ETag AND Content-Length match) before resuming.
+        // On mismatch, or when we cannot establish the current validator,
+        // discard the blob and download FRESH to a clean artifact instead.
+        //
+        // Legacy blobs with no persisted validator/URL take the original
+        // (unvalidated) resume path — non-destructive to pre-wrj8 state.
+        if let record = loadResumeValidator(episodeId: episodeId),
+           let urlString = record.url,
+           let sourceURL = URL(string: urlString) {
+            let current = await currentServerValidator(for: sourceURL)
+            let stillFresh = Self.resumeValidatorsMatch(stored: record, current: current)
+            if !stillFresh {
+                logger.info("resumeSuspendedTransfer: \(episodeId, privacy: .public) server rotated (or unverifiable) — discarding resume blob, downloading fresh")
+                try? deleteResumeData(episodeId: episodeId)
+                // playhead-wrj8: clear any INCOMPLETE leftover artifact (+
+                // its stale pin) for this episode first. We only reach here
+                // when `servingURLIfComplete` was nil (no complete pin), so
+                // anything present is a partial; removing it guarantees the
+                // fresh `backgroundDownload` isn't skipped by its
+                // existence check and lands a clean, fully-pinned artifact.
+                let leftover = completeFileURL(for: episodeId)
+                if FileManager.default.fileExists(atPath: leftover.path) {
+                    try? FileManager.default.removeItem(at: leftover)
+                }
+                deletePin(for: episodeId)
+                // Fresh full download to a new artifact via the normal
+                // background path (its own overwrite guard + pinning apply).
+                backgroundDownload(episodeId: episodeId, from: sourceURL)
+                return .redownloadedFresh
+            }
+        }
+
         // Route through the interactive session — force-quit resumes
         // are always user-initiated.
         let session = backgroundSession(for: .interactive)
@@ -406,6 +517,36 @@ extension DownloadManager {
         }
         logger.info("resumeSuspendedTransfer: resumed \(episodeId, privacy: .public)")
         return .resumed
+    }
+
+    /// playhead-wrj8: a stored resume blob is safe to splice only when the
+    /// live server validator is present AND matches on BOTH ETag and
+    /// Content-Length. A `nil` current validator (HEAD failed / server
+    /// omitted headers) is treated as "cannot prove freshness" → NOT a
+    /// match, forcing a fresh download rather than risking a rotated splice.
+    static func resumeValidatorsMatch(
+        stored: ResumeValidatorRecord,
+        current: HTTPAssetMetadata?
+    ) -> Bool {
+        guard let current else { return false }
+        // ETag is the strongest freshness signal. If we captured one at
+        // suspend time, demand an EXACT match now — a mismatch OR the
+        // server no longer surfacing an ETag both mean we cannot prove the
+        // bytes are unchanged, so treat either as "rotated" and force a
+        // fresh download. (A Content-Length fallback here would false-
+        // negative when a rotated DAI stitch happens to share the old
+        // length.)
+        if let storedETag = stored.etag {
+            return current.etag == storedETag
+        }
+        // No ETag was ever captured — fall back to Content-Length equality
+        // (both sides must be present and equal). A length change alone is
+        // proof the enclosure rotated.
+        if let storedLen = stored.contentLength, let currentLen = current.contentLength {
+            return storedLen == currentLen
+        }
+        // Nothing provable → do not splice.
+        return false
     }
 
 }
