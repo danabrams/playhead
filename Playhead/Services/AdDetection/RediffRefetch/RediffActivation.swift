@@ -86,14 +86,17 @@ enum RediffActivation {
     /// started and no power/network signal is even read — byte-identical to the
     /// lagged-only app.
     ///
-    /// DELIBERATELY `false`. A day-0 fetch is a full ~54 MB × K second download
-    /// AT PLAY TIME, so flipping it on is a bandwidth/battery go/no-go that
-    /// belongs to the SEPARATE xsdz.36 rollout, NOT this bead — the mechanism
-    /// ships here gated OFF. Even when on it only runs on WiFi + (charging OR a
-    /// user "deep-scan" opt-in), never on cellular or unplugged-without-opt-in;
-    /// see `DayZeroRediffGate`. Auto-skip stays held — day-0 is mark-only, on the
-    /// SAME `RediffSlotOwnership` marks path as the lagged sweep.
-    static let dayZeroEnabledByDefault = false
+    /// ACTIVATED `true` (playhead-xsdz.36, 2026-07-23). The bandwidth/battery
+    /// go/no-go was cleared by the minutes-apart corpus measurement: varied
+    /// personas + 9s6q segment recovery turn the two dominant client-PINNED
+    /// stacks from 0 → real day-0 width (Conan 211 s; Fresh Air 203 s,
+    /// corroborated across Mac+Overcast at matching A-times). A day-0 fetch is
+    /// ~54 MB × K at PLAY TIME, so it only runs on WiFi + (charging OR a user
+    /// "deep-scan" opt-in), never on cellular or unplugged-without-opt-in; see
+    /// `DayZeroRediffGate`. Auto-skip stays held — day-0 is MARK-ONLY, on the
+    /// SAME `RediffSlotOwnership` marks path as the lagged sweep (a wrong slot
+    /// is a banner, never a skip).
+    static let dayZeroEnabledByDefault = true
 
     /// playhead-xsdz.36.4 / playhead-9s6q (FIX B): the k-way fetch count the
     /// DAY-0 trigger uses, INDEPENDENT of `productionKWayFetchCount` (which
@@ -128,12 +131,15 @@ enum RediffActivation {
     /// (Fresh Air-class: real rotated ads of differing lengths) yields its ad
     /// slots instead of nothing.
     ///
-    /// DELIBERATELY `false`. This is the day-0 recall fix, but flipping it on is
-    /// a correctness go/no-go for the width oracle (measure Fresh Air recovery
-    /// AND any lagged false-widening/boundary delta first), so the MECHANISM
-    /// ships here gated OFF. Only the DAY-0 byte-exact mint path
-    /// (`AdDetectionService.mintByteExactDayZeroMarks`) reads this flag; the
-    /// LAGGED sweep passes `false` unconditionally and stays on the strict
-    /// wholesale-reject behavior until a separate, explicit enablement.
-    static let nonMonotonicSegmentRecoveryEnabled = false
+    /// ACTIVATED `true` (playhead-xsdz.36, 2026-07-23). The width-oracle
+    /// correctness go/no-go was cleared: on the minutes-apart corpus the
+    /// aligner's monotonic-SEGMENT partition recovers Fresh Air's 3 rotated-ad
+    /// slots (≈203 s) that the strict wholesale reject discarded, and the slots
+    /// are corroborated across the Mac and Overcast personas at matching A-times
+    /// (real ad replacements, not fabrication). Only the DAY-0 byte-exact mint
+    /// path (`AdDetectionService.mintByteExactDayZeroMarks`) reads this flag; the
+    /// LAGGED sweep still passes `false` unconditionally and stays on the strict
+    /// wholesale-reject behavior — this activation does NOT touch the lagged
+    /// width oracle, so there is no lagged false-widening exposure.
+    static let nonMonotonicSegmentRecoveryEnabled = true
 }
