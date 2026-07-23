@@ -1281,6 +1281,25 @@ actor DownloadManager {
         )
         let fileHandle = try FileHandle(forWritingTo: completeURL)
 
+        // playhead-wrj8 (R1): seed an always-incomplete pin (Int64.max) the
+        // instant the empty file exists, BEFORE the network await below.
+        // Without it, `servingURLIfComplete` treats the freshly-created
+        // 0-byte / mid-connection file as complete-by-existence (no pin yet)
+        // for the whole connection-setup window, so a concurrent cache-hit
+        // reader could be handed a truncated file — the exact "serve a
+        // partial" hole the invariant forbids. The real Content-Length
+        // rewrites this a few lines down; `finalizeStreamingPin` stamps the
+        // true length at completion.
+        writePin(
+            AudioAssetPin(
+                expectedBytes: Int64.max,
+                sha256: nil,
+                sourceURL: url.absoluteString,
+                etag: nil
+            ),
+            for: episodeId
+        )
+
         let request = URLRequest(url: url)
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
 
@@ -1289,6 +1308,8 @@ actor DownloadManager {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             try? fileHandle.close()
             try? fm.removeItem(at: completeURL)
+            // Drop the seed pin so a removed file leaves no orphan pin behind.
+            deletePin(for: episodeId)
             throw DownloadManagerError.downloadFailed(episodeId, "HTTP \(code)")
         }
 

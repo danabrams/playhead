@@ -616,6 +616,42 @@ struct DownloadManagerImmutableArtifactTests {
         #expect(await manager.isCached(episodeId: episodeId))
     }
 
+    @Test("An in-flight stream's Int64.max seed pin withholds the file until finalized")
+    func inflightSeedPinWithheld() async throws {
+        // Locks the playhead-wrj8 (R1) fix: streamingDownload seeds an
+        // Int64.max-length pin the instant the empty file exists (before its
+        // first network byte), so `servingURLIfComplete` withholds the
+        // growing file for the whole download rather than serving a
+        // 0-byte / partial file complete-by-existence.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "ep-inflight-seed"
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        // Freshly-created, still-empty stream file + the sentinel seed pin.
+        try Data().write(to: completeURL)
+        await manager.writePin(
+            AudioAssetPin(expectedBytes: Int64.max, sha256: nil, sourceURL: nil, etag: nil),
+            for: episodeId
+        )
+        #expect(await manager.cachedFileURL(for: episodeId) == nil)
+        #expect(await manager.isCached(episodeId: episodeId) == false)
+
+        // Bytes accumulate but stay below the unfinalized sentinel.
+        try Data(repeating: 0x01, count: 4096).write(to: completeURL)
+        #expect(await manager.isCached(episodeId: episodeId) == false)
+
+        // Finalize to the true on-disk length (as streaming completion does).
+        await manager.writePin(
+            AudioAssetPin(expectedBytes: 4096, sha256: nil, sourceURL: nil, etag: nil),
+            for: episodeId
+        )
+        #expect(await manager.cachedFileURL(for: episodeId) == completeURL)
+    }
+
     @Test("A legacy bare file with no pin is served (non-destructive migration)")
     func legacyBareFileServed() async throws {
         let dir = try makeTempDir()
