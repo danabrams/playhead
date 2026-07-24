@@ -230,4 +230,42 @@ struct RediffConfirmedKindFusionTests {
         #expect(span.carriesRediffByteExactWidth)
         #expect(span.anchorProvenance.contains(.rediffSlot))
     }
+
+    // MARK: - (e) Config wire-in: ships OFF, threads verbatim (mirrors the
+    // sibling CertaintyTieredSkipFlagsWireInTests). Guards the eligibility-
+    // affecting flag against a silent default-flip or a dropped
+    // AdDetectionConfig → FusionWeightConfig threading — the FusionWeightConfig
+    // default is separately pinned below.
+
+    @Test("(e) AdDetectionConfig.default ships the rediff-confirmed KIND flag OFF")
+    func configDefaultShipsOff() {
+        #expect(AdDetectionConfig.default.rediffConfirmedKindEnabled == false,
+                "eligibility-affecting KIND flag ships OFF — the flip is a corpus-A/B decision")
+    }
+
+    @Test("(e) AdDetectionConfig.init defaults rediffConfirmedKindEnabled to false when omitted")
+    func configInitOmittedDefaultsOff() {
+        let omitted = AdDetectionConfig(
+            candidateThreshold: 0.40, confirmationThreshold: 0.70, suppressionThreshold: 0.25,
+            hotPathLookahead: 90.0, detectorVersion: "test-v1"
+        )
+        #expect(omitted.rediffConfirmedKindEnabled == false, "init default must match .default (OFF)")
+    }
+
+    @Test("(e) AdDetectionConfig.init carries rediffConfirmedKindEnabled through verbatim")
+    func configInitCarriesFlagVerbatim() {
+        let on = AdDetectionConfig(
+            candidateThreshold: 0.40, confirmationThreshold: 0.70, suppressionThreshold: 0.25,
+            hotPathLookahead: 90.0, detectorVersion: "test-v1",
+            rediffConfirmedKindEnabled: true
+        )
+        #expect(on.rediffConfirmedKindEnabled == true,
+                "the flag must thread through the init verbatim, not be pinned to a constant")
+    }
+
+    @Test("(e) FusionWeightConfig() defaults the rediff-confirmed KIND flag OFF")
+    func fusionConfigDefaultsOff() {
+        #expect(FusionWeightConfig().rediffConfirmedKindEnabled == false,
+                "the bare FusionWeightConfig used at the non-threaded decision-log sites emits no kind")
+    }
 }
