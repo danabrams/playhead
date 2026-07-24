@@ -1890,6 +1890,14 @@ final class PlayheadRuntime {
             // (`downloadManager.setAnalysisWorkScheduler`) moves up too
             // so the scheduler wiring lands in the same critical section.
             await downloadManager.setAnalysisWorkScheduler(analysisWorkScheduler)
+            // playhead-xsdz.71 (Signal 1, ADDITIVE/observational): wire the
+            // DAI-stitch redirect-chain recorder so enclosure downloads observe
+            // the show's ad-stitch network and persist a DAI-EXPECTED prior on
+            // the `podcast_profiles` row. Recorded but NOT yet consumed by any
+            // detector/scorer/banner/rediff path (follow-on bead).
+            await downloadManager.setDAIStitchRecorder(
+                AnalysisStoreDAIStitchRecorder(store: analysisStore)
+            )
             await backgroundProcessingService.setPreAnalysisServices(
                 scheduler: analysisWorkScheduler,
                 reconciler: analysisJobReconciler

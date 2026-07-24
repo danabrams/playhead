@@ -655,6 +655,19 @@ struct PodcastProfile: Sendable {
     /// know the network (trust-scoring, etc.) does NOT clobber the
     /// previously-recorded value.
     let networkId: String?
+    /// playhead-xsdz.71 (Signal 1): the identified DAI-stitch network's
+    /// `DAIStitchNetwork.rawValue`, derived from the enclosure download's
+    /// redirect chain by `DAIStitchClassifier` (a DISTINCT classifier from the
+    /// editorial `networkId` above). `nil` until the first redirect chain is
+    /// observed for the show (and on pre-xsdz.71 rows). Written ONLY by the
+    /// column-specific `updateProfileDAIStitch` setter (never by
+    /// `upsertProfile`), so a profile rebuild preserves it. ADDITIVE-ONLY —
+    /// recorded but not yet consumed.
+    let daiStitchNetwork: String?
+    /// playhead-xsdz.71 (Signal 1): whether DAI is EXPECTED for the show (a
+    /// known DAI-stitch host appeared in the redirect chain). `nil` until
+    /// classified; set together with `daiStitchNetwork`.
+    let daiExpected: Bool?
 
     init(
         podcastId: String,
@@ -670,7 +683,9 @@ struct PodcastProfile: Sendable {
         traitProfileJSON: String? = nil,
         title: String? = nil,
         adDurationStatsJSON: String? = nil,
-        networkId: String? = nil
+        networkId: String? = nil,
+        daiStitchNetwork: String? = nil,
+        daiExpected: Bool? = nil
     ) {
         self.podcastId = podcastId
         self.sponsorLexicon = sponsorLexicon
@@ -686,6 +701,8 @@ struct PodcastProfile: Sendable {
         self.title = title
         self.adDurationStatsJSON = adDurationStatsJSON
         self.networkId = networkId
+        self.daiStitchNetwork = daiStitchNetwork
+        self.daiExpected = daiExpected
     }
 
     /// Convenience: decode the stored trait profile, falling back to
@@ -696,6 +713,20 @@ struct PodcastProfile: Sendable {
               let decoded = try? JSONDecoder().decode(ShowTraitProfile.self, from: data)
         else { return .unknown }
         return decoded
+    }
+
+    /// playhead-xsdz.71 (Signal 1): the persisted DAI-stitch classification for
+    /// this show, or `nil` when no redirect chain has been observed yet. The
+    /// read accessor for the recorded DAI-EXPECTED prior. `matchedHost` is a
+    /// diagnostics-only field that is not persisted, so it reads back as `nil`.
+    var daiStitchClassification: DAIStitchClassification? {
+        guard let raw = daiStitchNetwork,
+              let network = DAIStitchNetwork(rawValue: raw) else { return nil }
+        return DAIStitchClassification(
+            stitchNetwork: network,
+            daiExpected: daiExpected ?? false,
+            matchedHost: nil
+        )
     }
 }
 
@@ -1525,6 +1556,40 @@ actor AnalysisStore {
             // accept the larger index footprint), or add a separate
             // index over the NULL subset.
             try exec("CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId ON podcast_profiles(networkId) WHERE networkId IS NOT NULL")
+            // playhead-xsdz.71 (Signal 1): `daiStitchNetwork` + `daiExpected`
+            // on podcast_profiles. Structural DAI prior derived from the
+            // enclosure download's redirect chain by `DAIStitchClassifier`
+            // (a DISTINCT classifier from the editorial `networkId` above):
+            // `daiStitchNetwork` is the identified ad-stitch network's
+            // `DAIStitchNetwork.rawValue`, `daiExpected` is 1/0. Both NULL on
+            // pre-xsdz.71 rows and until the first redirect chain is observed
+            // for the show; the column-specific setter
+            // `updateProfileDAIStitch` owns the writes (once-per-show, gated on
+            // `daiStitchNetwork IS NULL`). ADDITIVE-ONLY: recorded but not yet
+            // consumed by any detector/scorer/banner/rediff path.
+            //
+            // Deliberately NOT written by `upsertProfile` (unlike `networkId`):
+            // the two columns are absent from that statement's INSERT/SET
+            // lists, so a profile rebuild (trust-scoring / priors update)
+            // leaves them untouched — a simpler preservation than COALESCE.
+            //
+            // Drift note (mirrors the spxs note above): `migrateOnlyForTesting()`
+            // does NOT replay these two `addColumnIfNeeded` calls (nor the
+            // sibling `traitProfileJSON` / `adDurationStatsJSON` / `networkId`
+            // ones). The ladder-only seam is used exclusively by schema-version
+            // migration tests that never seed real `podcast_profiles` rows, so
+            // the gap is theoretical; a future ladder-only test that drives
+            // `updateProfileDAIStitch` / `fetchProfile` must replay all of them.
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "daiStitchNetwork",
+                definition: "TEXT"
+            )
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "daiExpected",
+                definition: "INTEGER"
+            )
             // playhead-7mq: model/policy/feature-schema version columns on
             // the six tables whose row validity depends on model, policy,
             // or feature-schema versions. Foundation for B4 fast
@@ -8031,11 +8096,12 @@ actor AnalysisStore {
         // decoder reads. `title` lands at index 11 — append-only.
         // playhead-084j: `adDurationStatsJSON` lands at index 12.
         // playhead-spxs: `networkId` lands at index 13.
+        // playhead-xsdz.71: `daiStitchNetwork` at 14, `daiExpected` at 15.
         let sql = """
             SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
                    jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
                    observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-                   title, adDurationStatsJSON, networkId
+                   title, adDurationStatsJSON, networkId, daiStitchNetwork, daiExpected
             FROM podcast_profiles WHERE podcastId = ?
             """
         let stmt = try prepare(sql)
@@ -8056,7 +8122,9 @@ actor AnalysisStore {
             traitProfileJSON: optionalText(stmt, 10),
             title: optionalText(stmt, 11),
             adDurationStatsJSON: optionalText(stmt, 12),
-            networkId: optionalText(stmt, 13)
+            networkId: optionalText(stmt, 13),
+            daiStitchNetwork: optionalText(stmt, 14),
+            daiExpected: optionalInt(stmt, 15).map { $0 != 0 }
         )
     }
 
@@ -8085,7 +8153,7 @@ actor AnalysisStore {
             SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
                    jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
                    observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-                   title, adDurationStatsJSON, networkId
+                   title, adDurationStatsJSON, networkId, daiStitchNetwork, daiExpected
             FROM podcast_profiles WHERE networkId = ?
             """
         let stmt = try prepare(sql)
@@ -8108,7 +8176,9 @@ actor AnalysisStore {
                     traitProfileJSON: optionalText(stmt, 10),
                     title: optionalText(stmt, 11),
                     adDurationStatsJSON: optionalText(stmt, 12),
-                    networkId: optionalText(stmt, 13)
+                    networkId: optionalText(stmt, 13),
+                    daiStitchNetwork: optionalText(stmt, 14),
+                    daiExpected: optionalInt(stmt, 15).map { $0 != 0 }
                 )
             )
         }
@@ -8140,6 +8210,44 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, title)
         bind(stmt, 2, podcastId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-xsdz.71 (Signal 1): persist the show-level DAI-stitch
+    /// classification (network + DAI-EXPECTED prior) derived from the enclosure
+    /// download's redirect chain. Column-specific setter that writes ONLY the
+    /// two columns it owns — `upsertProfile` never touches them, so a profile
+    /// rebuild (trust-scoring / priors update) preserves the classification.
+    ///
+    /// ONCE-PER-SHOW / IDEMPOTENT / NO-CREATE semantics, all enforced in one
+    /// statement:
+    ///   * `WHERE podcastId = ?` — a plain UPDATE, so a brand-new show whose
+    ///     `podcast_profiles` row does not exist yet is a benign no-op (mirrors
+    ///     `updateProfileTitle`). A later download, once the row exists, records
+    ///     it.
+    ///   * `AND daiStitchNetwork IS NULL` — the once-per-show gate: the first
+    ///     observation wins and later observations (which may see a truncated
+    ///     chain) cannot overwrite it. Re-recording is a cheap no-op.
+    ///
+    /// - Parameters:
+    ///   - podcastId: `podcast_profiles.podcastId` of the row to update.
+    ///   - daiStitchNetwork: `DAIStitchNetwork.rawValue` of the classification.
+    ///   - daiExpected: whether DAI is expected for the show (stored 1/0).
+    func updateProfileDAIStitch(
+        podcastId: String,
+        daiStitchNetwork: String,
+        daiExpected: Bool
+    ) throws {
+        let sql = """
+            UPDATE podcast_profiles
+            SET daiStitchNetwork = ?, daiExpected = ?
+            WHERE podcastId = ? AND daiStitchNetwork IS NULL
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, daiStitchNetwork)
+        bind(stmt, 2, daiExpected ? 1 : 0)
+        bind(stmt, 3, podcastId)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
