@@ -3714,6 +3714,22 @@ final class PlayheadRuntime {
         }
     }
 
+    /// playhead-dqfm: install the SwiftData-backed scarcity-ranking provider
+    /// for the reconciler's backfill re-prioritization pass, once the
+    /// `ModelContainer` exists. Same late-attach pattern as
+    /// `attachRediffEnclosureResolver`. Until this runs the reconciler's
+    /// provider is `nil` and within-lane backfill ordering stays plain FIFO.
+    /// No-op in preview runtimes (no live device/library stack).
+    func attachBacklogScarcityRanking(modelContainer: ModelContainer) async {
+        guard !isPreviewRuntime else { return }
+        let ranking = ProductionBacklogScarcityRanking(
+            modelContainer: modelContainer,
+            capabilitiesService: capabilitiesService,
+            config: .load()
+        )
+        await analysisJobReconciler.setBacklogScarcityRanking(ranking)
+    }
+
 }
 
 /// Thread-safe holder for the lazily-initialized `ShadowRetryObserver`.
