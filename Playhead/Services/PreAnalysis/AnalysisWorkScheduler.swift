@@ -2243,6 +2243,18 @@ actor AnalysisWorkScheduler {
         while !Task.isCancelled, ContinuousClock.now < deadline {
             let dispatched = await runSingleDispatchPass()
             if !dispatched { break }
+            // playhead-bbut: cooperative yield between passes. In the one
+            // pathology where the eligibility SELECT keeps succeeding but the
+            // lease UPDATE persistently throws (a stuck DB write-lock),
+            // `runSingleDispatchPass` returns `true` without the row leaving the
+            // queue, so this loop would otherwise TIGHT-spin (re-selecting the
+            // same row) until the caller deadline. A plain CPU-pegging spin
+            // starves other actor work and delays cancellation observation; the
+            // yield makes the loop cooperative and gives `Task.isCancelled` /
+            // the deadline a prompt suspension point without changing dispatch
+            // semantics on the healthy path (where each pass runs a real,
+            // slow, awaited job).
+            await Task.yield()
         }
     }
 
