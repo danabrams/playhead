@@ -26,6 +26,29 @@ struct DecodedSpan: Sendable, Equatable, Identifiable {
 
     var duration: Double { endTime - startTime }
 
+    /// playhead-pzy2: True when the byte-exact REDIFF width-oracle owns this
+    /// span's width (`.rediffSlot` in `anchorProvenance`) — the
+    /// 100%-deterministic DAI-divergence marker (the origin literally served
+    /// different ad bytes). This reads the SAME `.contains(.rediffSlot)` that
+    /// `AdDetectionService.deriveFusionEdgeAnchors` uses to stamp the
+    /// `.rediffByteExact` edge anchor, so the "byte-exact rediff" concept has one
+    /// definition.
+    ///
+    /// Deterministic certainty OUTRANKS the low-certainty lexical / self-promo
+    /// demotion heuristics: a span the rediff differ proved is a real ad must
+    /// keep its width / eligibility even when a self-promo phrase or a creator
+    /// "content" chapter label would otherwise demote it — the demotion-path
+    /// mirror of how these edges are already EXEMPT from the boundary refiners
+    /// (`isWidthOwnership` bypass) and the pre-roll start clamp (`PreRollStartClamp`).
+    ///
+    /// Deliberately splice-AGNOSTIC: `.spliceSlot` is ACOUSTIC width, NOT
+    /// byte-exact, so a splice-owned span is NOT exempt (mirrors
+    /// `deriveFusionEdgeAnchors`, which sets `.rediffByteExact` only for
+    /// `.rediffSlot`). FM / lexical-only spans (no `.rediffSlot`) stay demotable.
+    var carriesRediffByteExactWidth: Bool {
+        anchorProvenance.contains(.rediffSlot)
+    }
+
     /// Compute the stable id from its components.
     static func makeId(assetId: String, firstAtomOrdinal: Int, lastAtomOrdinal: Int) -> String {
         let input = "\(assetId):\(firstAtomOrdinal):\(lastAtomOrdinal)"
