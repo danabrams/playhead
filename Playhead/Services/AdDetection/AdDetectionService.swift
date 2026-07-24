@@ -9364,21 +9364,61 @@ actor AdDetectionService {
         }
     }
 
+    /// playhead-xsdz.69: a sponsor BRAND — a matched sponsor entity or a bare
+    /// sponsor-lexicon hit — is ATTENTION, not a verdict. Promoting it to a span
+    /// requires a co-occurring CONFIRMING ad-cue (a disclosure frame like
+    /// "brought to you by", a URL, a promo code, or an FM-positive). A bare brand
+    /// mention with none of those is editorial talk ("the Red Bull team won"),
+    /// not an ad read. Set to `false` to restore the pre-xsdz.69 behavior where a
+    /// bare brand promotes unconditionally.
+    static let sponsorRequiresConfirmingAdCue = true
+
+    /// True when the hypothesis carries a confirming ad-cue beyond the mere brand
+    /// name — a disclosure frame, URL, promo code, or FM-positive anchor. Shared
+    /// by the sponsor-promotion gate (and reused by the backfill / candidate
+    /// paths) so the "does this brand hit look like an actual ad?" test is
+    /// single-sourced. Real ad reads carry a cue; bare editorial brand-talk does
+    /// not (playhead-xsdz.69).
+    static func hypothesisHasConfirmingAdCue(_ hypothesis: SpanHypothesis) -> Bool {
+        let anchors = [hypothesis.seedAnchor] + hypothesis.supportingAnchors
+            + (hypothesis.closingAnchor.map { [$0] } ?? [])
+        return anchors.contains { anchor in
+            switch anchor.anchorType {
+            case .disclosure, .url, .promoCode, .fmPositive:
+                return true
+            case .sponsorLexicon, .transitionMarker:
+                return false
+            }
+        }
+    }
+
     private func shouldPromoteHotPathHypothesis(_ hypothesis: SpanHypothesis) -> Bool {
         let additionalEvidenceCount = hypothesis.supportingAnchors.count
             + hypothesis.bodyEvidence.count
             + (hypothesis.closingAnchor == nil ? 0 : 1)
         guard additionalEvidenceCount > 0 else { return false }
 
+        // playhead-xsdz.69: sponsor identity (matched entity) promotes only with
+        // a co-occurring confirming ad-cue — this kills the editorial brand-as-
+        // sponsor false positive (e.g. sports teams named after their sponsors)
+        // while real ad reads still fire. Truly-bare host-reads are the
+        // specialist's job (the durable disposer).
         if hypothesis.sponsorEntity != nil {
-            return true
+            return Self.sponsorRequiresConfirmingAdCue
+                ? Self.hypothesisHasConfirmingAdCue(hypothesis)
+                : true
         }
 
         let anchors = [hypothesis.seedAnchor] + hypothesis.supportingAnchors
+        let hasConfirmingCue = Self.hypothesisHasConfirmingAdCue(hypothesis)
         return anchors.contains { anchor in
             switch anchor.anchorType {
-            case .disclosure, .sponsorLexicon, .fmPositive:
+            case .disclosure, .fmPositive:
                 return true
+            case .sponsorLexicon:
+                // A bare sponsor-lexicon brand hit is attention-only; it needs a
+                // confirming cue to promote (playhead-xsdz.69).
+                return Self.sponsorRequiresConfirmingAdCue ? hasConfirmingCue : true
             case .url, .promoCode, .transitionMarker:
                 return false
             }
