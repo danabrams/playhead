@@ -472,6 +472,31 @@ struct AdDetectionConfig: Sendable {
     /// (both can shadow at once, to their OWN observers).
     let rediffSlotShadowEnabled: Bool
 
+    /// playhead-xsdz.62: master flag for counting a BYTE-EXACT rediff slot as a
+    /// distinct corroborating evidence KIND in the fusion corroboration quorum.
+    /// Threaded verbatim into `FusionWeightConfig.rediffConfirmedKindEnabled`.
+    /// When `true`, `BackfillEvidenceFusion.buildLedger()` appends a single
+    /// weight-0 `.rediffConfirmed` ledger entry for any span whose WIDTH is owned
+    /// by the byte-exact rediff oracle (`.rediffSlot` provenance ==
+    /// `DecodedSpan.carriesRediffByteExactWidth`). That deterministic kind counts
+    /// toward the `distinctKinds.count` quorum in the three `DecisionMapper`
+    /// corroboration gates, so a rediff-confirmed DAI ad + one other corroborating
+    /// kind reaches eligibility WITHOUT an FM vote — FM absent/uncertain (the
+    /// xsdz.63 finding on produced-DAI ads carrying URLs/"sponsored by") no longer
+    /// blocks a byte-exact-rediff-confirmed insertion. Adds NO score mass (the
+    /// entry is weight-0) and NEVER sets a span's width (that stays the rediff
+    /// ownership pass). Acoustic splice (`.spliceSlot`) is not byte-exact and
+    /// never emits this kind.
+    ///
+    /// Default OFF: this is an ELIGIBILITY-affecting change, so it ships OFF and
+    /// flips after a corpus A/B — the same measurement-gated discipline as its
+    /// siblings (`certaintyTieredSkipEnabled`, `userCorrectionReadSideEnabled`).
+    /// With OFF the constructed `FusionWeightConfig` is byte-identical to today
+    /// and no `.rediffConfirmed` entry is ever emitted. (Also inert in real
+    /// production regardless of the flag until a `RediffBSideProvider` is wired,
+    /// since no span carries `.rediffSlot` without it.)
+    let rediffConfirmedKindEnabled: Bool
+
     /// playhead-dsbc (Phase B1): master flag for the distilled specialist
     /// classifier's SHADOW pass. When `true` AND a
     /// `LiveSpecialistShadowDispatcher` with a non-nil
@@ -794,6 +819,7 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: Bool = false,
         rediffSlotOwnershipEnabled: Bool = true,
         rediffSlotShadowEnabled: Bool = false,
+        rediffConfirmedKindEnabled: Bool = false,
         specialistShadowEnabled: Bool = false,
         specialistScanEnabled: Bool = false,
         specialistMarkComposeEnabled: Bool = false,
@@ -867,6 +893,7 @@ struct AdDetectionConfig: Sendable {
         self.spliceSlotShadowEnabled = spliceSlotShadowEnabled
         self.rediffSlotOwnershipEnabled = rediffSlotOwnershipEnabled
         self.rediffSlotShadowEnabled = rediffSlotShadowEnabled
+        self.rediffConfirmedKindEnabled = rediffConfirmedKindEnabled
         self.specialistShadowEnabled = specialistShadowEnabled
         self.specialistScanEnabled = specialistScanEnabled
         self.specialistMarkComposeEnabled = specialistMarkComposeEnabled
@@ -928,6 +955,7 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: false,
         rediffSlotOwnershipEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1) — rediff width marks, presence 97.8% gold-audited; the mark-only rung of the xsdz.36 ladder
         rediffSlotShadowEnabled: false,
+        rediffConfirmedKindEnabled: false,  // playhead-xsdz.62: byte-exact rediff counts as a corroborating KIND; ships OFF (eligibility-affecting), flip after corpus A/B like certaintyTieredSkipEnabled. Byte-identical + inert until flipped.
         specialistShadowEnabled: false,  // playhead-dsbc (Phase B1): specialist-shadow plumbing ships OFF and fully inert; live runtime is phone-gated Phase B2
         specialistScanEnabled: false,  // playhead-b6jq (PR 4): host-read scan phase ships OFF and fully inert (persist-only, acts on nothing); PR 5 consumes the rows
         specialistMarkComposeEnabled: false,  // playhead-b6jq (PR 5): mark-compose ships OFF and fully inert (zero ad_windows writes, byte-identical); flip after corpus A/B
@@ -3946,7 +3974,11 @@ actor AdDetectionService {
         let fusionConfig = FusionWeightConfig(
             certaintyTieredEnabled: config.certaintyTieredSkipEnabled,
             hostReadConfidenceFloor: config.hostReadConfidenceFloor,
-            postRollGuardSeconds: config.postRollGuardSeconds
+            postRollGuardSeconds: config.postRollGuardSeconds,
+            // playhead-xsdz.62: thread the byte-exact rediff-confirmed KIND flag.
+            // OFF by default, so with no config change `buildLedger` emits no
+            // `.rediffConfirmed` entry and the fusion output is byte-identical.
+            rediffConfirmedKindEnabled: config.rediffConfirmedKindEnabled
         )
         // transcriptQuality is the same for every span (derived from the full atom array),
         // so compute it once outside the loop rather than redundantly per span.

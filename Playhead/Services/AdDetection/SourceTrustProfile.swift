@@ -131,7 +131,13 @@ enum SourceEvidenceFamily: String, Sendable, Equatable, CaseIterable {
             // Phase 11 audit/operational rows are persisted alongside
             // evidence for observability, not as fusion/trust signals.
             return .observability
-        case .fingerprint, .catalog, .crossEpisodeMemory, .crossShowSyndication:
+        case .fingerprint, .catalog, .crossEpisodeMemory, .crossShowSyndication, .rediffConfirmed:
+            // playhead-xsdz.62: byte-exact rediff confirmation is a deterministic
+            // cross-FETCH reference-match (played bytes vs. a re-fetched copy), so
+            // it shares the `.reference` family. Same orthogonality guarantee as
+            // its peers — it never self-corroborates against another reference
+            // channel. (Immaterial in practice: the rediff kind is emitted
+            // weight-0, and trust updates skip weight-0 entries.)
             // playhead-xsdz.9: cross-episode copy-alignment is an external
             // reference-match signal (it compares against a stored bank of
             // confirmed-ad sequences), same family as fingerprint / catalog.

@@ -302,6 +302,27 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     /// Persistence note: additive case; no migration required. Forward-only,
     /// matching `.crossEpisodeMemory` / `.rhetoricalGrammar`.
     case crossShowSyndication
+    /// playhead-xsdz.62: Byte-exact REDIFF-confirmed DAI insertion. Emitted by
+    /// `BackfillEvidenceFusion.buildLedger()` (behind `rediffConfirmedKindEnabled`)
+    /// for a span whose WIDTH is owned by the byte-exact rediff oracle
+    /// (`.rediffSlot` in `anchorProvenance` == `DecodedSpan.carriesRediffByteExactWidth`).
+    /// A byte-exact-rediff-confirmed rotating region IS a DAI-inserted ad by
+    /// deterministic definition (the origin literally served different ad bytes
+    /// on a re-fetch — no classification needed), so this is a DISTINCT
+    /// corroborating KIND for the fusion corroboration quorum: it gives
+    /// rediff-confirmed DAI a reproducible 2nd deterministic kind so FM's vote
+    /// stops being load-bearing for their eligibility. It is a deterministic
+    /// PRESENCE marker, NOT a score driver — the emitted entry carries weight 0
+    /// (the kind itself is the whole signal), so it increments
+    /// `distinctKinds.count` in the corroboration gates WITHOUT changing
+    /// `proposalConfidence` / `skipConfidence`. It is a cross-fetch reference-match
+    /// signal (shares the `.reference` family with `.fingerprint` / `.catalog` /
+    /// `.crossEpisodeMemory` / `.crossShowSyndication`). Deliberately byte-exact
+    /// ONLY: acoustic splice (`.spliceSlot`) is NOT deterministic and never
+    /// triggers this kind (it fails `carriesRediffByteExactWidth`).
+    /// Persistence note: additive case; no migration required. Forward-only,
+    /// matching `.breakAlignment` / `.crossShowSyndication`.
+    case rediffConfirmed
     /// Phase 11 random negative-audit marker. These rows are persisted in
     /// `evidence_events` for miss-rate estimation, but they are not positive
     /// FM evidence for training or fusion.
@@ -318,7 +339,7 @@ enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
         case .fm, .lexical, .acoustic, .catalog, .classifier, .fingerprint,
              .fusedScore, .metadata, .musicBed, .breakAlignment, .lexicalAutoAd,
              .audioForensics, .crossEpisodeMemory, .rhetoricalGrammar,
-             .crossShowSyndication:
+             .crossShowSyndication, .rediffConfirmed:
             return false
         }
     }
