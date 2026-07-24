@@ -289,6 +289,14 @@ actor DownloadManager {
     /// Optional scheduler for enqueuing pre-analysis jobs after download.
     private var analysisWorkScheduler: AnalysisWorkScheduler?
 
+    /// playhead-xsdz.71 (Signal 1, ADDITIVE/observational): optional recorder
+    /// that receives the enclosure download's redirect-chain hop hosts so the
+    /// DAI-stitch classifier can persist a show-level DAI-EXPECTED prior. `nil`
+    /// (default, and every test) ⇒ NO redirect-recording delegate is attached
+    /// and the download is byte-identical to before. Injected once by
+    /// `PlayheadRuntime`. This only OBSERVES — no consumer wiring.
+    private var daiStitchRecorder: (any DAIStitchChainRecording)?
+
     /// Background URL sessions keyed by role. Lazy-instantiated on first
     /// use so tests can construct a `DownloadManager` without spinning
     /// up NSURLSession state for identifiers they don't exercise.
@@ -594,6 +602,44 @@ actor DownloadManager {
     /// Wire up the analysis scheduler so downloads automatically enqueue jobs.
     func setAnalysisWorkScheduler(_ scheduler: AnalysisWorkScheduler) {
         self.analysisWorkScheduler = scheduler
+    }
+
+    /// playhead-xsdz.71 (Signal 1): inject the DAI-stitch redirect-chain
+    /// recorder. Wired once by `PlayheadRuntime`; left `nil` in tests so the
+    /// download path stays byte-identical.
+    func setDAIStitchRecorder(_ recorder: any DAIStitchChainRecording) {
+        self.daiStitchRecorder = recorder
+    }
+
+    /// playhead-xsdz.71 (Signal 1): build a redirect-recording delegate when a
+    /// recorder is wired AND we know the show, else `nil` (no delegate → the
+    /// download call is byte-identical). Shared by the download + streaming
+    /// paths.
+    private func makeRedirectRecordingDelegate(
+        url: URL,
+        context: DownloadContext?
+    ) -> RedirectChainRecordingDelegate? {
+        guard daiStitchRecorder != nil, context?.podcastId != nil else { return nil }
+        return RedirectChainRecordingDelegate(initialHost: url.host)
+    }
+
+    /// playhead-xsdz.71 (Signal 1): hand the observed redirect chain to the
+    /// recorder off the download's critical path. Best-effort/observational; a
+    /// `nil` recorder/delegate/podcastId is a no-op. `finalHost` is the final
+    /// response URL host, appended when it differs from the last recorded hop.
+    private func recordDAIStitchChain(
+        delegate: RedirectChainRecordingDelegate?,
+        context: DownloadContext?,
+        finalHost: String?
+    ) {
+        guard let recorder = daiStitchRecorder,
+              let delegate,
+              let podcastId = context?.podcastId else { return }
+        var hosts = delegate.hopHosts
+        if let finalHost, !finalHost.isEmpty, hosts.last != finalHost {
+            hosts.append(finalHost)
+        }
+        Task { await recorder.recordRedirectChain(podcastId: podcastId, hopHosts: hosts) }
     }
 
     /// playhead-44h1 (fix): inject a `BackgroundTaskScheduling` so
@@ -1113,8 +1159,16 @@ actor DownloadManager {
         let request = URLRequest(url: url)
         let fm = FileManager.default
 
+        // playhead-xsdz.71 (Signal 1, additive): observe the enclosure's
+        // redirect chain when a recorder is wired. The delegate only records hop
+        // hosts and returns the proposed redirect, so passing it (or `nil`) is
+        // byte-identical to today's `download(for:)`.
+        let redirectDelegate = makeRedirectRecordingDelegate(url: url, context: context)
+
         // Download to a temporary file (handled efficiently by URLSession).
-        let (tempURL, response) = try await URLSession.shared.download(for: request)
+        let (tempURL, response) = try await URLSession.shared.download(
+            for: request, delegate: redirectDelegate
+        )
         // Clean up temp file on any error path.
         defer { try? fm.removeItem(at: tempURL) }
 
@@ -1123,6 +1177,12 @@ actor DownloadManager {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw DownloadManagerError.downloadFailed(episodeId, "HTTP \(code)")
         }
+
+        // playhead-xsdz.71 (Signal 1): record the observed redirect chain
+        // (no-op unless a recorder is wired).
+        recordDAIStitchChain(
+            delegate: redirectDelegate, context: context, finalHost: httpResponse.url?.host
+        )
 
         // Harvest HTTP metadata for weak fingerprinting.
         let reportedLength = httpResponse.expectedContentLength
@@ -1301,7 +1361,14 @@ actor DownloadManager {
         )
 
         let request = URLRequest(url: url)
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        // playhead-xsdz.71 (Signal 1, additive): observe the enclosure's
+        // redirect chain when a recorder is wired. Behavior-preserving — the
+        // delegate only records hop hosts and follows the proposed redirect, so
+        // passing it (or `nil`) is byte-identical to today's `bytes(for:)`.
+        let redirectDelegate = makeRedirectRecordingDelegate(url: url, context: context)
+        let (bytes, response) = try await URLSession.shared.bytes(
+            for: request, delegate: redirectDelegate
+        )
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
@@ -1312,6 +1379,14 @@ actor DownloadManager {
             deletePin(for: episodeId)
             throw DownloadManagerError.downloadFailed(episodeId, "HTTP \(code)")
         }
+
+        // playhead-xsdz.71 (Signal 1): record the observed redirect chain now
+        // that the response headers are in (the redirects completed during the
+        // `bytes(for:)` await). No-op unless a recorder is wired. Fired before
+        // the detached streaming body so it stays off the byte-copy loop.
+        recordDAIStitchChain(
+            delegate: redirectDelegate, context: context, finalHost: httpResponse.url?.host
+        )
 
         // Harvest HTTP metadata for weak fingerprinting.
         let reportedLength = httpResponse.expectedContentLength
