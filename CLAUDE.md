@@ -27,6 +27,12 @@ xcodebuild test -scheme Playhead -testPlan PlayheadFastTests \
 ```
 Skips XCTest interruption-cycle integration suites. Runs in ~3 minutes on simulator.
 
+**Memory-safe gate — recommended on this 16 GB box (`scripts/fast-gate.sh`, playhead-qt8y):** the raw command above leaves test parallelism **unbounded**, so Xcode clones the simulator up to core-count times (each clone is a full runtime + a ~1 GB Playhead test host), driving free memory to ~tens of MB → the run is OOM-killed mid-suite (`** BUILD INTERRUPTED **`, signal 144) with **no test failure** — pure resource exhaustion, near-certain if a second `xcodebuild` runs alongside. Run the gate through the wrapper instead, which caps the parallel clone count (`-parallel-testing-worker-count 2`) — bounding peak memory (~2 test hosts; measured **~57% free** vs ~0.5% unbounded) while keeping Swift Testing's cheap **in-process** concurrency, so the ~8,300-test bulk stays fast — and auto-recovers a wedged sim (`Mach error -308`):
+```bash
+scripts/fast-gate.sh    # bounded PlayheadFastTests gate (workers=2); forwards -only-testing:... etc.
+```
+A capped run that **completes reliably** beats an unbounded one that OOMs and must be retried (every kill = a wasted rebuild+rerun). Tune via `PLAYHEAD_TEST_WORKERS` / `PLAYHEAD_DEST`. The memory driver is the parallel simulator **clones**, not Swift Testing's in-process concurrency. Deferred (a coverage tradeoff for Dan's call): PerfGate-ing the load-sensitive behavioral flake families (gy2s pipeline-stall / RouteChange / Interruption / PlaybackService audio-session / playhead-7h2 runtime-shutdown) out of the default gate — those test real behaviors, so moving them is a coverage decision, not done here.
+
 **Phase-close verification only (final gate before closing an epic):**
 ```bash
 xcodebuild test -scheme Playhead -testPlan PlayheadIntegrationTests \
