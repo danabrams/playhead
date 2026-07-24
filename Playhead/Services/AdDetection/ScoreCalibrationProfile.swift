@@ -162,6 +162,7 @@ struct ScoreCalibrationProfile: Sendable {
         case .crossEpisodeMemory: return fingerprintCalibrator  // playhead-xsdz.9: cross-episode copy-alignment is a reference-match signal like fingerprint; share its calibrator until we have alignment-specific replay-corpus data.
         case .rhetoricalGrammar: return lexicalCalibrator  // playhead-xsdz.12: rhetorical act-sequence grammar is a text-derived signal; share the lexical calibrator until we have grammar-specific replay-corpus data.
         case .crossShowSyndication: return fingerprintCalibrator  // playhead-xsdz.13: cross-show syndication is a cross-library reference-match signal like fingerprint / crossEpisodeMemory; share its calibrator until we have syndication-specific replay-corpus data.
+        case .rediffConfirmed: return fingerprintCalibrator  // playhead-xsdz.62: byte-exact rediff confirmation is a deterministic cross-fetch reference-match; share the fingerprint calibrator like its reference-family peers. Immaterial in practice — the kind is emitted weight-0 — but keeps the family consistent and the v0/v1 calibration invariants honest.
         case .fusedScore: return .identity
         case .audit, .operational: return .identity
         }

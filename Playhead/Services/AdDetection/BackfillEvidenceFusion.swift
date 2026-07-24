@@ -225,6 +225,27 @@ struct FusionWeightConfig: Sendable {
     /// or `certaintyTieredEnabled` is off. DEFAULT `90.0`.
     let postRollGuardSeconds: Double
 
+    /// playhead-xsdz.62: master switch for counting a BYTE-EXACT rediff slot as
+    /// a distinct corroborating evidence KIND in the fusion quorum. DEFAULT
+    /// `false` — production behavior is byte-identical to today until a caller
+    /// opts in, so the bare `FusionWeightConfig()` used at the other decision
+    /// sites and across the test suite emits NO `.rediffConfirmed` entry. When
+    /// `true`, `buildLedger()` appends a single weight-0 `.rediffConfirmed`
+    /// ledger entry for any span whose WIDTH is owned by the byte-exact rediff
+    /// oracle (`span.carriesRediffByteExactWidth == anchorProvenance.contains(.rediffSlot)`).
+    /// That gives a rediff-confirmed DAI ad a reproducible 2nd deterministic
+    /// kind in the corroboration gates (`quorumGateForFMConsensus` /
+    /// `quorumGateForFMAcoustic` / `metadataCorroborationGate`), so a
+    /// rediff-confirmed region + one other corroborating kind reaches the
+    /// eligibility quorum WITHOUT requiring an FM vote — FM absent/uncertain no
+    /// longer blocks a byte-exact-rediff-confirmed DAI insertion. It is a
+    /// deterministic PRESENCE marker with NO score mass (weight 0), so it only
+    /// increments `distinctKinds.count`; it never changes `proposalConfidence` /
+    /// `skipConfidence`, never sets a span's WIDTH (that stays the rediff
+    /// ownership pass's job), and NEVER fires for acoustic splice
+    /// (`.spliceSlot` is not byte-exact).
+    let rediffConfirmedKindEnabled: Bool
+
     init(
         fmCap: Double = 0.4,
         classifierCap: Double = 0.3,
@@ -242,7 +263,8 @@ struct FusionWeightConfig: Sendable {
         crossShowSyndicationCap: Double = 0.2,
         certaintyTieredEnabled: Bool = false,
         hostReadConfidenceFloor: Double = 0.9,
-        postRollGuardSeconds: Double = 90.0
+        postRollGuardSeconds: Double = 90.0,
+        rediffConfirmedKindEnabled: Bool = false
     ) {
         self.fmCap = fmCap
         self.classifierCap = classifierCap
@@ -261,6 +283,7 @@ struct FusionWeightConfig: Sendable {
         self.certaintyTieredEnabled = certaintyTieredEnabled
         self.hostReadConfidenceFloor = hostReadConfidenceFloor
         self.postRollGuardSeconds = postRollGuardSeconds
+        self.rediffConfirmedKindEnabled = rediffConfirmedKindEnabled
 
         // playhead-2hpn R4 (+R5): enforce the musicBedCap >=
         // musicBedConfirmedJingleWeight invariant at construction time, not
@@ -441,6 +464,37 @@ struct BackfillEvidenceFusion: Sendable {
             weight: classifierWeight,
             detail: .classifier(score: classifierScore)
         ))
+
+        // playhead-xsdz.62: BYTE-EXACT rediff-confirmed kind. A span whose WIDTH
+        // is owned by the byte-exact rediff oracle
+        // (`span.carriesRediffByteExactWidth == anchorProvenance.contains(.rediffSlot)`,
+        // the SAME one definition `DecodedSpan`/`deriveFusionEdgeAnchors` use) is
+        // a DAI-inserted ad by deterministic definition — the origin literally
+        // served different ad bytes on a re-fetch — so it contributes a DISTINCT
+        // corroborating KIND to the fusion quorum. This gives rediff-confirmed
+        // DAI a reproducible 2nd deterministic kind so FM's vote stops being
+        // load-bearing for their eligibility (a rediff-confirmed region + one
+        // other corroborating kind reaches the quorum WITHOUT an FM vote).
+        //
+        // WEIGHT 0 by design: the kind is the whole signal (a deterministic
+        // PRESENCE marker), so it adds NO score mass — `proposalConfidence` /
+        // `skipConfidence` stay byte-identical and only `distinctKinds.count`
+        // in the corroboration gates increments. Flag-gated + emission-only:
+        // when `rediffConfirmedKindEnabled == false` the loop is a no-op and
+        // the ledger is byte-identical to pre-xsdz.62, so the gate-side set
+        // additions below are inert. Byte-exact ONLY: acoustic splice
+        // (`.spliceSlot`) is not byte-exact and fails
+        // `carriesRediffByteExactWidth`, so it never emits this kind. Reuses the
+        // `.fingerprint` detail variant (byte-exact == a perfect deterministic
+        // match) — the same "reuse the closest detail, a bespoke case is churn"
+        // pattern as `.crossEpisodeMemory` / `.crossShowSyndication`.
+        if config.rediffConfirmedKindEnabled, span.carriesRediffByteExactWidth {
+            ledger.append(EvidenceLedgerEntry(
+                source: .rediffConfirmed,
+                weight: 0.0,
+                detail: .fingerprint(matchCount: 1, averageSimilarity: 1.0)
+            ))
+        }
 
         // FM entries: gated by mode, filtered to containsAd only (Positive-Only Rule).
         // Non-positive dispositions (noAds/uncertain/abstain) are intentionally dropped;
@@ -1170,6 +1224,17 @@ struct DecisionMapper: Sendable {
             if inAudioCorroboratingSources.contains(entry.source) {
                 return true
             }
+            // playhead-xsdz.62: a BYTE-EXACT rediff-confirmed kind corroborates
+            // the metadata cue. It is not literally "in-audio" — it is
+            // DETERMINISTIC ground truth (the origin served different ad bytes on
+            // a re-fetch), the strongest corroboration there is — so a span
+            // carrying both a metadata cue AND the rediff kind clears this gate.
+            // Only present when `rediffConfirmedKindEnabled` emitted it in
+            // `buildLedger()`, so this branch is inert flag-OFF (and never fires
+            // for acoustic splice, which is not byte-exact).
+            if entry.source == .rediffConfirmed {
+                return true
+            }
             if entry.source == .classifier, entry.weight > 0 {
                 return true
             }
@@ -1197,6 +1262,13 @@ struct DecisionMapper: Sendable {
         // `buildLedger()` is excluded so the gate cannot be satisfied by
         // a single FM signal alone. Sister gate `metadataCorroborationGate`
         // applies the same filter — keep them in sync.
+        // playhead-xsdz.62: a `.rediffConfirmed` entry (emitted weight-0 when
+        // `rediffConfirmedKindEnabled` fires on a byte-exact rediff span) is a
+        // DISTINCT source here, so it counts as a corroborating kind — an
+        // FM-consensus span whose only other kind is the deterministic rediff
+        // confirmation now reaches the 2-kind quorum. Only zero-weight
+        // `.classifier` is excluded; every other source (rediff included) counts
+        // regardless of weight, so no change is needed to this counting itself.
         let corroboratingSources = Set(scoringLedger.compactMap { entry -> EvidenceSourceType? in
             if entry.source == .classifier, entry.weight == 0 { return nil }
             return entry.source
@@ -1233,7 +1305,14 @@ struct DecisionMapper: Sendable {
         // in-audio corroborator (the persuasion-arc grammar on the span's
         // transcript prose). Same rationale as `.lexical` / `.audioForensics`:
         // it is real non-FM signal corroborating an fmAcoustic-anchored span.
-        let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .lexicalAutoAd, .catalog, .acoustic, .musicBed, .fingerprint, .breakAlignment, .audioForensics, .rhetoricalGrammar]
+        // playhead-xsdz.62: include `.rediffConfirmed` — a BYTE-EXACT
+        // rediff-confirmed kind is deterministic, non-FM external corroboration
+        // (the strongest there is). A span anchored by `.fmAcousticCorroborated`
+        // whose only non-FM evidence is the rediff kind is corroborated by
+        // deterministic ground truth. Only present when
+        // `rediffConfirmedKindEnabled` emitted it in `buildLedger()`, so this is
+        // inert flag-OFF and never fires for acoustic splice.
+        let nonClassifierExternal: Set<EvidenceSourceType> = [.lexical, .lexicalAutoAd, .catalog, .acoustic, .musicBed, .fingerprint, .breakAlignment, .audioForensics, .rhetoricalGrammar, .rediffConfirmed]
         let hasExternalCorroboration = scoringLedger.contains { entry in
             if nonClassifierExternal.contains(entry.source) {
                 return true
