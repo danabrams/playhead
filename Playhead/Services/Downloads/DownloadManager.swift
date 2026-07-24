@@ -480,22 +480,29 @@ actor DownloadManager {
     /// (that budget is for foreground transfers only). `totalBytes <= 0`
     /// (size unknown) is dropped rather than broadcast as a
     /// divide-by-zero 0% event.
-    private func broadcastBackgroundProgress(
+    // playhead-y3q5: internal (not private) so the monotonicity regression
+    // test can drive out-of-order completion/straggler ticks directly.
+    func broadcastBackgroundProgress(
         episodeId: String,
         bytesWritten: Int64,
         totalBytes: Int64
     ) {
         guard totalBytes > 0 else { return }
         // playhead-3xtw (L2): drop stale, out-of-order ticks so the
-        // delivered fraction is monotonic within a transfer. Cleared on
-        // completion here and on a fresh `backgroundDownload` start.
+        // delivered fraction is monotonic within a transfer.
+        // playhead-y3q5: on the completion tick, PIN the high-water at
+        // `totalBytes` (never reset it to nil). Each didWriteData callback
+        // hops to the actor via an unstructured Task with NO ordering
+        // guarantee, so if the 100% tick's Task wins the race, a
+        // later-arriving earlier tick used to read `nil ?? 0 = 0`, pass the
+        // guard, and broadcast a REGRESSED (<100%) fraction after 100% — the
+        // exact non-monotonicity this guard exists to prevent. Pinning at
+        // `totalBytes` (via the `min` cap) makes that straggler fail the
+        // `>= highWater` guard and get dropped. The slot is cleared for a
+        // re-download by the fresh-start reset in `backgroundDownload`.
         let highWater = lastBackgroundProgressBytes[episodeId] ?? 0
         guard bytesWritten >= highWater else { return }
-        if bytesWritten >= totalBytes {
-            lastBackgroundProgressBytes[episodeId] = nil
-        } else {
-            lastBackgroundProgressBytes[episodeId] = bytesWritten
-        }
+        lastBackgroundProgressBytes[episodeId] = min(bytesWritten, totalBytes)
         let progress = DownloadProgress(
             episodeId: episodeId,
             bytesWritten: bytesWritten,
