@@ -4728,8 +4728,19 @@ actor AdDetectionService {
             // demotion only fires when the current gate is structurally
             // weaker than `.blockedByPolicy` (severity < 2 — i.e.
             // `.eligible`, `.markOnly`, or `.cappedByFMSuppression`).
+            //
+            // playhead-pzy2: byte-exact rediff certainty is EXEMPT — the
+            // demotion-path mirror of the self-promo exemption below. A span whose
+            // width the rediff differ owns (`.rediffSlot`) is a 100%-deterministic
+            // DAI divergence (the origin served different ad bytes), so it stays an
+            // ad even when it sits inside a creator "content" chapter that only
+            // makes it LOOK editorial — deterministic certainty outranks the
+            // chapter-label clue. Splice-AGNOSTIC (`.spliceSlot` is acoustic width,
+            // not exempt); FM / lexical-only spans stay demotable, so the exemption
+            // cannot leak to any non-deterministic span.
             if creatorChapterFusionEnabled,
                decision.eligibilityGate.severity < SkipEligibilityGate.blockedByPolicy.severity,
+               !refinedSpan.carriesRediffByteExactWidth,
                CreatorChapterSuppressionEvaluator.shouldSuppress(
                    span: refinedSpan,
                    chapters: assetChapterEvidence
@@ -4775,9 +4786,21 @@ actor AdDetectionService {
             // `selfPromoBank` to nil, so the `let` binding short-circuits before
             // `PromoSuppressor` is ever consulted — a zero-cost no-op that is
             // byte-identical to pre-fl4j for episodes the bead doesn't apply to.
+            //
+            // playhead-pzy2: byte-exact rediff certainty is EXEMPT. A span whose
+            // width the rediff differ owns (`.rediffSlot`) is a 100%-deterministic
+            // DAI divergence — the origin literally served different ad bytes — so
+            // it stays an ad regardless of a low-certainty self-promo lexical clue
+            // (a phrase that only "sounds like" the show promoting itself must not
+            // demote a proven ad). This mirrors the same edges' existing exemptions
+            // from the boundary refiners (`isWidthOwnership` bypass) and the
+            // pre-roll start clamp. Splice-AGNOSTIC: `.spliceSlot` (acoustic width)
+            // is NOT exempt, and FM / lexical-only spans stay fully demotable — the
+            // exemption cannot leak to any non-deterministic span.
             if config.selfPromoSuppressionEnabled,
                let selfPromoBank,
                decision.eligibilityGate.severity < SkipEligibilityGate.markOnly.severity,
+               !refinedSpan.carriesRediffByteExactWidth,
                PromoSuppressor.shouldSuppress(
                    span: refinedSpan,
                    transcriptWords: selfPromoWords,
