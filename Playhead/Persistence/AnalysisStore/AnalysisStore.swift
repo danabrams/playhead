@@ -8650,6 +8650,30 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// playhead-dqfm: bump a still-`queued` job's `priority` for the
+    /// scarcity-aware backfill re-prioritization pass. Only `priority` +
+    /// `updatedAt` change — `state`, lease, coverage, `createdAt`,
+    /// `generationID`, and `schedulerEpoch` are all left untouched (this is a
+    /// selection nudge, NOT a lifecycle transition, so it must not disturb the
+    /// FIFO `createdAt` tiebreak, orphan-recovery routing, or the lease clock).
+    ///
+    /// Guarded on `state = 'queued'`: if the row was leased / started running
+    /// between the reconciler's read and this write, the UPDATE is a benign
+    /// 0-row no-op rather than re-ranking an in-flight job.
+    func updateJobPriority(jobId: String, priority: Int) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET priority = ?, updatedAt = ?
+            WHERE jobId = ? AND state = 'queued'
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, priority)
+        bind(stmt, 2, Date().timeIntervalSince1970)
+        bind(stmt, 3, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     /// playhead-gy2s (RC-2): record why the admission gate hard-rejected a
     /// pre-analysis pass, as a durable advisory on the job row. UPDATED in
     /// place (never appended) so a job rejecting on every 30 s poll refreshes
