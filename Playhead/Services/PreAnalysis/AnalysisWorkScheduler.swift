@@ -674,6 +674,14 @@ actor AnalysisWorkScheduler {
     /// explicit `desiredCoverage`. Consumed alongside
     /// `pendingUserIntentEpisodes`.
     private var pendingUserIntentCoverage: [String: Double] = [:]
+    /// Monotonic ownership epoch for enqueue work derived from a cached
+    /// download. Cache removal increments the episode's value before deleting
+    /// scheduler rows; an enqueue suspended in AnalysisStore must observe the
+    /// mismatch and clean up instead of resurrecting the removed job.
+    private var downloadRetirementGenerationByEpisode:
+        [String: UInt64] = [:]
+    private var enqueueBarrierForTesting:
+        (@Sendable () async -> Void)?
 
     init(
         store: AnalysisStore,
@@ -737,6 +745,11 @@ actor AnalysisWorkScheduler {
         podcastTitle: String? = nil,
         episodeTitle: String? = nil
     ) async {
+        let capturedRetirementGeneration =
+            downloadRetirementGenerationByEpisode[episodeId, default: 0]
+        if let enqueueBarrierForTesting {
+            await enqueueBarrierForTesting()
+        }
         // playhead-3xtw: a user tapped "Download & Analyze" for this
         // episode (recorded via `markEpisodeUserIntent`). Route its
         // analysis to the user-intent (`.now`) lane — priority >= 20 —
@@ -767,6 +780,13 @@ actor AnalysisWorkScheduler {
         // the empty-string sentinel (the live-lease check is
         // `leaseOwner IS NOT NULL`).
         let currentEpoch = (try? await store.fetchSchedulerEpoch()) ?? 0
+        guard downloadRetirementGenerationByEpisode[
+            episodeId,
+            default: 0
+        ] == capturedRetirementGeneration else {
+            clearPendingDownloadState(episodeId: episodeId)
+            return
+        }
         let job = AnalysisJob(
             jobId: UUID().uuidString,
             jobType: "preAnalysis",
@@ -793,7 +813,21 @@ actor AnalysisWorkScheduler {
             schedulerEpoch: currentEpoch
         )
         do {
-            try await store.insertJob(job)
+            _ = try await store.insertJob(job)
+            guard downloadRetirementGenerationByEpisode[
+                episodeId,
+                default: 0
+            ] == capturedRetirementGeneration else {
+                try await store.deleteRetiredAnalysisEnqueue(
+                    jobId: job.jobId,
+                    generationID: job.generationID
+                )
+                queueWaitStates.removeValue(
+                    forKey: job.jobId
+                )
+                clearPendingDownloadState(episodeId: episodeId)
+                return
+            }
             queueWaitStates[job.jobId] = PreAnalysisInstrumentation.beginQueueWait(jobId: job.jobId)
             logger.info("Enqueued job \(job.jobId) for episode \(episodeId), priority=\(priority), coverage=\(coverage)s")
         } catch {
@@ -951,6 +985,13 @@ actor AnalysisWorkScheduler {
             }
         }
 
+        guard downloadRetirementGenerationByEpisode[
+            episodeId,
+            default: 0
+        ] == capturedRetirementGeneration else {
+            clearPendingDownloadState(episodeId: episodeId)
+            return
+        }
         wakeSchedulerLoop()
 
         // playhead-gjz6 (Gap-4 second half): if the app is currently
@@ -973,6 +1014,56 @@ actor AnalysisWorkScheduler {
             await backfillScheduler?.scheduleBackfillIfNeeded()
         }
     }
+
+    /// Retires every scheduler artifact owned by the removed cached download.
+    /// The generation increment occurs before the first suspension, closing
+    /// both sides of the enqueue/remove race on this actor.
+    func retireDownloadAnalysis(
+        episodeId: String,
+        downloadId: String
+    ) async {
+        downloadRetirementGenerationByEpisode[
+            episodeId,
+            default: 0
+        ] &+= 1
+        clearPendingDownloadState(episodeId: episodeId)
+        if currentEpisodeId == episodeId {
+            shouldCancelCurrentJob = true
+            lostOwnership = true
+            leaseRenewalTask?.cancel()
+            currentRunningTask?.cancel()
+        }
+        do {
+            let removed = try await store
+                .deleteAnalysisJobsForRemovedDownload(
+                    episodeId: episodeId,
+                    downloadId: downloadId
+                )
+            for jobID in removed {
+                queueWaitStates.removeValue(forKey: jobID)
+            }
+        } catch {
+            logger.error(
+                "Failed to retire download analysis for \(episodeId): \(error)"
+            )
+        }
+    }
+
+    private func clearPendingDownloadState(episodeId: String) {
+        pendingUserIntentEpisodes.remove(episodeId)
+        pendingUserIntentCoverage[episodeId] = nil
+        pendingEpisodeTitles[episodeId] = nil
+        pendingProbedEpisodeDurations = pendingProbedEpisodeDurations
+            .filter { $0.key.episodeId != episodeId }
+    }
+
+    #if DEBUG
+    func _setEnqueueBarrierForTesting(
+        _ barrier: (@Sendable () async -> Void)?
+    ) {
+        enqueueBarrierForTesting = barrier
+    }
+    #endif
 
     // MARK: - User-intent preparation (playhead-3xtw)
 

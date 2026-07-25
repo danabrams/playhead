@@ -859,8 +859,8 @@ struct AddedMarkAutoSkipEligibleTests {
     /// non-auto modes"). The `.eligible` stamp only lets the userMarked row PASS
     /// the `receiveAdWindows` gate FILTER (into the managed set); the trust MODE
     /// gate in `evaluateWindow` still governs whether a skip fires. In `.manual`
-    /// mode the row is INGESTED and evaluated to `.confirmed` (banner + manual
-    /// "Skip Ad" affordance) but is NEVER auto-skipped. The first #expect proves
+    /// mode the row is INGESTED and evaluated to `.confirmed` for logging, but
+    /// is NEVER auto-skipped or presented as a completed skip. The first #expect proves
     /// the row was ingested (not vacuously green by being dropped); the second is
     /// the trust guarantee. RED if a future change special-cases userMarked to
     /// force-skip regardless of mode.

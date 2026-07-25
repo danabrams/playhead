@@ -121,14 +121,38 @@ final class NowPlayingViewModel {
 
     /// Begin observing banner items from a SkipOrchestrator.
     /// Each item is enqueued into the provided AdBannerQueue on the MainActor.
-    func observeBanners(from orchestrator: SkipOrchestrator, into queue: AdBannerQueue) {
+    func observeBanners(
+        from orchestrator: SkipOrchestrator,
+        into queue: AdBannerQueue,
+        hostGeneration: UInt64
+    ) {
         bannerObservationTask?.cancel()
         bannerObservationTask = Task {
-            let stream = await orchestrator.bannerItemStream()
-            for await item in stream {
+            let stream = await orchestrator.bannerEventStream()
+            for await event in stream {
                 guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    queue.enqueue(item)
+                switch event {
+                case let .present(item):
+                    let didAccept = await MainActor.run {
+                        queue.enqueue(item, hostGeneration: hostGeneration)
+                    }
+                    if didAccept, item.tier == .suggest {
+                        await orchestrator.acknowledgeSuggestedBannerDelivery(
+                            windowId: item.windowId,
+                            episodeId: item.episodeId,
+                            playbackLifecycleGeneration:
+                                item.playbackLifecycleGeneration,
+                            suggestionRevisionToken:
+                                item.suggestionRevisionToken
+                        )
+                    }
+                case let .retireWindow(retirement):
+                    _ = await MainActor.run {
+                        queue.retireWindow(
+                            retirement,
+                            hostGeneration: hostGeneration
+                        )
+                    }
                 }
             }
         }
@@ -156,19 +180,19 @@ final class NowPlayingViewModel {
 
     func skipForward() {
         Task {
-            await runtime.skipForward()
+            _ = await runtime.skipForward()
         }
     }
 
     func skipBackward() {
         Task {
-            await runtime.skipBackward()
+            _ = await runtime.skipBackward()
         }
     }
 
     func seek(to seconds: TimeInterval) {
         Task {
-            await runtime.seek(to: seconds)
+            _ = await runtime.seek(to: seconds)
         }
     }
 
@@ -178,16 +202,36 @@ final class NowPlayingViewModel {
     /// 2. Set decisionState to .reverted so auto-skip ignores this span.
     /// 3. Feed a false-positive signal to the PodcastProfile trust scoring.
     func handleListenRewind(item: AdSkipBannerItem) {
-        // Rewind to the ad start (snapped boundary).
-        seek(to: item.adStartTime)
-
-        // Revert the ad window and update trust scoring through the shared runtime.
         Task {
-            await runtime.recordListenRewind(
-                windowId: item.windowId,
-                podcastId: item.podcastId
-            )
+            _ = await handleListenRewindAwaitingAction(item: item)
         }
+    }
+
+    @discardableResult
+    func handleListenRewindAwaitingAction(
+        item: AdSkipBannerItem
+    ) async -> Bool {
+        let expectedEpisodeId = item.episodeId
+        guard let expectedPlaybackGeneration =
+            item.playbackLifecycleGeneration
+        else {
+            return false
+        }
+        guard runtime.currentEpisodeId == expectedEpisodeId,
+              runtime.playEpisodeGeneration
+                == expectedPlaybackGeneration
+        else {
+            return false
+        }
+        return await runtime.listenRewind(
+            windowId: item.windowId,
+            podcastId: item.podcastId,
+            to: item.adStartTime,
+            bannerEndTime: item.adEndTime,
+            ifCurrentEpisodeId: expectedEpisodeId,
+            ifPlaybackLifecycleGeneration:
+                expectedPlaybackGeneration
+        )
     }
 
     func setSpeed(_ speed: Float) {
@@ -204,6 +248,9 @@ final class NowPlayingViewModel {
     /// orchestrator for immediate skip + UI update + persistence.
     func reportHearingAd() {
         guard let assetId = runtime.currentAnalysisAssetId else { return }
+        let episodeId = runtime.currentEpisodeId
+        let podcastId = runtime.currentPodcastId
+        let playbackGeneration = runtime.playEpisodeGeneration
         // Debounce: ignore taps within 5 seconds of the last report.
         // Also allow reports when clock jumps backward (negative interval).
         if let last = lastHearingAdReportTime {
@@ -236,13 +283,19 @@ final class NowPlayingViewModel {
             )
 
             // Inject into skip orchestrator + persist via runtime.
-            await runtimeRef.injectUserMarkedAd(
+            let persisted = await runtimeRef.injectUserMarkedAd(
                 start: boundary.startTime,
-                end: boundary.endTime
+                end: boundary.endTime,
+                ifCurrentAnalysisAssetId: assetId,
+                ifCurrentEpisodeId: episodeId,
+                ifPlaybackLifecycleGeneration: playbackGeneration,
+                podcastId: podcastId
             )
+            guard persisted else { return }
 
-            // Feed false-negative signal to TrustService.
-            if let podcastId = runtimeRef.currentPodcastId {
+            // Attribute the durable user mark to the show captured at tap time,
+            // even if autoplay advances after persistence has begun.
+            if let podcastId {
                 await runtimeRef.trustService.recordFalseNegativeSignal(podcastId: podcastId)
             }
         }

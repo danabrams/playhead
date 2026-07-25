@@ -27,6 +27,84 @@ private actor LoaderDriver {
     }
 }
 
+private actor ControlledItemSeek {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func perform() async -> Bool {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+        return true
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private actor ControlledSeekSequence {
+    private var nextOperation = 0
+    private var startedOperations: Set<Int> = []
+    private var startWaiters:
+        [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var releaseContinuations:
+        [Int: CheckedContinuation<Bool, Never>] = [:]
+
+    func perform() async -> Bool {
+        let operation = nextOperation
+        nextOperation += 1
+        startedOperations.insert(operation)
+        let waiters = startWaiters.removeValue(forKey: operation) ?? []
+        for waiter in waiters {
+            waiter.resume()
+        }
+        return await withCheckedContinuation { continuation in
+            releaseContinuations[operation] = continuation
+        }
+    }
+
+    func waitUntilStarted(_ operation: Int) async {
+        if startedOperations.contains(operation) { return }
+        await withCheckedContinuation { continuation in
+            startWaiters[operation, default: []].append(continuation)
+        }
+    }
+
+    func release(_ operation: Int, completed: Bool) {
+        releaseContinuations.removeValue(forKey: operation)?.resume(
+            returning: completed
+        )
+    }
+}
+
+private actor ItemSeekRecorder {
+    private var callCount = 0
+
+    func record() {
+        callCount += 1
+    }
+
+    func count() -> Int {
+        callCount
+    }
+}
+
 // MARK: - Actor Isolation
 
 @Suite("PlaybackServiceActor – Isolation")
@@ -81,6 +159,851 @@ struct PlaybackServiceActorIsolationTests {
                 #expect(state.status == .idle)
             }
         }
+    }
+
+    @Test("A detach token rejects a stale queued item installation")
+    func detachTokenRejectsStaleLoad() async throws {
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
+        let staleAdmission = try #require(
+            await service.pauseAndDetachCurrentItem(force: false)
+        )
+        #expect(
+            await service.snapshot().status == .idle,
+            "The first no-item admission must not synthesize a pause edge"
+        )
+
+        let currentAdmission = try #require(
+            await service.pauseAndDetachCurrentItem()
+        )
+        #expect(currentAdmission != staleAdmission)
+
+        let staleItem = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(
+                    string: "playhead-progressive://audio/stale-load.mp3"
+                )!
+            )
+        )
+        #expect(
+            !(await service.loadItem(
+                staleItem,
+                ifCurrentItemGeneration: staleAdmission
+            ))
+        )
+        #expect(!(await service._testingHasPlayerItem))
+        #expect(!(await service._testingHasCurrentPlayerItem))
+
+        let currentItem = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(
+                    string: "playhead-progressive://audio/current-load.mp3"
+                )!
+            )
+        )
+        #expect(
+            await service.loadItem(
+                currentItem,
+                ifCurrentItemGeneration: currentAdmission
+            )
+        )
+        #expect(await service._testingHasPlayerItem)
+        #expect(await service._testingHasCurrentPlayerItem)
+        await service.tearDown()
+    }
+
+    @Test("A detached item cannot resurrect Now Playing through stale rate delivery")
+    func detachedItemRejectsStaleRateNowPlayingUpdate() async {
+        let nowPlaying = FakeNowPlayingInfoProvider()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: nowPlaying,
+            notificationCenter: NotificationCenter()
+        )
+        let item = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(
+                    string: "playhead-progressive://audio/rate-stale.mp3"
+                )!
+            )
+        )
+        await service.loadItem(item)
+        await service.setNowPlayingMetadata(title: "Old episode")
+        let installed = await service.snapshotWithItemGeneration()
+        #expect(nowPlaying.info != nil)
+
+        _ = await service.pauseAndDetachCurrentItem()
+        #expect(nowPlaying.info == nil)
+
+        await service._testingApplyObservedRate(
+            0,
+            expectedGeneration: installed.itemGeneration
+        )
+        #expect(
+            nowPlaying.info == nil,
+            "A queued rate callback from the detached generation must not recreate Now Playing"
+        )
+        await service.pause()
+        #expect(
+            nowPlaying.info == nil,
+            "A later Pause command without an item must not recreate Now Playing"
+        )
+        await service.tearDown()
+    }
+
+    @Test("Replacement metadata survives controls before its item installs")
+    func replacementMetadataSurvivesItemlessLoadingGap() async throws {
+        let nowPlaying = FakeNowPlayingInfoProvider()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: nowPlaying,
+            notificationCenter: NotificationCenter()
+        )
+        let oldItem = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(
+                    string: "playhead-progressive://audio/metadata-old.mp3"
+                )!
+            )
+        )
+        await service.loadItem(oldItem)
+        await service.setNowPlayingMetadata(title: "Old episode")
+
+        let admission = try #require(
+            await service.pauseAndDetachCurrentItem()
+        )
+        #expect(nowPlaying.info == nil)
+
+        await service.setNowPlayingMetadata(title: "Replacement episode")
+        await service.pause()
+        #expect(
+            nowPlaying.info?[MPMediaItemPropertyTitle] as? String
+                == "Replacement episode",
+            "A control event in the loading gap must preserve pending replacement metadata"
+        )
+
+        let replacement = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(
+                    string: "playhead-progressive://audio/metadata-new.mp3"
+                )!
+            )
+        )
+        let installed = await service.loadItem(
+            replacement,
+            ifCurrentItemGeneration: admission
+        )
+        #expect(installed)
+        await service.pause()
+        #expect(
+            nowPlaying.info?[MPMediaItemPropertyTitle] as? String
+                == "Replacement episode",
+            "Installing the admitted item must retain the metadata published before loading"
+        )
+        await service.tearDown()
+    }
+
+    @Test("A replaced item cannot publish an old seek after actor reentrancy")
+    func replacedItemRejectsStaleSeekCompletion() async {
+        let controlledSeek = ControlledItemSeek()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            itemSeekOperation: { _, _ in
+                await controlledSeek.perform()
+            }
+        )
+        let itemA = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/a.mp3")!
+            )
+        )
+        let itemB = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/b.mp3")!
+            )
+        )
+
+        await service.loadItem(itemA)
+        let context = await service.snapshotWithItemGeneration()
+        let seekTask = Task {
+            await service.seek(
+                to: 42,
+                ifCurrentItemGeneration: context.itemGeneration
+            )
+        }
+
+        await controlledSeek.waitUntilStarted()
+        await service.loadItem(itemB)
+        await controlledSeek.release()
+
+        #expect(await seekTask.value == false)
+        #expect(
+            await service.snapshot().currentTime != 42,
+            "The old item's completion must not overwrite the replacement item's state"
+        )
+    }
+
+    @Test("Newest overlapping user seek wins on the same item")
+    func newestSameItemSeekWinsWhenOlderCompletionArrivesLast() async {
+        let controlledSeeks = ControlledSeekSequence()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            itemSeekOperation: { _, _ in
+                await controlledSeeks.perform()
+            }
+        )
+        let item = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(
+                    string:
+                        "playhead-progressive://audio/latest-seek-wins.mp3"
+                )!
+            )
+        )
+        await service.loadItem(item)
+        let context = await service.snapshotWithItemGeneration()
+
+        let olderSeek = Task {
+            await service.seek(
+                to: 40,
+                ifCurrentItemGeneration: context.itemGeneration
+            )
+        }
+        await controlledSeeks.waitUntilStarted(0)
+        let newerSeek = Task {
+            await service.seek(
+                to: 90,
+                ifCurrentItemGeneration: context.itemGeneration
+            )
+        }
+        await controlledSeeks.waitUntilStarted(1)
+
+        await controlledSeeks.release(1, completed: true)
+        #expect(await newerSeek.value)
+        #expect(await service.snapshot().currentTime == 90)
+
+        await controlledSeeks.release(0, completed: true)
+        #expect(
+            !(await olderSeek.value),
+            "The superseded operation must reject even if its injected seek reports success"
+        )
+        #expect(
+            await service.snapshot().currentTime == 90,
+            "An older overlapping completion must not publish over the newest target"
+        )
+        await service.tearDown()
+    }
+
+    @Test("A replaced item cannot receive stale skip-transition completion")
+    func replacedItemRejectsStaleSkipTransitionCompletion() async {
+        let controlledSeek = ControlledItemSeek()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            itemSeekOperation: { _, _ in
+                await controlledSeek.perform()
+            }
+        )
+        let itemA = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/skip-a.mp3")!
+            )
+        )
+        let itemB = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/skip-b.mp3")!
+            )
+        )
+
+        await service.loadItem(itemA)
+        let originalVolume = await service._testingPlayerVolume
+        let transition = Task {
+            await service._testingPerformSkipTransition(to: 120)
+        }
+        await controlledSeek.waitUntilStarted()
+        #expect(
+            await service._testingPlayerVolume
+                == PlaybackService._testingDuckVolume
+        )
+
+        await service.loadItem(itemB)
+        #expect(
+            await service._testingPlayerVolume == originalVolume,
+            "Installing the replacement must clear the old item's duck"
+        )
+        await controlledSeek.release()
+        await transition.value
+
+        #expect(
+            await service.snapshot().currentTime != 120,
+            "The old cue completion must not publish into the replacement"
+        )
+        #expect(await service._testingPlayerVolume == originalVolume)
+    }
+
+    @Test("A failed item seek releases the active transition duck")
+    func failedItemSeekRestoresVolume() async {
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            itemSeekOperation: { _, _ in false }
+        )
+        let item = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(
+                    string:
+                        "playhead-progressive://audio/seek-failure.mp3"
+                )!
+            )
+        )
+        await service.loadItem(item)
+        let originalVolume = await service._testingPlayerVolume
+
+        await service._testingPerformSkipTransition(to: 120)
+
+        #expect(
+            await service._testingPlayerVolume == originalVolume,
+            "A false seek completion must not strand playback at duck volume"
+        )
+        #expect(
+            await service.snapshot().currentTime != 120,
+            "A failed seek must not publish the cue target"
+        )
+    }
+
+    @Test("Listen disarm invalidates an in-flight transition for the same cue")
+    func listenDisarmInvalidatesInFlightTransition() async {
+        let controlledSeek = ControlledItemSeek()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            itemSeekOperation: { _, _ in
+                await controlledSeek.perform()
+            }
+        )
+        let item = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/listen.mp3")!
+            )
+        )
+        await service.loadItem(item)
+        let originalVolume = await service._testingPlayerVolume
+        let transition = Task {
+            await service._testingPerformSkipTransition(to: 119)
+        }
+        await controlledSeek.waitUntilStarted()
+        #expect(
+            await service._testingPlayerVolume
+                == PlaybackService._testingDuckVolume
+        )
+
+        await service.disarmSkipCues(
+            overlappingStart: 60,
+            end: 120
+        )
+        #expect(await service._testingPlayerVolume == originalVolume)
+        await controlledSeek.release()
+        await transition.value
+
+        #expect(
+            await service.snapshot().currentTime != 119,
+            "The invalidated cue transition must not defeat Listen"
+        )
+    }
+
+    @Test("Cue removal cannot cancel an overlapping user seek")
+    func cueRemovalDoesNotCancelOverlappingUserSeek() async {
+        let controlledSeeks = ControlledSeekSequence()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            itemSeekOperation: { _, _ in
+                await controlledSeeks.perform()
+            }
+        )
+        let item = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/user-seek-wins.mp3")!
+            )
+        )
+        await service.loadItem(item)
+        await service.setSkipCues([
+            CMTimeRange(
+                start: CMTime(seconds: 60, preferredTimescale: 600),
+                end: CMTime(seconds: 120, preferredTimescale: 600)
+            ),
+        ])
+
+        // Park the automatic skip inside AVFoundation's seek, then start a
+        // user seek while the actor is re-entrant. The user seek must retire
+        // the automatic transition before it begins.
+        let transition = Task {
+            await service._testingPerformSkipTransition(
+                cueStart: 60,
+                cueEnd: 120
+            )
+        }
+        await controlledSeeks.waitUntilStarted(0)
+        let context = await service.snapshotWithItemGeneration()
+        let userSeek = Task {
+            await service.seek(
+                to: 42,
+                ifCurrentItemGeneration: context.itemGeneration
+            )
+        }
+        await controlledSeeks.waitUntilStarted(1)
+
+        // A gate flip after the user seek starts must not cancel all pending
+        // seeks on the item. Model AVFoundation reporting the old automatic
+        // seek as cancelled and the newer user seek as completed.
+        await service.setSkipCues([])
+        await controlledSeeks.release(1, completed: true)
+        #expect(await userSeek.value)
+        #expect(await service.snapshot().currentTime == 42)
+
+        await controlledSeeks.release(0, completed: false)
+        await transition.value
+        #expect(
+            await service.snapshot().currentTime == 42,
+            "The cancelled automatic skip must not overwrite the user seek"
+        )
+    }
+
+    @Test("Listen disarm invalidates an in-flight merged-pod transition")
+    func listenDisarmInvalidatesMergedPodTransition() async {
+        let controlledSeek = ControlledItemSeek()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            itemSeekOperation: { _, _ in
+                await controlledSeek.perform()
+            }
+        )
+        let item = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/merged-pod.mp3")!
+            )
+        )
+        await service.loadItem(item)
+        await service.setSkipCues([
+            CMTimeRange(
+                start: CMTime(seconds: 60, preferredTimescale: 600),
+                end: CMTime(seconds: 150, preferredTimescale: 600)
+            ),
+        ])
+        let originalVolume = await service._testingPlayerVolume
+        let transition = Task {
+            await service._testingPerformSkipTransition(
+                cueStart: 60,
+                cueEnd: 150
+            )
+        }
+        await controlledSeek.waitUntilStarted()
+
+        // The banner represents only the first ad in a cue merged across an
+        // adjacent second ad. Its restored span does not contain the pod-end
+        // seek target, but it does overlap the transition's owning cue.
+        await service.disarmSkipCues(
+            overlappingStart: 60,
+            end: 90
+        )
+        #expect(await service._testingPlayerVolume == originalVolume)
+        #expect(await service._testingSkipCues.isEmpty)
+        await controlledSeek.release()
+        await transition.value
+
+        #expect(
+            await service.snapshot().currentTime != 150,
+            "The merged-pod transition must not skip past the restored first ad"
+        )
+    }
+
+    @Test("Listen disarm invalidates a detected transition before queued execution")
+    func listenDisarmInvalidatesReservedTransition() async throws {
+        let seekRecorder = ItemSeekRecorder()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            itemSeekOperation: { _, _ in
+                await seekRecorder.record()
+                return true
+            }
+        )
+        let item = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/reserved.mp3")!
+            )
+        )
+        await service.loadItem(item)
+        let originalVolume = await service._testingPlayerVolume
+
+        // Model checkSkipCues detecting and synchronously claiming the cue,
+        // followed by Listen winning the actor queue before the transition's
+        // unstructured async execution begins.
+        let transitionToken = try #require(
+            await service._testingReserveSkipTransition(
+                cueStart: 60,
+                cueEnd: 120
+            )
+        )
+        await service.disarmSkipCues(
+            overlappingStart: 60,
+            end: 90
+        )
+        await service._testingExecuteReservedSkipTransition(
+            transitionToken: transitionToken
+        )
+
+        #expect(await seekRecorder.count() == 0)
+        #expect(await service.snapshot().currentTime != 120)
+        #expect(await service._testingPlayerVolume == originalVolume)
+    }
+
+    @Test("Removing a cue invalidates its detected transition before queued execution")
+    func cueRemovalInvalidatesReservedTransition() async throws {
+        let seekRecorder = ItemSeekRecorder()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            itemSeekOperation: { _, _ in
+                await seekRecorder.record()
+                return true
+            }
+        )
+        let item = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/gate-flip.mp3")!
+            )
+        )
+        await service.loadItem(item)
+        await service.setSkipCues([
+            CMTimeRange(
+                start: CMTime(seconds: 60, preferredTimescale: 600),
+                end: CMTime(seconds: 120, preferredTimescale: 600)
+            ),
+        ])
+        let originalVolume = await service._testingPlayerVolume
+
+        // Model the periodic observer claiming a cue immediately before an
+        // eligibility/gate update removes that cue from the active set.
+        let transitionToken = try #require(
+            await service._testingReserveSkipTransition(
+                cueStart: 60,
+                cueEnd: 120
+            )
+        )
+        await service.setSkipCues([])
+        await service._testingExecuteReservedSkipTransition(
+            transitionToken: transitionToken
+        )
+
+        #expect(await seekRecorder.count() == 0)
+        #expect(await service.snapshot().currentTime != 120)
+        #expect(await service._testingPlayerVolume == originalVolume)
+    }
+
+    @Test("Tear down invalidates a detected transition before queued execution")
+    func tearDownInvalidatesReservedTransition() async throws {
+        let seekRecorder = ItemSeekRecorder()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter(),
+            itemSeekOperation: { _, _ in
+                await seekRecorder.record()
+                return true
+            }
+        )
+        let item = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/teardown.mp3")!
+            )
+        )
+        await service.loadItem(item)
+        let originalVolume = await service._testingPlayerVolume
+        let transitionToken = try #require(
+            await service._testingReserveSkipTransition(
+                cueStart: 60,
+                cueEnd: 120
+            )
+        )
+
+        await service.tearDown()
+        await service._testingExecuteReservedSkipTransition(
+            transitionToken: transitionToken
+        )
+
+        #expect(await seekRecorder.count() == 0)
+        #expect(await service.snapshot().currentTime != 120)
+        #expect(await service._testingPlayerVolume == originalVolume)
+    }
+
+    @Test("Tear down joins setup, releases the current item, and ignores later interruptions")
+    func tearDownOwnsEveryLongLivedResource() async {
+        let center = NotificationCenter()
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: center
+        )
+        let item = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(
+                    string: "playhead-progressive://audio/owned-teardown.mp3"
+                )!
+            )
+        )
+        await service.loadItem(item)
+        await service._testingInjectState(
+            PlaybackState(
+                status: .paused,
+                currentTime: 20,
+                duration: 100,
+                rate: 0,
+                playbackSpeed: 1
+            )
+        )
+        #expect(await service._testingHasPlayerItem)
+        #expect(await service._testingHasCurrentPlayerItem)
+
+        await service.tearDown()
+
+        #expect(await service._testingIsTornDown)
+        #expect(!(await service._testingHasPlayerItem))
+        #expect(!(await service._testingHasCurrentPlayerItem))
+        let terminalSnapshot = await service.snapshot()
+        #expect(!(await service.seek(to: 42)))
+        #expect(
+            await service.snapshot() == terminalSnapshot,
+            "post-teardown seek must not mutate the terminal state"
+        )
+        let stalePostShutdownItem = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(
+                    string:
+                        "playhead-progressive://audio/stale-after-teardown.mp3"
+                )!
+            )
+        )
+        await service.loadItem(stalePostShutdownItem)
+        #expect(
+            !(await service._testingHasPlayerItem),
+            "a cancelled runtime prefetch must not resurrect a torn-down item"
+        )
+        #expect(!(await service._testingHasCurrentPlayerItem))
+        center.post(
+            name: AVAudioSession.interruptionNotification,
+            object: nil,
+            userInfo: [
+                AVAudioSessionInterruptionTypeKey:
+                    AVAudioSession.InterruptionType.ended.rawValue,
+                AVAudioSessionInterruptionOptionKey:
+                    AVAudioSession.InterruptionOptions.shouldResume.rawValue,
+            ]
+        )
+        for _ in 0..<5 {
+            await Task.yield()
+        }
+        #expect(
+            await service.snapshot().status == .paused,
+            "a joined interruption observer cannot resume a torn-down service"
+        )
+    }
+
+    @Test("A state subscriber added after tear down hydrates once and finishes")
+    func postTearDownStateSubscriberFinishes() async {
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
+        await service.tearDown()
+
+        let stream = await service.observeStates()
+        var iterator = stream.makeAsyncIterator()
+        let terminalSnapshot = await iterator.next()
+
+        #expect(terminalSnapshot?.status == .paused)
+        #expect(await iterator.next() == nil)
+    }
+
+    @Test(
+        "Interruption observation does not retain a released playback service",
+        .timeLimit(.minutes(1))
+    )
+    func interruptionObserverDoesNotCreateRetainCycle() async {
+        let center = NotificationCenter()
+        func makeObservedServiceLatch() async -> DeallocLatch {
+            let service = await PlaybackService(
+                audioSession: FakeAudioSessionProvider(),
+                nowPlayingInfo: FakeNowPlayingInfoProvider(),
+                notificationCenter: center
+            )
+            // Let the retained setup hop install the interruption sequence.
+            for _ in 0..<5 {
+                await Task.yield()
+            }
+            return attachDeallocLatch(to: service)
+        }
+
+        let deallocated = await makeObservedServiceLatch()
+        await deallocated.wait()
+    }
+
+    @Test("A replaced item rejects a queued periodic-time callback")
+    func replacedItemRejectsStalePeriodicTimeDelivery() async {
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
+        let itemA = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/time-a.mp3")!
+            )
+        )
+        let itemB = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/time-b.mp3")!
+            )
+        )
+
+        await service.loadItem(itemA)
+        let itemAContext = await service.snapshotWithItemGeneration()
+        await service.loadItem(itemB)
+        await service._testingDeliverPeriodicTime(
+            CMTime(seconds: 9_999, preferredTimescale: 600),
+            for: itemA,
+            expectedGeneration: itemAContext.itemGeneration
+        )
+
+        #expect(
+            await service.snapshot().currentTime != 9_999,
+            "A queued periodic tick from A must not publish into B"
+        )
+    }
+
+    @Test("Listen disarm removes every cue overlapping the banner span")
+    func listenDisarmRemovesEveryOverlappingCue() async {
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
+        await service.setSkipCues([
+            CMTimeRange(
+                start: CMTime(seconds: 65, preferredTimescale: 600),
+                end: CMTime(seconds: 95, preferredTimescale: 600)
+            ),
+            CMTimeRange(
+                start: CMTime(seconds: 110, preferredTimescale: 600),
+                end: CMTime(seconds: 130, preferredTimescale: 600)
+            ),
+            CMTimeRange(
+                start: CMTime(seconds: 200, preferredTimescale: 600),
+                end: CMTime(seconds: 230, preferredTimescale: 600)
+            ),
+        ])
+
+        await service.disarmSkipCues(
+            overlappingStart: 60,
+            end: 120
+        )
+
+        let remaining = await service._testingSkipCues
+        #expect(remaining.count == 1)
+        #expect(CMTimeGetSeconds(remaining[0].start) == 200)
+    }
+
+    @Test("A stale item generation cannot disarm replacement cues")
+    func staleItemGenerationCannotDisarmReplacementCues() async {
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
+        let itemA = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/disarm-a.mp3")!
+            )
+        )
+        let itemB = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/disarm-b.mp3")!
+            )
+        )
+        await service.loadItem(itemA)
+        let itemAContext = await service.snapshotWithItemGeneration()
+        await service.loadItem(itemB)
+        await service.setSkipCues([
+            CMTimeRange(
+                start: CMTime(seconds: 60, preferredTimescale: 600),
+                end: CMTime(seconds: 120, preferredTimescale: 600)
+            ),
+        ])
+
+        #expect(
+            !(await service.disarmSkipCues(
+                overlappingStart: 60,
+                end: 120,
+                ifCurrentItemGeneration: itemAContext.itemGeneration
+            ))
+        )
+        #expect(
+            await service._testingSkipCues.count == 1,
+            "The replacement item's cue must survive a stale Listen actor hop"
+        )
+    }
+
+    @Test("A replaced item cannot publish an already-queued status callback")
+    func replacedItemRejectsStaleStatusDelivery() async {
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
+        let itemA = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/status-a.mp3")!
+            )
+        )
+        let itemB = AVPlayerItem(
+            asset: AVURLAsset(
+                url: URL(string: "playhead-progressive://audio/status-b.mp3")!
+            )
+        )
+
+        await service.loadItem(itemA)
+        let itemAContext = await service.snapshotWithItemGeneration()
+
+        // Model a ready-to-play KVO delivery captured for A, queued outside
+        // the actor, and released only after B becomes the current item.
+        await service.loadItem(itemB)
+        await service._testingDeliverItemStatus(
+            .readyToPlay,
+            duration: 9_999,
+            for: itemA,
+            expectedGeneration: itemAContext.itemGeneration
+        )
+
+        #expect(
+            await service.snapshot().duration != 9_999,
+            "A queued callback from the old item must not publish its duration as B's"
+        )
     }
 }
 

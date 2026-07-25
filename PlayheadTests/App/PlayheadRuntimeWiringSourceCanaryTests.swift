@@ -488,6 +488,54 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         }
     }
 
+    /// Replacement playback must synchronously retire the prior episode before
+    /// any AVPlayer load. Asset resolution happens after playback begins and
+    /// can return nil, so the later `SkipOrchestrator.beginEpisode` handoff is
+    /// not a safe clearing boundary.
+    func testReplacementClearsPriorEpisodeBeforeLoadingAudio() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        guard let playBody = SwiftSourceInspector.firstBody(
+            in: stripped,
+            after: "private func performPlayEpisode("
+        ) else {
+            XCTFail("Could not locate performPlayEpisode body.")
+            return
+        }
+        guard let clearRange = playBody.range(
+            of: "clearPriorEpisodePlaybackStateBeforeReplacement("
+        ) else {
+            XCTFail(
+                "performPlayEpisode must clear prior episode state before loading replacement audio."
+            )
+            return
+        }
+        guard let firstLoadRange = playBody.range(of: "playbackService.load") else {
+            XCTFail("Could not locate replacement PlaybackService load call.")
+            return
+        }
+        XCTAssertLessThan(
+            clearRange.lowerBound,
+            firstLoadRange.lowerBound,
+            "old cues must be disarmed before either streaming or local replacement audio can play"
+        )
+
+        guard let clearBody = SwiftSourceInspector.firstBody(
+            in: stripped,
+            after: "private func clearPriorEpisodePlaybackStateBeforeReplacement("
+        ) else {
+            XCTFail("Could not locate replacement-boundary clear helper.")
+            return
+        }
+        XCTAssertTrue(clearBody.contains("skipOrchestrator.endEpisode()"))
+        XCTAssertTrue(clearBody.contains("playbackService.setSkipCues([])"))
+        XCTAssertTrue(clearBody.contains("silenceCompressionCoordinator.updateSkipRanges([])"))
+        XCTAssertTrue(clearBody.contains("silenceCompressionCoordinator.endEpisode()"))
+    }
+
     /// skeptical-review-cycle-12 T-4: pin the two
     /// `MainActor.assertIsolated()` calls inserted by cycles 9-11 inside
     /// the bare bootstrap `Task { ... }` bodies in `PlayheadRuntime`'s
@@ -895,5 +943,70 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
                 """
             )
         }
+    }
+
+    func testUserMarkLiveInjectionRevalidatesPlaybackAfterPersistence() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let signature = "ifCurrentAnalysisAssetId expectedAssetId: String"
+        guard let body = SwiftSourceInspector.firstBody(
+            in: source,
+            after: signature
+        ) else {
+            XCTFail("Could not locate PlayheadRuntime.injectUserMarkedAd")
+            return
+        }
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(body)
+
+        guard let initialGuard = stripped.range(
+            of: "guard currentAnalysisAssetId == expectedAssetId"
+        ),
+        let persist = stripped.range(
+            of: "adDetectionService.recordUserMarkedAd"
+        ),
+        let guardRange = stripped.range(
+            of: "guard currentAnalysisAssetId == expectedAssetId",
+            range: persist.upperBound..<stripped.endIndex
+        ),
+        let injection = stripped.range(
+            of: "skipOrchestrator.injectUserMarkedAd",
+            range: guardRange.upperBound..<stripped.endIndex
+        ) else {
+            XCTFail(
+                "User-mark persistence must be followed by a playback identity guard before live injection"
+            )
+            return
+        }
+
+        XCTAssertLessThan(initialGuard.lowerBound, persist.lowerBound)
+        let guardedSlice = stripped[guardRange.lowerBound..<injection.lowerBound]
+        XCTAssertTrue(guardedSlice.contains("currentEpisodeId == expectedEpisodeId"))
+        XCTAssertTrue(guardedSlice.contains("playEpisodeGeneration == expectedGeneration"))
+    }
+
+    func testPlaybackUsesDownloadManagerCanonicalCacheURL() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let body = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: source,
+                after: "private func performPlayEpisode("
+            )
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(body)
+
+        XCTAssertTrue(
+            stripped.contains(
+                "downloadManager.cachedFileURL(for: episodeId)"
+            )
+        )
+        XCTAssertTrue(stripped.contains("localURL = cached"))
+        XCTAssertTrue(stripped.contains("episode.cachedAudioURL = cached"))
+        XCTAssertFalse(
+            stripped.contains("localURL = pinned"),
+            "SwiftData's cached URL is a mirror, not an authority that may bypass manager hash/path selection"
+        )
     }
 }

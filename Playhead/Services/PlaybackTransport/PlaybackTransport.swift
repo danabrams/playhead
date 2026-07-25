@@ -107,12 +107,54 @@ final class PlaybackService: NSObject, Sendable {
     /// sleeper in the serial perf pass (PerfGate / scripts/perf-tests.sh).
     private let transitionSleeper: @Sendable (Duration) async -> Void
 
+    /// Injectable item-seek seam. Production delegates to AVPlayerItem and
+    /// preserves its completion result; tests can suspend or cancel the
+    /// operation to prove stale/cancelled seeks cannot publish a position
+    /// after actor reentrancy.
+    private let itemSeekOperation:
+        @Sendable (AVPlayerItem, CMTime) async -> Bool
+    #if DEBUG
+    private var itemSeekOperationOverrideForTesting:
+        (@Sendable (AVPlayerItem, CMTime) async -> Bool)?
+    #endif
+
     // MARK: - State
 
     private var _state = PlaybackState()
     private var skipCues: [CMTimeRange] = []
     private var isLocalAsset: Bool = false
-    private var isHandlingSkip: Bool = false
+    /// Identity and cue range that own the active duck/seek/release
+    /// transition. A unique token prevents stale deferred cleanup from
+    /// clobbering a newer transition, while the range lets Listen cancel a
+    /// merged-pod seek even when its target lies beyond the visible banner.
+    private var nextSkipTransitionToken: UInt64 = 0
+    private var activeSkipTransitionToken: UInt64?
+    private var activeSkipTransitionItemGeneration: UInt64?
+    private var activeSkipTransitionOriginalVolume: Float?
+    private var activeSkipTransitionCueStart: TimeInterval?
+    private var activeSkipTransitionTarget: TimeInterval?
+    /// Monotonically identifies the item installed by `loadPlayerItem`.
+    /// Episode-bound actions capture this before suspending and require the
+    /// same generation at the actual seek boundary.
+    private var playerItemGeneration: UInt64 = 0
+    /// Latest-wins identity for user transport seeks within one item.
+    /// Item identity alone cannot reject two overlapping seeks on the same
+    /// episode because actor reentrancy lets the older AVFoundation await
+    /// resume after the newer one.
+    private var userSeekOperationGeneration: UInt64 = 0
+    /// Stop/detach is a terminal boundary for the outgoing lock-screen card.
+    /// Keep later item-less control/KVO updates from recreating it, while
+    /// still allowing replacement metadata to opt back in before its item
+    /// finishes loading.
+    private var isNowPlayingPublicationSuppressed = false
+    /// Long-lived async notification observer owned by this transport.
+    /// Teardown cancels and joins it before returning.
+    private var interruptionObservationTask: Task<Void, Never>?
+    /// The public initializer is intentionally nonisolated so the synchronous
+    /// app runtime can construct the transport. Actor-bound setup therefore
+    /// runs in one retained task that teardown can cancel and join.
+    private nonisolated(unsafe) var setupTask: Task<Void, Never>?
+    private var isTornDown = false
 
     /// playhead-epii: rate multiplier currently applied on top of the
     /// user's `_state.playbackSpeed`. `1.0` means "no compression
@@ -188,6 +230,16 @@ final class PlaybackService: NSObject, Sendable {
         notificationCenter: NotificationCenter,
         transitionSleeper: @escaping @Sendable (Duration) async -> Void = { duration in
             try? await Task.sleep(for: duration)
+        },
+        itemSeekOperation: @escaping @Sendable (
+            AVPlayerItem,
+            CMTime
+        ) async -> Bool = { item, target in
+            await item.seek(
+                to: target,
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
         }
     ) {
         let player = AVPlayer()
@@ -197,6 +249,7 @@ final class PlaybackService: NSObject, Sendable {
         self.nowPlayingInfo = nowPlayingInfo
         self.notificationCenter = notificationCenter
         self.transitionSleeper = transitionSleeper
+        self.itemSeekOperation = itemSeekOperation
 
         super.init()
 
@@ -230,28 +283,54 @@ final class PlaybackService: NSObject, Sendable {
             }
         }
 
-        Task { @PlaybackServiceActor [self] in
+        // The designated initializer is nonisolated so PlayheadRuntime can
+        // construct the service synchronously. Retain the actor hop: teardown
+        // cancels and joins it, preventing delayed setup from reinstalling
+        // resources after teardown has removed them.
+        self.setupTask = Task { @PlaybackServiceActor [weak self] in
+            guard let self,
+                  !Task.isCancelled,
+                  !self.isTornDown
+            else {
+                return
+            }
             self.configureAudioSession()
             self.configureRemoteCommands()
-            self.startPeriodicTimeObserver()
+            self.restartPeriodicTimeObserver()
             self.observePlayerRate()
-            // Interruptions and route changes use async notification
-            // sequences so they run entirely on PlaybackServiceActor.
-            // Combine's .sink runs on the notification's posting thread
-            // (main queue), which triggers Swift 6 actor isolation
-            // assertions when accessing actor-isolated self.
+            // Interruptions use an async notification sequence, whose retained
+            // task is cancelled and joined by `tearDown()`.
             self.observeInterruptionsAsync()
-            // Route-change observer is installed synchronously above so
-            // immediate synthetic notifications cannot outrun registration.
-            // Player-item-finish observer is installed synchronously
-            // above (block-based) — no async hop needed because the
-            // re-broadcast is a pure NotificationCenter.post and does
-            // not touch actor-isolated state.
         }
     }
 
     /// Tear down observers and streams. Call before releasing the service.
-    func tearDown() {
+    func tearDown() async {
+        guard !isTornDown else { return }
+        isTornDown = true
+        let pendingSetupTask = setupTask
+        pendingSetupTask?.cancel()
+        setupTask = nil
+        await pendingSetupTask?.value
+        let interruptionTask = interruptionObservationTask
+        interruptionTask?.cancel()
+        interruptionObservationTask = nil
+        cancelActiveSkipTransition()
+        playerItemGeneration &+= 1
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        playerItem = nil
+        isNowPlayingPublicationSuppressed = true
+        nowPlayingInfo.setNowPlayingInfo(nil)
+        skipCues.removeAll()
+        // KVO delivery is asynchronous. Once teardown has marked the service
+        // terminal, rate/item callbacks are ignored, so publish the matching
+        // stopped transport state explicitly instead of depending on a final
+        // `player.rate == 0` callback that may already be queued.
+        // Do not yield another value here: teardown's stream contract is to
+        // finish existing observers immediately after their current snapshot.
+        _state.status = .paused
+        _state.rate = 0
         if let token = timeObserverToken {
             player.removeTimeObserver(token)
             timeObserverToken = nil
@@ -271,6 +350,7 @@ final class PlaybackService: NSObject, Sendable {
             continuation.finish()
         }
         stateObservers.removeAll()
+        await interruptionTask?.value
     }
 
     // MARK: - Audio Session
@@ -292,6 +372,10 @@ final class PlaybackService: NSObject, Sendable {
     ///   - url: Remote or local audio URL.
     ///   - startPosition: Resume position in seconds (0 for start).
     func load(url: URL, startPosition: TimeInterval = 0) async {
+        // Runtime shutdown cancels its prefetch task without joining it. That
+        // task can therefore arrive here after `tearDown()` has removed every
+        // observer and player item; never let a stale load resurrect them.
+        guard !isTornDown else { return }
         // Determine if this is a local file.
         isLocalAsset = url.isFileURL
 
@@ -310,6 +394,7 @@ final class PlaybackService: NSObject, Sendable {
     /// the loader on this actor (which causes executor conflicts during
     /// audio session interruptions).
     func loadItem(_ item: AVPlayerItem, startPosition: TimeInterval = 0) async {
+        guard !isTornDown else { return }
         isLocalAsset = true
         loadPlayerItem(item)
 
@@ -319,11 +404,81 @@ final class PlaybackService: NSObject, Sendable {
         }
     }
 
+    /// Installs an item only while the transport still owns the admission
+    /// generation captured at the runtime's detach boundary. This closes the
+    /// cross-actor window where an older progressive task can queue a load,
+    /// lose its runtime generation, and otherwise reinstall its item after a
+    /// newer request has detached it.
+    @discardableResult
+    func load(
+        url: URL,
+        startPosition: TimeInterval = 0,
+        ifCurrentItemGeneration expectedGeneration: UInt64
+    ) async -> Bool {
+        guard !isTornDown,
+              playerItemGeneration == expectedGeneration else {
+            return false
+        }
+        isLocalAsset = url.isFileURL
+        let item = AVPlayerItem(asset: AVURLAsset(url: url))
+        loadPlayerItem(item)
+        let installedGeneration = playerItemGeneration
+
+        if startPosition > 0 {
+            let target = CMTime(seconds: startPosition, preferredTimescale: 600)
+            await player.currentItem?.seek(
+                to: target,
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+        }
+        return !isTornDown
+            && playerItemGeneration == installedGeneration
+            && playerItem === item
+            && player.currentItem === item
+    }
+
+    @discardableResult
+    func loadItem(
+        _ item: AVPlayerItem,
+        startPosition: TimeInterval = 0,
+        ifCurrentItemGeneration expectedGeneration: UInt64
+    ) async -> Bool {
+        guard !isTornDown,
+              playerItemGeneration == expectedGeneration else {
+            return false
+        }
+        isLocalAsset = true
+        loadPlayerItem(item)
+        let installedGeneration = playerItemGeneration
+
+        if startPosition > 0 {
+            let target = CMTime(seconds: startPosition, preferredTimescale: 600)
+            await player.currentItem?.seek(
+                to: target,
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+        }
+        return !isTornDown
+            && playerItemGeneration == installedGeneration
+            && playerItem === item
+            && player.currentItem === item
+    }
+
     private func loadPlayerItem(_ item: AVPlayerItem) {
+        guard !isTornDown else { return }
+        // Invalidate any suspended duck/seek owned by the prior item before
+        // replacing it. The old seek may already be inside AVFoundation; its
+        // token checks will reject the completion after this synchronous clear.
+        cancelActiveSkipTransition()
+        playerItemGeneration &+= 1
+        userSeekOperationGeneration &+= 1
+        isNowPlayingPublicationSuppressed = false
         playerItem = item
 
         itemStatusObservation?.invalidate()
-        let block = makeItemStatusBlock()
+        let block = makeItemStatusBlock(itemGeneration: playerItemGeneration)
         itemStatusObservation = item.observe(\.status, options: [.new], changeHandler: block)
 
         // playhead-epii: a new item carries the platform default
@@ -339,28 +494,57 @@ final class PlaybackService: NSObject, Sendable {
 
         updateState { $0.status = .loading }
         player.replaceCurrentItem(with: item)
+        observePlayerRate()
+        restartPeriodicTimeObserver()
     }
 
     /// Non-isolated so the closure avoids actor-executor crashes at call site.
-    private nonisolated func makeItemStatusBlock()
+    private nonisolated func makeItemStatusBlock(itemGeneration: UInt64)
         -> @Sendable (AVPlayerItem, NSKeyValueObservedChange<AVPlayerItem.Status>) -> Void
     {
         { [weak self] item, _ in
             guard let self else { return }
             Task { @PlaybackServiceActor in
-                self.handleItemStatusChange(item)
+                self.handleItemStatusChange(
+                    item,
+                    expectedGeneration: itemGeneration
+                )
             }
         }
     }
 
-    private func handleItemStatusChange(_ item: AVPlayerItem) {
-        switch item.status {
+    private func handleItemStatusChange(
+        _ item: AVPlayerItem,
+        expectedGeneration: UInt64
+    ) {
+        applyItemStatusChange(
+            item.status,
+            duration: CMTimeGetSeconds(item.duration),
+            failureMessage: item.error?.localizedDescription,
+            for: item,
+            expectedGeneration: expectedGeneration
+        )
+    }
+
+    private func applyItemStatusChange(
+        _ status: AVPlayerItem.Status,
+        duration: TimeInterval,
+        failureMessage: String?,
+        for item: AVPlayerItem,
+        expectedGeneration: UInt64
+    ) {
+        guard !isTornDown,
+              playerItemGeneration == expectedGeneration,
+              playerItem === item,
+              player.currentItem === item else {
+            return
+        }
+
+        switch status {
         case .readyToPlay:
-            let duration = CMTimeGetSeconds(item.duration)
             applyReadyToPlayState(duration: duration)
         case .failed:
-            let msg = item.error?.localizedDescription ?? "unknown"
-            updateState { $0.status = .failed(msg) }
+            updateState { $0.status = .failed(failureMessage ?? "unknown") }
         case .unknown:
             break
         @unknown default:
@@ -371,7 +555,7 @@ final class PlaybackService: NSObject, Sendable {
     // MARK: - Transport Controls
 
     func play() {
-        guard playerItem != nil else { return }
+        guard !isTornDown, playerItem != nil else { return }
         // playhead-epii: factor in any active compression multiplier so
         // resuming inside a compressed region doesn't snap to base
         // speed for one observer cycle. Clamp identically to the
@@ -386,9 +570,54 @@ final class PlaybackService: NSObject, Sendable {
     }
 
     func pause() {
+        guard !isTornDown else { return }
         player.pause()
         updateState { $0.status = .paused }
         updateNowPlayingInfo()
+    }
+
+    /// Pause and synchronously detach the installed item.
+    ///
+    /// Replacement and Stop release progressive-loader ownership immediately
+    /// after this boundary. Merely pausing leaves the old item resumable by a
+    /// remote Play command after its backing transfer has been cancelled.
+    /// Invalidating the item generation also rejects any suspended seek or KVO
+    /// completion owned by the detached episode.
+    func pauseAndDetachCurrentItem(
+        preservingPosition: Bool = false,
+        force: Bool = true
+    ) -> UInt64? {
+        guard !isTornDown else { return nil }
+        guard force || playerItem != nil || player.currentItem != nil else {
+            return playerItemGeneration
+        }
+        cancelActiveSkipTransition()
+        playerItemGeneration &+= 1
+        rateObservation?.invalidate()
+        rateObservation = nil
+        player.pause()
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
+        player.replaceCurrentItem(with: nil)
+        playerItem = nil
+        isNowPlayingPublicationSuppressed = true
+        skipCues.removeAll()
+        compressionMultiplier = 1
+        currentTimePitchAlgorithm = .spectral
+        if let token = timeObserverToken {
+            player.removeTimeObserver(token)
+            timeObserverToken = nil
+        }
+        updateState {
+            $0.status = .paused
+            $0.rate = 0
+            if !preservingPosition {
+                $0.currentTime = 0
+                $0.duration = 0
+            }
+        }
+        nowPlayingInfo.setNowPlayingInfo(nil)
+        return playerItemGeneration
     }
 
     func togglePlayPause() {
@@ -404,11 +633,29 @@ final class PlaybackService: NSObject, Sendable {
         _state
     }
 
+    /// Returns transport state together with the identity of the installed
+    /// player item. The pair is captured in one actor turn.
+    func snapshotWithItemGeneration() -> (
+        state: PlaybackState,
+        itemGeneration: UInt64
+    ) {
+        (_state, playerItemGeneration)
+    }
+
     /// Subscribe to playback state with immediate hydration.
     /// This avoids remount bugs where a late subscriber sees defaults until the
     /// next transport event arrives.
     func observeStates() -> AsyncStream<PlaybackState> {
         AsyncStream { continuation in
+            // Teardown is terminal. A subscriber that attaches after that
+            // boundary still receives the final snapshot promised by the
+            // hydration contract, but its stream must finish immediately
+            // instead of being retained forever with no possible producer.
+            if isTornDown {
+                continuation.yield(_state)
+                continuation.finish()
+                return
+            }
             let id = UUID()
             stateObservers[id] = continuation
             continuation.yield(_state)
@@ -421,13 +668,77 @@ final class PlaybackService: NSObject, Sendable {
     }
 
     /// Seek to an absolute position in seconds.
-    func seek(to seconds: TimeInterval) async {
-        let target = CMTime(seconds: seconds, preferredTimescale: 600)
-        await player.currentItem?.seek(
-            to: target, toleranceBefore: .zero, toleranceAfter: .zero
+    private func performItemSeek(
+        _ item: AVPlayerItem,
+        target: CMTime
+    ) async -> Bool {
+        #if DEBUG
+        if let itemSeekOperationOverrideForTesting {
+            return await itemSeekOperationOverrideForTesting(item, target)
+        }
+        #endif
+        return await itemSeekOperation(item, target)
+    }
+
+    /// Seek to an absolute position in seconds.
+    @discardableResult
+    func seek(to seconds: TimeInterval) async -> Bool {
+        guard !isTornDown else { return false }
+        // Preserve the transport's deterministic state-seam contract when no
+        // AVPlayer item is installed. Playback reliability tests and preview
+        // callers intentionally drive the state machine without decoded
+        // media; there is no item identity that can become stale in this path.
+        guard player.currentItem != nil else {
+            userSeekOperationGeneration &+= 1
+            updateState { $0.currentTime = seconds }
+            updateNowPlayingInfo()
+            return true
+        }
+        return await seek(
+            to: seconds,
+            ifCurrentItemGeneration: playerItemGeneration
         )
+    }
+
+    /// Seek only if the item installed when the caller captured its transport
+    /// context is still current. The identity check after `await` is
+    /// load-bearing: `AVPlayerItem.seek` suspends this actor, allowing a new
+    /// episode to replace the item before the old seek resumes.
+    @discardableResult
+    func seek(
+        to seconds: TimeInterval,
+        ifCurrentItemGeneration expectedGeneration: UInt64
+    ) async -> Bool {
+        guard !isTornDown,
+              playerItemGeneration == expectedGeneration,
+              let item = player.currentItem,
+              playerItem === item else {
+            return false
+        }
+        userSeekOperationGeneration &+= 1
+        let seekGeneration = userSeekOperationGeneration
+
+        // A user transport seek owns the item once it starts. Retire any
+        // in-flight automatic transition synchronously first so a subsequent
+        // cue removal cannot call cancelPendingSeeks() against this newer
+        // seek. The active transition's completion is already token-guarded.
+        cancelActiveSkipTransition()
+        // A newer user seek supersedes any older pending user seek on this
+        // same item. The generation check below remains the authoritative
+        // state-publication fence for injected/non-cancellable operations.
+        item.cancelPendingSeeks()
+        let target = CMTime(seconds: seconds, preferredTimescale: 600)
+        let completed = await performItemSeek(item, target: target)
+        guard completed,
+              userSeekOperationGeneration == seekGeneration,
+              playerItemGeneration == expectedGeneration,
+              player.currentItem === item,
+              playerItem === item else {
+            return false
+        }
         updateState { $0.currentTime = seconds }
         updateNowPlayingInfo()
+        return true
     }
 
     /// Skip forward by the given number of seconds (default 30).
@@ -453,6 +764,7 @@ final class PlaybackService: NSObject, Sendable {
     /// inside a 2.5× compressed music bed at the time. The compressor
     /// will re-engage on the next lookahead tick if appropriate.
     func setSpeed(_ speed: Float) {
+        guard !isTornDown else { return }
         let clamped = min(max(speed, Self.minSpeed), Self.maxSpeed)
         _state.playbackSpeed = clamped
         compressionMultiplier = 1.0
@@ -484,6 +796,7 @@ final class PlaybackService: NSObject, Sendable {
         multiplier: Float,
         algorithm: AVAudioTimePitchAlgorithm
     ) {
+        guard !isTornDown else { return }
         let clampedMultiplier = max(1.0, multiplier)
         guard
             clampedMultiplier != compressionMultiplier
@@ -500,7 +813,7 @@ final class PlaybackService: NSObject, Sendable {
     /// base speed (not the pre-compression base) — `setSpeed` already
     /// stamped the new value into `_state.playbackSpeed`.
     func endCompression() {
-        guard
+        guard !isTornDown,
             compressionMultiplier != 1.0
                 || currentTimePitchAlgorithm != .spectral
         else { return }
@@ -544,20 +857,105 @@ final class PlaybackService: NSObject, Sendable {
     /// Accept skip cue ranges from SkipOrchestrator.
     /// When playback enters a cue range, the service performs a smooth skip.
     func setSkipCues(_ cues: [CMTimeRange]) {
+        guard !isTornDown else { return }
         skipCues = cues
+        guard let activeStart = activeSkipTransitionCueStart,
+              let activeEnd = activeSkipTransitionTarget
+        else {
+            return
+        }
+
+        // A transition is claimed synchronously when the periodic observer
+        // enters a cue, then executed by a queued Task. An eligibility flip,
+        // episode clear, or cue recomputation can remove/replace that range
+        // before the Task starts. Keep the reservation only while the exact
+        // owning cue remains armed; otherwise the stale seek must be canceled.
+        let stillArmed = cues.contains { cue in
+            let cueStart = CMTimeGetSeconds(cue.start)
+            let cueEnd = CMTimeGetSeconds(CMTimeRangeGetEnd(cue))
+            return abs(cueStart - activeStart) <= 0.001
+                && abs(cueEnd - activeEnd) <= 0.001
+        }
+        if !stillArmed {
+            cancelActiveSkipTransition()
+        }
+    }
+
+    /// Synchronously disarms any currently-installed cue overlapping the
+    /// user's restored banner span. The full span matters when edge padding
+    /// moves a cue's start later than the banner's rewind target.
+    func disarmSkipCues(overlappingStart start: TimeInterval, end: TimeInterval) {
+        guard !isTornDown else { return }
+        skipCues.removeAll { cue in
+            let cueStart = CMTimeGetSeconds(cue.start)
+            let cueEnd = CMTimeGetSeconds(CMTimeRangeGetEnd(cue))
+            return cueStart < end && cueEnd > start
+        }
+        if let cueStart = activeSkipTransitionCueStart,
+           let cueEnd = activeSkipTransitionTarget,
+           cueStart < end,
+           cueEnd > start {
+            cancelActiveSkipTransition()
+        }
+    }
+
+    /// Item-bound form for deferred banner actions. A runtime episode check
+    /// performed before this actor hop is not enough: the player item can be
+    /// replaced before the hop executes. Reject the stale disarm rather than
+    /// removing cues or canceling a transition owned by the replacement item.
+    @discardableResult
+    func disarmSkipCues(
+        overlappingStart start: TimeInterval,
+        end: TimeInterval,
+        ifCurrentItemGeneration expectedGeneration: UInt64
+    ) -> Bool {
+        guard !isTornDown,
+              playerItemGeneration == expectedGeneration else {
+            return false
+        }
+        disarmSkipCues(overlappingStart: start, end: end)
+        return playerItemGeneration == expectedGeneration
+    }
+
+    /// Cancels the actor-owned half of a reserved transition and restores the
+    /// shared player immediately. Any already-suspended seek completion sees
+    /// the cleared token and cannot publish position or volume afterward.
+    private func cancelActiveSkipTransition() {
+        guard activeSkipTransitionToken != nil else { return }
+        player.currentItem?.cancelPendingSeeks()
+        if let originalVolume = activeSkipTransitionOriginalVolume {
+            player.volume = originalVolume
+        }
+        activeSkipTransitionToken = nil
+        activeSkipTransitionItemGeneration = nil
+        activeSkipTransitionOriginalVolume = nil
+        activeSkipTransitionCueStart = nil
+        activeSkipTransitionTarget = nil
     }
 
     /// Check if current time has entered a skip cue and handle it.
     private func checkSkipCues(currentTime: CMTime) {
-        guard !isHandlingSkip, !skipCues.isEmpty else { return }
+        guard activeSkipTransitionToken == nil,
+              !skipCues.isEmpty
+        else {
+            return
+        }
 
         let currentSeconds = CMTimeGetSeconds(currentTime)
         for cue in skipCues {
             let start = CMTimeGetSeconds(cue.start)
             let end = CMTimeGetSeconds(CMTimeRangeGetEnd(cue))
             if currentSeconds >= start, currentSeconds < end {
+                guard let transitionToken = reserveSkipTransition(
+                    to: end,
+                    cueStart: start
+                ) else {
+                    return
+                }
                 Task { @PlaybackServiceActor in
-                    await self.performSkipTransition(to: end)
+                    await self.performReservedSkipTransition(
+                        transitionToken: transitionToken
+                    )
                 }
                 return
             }
@@ -565,78 +963,241 @@ final class PlaybackService: NSObject, Sendable {
     }
 
     /// Perform a perceptually clean skip transition: duck volume, seek, release.
-    private func performSkipTransition(to targetSeconds: TimeInterval) async {
-        guard !isHandlingSkip else { return }
-        isHandlingSkip = true
-        defer { isHandlingSkip = false }
+    private func performSkipTransition(
+        to targetSeconds: TimeInterval,
+        cueStart: TimeInterval
+    ) async {
+        guard let transitionToken = reserveSkipTransition(
+            to: targetSeconds,
+            cueStart: cueStart
+        ) else {
+            return
+        }
+        await performReservedSkipTransition(
+            transitionToken: transitionToken
+        )
+    }
 
-        await duckSeekRelease(to: targetSeconds)
+    /// Claims the transition synchronously with cue detection. Listen can then
+    /// invalidate the claim before the unstructured async task begins, so
+    /// queued work cannot resurrect a cue that was already disarmed.
+    private func reserveSkipTransition(
+        to targetSeconds: TimeInterval,
+        cueStart: TimeInterval
+    ) -> UInt64? {
+        guard activeSkipTransitionToken == nil else { return nil }
+        let transitionGeneration = playerItemGeneration
+        let originalVolume = player.volume
+        nextSkipTransitionToken &+= 1
+        let transitionToken = nextSkipTransitionToken
+        activeSkipTransitionToken = transitionToken
+        activeSkipTransitionItemGeneration = transitionGeneration
+        activeSkipTransitionOriginalVolume = originalVolume
+        activeSkipTransitionCueStart = cueStart
+        activeSkipTransitionTarget = targetSeconds
+        return transitionToken
+    }
+
+    /// Executes a previously claimed transition. Every field is re-read from
+    /// the active reservation so a replacement item or Listen disarm that ran
+    /// after detection makes this queued task a no-op.
+    private func performReservedSkipTransition(
+        transitionToken: UInt64
+    ) async {
+        guard activeSkipTransitionToken == transitionToken,
+              let transitionGeneration =
+                activeSkipTransitionItemGeneration,
+              let originalVolume = activeSkipTransitionOriginalVolume,
+              let targetSeconds = activeSkipTransitionTarget
+        else {
+            return
+        }
+        let transitionItem = player.currentItem
+        defer {
+            if activeSkipTransitionToken == transitionToken {
+                activeSkipTransitionToken = nil
+                activeSkipTransitionItemGeneration = nil
+                activeSkipTransitionOriginalVolume = nil
+                activeSkipTransitionCueStart = nil
+                activeSkipTransitionTarget = nil
+            }
+        }
+
+        await duckSeekRelease(
+            to: targetSeconds,
+            item: transitionItem,
+            expectedGeneration: transitionGeneration,
+            transitionToken: transitionToken,
+            originalVolume: originalVolume
+        )
     }
 
     /// Duck volume, seek precisely, then restore volume.
-    private func duckSeekRelease(to seconds: TimeInterval) async {
-        let originalVolume = player.volume
-
+    private func duckSeekRelease(
+        to seconds: TimeInterval,
+        item: AVPlayerItem?,
+        expectedGeneration: UInt64,
+        transitionToken: UInt64,
+        originalVolume: Float
+    ) async {
         // Duck
         player.volume = Self.duckVolume
 
         // Seek
         let target = CMTime(seconds: seconds, preferredTimescale: 600)
-        await player.currentItem?.seek(
-            to: target, toleranceBefore: .zero, toleranceAfter: .zero
-        )
+        if let item {
+            let completed = await performItemSeek(item, target: target)
+            guard completed else {
+                // A failed seek leaves the same transition alive but has
+                // already passed the duck. Release only when this token still
+                // owns the current item; replacement/disarm paths restore the
+                // captured volume while invalidating the token and must not be
+                // overwritten by this stale completion.
+                if isCurrentSkipTransition(
+                    item: item,
+                    expectedGeneration: expectedGeneration,
+                    transitionToken: transitionToken
+                ) {
+                    player.volume = originalVolume
+                    activeSkipTransitionOriginalVolume = nil
+                }
+                return
+            }
+            guard isCurrentSkipTransition(
+                item: item,
+                expectedGeneration: expectedGeneration,
+                transitionToken: transitionToken
+            ) else {
+                return
+            }
+        }
 
         // Brief pause for the seek to settle, then release. Routed
         // through the injectable sleeper seam (playhead-m9xk); the
         // production default performs the identical
         // `try? await Task.sleep(for:)` this line previously inlined.
         await transitionSleeper(.milliseconds(Int(Self.duckDuration * 1000)))
+        if let item {
+            guard isCurrentSkipTransition(
+                item: item,
+                expectedGeneration: expectedGeneration,
+                transitionToken: transitionToken
+            ) else {
+                return
+            }
+        } else {
+            guard playerItemGeneration == expectedGeneration,
+                  player.currentItem == nil,
+                  activeSkipTransitionToken == transitionToken,
+                  activeSkipTransitionItemGeneration
+                    == expectedGeneration
+            else {
+                return
+            }
+        }
 
         // Restore volume
         player.volume = originalVolume
+        activeSkipTransitionOriginalVolume = nil
 
         updateState { $0.currentTime = seconds }
         updateNowPlayingInfo()
     }
 
+    private func isCurrentSkipTransition(
+        item: AVPlayerItem,
+        expectedGeneration: UInt64,
+        transitionToken: UInt64
+    ) -> Bool {
+        playerItemGeneration == expectedGeneration
+            && activeSkipTransitionToken == transitionToken
+            && activeSkipTransitionItemGeneration
+                == expectedGeneration
+            && player.currentItem === item
+            && playerItem === item
+    }
+
     // MARK: - Time Observer
 
-    private func startPeriodicTimeObserver() {
+    private func restartPeriodicTimeObserver() {
+        if let token = timeObserverToken {
+            player.removeTimeObserver(token)
+            timeObserverToken = nil
+        }
         let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
-        let block = makeTimeObserverBlock()
+        let item = player.currentItem
+        let itemGeneration = playerItemGeneration
+        let block = makeTimeObserverBlock(
+            item: item,
+            itemGeneration: itemGeneration
+        )
         timeObserverToken = player.addPeriodicTimeObserver(
             forInterval: interval, queue: nil, using: block
         )
     }
 
     /// Non-isolated so the closure avoids actor-executor crashes at call site.
-    private nonisolated func makeTimeObserverBlock() -> @Sendable (CMTime) -> Void {
+    private nonisolated func makeTimeObserverBlock(
+        item: AVPlayerItem?,
+        itemGeneration: UInt64
+    ) -> @Sendable (CMTime) -> Void {
         { [weak self] time in
             guard let self else { return }
             Task { @PlaybackServiceActor in
-                let seconds = CMTimeGetSeconds(time)
-                guard seconds.isFinite else { return }
-                self.updateState { $0.currentTime = seconds }
-                self.checkSkipCues(currentTime: time)
+                self.handlePeriodicTime(
+                    time,
+                    for: item,
+                    expectedGeneration: itemGeneration
+                )
             }
         }
+    }
+
+    private func handlePeriodicTime(
+        _ time: CMTime,
+        for item: AVPlayerItem?,
+        expectedGeneration: UInt64
+    ) {
+        guard !isTornDown,
+              playerItemGeneration == expectedGeneration else { return }
+        if let item {
+            guard player.currentItem === item,
+                  playerItem === item
+            else {
+                return
+            }
+        } else {
+            guard player.currentItem == nil else { return }
+        }
+        let seconds = CMTimeGetSeconds(time)
+        guard seconds.isFinite else { return }
+        updateState { $0.currentTime = seconds }
+        checkSkipCues(currentTime: time)
     }
 
     // MARK: - Rate Observation
 
     private func observePlayerRate() {
-        let block = makeRateObserverBlock()
+        rateObservation?.invalidate()
+        let itemGeneration = playerItemGeneration
+        let block = makeRateObserverBlock(itemGeneration: itemGeneration)
         rateObservation = player.observe(\.rate, options: [.new], changeHandler: block)
     }
 
     /// Non-isolated so the closure avoids actor-executor crashes at call site.
-    private nonisolated func makeRateObserverBlock()
+    private nonisolated func makeRateObserverBlock(
+        itemGeneration: UInt64
+    )
         -> @Sendable (AVPlayer, NSKeyValueObservedChange<Float>) -> Void
     {
-        { [weak self] player, _ in
+        { [weak self] player, change in
             guard let self else { return }
+            let rate = change.newValue ?? player.rate
             Task { @PlaybackServiceActor in
-                self.applyObservedRate(player.rate)
+                self.applyObservedRate(
+                    rate,
+                    expectedGeneration: itemGeneration
+                )
             }
         }
     }
@@ -649,12 +1210,14 @@ final class PlaybackService: NSObject, Sendable {
     /// closure accesses actor-isolated self from the main queue.
     private func observeInterruptionsAsync() {
         let center = notificationCenter
-        Task { @PlaybackServiceActor [weak self] in
+        interruptionObservationTask?.cancel()
+        interruptionObservationTask = Task { [weak self] in
             let notifications = center.notifications(
                 named: AVAudioSession.interruptionNotification
             )
             for await notification in notifications {
-                guard let self else { break }
+                guard !Task.isCancelled, let self else { break }
+                guard !self.isTornDown else { break }
                 guard let info = notification.userInfo,
                       let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
                       let type = AVAudioSession.InterruptionType(rawValue: typeValue)
@@ -680,7 +1243,8 @@ final class PlaybackService: NSObject, Sendable {
     // MARK: - Route Changes
 
     private func handleRouteChange(reasonValue: UInt?) {
-        guard let reasonValue,
+        guard !isTornDown,
+              let reasonValue,
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue)
         else { return }
 
@@ -695,6 +1259,10 @@ final class PlaybackService: NSObject, Sendable {
     // MARK: - Now Playing Info Center
 
     private func updateNowPlayingInfo() {
+        guard !isNowPlayingPublicationSuppressed else {
+            nowPlayingInfo.setNowPlayingInfo(nil)
+            return
+        }
         var info = nowPlayingInfo.getNowPlayingInfo() ?? [:]
         info[MPMediaItemPropertyPlaybackDuration] = _state.duration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = _state.currentTime
@@ -710,6 +1278,8 @@ final class PlaybackService: NSObject, Sendable {
         albumTitle: String? = nil,
         artworkImage: UIImage? = nil
     ) {
+        guard !isTornDown else { return }
+        isNowPlayingPublicationSuppressed = false
         var info = nowPlayingInfo.getNowPlayingInfo() ?? [:]
         info[MPMediaItemPropertyTitle] = title
         if let artist { info[MPMediaItemPropertyArtist] = artist }
@@ -761,7 +1331,18 @@ final class PlaybackService: NSObject, Sendable {
         updateNowPlayingInfo()
     }
 
-    private func applyObservedRate(_ rate: Float) {
+    private func applyObservedRate(
+        _ rate: Float,
+        expectedGeneration: UInt64? = nil
+    ) {
+        guard !isTornDown else { return }
+        if let expectedGeneration {
+            guard playerItemGeneration == expectedGeneration,
+                  playerItem != nil,
+                  player.currentItem != nil else {
+                return
+            }
+        }
         updateState {
             $0.rate = rate
             switch $0.status {
@@ -775,7 +1356,9 @@ final class PlaybackService: NSObject, Sendable {
                 break
             }
         }
-        updateNowPlayingInfo()
+        if playerItem != nil, player.currentItem != nil {
+            updateNowPlayingInfo()
+        }
     }
 
     private func updateState(_ mutate: (inout PlaybackState) -> Void) {
@@ -802,12 +1385,78 @@ final class PlaybackService: NSObject, Sendable {
         applyObservedRate(rate)
     }
 
+    func _testingApplyObservedRate(
+        _ rate: Float,
+        expectedGeneration: UInt64
+    ) {
+        applyObservedRate(
+            rate,
+            expectedGeneration: expectedGeneration
+        )
+    }
+
+    /// Delivers a captured item-status callback payload after a test-controlled
+    /// delay. This models a KVO callback that was queued before the item was
+    /// replaced but entered the playback actor afterward.
+    func _testingDeliverItemStatus(
+        _ status: AVPlayerItem.Status,
+        duration: TimeInterval,
+        for item: AVPlayerItem,
+        expectedGeneration: UInt64
+    ) {
+        applyItemStatusChange(
+            status,
+            duration: duration,
+            failureMessage: nil,
+            for: item,
+            expectedGeneration: expectedGeneration
+        )
+    }
+
+    /// Delivers a captured periodic-time callback after replacement.
+    func _testingDeliverPeriodicTime(
+        _ time: CMTime,
+        for item: AVPlayerItem,
+        expectedGeneration: UInt64
+    ) {
+        handlePeriodicTime(
+            time,
+            for: item,
+            expectedGeneration: expectedGeneration
+        )
+    }
+
     /// Test-only hook that drives the skip-cue duck/seek/release path
     /// without needing the periodic time observer to hit the cue
     /// naturally. Used by `SkipCueSmoothingTests` (playhead-456) to
     /// measure transition wall-clock latency.
     func _testingPerformSkipTransition(to seconds: TimeInterval) async {
-        await performSkipTransition(to: seconds)
+        await performSkipTransition(to: seconds, cueStart: seconds)
+    }
+
+    /// Test-only range-aware hook for merged-cue Listen cancellation.
+    func _testingPerformSkipTransition(
+        cueStart: TimeInterval,
+        cueEnd: TimeInterval
+    ) async {
+        await performSkipTransition(to: cueEnd, cueStart: cueStart)
+    }
+
+    /// Test-only split-phase hooks for the detect → Listen → queued-execute
+    /// ordering that the production periodic observer can encounter.
+    func _testingReserveSkipTransition(
+        cueStart: TimeInterval,
+        cueEnd: TimeInterval
+    ) -> UInt64? {
+        reserveSkipTransition(to: cueEnd, cueStart: cueStart)
+    }
+
+    func _testingExecuteReservedSkipTransition(
+        transitionToken: UInt64
+    ) async {
+        await performReservedSkipTransition(
+            transitionToken: transitionToken
+        )
     }
 
     /// Test-only accessor for the currently-armed skip cue ranges.
@@ -821,6 +1470,13 @@ final class PlaybackService: NSObject, Sendable {
     /// the injected sleeper, the volume must read `Self.duckVolume`;
     /// after release it must be restored.
     var _testingPlayerVolume: Float { player.volume }
+
+    /// Teardown ownership probes. Both references must be cleared before
+    /// teardown returns so neither AVPlayer nor the transport can keep the
+    /// replaced episode alive.
+    var _testingHasPlayerItem: Bool { playerItem != nil }
+    var _testingHasCurrentPlayerItem: Bool { player.currentItem != nil }
+    var _testingIsTornDown: Bool { isTornDown }
 
     /// Test-only mirror of the production duck level so ordering tests
     /// compare against the real constant instead of a copied literal.
@@ -837,9 +1493,27 @@ final class PlaybackService: NSObject, Sendable {
     /// itemStatusObservation is not wired up — so no KVO fires and
     /// `_state.status` is not overwritten.
     func _testingInstallStubPlayerItem() {
+        isNowPlayingPublicationSuppressed = false
         playerItem = AVPlayerItem(asset: AVURLAsset(
             url: URL(string: "playhead-progressive://stub/sentinel.mp3")!
         ))
+    }
+
+    /// Installs the sentinel in both ownership slots without KVO so lifecycle
+    /// tests can verify synchronous detachment from AVPlayer itself.
+    func _testingInstallStubCurrentPlayerItem() {
+        isNowPlayingPublicationSuppressed = false
+        let item = AVPlayerItem(asset: AVURLAsset(
+            url: URL(string: "playhead-progressive://stub/current.mp3")!
+        ))
+        playerItem = item
+        player.replaceCurrentItem(with: item)
+    }
+
+    func _testingSetItemSeekOperation(
+        _ operation: (@Sendable (AVPlayerItem, CMTime) async -> Bool)?
+    ) {
+        itemSeekOperationOverrideForTesting = operation
     }
 #endif
 }

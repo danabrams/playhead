@@ -458,6 +458,16 @@ struct ResumeSuspendedTransferTests {
         // skipped by the existence check.
         let leftover = await manager.completeFileURL(for: episodeId)
         try Data(repeating: 0x11, count: 40).write(to: leftover)
+        await manager._setExtensionCacheForTesting(
+            episodeId: episodeId,
+            fileExtension: "m4a"
+        )
+        let sibling = await manager.completeFileURL(for: episodeId)
+        try Data(repeating: 0x22, count: 50).write(to: sibling)
+        await manager._setExtensionCacheForTesting(
+            episodeId: episodeId,
+            fileExtension: "mp3"
+        )
         await manager.writePin(
             AudioAssetPin(expectedBytes: 100, sha256: nil, sourceURL: nil, etag: nil),
             for: episodeId
@@ -474,6 +484,10 @@ struct ResumeSuspendedTransferTests {
         // The incomplete leftover + its stale pin were cleared so the fresh
         // download is not skipped by the existence check.
         #expect(!FileManager.default.fileExists(atPath: leftover.path))
+        #expect(
+            !FileManager.default.fileExists(atPath: sibling.path),
+            "Fresh recovery must purge every extension sibling for the canonical episode"
+        )
         #expect(await manager.loadPin(for: episodeId) == nil)
 
         await manager.invalidateBackgroundSessionsForTesting()
@@ -583,11 +597,11 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        // Real manager so the delegate's onResumeDataHarvested callback
-        // is wired to the real `persistResumeData` actor path. This is
-        // the whole point of the bead — we must hit the directory write
-        // so we catch any future directory-path regression.
-        let manager = DownloadManager(cacheDirectory: dir)
+        let recorder = HyhtRecorder()
+        let manager = DownloadManager(
+            cacheDirectory: dir,
+            workJournalRecorder: recorder
+        )
         try await manager.bootstrap()
 
         let delegate = await manager.sessionDelegateForTesting()
@@ -602,35 +616,30 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
             ]
         )
 
-        // playhead-vsot round 3: event-driven instead of a 2 s
-        // `pollUntil` deadline (the same short-wall-clock class that
-        // flaked the interruption/route-change/scan families under the
-        // parallel gate — the harvest's persist Task can be starved past
-        // 2 s). Chain the delegate's `onResumeDataHarvested`: the
-        // production closure (wired in `DownloadManager.init`) still runs
-        // and persists — proving the init wiring — and our wrapper awaits
-        // an idempotent persist round-trip so it can signal true
-        // completion. `persistResumeData` overwrites with identical
-        // bytes, so the double write is a no-op on the observable state.
-        // No deadline; the `.timeLimit` trait is the hang backstop.
-        let persisted = TestEventCounter()
-        let productionHarvest = delegate.onResumeDataHarvested
-        // playhead-wrj8: closure widened to carry the source URL + HTTP
-        // validator harvested off the task; forward them through.
-        delegate.onResumeDataHarvested = { episodeId, data, sourceURL, metadata in
-            productionHarvest?(episodeId, data, sourceURL, metadata)
-            Task {
-                try? await manager.persistResumeData(
-                    episodeId: episodeId, data: data, sourceURL: sourceURL, validator: metadata
-                )
-                persisted.increment()
-            }
-        }
-
         let task = G2wqStubTask(taskDescription: "ep-g2wq-harvest")
+        let identity = BackgroundTransferIdentity(
+            sessionIdentifier: URLSession.shared.configuration.identifier ?? "",
+            taskIdentifier: task.taskIdentifier
+        )
+        await manager._registerBackgroundTransferForTesting(
+            episodeId: "ep-g2wq-harvest",
+            identity: identity
+        )
         delegate.urlSession(URLSession.shared, task: task, didCompleteWithError: cancelError)
 
-        await persisted.wait(for: 1)
+        #expect(
+            try await pollUntil {
+                let stored = try await manager.loadResumeData(
+                    episodeId: "ep-g2wq-harvest"
+                )
+                let inFlight =
+                    await manager._isBackgroundDownloadInFlightForTesting(
+                        episodeId: "ep-g2wq-harvest"
+                    )
+                return stored == resumeBlob && !inFlight
+            },
+            "resume persistence and ownership release must complete in one actor callback"
+        )
 
         let loaded = try await manager.loadResumeData(episodeId: "ep-g2wq-harvest")
         #expect(loaded == resumeBlob)
@@ -639,6 +648,19 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         // harvested episode, proving the index file was written too.
         let ids = await manager.persistedResumeDataEpisodeIds()
         #expect(ids.contains("ep-g2wq-harvest"))
+
+        let admissions =
+            await manager._backgroundDownloadAdmissionCountForTesting()
+        await manager.backgroundDownload(
+            episodeId: "ep-g2wq-harvest",
+            from: URL(string: "https://example.invalid/retry.mp3")!
+        )
+        #expect(
+            await manager._backgroundDownloadAdmissionCountForTesting()
+                == admissions + 1,
+            "a terminal resumable failure must release the retry guard"
+        )
+        await manager.cancelDownload(episodeId: "ep-g2wq-harvest")
     }
 
     @Test("didCompleteWithError skips harvest when NSURLSessionDownloadTaskResumeData is absent")
@@ -646,7 +668,11 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let manager = DownloadManager(cacheDirectory: dir)
+        let recorder = HyhtRecorder()
+        let manager = DownloadManager(
+            cacheDirectory: dir,
+            workJournalRecorder: recorder
+        )
         try await manager.bootstrap()
 
         let delegate = await manager.sessionDelegateForTesting()
@@ -664,17 +690,42 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         )
 
         let task = G2wqStubTask(taskDescription: "ep-g2wq-no-blob")
+        let identity = BackgroundTransferIdentity(
+            sessionIdentifier: URLSession.shared.configuration.identifier ?? "",
+            taskIdentifier: task.taskIdentifier
+        )
+        await manager._registerBackgroundTransferForTesting(
+            episodeId: "ep-g2wq-no-blob",
+            identity: identity
+        )
         delegate.urlSession(URLSession.shared, task: task, didCompleteWithError: nonResumableError)
 
-        // Give any spurious async harvest Task a chance to run (it
-        // shouldn't exist), then assert nothing was persisted.
-        try await Task.sleep(for: .milliseconds(200))
+        #expect(
+            await pollUntil {
+                !(await manager._isBackgroundDownloadInFlightForTesting(
+                    episodeId: "ep-g2wq-no-blob"
+                ))
+            }
+        )
 
         let ids = await manager.persistedResumeDataEpisodeIds()
         #expect(ids.isEmpty, "Resume-data directory must remain empty when error carries no NSURLSessionDownloadTaskResumeData blob")
 
         let loaded = try await manager.loadResumeData(episodeId: "ep-g2wq-no-blob")
         #expect(loaded == nil)
+
+        let admissions =
+            await manager._backgroundDownloadAdmissionCountForTesting()
+        await manager.backgroundDownload(
+            episodeId: "ep-g2wq-no-blob",
+            from: URL(string: "https://example.invalid/retry.mp3")!
+        )
+        #expect(
+            await manager._backgroundDownloadAdmissionCountForTesting()
+                == admissions + 1,
+            "a terminal non-resumable failure must release the retry guard"
+        )
+        await manager.cancelDownload(episodeId: "ep-g2wq-no-blob")
     }
 }
 

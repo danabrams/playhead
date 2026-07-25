@@ -1318,6 +1318,140 @@ struct CorrectionReplayCandidateTests {
         #expect(afterRun2.isEmpty,
                 "in-flight tracker must be empty after a second back-to-back run; got \(afterRun2)")
     }
+
+    @Test(
+        "all four explicit banner receipt sources are excluded from correction replay"
+    )
+    func explicitBannerReceiptsNeverCreateReplayRows() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-explicit-replay-privacy"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration = 1_800.0
+        try await insertUniformFeatureGrid(
+            store: store,
+            assetId: assetId,
+            duration: duration
+        )
+        let explicitSources: [CorrectionSource] = [
+            .bannerAutoSkipConfirmed,
+            .bannerAutoSkipDenied,
+            .bannerSuggestionConfirmed,
+            .bannerSuggestionDenied,
+        ]
+        for (index, source) in explicitSources.enumerated() {
+            let start = 300.0 + Double(index * 120)
+            let producer = AdWindow(
+                id: "explicit-replay-producer-\(index)",
+                analysisAssetId: assetId,
+                startTime: start,
+                endTime: start + 60,
+                confidence: 0.9,
+                boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: "explicit-replay-privacy-test",
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: start,
+                metadataSource: "test",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: nil,
+                eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+            )
+            let promotedID = "explicit-replay-promoted-\(index)"
+            let singularTarget =
+                source == .bannerSuggestionConfirmed
+                ? promotedID
+                : producer.id
+            let targetIDs =
+                source == .bannerSuggestionConfirmed
+                ? [producer.id, promotedID]
+                : [producer.id]
+            try await store.appendCorrectionEvent(
+                CorrectionEvent(
+                    analysisAssetId: assetId,
+                    scope: CorrectionScope.exactTimeSpan(
+                        assetId: assetId,
+                        startTime: start,
+                        endTime: start + 60
+                    ).serialized,
+                    createdAt: 1_700_100_000 + Double(index),
+                    source: source,
+                    correctionType: .falseNegative,
+                    targetRefs: CorrectionTargetRefs(
+                        adWindowId: singularTarget,
+                        adWindowIds: targetIDs,
+                        explicitFeedbackDetectionProjection:
+                            ExplicitFeedbackDetectionProjection(producer)
+                    )
+                )
+            )
+        }
+
+        let service = makeService(
+            store: store,
+            classifier: SlotScoringClassifier(
+                scoresByStartTime: [:],
+                defaultScore: 0.05
+            )
+        )
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let replayRows = (try await store.fetchAdWindows(assetId: assetId))
+            .filter { $0.boundaryState == "correctionReplay" }
+        #expect(
+            replayRows.isEmpty,
+            "Private banner receipts must not become future suggestion rows"
+        )
+    }
+
+    @Test(
+        "legacy falseNegative correction still creates replay after explicit sources are filtered"
+    )
+    func legacyFalseNegativeStillCreatesReplayRow() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-legacy-replay-control"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration = 1_800.0
+        try await insertUniformFeatureGrid(
+            store: store,
+            assetId: assetId,
+            duration: duration
+        )
+        try await appendFalseNegativeCorrection(
+            store: store,
+            assetId: assetId,
+            startTime: 420,
+            endTime: 480
+        )
+
+        let service = makeService(
+            store: store,
+            classifier: SlotScoringClassifier(
+                scoresByStartTime: [:],
+                defaultScore: 0.05
+            )
+        )
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let replayRows = (try await store.fetchAdWindows(assetId: assetId))
+            .filter { $0.boundaryState == "correctionReplay" }
+        #expect(replayRows.count == 1)
+        #expect(replayRows.first?.startTime == 420)
+        #expect(replayRows.first?.endTime == 480)
+    }
 }
 
 // MARK: - Test doubles

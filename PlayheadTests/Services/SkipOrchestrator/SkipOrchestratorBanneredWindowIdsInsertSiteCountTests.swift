@@ -8,11 +8,10 @@
 //
 //     1. `evaluateAndPush` terminal-state branch (the
 //        decisionState == .applied arm)
-//     2. `evaluateAndPush` promotion branch (decision becomes
-//        .confirmed or .applied)
-//     3. `injectUserMarkedAd` (manual user-correction entry point)
-//     4. `beginEpisode` preload pre-population (suppresses cross-
+//     2. `evaluateAndPush` promotion branch (decision becomes .applied)
+//     3. `beginEpisode` preload pre-population (suppresses cross-
 //        launch banner re-fire for already-applied rows)
+//     4. accepted-suggestion duplicate-presentation suppression
 //
 // A future contributor adding a fifth ad-hoc writer (e.g. a "silent
 // skip" mode that bypasses `evaluateAndPush`) would silently weaken
@@ -61,10 +60,10 @@ final class SkipOrchestratorBanneredWindowIdsInsertSiteCountTests: XCTestCase {
             is exactly 4 production writers:
               1. `evaluateAndPush` terminal-state branch
               2. `evaluateAndPush` promotion branch
-              3. `injectUserMarkedAd`
-              4. `beginEpisode` preload pre-population
+              3. `beginEpisode` preload pre-population
+              4. accepted-suggestion duplicate-presentation suppression
 
-            If a fifth writer was added intentionally, update this canary \
+            If another writer was added intentionally, update this canary \
             AND the writer-list in `emitBannerItem`'s comment (search \
             `SkipOrchestrator.swift` for `Cycle-27 L-2`) AND add a per-site \
             anchor at the new insert (search `SkipOrchestrator.swift` for \

@@ -85,6 +85,52 @@ struct CorpusExporterTests {
         #expect(correctionJSON["type"] as? String == "correction")
     }
 
+    @Test("feedback-targeted ad-window export redacts only response-derived state")
+    func adWindowExportRedactsFeedbackState() throws {
+        let window = AdWindow(
+            id: "window-denied",
+            analysisAssetId: "asset-X",
+            startTime: 10,
+            endTime: 40,
+            confidence: 0.8,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.reverted.rawValue,
+            detectorVersion: "test",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: 10,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: true
+        )
+
+        let json = try decodeJSONObject(
+            from: CorpusExporter.adWindowLine(
+                window,
+                redactingExplicitBannerFeedback: true
+            )
+        )
+
+        #expect(
+            !json.keys.contains("userDismissedBanner"),
+            "Diagnostics must not expose a per-window Yes/No response"
+        )
+        #expect(json["boundaryState"] is NSNull)
+        #expect(json["decisionState"] is NSNull)
+        #expect(json["wasSkipped"] is NSNull)
+        #expect(json["id"] as? String == window.id)
+        #expect(json["startTime"] as? Double == window.startTime)
+        #expect(json["endTime"] as? Double == window.endTime)
+        #expect(json["confidence"] as? Double == window.confidence)
+        #expect(
+            json["metadataSource"] as? String == window.metadataSource
+        )
+    }
+
     // MARK: - Asset record
 
     @Test("asset record carries analysisAssetId, episodeId, sourceURL; missing optional metadata serialized as null")
@@ -126,12 +172,13 @@ struct CorpusExporterTests {
     @Test("listen_rewind record carries assetId, windowId, podcastId, time, createdAt — playhead-q45f.1")
     func listenRewindRecordShape() throws {
         let row = AdListenRewindRow(
+            analysisAssetId: "asset-Z",
             windowId: "win-Z",
             podcastId: "pod-Z",
             time: 87.5,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000)
         )
-        let data = try CorpusExporter.listenRewindLine(row, analysisAssetId: "asset-Z")
+        let data = try CorpusExporter.listenRewindLine(row)
         let json = try decodeJSONObject(from: data)
         #expect(json["type"] as? String == "listen_rewind")
         #expect(json["schemaVersion"] as? Int == 1)
@@ -150,9 +197,9 @@ struct CorpusExporterTests {
             assets: [asset],
             listenRewinds: [
                 "asset-q45f-1": [
-                    AdListenRewindRow(windowId: "win-A", podcastId: "pod-1", time: 60, createdAt: Date(timeIntervalSince1970: 1_700_000_100)),
-                    AdListenRewindRow(windowId: "win-A", podcastId: "pod-1", time: 60, createdAt: Date(timeIntervalSince1970: 1_700_000_200)),
-                    AdListenRewindRow(windowId: "win-B", podcastId: "pod-1", time: 120, createdAt: Date(timeIntervalSince1970: 1_700_000_300)),
+                    AdListenRewindRow(analysisAssetId: "asset-q45f-1", windowId: "win-A", podcastId: "pod-1", time: 60, createdAt: Date(timeIntervalSince1970: 1_700_000_100)),
+                    AdListenRewindRow(analysisAssetId: "asset-q45f-1", windowId: "win-A", podcastId: "pod-1", time: 60, createdAt: Date(timeIntervalSince1970: 1_700_000_200)),
+                    AdListenRewindRow(analysisAssetId: "asset-q45f-1", windowId: "win-B", podcastId: "pod-1", time: 120, createdAt: Date(timeIntervalSince1970: 1_700_000_300)),
                 ]
             ]
         )
@@ -399,6 +446,37 @@ struct CorpusExporterTests {
         }
     }
 
+    @Test("all explicit banner receipt serializers fail closed")
+    func explicitBannerReceiptLinesAreWithheld() throws {
+        let sources: [CorrectionSource] = [
+            .bannerAutoSkipConfirmed,
+            .bannerAutoSkipDenied,
+            .bannerSuggestionConfirmed,
+            .bannerSuggestionDenied,
+        ]
+        for (index, source) in sources.enumerated() {
+            let event = CorrectionEvent(
+                id: "private-receipt-\(index)",
+                analysisAssetId: "asset-private",
+                scope: CorrectionScope.exactTimeSpan(
+                    assetId: "asset-private",
+                    startTime: Double(index * 40),
+                    endTime: Double(index * 40 + 30)
+                ).serialized,
+                createdAt: 1_700_000_000 + Double(index),
+                source: source,
+                correctionType: source.kind.correctionType,
+                targetRefs: CorrectionTargetRefs(
+                    adWindowId: "window-\(index)"
+                )
+            )
+            #expect(
+                try CorpusExporter.correctionLine(event) == nil,
+                "Explicit \(source.rawValue) receipt must never serialize"
+            )
+        }
+    }
+
     // MARK: - Corrupt scope handling
 
     @Test("correctionLine returns nil for an unparseable scope string — caller logs and skips")
@@ -473,6 +551,1311 @@ struct CorpusExporterTests {
         #expect(typeCounts["asset"] == 2)
         #expect(typeCounts["decision"] == 2)
         #expect(typeCounts["correction"] == 1)
+    }
+
+    @Test("export withholds all four explicit routes while preserving unrelated diagnostics")
+    func exportRedactsExplicitBannerFeedbackNarrowly() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-private-feedback")
+        let assetId = "asset-private-feedback"
+        try await store.insertAsset(makeTestAsset(id: assetId))
+
+        func makeWindow(
+            id: String,
+            start: Double,
+            boundaryState: String,
+            decisionState: String,
+            wasSkipped: Bool,
+            dismissed: Bool = false
+        ) -> AdWindow {
+            AdWindow(
+                id: id,
+                analysisAssetId: assetId,
+                startTime: start,
+                endTime: start + 30,
+                confidence: 0.81,
+                boundaryState: boundaryState,
+                decisionState: decisionState,
+                detectorVersion: "privacy-test",
+                advertiser: "Unrelated diagnostic sponsor",
+                product: "Unrelated product",
+                adDescription: "Unrelated detector description",
+                evidenceText: "Unrelated detector evidence",
+                evidenceStartTime: start,
+                metadataSource: "privacy-test-source",
+                metadataConfidence: 0.72,
+                metadataPromptVersion: "privacy-test-prompt",
+                wasSkipped: wasSkipped,
+                userDismissedBanner: dismissed
+            )
+        }
+
+        let routeWindows = [
+            makeWindow(
+                id: "window-auto-yes",
+                start: 10,
+                boundaryState: "lexical",
+                decisionState: AdDecisionState.applied.rawValue,
+                wasSkipped: true
+            ),
+            makeWindow(
+                id: "window-auto-no",
+                start: 50,
+                boundaryState: "lexical",
+                decisionState: AdDecisionState.reverted.rawValue,
+                wasSkipped: true
+            ),
+            makeWindow(
+                id: "window-suggest-yes",
+                start: 90,
+                boundaryState: "userConfirmedSuggested",
+                decisionState: AdDecisionState.applied.rawValue,
+                wasSkipped: true
+            ),
+            makeWindow(
+                id: "window-suggest-no",
+                start: 130,
+                boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+                decisionState: AdDecisionState.reverted.rawValue,
+                wasSkipped: false,
+                dismissed: true
+            ),
+        ]
+        let unrelated = makeWindow(
+            id: "window-unrelated",
+            start: 170,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            wasSkipped: false
+        )
+        let suggestYesOriginal = makeWindow(
+            id: "window-suggest-yes-original",
+            start: 90,
+            boundaryState: "suggestion-producer",
+            decisionState: AdDecisionState.suppressed.rawValue,
+            wasSkipped: false
+        )
+        let sources: [CorrectionSource] = [
+            .bannerAutoSkipConfirmed,
+            .bannerAutoSkipDenied,
+            .bannerSuggestionConfirmed,
+            .bannerSuggestionDenied,
+        ]
+        let unansweredRouteWindows = sources.enumerated().map {
+            index,
+            source in
+            let responseWindow = routeWindows[index]
+            let producer =
+                source == .bannerSuggestionConfirmed
+                ? suggestYesOriginal
+                : responseWindow
+            return AdWindow(
+                id: producer.id,
+                analysisAssetId: producer.analysisAssetId,
+                startTime: producer.startTime,
+                endTime: producer.endTime,
+                confidence: producer.confidence,
+                boundaryState: producer.boundaryState,
+                decisionState:
+                    source == .bannerAutoSkipConfirmed
+                    || source == .bannerAutoSkipDenied
+                    ? AdDecisionState.confirmed.rawValue
+                    : AdDecisionState.candidate.rawValue,
+                detectorVersion: producer.detectorVersion,
+                advertiser: producer.advertiser,
+                product: producer.product,
+                adDescription: producer.adDescription,
+                evidenceText: producer.evidenceText,
+                evidenceStartTime: producer.evidenceStartTime,
+                metadataSource: producer.metadataSource,
+                metadataConfidence: producer.metadataConfidence,
+                metadataPromptVersion: producer.metadataPromptVersion,
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: producer.evidenceSources,
+                eligibilityGate: producer.eligibilityGate,
+                catalogStoreMatchSimilarity:
+                    producer.catalogStoreMatchSimilarity,
+                startEdgeAnchor: producer.startEdgeAnchor,
+                endEdgeAnchor: producer.endEdgeAnchor
+            )
+        }
+        try await store.seedExplicitFeedbackEgressBaselineForTesting(
+            analysisAssetId: assetId,
+            unansweredWindows: unansweredRouteWindows + [unrelated]
+        )
+        for window in routeWindows + [suggestYesOriginal, unrelated] {
+            try await store.insertAdWindow(window)
+        }
+
+        var expectedProjectionByID: [String: AdWindow] = [:]
+        for (index, source) in sources.enumerated() {
+            let window = routeWindows[index]
+            let producer =
+                source == .bannerSuggestionConfirmed
+                ? suggestYesOriginal
+                : window
+            let preResponse = AdWindow(
+                id: producer.id,
+                analysisAssetId: producer.analysisAssetId,
+                startTime: producer.startTime,
+                endTime: producer.endTime,
+                confidence: producer.confidence,
+                boundaryState: producer.boundaryState,
+                decisionState:
+                    source == .bannerAutoSkipConfirmed
+                    || source == .bannerAutoSkipDenied
+                    ? AdDecisionState.confirmed.rawValue
+                    : AdDecisionState.candidate.rawValue,
+                detectorVersion: producer.detectorVersion,
+                advertiser: producer.advertiser,
+                product: producer.product,
+                adDescription: producer.adDescription,
+                evidenceText: producer.evidenceText,
+                evidenceStartTime: producer.evidenceStartTime,
+                metadataSource: producer.metadataSource,
+                metadataConfidence: producer.metadataConfidence,
+                metadataPromptVersion: window.metadataPromptVersion,
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: producer.evidenceSources,
+                eligibilityGate: producer.eligibilityGate,
+                catalogStoreMatchSimilarity:
+                    producer.catalogStoreMatchSimilarity,
+                startEdgeAnchor: producer.startEdgeAnchor,
+                endEdgeAnchor: producer.endEdgeAnchor
+            )
+            expectedProjectionByID[preResponse.id] = preResponse
+            let targetIDs =
+                source == .bannerSuggestionConfirmed
+                ? [suggestYesOriginal.id, window.id]
+                : [window.id]
+            try await store.appendCorrectionEvent(
+                CorrectionEvent(
+                    id: "private-route-receipt-\(index)",
+                    analysisAssetId: assetId,
+                    scope: CorrectionScope.exactTimeSpan(
+                        assetId: assetId,
+                        startTime: window.startTime,
+                        endTime: window.endTime
+                    ).serialized,
+                    createdAt: 1_700_000_100 + Double(index),
+                    source: source,
+                    podcastId: "private-podcast",
+                    correctionType: source.kind.correctionType,
+                    causalSource: .specialist,
+                    targetRefs: CorrectionTargetRefs(
+                        adWindowId: window.id,
+                        adWindowIds: targetIDs,
+                        explicitFeedbackDetectionProjection:
+                            ExplicitFeedbackDetectionProjection(preResponse),
+                        evidenceRefs: ["private-evidence-\(index)"],
+                        sponsorEntity: "private-target-\(index)"
+                    )
+                )
+            )
+        }
+
+        let result = try await CorpusExporter.export(
+            store: store,
+            documentsURL: docs
+        )
+        #expect(result.correctionCount == 0)
+        #expect(result.skippedCorrectionCount == 0)
+        #expect(result.adWindowCount == 5)
+        let records = try parseJSONL(at: result.fileURL)
+        #expect(
+            !records.contains { $0["type"] as? String == "correction" }
+        )
+
+        let windowRecords = records.filter {
+            $0["type"] as? String == "ad_window"
+        }
+        for preResponse in expectedProjectionByID.values {
+            let record = try #require(
+                windowRecords.first {
+                    $0["id"] as? String == preResponse.id
+                }
+            )
+            #expect(
+                record["boundaryState"] as? String
+                    == preResponse.boundaryState
+            )
+            #expect(
+                record["decisionState"] as? String
+                    == preResponse.decisionState
+            )
+            #expect(record["wasSkipped"] as? Bool == false)
+            #expect(record["startTime"] as? Double == preResponse.startTime)
+            #expect(record["endTime"] as? Double == preResponse.endTime)
+            #expect(record["confidence"] as? Double == 0.81)
+            #expect(
+                record["metadataSource"] as? String
+                    == "privacy-test-source"
+            )
+        }
+        let unrelatedRecord = try #require(
+            windowRecords.first {
+                $0["id"] as? String == unrelated.id
+            }
+        )
+        #expect(
+            unrelatedRecord["boundaryState"] as? String
+                == unrelated.boundaryState
+        )
+        #expect(
+            unrelatedRecord["decisionState"] as? String
+                == unrelated.decisionState
+        )
+        #expect(unrelatedRecord["wasSkipped"] as? Bool == false)
+
+        let bytes = try String(
+            contentsOf: result.fileURL,
+            encoding: .utf8
+        )
+        for source in sources {
+            #expect(!bytes.contains(source.rawValue))
+        }
+        for index in sources.indices {
+            #expect(!bytes.contains("private-route-receipt-\(index)"))
+            #expect(!bytes.contains("private-evidence-\(index)"))
+            #expect(!bytes.contains("private-target-\(index)"))
+        }
+        for aggregateKey in [
+            "bannersShown",
+            "bannersConfirmed",
+            "bannersDenied",
+        ] {
+            #expect(!bytes.contains(aggregateKey))
+        }
+    }
+
+    @Test("debug episode and library exports redact all explicit routes narrowly")
+    func debugExportsRedactExplicitBannerFeedback() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-debug-private-feedback"
+        let asset = makeTestAsset(id: assetId)
+        try await store.insertAsset(asset)
+        let sources: [CorrectionSource] = [
+            .bannerAutoSkipConfirmed,
+            .bannerAutoSkipDenied,
+            .bannerSuggestionConfirmed,
+            .bannerSuggestionDenied,
+        ]
+        var privateStateSentinels: [String] = []
+        var privateAdvertiserSentinels: [String] = []
+        let unrelatedBoundary = "public-unrelated-boundary"
+        let unrelatedDecision = "public-unrelated-decision"
+        let unrelatedWindow = AdWindow(
+            id: "debug-unrelated-window",
+            analysisAssetId: assetId,
+            startTime: 180,
+            endTime: 210,
+            confidence: 0.91,
+            boundaryState: unrelatedBoundary,
+            decisionState: unrelatedDecision,
+            detectorVersion: "debug-privacy",
+            advertiser: "Unrelated Diagnostic Sponsor",
+            product: nil,
+            adDescription: nil,
+            evidenceText: "Unrelated Diagnostic Evidence",
+            evidenceStartTime: 180,
+            metadataSource: "debug-privacy",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: true,
+            userDismissedBanner: false
+        )
+        let preResponseWindows: [AdWindow] =
+            sources.enumerated().map { index, source in
+                let start = 10.0 + Double(index * 40)
+                return AdWindow(
+                    id: "debug-private-window-\(index)",
+                    analysisAssetId: assetId,
+                    startTime: start,
+                    endTime: start + 30,
+                    confidence: 0.83,
+                    boundaryState:
+                        "public-pre-response-boundary-\(index)",
+                    decisionState:
+                        source == .bannerAutoSkipConfirmed
+                        || source == .bannerAutoSkipDenied
+                        ? AdDecisionState.applied.rawValue
+                        : AdDecisionState.candidate.rawValue,
+                    detectorVersion: "debug-privacy",
+                    advertiser: "Diagnostic Sponsor \(index)",
+                    product: "Diagnostic Product \(index)",
+                    adDescription: nil,
+                    evidenceText: "Diagnostic Evidence \(index)",
+                    evidenceStartTime: start,
+                    metadataSource: "debug-privacy",
+                    metadataConfidence: 0.7,
+                    metadataPromptVersion: nil,
+                    wasSkipped:
+                        source == .bannerAutoSkipConfirmed
+                        || source == .bannerAutoSkipDenied,
+                    userDismissedBanner: false
+                )
+            }
+        try await store.seedExplicitFeedbackEgressBaselineForTesting(
+            analysisAssetId: assetId,
+            unansweredWindows: preResponseWindows + [unrelatedWindow]
+        )
+
+        for (index, source) in sources.enumerated() {
+            let start = 10.0 + Double(index * 40)
+            let windowId = "debug-private-window-\(index)"
+            let advertiser = "Diagnostic Sponsor \(index)"
+            privateAdvertiserSentinels.append(advertiser)
+            func routeWindow(
+                id: String,
+                boundary: String,
+                decision: String,
+                skipped: Bool,
+                dismissed: Bool
+            ) -> AdWindow {
+                AdWindow(
+                    id: id,
+                    analysisAssetId: assetId,
+                    startTime: start,
+                    endTime: start + 30,
+                    confidence: 0.83,
+                    boundaryState: boundary,
+                    decisionState: decision,
+                    detectorVersion: "debug-privacy",
+                    advertiser: advertiser,
+                    product: "Diagnostic Product \(index)",
+                    adDescription: nil,
+                    evidenceText: "Diagnostic Evidence \(index)",
+                    evidenceStartTime: start,
+                    metadataSource: "debug-privacy",
+                    metadataConfidence: 0.7,
+                    metadataPromptVersion: nil,
+                    wasSkipped: skipped,
+                    userDismissedBanner: dismissed
+                )
+            }
+            let preResponse = preResponseWindows[index]
+            let responseRows: [AdWindow]
+            let singularTarget: String
+            let allTargets: [String]
+            switch source {
+            case .bannerAutoSkipConfirmed:
+                responseRows = [preResponse]
+                singularTarget = windowId
+                allTargets = [windowId]
+            case .bannerAutoSkipDenied:
+                responseRows = [
+                    routeWindow(
+                        id: windowId,
+                        boundary: preResponse.boundaryState,
+                        decision: AdDecisionState.reverted.rawValue,
+                        skipped: true,
+                        dismissed: false
+                    ),
+                ]
+                singularTarget = windowId
+                allTargets = [windowId]
+            case .bannerSuggestionDenied:
+                responseRows = [
+                    routeWindow(
+                        id: windowId,
+                        boundary: preResponse.boundaryState,
+                        decision: AdDecisionState.reverted.rawValue,
+                        skipped: false,
+                        dismissed: true
+                    ),
+                ]
+                singularTarget = windowId
+                allTargets = [windowId]
+            case .bannerSuggestionConfirmed:
+                let promotedID = "\(windowId)-promoted"
+                responseRows = [
+                    routeWindow(
+                        id: windowId,
+                        boundary: preResponse.boundaryState,
+                        decision: AdDecisionState.suppressed.rawValue,
+                        skipped: false,
+                        dismissed: false
+                    ),
+                    routeWindow(
+                        id: promotedID,
+                        boundary: "userConfirmedSuggested",
+                        decision: AdDecisionState.applied.rawValue,
+                        skipped: true,
+                        dismissed: false
+                    ),
+                ]
+                singularTarget = promotedID
+                allTargets = [windowId, promotedID]
+                privateStateSentinels.append("userConfirmedSuggested")
+            case .listenRevert, .manualVeto, .falseNegative:
+                Issue.record("Unexpected non-explicit source")
+                continue
+            }
+            for responseRow in responseRows {
+                try await store.insertAdWindow(responseRow)
+            }
+            try await store.appendCorrectionEvent(
+                CorrectionEvent(
+                    id: "debug-private-receipt-\(index)",
+                    analysisAssetId: assetId,
+                    scope: CorrectionScope.exactTimeSpan(
+                        assetId: assetId,
+                        startTime: start,
+                        endTime: start + 30
+                    ).serialized,
+                    createdAt: 1_700_000_500 + Double(index),
+                    source: source,
+                    correctionType: source.kind.correctionType,
+                    targetRefs: CorrectionTargetRefs(
+                        adWindowId: singularTarget,
+                        adWindowIds: allTargets,
+                        explicitFeedbackDetectionProjection:
+                            ExplicitFeedbackDetectionProjection(preResponse),
+                        sponsorEntity: "debug-private-target-\(index)"
+                    )
+                )
+            )
+        }
+
+        try await store.insertAdWindow(unrelatedWindow)
+
+        let episodeExport = try #require(
+            await DebugEpisodeExportService.build(
+                episodeTitle: "Privacy Test Episode",
+                podcastTitle: "Privacy Test Podcast",
+                analysisAssetId: assetId,
+                episodeId: asset.episodeId,
+                store: store
+            )
+        )
+        let libraryExport = try #require(
+            await DebugEpisodeExportService.buildLibraryExport(store: store)
+        )
+        for content in [episodeExport.content, libraryExport.content] {
+            for sentinel in privateStateSentinels {
+                #expect(!content.contains(sentinel))
+            }
+            for (index, source) in sources.enumerated() {
+                #expect(!content.contains(source.rawValue))
+                #expect(!content.contains("debug-private-receipt-\(index)"))
+                #expect(!content.contains("debug-private-target-\(index)"))
+                #expect(
+                    !content.contains(
+                        String(1_700_000_500 + index)
+                    )
+                )
+            }
+            for aggregateKey in [
+                "bannersShown",
+                "bannersConfirmed",
+                "bannersDenied",
+            ] {
+                #expect(!content.contains(aggregateKey))
+            }
+            #expect(content.contains(unrelatedDecision))
+            #expect(content.contains("Unrelated Diagnostic Sponsor"))
+            #expect(content.contains("Unrelated Diagnostic Evidence"))
+            for advertiser in privateAdvertiserSentinels {
+                #expect(
+                    content.contains(advertiser),
+                    "Detection diagnostics unrelated to the response must remain available"
+                )
+            }
+        }
+        #expect(episodeExport.content.contains(unrelatedBoundary))
+        #expect(!episodeExport.content.contains("(was skipped)"))
+    }
+
+    @Test(
+        "all explicit routes are byte-equivalent to unanswered Corpus and Debug exports"
+    )
+    func explicitRoutesMatchUnansweredExportBytes() async throws {
+        let exportedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let sources: [CorrectionSource] = [
+            .bannerAutoSkipConfirmed,
+            .bannerAutoSkipDenied,
+            .bannerSuggestionConfirmed,
+            .bannerSuggestionDenied,
+        ]
+
+        func window(
+            id: String,
+            assetId: String,
+            start: Double,
+            boundary: String =
+                AdBoundaryState.acousticRefined.rawValue,
+            decision: String,
+            skipped: Bool = false,
+            dismissed: Bool = false
+        ) -> AdWindow {
+            AdWindow(
+                id: id,
+                analysisAssetId: assetId,
+                startTime: start,
+                endTime: start + 35,
+                confidence: 0.864,
+                boundaryState: boundary,
+                decisionState: decision,
+                detectorVersion: "equivalence-detector",
+                advertiser: "Equivalence Sponsor",
+                product: "Equivalence Product",
+                adDescription: "Equivalence Description",
+                evidenceText: "Equivalence Evidence",
+                evidenceStartTime: start + 1,
+                metadataSource: "equivalence-source",
+                metadataConfidence: 0.753,
+                metadataPromptVersion: "equivalence-prompt",
+                wasSkipped: skipped,
+                userDismissedBanner: dismissed,
+                evidenceSources: "semantic,acoustic",
+                eligibilityGate: SkipEligibilityGate.eligible.rawValue,
+                catalogStoreMatchSimilarity: 0.642,
+                startEdgeAnchor: "equivalence-start",
+                endEdgeAnchor: "equivalence-end"
+            )
+        }
+
+        for (index, source) in sources.enumerated() {
+            let assetId = "asset-export-equivalence-\(index)"
+            let asset = AnalysisAsset(
+                id: assetId,
+                episodeId: "episode-export-equivalence-\(index)",
+                assetFingerprint: String(repeating: "\(index)", count: 64),
+                weakFingerprint: nil,
+                sourceURL: "file:///test/\(assetId).m4a",
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: 180,
+                analysisState: "new",
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: 300
+            )
+            let original = window(
+                id: "original-export-row-\(index)",
+                assetId: assetId,
+                start: 45,
+                decision:
+                    index < 2
+                    ? AdDecisionState.confirmed.rawValue
+                    : AdDecisionState.candidate.rawValue
+            )
+            let sameSpanDeniedPeer = window(
+                id: "same-span-denied-peer-\(index)",
+                assetId: assetId,
+                start: original.startTime,
+                decision: AdDecisionState.candidate.rawValue
+            )
+            let retiredByBackfill = window(
+                id: "retired-by-backfill-\(index)",
+                assetId: assetId,
+                start: 90,
+                decision: AdDecisionState.candidate.rawValue
+            )
+            let modifiedByBackfill = window(
+                id: "modified-by-backfill-\(index)",
+                assetId: assetId,
+                start: 140,
+                decision: AdDecisionState.candidate.rawValue
+            )
+            let sharedConfirmed = window(
+                id: "public-confirmed-\(index)",
+                assetId: assetId,
+                start: 1,
+                decision: AdDecisionState.confirmed.rawValue
+            )
+
+            let baselineStore = try await makeTestStore()
+            try await baselineStore.insertAsset(asset)
+            let routeBaselineRows =
+                source == .bannerSuggestionDenied
+                ? [original, sameSpanDeniedPeer]
+                : [original]
+            let baselineRows =
+                [sharedConfirmed]
+                + routeBaselineRows
+                + [retiredByBackfill, modifiedByBackfill]
+            let baselineSpan = DecodedSpan(
+                id: DecodedSpan.makeId(
+                    assetId: assetId,
+                    firstAtomOrdinal: 0,
+                    lastAtomOrdinal: 9
+                ),
+                assetId: assetId,
+                firstAtomOrdinal: 0,
+                lastAtomOrdinal: 9,
+                startTime: 0,
+                endTime: 100,
+                anchorProvenance: [
+                    .classifierSeed(
+                        regionId: "pre-response-\(index)",
+                        score: 0.91
+                    ),
+                ]
+            )
+            let rewindCreatedAt = Date(
+                timeIntervalSince1970: 1_700_100_000 + Double(index)
+            )
+            for row in baselineRows {
+                try await baselineStore.insertAdWindow(row)
+            }
+            try await baselineStore.upsertDecodedSpans([baselineSpan])
+            try await baselineStore.insertListenRewind(
+                windowId: retiredByBackfill.id,
+                analysisAssetId: assetId,
+                podcastId: "equivalence-podcast",
+                time: retiredByBackfill.startTime,
+                createdAt: rewindCreatedAt
+            )
+
+            let respondedStore = try await makeTestStore()
+            try await respondedStore.insertAsset(asset)
+            for row in baselineRows {
+                try await respondedStore.insertAdWindow(row)
+            }
+            try await respondedStore.upsertDecodedSpans([baselineSpan])
+            try await respondedStore.insertListenRewind(
+                windowId: retiredByBackfill.id,
+                analysisAssetId: assetId,
+                podcastId: "equivalence-podcast",
+                time: retiredByBackfill.startTime,
+                createdAt: rewindCreatedAt
+            )
+            let promoted = window(
+                id: "promoted-export-row-\(index)",
+                assetId: assetId,
+                start: original.startTime,
+                boundary: "userConfirmedSuggested",
+                decision: AdDecisionState.applied.rawValue,
+                skipped: true
+            )
+            func receipt(
+                id: String,
+                producer: AdWindow,
+                singularID: String,
+                targetIDs: [String]
+            ) -> CorrectionEvent {
+                CorrectionEvent(
+                    id: id,
+                    analysisAssetId: assetId,
+                    scope: CorrectionScope.exactTimeSpan(
+                        assetId: assetId,
+                        startTime: producer.startTime,
+                        endTime: producer.endTime
+                    ).serialized,
+                    createdAt: 1_700_200_000 + Double(index),
+                    source: source,
+                    correctionType: source.kind.correctionType,
+                    targetRefs: CorrectionTargetRefs(
+                        adWindowId: singularID,
+                        adWindowIds: targetIDs,
+                        explicitFeedbackDetectionProjection:
+                            ExplicitFeedbackDetectionProjection(producer),
+                        exactFeedbackSpan: ExactFeedbackSpan(
+                            startTime: producer.startTime,
+                            endTime: producer.endTime
+                        )
+                    )
+                )
+            }
+
+            switch source {
+            case .bannerAutoSkipConfirmed:
+                #expect(
+                    try await respondedStore.persistConfirmedAutoSkip(
+                        windowId: original.id,
+                        analysisAssetId: assetId,
+                        expectedEpisodeId: asset.episodeId,
+                        expectedStartTime: original.startTime,
+                        expectedEndTime: original.endTime,
+                        expectedProducerRevision: original,
+                        expectedMaterialToken:
+                            AdWindowMaterialIdentity.autoSkipToken(
+                                window: original,
+                                displayedStart: original.startTime,
+                                displayedEnd: original.endTime
+                            ),
+                        correction: receipt(
+                            id: "auto-yes-\(index)",
+                            producer: original,
+                            singularID: original.id,
+                            targetIDs: [original.id]
+                        )
+                    ) == true
+                )
+            case .bannerAutoSkipDenied:
+                #expect(
+                    try await respondedStore.persistDeniedAutoSkip(
+                        windowId: original.id,
+                        analysisAssetId: assetId,
+                        expectedEpisodeId: asset.episodeId,
+                        expectedStartTime: original.startTime,
+                        expectedEndTime: original.endTime,
+                        expectedProducerRevision: original,
+                        expectedMaterialToken:
+                            AdWindowMaterialIdentity.autoSkipToken(
+                                window: original,
+                                displayedStart: original.startTime,
+                                displayedEnd: original.endTime
+                            ),
+                        correction: receipt(
+                            id: "auto-no-\(index)",
+                            producer: original,
+                            singularID: original.id,
+                            targetIDs: [original.id]
+                        )
+                    ) == true
+                )
+            case .bannerSuggestionConfirmed:
+                #expect(
+                    try await respondedStore
+                        .persistAcceptedSuggestionIfCurrent(
+                            originalWindowId: original.id,
+                            originalAnalysisAssetId: assetId,
+                            expectedEpisodeId: asset.episodeId,
+                            expectedStartTime: original.startTime,
+                            expectedEndTime: original.endTime,
+                            expectedProducerRevision: original,
+                            expectedMaterialToken:
+                                AdWindowMaterialIdentity
+                                .suggestionToken(original),
+                            promotedWindow: promoted,
+                            correction: receipt(
+                                id: "suggest-yes-\(index)",
+                                producer: original,
+                                singularID: promoted.id,
+                                targetIDs: [original.id, promoted.id]
+                            )
+                        ) == true
+                )
+            case .bannerSuggestionDenied:
+                for (receiptIndex, producer) in
+                    [original, sameSpanDeniedPeer].enumerated()
+                {
+                    #expect(
+                        try await respondedStore
+                            .persistDeclinedSuggestionIfCurrent(
+                                windowId: producer.id,
+                                analysisAssetId: assetId,
+                                expectedEpisodeId: asset.episodeId,
+                                expectedStartTime: producer.startTime,
+                                expectedEndTime: producer.endTime,
+                                expectedProducerRevision: producer,
+                                expectedMaterialToken:
+                                    AdWindowMaterialIdentity
+                                    .suggestionToken(producer),
+                                correction: receipt(
+                                    id:
+                                        "suggest-no-\(index)-\(receiptIndex)",
+                                    producer: producer,
+                                    singularID: producer.id,
+                                    targetIDs: [producer.id]
+                                )
+                            ) == true
+                    )
+                }
+            case .listenRevert, .manualVeto, .falseNegative:
+                Issue.record("Unexpected non-explicit source")
+                continue
+            }
+
+            // A Listen arriving after the atomic explicit-response marker is
+            // private post-answer state. Even though it targets a window ID
+            // present in the frozen baseline, it must not change Corpus bytes
+            // or counts for any of the four explicit routes.
+            try await respondedStore.insertListenRewind(
+                windowId: original.id,
+                analysisAssetId: assetId,
+                podcastId: "post-marker-private-podcast",
+                time: original.startTime,
+                createdAt: Date(
+                    timeIntervalSince1970:
+                        1_700_300_000 + Double(index)
+                )
+            )
+
+            // Exercise the real atomic backfill reconciliation after private
+            // feedback: one unrelated row is created, one retired, and one
+            // producer revision is replaced near the decision threshold.
+            let createdByBackfill = window(
+                id: "created-by-backfill-\(index)",
+                assetId: assetId,
+                start: 190,
+                decision: AdDecisionState.candidate.rawValue
+            )
+            let modifiedReplacement = window(
+                id: modifiedByBackfill.id,
+                assetId: assetId,
+                start: modifiedByBackfill.startTime + 0.125,
+                decision: AdDecisionState.confirmed.rawValue
+            )
+            try await respondedStore.reconcileBackfillAdWindows(
+                [createdByBackfill, modifiedReplacement],
+                retiredIDs: [retiredByBackfill.id]
+            )
+            try await respondedStore.updateConfirmedAdCoverage(
+                id: assetId,
+                endTime: 299
+            )
+
+            // Drive the real correction-mask/projector/decoder read side after
+            // the explicit receipt lands, then persist its learned live span
+            // shape. Yes routes force-anchor the answered time range; No
+            // routes veto it. Either result diverges from the pre-answer span,
+            // while outward Corpus bytes must continue to use the baseline.
+            let atoms: [TranscriptAtom] = (0..<20).map { ordinal in
+                TranscriptAtom(
+                    atomKey: TranscriptAtomKey(
+                        analysisAssetId: assetId,
+                        transcriptVersion: "equivalence-tv",
+                        atomOrdinal: ordinal
+                    ),
+                    contentHash: "equivalence-\(ordinal)",
+                    startTime: Double(ordinal) * 10,
+                    endTime: Double(ordinal + 1) * 10,
+                    text: "equivalence atom \(ordinal)",
+                    chunkIndex: ordinal
+                )
+            }
+            let correctionStore = PersistentUserCorrectionStore(
+                store: respondedStore
+            )
+            let maskProvider =
+                await AdDetectionService.makeCorrectionMaskProvider(
+                    enabled: true,
+                    store: correctionStore,
+                    analysisAssetId: assetId,
+                    atoms: atoms
+                )
+            let learnedEvidence = await AtomEvidenceProjector().project(
+                regions: [],
+                catalog: EvidenceCatalog(
+                    analysisAssetId: assetId,
+                    transcriptVersion: "equivalence-tv",
+                    entries: []
+                ),
+                atoms: atoms,
+                correctionMaskProvider: maskProvider
+            )
+            let learnedSpans = MinimalContiguousSpanDecoder().decode(
+                atoms: learnedEvidence,
+                assetId: assetId
+            )
+            try await respondedStore.deleteDecodedSpans(
+                assetId: assetId
+            )
+            try await respondedStore.upsertDecodedSpans(learnedSpans)
+            #expect(
+                learnedSpans != [baselineSpan],
+                "The real correction projector must make live decoded spans diverge"
+            )
+            let privatelyLearnedRows = try await respondedStore
+                .fetchAdWindows(assetId: assetId)
+            #expect(
+                Set(privatelyLearnedRows.map(\.id))
+                    != Set(baselineRows.map(\.id)),
+                "Local backfill rows must genuinely diverge"
+            )
+            if source == .bannerSuggestionDenied {
+                let receipts =
+                    try await respondedStore.loadCorrectionEvents(
+                        analysisAssetId: assetId
+                    )
+                #expect(receipts.count == 2)
+                #expect(
+                    Set(receipts.compactMap {
+                        $0.targetRefs?.adWindowId
+                    }) == Set([original.id, sameSpanDeniedPeer.id])
+                )
+            }
+
+            let baselineDocs = try makeTempDir(
+                prefix: "CorpusExport-equivalence-before-\(index)"
+            )
+            let respondedDocs = try makeTempDir(
+                prefix: "CorpusExport-equivalence-after-\(index)"
+            )
+            let beforeCorpus = try await CorpusExporter.export(
+                store: baselineStore,
+                documentsURL: baselineDocs,
+                now: exportedAt,
+                dedupMemo: CorpusExportDedupMemo()
+            )
+            let afterCorpus = try await CorpusExporter.export(
+                store: respondedStore,
+                documentsURL: respondedDocs,
+                now: exportedAt,
+                dedupMemo: CorpusExportDedupMemo()
+            )
+            #expect(
+                try Data(contentsOf: afterCorpus.fileURL)
+                    == Data(contentsOf: beforeCorpus.fileURL),
+                "\(source) changed Corpus rows, count, identity, span, or bytes"
+            )
+            #expect(beforeCorpus.spanCount == 1)
+            #expect(afterCorpus.spanCount == 1)
+            #expect(beforeCorpus.listenRewindCount == 1)
+            #expect(afterCorpus.listenRewindCount == 1)
+
+            let beforeEpisode = try #require(
+                await DebugEpisodeExportService.build(
+                    episodeTitle: "Equivalence Episode",
+                    podcastTitle: "Equivalence Podcast",
+                    analysisAssetId: assetId,
+                    episodeId: asset.episodeId,
+                    store: baselineStore,
+                    exportedAt: exportedAt
+                )
+            )
+            let afterEpisode = try #require(
+                await DebugEpisodeExportService.build(
+                    episodeTitle: "Equivalence Episode",
+                    podcastTitle: "Equivalence Podcast",
+                    analysisAssetId: assetId,
+                    episodeId: asset.episodeId,
+                    store: respondedStore,
+                    exportedAt: exportedAt
+                )
+            )
+            #expect(afterEpisode.content == beforeEpisode.content)
+            #expect(afterEpisode.filename == beforeEpisode.filename)
+
+            let beforeLibrary = try #require(
+                await DebugEpisodeExportService.buildLibraryExport(
+                    store: baselineStore,
+                    exportedAt: exportedAt
+                )
+            )
+            let afterLibrary = try #require(
+                await DebugEpisodeExportService.buildLibraryExport(
+                    store: respondedStore,
+                    exportedAt: exportedAt
+                )
+            )
+            #expect(afterLibrary.content == beforeLibrary.content)
+            #expect(afterLibrary.filename == beforeLibrary.filename)
+
+            let baselineShareProjection = try #require(
+                try await baselineStore
+                    .responseIndependentAdWindows(
+                        analysisAssetId: assetId
+                    )
+            )
+            #expect(
+                baselineShareProjection.allSatisfy(
+                    CrossUserAnalysisSnapshot.Window
+                        .hasKnownExportDisposition
+                )
+            )
+            let directlyExportableShareWindows =
+                baselineShareProjection.compactMap(
+                    CrossUserAnalysisSnapshot.Window.exported
+                )
+            for projectedRow in baselineShareProjection {
+                #expect(
+                    CrossUserAnalysisSnapshot.Window.exported(
+                        from: projectedRow
+                    ) != nil,
+                    "CrossUser fixture row is not exportable: \(projectedRow.id), decision=\(projectedRow.decisionState), boundary=\(projectedRow.boundaryState), gate=\(projectedRow.eligibilityGate ?? "nil")"
+                )
+            }
+            #expect(
+                directlyExportableShareWindows.count
+                    == baselineShareProjection.count
+            )
+            #expect(
+                CrossUserAnalysisShareKey.make(
+                    podcastId: "equivalence-podcast",
+                    fileSHA: asset.assetFingerprint,
+                    analysisVersion: asset.analysisVersion
+                ) != nil
+            )
+            let beforeShare = try #require(
+                try await baselineStore
+                .exportCrossUserAnalysisSnapshot(
+                    assetId: assetId,
+                    podcastId: "equivalence-podcast",
+                    exportedAt: exportedAt,
+                    sourceAppBuild: "equivalence-build"
+                )
+            )
+            let afterShare = try #require(
+                try await respondedStore
+                .exportCrossUserAnalysisSnapshot(
+                    assetId: assetId,
+                    podcastId: "equivalence-podcast",
+                    exportedAt: exportedAt,
+                    sourceAppBuild: "equivalence-build"
+                )
+            )
+            #expect(
+                beforeShare.windows.map(\.sourceWindowId)
+                    == afterShare.windows.map(\.sourceWindowId)
+            )
+            #expect(
+                beforeShare.analysisCoverageEndSec
+                    == afterShare.analysisCoverageEndSec
+            )
+            #expect(beforeShare.windows.count == afterShare.windows.count)
+            #expect(
+                afterShare == beforeShare,
+                "\(source) changed shared IDs, count, coverage, or bytes after real backfill reconciliation"
+            )
+
+            try await respondedStore.execForTesting(
+                "DELETE FROM correction_events WHERE analysisAssetId = '\(assetId)'"
+            )
+            let markerOnlyProjection =
+                try await respondedStore.responseIndependentAdWindows(
+                    analysisAssetId: assetId
+                )
+            let unansweredProjection =
+                try await baselineStore.responseIndependentAdWindows(
+                    analysisAssetId: assetId
+                )
+            #expect(
+                markerOnlyProjection?
+                    .map(ExplicitFeedbackDetectionProjection.init)
+                    == unansweredProjection?
+                    .map(ExplicitFeedbackDetectionProjection.init),
+                "The durable baseline marker must prevent live-row fallback after receipt loss"
+            )
+        }
+    }
+
+    @Test("Suggest-Yes original and promoted rows are jointly private in every export")
+    func suggestYesPairIsRedactedAcrossExports() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(prefix: "CorpusExport-suggest-pair")
+        let assetId = "asset-suggest-pair"
+        let asset = makeTestAsset(id: assetId)
+        try await store.insertAsset(asset)
+
+        func window(
+            id: String,
+            start: Double,
+            boundary: String,
+            decision: String,
+            skipped: Bool,
+            advertiser: String
+        ) -> AdWindow {
+            AdWindow(
+                id: id,
+                analysisAssetId: assetId,
+                startTime: start,
+                endTime: start + 30,
+                confidence: 0.87,
+                boundaryState: boundary,
+                decisionState: decision,
+                detectorVersion: "pair-diagnostics",
+                advertiser: advertiser,
+                product: "Pair diagnostic product",
+                adDescription: nil,
+                evidenceText: "Pair diagnostic evidence",
+                evidenceStartTime: start,
+                metadataSource: "pair-diagnostics",
+                metadataConfidence: 0.76,
+                metadataPromptVersion: nil,
+                wasSkipped: skipped,
+                userDismissedBanner: false
+            )
+        }
+
+        let original = window(
+            id: "suggest-original-row",
+            start: 20,
+            boundary: "private-original-boundary",
+            decision: AdDecisionState.suppressed.rawValue,
+            skipped: false,
+            advertiser: "Original Diagnostic Sponsor"
+        )
+        let promoted = window(
+            id: "suggest-promoted-row",
+            start: 20,
+            boundary: "userConfirmedSuggested",
+            decision: AdDecisionState.applied.rawValue,
+            skipped: true,
+            advertiser: "Promoted Diagnostic Sponsor"
+        )
+        let unrelated = window(
+            id: "pair-unrelated-row",
+            start: 100,
+            boundary: "public-pair-boundary",
+            decision: "public-pair-decision",
+            skipped: true,
+            advertiser: "Unrelated Pair Sponsor"
+        )
+        let preResponseOriginal = AdWindow(
+            id: original.id,
+            analysisAssetId: original.analysisAssetId,
+            startTime: original.startTime,
+            endTime: original.endTime,
+            confidence: original.confidence,
+            boundaryState: original.boundaryState,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: original.detectorVersion,
+            advertiser: original.advertiser,
+            product: original.product,
+            adDescription: original.adDescription,
+            evidenceText: original.evidenceText,
+            evidenceStartTime: original.evidenceStartTime,
+            metadataSource: original.metadataSource,
+            metadataConfidence: original.metadataConfidence,
+            metadataPromptVersion: original.metadataPromptVersion,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: original.evidenceSources,
+            eligibilityGate: original.eligibilityGate,
+            catalogStoreMatchSimilarity:
+                original.catalogStoreMatchSimilarity,
+            startEdgeAnchor: original.startEdgeAnchor,
+            endEdgeAnchor: original.endEdgeAnchor
+        )
+        try await store.seedExplicitFeedbackEgressBaselineForTesting(
+            analysisAssetId: assetId,
+            unansweredWindows: [preResponseOriginal, unrelated]
+        )
+        for value in [original, promoted, unrelated] {
+            try await store.insertAdWindow(value)
+        }
+        try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                id: "private-suggest-pair-receipt",
+                analysisAssetId: assetId,
+                scope: CorrectionScope.exactTimeSpan(
+                    assetId: assetId,
+                    startTime: 20,
+                    endTime: 50
+                ).serialized,
+                createdAt: 1_700_001_000,
+                source: .bannerSuggestionConfirmed,
+                correctionType: .falseNegative,
+                targetRefs: CorrectionTargetRefs(
+                    adWindowId: promoted.id,
+                    adWindowIds: [original.id, promoted.id],
+                    explicitFeedbackDetectionProjection:
+                        ExplicitFeedbackDetectionProjection(
+                            preResponseOriginal
+                        )
+                )
+            )
+        )
+
+        let corpus = try await CorpusExporter.export(
+            store: store,
+            documentsURL: docs
+        )
+        let records = try parseJSONL(at: corpus.fileURL)
+        let windowRecords = records.filter {
+            $0["type"] as? String == "ad_window"
+        }
+        let restored = try #require(
+            windowRecords.first { $0["id"] as? String == original.id }
+        )
+        #expect(
+            restored["boundaryState"] as? String
+                == original.boundaryState
+        )
+        #expect(
+            restored["decisionState"] as? String
+                == AdDecisionState.candidate.rawValue
+        )
+        #expect(restored["wasSkipped"] as? Bool == false)
+        #expect(
+            restored["advertiser"] as? String == original.advertiser
+        )
+        #expect(
+            !windowRecords.contains {
+                $0["id"] as? String == promoted.id
+            }
+        )
+        let publicRecord = try #require(
+            windowRecords.first {
+                $0["id"] as? String == unrelated.id
+            }
+        )
+        #expect(
+            publicRecord["decisionState"] as? String
+                == unrelated.decisionState
+        )
+        #expect(publicRecord["wasSkipped"] as? Bool == false)
+        #expect(corpus.correctionCount == 0)
+
+        let episode = try #require(
+            await DebugEpisodeExportService.build(
+                episodeTitle: "Suggest Pair Episode",
+                podcastTitle: "Suggest Pair Podcast",
+                analysisAssetId: assetId,
+                episodeId: asset.episodeId,
+                store: store
+            )
+        )
+        let library = try #require(
+            await DebugEpisodeExportService.buildLibraryExport(
+                store: store
+            )
+        )
+        for content in [episode.content, library.content] {
+            #expect(
+                content.contains(AdDecisionState.candidate.rawValue)
+            )
+            #expect(!content.contains(promoted.boundaryState))
+            #expect(!content.contains(promoted.decisionState))
+            #expect(!content.contains("private-suggest-pair-receipt"))
+            #expect(content.contains("Original Diagnostic Sponsor"))
+            #expect(!content.contains("Promoted Diagnostic Sponsor"))
+            #expect(content.contains(unrelated.decisionState))
+        }
+        #expect(episode.content.contains(original.boundaryState))
+        #expect(!episode.content.contains("(was skipped)"))
+    }
+
+    @Test("correction-query failure fails closed with no detection rows")
+    func correctionQueryFailureFailsClosedForWindowState() async throws {
+        let docs = try makeTempDir(prefix: "CorpusExport-feedback-failure")
+        let asset = makeTestAsset(id: "asset-feedback-query-failure")
+        let privateWindow = AdWindow(
+            id: "query-failure-private-row",
+            analysisAssetId: asset.id,
+            startTime: 30,
+            endTime: 60,
+            confidence: 0.88,
+            boundaryState: "query-failure-private-boundary",
+            decisionState: "query-failure-private-decision",
+            detectorVersion: "query-failure-diagnostics",
+            advertiser: "Query Failure Diagnostic Sponsor",
+            product: nil,
+            adDescription: nil,
+            evidenceText: "Query Failure Diagnostic Evidence",
+            evidenceStartTime: 30,
+            metadataSource: "query-failure-diagnostics",
+            metadataConfidence: 0.7,
+            metadataPromptVersion: nil,
+            wasSkipped: true,
+            userDismissedBanner: true
+        )
+        let source = FailingSource(
+            assets: [asset],
+            spans: [:],
+            events: [:],
+            windows: [asset.id: [privateWindow]],
+            failSpansFor: [],
+            failEventsFor: [asset.id]
+        )
+
+        let result = try await CorpusExporter.export(
+            store: source,
+            documentsURL: docs
+        )
+        let records = try parseJSONL(at: result.fileURL)
+        #expect(
+            !records.contains {
+                $0["type"] as? String == "ad_window"
+            }
+        )
+        #expect(result.adWindowCount == 0)
     }
 
     @Test("export skips corrupt-scope correction rows without aborting the overall export")
@@ -785,18 +2168,25 @@ struct CorpusExporterTests {
         #expect(decoded == provenance, "AnchorRef Codable adapter did not round-trip")
     }
 
-    // MARK: - G4: decisionLogManifestURL pairing
+    // MARK: - Decision-log pairing quarantine
 
-    @Test("export: decisionLogManifestURL is surfaced when decision-log.jsonl exists as a sibling")
-    func decisionLogManifestURLSurfacedWhenPresent() async throws {
+    @Test("export never pairs a mutable sibling decision-log.jsonl")
+    func decisionLogManifestURLNilWhenSiblingPresent() async throws {
         let store = try await makeTestStore()
         let docs = try makeTempDir(prefix: "CorpusExport-sibling-yes")
         let sibling = docs.appendingPathComponent("decision-log.jsonl")
-        try Data("{\"fake\":true}\n".utf8).write(to: sibling)
+        let siblingBytes = Data("{\"fake\":true}\n".utf8)
+        try siblingBytes.write(to: sibling)
 
         let result = try await CorpusExporter.export(store: store, documentsURL: docs)
-        #expect(result.decisionLogManifestURL == sibling,
-                "expected \(sibling.path), got \(String(describing: result.decisionLogManifestURL?.path))")
+        #expect(
+            result.decisionLogManifestURL == nil,
+            "A live mutable decision log has no response-independent frozen projection and must never be paired"
+        )
+        #expect(
+            try Data(contentsOf: sibling) == siblingBytes,
+            "Export must leave the local decision log untouched"
+        )
     }
 
     @Test("export: decisionLogManifestURL is nil when no sibling decision-log.jsonl exists")
@@ -806,6 +2196,112 @@ struct CorpusExporterTests {
         // Deliberately no decision-log.jsonl written.
         let result = try await CorpusExporter.export(store: store, documentsURL: docs)
         #expect(result.decisionLogManifestURL == nil)
+    }
+
+    @Test(
+        "durable explicit identity survives damaged source and suppresses corrections and live egress"
+    )
+    func damagedExplicitReceiptRemainsPrivate() async throws {
+        let store = try await makeTestStore()
+        let docs = try makeTempDir(
+            prefix: "CorpusExport-damaged-private-receipt"
+        )
+        let sibling = docs.appendingPathComponent("decision-log.jsonl")
+        let decisionBytes = Data("{\"private-learned\":true}\n".utf8)
+        try decisionBytes.write(to: sibling)
+
+        let assetId = "asset-damaged-private-receipt"
+        let asset = makeTestAsset(id: assetId)
+        let window = AdWindow(
+            id: "window-damaged-private-receipt",
+            analysisAssetId: assetId,
+            startTime: 10,
+            endTime: 40,
+            confidence: 0.88,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "damaged-private",
+            advertiser: "Private Durable Sponsor",
+            product: nil,
+            adDescription: nil,
+            evidenceText: "Private durable evidence",
+            evidenceStartTime: 10,
+            metadataSource: "damaged-private",
+            metadataConfidence: 0.7,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+        try await store.insertAsset(asset)
+        try await store.insertAdWindow(window)
+        let source = CorrectionSource.bannerAutoSkipDenied
+        _ = try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                id: "damaged-private-receipt",
+                analysisAssetId: assetId,
+                scope: CorrectionScope.exactTimeSpan(
+                    assetId: assetId,
+                    startTime: window.startTime,
+                    endTime: window.endTime
+                ).serialized,
+                source: source,
+                correctionType: source.kind.correctionType,
+                targetRefs: CorrectionTargetRefs(
+                    adWindowId: window.id,
+                    adWindowIds: [window.id],
+                    explicitFeedbackDetectionProjection:
+                        ExplicitFeedbackDetectionProjection(window),
+                    exactFeedbackSpan: ExactFeedbackSpan(
+                        startTime: window.startTime,
+                        endTime: window.endTime
+                    )
+                )
+            )
+        )
+        try await store.execForTesting("""
+            UPDATE correction_events
+            SET source = 'future-unknown-private-route',
+                targetRefsJSON = '{malformed'
+            WHERE id = 'damaged-private-receipt'
+            """)
+
+        let loaded = try #require(
+            try await store.loadCorrectionEvents(
+                analysisAssetId: assetId
+            ).first
+        )
+        #expect(loaded.source == nil)
+        #expect(loaded.targetRefs == nil)
+        #expect(loaded.persistedCorrectionIdentityKey?.isEmpty == false)
+        #expect(loaded.isPrivateExplicitFeedbackReceipt)
+        #expect(
+            try await store.responseIndependentAdWindows(
+                analysisAssetId: assetId
+            ) == nil
+        )
+
+        let result = try await CorpusExporter.export(
+            store: store,
+            documentsURL: docs
+        )
+        #expect(result.correctionCount == 0)
+        #expect(result.skippedCorrectionCount == 0)
+        #expect(result.adWindowCount == 0)
+        #expect(result.decisionLogManifestURL == nil)
+        #expect(
+            try Data(contentsOf: sibling) == decisionBytes,
+            "The local decision log remains untouched; only pairing is withheld"
+        )
+        let content = try String(
+            contentsOf: result.fileURL,
+            encoding: .utf8
+        )
+        #expect(
+            !content.contains(
+                "\"id\":\"damaged-private-receipt\""
+            )
+        )
+        #expect(!content.contains(window.id))
     }
 
     // MARK: - narl.2: shadow sidecar write
@@ -1016,6 +2512,7 @@ private struct FailingSource: CorpusExportSource {
     let assets: [AnalysisAsset]
     let spans: [String: [DecodedSpan]]
     let events: [String: [CorrectionEvent]]
+    let windows: [String: [AdWindow]]
     let failSpansFor: Set<String>
     let failEventsFor: Set<String>
     let failAllAssets: Bool
@@ -1024,6 +2521,7 @@ private struct FailingSource: CorpusExportSource {
         assets: [AnalysisAsset],
         spans: [String: [DecodedSpan]],
         events: [String: [CorrectionEvent]],
+        windows: [String: [AdWindow]] = [:],
         failSpansFor: Set<String>,
         failEventsFor: Set<String>,
         failAllAssets: Bool = false
@@ -1031,6 +2529,7 @@ private struct FailingSource: CorpusExportSource {
         self.assets = assets
         self.spans = spans
         self.events = events
+        self.windows = windows
         self.failSpansFor = failSpansFor
         self.failEventsFor = failEventsFor
         self.failAllAssets = failAllAssets
@@ -1058,7 +2557,7 @@ private struct FailingSource: CorpusExportSource {
     /// for the new `ad_window` record lives in
     /// `AdCatalogStoreMatchTelemetryTests`.
     func fetchAdWindows(assetId: String) async throws -> [AdWindow] {
-        return []
+        windows[assetId] ?? []
     }
 
     func loadCorrectionEvents(analysisAssetId: String) async throws -> [CorrectionEvent] {
@@ -1118,6 +2617,22 @@ private struct ListenRewindSource: CorpusExportSource {
     func allShadowFMResponses() async throws -> [ShadowFMResponse] { [] }
     func fetchListenRewinds(forAssetId assetId: String) async throws -> [AdListenRewindRow] {
         listenRewinds[assetId] ?? []
+    }
+    func fetchResponseIndependentAssetEgressProjection(
+        analysisAssetId: String
+    ) async throws -> ResponseIndependentAssetEgressProjection? {
+        guard let asset = assets.first(where: {
+            $0.id == analysisAssetId
+        }) else {
+            return nil
+        }
+        return ResponseIndependentAssetEgressProjection(
+            windows: [],
+            decodedSpans: [],
+            listenRewinds: listenRewinds[analysisAssetId] ?? [],
+            confirmedAdCoverageEndTime:
+                asset.confirmedAdCoverageEndTime
+        )
     }
 }
 

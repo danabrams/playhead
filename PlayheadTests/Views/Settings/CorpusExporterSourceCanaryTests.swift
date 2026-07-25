@@ -65,6 +65,27 @@ struct CorpusExporterSourceCanaryTests {
         #expect(debugOpen.lowerBound < entry.lowerBound)
     }
 
+    @Test("Corpus export has no mutable decision-log pairing or marker-scan seam")
+    func exporterDoesNotPairMutableDecisionLog() throws {
+        let exporter = try read(
+            "Playhead/Views/Settings/CorpusExporter.swift"
+        )
+        let settings = try read(
+            "Playhead/Views/Settings/SettingsView.swift"
+        )
+        #expect(
+            !exporter.contains(
+                "containsDurablePrivateExplicitFeedbackMarker"
+            )
+        )
+        #expect(
+            !exporter.contains(
+                "appendingPathComponent(\"decision-log.jsonl\")"
+            )
+        )
+        #expect(!settings.contains("paired with"))
+    }
+
     // MARK: - Settings call site
 
     @Test("SettingsView references CorpusExporter only under #if DEBUG")

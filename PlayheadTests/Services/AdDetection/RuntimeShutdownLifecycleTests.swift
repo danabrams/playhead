@@ -43,6 +43,7 @@
 import Foundation
 import ObjectiveC
 import Testing
+import CoreMedia
 
 @testable import Playhead
 
@@ -107,6 +108,95 @@ private final class DeinitSentinel {
 }
 
 private nonisolated(unsafe) var deinitSentinelKey: UInt8 = 0
+
+enum RuntimeSeekRaceAction: CaseIterable, Sendable {
+    case scrub
+    case skipForward
+    case skipBackward
+}
+
+enum RuntimeSeekEffectStage: CaseIterable, Equatable, Sendable {
+    case skip
+    case silence
+    case scrub
+    case persistence
+}
+
+private actor RuntimeSeekPersistenceProbe {
+    private var positions: [TimeInterval] = []
+
+    func append(_ position: TimeInterval) {
+        positions.append(position)
+    }
+
+    func snapshot() -> [TimeInterval] {
+        positions
+    }
+}
+
+private actor RuntimePlaybackObserverGate {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func hold() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private actor FirstAcceptedRuntimeSeekGate {
+    private var invocationCount = 0
+    private var firstStarted = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func holdFirstInvocation() async {
+        let invocation = invocationCount
+        invocationCount += 1
+        guard invocation == 0 else { return }
+        firstStarted = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilFirstStarted() async {
+        if firstStarted { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func releaseFirst() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
 
 @Suite("playhead-7h2: runtime shutdown lifecycle")
 struct RuntimeShutdownLifecycleTests {
@@ -423,5 +513,517 @@ struct RuntimeShutdownLifecycleTests {
         // remains cancelled.
         await runtime.shutdown()
         #expect(task.isCancelled, "observer task must remain cancelled after second shutdown()")
+    }
+
+    @MainActor
+    @Test("replacement boundary clears prior transport cues without a resolved asset",
+          .timeLimit(.minutes(1)))
+    func replacementBoundaryClearsCuesBeforeAssetResolution() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        await runtime.playbackService.setSkipCues([
+            CMTimeRange(
+                start: CMTime(seconds: 10, preferredTimescale: 600),
+                end: CMTime(seconds: 20, preferredTimescale: 600)
+            ),
+        ])
+        await runtime.playbackService._testingInjectState(
+            PlaybackState(
+                status: .playing,
+                currentTime: 5,
+                duration: 100,
+                rate: 1,
+                playbackSpeed: 1
+            )
+        )
+        #expect(!(await runtime.playbackService._testingSkipCues).isEmpty)
+
+        await runtime._clearPriorEpisodePlaybackStateForTesting()
+
+        #expect(
+            await runtime.playbackService.snapshot().status == .paused,
+            "replacement must quiesce the prior item before retiring its cache ownership"
+        )
+        #expect(
+            (await runtime.playbackService._testingSkipCues).isEmpty,
+            "the replacement must disarm prior cues even if no asset ever resolves"
+        )
+        await runtime.shutdown()
+    }
+
+    @MainActor
+    @Test("shutdown balances playback-owned download protection",
+          .timeLimit(.minutes(1)))
+    func shutdownReleasesPlaybackProtection() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        let episodeId = "shutdown-protected-episode"
+        await runtime._protectPlaybackEpisodeForTesting(episodeId)
+        #expect(
+            await runtime.downloadManager.protectedEpisodeIdsForTesting() == [episodeId]
+        )
+
+        await runtime.shutdown()
+
+        #expect(
+            await runtime.downloadManager.protectedEpisodeIdsForTesting().isEmpty,
+            "shutdown must balance protection because stopPlayback is rejected afterward"
+        )
+    }
+
+    @MainActor
+    @Test(
+        "shutdown tears down playback observers and finishes state streams",
+        .timeLimit(.minutes(1))
+    )
+    func shutdownTearsDownPlaybackTransport() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        let stream = await runtime.playbackService.observeStates()
+        let streamFinished = Task {
+            var iterator = stream.makeAsyncIterator()
+            _ = await iterator.next()
+            return await iterator.next() == nil
+        }
+
+        await runtime.shutdown()
+
+        #expect(
+            await streamFinished.value,
+            "PlaybackTransport.tearDown must finish observers during runtime shutdown"
+        )
+    }
+
+    @MainActor
+    @Test(
+        "shutdown joins a playback-state body already suspended downstream",
+        .timeLimit(.minutes(1))
+    )
+    func shutdownJoinsPlaybackStateConsumer() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        let bodyGate = RuntimePlaybackObserverGate()
+        runtime._setPlaybackStateObserverHookForTesting {
+            await bodyGate.hold()
+        }
+
+        await runtime.playbackService._testingInjectState(
+            PlaybackState(
+                status: .playing,
+                currentTime: 12,
+                duration: 100,
+                rate: 1,
+                playbackSpeed: 1
+            )
+        )
+        await bodyGate.waitUntilStarted()
+
+        let shutdown = Task { @MainActor in
+            await runtime.shutdown()
+        }
+        for _ in 0..<5 {
+            await Task.yield()
+        }
+        #expect(
+            !runtime._playbackStateObserverDidExitForTesting(),
+            "The held body must still own the observer until its downstream hop returns"
+        )
+
+        await bodyGate.release()
+        await shutdown.value
+        #expect(
+            runtime._playbackStateObserverDidExitForTesting(),
+            "shutdown must join the state consumer before returning"
+        )
+    }
+
+    @MainActor
+    @Test("user-mark write rejects a playback context replaced after the tap")
+    func staleUserMarkContextIsRejected() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        let generationA = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: "asset-a",
+            episodeId: "episode-a",
+            podcastId: "podcast-a"
+        )
+        let generationB = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: "asset-b",
+            episodeId: "episode-b",
+            podcastId: "podcast-b"
+        )
+
+        #expect(generationB != generationA)
+        #expect(
+            !(await runtime.injectUserMarkedAd(
+                start: 10,
+                end: 40,
+                ifCurrentAnalysisAssetId: "asset-a",
+                ifCurrentEpisodeId: "episode-a",
+                ifPlaybackLifecycleGeneration: generationA,
+                podcastId: "podcast-a"
+            )),
+            "episode A's expanded boundary must never persist or inject into episode B"
+        )
+        await runtime.shutdown()
+    }
+
+    @MainActor
+    @Test(
+        "scrub and skip controls reject replacement/replay after context capture",
+        arguments: RuntimeSeekRaceAction.allCases
+    )
+    func staleUserSeekContextIsRejected(
+        _ action: RuntimeSeekRaceAction
+    ) async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        _ = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: "asset-a",
+            episodeId: "episode-a",
+            podcastId: "podcast-a"
+        )
+        await runtime.playbackService._testingInjectState(
+            PlaybackState(
+                status: .playing,
+                currentTime: 50,
+                duration: 200,
+                rate: 1,
+                playbackSpeed: 1
+            )
+        )
+        runtime._setSeekContextCapturedHookForTesting {
+            // Forward models same-episode replay; scrub/backward model an
+            // episode replacement. Both must invalidate the captured
+            // playback generation before any downstream seek side effect.
+            let replacementEpisode =
+                action == .skipForward ? "episode-a" : "episode-b"
+            _ = runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: "asset-replacement",
+                episodeId: replacementEpisode,
+                podcastId: "podcast-replacement"
+            )
+        }
+
+        let accepted: Bool
+        switch action {
+        case .scrub:
+            accepted = await runtime.seek(to: 90)
+        case .skipForward:
+            accepted = await runtime.skipForward()
+        case .skipBackward:
+            accepted = await runtime.skipBackward()
+        }
+
+        #expect(!accepted)
+        #expect(await runtime.playbackService.snapshot().currentTime == 50)
+        #expect(runtime._committedUserSeekCountForTesting() == 0)
+        await runtime.shutdown()
+    }
+
+    @MainActor
+    @Test("transport rejection suppresses every runtime seek side effect")
+    func rejectedTransportSeekHasNoDownstreamEffects() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        _ = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: "asset-a",
+            episodeId: "episode-a",
+            podcastId: "podcast-a"
+        )
+        await runtime.playbackService._testingInjectState(
+            PlaybackState(
+                status: .playing,
+                currentTime: 25,
+                duration: 200,
+                rate: 1,
+                playbackSpeed: 1
+            )
+        )
+
+        // Preview runtime has no installed AVPlayerItem, so the item-fenced
+        // transport operation rejects. Runtime must honor that Bool.
+        #expect(!(await runtime.seek(to: 80)))
+        #expect(await runtime.playbackService.snapshot().currentTime == 25)
+        #expect(runtime._committedUserSeekCountForTesting() == 0)
+        await runtime.shutdown()
+    }
+
+    @MainActor
+    @Test("newest same-lifecycle runtime seek owns every downstream effect")
+    func newestRuntimeSeekSuppressesOlderDownstreamEffects() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        _ = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: "asset-a",
+            episodeId: "episode-a",
+            podcastId: "podcast-a"
+        )
+        await runtime.playbackService._testingInstallStubCurrentPlayerItem()
+        await runtime.playbackService._testingSetItemSeekOperation {
+            _, _ in true
+        }
+        await runtime.playbackService._testingInjectState(
+            PlaybackState(
+                status: .playing,
+                currentTime: 20,
+                duration: 200,
+                rate: 1,
+                playbackSpeed: 1
+            )
+        )
+        let firstAcceptedGate = FirstAcceptedRuntimeSeekGate()
+        runtime._setSeekTransportAcceptedHookForTesting {
+            await firstAcceptedGate.holdFirstInvocation()
+        }
+
+        let olderSeek = Task { @MainActor in
+            await runtime.seek(to: 40)
+        }
+        await firstAcceptedGate.waitUntilFirstStarted()
+        let newerSeek = Task { @MainActor in
+            await runtime.seek(to: 90)
+        }
+
+        #expect(await newerSeek.value)
+        #expect(await runtime.playbackService.snapshot().currentTime == 90)
+        let countsAfterNewest = runtime
+            ._userSeekDownstreamCountsForTesting()
+        #expect(countsAfterNewest.skip == 1)
+        #expect(countsAfterNewest.silence == 1)
+        #expect(countsAfterNewest.scrub == 1)
+        #expect(countsAfterNewest.persistence == 1)
+        #expect(countsAfterNewest.committed == 1)
+
+        await firstAcceptedGate.releaseFirst()
+        #expect(
+            !(await olderSeek.value),
+            "The older same-episode operation must reject after the newer seek starts"
+        )
+        let finalCounts = runtime._userSeekDownstreamCountsForTesting()
+        #expect(finalCounts.skip == 1)
+        #expect(finalCounts.silence == 1)
+        #expect(finalCounts.scrub == 1)
+        #expect(finalCounts.persistence == 1)
+        #expect(finalCounts.committed == 1)
+        #expect(
+            await runtime.playbackService.snapshot().currentTime == 90
+        )
+        await runtime.shutdown()
+    }
+
+    @MainActor
+    @Test(
+        "newer seek wins when the older seek is suspended inside every downstream effect",
+        arguments: RuntimeSeekEffectStage.allCases
+    )
+    func newestSeekWinsAcrossInEffectSuspension(
+        _ stage: RuntimeSeekEffectStage
+    ) async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        _ = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: "asset-effect-race",
+            episodeId: "episode-effect-race",
+            podcastId: "podcast-effect-race"
+        )
+        await runtime.playbackService._testingInstallStubCurrentPlayerItem()
+        await runtime.playbackService._testingSetItemSeekOperation {
+            _, _ in true
+        }
+        await runtime.playbackService._testingInjectState(
+            PlaybackState(
+                status: .playing,
+                currentTime: 20,
+                duration: 200,
+                rate: 1,
+                playbackSpeed: 1
+            )
+        )
+
+        let gate = FirstAcceptedRuntimeSeekGate()
+        let persistence = RuntimeSeekPersistenceProbe()
+        switch stage {
+        case .skip:
+            await runtime._setSkipSeekEffectHookForTesting {
+                await gate.holdFirstInvocation()
+            }
+        case .silence:
+            runtime._setSilenceSeekEffectHookForTesting {
+                await gate.holdFirstInvocation()
+            }
+        case .scrub:
+            await runtime._setScrubSeekEffectHookForTesting {
+                await gate.holdFirstInvocation()
+            }
+        case .persistence:
+            runtime.setPlaybackPositionPersistenceHandler { _ in
+                await gate.holdFirstInvocation()
+                guard !Task.isCancelled,
+                      let captured =
+                        await runtime.capturePlaybackPosition()
+                else {
+                    return
+                }
+                await persistence.append(captured.position)
+            }
+        }
+
+        let olderSeek = Task { @MainActor in
+            await runtime.seek(to: 40)
+        }
+        await gate.waitUntilFirstStarted()
+        let newerSeek = Task { @MainActor in
+            await runtime.seek(to: 90)
+        }
+
+        #expect(await newerSeek.value)
+        #expect(await runtime.playbackService.snapshot().currentTime == 90)
+        await gate.releaseFirst()
+        #expect(!(await olderSeek.value))
+
+        let effectTargets =
+            await runtime._userSeekEffectTargetsForTesting()
+        #expect(effectTargets.skip == 90)
+        #expect(effectTargets.silence == 90)
+        #expect(effectTargets.scrub == 90)
+        #expect(await runtime.playbackService.snapshot().currentTime == 90)
+        #expect(runtime._committedUserSeekCountForTesting() == 1)
+        if stage == .persistence {
+            #expect(await persistence.snapshot() == [90])
+        }
+        await runtime.shutdown()
+    }
+
+    @MainActor
+    @Test("Replacement, Stop, and shutdown do not join a cancellation-unresponsive cache task",
+          // The canonical fast plan starts thousands of Swift Testing cases
+          // together. On a saturated simulator, even this focused ~6-second
+          // scenario can remain executor-starved for over a minute before it
+          // runs. Keep the limit finite while allowing the full-plan scheduler
+          // enough headroom; behavioral hangs still fail well before the gate's
+          // outer timeout.
+          .timeLimit(.minutes(3)))
+    func lifecycleInvalidationDoesNotJoinStalledCacheTask() async {
+        let replacementRuntime = PlayheadRuntime(isPreviewRuntime: true)
+        let replacementLatch = DeinitLatch()
+        let stalledDuringReplacement = Task {
+            await replacementLatch.wait()
+        }
+        replacementRuntime._setAudioCacheTaskForTesting(stalledDuringReplacement)
+
+        // `performPlayEpisode` uses this same non-joining invalidation helper
+        // before touching replacement transport state.
+        replacementRuntime._cancelAudioCacheTaskForTesting()
+
+        #expect(stalledDuringReplacement.isCancelled)
+        replacementLatch.signal()
+        await stalledDuringReplacement.value
+        await replacementRuntime.shutdown()
+
+        let stopRuntime = PlayheadRuntime(isPreviewRuntime: true)
+        let stopLatch = DeinitLatch()
+        let stalledDuringStop = Task {
+            await stopLatch.wait()
+        }
+        stopRuntime._setAudioCacheTaskForTesting(stalledDuringStop)
+
+        await stopRuntime.stopPlayback()
+
+        #expect(stalledDuringStop.isCancelled)
+        stopLatch.signal()
+        await stalledDuringStop.value
+        await stopRuntime.shutdown()
+
+        let shutdownRuntime = PlayheadRuntime(isPreviewRuntime: true)
+        let shutdownLatch = DeinitLatch()
+        let stalledDuringShutdown = Task {
+            await shutdownLatch.wait()
+        }
+        shutdownRuntime._setAudioCacheTaskForTesting(stalledDuringShutdown)
+
+        await shutdownRuntime.shutdown()
+
+        #expect(stalledDuringShutdown.isCancelled)
+        shutdownLatch.signal()
+        await stalledDuringShutdown.value
+    }
+
+    @MainActor
+    @Test("progressive cache cancellation follows transport quiescence")
+    func progressiveCancellationFollowsPause() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        let generation = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: nil,
+            episodeId: "progressive-episode",
+            podcastId: "podcast"
+        )
+        await runtime.playbackService._testingInjectState(
+            PlaybackState(
+                status: .playing,
+                currentTime: 20,
+                duration: 100,
+                rate: 1,
+                playbackSpeed: 1
+            )
+        )
+        await runtime.playbackService._testingInstallStubCurrentPlayerItem()
+        #expect(await runtime.playbackService._testingHasPlayerItem)
+        #expect(await runtime.playbackService._testingHasCurrentPlayerItem)
+        let heldLatch = DeinitLatch()
+        let held = Task {
+            await heldLatch.wait()
+        }
+        runtime._setAudioCacheTaskForTesting(held)
+
+        #expect(
+            await runtime._quiescePlaybackThenCancelAudioCacheForTesting(
+                generation: generation
+            )
+        )
+        #expect(held.isCancelled)
+        #expect(
+            await runtime.playbackService.snapshot().status == .paused,
+            "The shared replacement/Stop boundary must pause before releasing the progressive artifact"
+        )
+        #expect(
+            !(await runtime.playbackService._testingHasPlayerItem),
+            "The old item must no longer satisfy a later Play command"
+        )
+        #expect(
+            !(await runtime.playbackService._testingHasCurrentPlayerItem),
+            "The old item must be detached from AVPlayer before its loader is released"
+        )
+        await runtime.playbackService.play()
+        #expect(
+            await runtime.playbackService.snapshot().status == .paused,
+            "Play must remain a no-op until the replacement item is installed"
+        )
+        heldLatch.signal()
+        await held.value
+        await runtime.shutdown()
+    }
+
+    @MainActor
+    @Test(
+        "a cache task cancelled before its first turn cannot enter the streaming lane",
+        .timeLimit(.minutes(1))
+    )
+    func cancelledCacheTaskRejectsEntryBeforeDownloadManager() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        let generation = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: nil,
+            episodeId: "episode-a",
+            podcastId: "podcast-a"
+        )
+        let startGate = RuntimePlaybackObserverGate()
+        let staleEntry = Task { @MainActor in
+            await startGate.hold()
+            return await runtime._audioCacheEntryAdmittedForTesting(
+                generation: generation,
+                episodeId: "episode-a"
+            )
+        }
+
+        await startGate.waitUntilStarted()
+        staleEntry.cancel()
+        await startGate.release()
+
+        #expect(
+            !(await staleEntry.value),
+            "Cancellation before entry must reject the operation wrapped around DownloadManager.streamingDownload"
+        )
+        await runtime.shutdown()
     }
 }

@@ -11,7 +11,7 @@ import Foundation
 
 // MARK: - DecodedSpan
 
-struct DecodedSpan: Sendable, Equatable, Identifiable {
+struct DecodedSpan: Sendable, Codable, Equatable, Identifiable {
     /// SHA256 prefix of "\(assetId):\(firstAtomOrdinal):\(lastAtomOrdinal)".
     /// Stable across re-runs — same inputs, same id.
     let id: String

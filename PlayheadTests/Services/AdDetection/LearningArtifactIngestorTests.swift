@@ -976,4 +976,61 @@ struct LearningArtifactIngestorTests {
         #expect(lowerResult.outcome == .ingested,
             "differently-cased sponsor names are DIFFERENT identities on disk and must therefore be DIFFERENT in-process keys; got \(lowerResult.outcome)")
     }
+
+    @Test(
+        "all four same-span explicit routes retain distinct post-commit learning triggers"
+    )
+    func explicitRouteIdentityMatchesV32PersistenceTuple()
+        async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let ingestor = LearningArtifactIngestor(store: store)
+        let sources: [CorrectionSource] = [
+            .bannerAutoSkipConfirmed,
+            .bannerAutoSkipDenied,
+            .bannerSuggestionConfirmed,
+            .bannerSuggestionDenied,
+        ]
+        let startTime = 60.1234
+        let endTime = 75.9876
+
+        for (index, source) in sources.enumerated() {
+            let correction = CorrectionEvent(
+                id: "explicit-route-learning-\(index)",
+                analysisAssetId: assetId,
+                scope: CorrectionScope.exactTimeSpan(
+                    assetId: assetId,
+                    startTime: startTime,
+                    endTime: endTime
+                ).serialized,
+                createdAt: 1_700_000_500 + Double(index),
+                source: source,
+                podcastId: podcastId,
+                correctionType: source.kind.correctionType,
+                targetRefs: CorrectionTargetRefs(
+                    adWindowId: "explicit-route-window-\(index)",
+                    exactFeedbackSpan: ExactFeedbackSpan(
+                        startTime: startTime,
+                        endTime: endTime
+                    )
+                )
+            )
+            let wasNewlyInserted =
+                try await store.appendCorrectionEvent(correction)
+            #expect(wasNewlyInserted)
+            let result = try await ingestor.ingestAlreadyPersisted(
+                correction: correction,
+                wasNewlyInserted: wasNewlyInserted
+            )
+            #expect(
+                result.outcome == .ingested,
+                "route \(source.rawValue) must retain its own derived-learning trigger"
+            )
+        }
+
+        let diagnostics = await ingestor.diagnostics()
+        #expect(diagnostics.raw == 4)
+        #expect(diagnostics.ingested == 4)
+        #expect(diagnostics.deduped == 0)
+    }
 }

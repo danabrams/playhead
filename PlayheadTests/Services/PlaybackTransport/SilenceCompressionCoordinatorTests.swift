@@ -92,6 +92,41 @@ struct SilenceCompressionCoordinatorTests {
         #expect(endCount >= 1)
     }
 
+    @Test("Episode-bound seek rejects a stale same-episode lifecycle token")
+    func episodeBoundSeekRejectsStaleLifecycle() async {
+        let playback = RecordingPlaybackController()
+        let source = RecordingAnalysisSource(windows: [])
+        let coord = SilenceCompressionCoordinator(
+            playback: playback,
+            source: source
+        )
+
+        await coord.beginEpisode(assetId: "asset-1", keepFullMusic: false)
+        let staleGeneration = coord.episodeLifecycleGenerationSnapshot()
+        // Replaying the same asset still creates a distinct lifecycle.
+        await coord.beginEpisode(assetId: "asset-1", keepFullMusic: false)
+        let endCountBeforeStaleAction = await playback.endCallCount
+
+        let acceptedStaleAction = await coord.recordUserSeek(
+            to: 12,
+            ifEpisodeLifecycleGeneration: staleGeneration
+        )
+
+        #expect(!acceptedStaleAction)
+        #expect(
+            await playback.endCallCount == endCountBeforeStaleAction,
+            "A stale banner seek must not disengage compression on the replacement lifecycle"
+        )
+
+        let currentGeneration = coord.episodeLifecycleGenerationSnapshot()
+        let acceptedCurrentAction = await coord.recordUserSeek(
+            to: 12,
+            ifEpisodeLifecycleGeneration: currentGeneration
+        )
+        #expect(acceptedCurrentAction)
+        #expect(await playback.endCallCount == endCountBeforeStaleAction + 1)
+    }
+
     @Test("notePlayhead inside a music plan ⇒ engages with varispeed/high rate")
     func playheadInsidePlanEngages() async {
         let windows = (0..<6).map { i in

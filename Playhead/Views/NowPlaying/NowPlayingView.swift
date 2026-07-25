@@ -7,6 +7,124 @@ import OSLog
 import SwiftData
 import SwiftUI
 
+private struct BannerPlaybackContext: Equatable {
+    let episodeId: String?
+    let playbackLifecycleGeneration: UInt64
+}
+
+/// Maps banner-tier answers onto the production correction seams without
+/// teaching the reusable banner view about `PlayheadRuntime`.
+///
+/// The initializer accepts narrow sinks so tests can exercise the same ID and
+/// explicit-denial routing that production uses.
+@MainActor
+struct BannerFeedbackProductionActions {
+    let onAutoSkipConfirmed: (AdSkipBannerItem) async -> Bool
+    let onNotAnAd: (AdSkipBannerItem) async -> Bool
+    let onSuggestSkip: (AdSkipBannerItem) async -> Bool
+    let onSuggestDecline: (AdSkipBannerItem) async -> Bool
+    let onSuggestExitWithoutSkip: (AdSkipBannerItem, Bool) -> Void
+
+    init(
+        confirmAutoSkippedBanner: @escaping (
+            _ windowId: String,
+            _ analysisAssetId: String?,
+            _ startTime: Double,
+            _ endTime: Double,
+            _ expectedEpisodeId: String?,
+            _ expectedPlaybackLifecycleGeneration: UInt64?,
+            _ expectedWindowMaterialRevisionToken: String?
+        ) async -> Bool = { _, _, _, _, _, _, _ in false },
+        revertWindow: @escaping (
+            _ windowId: String,
+            _ podcastId: String,
+            _ analysisAssetId: String?,
+            _ startTime: Double,
+            _ endTime: Double,
+            _ expectedEpisodeId: String?,
+            _ expectedPlaybackLifecycleGeneration: UInt64?,
+            _ expectedWindowMaterialRevisionToken: String?
+        ) async -> Bool,
+        acceptSuggestedSkip: @escaping (
+            _ windowId: String,
+            _ expectedEpisodeId: String?,
+            _ expectedPlaybackLifecycleGeneration: UInt64?,
+            _ expectedSuggestionRevisionToken: String?
+        ) async -> Bool,
+        declineSuggestedSkip: @escaping (
+            _ windowId: String,
+            _ isExplicitDenial: Bool,
+            _ expectedEpisodeId: String?,
+            _ expectedPlaybackLifecycleGeneration: UInt64?,
+            _ expectedSuggestionRevisionToken: String?
+        ) async -> Bool
+    ) {
+        onAutoSkipConfirmed = { item in
+            await confirmAutoSkippedBanner(
+                item.windowId,
+                item.analysisAssetId,
+                item.adStartTime,
+                item.adEndTime,
+                item.episodeId,
+                item.playbackLifecycleGeneration,
+                item.windowMaterialRevisionToken
+            )
+        }
+        onNotAnAd = { item in
+            await revertWindow(
+                item.windowId,
+                item.podcastId,
+                item.analysisAssetId,
+                item.adStartTime,
+                item.adEndTime,
+                item.episodeId,
+                item.playbackLifecycleGeneration,
+                item.windowMaterialRevisionToken
+            )
+        }
+        onSuggestSkip = { item in
+            await acceptSuggestedSkip(
+                item.windowId,
+                item.episodeId,
+                item.playbackLifecycleGeneration,
+                item.suggestionRevisionToken
+            )
+        }
+        onSuggestDecline = { item in
+            await declineSuggestedSkip(
+                item.windowId,
+                true,
+                item.episodeId,
+                item.playbackLifecycleGeneration,
+                item.suggestionRevisionToken
+            )
+        }
+        onSuggestExitWithoutSkip = { item, isExplicitDenial in
+            Task { @MainActor in
+                _ = await declineSuggestedSkip(
+                    item.windowId,
+                    isExplicitDenial,
+                    item.episodeId,
+                    item.playbackLifecycleGeneration,
+                    item.suggestionRevisionToken
+                )
+            }
+        }
+    }
+
+    /// Builds the production queue with both durable aggregate storage and the
+    /// suggest-exit route installed as one composition step. Tests inject an
+    /// isolated store and narrow sinks into this same path, avoiding
+    /// source-text canaries for production wiring.
+    func makeQueue(
+        feedbackCounterStore: BannerFeedbackCounterStore
+    ) -> AdBannerQueue {
+        let queue = AdBannerQueue(feedbackCounterStore: feedbackCounterStore)
+        queue.onSuggestExitWithoutSkip = onSuggestExitWithoutSkip
+        return queue
+    }
+}
+
 // MARK: - NowPlayingView
 
 struct NowPlayingView: View {
@@ -23,7 +141,8 @@ struct NowPlayingView: View {
     private var runtime: PlayheadRuntime
     private let ownsViewModel: Bool
     @State private var viewModel: NowPlayingViewModel
-    @State private var bannerQueue = AdBannerQueue()
+    private let bannerFeedbackActions: BannerFeedbackProductionActions
+    @State private var bannerQueue: AdBannerQueue
     @State private var showTranscriptPeek = false
     /// playhead-05i: drives the "Up Next" sheet presentation. The
     /// sheet hosts a `QueueView` whose VM reads the same
@@ -44,10 +163,130 @@ struct NowPlayingView: View {
         let resolvedViewModel = viewModel ?? NowPlayingViewModel(runtime: runtime)
         self.ownsViewModel = viewModel == nil
         self._viewModel = State(wrappedValue: resolvedViewModel)
+        let actions = BannerFeedbackProductionActions(
+            confirmAutoSkippedBanner: {
+                [weak runtime = runtime]
+                windowId,
+                analysisAssetId,
+                startTime,
+                endTime,
+                expectedEpisodeId,
+                expectedPlaybackGeneration,
+                expectedMaterialToken in
+                guard let runtime else { return false }
+                let orchestrator = runtime.skipOrchestrator
+                guard runtime.currentEpisodeId == expectedEpisodeId,
+                      runtime.playEpisodeGeneration
+                        == expectedPlaybackGeneration
+                else {
+                    return false
+                }
+                return await orchestrator.confirmAutoSkippedBanner(
+                    windowId: windowId,
+                    analysisAssetId: analysisAssetId,
+                    startTime: startTime,
+                    endTime: endTime,
+                    ifCurrentEpisodeId: expectedEpisodeId,
+                    ifPlaybackLifecycleGeneration:
+                        expectedPlaybackGeneration,
+                    ifWindowMaterialRevisionToken: expectedMaterialToken
+                )
+            },
+            revertWindow: {
+                [weak runtime = runtime]
+                windowId,
+                podcastId,
+                analysisAssetId,
+                startTime,
+                endTime,
+                expectedEpisodeId,
+                expectedPlaybackGeneration,
+                expectedMaterialToken in
+                guard let runtime else { return false }
+                let orchestrator = runtime.skipOrchestrator
+                guard runtime.currentEpisodeId == expectedEpisodeId,
+                      runtime.playEpisodeGeneration
+                        == expectedPlaybackGeneration
+                else {
+                    return false
+                }
+                return await orchestrator.denyAutoSkippedBanner(
+                    windowId: windowId,
+                    analysisAssetId: analysisAssetId,
+                    startTime: startTime,
+                    endTime: endTime,
+                    podcastId: podcastId,
+                    ifCurrentEpisodeId: expectedEpisodeId,
+                    ifPlaybackLifecycleGeneration:
+                        expectedPlaybackGeneration,
+                    ifWindowMaterialRevisionToken: expectedMaterialToken
+                )
+            },
+            acceptSuggestedSkip: {
+                [weak runtime = runtime]
+                windowId,
+                expectedEpisodeId,
+                expectedPlaybackGeneration,
+                expectedSuggestionRevisionToken in
+                guard let runtime else { return false }
+                let orchestrator = runtime.skipOrchestrator
+                guard runtime.currentEpisodeId == expectedEpisodeId,
+                      runtime.playEpisodeGeneration
+                        == expectedPlaybackGeneration
+                else {
+                    return false
+                }
+                return await orchestrator.acceptSuggestedSkip(
+                    windowId: windowId,
+                    ifCurrentEpisodeId: expectedEpisodeId,
+                    ifPlaybackLifecycleGeneration:
+                        expectedPlaybackGeneration,
+                    ifSuggestionRevisionToken:
+                        expectedSuggestionRevisionToken
+                )
+            },
+            declineSuggestedSkip: {
+                [weak runtime = runtime]
+                windowId,
+                isExplicitDenial,
+                expectedEpisodeId,
+                expectedPlaybackGeneration,
+                expectedSuggestionRevisionToken in
+                guard let runtime else { return false }
+                let orchestrator = runtime.skipOrchestrator
+                guard runtime.currentEpisodeId == expectedEpisodeId,
+                      runtime.playEpisodeGeneration
+                        == expectedPlaybackGeneration
+                else {
+                    return false
+                }
+                return await orchestrator.declineSuggestedSkip(
+                    windowId: windowId,
+                    isExplicitDenial: isExplicitDenial,
+                    ifCurrentEpisodeId: expectedEpisodeId,
+                    ifPlaybackLifecycleGeneration:
+                        expectedPlaybackGeneration,
+                    ifSuggestionRevisionToken:
+                        expectedSuggestionRevisionToken
+                )
+            }
+        )
+        self.bannerFeedbackActions = actions
+        self._bannerQueue = State(
+            wrappedValue: actions.makeQueue(feedbackCounterStore: .shared)
+        )
     }
 
     private var analysisAssetId: String? {
         runtime.currentAnalysisAssetId
+    }
+
+    private var bannerPlaybackContext: BannerPlaybackContext {
+        BannerPlaybackContext(
+            episodeId: runtime.currentEpisodeId,
+            playbackLifecycleGeneration:
+                runtime.playEpisodeGeneration
+        )
     }
 
     var body: some View {
@@ -120,40 +359,37 @@ struct NowPlayingView: View {
             // Ad skip banner — slides in at bottom, single lane, auto-dismiss.
             AdBannerView(
                 queue: bannerQueue,
-                onListen: { item in
-                    viewModel.handleListenRewind(item: item)
+                isPresentationVisible:
+                    !showQueueSheet
+                    && !showActivitySheet
+                    && !showTranscriptPeek,
+                isItemCurrent: { item in
+                    item.episodeId == runtime.currentEpisodeId
+                        && item.playbackLifecycleGeneration
+                            == runtime.playEpisodeGeneration
                 },
-                // Phase 7.2 / playhead-zskc: "Not an ad" correction from the
-                // banner. Route through `revertWindow(windowId:)` rather than
+                onListenAsync: { item in
+                    await viewModel.handleListenRewindAwaitingAction(item: item)
+                },
+                onAutoSkipConfirmedAsync:
+                    bannerFeedbackActions.onAutoSkipConfirmed,
+                // A No response to an automatic skip is the "Not an ad"
+                // correction. Route through `revertWindow(windowId:)` rather than
                 // constructing a CorrectionEvent directly — the orchestrator
                 // path writes a precise `.exactTimeSpan` correction (covering
                 // the window's snapped start/end) and handles the state,
                 // trust signal, and persistence atomically. Previously this
                 // site bypassed the orchestrator and persisted an
                 // `exactSpan:0:Int.max` whole-episode veto.
-                onNotAnAd: { item in
-                    let orchestrator = runtime.skipOrchestrator
-                    let podcastId = item.podcastId
-                    let windowId = item.windowId
-                    Task {
-                        await orchestrator.revertWindow(
-                            windowId: windowId,
-                            podcastId: podcastId
-                        )
-                    }
-                },
-                // playhead-gtt9.23: tap-to-skip on a suggest-tier banner.
+                onNotAnAdAsync: bannerFeedbackActions.onNotAnAd,
+                // playhead-gtt9.23: Yes on a suggest-tier banner.
                 // Promotes the suggested span into the active skip path
                 // and records a falseNegative correction (the user just
                 // told us "this WAS an ad" — exactly the calibration
                 // signal future threshold tuning needs).
-                onSuggestSkip: { item in
-                    let orchestrator = runtime.skipOrchestrator
-                    let windowId = item.windowId
-                    Task {
-                        await orchestrator.acceptSuggestedSkip(windowId: windowId)
-                    }
-                },
+                onSuggestSkipAsync: bannerFeedbackActions.onSuggestSkip,
+                onSuggestDeclineAsync:
+                    bannerFeedbackActions.onSuggestDecline,
                 // playhead-3bv.4: "Always skip this sponsor" on an
                 // auto-skipped banner. Records a `sponsorOnShow` scope
                 // correction so the SponsorKnowledgeStore's negative-
@@ -167,12 +403,17 @@ struct NowPlayingView: View {
                 // `.whitespacesAndNewlines`) is deliberate: this is a
                 // contract drift guard against the knowledge-store's
                 // exact character-set choice.
-                onAlwaysSkipSponsor: { item in
-                    guard let advertiser = item.advertiser else { return }
-                    let normalized = advertiser
-                        .lowercased()
-                        .trimmingCharacters(in: .whitespaces)
-                    guard !normalized.isEmpty else { return }
+                onAlwaysSkipSponsorAsync: { item in
+                    guard runtime.currentEpisodeId == item.episodeId,
+                          runtime.playEpisodeGeneration
+                            == item.playbackLifecycleGeneration,
+                          let advertiser = item.advertiser
+                    else {
+                        return false
+                    }
+                    let normalized = AdBannerView
+                        .normalizedAlwaysSkipSponsor(advertiser)
+                    guard !normalized.isEmpty else { return false }
                     let podcastId = item.podcastId
                     let assetId = runtime.currentAnalysisAssetId
                         ?? "podcast:\(podcastId)"
@@ -191,57 +432,64 @@ struct NowPlayingView: View {
                         )
                     )
                     let store = runtime.correctionStore
-                    Task {
-                        do {
-                            try await store.record(event)
-                        } catch {
-                            Self.logger.error(
-                                "alwaysSkipSponsor: failed to persist sponsorOnShow event for \(normalized, privacy: .public) on \(podcastId, privacy: .public): \(error.localizedDescription, privacy: .public)"
-                            )
-                        }
+                    do {
+                        try await store.record(event)
+                        return true
+                    } catch {
+                        Self.logger.error(
+                            "alwaysSkipSponsor: failed to persist sponsorOnShow event for \(normalized, privacy: .public) on \(podcastId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                        )
+                        return false
                     }
                 }
             )
         }
         .onAppear {
+            let bannerHostGeneration = bannerQueue.activateHost(
+                for: runtime.currentEpisodeId,
+                playbackLifecycleGeneration:
+                    runtime.playEpisodeGeneration
+            )
             viewModel.startObserving()
             viewModel.observeAdSegments(from: runtime.skipOrchestrator)
-            viewModel.observeBanners(from: runtime.skipOrchestrator, into: bannerQueue)
-            // playhead-gtt9.23: when a suggest-tier banner exits without
-            // a Skip tap (auto-fade or dismiss button), tell the
-            // orchestrator to drop the suggest window.
-            //
-            // playhead-rfu-sad: bind only once. `onAppear` fires every
-            // time the view returns to screen (sheet dismissal, push
-            // pop, app foreground), and rebinding on each call would
-            // create churn for no benefit — the queue retains the
-            // closure for its lifetime, and the runtime reference is
-            // stable across view-lifecycle events. Guard with a
-            // `nil` check so subsequent re-appearances are no-ops.
-            // The `runtime` capture is also weakened so a stale
-            // closure cannot fire on a deallocated runtime if the
-            // queue ever outlives this view.
-            if bannerQueue.onSuggestExitWithoutSkip == nil {
-                // playhead-lc7z: `userDismissed` is true only for an explicit
-                // "✕" tap; an auto-fade passes false. The orchestrator
-                // captures the explicit dismissal as a `.falsePositive`
-                // correction (and stamps `userDismissedBanner`), while a
-                // passive fade stays a silent decline.
-                bannerQueue.onSuggestExitWithoutSkip = { [weak runtime] item, userDismissed in
-                    guard let runtime else { return }
-                    let orchestrator = runtime.skipOrchestrator
-                    let windowId = item.windowId
-                    Task {
-                        await orchestrator.declineSuggestedSkip(
-                            windowId: windowId,
-                            userDismissed: userDismissed
-                        )
-                    }
-                }
-            }
+            viewModel.observeBanners(
+                from: runtime.skipOrchestrator,
+                into: bannerQueue,
+                hostGeneration: bannerHostGeneration
+            )
             Task { await viewModel.loadSkipMode(from: runtime.skipOrchestrator) }
         }
+        .onChange(of: bannerPlaybackContext) {
+            previousContext,
+            currentContext in
+            // Now Playing remains mounted across autoplay/queue advancement.
+            // Retire banners at both episode and same-episode replacement
+            // boundaries so an old presentation cannot act on new state.
+            let bannerHostGeneration =
+                bannerQueue.discardAllOnPlaybackContextChange(
+                    fromEpisodeId: previousContext.episodeId,
+                    toEpisodeId: currentContext.episodeId,
+                    fromPlaybackLifecycleGeneration:
+                        previousContext.playbackLifecycleGeneration,
+                    toPlaybackLifecycleGeneration:
+                        currentContext.playbackLifecycleGeneration
+            )
+            // Reattach with the new generation. The orchestrator may still be
+            // serving the previous episode until PlayheadRuntime finishes its
+            // asynchronous episode setup; item-level episode identity rejects
+            // those late old emissions during that interval.
+            viewModel.observeBanners(
+                from: runtime.skipOrchestrator,
+                into: bannerQueue,
+                hostGeneration: bannerHostGeneration
+            )
+        }
         .onDisappear {
+            // This is the lifecycle boundary for the queue owner, not a
+            // temporary sheet/background obscuration. Retire all outstanding
+            // suggestions neutrally so the orchestrator cannot retain windows
+            // that no visible banner can answer.
+            bannerQueue.discardAllOnHostDisappear()
             if ownsViewModel {
                 viewModel.stopObserving()
             } else {

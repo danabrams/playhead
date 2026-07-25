@@ -79,7 +79,7 @@ struct EpisodeFingerprintsV27MigrationTests {
         // (playhead-hdgk ad_windows edge-anchor columns) → 30 (playhead-gy2s
         // analysis_jobs reject-advisory columns) → 31 (playhead-b6jq
         // specialist_scan_results); the V27 table pins below are unchanged.
-        #expect(AnalysisStore.currentSchemaVersion == 31)
+        #expect(AnalysisStore.currentSchemaVersion == 34)
         #expect(try probeTableExists(in: dir, table: "episode_fingerprints"))
     }
 

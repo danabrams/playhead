@@ -98,6 +98,21 @@ struct AdDetectionServiceListenRewindRerouteTests {
         )
     }
 
+    private func awaitProfile(
+        store: AnalysisStore,
+        podcastId: String,
+        recentFalseSkipSignals expectedCount: Int
+    ) async throws -> PodcastProfile? {
+        for _ in 0..<200 {
+            let profile = try await store.fetchProfile(podcastId: podcastId)
+            if profile?.recentFalseSkipSignals == expectedCount {
+                return profile
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        return try await store.fetchProfile(podcastId: podcastId)
+    }
+
     @Test("a single recordListenRewind moves trust by exactly weakFalseSignalPenalty (default 0.05)")
     func singleRewindAppliesWeakPenalty() async throws {
         let store = try await makeTestStore()
@@ -111,9 +126,17 @@ struct AdDetectionServiceListenRewindRerouteTests {
         try await store.upsertProfile(makeProfile(podcastId: podcastId))
 
         let service = await makeService(store: store, trust: trust)
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
 
-        let profile = try await store.fetchProfile(podcastId: podcastId)
+        let profile = try await awaitProfile(
+            store: store,
+            podcastId: podcastId,
+            recentFalseSkipSignals: 1
+        )
         #expect(abs((profile?.skipTrustScore ?? -1) - 0.85) < 1e-10,
                 "expected 0.85, got \(profile?.skipTrustScore ?? -1)")
         #expect(profile?.recentFalseSkipSignals == 1)
@@ -142,10 +165,22 @@ struct AdDetectionServiceListenRewindRerouteTests {
         try await store.upsertProfile(makeProfile(podcastId: podcastId, mode: .auto, trust: 0.90))
 
         let service = await makeService(store: store, trust: trust)
-        try await service.recordListenRewind(windowId: "win-1", podcastId: podcastId)
-        try await service.recordListenRewind(windowId: "win-2", podcastId: podcastId)
+        try await service.recordListenRewind(
+            windowId: "win-1",
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
+        try await service.recordListenRewind(
+            windowId: "win-2",
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
 
-        let profile = try await store.fetchProfile(podcastId: podcastId)
+        let profile = try await awaitProfile(
+            store: store,
+            podcastId: podcastId,
+            recentFalseSkipSignals: 2
+        )
         #expect(profile?.mode == SkipMode.manual.rawValue,
                 "two rewinds must demote auto -> manual; pre-q45f this never happened")
         #expect(profile?.recentFalseSkipSignals == 2)
@@ -165,7 +200,11 @@ struct AdDetectionServiceListenRewindRerouteTests {
         try await store.upsertProfile(makeProfile(podcastId: podcastId))
 
         let service = await makeService(store: store, trust: trust)
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
 
         let rows = try await store.fetchListenRewinds(forAssetId: assetId)
         #expect(rows.count == 1)
@@ -198,7 +237,11 @@ struct AdDetectionServiceListenRewindRerouteTests {
                 fmBackfillMode: .off
             )
         )
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
 
         // Decision flip + event log still happen.
         let rows = try await store.fetchListenRewinds(forAssetId: assetId)
@@ -260,9 +303,17 @@ struct AdDetectionServiceListenRewindRerouteTests {
         ))
 
         let service = await makeService(store: store, trust: trust)
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
 
-        let after = try await store.fetchProfile(podcastId: podcastId)
+        let after = try await awaitProfile(
+            store: store,
+            podcastId: podcastId,
+            recentFalseSkipSignals: 1
+        )
         // playhead-q45f cycle-2 M-1: assert mutation occurred so this
         // test cannot pass trivially when the trust delegate silently
         // no-ops. The carry-forward checks below ride on top of a
@@ -307,7 +358,11 @@ struct AdDetectionServiceListenRewindRerouteTests {
         // Note: no upsertProfile — this podcast has no profile row.
 
         let service = await makeService(store: store, trust: trust)
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
 
         // No lazy-create — fetchProfile must still return nil.
         let profile = try await store.fetchProfile(podcastId: podcastId)

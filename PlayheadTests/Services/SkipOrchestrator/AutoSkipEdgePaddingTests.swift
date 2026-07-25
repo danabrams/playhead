@@ -539,7 +539,19 @@ struct AutoSkipEdgePaddingWiringTests {
         // never gets edge anchors stamped. Without the boundaryState
         // exemption, the flag-ON veto would silently demote the user's own
         // "Skip" tap back to markOnly.
-        let orchestrator = try await Self.makeAutoOrchestrator()
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore:
+                PersistentUserCorrectionStore(store: store)
+        )
         nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
         await orchestrator.setSkipCueHandler { ranges in pushedCues = ranges }
         await orchestrator.beginEpisode(
@@ -562,6 +574,7 @@ struct AutoSkipEdgePaddingWiringTests {
             wasSkipped: false, userDismissedBanner: false,
             eligibilityGate: "markOnly"
         )
+        try await store.insertAdWindow(suggested)
         await orchestrator.receiveAdWindows([suggested])
         #expect(pushedCues.isEmpty, "markOnly ingest must not fire a cue")
 

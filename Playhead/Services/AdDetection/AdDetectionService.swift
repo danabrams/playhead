@@ -1601,6 +1601,12 @@ actor AdDetectionService {
     /// in `PlayheadRuntime` always installs a real service before the
     /// first user tap.
     private(set) var trustScoringService: TrustScoringService?
+#if DEBUG
+    private var postUserMarkCommitHandlerForTesting:
+        (@Sendable () async -> Void)?
+    private var listenRewindTrustHandlerForTesting:
+        (@Sendable (String) async -> Void)?
+#endif
 
     /// playhead-z3ch: Provider for feed-description metadata. `runBackfill`
     /// queries it once per asset and synthesizes `.metadata` ledger entries
@@ -2232,6 +2238,18 @@ actor AdDetectionService {
     }
 
     #if DEBUG
+    func _setPostUserMarkCommitHandlerForTesting(
+        _ handler: (@Sendable () async -> Void)?
+    ) {
+        postUserMarkCommitHandlerForTesting = handler
+    }
+
+    func _setListenRewindTrustHandlerForTesting(
+        _ handler: (@Sendable (String) async -> Void)?
+    ) {
+        listenRewindTrustHandlerForTesting = handler
+    }
+
     /// playhead-8em9 (narL): Test seam for installing a decision logger
     /// post-init. Production wires the logger via `init(decisionLogger:)`
     /// to avoid a Task-install race; this setter exists only for tests that
@@ -2757,13 +2775,14 @@ actor AdDetectionService {
     /// Persist a user-marked ad region as an AdWindow and CorrectionEvent.
     /// Called from PlayheadRuntime when the user reports hearing an ad that
     /// the detector missed (false negative correction).
+    @discardableResult
     func recordUserMarkedAd(
         analysisAssetId: String,
         startTime: Double,
         endTime: Double,
-        podcastId: String?
-    ) async {
-        let windowId = UUID().uuidString
+        podcastId: String?,
+        windowId: String = UUID().uuidString
+    ) async -> Bool {
         let adWindow = AdWindow(
             id: windowId,
             analysisAssetId: analysisAssetId,
@@ -2801,7 +2820,7 @@ actor AdDetectionService {
             // and is robust to any future tightening of the `receiveAdWindows`
             // guard that would drop `nil`. It only auto-skips WHERE the mode
             // already auto-skips (`.auto`); in `.manual`/`.shadow`,
-            // `evaluateWindow` returns `.confirmed` (banner, no skip) — identical
+            // `evaluateWindow` returns `.confirmed` (log-only, no skip) — identical
             // to the `nil` behaviour. The re-derived fusion window over the same
             // region is deduped away in `reconcileBackfillWindows`, so this row is
             // the single surfaced window for the marked ad. Only THIS definitive
@@ -2810,71 +2829,126 @@ actor AdDetectionService {
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
 
+        let correctionScope = CorrectionScope.exactTimeSpan(
+            assetId: analysisAssetId,
+            startTime: min(startTime, endTime),
+            endTime: max(startTime, endTime)
+        )
+        let correction = CorrectionEvent(
+            analysisAssetId: analysisAssetId,
+            scope: correctionScope.serialized,
+            source: .falseNegative,
+            podcastId: podcastId,
+            correctionType: .falseNegative
+        )
+
+        let didPersistWindow: Bool
         do {
-            try await store.insertAdWindow(adWindow)
+            try await store.persistUserMarkedAd(
+                window: adWindow,
+                correction: correction
+            )
+            didPersistWindow = true
         } catch {
-            logger.warning("Failed to persist user-marked ad window: \(error.localizedDescription)")
+            logger.warning(
+                "Failed to atomically persist user-marked ad window and correction: \(error.localizedDescription)"
+            )
+            didPersistWindow = false
         }
 
-        // Record a false-negative correction event for the trust/learning pipeline.
-        // playhead-zskc: the caller (NowPlayingViewModel.reportHearingAd) has
-        // already run BoundaryExpander, so `startTime` and `endTime` represent
-        // the real ad boundaries. Persist them as `.exactTimeSpan` rather than
-        // collapsing to the coarse `exactSpan:0:Int.max` whole-episode veto.
-        //
-        // This path does NOT call `recordFalseNegative`: that API is for
-        // contexts where we only have a single reported time and must
-        // synthesize a ±15s window + AdWindow. Here the AdWindow is already
-        // persisted above and the boundaries came from real features.
-        if let correctionStore {
-            await correctionStore.recordVeto(
+        // The false-negative correction is committed in the same SQLite
+        // transaction as the AdWindow above. Do not route this gesture through
+        // the non-throwing `recordVeto` convenience API: a window-only success
+        // would acknowledge feedback that the learning system never received.
+        guard didPersistWindow else { return false }
+
+        // Training materialization and catalog ingress are derived,
+        // idempotent work. The atomic user-facing receipt above is already
+        // durable; never hold the live cue/timeline injection behind these
+        // secondary SQLite/catalog actor hops.
+#if DEBUG
+        if let handler = postUserMarkCommitHandlerForTesting {
+            Task {
+                await handler()
+            }
+        } else {
+            scheduleUserMarkedAdDerivedWork(
+                analysisAssetId: analysisAssetId,
                 startTime: startTime,
                 endTime: endTime,
-                assetId: analysisAssetId,
-                podcastId: podcastId,
-                source: .falseNegative
+                podcastId: podcastId
             )
         }
+#else
+        scheduleUserMarkedAdDerivedWork(
+            analysisAssetId: analysisAssetId,
+            startTime: startTime,
+            endTime: endTime,
+            podcastId: podcastId
+        )
+#endif
+        return true
+    }
 
-        // playhead-gtt9.17: catalog ingress on user-confirmed ad. A user
-        // marking a span as ad is the strongest possible label — higher
-        // confidence than an autoSkipEligible fusion decision. Fingerprint
-        // the user-marked span's overlapping feature windows and insert so
-        // subsequent episodes of the same show match on this creative.
-        //
-        // Absent feature windows (e.g. a podcast whose audio never ran
-        // through feature extraction) yields an empty slice → zero
-        // fingerprint → skipped by `AdCatalogStore.insert` guard. Silent
-        // on any SQLite failure; a correction-path catalog miss is
-        // strictly a missed precision opportunity, not a correctness bug.
-        if let adCatalogStore {
-            let featureWindows: [FeatureWindow]
-            do {
-                featureWindows = try await store.fetchFeatureWindows(
-                    assetId: analysisAssetId,
-                    from: startTime,
-                    to: endTime
-                )
-            } catch {
-                logger.warning("recordUserMarkedAd: fetchFeatureWindows failed (skipping catalog insert): \(error.localizedDescription, privacy: .public)")
-                return
-            }
-            let fingerprint = AcousticFingerprint.fromFeatureWindows(featureWindows)
-            guard !fingerprint.isZero else { return }
-            do {
-                _ = try await adCatalogStore.insert(
-                    showId: podcastId,
-                    episodePosition: .unknown,
-                    durationSec: max(0, endTime - startTime),
-                    acousticFingerprint: fingerprint,
-                    transcriptSnippet: nil,
-                    sponsorTokens: nil,
-                    originalConfidence: 1.0
-                )
-                logger.debug("recordUserMarkedAd: inserted catalog entry for user-marked ad on asset \(analysisAssetId, privacy: .public)")
-            } catch {
-                logger.warning("recordUserMarkedAd: catalog insert failed: \(error.localizedDescription, privacy: .public)")
-            }
+    private func scheduleUserMarkedAdDerivedWork(
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        podcastId: String?
+    ) {
+        Task {
+            await performUserMarkedAdDerivedWork(
+                analysisAssetId: analysisAssetId,
+                startTime: startTime,
+                endTime: endTime,
+                podcastId: podcastId
+            )
+        }
+    }
+
+    private func performUserMarkedAdDerivedWork(
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        podcastId: String?
+    ) async {
+        // The atomic store path intentionally bypasses
+        // `PersistentUserCorrectionStore.record`, whose optional ingestor
+        // normally refreshes derived training examples after an append.
+        await materializeTrainingExamples(forAsset: analysisAssetId)
+
+        // A user-confirmed span is the strongest catalog label. Missing
+        // feature windows or catalog failures are secondary precision misses,
+        // never failures of the already-committed user action.
+        guard let adCatalogStore else { return }
+        let featureWindows: [FeatureWindow]
+        do {
+            featureWindows = try await store.fetchFeatureWindows(
+                assetId: analysisAssetId,
+                from: startTime,
+                to: endTime
+            )
+        } catch {
+            logger.warning("recordUserMarkedAd: fetchFeatureWindows failed (skipping catalog insert): \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        let fingerprint = AcousticFingerprint.fromFeatureWindows(
+            featureWindows
+        )
+        guard !fingerprint.isZero else { return }
+        do {
+            _ = try await adCatalogStore.insert(
+                showId: podcastId,
+                episodePosition: .unknown,
+                durationSec: max(0, endTime - startTime),
+                acousticFingerprint: fingerprint,
+                transcriptSnippet: nil,
+                sponsorTokens: nil,
+                originalConfidence: 1.0
+            )
+            logger.debug("recordUserMarkedAd: inserted catalog entry for user-marked ad on asset \(analysisAssetId, privacy: .public)")
+        } catch {
+            logger.warning("recordUserMarkedAd: catalog insert failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -5650,8 +5724,8 @@ actor AdDetectionService {
             // can't resurrect them; this call also drops them from the live
             // in-memory window set so a superseded hot false-positive stops
             // auto-skipping in-session. Safe to deliver the full set:
-            // `retireAdWindows` no-ops unknown ids and refuses to drop
-            // `.applied` / `.reverted` rows. Unconditional on
+            // `retireAdWindows` no-ops unknown ids and preserves only
+            // user-terminal `.reverted` rows. Unconditional on
             // `fusionDecisionResults` — a clean backfill (no ads) still retires
             // a rejected hot candidate.
             if !retiredHotPathWindowIDs.isEmpty {
@@ -7584,7 +7658,7 @@ actor AdDetectionService {
     ) -> AdWindow {
         // Map fusion policy action + gate to AdDecisionState for persistence.
         // autoSkipEligible: confirmed when gate passes, candidate otherwise.
-        // detectOnly/logOnly: always confirmed (banner shown; data preserved for Phase 7).
+        // detectOnly/logOnly: always confirmed (no applied-skip banner; data preserved for Phase 7).
         // suppress: always suppressed (never shown to user).
         let decisionState: AdDecisionState
         switch policyAction {
@@ -8551,48 +8625,33 @@ actor AdDetectionService {
     /// `falseSignalPenalty = 0.10` to reflect that weaker confidence, while
     /// still letting repeated rewinds accumulate into a mode demotion.
     ///
-    /// Side effects on every call:
-    ///   1. Flip `AdWindowDecision` to `.reverted`.
-    ///   2. Append a row to `ad_listen_rewinds` (q45f.1 event log) keyed
-    ///      to `window.startTime`. Skipped if the window lookup fails.
-    ///   3. Delegate to `trustScoringService?.recordWeakFalseSkipSignal`
-    ///      for the atomic profile mutation + demotion evaluation. Optional
-    ///      chaining lets legacy test factories (no trust service injected)
-    ///      still get steps 1 & 2.
+    /// Side effects on every accepted call:
+    ///   1. Atomically flip `AdWindowDecision` to `.reverted` and append a
+    ///      row to `ad_listen_rewinds`, keyed to `window.startTime`.
+    ///      A missing window or insert failure rejects and rolls back the
+    ///      whole receipt so the banner can remain retryable.
+    ///   2. Only after that receipt commits, delegate to
+    ///      `trustScoringService?.recordWeakFalseSkipSignal` for the atomic
+    ///      profile mutation + demotion evaluation. Optional chaining lets
+    ///      legacy test factories still get the durable correction.
     ///
     /// Do NOT re-introduce an inline profile mutation here — the
     /// `testRecordListenRewindBodyRoutesThroughTrustScoringService`
     /// canary blocks that regression at source-inspection time.
     func recordListenRewind(
         windowId: String,
+        analysisAssetId: String,
         podcastId: String
     ) async throws {
-        // Revert the window (user tapped "Listen" to play through).
-        try await store.updateAdWindowDecision(
-            id: windowId,
-            decisionState: AdDecisionState.reverted.rawValue
+        // The decision flip and append-only event are one durable receipt.
+        // Propagate any failure so the banner remains retryable; accepting a
+        // partial write would consume the user's only correction surface.
+        try await store.persistListenRewind(
+            windowId: windowId,
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId,
+            createdAt: Date()
         )
-
-        // playhead-q45f.1: append an event row to `ad_listen_rewinds`
-        // so the q45f counterfactual gate's frozen-trace replay can see
-        // *that* the user rewound, in addition to the indirect signal
-        // already encoded in `AdWindowDecision.reverted`. The row's
-        // `time` is the source window's `startTime` — the position the
-        // banner's "Listen" tap rewinds the player to, mirroring
-        // `seek(to: item.adStartTime)` in `NowPlayingViewModel`. Done
-        // before the profile mutation so a missing-profile early
-        // return still leaves the event in the log (q45f's gate cares
-        // about the *event*, not the trust-score side-effect).
-        if let window = try await store.fetchAdWindow(id: windowId) {
-            try await store.insertListenRewind(
-                windowId: windowId,
-                podcastId: podcastId,
-                time: window.startTime,
-                createdAt: Date()
-            )
-        } else {
-            logger.warning("recordListenRewind: no ad_window for id=\(windowId); skipping event log")
-        }
 
         // playhead-q45f: route the trust-score side-effect through
         // `TrustScoringService.recordWeakFalseSkipSignal`. The pre-q45f
@@ -8608,7 +8667,29 @@ actor AdDetectionService {
         // without injecting a trust service) still get the decision
         // flip + event log row. Production wiring in `PlayheadRuntime`
         // always installs a real service before the first user tap.
-        await trustScoringService?.recordWeakFalseSkipSignal(podcastId: podcastId)
+        // Trust calibration is downstream of the durable receipt and must not
+        // hold the UI's claimed Listen action open.
+#if DEBUG
+        if let handler = listenRewindTrustHandlerForTesting {
+            Task {
+                await handler(podcastId)
+            }
+        } else if let trustScoringService {
+            Task {
+                await trustScoringService.recordWeakFalseSkipSignal(
+                    podcastId: podcastId
+                )
+            }
+        }
+#else
+        if let trustScoringService {
+            Task {
+                await trustScoringService.recordWeakFalseSkipSignal(
+                    podcastId: podcastId
+                )
+            }
+        }
+#endif
 
         logger.info("Recorded listen-rewind for window \(windowId), podcast \(podcastId)")
     }
@@ -10120,13 +10201,22 @@ actor AdDetectionService {
             logger.warning("correctionReplayCandidates: loadCorrectionEvents failed: \(error.localizedDescription, privacy: .public)")
             return []
         }
-        guard !events.isEmpty else { return [] }
+        // Explicit banner receipts are private acknowledgements of an
+        // already-materialized detection row. They must never enter the
+        // correction-replay synthesizer: treating either Yes route as a
+        // generic false negative would create a fresh random-ID window and
+        // leak the answer into diagnostics/sharing on the next hot-path run.
+        let replayEvents = events.filter {
+            !$0.isPrivateExplicitFeedbackReceipt
+        }
+        guard !replayEvents.isEmpty else { return [] }
 
         // Build the set of `.exactTimeSpan` ranges that have a
         // `.falsePositive` correction. These mask `.falseNegative`
         // ranges they fully cover so a vetoed span is never re-emitted.
         var falsePositiveRanges: [(start: Double, end: Double)] = []
-        for event in events where event.correctionType == .falsePositive {
+        for event in replayEvents
+            where event.correctionType == .falsePositive {
             guard let scope = CorrectionScope.deserialize(event.scope) else { continue }
             guard case .exactTimeSpan(_, let s, let e) = scope else { continue }
             falsePositiveRanges.append((s, e))
@@ -10135,7 +10225,8 @@ actor AdDetectionService {
         // Collect unique `.falseNegative` `.exactTimeSpan` ranges.
         var falseNegativeRanges: [(start: Double, end: Double)] = []
         var seen: Set<String> = []
-        for event in events where event.correctionType == .falseNegative {
+        for event in replayEvents
+            where event.correctionType == .falseNegative {
             guard let scope = CorrectionScope.deserialize(event.scope) else { continue }
             guard case .exactTimeSpan(_, let s, let e) = scope else { continue }
             // Defensive: reject non-finite or zero-duration spans.

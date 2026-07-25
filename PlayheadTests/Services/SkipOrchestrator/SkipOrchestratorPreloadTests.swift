@@ -188,7 +188,6 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
 
         // beginEpisode should load the windows and push them through the pipeline.
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
-
         // The orchestrator should have processed the pre-loaded windows.
         // In default shadow mode, windows are confirmed (not applied), so the
         // decision log should have entries for the preloaded windows.
@@ -288,8 +287,8 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
     /// Cycle-21 H-1 (banner-emission angle): a preloaded `.applied`
     /// window MUST NOT re-fire its banner, even though the row IS
     /// forwarded so the cue can re-push. Deterministic positive
-    /// control: a sibling `.confirmed` row at a later `startTime` IS
-    /// expected to emit a banner — `evaluateAndPush` iterates windows
+    /// control: a sibling `.confirmed` row at a later `startTime` is
+    /// promoted in auto mode and expected to emit a banner — `evaluateAndPush` iterates windows
     /// in `snappedStart`-ascending order, so if the `.applied`
     /// suppression is broken the FIRST banner the collector receives
     /// would be for `win-applied`. We assert the first (and only)
@@ -299,7 +298,7 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
     ///   2. no `.applied` banner came first.
     ///
     /// Cycle-21 M-2: replaces a fixed `Task.sleep` with a deterministic
-    /// "wait for the confirmed banner to arrive" pattern so the test
+    /// "wait for the auto-promoted banner to arrive" pattern so the test
     /// can't false-pass on a slow CI host where the regression's
     /// banner emission would still be in-flight when the sleep ends.
     ///
@@ -307,7 +306,7 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
     /// iteration-order change in `evaluateAndPush`. The "first banner
     /// is win-confirmed" check by itself is iteration-order-coupled —
     /// if the production sort flipped to descending or `snappedEnd`,
-    /// the .confirmed banner could land first even with a broken
+    /// the auto-promoted banner could land first even with a broken
     /// `.applied` suppression. Cycle-22 added a gate-snapshot check
     /// over `banneredWindowIds` (the helper was deleted in cycle-27
     /// as dead code, since cycle-23 found the gate is also written
@@ -340,6 +339,10 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         }
 
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
+        // Confirmed shadow/manual windows are intentionally silent because no
+        // skip occurred. Promote the positive-control row through auto mode so
+        // the emitted card truthfully represents an applied skip.
+        await orchestrator.setActiveSkipMode(.auto)
 
         // Cycle-23 H-1 (iteration-order-independent + pre-population-
         // specific): observe the EMISSION snapshot, not the suppression
@@ -366,15 +369,14 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
             """
         )
 
-        // Deterministic: wait for the .confirmed banner to arrive (it
-        // WILL arrive — the orchestrator emits a banner the first time
-        // it sees a .confirmed window). The collector breaks after 1
+        // Deterministic: wait for the auto-promoted banner to arrive.
+        // The collector breaks after 1
         // item, so we get exactly the FIRST banner emitted. This
         // check proves the gate is wired through `evaluateAndPush`
         // (i.e., the suppression actually fires), complementing the
         // gate-snapshot assertion above.
         let received = await collector.value
-        XCTAssertEqual(received.count, 1, "Expected exactly one banner — the .confirmed window's.")
+        XCTAssertEqual(received.count, 1, "Expected exactly one banner — the auto-promoted window's.")
         XCTAssertEqual(
             received.first?.windowId,
             "win-confirmed",
@@ -576,7 +578,7 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
     /// contain `win-confirmed`", and the test signals "setup broken"
     /// rather than "endEpisode reset broken".
     func testEndEpisodeResetsEmittedAutoSkipBannersSet() async throws {
-        // Seed a confirmed window high enough to fire a banner.
+        // Seed a confirmed window high enough to apply after auto mode is enabled.
         try await store.insertAdWindow(
             makeAdWindow(id: "win-confirmed", start: 10.0, end: 40.0, confidence: 0.95, decisionState: "confirmed")
         )
@@ -592,8 +594,9 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         }
 
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
+        await orchestrator.setActiveSkipMode(.auto)
         let received = await collector.value
-        XCTAssertEqual(received.count, 1, "Setup precondition: confirmed window must emit one banner.")
+        XCTAssertEqual(received.count, 1, "Setup precondition: auto-promoted window must emit one banner.")
 
         let emittedDuringEpisode = await orchestrator.emittedAutoSkipBannersSnapshot()
         XCTAssertTrue(
@@ -685,11 +688,12 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
             return items
         }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
+        await orchestrator.setActiveSkipMode(.auto)
         let ep1Banners = await collector1.value
         XCTAssertEqual(
             ep1Banners.first?.windowId,
             "win-ep1",
-            "Setup precondition: episode 1's confirmed window must emit a banner before we test cross-episode isolation."
+            "Setup precondition: episode 1's auto-promoted window must emit a banner before we test cross-episode isolation."
         )
 
         let snapshotDuringEp1 = await orchestrator.emittedAutoSkipBannersSnapshot()
@@ -711,16 +715,17 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
             return items
         }
         await orchestrator.beginEpisode(analysisAssetId: "asset-2", episodeId: "asset-2")
+        await orchestrator.setActiveSkipMode(.auto)
         let ep2Banners = await collector2.value
         XCTAssertEqual(
             ep2Banners.count,
             1,
-            "Episode 2's confirmed window must emit a fresh banner — emittedAutoSkipBannerWindowIds carry-over would not cause suppression here (the set is observability-only), but absence of a banner indicates a deeper regression in the new-episode emission path."
+            "Episode 2's auto-promoted window must emit a fresh banner — emittedAutoSkipBannerWindowIds carry-over would not cause suppression here (the set is observability-only), but absence of a banner indicates a deeper regression in the new-episode emission path."
         )
         XCTAssertEqual(
             ep2Banners.first?.windowId,
             "win-ep2",
-            "Episode 2's first banner must be for `win-ep2` (the only confirmed window on asset-2)."
+            "Episode 2's first banner must be for `win-ep2` (the only auto-promoted window on asset-2)."
         )
 
         let snapshotDuringEp2 = await orchestrator.emittedAutoSkipBannersSnapshot()

@@ -50,7 +50,10 @@ struct UserMarkedAdInjectionTests {
             trustScore: 0.9,
             observations: 10
         )
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
 
         let accumulator = CueAccumulator()
         await orchestrator.setSkipCueHandler { cues in
@@ -94,7 +97,10 @@ struct UserMarkedAdInjectionTests {
             trustScore: 0.9,
             observations: 10
         )
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: "podcast-1")
 
@@ -168,9 +174,82 @@ struct UserMarkedAdInjectionTests {
             }
         }
     }
+
+    @Test("late persisted mark cannot inject into replacement asset")
+    func lateMarkIsRejectedAfterEpisodeReplacement() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(
+                id: "asset-2",
+                episodeId: "episode-2"
+            )
+        )
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "episode-1",
+            podcastId: "podcast-1"
+        )
+
+        // Model persistence completing after playback has already switched.
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2",
+            episodeId: "episode-2",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.injectUserMarkedAd(
+            start: 60,
+            end: 120,
+            analysisAssetId: "asset-1",
+            windowId: "late-old-asset-mark"
+        )
+
+        #expect((await orchestrator.activeWindowIDs()).isEmpty)
+        #expect((await orchestrator.getDecisionLog()).isEmpty)
+    }
 }
 
 // MARK: - AdDetectionService.recordUserMarkedAd Tests
+
+private actor UserMarkDerivedGate {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func hold() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
 
 @Suite("AdDetectionService - User Marked Ad Persistence")
 struct UserMarkedAdPersistenceTests {
@@ -253,6 +332,85 @@ struct UserMarkedAdPersistenceTests {
         #expect(fn.correctionType == .falseNegative,
                 "falseNegative source must persist as correctionType.falseNegative")
     }
+
+    @Test("A correction write failure rolls back the companion user-marked window")
+    func recordUserMarkedAdIsAtomic() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.execForTesting(
+            """
+            CREATE TRIGGER fail_user_mark_correction
+            BEFORE INSERT ON correction_events
+            WHEN NEW.analysisAssetId = 'asset-1'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected user-mark correction failure');
+            END
+            """
+        )
+        let service = AdDetectionService(
+            store: store,
+            metadataExtractor: FallbackExtractor()
+        )
+
+        let accepted = await service.recordUserMarkedAd(
+            analysisAssetId: "asset-1",
+            startTime: 30,
+            endTime: 90,
+            podcastId: "podcast-1",
+            windowId: "atomic-user-mark"
+        )
+
+        #expect(!accepted)
+        #expect(
+            (try await store.fetchAdWindows(assetId: "asset-1")).isEmpty,
+            "The AdWindow insert must roll back when its correction receipt fails"
+        )
+        #expect(
+            (try await store.loadCorrectionEvents(
+                analysisAssetId: "asset-1"
+            )).isEmpty
+        )
+    }
+
+    @Test(
+        "post-commit user-mark derivation does not gate the accepted result",
+        .timeLimit(.minutes(1))
+    )
+    func userMarkDerivedWorkIsNonBlocking() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let service = AdDetectionService(
+            store: store,
+            metadataExtractor: FallbackExtractor()
+        )
+        let derivedGate = UserMarkDerivedGate()
+        await service._setPostUserMarkCommitHandlerForTesting {
+            await derivedGate.hold()
+        }
+        let primaryResultGate = UserMarkDerivedGate()
+        let response = Task {
+            let accepted = await service.recordUserMarkedAd(
+                analysisAssetId: "asset-1",
+                startTime: 30,
+                endTime: 90,
+                podcastId: "podcast-1",
+                windowId: "nonblocking-user-mark"
+            )
+            await primaryResultGate.hold()
+            return accepted
+        }
+
+        await derivedGate.waitUntilStarted()
+        await primaryResultGate.waitUntilStarted()
+        #expect(
+            try await store.fetchAdWindow(id: "nonblocking-user-mark")
+                != nil,
+            "The primary row must already be durable while derivation is held"
+        )
+        await derivedGate.release()
+        await primaryResultGate.release()
+        #expect(await response.value)
+    }
 }
 
 // MARK: - Integration: Inject + Persist Roundtrip
@@ -271,7 +429,11 @@ struct UserMarkedAdIntegrationTests {
             trustScore: 0.9,
             observations: 10
         )
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
 
         let accumulator = CueAccumulator()
         await orchestrator.setSkipCueHandler { cues in
@@ -285,17 +447,21 @@ struct UserMarkedAdIntegrationTests {
         )
         await detectionService.setUserCorrectionStore(correctionStore)
 
-        // Simulate what PlayheadRuntime.injectUserMarkedAd does.
-        await orchestrator.injectUserMarkedAd(
-            start: 60.0,
-            end: 120.0,
-            analysisAssetId: "asset-1"
-        )
-        await detectionService.recordUserMarkedAd(
+        // Simulate PlayheadRuntime's persistence-first, shared-identity path.
+        let windowId = "runtime-shared-user-mark"
+        let persisted = await detectionService.recordUserMarkedAd(
             analysisAssetId: "asset-1",
             startTime: 60.0,
             endTime: 120.0,
-            podcastId: "podcast-1"
+            podcastId: "podcast-1",
+            windowId: windowId
+        )
+        #expect(persisted)
+        await orchestrator.injectUserMarkedAd(
+            start: 60.0,
+            end: 120.0,
+            analysisAssetId: "asset-1",
+            windowId: windowId
         )
 
         // Allow the fire-and-forget Task in the handler to complete.
@@ -309,6 +475,7 @@ struct UserMarkedAdIntegrationTests {
         let windows = try await store.fetchAdWindows(assetId: "asset-1")
         let userWindow = windows.first { $0.metadataSource == "userCorrection" }
         #expect(userWindow != nil, "Expected persisted userCorrection AdWindow")
+        #expect(userWindow?.id == windowId)
 
         // Verify correction event.
         let corrections = try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
@@ -320,5 +487,18 @@ struct UserMarkedAdIntegrationTests {
             #expect(fn.scope.hasPrefix("exactTimeSpan:"),
                     "Expected exactTimeSpan scope, got \(fn.scope)")
         }
+
+        // Auto-No must update the same durable row represented by the live
+        // banner, not silently accept a zero-row UPDATE under another UUID.
+        let reverted = await orchestrator.revertWindow(
+            windowId: windowId,
+            podcastId: "podcast-1"
+        )
+        #expect(reverted)
+        let refreshedWindows = try await store.fetchAdWindows(assetId: "asset-1")
+        let updated = try #require(
+            refreshedWindows.first { $0.id == windowId }
+        )
+        #expect(updated.decisionState == AdDecisionState.reverted.rawValue)
     }
 }

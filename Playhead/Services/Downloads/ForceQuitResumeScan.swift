@@ -479,18 +479,20 @@ extension DownloadManager {
             let stillFresh = Self.resumeValidatorsMatch(stored: record, current: current)
             if !stillFresh {
                 logger.info("resumeSuspendedTransfer: \(episodeId, privacy: .public) server rotated (or unverifiable) — discarding resume blob, downloading fresh")
-                try? deleteResumeData(episodeId: episodeId)
                 // playhead-wrj8: clear any INCOMPLETE leftover artifact (+
                 // its stale pin) for this episode first. We only reach here
                 // when `servingURLIfComplete` was nil (no complete pin), so
                 // anything present is a partial; removing it guarantees the
                 // fresh `backgroundDownload` isn't skipped by its
                 // existence check and lands a clean, fully-pinned artifact.
-                let leftover = completeFileURL(for: episodeId)
-                if FileManager.default.fileExists(atPath: leftover.path) {
-                    try? FileManager.default.removeItem(at: leftover)
-                }
+                //
+                // The basename can own several supported-extension siblings.
+                // Purge all of them before deleting the shared pin; otherwise
+                // a leftover sibling would become a fail-open legacy cache hit
+                // and silently defeat this promised fresh download.
+                try removeAllAudioArtifacts(for: episodeId)
                 deletePin(for: episodeId)
+                try? deleteResumeData(episodeId: episodeId)
                 // Fresh full download to a new artifact via the normal
                 // background path (its own overwrite guard + pinning apply).
                 backgroundDownload(episodeId: episodeId, from: sourceURL)
@@ -503,6 +505,11 @@ extension DownloadManager {
         let session = backgroundSession(for: .interactive)
         let task = session.downloadTask(withResumeData: blob)
         task.taskDescription = episodeId
+        registerBackgroundTransfer(
+            task: task,
+            session: session,
+            episodeId: episodeId
+        )
         task.resume()
 
         // The OS owns the transfer from here; drop our blob so a

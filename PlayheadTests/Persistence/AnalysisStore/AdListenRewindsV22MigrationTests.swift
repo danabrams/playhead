@@ -13,8 +13,8 @@
 //      indexes or fail.
 //   4. Round-trip CRUD via `insertListenRewind` /
 //      `fetchListenRewinds(forAssetId:)` writes and reads.
-//   5. Fetch joins through `ad_windows.analysisAssetId` so the
-//      exporter can attribute rewinds to a specific captured episode.
+//   5. V34 adds durable asset ownership without attributing legacy rows
+//      through a reusable window ID.
 
 import Foundation
 import SQLite3
@@ -93,6 +93,15 @@ struct AdListenRewindsV22MigrationTests {
         #expect(try probeTableExists(in: dir, table: "ad_listen_rewinds"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_ad_listen_rewinds_window"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_ad_listen_rewinds_podcast_time"))
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "ad_listen_rewinds",
+            column: "analysisAssetId"
+        ))
+        #expect(try probeIndexExists(
+            in: dir,
+            indexName: "idx_ad_listen_rewinds_asset_time"
+        ))
     }
 
     @Test("v21-seeded DB picks up ad_listen_rewinds at v22")
@@ -130,6 +139,15 @@ struct AdListenRewindsV22MigrationTests {
         #expect(try probeTableExists(in: dir, table: "ad_listen_rewinds"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_ad_listen_rewinds_window"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_ad_listen_rewinds_podcast_time"))
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "ad_listen_rewinds",
+            column: "analysisAssetId"
+        ))
+        #expect(try probeIndexExists(
+            in: dir,
+            indexName: "idx_ad_listen_rewinds_asset_time"
+        ))
     }
 
     @Test("V22 migration is idempotent across resetMigratedPathsForTesting")
@@ -152,8 +170,8 @@ struct AdListenRewindsV22MigrationTests {
 
     // MARK: - Round-trip
 
-    @Test("insertListenRewind / fetchListenRewinds round-trip via ad_windows JOIN")
-    func roundTripViaAssetJoin() async throws {
+    @Test("insertListenRewind / fetchListenRewinds round-trip via durable asset ownership")
+    func roundTripViaDurableAssetOwnership() async throws {
         let store = try await makeTestStore()
 
         // Seed two assets and three ad_windows: two on asset-A, one on
@@ -167,18 +185,21 @@ struct AdListenRewindsV22MigrationTests {
 
         try await store.insertListenRewind(
             windowId: "win-A1",
+            analysisAssetId: "asset-A",
             podcastId: "pod-1",
             time: 60.0,
             createdAt: Date(timeIntervalSince1970: 1_700_000_100)
         )
         try await store.insertListenRewind(
             windowId: "win-A1",
+            analysisAssetId: "asset-A",
             podcastId: "pod-1",
             time: 60.0,
             createdAt: Date(timeIntervalSince1970: 1_700_000_200)
         )
         try await store.insertListenRewind(
             windowId: "win-B1",
+            analysisAssetId: "asset-B",
             podcastId: "pod-2",
             time: 30.0,
             createdAt: Date(timeIntervalSince1970: 1_700_000_300)
@@ -186,15 +207,45 @@ struct AdListenRewindsV22MigrationTests {
 
         let aRows = try await store.fetchListenRewinds(forAssetId: "asset-A")
         #expect(aRows.count == 2)
+        #expect(aRows.allSatisfy { $0.analysisAssetId == "asset-A" })
         #expect(aRows.allSatisfy { $0.windowId == "win-A1" })
         #expect(aRows.allSatisfy { $0.podcastId == "pod-1" })
         #expect(aRows.allSatisfy { $0.time == 60.0 })
 
         let bRows = try await store.fetchListenRewinds(forAssetId: "asset-B")
         #expect(bRows.count == 1)
+        #expect(bRows.first?.analysisAssetId == "asset-B")
         #expect(bRows.first?.windowId == "win-B1")
         #expect(bRows.first?.podcastId == "pod-2")
         #expect(bRows.first?.time == 30.0)
+
+        do {
+            try await store.insertListenRewind(
+                windowId: "win-A1",
+                analysisAssetId: "asset-B",
+                podcastId: "wrong-owner",
+                time: 60,
+                createdAt: Date(
+                    timeIntervalSince1970: 1_700_000_350
+                )
+            )
+            Issue.record(
+                "A new rewind must reject a caller-supplied foreign owner"
+            )
+        } catch {
+            // Expected: current durable window ownership is authoritative at
+            // write time.
+        }
+
+        try await store.execForTesting(
+            "DELETE FROM ad_windows WHERE id = 'win-A1'"
+        )
+        #expect(
+            try await store.fetchListenRewinds(
+                forAssetId: "asset-A"
+            ).count == 2,
+            "Retiring a window must not discard its durably owned rewinds"
+        )
 
         // Repeated inserts persist as distinct events.
         let aAgain = try await store.fetchListenRewinds(forAssetId: "asset-A")

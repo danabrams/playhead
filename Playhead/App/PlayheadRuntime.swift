@@ -17,6 +17,33 @@ enum PlaybackPositionPersistenceTrigger: String, Sendable {
     case background
 }
 
+/// Cancellation-safe FIFO mutex for cross-service playback lifecycle
+/// transactions. Swift actors are reentrant, so merely putting the runtime on
+/// MainActor does not keep `playEpisode` / `stopPlayback` mutations ordered
+/// across their many external actor calls.
+actor PlaybackLifecycleMutex {
+    private var isLocked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        if !isLocked {
+            isLocked = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            isLocked = false
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class PlayheadRuntime {
@@ -237,6 +264,11 @@ final class PlayheadRuntime {
     /// a stale or nil episodeId and be dropped by the scheduler's
     /// stale-tick filter).
     private let currentEpisodeIdMirror = OSAllocatedUnfairLock<String?>(initialState: nil)
+    /// Latest-wins token for the synchronous SkipOrchestrator callback's
+    /// asynchronous fan-out. Cue arrays are full replacements, so an older
+    /// delivery Task must never restore episode-A ranges after episode B has
+    /// already published its empty/reset array.
+    private let skipCueDeliveryGeneration = OSAllocatedUnfairLock<UInt64>(initialState: 0)
 
     private let isPreviewRuntime: Bool
     private let logger = Logger(subsystem: "com.playhead", category: "Runtime")
@@ -306,6 +338,130 @@ final class PlayheadRuntime {
 
     /// Background download task for the current episode's audio cache.
     private var audioCacheTask: Task<Void, Never>?
+    /// Latest-wins token for reentrant `playEpisode` calls. MainActor methods
+    /// remain reentrant at every `await`, so episode identity alone cannot
+    /// prevent an older invocation from resuming after a newer tap.
+    /// Observable playback-request lifecycle. Banner presentations capture
+    /// this value so replaying the same canonical episode invalidates cards
+    /// emitted by the lifecycle it replaced.
+    private(set) var playEpisodeGeneration: UInt64 = 0
+    /// Latest-wins identity for overlapping user seeks inside one playback
+    /// request. Episode/lifecycle identity alone cannot distinguish them.
+    private var userSeekOperationGeneration: UInt64 = 0
+    /// Persistence tail for the currently admitted seek. A newer seek cancels
+    /// this before starting so the production handler can abandon any
+    /// suspension-delayed capture before it commits SwiftData state.
+    private var userSeekPersistenceTask: Task<Void, Never>?
+    private var userSeekPersistenceTaskID: UUID?
+    #if DEBUG
+    @ObservationIgnored
+    private var seekContextCapturedHookForTesting:
+        (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored
+    private var seekTransportAcceptedHookForTesting:
+        (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored
+    private var committedUserSeekCountForTesting = 0
+    @ObservationIgnored
+    private var skipSeekEffectCountForTesting = 0
+    @ObservationIgnored
+    private var silenceSeekEffectCountForTesting = 0
+    @ObservationIgnored
+    private var scrubSeekEffectCountForTesting = 0
+    @ObservationIgnored
+    private var persistenceSeekEffectCountForTesting = 0
+    #endif
+    @ObservationIgnored
+    private let playbackLifecycleMutex = PlaybackLifecycleMutex()
+    @ObservationIgnored
+    private var playbackLifecycleTask: Task<Void, Never>?
+    /// Episode whose analysis cache protection was actually established.
+    /// This intentionally differs from the published current intent while a
+    /// cancelable lifecycle transaction is between unprotect/protect calls.
+    private var protectedPlaybackEpisodeId: String?
+
+    private func isCurrentPlayRequest(
+        generation: UInt64,
+        episodeId: String
+    ) -> Bool {
+        !Task.isCancelled
+            && playEpisodeGeneration == generation
+            && currentEpisodeId == episodeId
+    }
+
+    /// Runs a streaming-lane entry operation only while its playback request
+    /// is still current. Keeping the guard and operation in one helper makes
+    /// their ordering structural: a task canceled before its first executor
+    /// turn cannot touch DownloadManager and supersede the replacement lane.
+    private func performCurrentAudioCacheEntry<Result>(
+        generation: UInt64,
+        episodeId: String,
+        operation: () async throws -> Result
+    ) async rethrows -> Result? {
+        guard isCurrentPlayRequest(
+            generation: generation,
+            episodeId: episodeId
+        ) else {
+            return nil
+        }
+        return try await operation()
+    }
+
+    /// Quiesces an already-published playback intent before its cache
+    /// protection or service state is retired. Keep the old episode identity
+    /// published through the detach so transport observers attribute that
+    /// terminal edge to the episode that actually produced the audio.
+    private func detachPriorPlaybackBeforeReplacement(
+        generation: UInt64,
+        preservingPosition: Bool = false
+    ) async -> UInt64? {
+        let hadPublishedEpisode = currentEpisodeId != nil
+        guard let itemAdmissionGeneration =
+            await playbackService.pauseAndDetachCurrentItem(
+                preservingPosition: preservingPosition,
+                force: hadPublishedEpisode
+            ),
+              !Task.isCancelled,
+              playEpisodeGeneration == generation else {
+            return nil
+        }
+        return itemAdmissionGeneration
+    }
+
+    /// Quiesces and detaches AVPlayer before releasing the progressive loader
+    /// or canceling its backing transfer. Cancellation may unlink the
+    /// incomplete artifact immediately, so callers must use this ordered
+    /// boundary. Stop preserves the captured position until its persistence
+    /// callback has consumed it; replacement resets transport timing.
+    private func quiescePlaybackThenCancelAudioCache(
+        generation: UInt64,
+        preservingPosition: Bool = false
+    ) async -> UInt64? {
+        guard let itemAdmissionGeneration =
+            await detachPriorPlaybackBeforeReplacement(
+                generation: generation,
+                preservingPosition: preservingPosition
+            ) else {
+            return nil
+        }
+        cancelAudioCacheTaskWithoutJoining()
+        guard !Task.isCancelled,
+              playEpisodeGeneration == generation else {
+            return nil
+        }
+        return itemAdmissionGeneration
+    }
+
+    /// Invalidates the streaming setup branch without awaiting its value.
+    /// Before DownloadManager reaches the playable threshold, its detached URL
+    /// transfer owns a continuation that does not observe cancellation; joining
+    /// that task would make replacement, Stop, or shutdown network-unbounded.
+    private func cancelAudioCacheTaskWithoutJoining() {
+        audioCacheTask?.cancel()
+        audioCacheTask = nil
+        activeProgressiveLoader = nil
+    }
+
     /// Retains the progressive resource loader outside PlaybackServiceActor.
     private var activeProgressiveLoader: ProgressiveResourceLoader?
     /// bd-3bz (Phase 4): observer that watches `canUseFoundationModels` for
@@ -364,6 +520,16 @@ final class PlayheadRuntime {
     /// loop terminates promptly.
     @ObservationIgnored
     private var repeatedAdCacheKillSwitchObserverTask: Task<Void, Never>?
+    /// Owns the playback-state consumer installed during initialization.
+    /// Shutdown cancels and joins it before tearing down PlaybackService so a
+    /// body already suspended in a downstream actor hop cannot resume after
+    /// the runtime's terminal boundary.
+    @ObservationIgnored
+    private var playbackStateObserverTask: Task<Void, Never>?
+    private let playbackStateObserverDidExit =
+        OSAllocatedUnfairLock<Bool>(initialState: false)
+    private let playbackStateObserverHookForTesting =
+        OSAllocatedUnfairLock<(@Sendable () async -> Void)?>(initialState: nil)
 
     /// True when an episode is actively loaded for playback.
     var isPlayingEpisode: Bool {
@@ -2341,7 +2507,13 @@ final class PlayheadRuntime {
             await analysisWorkScheduler.startSchedulerLoop()
         }
 
-        Task { [playbackService, analysisCoordinator, skipOrchestrator, shadowCaptureCoordinator, analysisWorkScheduler, currentEpisodeIdMirror, silenceCompressionCoordinator] in
+        let playbackStateObserverDidExit = playbackStateObserverDidExit
+        let playbackStateObserverHookForTesting =
+            playbackStateObserverHookForTesting
+        playbackStateObserverTask = Task { [playbackService, analysisCoordinator, skipOrchestrator, shadowCaptureCoordinator, analysisWorkScheduler, currentEpisodeIdMirror, silenceCompressionCoordinator, skipCueDeliveryGeneration, playbackStateObserverDidExit, playbackStateObserverHookForTesting] in
+            defer {
+                playbackStateObserverDidExit.withLock { $0 = true }
+            }
             // skeptical-review-cycle-10 L-4 / cycle-11 L-4: applied to
             // the bootstrap `Task { }` bodies whose semantics actually
             // depend on MainActor isolation — currently the launch-sweep
@@ -2357,7 +2529,7 @@ final class PlayheadRuntime {
             // debug builds if a future refactor breaks isolation
             // inheritance.
             MainActor.assertIsolated()
-            await skipOrchestrator.setSkipCueHandler { [silenceCompressionCoordinator] cues in
+            await skipOrchestrator.setSkipCueHandler { [silenceCompressionCoordinator, skipCueDeliveryGeneration] cues in
                 // cycle-1 H2: publish the skip-range fan-out to PlaybackService
                 // and SilenceCompressionCoordinator in a deterministic order
                 // (PlaybackService FIRST, coordinator SECOND) so downstream
@@ -2368,7 +2540,9 @@ final class PlayheadRuntime {
                 // brief inter-actor window where one consumer reflected the new
                 // ranges and the other did not. A single Task that awaits each
                 // hop sequentially pins ordering for any consumer that observes
-                // both sides.
+                // both sides. The generation check also gives successive full
+                // replacements latest-wins ordering, so an older episode's
+                // queued delivery cannot restore cues after a reset.
                 //
                 // playhead-epii: silence-compression hop is a thin in-memory
                 // filter (no I/O); MainActor isolation mirrors the coordinator.
@@ -2378,9 +2552,19 @@ final class PlayheadRuntime {
                         end: CMTimeGetSeconds(CMTimeRangeGetEnd(range))
                     )
                 }
+                let deliveryGeneration = skipCueDeliveryGeneration.withLock { generation in
+                    generation &+= 1
+                    return generation
+                }
                 Task { @PlaybackServiceActor in
+                    guard skipCueDeliveryGeneration.withLock({
+                        $0 == deliveryGeneration
+                    }) else { return }
                     playbackService.setSkipCues(cues)
                     await MainActor.run {
+                        guard skipCueDeliveryGeneration.withLock({
+                            $0 == deliveryGeneration
+                        }) else { return }
                         silenceCompressionCoordinator.updateSkipRanges(plain)
                     }
                 }
@@ -2409,6 +2593,13 @@ final class PlayheadRuntime {
 
             let stateStream = await playbackService.observeStates()
             for await state in stateStream {
+#if DEBUG
+                if let hook = playbackStateObserverHookForTesting.withLock({
+                    $0
+                }) {
+                    await hook()
+                }
+#endif
                 await skipOrchestrator.updatePlayheadTime(state.currentTime)
 
                 if state.playbackSpeed != lastSpeed {
@@ -2597,6 +2788,7 @@ final class PlayheadRuntime {
         // safety nets — cancelling the startup task and the drain timer —
         // and leaves the observer loop teardown to `shutdown()`.
         shadowRetryObserverStartupTask?.cancel()
+        playbackStateObserverTask?.cancel()
     }
 
     // MARK: - FM classifier factory (Cycle 6 M-5 regression rail)
@@ -2657,6 +2849,167 @@ final class PlayheadRuntime {
     /// kill-switch observer Task is cancelled after `shutdown()`.
     func _repeatedAdCacheKillSwitchObserverTaskForTesting() -> Task<Void, Never>? {
         repeatedAdCacheKillSwitchObserverTask
+    }
+
+    func _setPlaybackStateObserverHookForTesting(
+        _ hook: (@Sendable () async -> Void)?
+    ) {
+        playbackStateObserverHookForTesting.withLock { $0 = hook }
+    }
+
+    func _playbackStateObserverDidExitForTesting() -> Bool {
+        playbackStateObserverDidExit.withLock { $0 }
+    }
+
+    func _setSeekContextCapturedHookForTesting(
+        _ hook: (@MainActor @Sendable () async -> Void)?
+    ) {
+        seekContextCapturedHookForTesting = hook
+    }
+
+    func _setSeekTransportAcceptedHookForTesting(
+        _ hook: (@MainActor @Sendable () async -> Void)?
+    ) {
+        seekTransportAcceptedHookForTesting = hook
+    }
+
+    func _setSkipSeekEffectHookForTesting(
+        _ hook: (@Sendable () async -> Void)?
+    ) async {
+        await skipOrchestrator
+            ._setUserSeekEffectHookForTesting(hook)
+    }
+
+    func _setSilenceSeekEffectHookForTesting(
+        _ hook: (@MainActor @Sendable () async -> Void)?
+    ) {
+        silenceCompressionCoordinator
+            ._setUserSeekEffectHookForTesting(hook)
+    }
+
+    func _setScrubSeekEffectHookForTesting(
+        _ hook: (@Sendable () async -> Void)?
+    ) async {
+        await analysisCoordinator
+            ._setUserSeekEffectHookForTesting(hook)
+    }
+
+    func _userSeekEffectTargetsForTesting() async -> (
+        skip: TimeInterval,
+        silence: TimeInterval?,
+        scrub: TimeInterval?
+    ) {
+        (
+            await skipOrchestrator
+                ._currentPlayheadTimeForTesting(),
+            silenceCompressionCoordinator
+                ._lastAcceptedUserSeekTimeForTesting(),
+            await analysisCoordinator
+                ._latestPlayheadTimeForTesting()
+        )
+    }
+
+    func _committedUserSeekCountForTesting() -> Int {
+        committedUserSeekCountForTesting
+    }
+
+    func _userSeekDownstreamCountsForTesting() -> (
+        skip: Int,
+        silence: Int,
+        scrub: Int,
+        persistence: Int,
+        committed: Int
+    ) {
+        (
+            skipSeekEffectCountForTesting,
+            silenceSeekEffectCountForTesting,
+            scrubSeekEffectCountForTesting,
+            persistenceSeekEffectCountForTesting,
+            committedUserSeekCountForTesting
+        )
+    }
+
+    /// Establishes the same playback-owned DownloadManager protection that
+    /// `playEpisode` creates, without starting AVFoundation or network work.
+    /// Runtime lifecycle tests use it to verify shutdown balances ownership.
+    func _protectPlaybackEpisodeForTesting(_ episodeId: String) async {
+        if let protectedPlaybackEpisodeId,
+           protectedPlaybackEpisodeId != episodeId {
+            await downloadManager.unprotectFromAnalysis(
+                episodeId: protectedPlaybackEpisodeId
+            )
+        }
+        if protectedPlaybackEpisodeId != episodeId {
+            await downloadManager.protectForAnalysis(episodeId: episodeId)
+            protectedPlaybackEpisodeId = episodeId
+        }
+    }
+
+    /// Drives the production replacement-boundary helper without loading an
+    /// AVPlayer item, allowing a deterministic assertion that old cues are
+    /// cleared even when the replacement has no analysis asset.
+    func _clearPriorEpisodePlaybackStateForTesting() async {
+        playEpisodeGeneration &+= 1
+        let generation = playEpisodeGeneration
+        setCurrentEpisodeId("__prior_replacement_episode__")
+        guard await detachPriorPlaybackBeforeReplacement(
+            generation: generation
+        ) != nil else {
+            return
+        }
+        let episodeId = "__replacement_without_asset__"
+        setCurrentEpisodeId(episodeId)
+        _ = await clearPriorEpisodePlaybackStateBeforeReplacement(
+            generation: generation,
+            episodeId: episodeId
+        )
+    }
+
+    /// Installs a playback identity without loading media so user-mark tests
+    /// can deterministically model autoplay between the tap and the expanded
+    /// boundary write.
+    @discardableResult
+    func _setUserMarkPlaybackContextForTesting(
+        analysisAssetId: String?,
+        episodeId: String?,
+        podcastId: String?
+    ) -> UInt64 {
+        playEpisodeGeneration &+= 1
+        setCurrentAnalysisAssetId(analysisAssetId)
+        setCurrentEpisodeId(episodeId)
+        currentPodcastId = podcastId
+        return playEpisodeGeneration
+    }
+
+    /// Installs an arbitrary cache task so lifecycle tests can prove that
+    /// replacement, Stop, and shutdown cancel but never join a
+    /// cancellation-unresponsive streaming setup operation.
+    func _setAudioCacheTaskForTesting(_ task: Task<Void, Never>) {
+        audioCacheTask = task
+    }
+
+    func _cancelAudioCacheTaskForTesting() {
+        cancelAudioCacheTaskWithoutJoining()
+    }
+
+    func _quiescePlaybackThenCancelAudioCacheForTesting(
+        generation: UInt64
+    ) async -> Bool {
+        await quiescePlaybackThenCancelAudioCache(
+            generation: generation
+        ) != nil
+    }
+
+    func _audioCacheEntryAdmittedForTesting(
+        generation: UInt64,
+        episodeId: String
+    ) async -> Bool {
+        await performCurrentAudioCacheEntry(
+            generation: generation,
+            episodeId: episodeId
+        ) {
+            true
+        } == true
     }
     #endif
 
@@ -2861,6 +3214,16 @@ final class PlayheadRuntime {
     func shutdown() async {
         guard !isShutdown else { return }
         isShutdown = true
+        skipCueDeliveryGeneration.withLock { $0 &+= 1 }
+        // `playEpisode` / `stopPlayback` are serialized in a runtime-owned
+        // task because each transaction spans several reentrant service
+        // actors. Teardown invalidates the latest-wins token, cancels that
+        // transaction, and joins it before stopping the remaining observers
+        // so no playback lifecycle mutation can resume after shutdown.
+        playEpisodeGeneration &+= 1
+        let pendingPlaybackLifecycleTask = playbackLifecycleTask
+        pendingPlaybackLifecycleTask?.cancel()
+        playbackLifecycleTask = nil
         shadowRetryObserverStartupTask?.cancel()
         shadowRetryObserverStartupTask = nil
         // skeptical-review-cycle-5 H-Y1: cancel the launch sweep so a
@@ -2869,29 +3232,6 @@ final class PlayheadRuntime {
         // cancellation at its next checkpoint and unwind naturally.
         finalPassLaunchSweepTask?.cancel()
         finalPassLaunchSweepTask = nil
-        // skeptical-review-cycle-7 M2: the audio prefetch task is the
-        // third long-lived `Task` field on the runtime. The episode-
-        // change path at :1995 and `stopPlayback` at :2127 already
-        // cancel it on user-initiated transitions, but a teardown
-        // outside those paths (deinit, app suspension during prefetch,
-        // explicit shutdown for tests) used to leak it — the task
-        // would continue writing to the disk cache against a runtime
-        // that had already declared itself shut down.
-        //
-        // skeptical-review-cycle-8 L1: cancellation here narrows but
-        // does not close the gap. The task body has only two
-        // `Task.isCancelled` checkpoints (after `streamingDownload`
-        // and after `result.downloadComplete()`); the intermediate
-        // `playbackService.load` / `analysisCoordinator.handlePlaybackEvent`
-        // / `skipOrchestrator.beginEpisode` calls are not cancellation
-        // points. A shutdown that lands mid-`playbackService.load`
-        // still finishes that load against services that are otherwise
-        // being torn down. We accept that residual window — it is
-        // bounded by the duration of those individual awaits — and
-        // ensure the next checkpoint terminates the task before any
-        // further work is issued.
-        audioCacheTask?.cancel()
-        audioCacheTask = nil
         // playhead-43ed M1: cancel the RepeatedAdCache kill-switch
         // observer Task so its `for await` loop terminates and the
         // captured `repeatedAdCache` strong reference is released.
@@ -2899,12 +3239,38 @@ final class PlayheadRuntime {
         // teardown.
         repeatedAdCacheKillSwitchObserverTask?.cancel()
         repeatedAdCacheKillSwitchObserverTask = nil
+        let pendingPlaybackStateObserverTask = playbackStateObserverTask
+        pendingPlaybackStateObserverTask?.cancel()
+        playbackStateObserverTask = nil
         // playhead-l8dz: cancel the recovery observer's startup task and
         // stop the observer itself. Mirrors the shadowRetryObserver
         // teardown above so the loop task is awaited to completion before
         // shutdown returns.
         finalPassRecoveryObserverStartupTask?.cancel()
         finalPassRecoveryObserverStartupTask = nil
+        await pendingPlaybackLifecycleTask?.value
+        await pendingPlaybackStateObserverTask?.value
+        // PlaybackTransport owns periodic/KVO/notification observers, remote
+        // command targets, in-flight skip transitions, and state-stream
+        // continuations. Runtime shutdown is the terminal owner boundary, so
+        // drain those resources after the serialized lifecycle transaction
+        // has stopped and before returning to the caller.
+        await playbackService.tearDown()
+        // Playback teardown owns the progressive item. Only after it releases
+        // that item may streaming cancellation drop the loader and unlink the
+        // incomplete artifact. The task remains generation-invalid throughout
+        // the waits above, so no new live mutation can be published.
+        cancelAudioCacheTaskWithoutJoining()
+        // `stopPlayback()` is deliberately rejected once `isShutdown` is set,
+        // so shutdown must balance the playback-owned cache protection itself.
+        // The lifecycle task is joined above and new lifecycle requests are
+        // barred, making this the serialized terminal owner transition.
+        if let protectedEpisodeId = protectedPlaybackEpisodeId {
+            await downloadManager.unprotectFromAnalysis(episodeId: protectedEpisodeId)
+            if protectedPlaybackEpisodeId == protectedEpisodeId {
+                protectedPlaybackEpisodeId = nil
+            }
+        }
         await shadowRetryObserver?.stop()
         await finalPassThermalRecoveryObserver?.stop()
     }
@@ -2985,11 +3351,33 @@ final class PlayheadRuntime {
         episodePodcastIdBatchResolverBox.withLock { $0 = resolver }
     }
 
+    @discardableResult
     private func requestPlaybackPositionPersistence(
-        _ trigger: PlaybackPositionPersistenceTrigger
-    ) async {
-        guard let handler = playbackPositionPersistenceHandler else { return }
-        await handler(trigger)
+        _ trigger: PlaybackPositionPersistenceTrigger,
+        userSeekOperationGeneration seekGeneration: UInt64? = nil
+    ) async -> Bool {
+        guard let handler = playbackPositionPersistenceHandler else {
+            return true
+        }
+        guard let seekGeneration else {
+            await handler(trigger)
+            return true
+        }
+
+        let taskID = UUID()
+        let task = Task { @MainActor in
+            guard !Task.isCancelled else { return }
+            await handler(trigger)
+        }
+        userSeekPersistenceTask = task
+        userSeekPersistenceTaskID = taskID
+        await task.value
+        if userSeekPersistenceTaskID == taskID {
+            userSeekPersistenceTask = nil
+            userSeekPersistenceTaskID = nil
+        }
+        return !task.isCancelled
+            && userSeekOperationGeneration == seekGeneration
     }
 
     /// playhead-3xtw: user-intent "Download & Analyze on demand". Reads
@@ -3109,6 +3497,34 @@ final class PlayheadRuntime {
     }
 
     func playEpisode(_ episode: Episode) async {
+        guard !isShutdown else { return }
+        playEpisodeGeneration &+= 1
+        let playGeneration = playEpisodeGeneration
+        playbackLifecycleTask?.cancel()
+        let mutex = playbackLifecycleMutex
+        let task = Task { @MainActor [weak self] in
+            await mutex.acquire()
+            guard let self else {
+                await mutex.release()
+                return
+            }
+            if !Task.isCancelled,
+               self.playEpisodeGeneration == playGeneration {
+                await self.performPlayEpisode(
+                    episode,
+                    playGeneration: playGeneration
+                )
+            }
+            await mutex.release()
+        }
+        playbackLifecycleTask = task
+        await task.value
+    }
+
+    private func performPlayEpisode(
+        _ episode: Episode,
+        playGeneration: UInt64
+    ) async {
         let episodeId = episode.canonicalEpisodeKey
         let podcastId = episode.podcast?.feedURL.absoluteString
         let position = episode.playbackPosition
@@ -3124,6 +3540,17 @@ final class PlayheadRuntime {
         // by default.
         let keepFullMusic = episode.podcast?.keepFullMusic ?? false
 
+        // Metadata/cache resolution for the replacement suspends. Pause and
+        // detach the old item while its identity, eviction pin, progressive
+        // loader, and streaming artifact still own the transport. Releasing
+        // the loader/canceling the byte pump first can unlink the file while
+        // AVPlayer is still reading it; leaving the item installed lets a
+        // remote Play command resume it under the replacement identity.
+        guard let playbackItemAdmissionGeneration =
+            await quiescePlaybackThenCancelAudioCache(
+                generation: playGeneration
+            ) else { return }
+
         // playhead-wrj8 (#4): protect the file backing THIS episode from
         // LRU eviction while it is the in-use playback/marking target, so
         // `evictIfNeeded` can never delete the bytes the user is playing and
@@ -3131,14 +3558,10 @@ final class PlayheadRuntime {
         // episode's protection when switching (and stopPlayback releases the
         // current one at a true terminal). Guarded on `previous != episodeId`
         // so a re-play of the same episode does not double-protect.
-        let previousProtectedEpisodeId = currentEpisodeId
-        if previousProtectedEpisodeId != episodeId {
-            if let previousProtectedEpisodeId {
-                await downloadManager.unprotectFromAnalysis(episodeId: previousProtectedEpisodeId)
-            }
-            await downloadManager.protectForAnalysis(episodeId: episodeId)
-        }
-
+        let previousProtectedEpisodeId = protectedPlaybackEpisodeId
+        // Publish the latest intent before the first suspension. Every
+        // continuation below rejects itself by generation while the separate
+        // protected-id field continues to describe actual cache ownership.
         setCurrentEpisodeId(episodeId)
         currentPodcastId = podcastId
         currentEpisodeTitle = episode.title
@@ -3146,7 +3569,42 @@ final class PlayheadRuntime {
         currentArtworkURL = episode.podcast?.artworkURL
         setCurrentAnalysisAssetId(nil)
 
+        // Tear down the prior episode's transport-facing state before the
+        // replacement item can be loaded. Resolving an analysis asset happens
+        // after load/play and may fail entirely, so relying on the later
+        // `beginEpisode` call leaves the old item's skip cues armed on the new
+        // audio. The direct PlaybackService and coordinator clears make this
+        // boundary synchronous; SkipOrchestrator's callback remains the
+        // normal fan-out path for subsequent cue updates.
+        guard await clearPriorEpisodePlaybackStateBeforeReplacement(
+            generation: playGeneration,
+            episodeId: episodeId
+        ) else { return }
+
+        if previousProtectedEpisodeId != episodeId {
+            if let previousProtectedEpisodeId {
+                await downloadManager.unprotectFromAnalysis(episodeId: previousProtectedEpisodeId)
+                if protectedPlaybackEpisodeId == previousProtectedEpisodeId {
+                    protectedPlaybackEpisodeId = nil
+                }
+                guard isCurrentPlayRequest(
+                    generation: playGeneration,
+                    episodeId: episodeId
+                ) else { return }
+            }
+            await downloadManager.protectForAnalysis(episodeId: episodeId)
+            protectedPlaybackEpisodeId = episodeId
+            guard isCurrentPlayRequest(
+                generation: playGeneration,
+                episodeId: episodeId
+            ) else { return }
+        }
+
         await backgroundProcessingService.playbackDidStart()
+        guard isCurrentPlayRequest(
+            generation: playGeneration,
+            episodeId: episodeId
+        ) else { return }
 
         // playhead-o45p: run the surface-status reducer in the
         // play-started context so a cold-start ready_entered fires for
@@ -3156,6 +3614,10 @@ final class PlayheadRuntime {
         // `AnalysisCoordinator.transition` will handle that case once
         // the pipeline runs.
         await surfaceStatusObserver.observeEpisodePlayStarted(episodeId: episodeId)
+        guard isCurrentPlayRequest(
+            generation: playGeneration,
+            episodeId: episodeId
+        ) else { return }
 
         // Load artwork for lock screen / CarPlay Now Playing.
         var artwork: UIImage?
@@ -3164,6 +3626,10 @@ final class PlayheadRuntime {
                let image = UIImage(data: data) {
                 artwork = image
             }
+            guard isCurrentPlayRequest(
+                generation: playGeneration,
+                episodeId: episodeId
+            ) else { return }
         }
 
         await playbackService.setNowPlayingMetadata(
@@ -3172,34 +3638,43 @@ final class PlayheadRuntime {
             albumTitle: episode.podcast?.title,
             artworkImage: artwork
         )
+        guard isCurrentPlayRequest(
+            generation: playGeneration,
+            episodeId: episodeId
+        ) else { return }
 
         // Resolve a local audio file. Both playback and analysis use the
         // same file to avoid dynamic ad insertion serving different ads
         // on separate HTTP requests.
         //
         // playhead-wrj8 (#1): resolve EXCLUSIVELY through the pinned
-        // complete artifact. The persisted `episode.cachedAudioURL` pin is
-        // trusted only when the download manager confirms the file is still
-        // present AND complete (`servingURLIfComplete`) — never blindly,
-        // so a stale pointer at an evicted/rotated/partial file can't be
-        // played. Once a complete artifact exists we never fall through to
-        // the streaming path (which re-derives from the mutable
-        // `episode.audioURL` and could land a different DAI stitch).
+        // complete artifact. The persisted `episode.cachedAudioURL` is only a
+        // mirror; DownloadManager is always the resolver of record so an old
+        // extension sibling can never bypass its pin/hash disambiguation.
+        // Once a complete artifact exists we never fall through to the
+        // streaming path (which re-derives from the mutable `episode.audioURL`
+        // and could land a different DAI stitch).
         let localURL: URL
-        if let pinned = episode.cachedAudioURL,
-           FileManager.default.fileExists(atPath: pinned.path),
-           await downloadManager.servingURLIfComplete(for: episodeId) != nil {
-            localURL = pinned
-        } else if let cached = await downloadManager.cachedFileURL(for: episodeId) {
+        if let cached = await downloadManager.cachedFileURL(for: episodeId) {
+            guard isCurrentPlayRequest(
+                generation: playGeneration,
+                episodeId: episodeId
+            ) else { return }
             localURL = cached
-            // Persist the per-episode pin so subsequent plays resolve
-            // straight to the immutable artifact.
-            episode.cachedAudioURL = cached
+            // Refresh the SwiftData mirror to the manager-selected canonical
+            // path (including cross-extension migration recovery).
+            if episode.cachedAudioURL?.standardizedFileURL
+                != cached.standardizedFileURL {
+                episode.cachedAudioURL = cached
+            }
             episode.downloadState = .downloaded
         } else {
+            guard isCurrentPlayRequest(
+                generation: playGeneration,
+                episodeId: episodeId
+            ) else { return }
             // Not cached — stream-download and play once enough is buffered.
             logger.info("Episode not cached — streaming download: \(episodeId)")
-            audioCacheTask?.cancel()
 
             // playhead-i9dj: capture the SwiftData titles before entering
             // the Task closure so the AnalysisStore can persist them for
@@ -3216,15 +3691,37 @@ final class PlayheadRuntime {
                 episodeTitle: episode.title
             )
 
-            audioCacheTask = Task { [weak self, downloadManager, analysisCoordinator] in
+            audioCacheTask = Task { @MainActor [weak self, downloadManager, analysisCoordinator] in
+                // A replacement can cancel this task before it receives its
+                // first executor turn. Reject that stale request before it
+                // enters DownloadManager's singular streaming lane; entering
+                // first would let old A cancel/delete the newer B transfer,
+                // then notice its own cancellation only afterward.
                 guard let self else { return }
                 do {
-                    let result = try await downloadManager.streamingDownload(
-                        episodeId: episodeId,
-                        from: enclosureURL,
-                        context: titleContext
-                    )
-                    guard !Task.isCancelled, self.currentEpisodeId == episodeId else { return }
+                    let admittedResult =
+                        try await self.performCurrentAudioCacheEntry(
+                            generation: playGeneration,
+                            episodeId: episodeId,
+                            operation: {
+                            try await downloadManager.streamingDownload(
+                                episodeId: episodeId,
+                                from: enclosureURL,
+                                context: titleContext
+                            )
+                        })
+                    guard let result = admittedResult else { return }
+                    // The DownloadManager owns a detached byte pump after the
+                    // playable threshold. Always release this exact transfer
+                    // token when the lifecycle task exits early; a completed
+                    // transfer has already cleared its token, so the normal
+                    // path is a no-op.
+                    defer { result.cancel() }
+                    guard !Task.isCancelled,
+                          self.isCurrentPlayRequest(
+                            generation: playGeneration,
+                            episodeId: episodeId
+                          ) else { return }
 
                     // Build the progressive player item outside the actor.
                     // The ProgressiveResourceLoader must NOT live on
@@ -3248,15 +3745,52 @@ final class PlayheadRuntime {
                             let asset = AVURLAsset(url: proxyURL)
                             asset.resourceLoader.setDelegate(loader, queue: loader.queue)
                             let item = AVPlayerItem(asset: asset)
-                            await self.playbackService.loadItem(item, startPosition: position)
+                            let installed =
+                                await self.playbackService.loadItem(
+                                item,
+                                startPosition: position,
+                                ifCurrentItemGeneration:
+                                    playbackItemAdmissionGeneration
+                            )
+                            guard installed else {
+                                if self.activeProgressiveLoader === loader {
+                                    self.activeProgressiveLoader = nil
+                                }
+                                return
+                            }
                         } else {
-                            await self.playbackService.load(url: result.fileURL, startPosition: position)
+                            guard await self.playbackService.load(
+                                url: result.fileURL,
+                                startPosition: position,
+                                ifCurrentItemGeneration:
+                                    playbackItemAdmissionGeneration
+                            ) else { return }
                         }
                     } else {
-                        await self.playbackService.load(url: result.fileURL, startPosition: position)
+                        guard await self.playbackService.load(
+                            url: result.fileURL,
+                            startPosition: position,
+                            ifCurrentItemGeneration:
+                                playbackItemAdmissionGeneration
+                        ) else { return }
                     }
+                    guard !Task.isCancelled,
+                          self.isCurrentPlayRequest(
+                            generation: playGeneration,
+                            episodeId: episodeId
+                          ) else { return }
                     await self.playbackService.play()
+                    guard !Task.isCancelled,
+                          self.isCurrentPlayRequest(
+                            generation: playGeneration,
+                            episodeId: episodeId
+                          ) else { return }
                     await self.analysisWorkScheduler.playbackStarted(episodeId: episodeId)
+                    guard !Task.isCancelled,
+                          self.isCurrentPlayRequest(
+                            generation: playGeneration,
+                            episodeId: episodeId
+                          ) else { return }
 
                     // Resolve the analysis asset ID early so pre-materialized
                     // skip cues can be loaded before the download finishes.
@@ -3273,13 +3807,24 @@ final class PlayheadRuntime {
                             rate: 1.0
                         )
                     )
+                    guard !Task.isCancelled,
+                          self.isCurrentPlayRequest(
+                            generation: playGeneration,
+                            episodeId: episodeId
+                          ) else { return }
                     self.setCurrentAnalysisAssetId(resolvedAssetId)
                     if let assetId = resolvedAssetId {
                         await self.skipOrchestrator.beginEpisode(
                             analysisAssetId: assetId,
                             episodeId: episodeId,
-                            podcastId: podcastId
+                            podcastId: podcastId,
+                            playbackLifecycleGeneration: playGeneration
                         )
+                        guard !Task.isCancelled,
+                              self.isCurrentPlayRequest(
+                                generation: playGeneration,
+                                episodeId: episodeId
+                              ) else { return }
                         // playhead-epii: hand the asset id and the
                         // per-show override to the silence-compression
                         // coordinator. Until this call lands the
@@ -3288,6 +3833,11 @@ final class PlayheadRuntime {
                             assetId: assetId,
                             keepFullMusic: keepFullMusic
                         )
+                        guard !Task.isCancelled,
+                              self.isCurrentPlayRequest(
+                                generation: playGeneration,
+                                episodeId: episodeId
+                              ) else { return }
                         // playhead-xsdz.36.4: fire the immediate day-0 rediff
                         // for THIS just-started episode (inert unless the day-0
                         // flag + WiFi/charging gate pass). Fire-and-forget off
@@ -3302,7 +3852,11 @@ final class PlayheadRuntime {
                     // Wait for the full download before starting analysis —
                     // the decoder needs the complete file to get all shards.
                     try await result.downloadComplete()
-                    guard !Task.isCancelled, self.currentEpisodeId == episodeId else { return }
+                    guard !Task.isCancelled,
+                          self.isCurrentPlayRequest(
+                            generation: playGeneration,
+                            episodeId: episodeId
+                          ) else { return }
 
                     // Release the progressive loader — download is complete,
                     // all bytes are on disk and already served.
@@ -3312,7 +3866,11 @@ final class PlayheadRuntime {
                     // (the truncated 2MB file had different shard count/content).
                     await self.audioService.evictCache(episodeID: episodeId)
                 } catch {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled,
+                          self.isCurrentPlayRequest(
+                            generation: playGeneration,
+                            episodeId: episodeId
+                          ) else { return }
                     self.logger.error("Episode download failed: \(error)")
                 }
             }
@@ -3320,9 +3878,25 @@ final class PlayheadRuntime {
         }
 
         // Audio is local — play and analyze from the same file.
-        await playbackService.load(url: localURL, startPosition: position)
+        guard await playbackService.load(
+            url: localURL,
+            startPosition: position,
+            ifCurrentItemGeneration: playbackItemAdmissionGeneration
+        ) else { return }
+        guard isCurrentPlayRequest(
+            generation: playGeneration,
+            episodeId: episodeId
+        ) else { return }
         await playbackService.play()
+        guard isCurrentPlayRequest(
+            generation: playGeneration,
+            episodeId: episodeId
+        ) else { return }
         await analysisWorkScheduler.playbackStarted(episodeId: episodeId)
+        guard isCurrentPlayRequest(
+            generation: playGeneration,
+            episodeId: episodeId
+        ) else { return }
 
         guard let analysisURL = LocalAudioURL(localURL) else { return }
         let resolvedAssetId = await analysisCoordinator.handlePlaybackEvent(
@@ -3334,14 +3908,23 @@ final class PlayheadRuntime {
                 rate: 1.0
             )
         )
+        guard isCurrentPlayRequest(
+            generation: playGeneration,
+            episodeId: episodeId
+        ) else { return }
         setCurrentAnalysisAssetId(resolvedAssetId)
 
         if let assetId = resolvedAssetId {
             await skipOrchestrator.beginEpisode(
                 analysisAssetId: assetId,
                 episodeId: episodeId,
-                podcastId: podcastId
+                podcastId: podcastId,
+                playbackLifecycleGeneration: playGeneration
             )
+            guard isCurrentPlayRequest(
+                generation: playGeneration,
+                episodeId: episodeId
+            ) else { return }
             // playhead-epii: same handoff as the streaming branch —
             // hand the resolved asset id and per-show override to
             // the silence-compression coordinator.
@@ -3349,6 +3932,10 @@ final class PlayheadRuntime {
                 assetId: assetId,
                 keepFullMusic: keepFullMusic
             )
+            guard isCurrentPlayRequest(
+                generation: playGeneration,
+                episodeId: episodeId
+            ) else { return }
             // playhead-xsdz.36.4: fire the immediate day-0 rediff for THIS
             // just-started episode (inert unless the day-0 flag + WiFi/charging
             // gate pass). Fire-and-forget off the playback hot path.
@@ -3358,6 +3945,34 @@ final class PlayheadRuntime {
                 playedFileURL: localURL
             )
         }
+    }
+
+    /// Clears every playback-facing piece of the prior episode while the
+    /// runtime lifecycle mutex is held. This must complete before any
+    /// replacement `load`/`loadItem`, including replacements that never
+    /// resolve an analysis asset and therefore never call `beginEpisode`.
+    private func clearPriorEpisodePlaybackStateBeforeReplacement(
+        generation: UInt64,
+        episodeId: String
+    ) async -> Bool {
+        await skipOrchestrator.endEpisode()
+        guard isCurrentPlayRequest(
+            generation: generation,
+            episodeId: episodeId
+        ) else { return false }
+
+        await playbackService.setSkipCues([])
+        guard isCurrentPlayRequest(
+            generation: generation,
+            episodeId: episodeId
+        ) else { return false }
+
+        silenceCompressionCoordinator.updateSkipRanges([])
+        await silenceCompressionCoordinator.endEpisode()
+        return isCurrentPlayRequest(
+            generation: generation,
+            episodeId: episodeId
+        )
     }
 
     /// playhead-xsdz.36.4: kick off an IMMEDIATE (day-0) rediff for the
@@ -3394,25 +4009,71 @@ final class PlayheadRuntime {
     }
 
     func stopPlayback() async {
+        guard !isShutdown else { return }
+        playEpisodeGeneration &+= 1
+        let stopGeneration = playEpisodeGeneration
+        playbackLifecycleTask?.cancel()
+        let mutex = playbackLifecycleMutex
+        let task = Task { @MainActor [weak self] in
+            await mutex.acquire()
+            guard let self else {
+                await mutex.release()
+                return
+            }
+            if !Task.isCancelled,
+               self.playEpisodeGeneration == stopGeneration {
+                await self.performStopPlayback(
+                    stopGeneration: stopGeneration
+                )
+            }
+            await mutex.release()
+        }
+        playbackLifecycleTask = task
+        await task.value
+    }
+
+    private func performStopPlayback(stopGeneration: UInt64) async {
+        // Cancellation of the pre-threshold streaming continuation is not
+        // cooperative, so after pausing Stop invalidates and detaches rather
+        // than joining it. The task's generation guards reject every late
+        // continuation.
+        guard await quiescePlaybackThenCancelAudioCache(
+            generation: stopGeneration,
+            preservingPosition: true
+        ) != nil else { return }
         await requestPlaybackPositionPersistence(.stopped)
+        guard !Task.isCancelled,
+              playEpisodeGeneration == stopGeneration else { return }
         // playhead-wrj8 (#4): release the in-use eviction protection taken
         // in playEpisode. This is the true terminal for the current
         // episode's playback/marking, so the file may now be evicted under
         // LRU pressure when the cache is over budget.
-        if let protectedEpisodeId = currentEpisodeId {
+        if let protectedEpisodeId = protectedPlaybackEpisodeId {
             await downloadManager.unprotectFromAnalysis(episodeId: protectedEpisodeId)
+            if protectedPlaybackEpisodeId == protectedEpisodeId {
+                protectedPlaybackEpisodeId = nil
+            }
+            guard !Task.isCancelled,
+                  playEpisodeGeneration == stopGeneration else { return }
         }
-        audioCacheTask?.cancel()
-        audioCacheTask = nil
         await analysisWorkScheduler.playbackStopped()
+        guard !Task.isCancelled,
+              playEpisodeGeneration == stopGeneration else { return }
         await backgroundProcessingService.playbackDidStop()
+        guard !Task.isCancelled,
+              playEpisodeGeneration == stopGeneration else { return }
         await analysisCoordinator.handlePlaybackEvent(.stopped)
+        guard !Task.isCancelled,
+              playEpisodeGeneration == stopGeneration else { return }
         await skipOrchestrator.endEpisode()
+        guard !Task.isCancelled,
+              playEpisodeGeneration == stopGeneration else { return }
         // playhead-epii: clear the silence-compression planner and
         // disengage on PlaybackService so the next episode never
         // inherits stale plan state from the prior one.
         await silenceCompressionCoordinator.endEpisode()
-        await playbackService.pause()
+        guard !Task.isCancelled,
+              playEpisodeGeneration == stopGeneration else { return }
         setCurrentEpisodeId(nil)
         currentPodcastId = nil
         setCurrentAnalysisAssetId(nil)
@@ -3421,14 +4082,21 @@ final class PlayheadRuntime {
         currentArtworkURL = nil
     }
 
-    func recordListenRewind(windowId: String, podcastId: String) async {
+    @discardableResult
+    func recordListenRewind(
+        windowId: String,
+        analysisAssetId: String,
+        podcastId: String
+    ) async -> Bool {
         do {
             try await adDetectionService.recordListenRewind(
                 windowId: windowId,
+                analysisAssetId: analysisAssetId,
                 podcastId: podcastId
             )
+            return true
         } catch {
-            // Rewinds are user-facing; trust scoring remains best-effort.
+            return false
         }
     }
 
@@ -3450,37 +4118,406 @@ final class PlayheadRuntime {
         }
     }
 
-    func skipForward() async {
-        let snapshot = await playbackService.snapshot()
-        let target = min(
-            snapshot.currentTime + PlaybackService.skipForwardSeconds,
-            snapshot.duration
-        )
-        await seek(to: target)
+    private func beginUserSeekOperation() -> UInt64 {
+        userSeekOperationGeneration &+= 1
+        userSeekPersistenceTask?.cancel()
+        userSeekPersistenceTask = nil
+        userSeekPersistenceTaskID = nil
+        return userSeekOperationGeneration
     }
 
-    func skipBackward() async {
-        let snapshot = await playbackService.snapshot()
+    private func isCurrentUserSeekOperation(
+        _ seekGeneration: UInt64,
+        episodeId: String?,
+        playbackGeneration: UInt64
+    ) -> Bool {
+        !isShutdown
+            && userSeekOperationGeneration == seekGeneration
+            && currentEpisodeId == episodeId
+            && playEpisodeGeneration == playbackGeneration
+    }
+
+    @discardableResult
+    func skipForward() async -> Bool {
+        guard !isShutdown else { return false }
+        let seekGeneration = beginUserSeekOperation()
+        let episodeId = currentEpisodeId
+        let playbackGeneration = playEpisodeGeneration
+        let transportContext =
+            await playbackService.snapshotWithItemGeneration()
+        guard isCurrentUserSeekOperation(
+            seekGeneration,
+            episodeId: episodeId,
+            playbackGeneration: playbackGeneration
+        ) else {
+            return false
+        }
+        let target = min(
+            transportContext.state.currentTime
+                + PlaybackService.skipForwardSeconds,
+            transportContext.state.duration
+        )
+        return await performLifecycleScopedSeek(
+            to: target,
+            expectedEpisodeId: episodeId,
+            expectedPlaybackGeneration: playbackGeneration,
+            expectedSeekGeneration: seekGeneration,
+            transportContext: transportContext
+        )
+    }
+
+    @discardableResult
+    func skipBackward() async -> Bool {
+        guard !isShutdown else { return false }
+        let seekGeneration = beginUserSeekOperation()
+        let episodeId = currentEpisodeId
+        let playbackGeneration = playEpisodeGeneration
+        let transportContext =
+            await playbackService.snapshotWithItemGeneration()
+        guard isCurrentUserSeekOperation(
+            seekGeneration,
+            episodeId: episodeId,
+            playbackGeneration: playbackGeneration
+        ) else {
+            return false
+        }
         let target = max(
-            snapshot.currentTime - PlaybackService.skipBackwardSeconds,
+            transportContext.state.currentTime
+                - PlaybackService.skipBackwardSeconds,
             0
         )
-        await seek(to: target)
+        return await performLifecycleScopedSeek(
+            to: target,
+            expectedEpisodeId: episodeId,
+            expectedPlaybackGeneration: playbackGeneration,
+            expectedSeekGeneration: seekGeneration,
+            transportContext: transportContext
+        )
     }
 
-    func seek(to seconds: TimeInterval) async {
-        let snapshot = await playbackService.snapshot()
-        await skipOrchestrator.recordUserSeek(to: seconds)
+    @discardableResult
+    func seek(to seconds: TimeInterval) async -> Bool {
+        guard !isShutdown else { return false }
+        let seekGeneration = beginUserSeekOperation()
+        let episodeId = currentEpisodeId
+        let playbackGeneration = playEpisodeGeneration
+        let transportContext =
+            await playbackService.snapshotWithItemGeneration()
+        guard isCurrentUserSeekOperation(
+            seekGeneration,
+            episodeId: episodeId,
+            playbackGeneration: playbackGeneration
+        ) else {
+            return false
+        }
+        return await performLifecycleScopedSeek(
+            to: seconds,
+            expectedEpisodeId: episodeId,
+            expectedPlaybackGeneration: playbackGeneration,
+            expectedSeekGeneration: seekGeneration,
+            transportContext: transportContext
+        )
+    }
+
+    /// Episode-bound seek used by asynchronous banner actions. Recheck after
+    /// every suspension before issuing the next side effect so autoplay cannot
+    /// turn an accepted old-episode gesture into a seek on the new episode.
+    @discardableResult
+    func seek(
+        to seconds: TimeInterval,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil
+    ) async -> Bool {
+        guard !isShutdown else { return false }
+        let seekGeneration = beginUserSeekOperation()
+        let sourceLifecycleGeneration =
+            expectedPlaybackGeneration ?? playEpisodeGeneration
+        guard isCurrentUserSeekOperation(
+            seekGeneration,
+            episodeId: expectedEpisodeId,
+            playbackGeneration: sourceLifecycleGeneration
+        ) else {
+            return false
+        }
+        let transportContext =
+            await playbackService.snapshotWithItemGeneration()
+        guard isCurrentUserSeekOperation(
+            seekGeneration,
+            episodeId: expectedEpisodeId,
+            playbackGeneration: sourceLifecycleGeneration
+        ) else {
+            return false
+        }
+        return await performLifecycleScopedSeek(
+            to: seconds,
+            expectedEpisodeId: expectedEpisodeId,
+            expectedPlaybackGeneration: sourceLifecycleGeneration,
+            expectedSeekGeneration: seekGeneration,
+            transportContext: transportContext
+        )
+    }
+
+    private func performLifecycleScopedSeek(
+        to seconds: TimeInterval,
+        expectedEpisodeId: String?,
+        expectedPlaybackGeneration: UInt64,
+        expectedSeekGeneration: UInt64,
+        transportContext: (
+            state: PlaybackState,
+            itemGeneration: UInt64
+        )
+    ) async -> Bool {
+        guard isCurrentUserSeekOperation(
+            expectedSeekGeneration,
+            episodeId: expectedEpisodeId,
+            playbackGeneration: expectedPlaybackGeneration
+        ) else {
+            return false
+        }
+        let skipLifecycleGeneration =
+            await skipOrchestrator.episodeLifecycleGenerationSnapshot()
+        guard isCurrentUserSeekOperation(
+            expectedSeekGeneration,
+            episodeId: expectedEpisodeId,
+            playbackGeneration: expectedPlaybackGeneration
+        ) else {
+            return false
+        }
+        let silenceLifecycleGeneration =
+            silenceCompressionCoordinator.episodeLifecycleGenerationSnapshot()
+        guard isCurrentUserSeekOperation(
+            expectedSeekGeneration,
+            episodeId: expectedEpisodeId,
+            playbackGeneration: expectedPlaybackGeneration
+        ) else {
+            return false
+        }
+
+        #if DEBUG
+        await seekContextCapturedHookForTesting?()
+        #endif
+        guard isCurrentUserSeekOperation(
+            expectedSeekGeneration,
+            episodeId: expectedEpisodeId,
+            playbackGeneration: expectedPlaybackGeneration
+        ) else {
+            return false
+        }
+
+        // The item-fenced transport operation is the admission boundary.
+        // Do not retire orchestrator cues, compression plans, publish scrub
+        // events, or persist position until the exact captured player item
+        // confirms the seek.
+        let didSeekExpectedItem = await playbackService.seek(
+            to: seconds,
+            ifCurrentItemGeneration: transportContext.itemGeneration
+        )
+        #if DEBUG
+        if didSeekExpectedItem {
+            await seekTransportAcceptedHookForTesting?()
+        }
+        #endif
+        guard didSeekExpectedItem,
+              isCurrentUserSeekOperation(
+                expectedSeekGeneration,
+                episodeId: expectedEpisodeId,
+                playbackGeneration: expectedPlaybackGeneration
+              ) else {
+            return false
+        }
+
+        let didRecordExpectedSkipLifecycle =
+            await skipOrchestrator.recordUserSeek(
+                to: seconds,
+                ifEpisodeLifecycleGeneration: skipLifecycleGeneration,
+                userSeekOperationGeneration: expectedSeekGeneration
+            )
+        #if DEBUG
+        if didRecordExpectedSkipLifecycle {
+            skipSeekEffectCountForTesting += 1
+        }
+        #endif
+        guard didRecordExpectedSkipLifecycle,
+              isCurrentUserSeekOperation(
+                expectedSeekGeneration,
+                episodeId: expectedEpisodeId,
+                playbackGeneration: expectedPlaybackGeneration
+              ) else {
+            return false
+        }
         // playhead-epii: drop any in-flight compression so the user
         // doesn't land mid-plan and stay sped up across an unintended
         // boundary. The next playhead tick re-engages from idle if
         // the new position falls inside a fresh plan.
-        await silenceCompressionCoordinator.recordUserSeek(to: seconds)
-        await playbackService.seek(to: seconds)
-        await analysisCoordinator.handlePlaybackEvent(
-            .scrubbed(to: seconds, rate: snapshot.playbackSpeed)
+        let didRecordExpectedSilenceLifecycle =
+            await silenceCompressionCoordinator.recordUserSeek(
+                to: seconds,
+                ifEpisodeLifecycleGeneration:
+                    silenceLifecycleGeneration,
+                userSeekOperationGeneration: expectedSeekGeneration
+            )
+        #if DEBUG
+        if didRecordExpectedSilenceLifecycle {
+            silenceSeekEffectCountForTesting += 1
+        }
+        #endif
+        guard didRecordExpectedSilenceLifecycle,
+              isCurrentUserSeekOperation(
+                expectedSeekGeneration,
+                episodeId: expectedEpisodeId,
+                playbackGeneration: expectedPlaybackGeneration
+              ) else {
+            return false
+        }
+        let didRecordCurrentScrub =
+            await analysisCoordinator.handleUserSeekPlaybackEvent(
+                to: seconds,
+                rate: transportContext.state.playbackSpeed,
+                operationGeneration: expectedSeekGeneration
+            )
+        #if DEBUG
+        if didRecordCurrentScrub {
+            scrubSeekEffectCountForTesting += 1
+        }
+        #endif
+        guard didRecordCurrentScrub,
+              isCurrentUserSeekOperation(
+                expectedSeekGeneration,
+                episodeId: expectedEpisodeId,
+                playbackGeneration: expectedPlaybackGeneration
+              )
+        else {
+            return false
+        }
+
+        let didPersistCurrentSeek =
+            await requestPlaybackPositionPersistence(
+                .seek,
+                userSeekOperationGeneration:
+                    expectedSeekGeneration
+            )
+        #if DEBUG
+        if didPersistCurrentSeek {
+            persistenceSeekEffectCountForTesting += 1
+        }
+        #endif
+        guard didPersistCurrentSeek,
+              isCurrentUserSeekOperation(
+                expectedSeekGeneration,
+                episodeId: expectedEpisodeId,
+                playbackGeneration: expectedPlaybackGeneration
+              )
+        else {
+            return false
+        }
+        #if DEBUG
+        committedUserSeekCountForTesting += 1
+        #endif
+        return true
+    }
+
+    /// Executes the complete banner Listen transaction in safety order:
+    /// retire the live orchestrator cue, synchronously disarm the transport
+    /// cue, seek into the restored span, then persist the existing weak
+    /// false-skip signal.
+    @discardableResult
+    func listenRewind(
+        windowId: String,
+        podcastId: String,
+        to startTime: TimeInterval,
+        bannerEndTime: TimeInterval,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64
+    ) async -> Bool {
+        guard currentEpisodeId == expectedEpisodeId,
+              playEpisodeGeneration == expectedPlaybackGeneration,
+              let sourceAnalysisAssetId = currentAnalysisAssetId
+        else {
+            return false
+        }
+        let transportContext =
+            await playbackService.snapshotWithItemGeneration()
+        guard currentEpisodeId == expectedEpisodeId,
+              playEpisodeGeneration == expectedPlaybackGeneration
+        else {
+            return false
+        }
+        let didRetireLiveCue =
+            await skipOrchestrator.retireLiveSkipForListen(
+                windowId: windowId,
+                ifCurrentEpisodeId: expectedEpisodeId,
+                ifPlaybackLifecycleGeneration:
+                    expectedPlaybackGeneration
+            )
+        guard didRetireLiveCue,
+              currentEpisodeId == expectedEpisodeId,
+              playEpisodeGeneration == expectedPlaybackGeneration
+        else {
+            return false
+        }
+
+        let didDisarmExpectedItem = await playbackService.disarmSkipCues(
+            overlappingStart: startTime,
+            end: bannerEndTime,
+            ifCurrentItemGeneration: transportContext.itemGeneration
         )
-        await requestPlaybackPositionPersistence(.seek)
+        guard didDisarmExpectedItem,
+              currentEpisodeId == expectedEpisodeId,
+              playEpisodeGeneration == expectedPlaybackGeneration
+        else {
+            return false
+        }
+
+        let didSeek = await seek(
+            to: startTime,
+            ifCurrentEpisodeId: expectedEpisodeId,
+            ifPlaybackLifecycleGeneration:
+                expectedPlaybackGeneration
+        )
+        guard didSeek else { return false }
+
+        let persisted = await recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: sourceAnalysisAssetId,
+            podcastId: podcastId,
+            ifCurrentAnalysisAssetId: sourceAnalysisAssetId,
+            ifCurrentEpisodeId: expectedEpisodeId,
+            ifPlaybackLifecycleGeneration:
+                expectedPlaybackGeneration
+        )
+        guard persisted else { return false }
+        await skipOrchestrator.completeLiveSkipRetirementForListen(
+            windowId: windowId,
+            ifCurrentEpisodeId: expectedEpisodeId,
+            ifPlaybackLifecycleGeneration:
+                expectedPlaybackGeneration
+        )
+        return true
+    }
+
+    /// Episode-bound correction companion for the banner Listen action.
+    @discardableResult
+    func recordListenRewind(
+        windowId: String,
+        analysisAssetId: String,
+        podcastId: String,
+        ifCurrentAnalysisAssetId expectedAnalysisAssetId: String,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil
+    ) async -> Bool {
+        guard analysisAssetId == expectedAnalysisAssetId,
+              currentAnalysisAssetId == expectedAnalysisAssetId,
+              currentEpisodeId == expectedEpisodeId,
+              expectedPlaybackGeneration == nil
+                || playEpisodeGeneration == expectedPlaybackGeneration
+        else {
+            return false
+        }
+        return await recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: expectedAnalysisAssetId,
+            podcastId: podcastId
+        )
     }
 
     func setSpeed(_ speed: Float) async {
@@ -3507,28 +4544,67 @@ final class PlayheadRuntime {
     /// Called from NowPlayingViewModel (hearing-an-ad button) and
     /// TranscriptPeekView (transcript chunk selection).
     ///
-    /// 1. Tells SkipOrchestrator to inject the window for immediate effect
-    ///    (skip cues, banner, timeline markers).
-    /// 2. Tells AdDetectionService to persist the AdWindow and CorrectionEvent
-    ///    so future analysis incorporates the correction.
+    /// 1. Persists the AdWindow and CorrectionEvent under one generated ID.
+    /// 2. Injects that same durable window identity into SkipOrchestrator for
+    ///    immediate cues, banner feedback, and timeline markers.
     func injectUserMarkedAd(start: Double, end: Double) async {
         guard let assetId = currentAnalysisAssetId else { return }
-        let podcastId = currentPodcastId
+        _ = await injectUserMarkedAd(
+            start: start,
+            end: end,
+            ifCurrentAnalysisAssetId: assetId,
+            ifCurrentEpisodeId: currentEpisodeId,
+            ifPlaybackLifecycleGeneration: playEpisodeGeneration,
+            podcastId: currentPodcastId
+        )
+    }
 
-        // Immediate effect: inject into the live skip orchestrator.
+    /// Playback-bound form for user gestures whose boundary expansion suspends
+    /// before persistence begins. The caller captures this complete context at
+    /// tap time so an autoplay transition cannot write episode A's span into
+    /// episode B. Once A's durable write begins, it may finish across a host
+    /// transition; only the live cue injection remains current-lifecycle-bound.
+    @discardableResult
+    func injectUserMarkedAd(
+        start: Double,
+        end: Double,
+        ifCurrentAnalysisAssetId expectedAssetId: String,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedGeneration: UInt64,
+        podcastId: String?
+    ) async -> Bool {
+        guard currentAnalysisAssetId == expectedAssetId,
+              currentEpisodeId == expectedEpisodeId,
+              playEpisodeGeneration == expectedGeneration
+        else {
+            return false
+        }
+        let windowId = UUID().uuidString
+
+        // Persist before publishing a live cue/banner. The orchestrator and
+        // store must share one identity so later Yes/No feedback mutates the
+        // exact durable row represented by the card.
+        let persisted = await adDetectionService.recordUserMarkedAd(
+            analysisAssetId: expectedAssetId,
+            startTime: start,
+            endTime: end,
+            podcastId: podcastId,
+            windowId: windowId
+        )
+        guard persisted else { return false }
+        guard currentAnalysisAssetId == expectedAssetId,
+              currentEpisodeId == expectedEpisodeId,
+              playEpisodeGeneration == expectedGeneration else {
+            return true
+        }
+
         await skipOrchestrator.injectUserMarkedAd(
             start: start,
             end: end,
-            analysisAssetId: assetId
+            analysisAssetId: expectedAssetId,
+            windowId: windowId
         )
-
-        // Durable persistence: write AdWindow + CorrectionEvent to SQLite.
-        await adDetectionService.recordUserMarkedAd(
-            analysisAssetId: assetId,
-            startTime: start,
-            endTime: end,
-            podcastId: podcastId
-        )
+        return true
     }
 
     func setShowSkipMode(_ mode: SkipMode, orchestrator: SkipOrchestrator) async {

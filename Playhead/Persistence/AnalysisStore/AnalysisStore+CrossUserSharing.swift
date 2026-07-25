@@ -467,11 +467,20 @@ extension AnalysisStore {
               Self.isValidSharedMeasurements(measurements) else {
             return nil
         }
-        let adWindows = try fetchAdWindows(assetId: assetId)
-        guard adWindows.allSatisfy(CrossUserAnalysisSnapshot.Window.hasKnownExportDisposition) else {
+        guard let projectedWindows = try responseIndependentAdWindows(
+            analysisAssetId: assetId
+        )
+        else {
             return nil
         }
-        let windows = Self.exportableSnapshotPrefix(from: adWindows)
+        guard projectedWindows.allSatisfy(
+            CrossUserAnalysisSnapshot.Window.hasKnownExportDisposition
+        ) else {
+            return nil
+        }
+        let windows = Self.exportableSnapshotPrefix(
+            from: projectedWindows
+        )
         guard !windows.isEmpty else {
             return nil
         }

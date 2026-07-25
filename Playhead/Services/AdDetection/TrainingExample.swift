@@ -28,6 +28,20 @@ enum TrainingExampleBucket: String, Codable, Sendable, Hashable, CaseIterable {
     case disagreement
 }
 
+/// Durable provenance for the privacy boundary around on-device learning.
+///
+/// Training examples are never outward artifacts. Explicit banner answers
+/// receive a stronger classification so future local consumers cannot mistake
+/// response-derived labels for generic detector training material.
+enum TrainingExamplePrivacyClassification:
+    String, Codable, Sendable, Hashable, CaseIterable {
+    case onDeviceLocal
+    case localPrivateExplicitFeedback
+
+    /// There is currently no egress-eligible training-example class.
+    var permitsEgress: Bool { false }
+}
+
 /// One materialized training row. Mirrors the bead-spec field list 1:1.
 /// Field-naming tracks the source ledger names (`scanCohortJSON`,
 /// `decisionCohortJSON`, `transcriptQuality`) so cohorting queries can be
@@ -38,7 +52,7 @@ struct TrainingExample: Sendable, Equatable, Codable {
     /// shape changes incompatibly. `decodeIfPresent` lets older snapshots
     /// continue to decode without it (they default to v1) so we never
     /// have to run a destructive backfill.
-    static let schemaVersion: Int = 1
+    static let schemaVersion: Int = 2
 
     let id: String
     let analysisAssetId: String
@@ -63,6 +77,8 @@ struct TrainingExample: Sendable, Equatable, Codable {
     let classifierConfidence: Double
     /// Recorded user action ("skipped" / "reverted" / "vetoed" / nil).
     let userAction: String?
+    /// Explicit privacy provenance for this derived local label.
+    let privacyClassification: TrainingExamplePrivacyClassification
     /// Eligibility gate string at decision time (matches
     /// `SkipEligibilityGate.rawValue`). Nil when no decision exists for
     /// the region (uncertain bucket).
@@ -98,7 +114,9 @@ struct TrainingExample: Sendable, Equatable, Codable {
         scanCohortJSON: String,
         decisionCohortJSON: String?,
         transcriptQuality: String,
-        createdAt: Double
+        createdAt: Double,
+        privacyClassification:
+            TrainingExamplePrivacyClassification = .onDeviceLocal
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -116,6 +134,7 @@ struct TrainingExample: Sendable, Equatable, Codable {
         self.fmCertainty = fmCertainty
         self.classifierConfidence = classifierConfidence
         self.userAction = userAction
+        self.privacyClassification = privacyClassification
         self.eligibilityGate = eligibilityGate
         self.scanCohortJSON = scanCohortJSON
         self.decisionCohortJSON = decisionCohortJSON
@@ -143,6 +162,7 @@ struct TrainingExample: Sendable, Equatable, Codable {
         case fmCertainty
         case classifierConfidence
         case userAction
+        case privacyClassification
         case eligibilityGate
         case scanCohortJSON
         case decisionCohortJSON
@@ -172,6 +192,10 @@ struct TrainingExample: Sendable, Equatable, Codable {
         self.fmCertainty = try c.decode(Double.self, forKey: .fmCertainty)
         self.classifierConfidence = try c.decode(Double.self, forKey: .classifierConfidence)
         self.userAction = try c.decodeIfPresent(String.self, forKey: .userAction)
+        self.privacyClassification = try c.decodeIfPresent(
+            TrainingExamplePrivacyClassification.self,
+            forKey: .privacyClassification
+        ) ?? .onDeviceLocal
         self.eligibilityGate = try c.decodeIfPresent(String.self, forKey: .eligibilityGate)
         self.scanCohortJSON = try c.decode(String.self, forKey: .scanCohortJSON)
         self.decisionCohortJSON = try c.decodeIfPresent(String.self, forKey: .decisionCohortJSON)
@@ -200,6 +224,10 @@ struct TrainingExample: Sendable, Equatable, Codable {
         try c.encode(fmCertainty, forKey: .fmCertainty)
         try c.encode(classifierConfidence, forKey: .classifierConfidence)
         try c.encode(userAction, forKey: .userAction)
+        try c.encode(
+            privacyClassification,
+            forKey: .privacyClassification
+        )
         try c.encode(eligibilityGate, forKey: .eligibilityGate)
         try c.encode(scanCohortJSON, forKey: .scanCohortJSON)
         try c.encode(decisionCohortJSON, forKey: .decisionCohortJSON)
