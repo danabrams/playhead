@@ -25,15 +25,15 @@
 // The snapshot mirrors the fields the view model previously fetched
 // per refresh cycle:
 //
-//   - `chunks`               — fast-or-final dedup of `TranscriptChunk` rows
+//   - `chunks`               — interval-canonical `TranscriptChunk` rows
 //   - `adWindows`            — every `AdWindow` row for the asset
 //   - `decodedSpans`         — every `DecodedSpan` row (Phase 5 overlay)
 //   - `featureCoverageEnd`   — `AnalysisAsset.featureCoverageEndTime`
 //   - `fastTranscriptCoverageEnd`
 //                            — `AnalysisAsset.fastTranscriptCoverageEndTime`
 //   - `latestSessionState`   — `AnalysisSession.state` for the asset
-//   - `rawChunkCount`        — pre-dedup chunk count, used to surface
-//                              missing-write conditions in debug stats
+//   - `rawChunkCount`        — pre-canonical chunk count, used to surface
+//                              missing writes and projected overlaps in stats
 
 import Foundation
 
@@ -45,11 +45,13 @@ import Foundation
 /// its constituent row types — never `AnalysisStore`.
 struct TranscriptPeekSnapshot: Sendable {
 
-    /// All transcript chunks for the asset, post fast/final dedup,
-    /// sorted by `startTime`. Empty when no chunks exist yet.
+    /// All transcript chunks for the asset, post fast/final interval
+    /// canonicalization, sorted by `startTime`. Empty when no chunks exist
+    /// yet. Final-pass coverage replaces fully-covered fast rows; uncovered
+    /// fast-pass coverage remains visible.
     let chunks: [TranscriptChunk]
 
-    /// Pre-dedup chunk count from the source store. Used by the debug
+    /// Pre-canonical chunk count from the source store. Used by the debug
     /// stats line to surface missing-write conditions; equal to
     /// `chunks.count` when no fast→final overlap exists.
     let rawChunkCount: Int
@@ -119,7 +121,7 @@ struct TranscriptPeekSnapshot: Sendable {
 /// builds.
 protocol TranscriptPeekDataSource: Sendable {
     /// Fetch a fresh snapshot for `assetId`. The returned snapshot
-    /// always honors the dedup contract documented on
+    /// always honors the canonicalization contract documented on
     /// `TranscriptPeekSnapshot.chunks`. The function does not throw —
     /// underlying errors are reported via `fetchFailed`.
     func fetchSnapshot(assetId: String) async -> TranscriptPeekSnapshot
@@ -144,14 +146,20 @@ final class LiveTranscriptPeekDataSource: TranscriptPeekDataSource {
             let freshAds = try await store.fetchAdWindows(assetId: assetId)
             let freshSpans = try await store.fetchDecodedSpans(assetId: assetId)
 
-            // Deduplicate: if both fast and final exist for the same
-            // segment, prefer final. Group by chunkIndex, keep final
-            // when available.
-            let grouped = Dictionary(grouping: freshChunks, by: { $0.chunkIndex })
-            let deduped = grouped.values.map { group -> TranscriptChunk in
-                group.first(where: { $0.pass == "final" }) ?? group[0]
-            }
-            .sorted { $0.startTime < $1.startTime }
+            // Final-pass rows are appended at new chunk indexes, so index
+            // equality cannot identify the fast rows they replace. Build the
+            // same interval-coverage projection used by ad detection: final
+            // text replaces fully-covered fast rows, while partial edge
+            // overlap retains the fast row so display coverage is never lost.
+            let canonical = TranscriptChunkCanonicalizer.canonicalize(freshChunks)
+
+            // Mixed-pass canonicalization already emits a deterministic
+            // time-ordered array. Preserve the data source's established
+            // start-time display ordering for single-pass snapshots; the
+            // passthrough path preserves every persisted row identity/index.
+            let displayChunks = canonical.diagnostics.isPassthrough
+                ? canonical.chunks.sorted { $0.startTime < $1.startTime }
+                : canonical.chunks
 
             // Asset coverage + session state (best-effort; treat as
             // optional so partial failures don't blow away the
@@ -160,7 +168,7 @@ final class LiveTranscriptPeekDataSource: TranscriptPeekDataSource {
             let session = (try? await store.fetchLatestSessionForAsset(assetId: assetId)) ?? nil
 
             return TranscriptPeekSnapshot(
-                chunks: deduped,
+                chunks: displayChunks,
                 rawChunkCount: freshChunks.count,
                 adWindows: freshAds,
                 decodedSpans: freshSpans,

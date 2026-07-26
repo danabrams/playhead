@@ -1,6 +1,6 @@
 // TranscriptPeekViewModel.swift
 // Drives the transcript peek sheet: pulls snapshots from a
-// `TranscriptPeekDataSource`, polls for new fast-pass arrivals,
+// `TranscriptPeekDataSource`, polls for canonical transcript changes,
 // resolves the active segment index from the current playback time,
 // and identifies ad regions.
 //
@@ -13,13 +13,27 @@
 import Foundation
 import OSLog
 
+/// Immutable audio envelope captured when a visible transcript row is
+/// selected. Polling may replace or reorder canonical rows before the user
+/// confirms a mark, so submission state must not depend on a later array
+/// offset.
+struct TranscriptChunkSelection: Hashable, Sendable {
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+
+    init(chunk: TranscriptChunk) {
+        startTime = chunk.startTime
+        endTime = chunk.endTime
+    }
+}
+
 @MainActor
 @Observable
 final class TranscriptPeekViewModel {
 
     // MARK: - State
 
-    /// Transcript chunks sorted by startTime, fast-pass included.
+    /// Canonical display chunks sorted by startTime.
     private(set) var chunks: [TranscriptChunk] = []
 
     /// Ad windows for visual muting of ad segments (legacy Phase 2 path).
@@ -38,6 +52,11 @@ final class TranscriptPeekViewModel {
 
     /// Index of the chunk containing the current playback position, or nil.
     private(set) var activeChunkIndex: Int?
+
+    /// Most recent playback position supplied by the view. A poll can change
+    /// canonical row cardinality while playback is paused, so refresh uses
+    /// this value to resolve the active row against the new projection.
+    private var latestPlaybackPosition: TimeInterval?
 
     /// True while the initial load is in progress.
     private(set) var isLoading: Bool = true
@@ -82,10 +101,14 @@ final class TranscriptPeekViewModel {
             self.logger.info("Transcript peek: starting initial load for asset \(self.analysisAssetId)")
             let start = ContinuousClock.now
             await self.refresh()
+            // `refresh()` rejects a cancelled generation's snapshot, but
+            // this caller must also avoid publishing lifecycle state after
+            // `startPolling()` has replaced it with a newer task.
+            guard !Task.isCancelled else { return }
             self.isLoading = false
             self.logger.info("Transcript peek: initial load done in \(ContinuousClock.now - start), \(self.chunks.count) chunks")
 
-            // Continuous polling for new fast-pass chunks
+            // Continuous polling for transcript projection changes.
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.pollInterval))
                 guard !Task.isCancelled else { break }
@@ -108,28 +131,60 @@ final class TranscriptPeekViewModel {
 
     /// Call from the view whenever playback time updates.
     func updatePlaybackPosition(_ currentTime: TimeInterval) {
+        latestPlaybackPosition = currentTime
+
         guard !chunks.isEmpty else {
-            activeChunkIndex = nil
+            if activeChunkIndex != nil {
+                activeChunkIndex = nil
+            }
             return
         }
 
-        // Binary-ish search: chunks are sorted by startTime.
-        // Find the last chunk whose startTime <= currentTime.
-        var best: Int?
+        // Chunks are sorted by startTime, but retained partial-overlap rows
+        // can have non-monotonic end times. Prefer a final-pass row whenever
+        // both passes cover playback, then the latest-starting row within
+        // the same pass. Only fall back to the closest preceding row when
+        // playback lies in a transcript gap or past the final row.
+        var preceding: Int?
+        var covering: Int?
         for (index, chunk) in chunks.enumerated() {
             if chunk.startTime <= currentTime {
-                best = index
+                // Nested rows make latest-start and closest-preceding
+                // different concepts. In a gap, retain the row whose audio
+                // ended most recently; use later display order only to break
+                // an equal-end tie.
+                if let currentPreceding = preceding {
+                    if chunk.endTime >= chunks[currentPreceding].endTime {
+                        preceding = index
+                    }
+                } else {
+                    preceding = index
+                }
+                // Transcript audio envelopes are half-open [start, end), so
+                // a row ending exactly here must not outrank one that starts
+                // at the same boundary.
+                if chunk.endTime > currentTime {
+                    if let currentCovering = covering {
+                        let currentChunk = chunks[currentCovering]
+                        let candidateIsFinal =
+                            chunk.pass == TranscriptPassType.final_.rawValue
+                        let currentIsFinal =
+                            currentChunk.pass == TranscriptPassType.final_.rawValue
+
+                        if candidateIsFinal || !currentIsFinal {
+                            covering = index
+                        }
+                    } else {
+                        covering = index
+                    }
+                }
             } else {
                 break
             }
         }
-
-        // Verify the chunk actually covers currentTime (within endTime).
-        if let idx = best, chunks[idx].endTime >= currentTime {
-            activeChunkIndex = idx
-        } else {
-            // Between chunks or past the end — keep closest preceding chunk.
-            activeChunkIndex = best
+        let resolved = covering ?? preceding
+        if activeChunkIndex != resolved {
+            activeChunkIndex = resolved
         }
     }
 
@@ -166,6 +221,35 @@ final class TranscriptPeekViewModel {
         decodedSpans.filter { span in
             span.startTime < endTime && span.endTime > startTime
         }
+    }
+
+    /// Resolve currently visible audio envelopes captured from displayed rows
+    /// to the combined range used by the mark-ad and not-ad submission paths.
+    /// Capturing the envelope at tap time prevents a later polling refresh
+    /// from redirecting an array offset to unrelated audio; intersecting with
+    /// the latest projection closes the window between SwiftUI's deferred
+    /// selection reconciliation and a confirmation action.
+    func selectedChunkTimeRange(
+        selections: Set<TranscriptChunkSelection>
+    ) -> (start: TimeInterval, end: TimeInterval)? {
+        let visibleSelections = reconciledSelections(selections)
+        guard let start = visibleSelections.map(\.startTime).min(),
+              let end = visibleSelections.map(\.endTime).max()
+        else {
+            return nil
+        }
+        return (start: start, end: end)
+    }
+
+    /// Drop captured envelopes that no longer correspond to any visible
+    /// canonical row. Exact-span fast→final replacement remains selected,
+    /// while a differently bounded replacement cannot become an invisible,
+    /// impossible-to-deselect mark or veto.
+    func reconciledSelections(
+        _ selections: Set<TranscriptChunkSelection>
+    ) -> Set<TranscriptChunkSelection> {
+        let visibleSelections = Set(chunks.map(TranscriptChunkSelection.init))
+        return selections.intersection(visibleSelections)
     }
 
     // MARK: - Untranscribed-tail mark (playhead-m1l9)
@@ -236,7 +320,7 @@ final class TranscriptPeekViewModel {
         // Chunk count + time range
         if count > 0 {
             let minTime = chunks.first?.startTime ?? 0
-            let maxTime = chunks.last?.endTime ?? 0
+            let maxTime = chunks.map(\.endTime).max() ?? 0
             parts.append("\(count) chunks \(fmt(minTime))–\(fmt(maxTime))")
         } else {
             parts.append("0 chunks")
@@ -245,7 +329,8 @@ final class TranscriptPeekViewModel {
         // Ad window count
         parts.append("\(adWindows.count) ads")
 
-        // Raw chunk count (before dedup) to detect if writes are missing
+        // Raw chunk count (before display canonicalization) to detect whether
+        // writes are missing or overlapping rows were projected away.
         if snapshot.rawChunkCount != count {
             parts.append("raw \(snapshot.rawChunkCount)")
         }
@@ -309,10 +394,25 @@ final class TranscriptPeekViewModel {
     /// `startPolling` Task.
     func refresh() async {
         let snapshot = await dataSource.fetchSnapshot(assetId: analysisAssetId)
+        // A cancelled polling generation may finish after a replacement task
+        // because data sources are not required to cooperate with
+        // cancellation. Never let that stale response overwrite newer state.
+        guard !Task.isCancelled else { return }
+
         if snapshot.fetchFailed {
             logger.error("Transcript peek: snapshot fetch reported failure for asset \(self.analysisAssetId)")
+            // Poll failures are not authoritative empty projections. Retain
+            // the last good rows so active playback and in-progress mark/veto
+            // selections survive a transient store error.
+            updateDebugStats(snapshot: snapshot)
+            return
         }
         chunks = snapshot.chunks
+        if let latestPlaybackPosition {
+            updatePlaybackPosition(latestPlaybackPosition)
+        } else {
+            activeChunkIndex = nil
+        }
         adWindows = snapshot.adWindows
         decodedSpans = snapshot.decodedSpans
         fastTranscriptCoverageEndTime = snapshot.fastTranscriptCoverageEnd
